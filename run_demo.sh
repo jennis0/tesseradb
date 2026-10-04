@@ -4,8 +4,8 @@
 #
 # There is no hosted demo and nothing here deploys anywhere (README: "Deploying it → not yet").
 # This is the localhost development shape, and two things about it are development-only: the
-# session credential reaches the browser bundle, and `serve.dev_cors_origins` is typed in to let it
-# talk. Neither is anything to copy into an integration — see client-interaction §7.
+# API key that mints each principal's session reaches the browser, and `serve.dev_cors_origins` is
+# typed in to let it talk. Neither is anything to copy into an integration — see client-interaction §7.
 #
 #   ./run_demo.sh                 # build what is missing, serve every scale, open the viewer
 #   ./run_demo.sh --scale 2m4     # one scale only. Repeatable; the order is the picker's order
@@ -31,8 +31,8 @@
 # other's picker.
 #
 # Nothing is written under `clients/`. The viewer is told where the dataset document is through the
-# URL this script prints (`?datasets=/@fs/<absolute path>`), and its session credential through the
-# environment of the `npm run dev` process rather than a `.env.local`. `VITE_PORT` moves the viewer
+# URL this script prints (`?datasets=/@fs/<absolute path>`), and that document carries each
+# dataset's API key, rather than a `.env.local`. `VITE_PORT` moves the viewer
 # off 5173, and whatever port it lands on is what the generated deployments enumerate in
 # `serve.dev_cors_origins`.
 #
@@ -178,13 +178,12 @@ DATASETS="$DEMO/datasets.json"
 # `VITE_PORT` to run a second viewer beside one already holding 5173.
 VITE_PORT="${VITE_PORT:-5173}"
 
-export TESSERA_SESSION_CRED="${TESSERA_SESSION_CRED:-dev-session-credential}"
 export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
 
 bundle_override=""
 # A `tessera.toml` an operator already has — a dataset-ladder rung's, which `prepare.py` writes
 # beside its parquets. Unlike `--bundle`, nothing here is generated: the bundle path, the three
-# ports, the plugin, the disclosure floor and the credential variable names are that file's, and it
+# ports, the disclosure floor and the credential variable names are that file's, and it
 # is read rather than rewritten. It is the only route that serves a bundle whose credentials are
 # not the demo's, and the only one that leaves the deployment under the operator's control.
 deployment_override=""
@@ -375,9 +374,9 @@ if [[ -n "$deployment_override" ]]; then
   [[ "$bundle_override" = /* ]] || bundle_override="$DEPLOY_DIR/$bundle_override"
   [[ -d "$bundle_override" ]] || { echo "$deployment_override names a bundle that is not there: $bundle_override" >&2; exit 1; }
 
-  # The credentials this deployment declares, taken from the environment first and from the `.env`
-  # beside the file second: an exported variable is more specific than a file.
-  for role in session operator; do
+  # The operator credential this deployment declares, taken from the environment first and from
+  # the `.env` beside the file second: an exported variable is more specific than a file.
+  for role in operator; do
     var="$(toml_scalar serve "${role}_credential_env")"
     [[ -n "$var" ]] || continue
     if [[ -z "${!var:-}" && -f "$DEPLOY_DIR/.env" ]]; then
@@ -385,12 +384,8 @@ if [[ -n "$deployment_override" ]]; then
       [[ -n "$value" ]] && export "$var=$value"
     fi
     [[ -n "${!var:-}" ]] || { echo "$deployment_override declares $var for the $role plane and nothing sets it (not the environment, not $DEPLOY_DIR/.env)" >&2; exit 1; }
-    # The presets script and the viewer read the demo's variable names, not this deployment's.
-    if [[ "$role" == session ]]; then
-      export TESSERA_SESSION_CRED="${!var}"
-    else
-      export TESSERA_OPERATOR_CRED="${!var}"
-    fi
+    # The presets script reads the demo's variable name, not this deployment's.
+    export TESSERA_OPERATOR_CRED="${!var}"
   done
 
   # The browser talks to this server directly, so an origin the deployment does not enumerate is a
@@ -463,9 +458,6 @@ wal   = "$DEMO/$scale/wal.log"
 [build]
 schema = "$(schema_of "$scale")"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -474,9 +466,11 @@ viewer = "127.0.0.1:$(viewer_of "$scale")"
 session = "127.0.0.1:$(session_of "$scale")"
 control = "127.0.0.1:$(control_of "$scale")"
 max_k = 5000
-session_credential_env = "TESSERA_SESSION_CRED"
 operator_credential_env = "TESSERA_OPERATOR_CRED"
 dev_cors_origins = ["http://localhost:$VITE_PORT"]
+
+[catalogue]
+dir = "$DEMO/$scale/catalogue"
 EOF
 }
 
@@ -635,7 +629,7 @@ start_scale() {
   SERVE_PIDS+=($!)
   local pid=${SERVE_PIDS[-1]}
 
-  # Poll `/readyz` rather than sleeping: it is 2.3's verified + pinned + plugin-loaded +
+  # Poll `/readyz` rather than sleeping: it is 2.3's verified + pinned +
   # workers-ready gate, so a 200 means the bundle actually opened. A fixed sleep would race the
   # mmap and the fragment cache on a cold start and report a broken demo.
   printf 'waiting for %s readyz' "$scale"
@@ -659,7 +653,6 @@ for scale in "${scales[@]}"; do start_scale "$scale"; done
 # it; the picker's entries come from `$DATASETS`.
 export VITE_TESSERA_VIEWER_URL="http://127.0.0.1:$(viewer_of "${scales[0]}")"
 export VITE_TESSERA_SESSION_URL="http://127.0.0.1:$(session_of "${scales[0]}")"
-export VITE_TESSERA_SESSION_CREDENTIAL="$TESSERA_SESSION_CRED"
 # The dataset document, through Vite's `/@fs/` route, so the bare address finds the picker's
 # entries without `?datasets=` — the address printed below still carries it for a link.
 export VITE_TESSERA_DATASETS="/@fs$DATASETS"
@@ -709,11 +702,15 @@ CANDIDATES
   else
     terms_args=(--terms "$terms")
   fi
+  # Each preset is a principal of the scale's catalogue, created here with the operator
+  # credential, and the viewer mints its sessions with the API key written beside the presets.
   node scripts/measure-principals.mjs \
     --viewer "http://127.0.0.1:$(viewer_of "$scale")" \
     --session "http://127.0.0.1:$(session_of "$scale")" \
+    --control "http://127.0.0.1:$(control_of "$scale")" \
     "${terms_args[@]}" \
     --out "$DEMO/presets/$scale.json" \
+    --key-out "$DEMO/presets/$scale.key" \
     $([[ -f "$ranks" ]] && echo --ranks "$ranks")
 done
 
@@ -739,8 +736,9 @@ fresh="$DEMO/presets/datasets-this-run.json"
       "$scale" "$label" "$(items_of "$scale")" "$(prose_of "$scale")"
     title="$(title_of "$scale")"
     if [[ -n "$title" ]]; then printf '"titleField":"%s",' "$title"; fi
-    printf '"viewerUrl":"http://127.0.0.1:%s","sessionUrl":"http://127.0.0.1:%s","presets":' \
-      "$(viewer_of "$scale")" "$(session_of "$scale")"
+    # The key reaches the viewer's page through this document, which is for development only.
+    printf '"viewerUrl":"http://127.0.0.1:%s","sessionUrl":"http://127.0.0.1:%s","apiKey":"%s","presets":' \
+      "$(viewer_of "$scale")" "$(session_of "$scale")" "$(cat "$DEMO/presets/$scale.key")"
     cat "$DEMO/presets/$scale.json"
     printf '}'
   done

@@ -140,8 +140,8 @@ pub(crate) fn refresh_resident(
         // **Built before the cache call, because `make` must be infallible** — the single-flight
         // state machine has no way to carry a failure out of a slot, and stuffing one into the
         // value would cache it (I13a).
-        let fragment = match generation.fragments.get_or_build(
-            &previous.satisfied_sorted,
+        let fragment = match generation.fragments.get_or_build_grant(
+            &previous.grant,
             &generation.postings,
             &generation.delta_postings,
             generation.watermark,
@@ -204,7 +204,7 @@ pub(crate) fn refresh_resident(
                     // projection this session already holds and read no image.
                     let inputs = crate::projection::ProjectionInputs {
                         fragment: &fragment,
-                        satisfied: &previous.satisfied_sorted,
+                        satisfied: previous.grant.keys(),
                         postings: &generation.postings,
                         deltas: &generation.delta_postings,
                         images: view_data.term_images.as_deref(),
@@ -216,7 +216,7 @@ pub(crate) fn refresh_resident(
             SessionGeometry {
                 fragment: Arc::clone(&fragment),
                 projection: Arc::new(projection),
-                satisfied_sorted: Arc::clone(&previous.satisfied_sorted),
+                grant: previous.grant.clone(),
                 auth_data_hash: previous.auth_data_hash,
             }
         });

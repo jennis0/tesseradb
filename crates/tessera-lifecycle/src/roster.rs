@@ -238,8 +238,8 @@ impl ViewRoster {
                 key: key.to_string(),
             });
         }
-        // The gate arrives as `Engine::create_view` stored it: checked against the plugin,
-        // trimmed, and `None` for `public`.
+        // The gate arrives as `Engine::create_view` stored it: each label's canonical text, and
+        // `None` for `public`.
         // **A `timestamp_us` arrives as an integer, and the declaration is what says so.** JSON
         // carries no date type, so a record's `starts` is microseconds since the epoch as a
         // number; typing it from the wire alone would make every timestamp an `int` and refuse

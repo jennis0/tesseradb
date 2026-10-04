@@ -247,8 +247,8 @@ pub struct ArtifactProjections {
     /// How many forms this has built since the engine opened. Read by the fold's own log line and
     /// by [`crate::Engine::artifact_cache_builds`].
     pub(super) builds: std::sync::atomic::AtomicU64,
-    /// How many containment partitions this has composed since the engine opened. Under a foreign
-    /// plugin it stays at zero while `builds` climbs. Operator plane only.
+    /// How many containment partitions this has composed since the engine opened. Operator plane
+    /// only.
     pub(super) partitions: std::sync::atomic::AtomicU64,
     /// How many partitions this adopted from the prefix at open rather than composing.
     adopted: std::sync::atomic::AtomicU64,

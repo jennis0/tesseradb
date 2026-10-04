@@ -28,7 +28,7 @@ use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::artifacts::{ArtifactProjections, ArtifactRows, Containment};
 use tessera_engine::compose::{compose, EffectiveMask};
 use tessera_engine::projection::RowProjection;
-use tessera_engine::containment::{signature_shaped, ContainmentPartition, PartitionSource};
+use tessera_engine::containment::{ContainmentPartition, PartitionSource};
 use tessera_engine::denied_rows_of;
 use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, ContentSet};
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
@@ -588,52 +588,13 @@ fn an_unsuppress_does_not_restore_a_deleted_member_through_the_partition() {
     );
 }
 
-/// **The plugin gate, settled fail-closed.** Under any plugin but the builtin no partition is
-/// composed at all, and containment stays on the masked-count route — the same served rank, at the
-/// cost the partition exists to remove. The expression is over term signatures, which is sound
-/// only where an entity's visibility is decided by its own term set; a foreign plugin's rule
-/// cannot be shown to be, and nothing in the corpus forbids one that is not.
+/// A level composes its partition once, and a second view of the same level composes nothing.
 #[test]
-fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
+fn a_level_composes_its_partition_once_for_every_view() {
     let fx = build_fixture();
-    let builtin = tessera_plugin::Plugin::data_plugin_hash(&tessera_plugin::Passthrough::new());
-    assert!(signature_shaped(&builtin));
-    assert!(!signature_shaped("a plugin nobody here has seen"));
-
-    let projections = ArtifactProjections::new(std::env::temp_dir());
-    let foreign = PartitionSource {
-        postings: &fx.postings,
-        data_plugin_hash: "a plugin nobody here has seen",
-    };
-    let (rows, _) = projections.get_or_build(
-        "v00000",
-        "s0",
-        LAYER,
-        0,
-        &fx.store,
-        &fx.row_space,
-        Some(&foreign),
-        tessera_types::layer::ServingLayout::ArtifactMajor,
-        None,
-        0,
-        false,
-    );
-    assert!(
-        rows.partition().is_none(),
-        "a foreign plugin must not get a partition over term signatures"
-    );
-    assert_eq!(
-        projections.partitions(),
-        0,
-        "and the gauge says so, which is what makes the declining visible to an operator"
-    );
-
-    // The same level under the builtin does get one, so the case above is the gate and not an
-    // accident of the fixture.
     let projections = ArtifactProjections::new(std::env::temp_dir());
     let native = PartitionSource {
         postings: &fx.postings,
-        data_plugin_hash: &builtin,
     };
     let (rows, _) = projections.get_or_build(
         "v00000",
@@ -729,9 +690,6 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     };
     let source = PartitionSource {
         postings: &fx.postings,
-        data_plugin_hash: &tessera_plugin::Plugin::data_plugin_hash(
-            &tessera_plugin::Passthrough::new(),
-        ),
     };
 
     // The coordinate holds: mapped, and the level's first request composes nothing.
@@ -822,9 +780,6 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
     assert_eq!(projections.adopted(), 1);
     let source = PartitionSource {
         postings: &fx.postings,
-        data_plugin_hash: &tessera_plugin::Plugin::data_plugin_hash(
-            &tessera_plugin::Passthrough::new(),
-        ),
     };
     let _ = projections.get_or_build(
         "v00001",

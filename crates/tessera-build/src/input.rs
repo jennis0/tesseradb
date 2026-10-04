@@ -480,11 +480,11 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
 /// difference.
 #[derive(Debug, Clone)]
 pub enum TermDescriptors {
-    /// The exploded relation's own integer `term_id`s, spelled as decimals — what the probe
-    /// corpus has always carried and what `builtin:passthrough` has always been handed.
+    /// The exploded relation's own integer `term_id`s, spelled as decimals: each a bare term, so
+    /// each is its own index key.
     Ids,
-    /// A field-sourced view's distinct terms, **sorted**, a source term being a position in this
-    /// list.
+    /// A field-sourced view's distinct index keys, **sorted**, a source term being a position in
+    /// this list.
     ///
     /// **Sorted, and that is load-bearing.** Term ids are assigned by first appearance, ties
     /// broken by source term — so ordering source terms by their position here has to be ordering
@@ -569,8 +569,9 @@ pub fn read_access_vocabulary(
     Ok((distinct.into_iter().collect(), unlabelled))
 }
 
-/// The field route's counterpart to [`scan_pairs`]: one `(source_id, source_term)` per term a
-/// point carries, and **one carrying the default for a point that carries none**.
+/// The field route's counterpart to [`scan_pairs`]: one `(source_id, labels)` per point, `labels`
+/// being the positions in `vocabulary` of the labels it carries, or **the default alone for a point
+/// that carries none**.
 ///
 /// Three rules, all of them decided here because this is where a row's value becomes a term:
 ///
@@ -581,7 +582,7 @@ pub fn read_access_vocabulary(
 ///   a file that changed underneath the build. The permissive misreading — *null is unspecified,
 ///   so unrestricted* — would put every unlabelled point in everyone's mask.
 /// - **Terms are trimmed** by the label rule every reader of labels applies
-///   ([`tessera_types::label`]), so ` cs.LG` and `cs.LG` are one term. A term that is empty after
+///   ([`tessera_access`]), so ` cs.LG` and `cs.LG` are one term. A term that is empty after
 ///   trimming is not a term.
 /// - **Filling never overrides.** A point carrying terms of its own keeps exactly those. A point's
 ///   terms are disjunctive — `M_auth` is a union of posting lists — so a label added to a point can
@@ -592,7 +593,7 @@ pub fn read_access_vocabulary(
 // The eighth argument is the view's selection, and it belongs beside the file it filters: every
 // pass over a form B source takes the same three (`path`, `fields`, `select`) and a struct around
 // them would be a second spelling of `ViewArgs`.
-pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
+pub fn scan_access_field<F: FnMut(u64, &[u64]) -> ControlFlow<()>>(
     src: Source<'_>,
     field: Option<&str>,
     vocabulary: &[String],
@@ -613,7 +614,7 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
         // identity column alone, so a view declaring only a default opens no access column at all.
         scan_identity(src, |source_id| {
             fill.filled += 1;
-            visit(source_id, default_term)
+            visit(source_id, &[default_term])
         })?;
         return Ok(fill);
     };
@@ -625,6 +626,7 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     // batch has not needed yet, and a value no selected row carries is never looked up at all —
     // which is what lets a dictionary page hold values this prefix does not read.
     let mut positions: Vec<u64> = Vec::new();
+    let mut labels: Vec<u64> = Vec::new();
     scan_access_column(src, field, |ids, rows, batch| {
         positions.clear();
         positions.resize(batch.distinct().len(), u64::MAX);
@@ -645,12 +647,13 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
                     return ControlFlow::Break(());
                 };
                 fill.filled += 1;
-                if visit(source_id, default_term).is_break() {
+                if visit(source_id, &[default_term]).is_break() {
                     return ControlFlow::Break(());
                 }
                 continue;
             }
             fill.carried += 1;
+            labels.clear();
             for &term in terms {
                 let mut position = positions[term as usize];
                 if position == u64::MAX {
@@ -670,9 +673,10 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
                     position = at as u64;
                     positions[term as usize] = position;
                 }
-                if visit(source_id, position).is_break() {
-                    return ControlFlow::Break(());
-                }
+                labels.push(position);
+            }
+            if visit(source_id, &labels).is_break() {
+                return ControlFlow::Break(());
             }
         }
         ControlFlow::Continue(())

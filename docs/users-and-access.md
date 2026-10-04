@@ -1,11 +1,17 @@
 # Users, credentials and access expressions
 
-A design proposal. Nothing in it is built. The service as built is described in
-[system/access-control.md](system/access-control.md): three listeners, each gated by a shared
-secret or a token, and a built-in plugin that passes a credential's terms through unchanged. This
-note proposes what replaces that: principals stored by Tessera, standard ways to authenticate
-them, permissions for what a principal may do, and Accumulo-style access expressions for what a
-principal may see.
+A design note, part built. It proposes principals stored by Tessera, standard ways to
+authenticate them, permissions for what a principal may do, and Accumulo-style access expressions
+for what a principal may see. The catalogue, the three listeners' credentials, sessions and their
+ending, the catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients, access
+expressions and their index, and the removal of the plugin are built, and
+[system/access-control.md](system/access-control.md) describes them; where the build differs from
+this note, the note says so at the claim. **Not built yet:** writes masked by the writer's terms,
+writes with a session token on the viewer listener, and the audit log. Until masked writes are
+built, a principal with `write` writes against the whole corpus whether or not it holds
+`write-all`. While writes are unmasked, a principal with `write` can upsert an item it cannot see,
+by its unique value, and change its label. Granting `write` therefore grants what `read-all`
+grants wherever a view has a unique field.
 
 ## Decisions
 
@@ -13,14 +19,14 @@ principal may see.
 |---|---|
 | How a viewer authenticates | OIDC access tokens, local passwords, and API keys. An OIDC provider is optional. |
 | Where identity data lives | A catalogue in SQLite, beside the bundle and independent of it. |
-| What a principal may do | Four permissions over the whole database: `read`, `write`, `authorise-as`, `admin`. They are separate from terms. |
+| What a principal may do | Six permissions over the whole database: `read`, `write`, `authorise-as`, `admin`, `read-all` and `write-all`. They are separate from terms. |
 | What a principal may see | Terms, granted to local principals and groups, or derived from OIDC claims. |
 | Access labels | Accumulo visibility expressions, without negation. The empty expression is refused, and `public` is reserved. |
-| How labels are indexed | Each distinct label gets a label id. A label that is a disjunction of terms is indexed under each of its terms. Any other label is indexed under its label id, compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
+| How labels are indexed | An item's labels are read as one disjunction and normalised. Each term among its operands is indexed under itself. Each conjunction among them is indexed under a key of its own, compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
 | The plugin | Removed. |
 | OIDC users | Not stored. Claim rules turn claims into terms at each authorise. An administrator maps exact terms to local groups, which give their permissions and terms. |
 | A grant changes, or a password is set or cleared | Every session of every affected principal ends. |
-| Writes to items the writer cannot see | Masked by the writer's own terms. A principal flagged `bypass` acts on the whole corpus. |
+| Writes to items the writer cannot see | Masked by the writer's own terms. A principal holding `write-all` acts on the whole corpus. Not built yet: the mask. Every writer acts on the whole corpus, and can upsert an item it cannot see by its unique value and change its label. |
 | A masked insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
 | The first administrator | The operator credential file becomes a built-in superuser. |
 
@@ -39,18 +45,48 @@ A principal proves who it is with one of three credentials.
 
 | Credential | Held by | How Tessera checks it | What is stored |
 |---|---|---|---|
-| Password | Local person | argon2id against the stored hash. A password shorter than the configured minimum is refused when it is set. Failed attempts are limited per name presented. Accepted over TLS only. | The argon2id hash. |
+| Password | Local person | argon2id against the stored hash. A password shorter than the configured minimum is refused when it is set. Failed attempts are limited per name presented. The server accepts it over plain HTTP, so a deployment that takes passwords terminates TLS in front of the viewer listener. | The argon2id hash. |
 | API key | Local person or service | A random secret with a public id prefix. The prefix finds the record and the secret is compared by SHA-256 in constant time. A key can carry an expiry and a narrower set of permissions than its principal. | The prefix, the hash, the expiry and the permissions. The secret is shown once, at creation. |
-| OIDC access token | OIDC identity | The signature against the provider's published keys (JWKS), then issuer, audience, expiry and not-before. | The provider's configuration only. Validating a token needs no stored secret. |
+| OIDC access token | OIDC identity | The signature against the provider's published keys (JWKS), then issuer, audience, expiry and not-before, and the `typ` header where it is present. | The provider's configuration only. Validating a token needs no stored secret. |
 
 An API key's secret carries enough entropy that a stolen hash cannot be reversed by guessing, so a
 fast hash is enough. A password carries far less, so it takes argon2id.
+
+Password checks have their own admission limit: as many at once as the service has compute
+threads, which is one per core unless configured otherwise, and as many again waiting. A check
+past that is answered `429` with `Retry-After`, before the name is looked up, so an unknown name
+meets the same limit, the same work and the same answer as a known one. The service's blocking
+thread pool is sized to hold these checks beside every admitted viewer and ingest request, so a
+flood of logins cannot take the threads those requests need.
+
+An access token is refused when its JOSE header carries a `typ` other than `JWT`, `at+jwt` or
+`application/at+jwt`, compared without regard to case. RFC 9068 types an access token `at+jwt`.
+Other typed JWTs, such as a logout token (`logout+jwt`), are refused. An OpenID Connect ID token
+usually carries `typ: JWT` or no `typ`, so the header cannot tell it apart from an access token.
+What refuses it is the audience: an ID token's `aud` is the client's id, so a provider whose
+`audience` names the API, and not a client, refuses it. A deployment that sets `audience` to a
+client id accepts that client's ID tokens as access tokens.
+
+Two providers may not have the same issuer and audience. A token from either would verify against
+both, and which claim rules and role mappings applied would depend on the order the providers
+were tried in. One rule in the catalogue refuses such a provider, whether it is declared through
+the API or in `tessera.toml`. Providers with the same issuer and different audiences are allowed,
+and a token whose `aud` names more than one of their audiences is refused, because nothing in it
+says which provider's rules apply.
 
 A provider's JWKS URL uses `https`, or `http` to a loopback address (`localhost`, `127.0.0.1` or
 `::1`). Any other `http` URL is refused when the provider is declared, because anyone on the network
 path could substitute the keys and then sign a token for any identity. Setting the environment
 variable `TESSERA_ALLOW_INSECURE_JWKS=1` accepts it, for a development provider on a private
 network.
+
+The service fetches a provider's keys when a token first needs them and keeps them for an hour. A
+token naming a key the held set lacks fetches the set again. Each URL is fetched at most once
+every ten seconds, and one fetch at a time; a fetch completes and stores its keys even when the
+request that started it has gone away. When a refetch fails, the keys of the last successful fetch
+stay in use until they are 24 hours old. After that, every token of that provider is refused until
+a fetch succeeds, so a key the provider has withdrawn is not trusted indefinitely while its JWKS
+URL is unreachable.
 
 ## The catalogue
 
@@ -65,7 +101,7 @@ It holds:
 - local principals, with their password hashes and API keys;
 - local groups and their members;
 - the terms granted to each principal and each group;
-- the permissions granted to each principal and each group, and the `bypass` flag;
+- the permissions granted to each principal and each group;
 - each OIDC provider declared through the API: issuer, audience, JWKS location, and the rules that
   turn claims into terms, and the role mappings from exact claim values to local groups. A
   provider can also be declared in `tessera.toml` ([Surfaces](#surfaces)).
@@ -91,23 +127,50 @@ terms, which say what a principal may see.
 | Permission | Allows |
 |---|---|
 | `read` | Authorising a session for itself, and every viewer request made with that session's token. |
-| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. All of it is masked by the principal's own terms ([Writes](#writes)). |
+| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. Flushing and compacting. All of it is masked by the principal's own terms ([Writes](#writes)). Not built yet: the mask, so a write acts on the whole corpus. While writes are unmasked, a principal with `write` can upsert an item it cannot see, by its unique value, and change its label. Granting `write` therefore grants what `read-all` grants wherever a view has a unique field. |
 | `authorise-as` | Authorising a session for another principal: a named local principal, or an OIDC identity whose token the caller passes on. |
-| `admin` | Every change to the catalogue. |
+| `admin` | Every change to the catalogue, and the service's status. |
+| `read-all` | With `read`, a session whose authorised set is every item and which satisfies every label. |
+| `write-all` | With `write`, writes against the whole corpus, unmasked. |
 
-The four are independent. `admin` implies neither `read` nor `write`, so an account that manages
-users can be one that sees nothing. The superuser ([Bootstrap](#bootstrap)) holds all four.
+The six are independent. `admin` implies neither `read` nor `write`, so an account that manages
+users can be one that sees nothing. `read-all` and `write-all` widen `read` and `write` and do
+nothing alone. All six are granted to a principal or a group in the same way, and an OIDC identity
+receives them through a role mapping as it receives any other. The superuser
+([Bootstrap](#bootstrap)) holds all six.
+
+`admin` can grant any permission to any principal, itself included, so a principal holding
+`admin` can make itself hold `read-all` and `write-all`. `admin` is therefore equivalent to every
+permission, and is granted as such.
+
+A session holding `read-all` holds no terms and satisfies every index key, including one a flush
+promotes after the session was authorised. Its authorised set is the union of every posting at
+the corpus's current watermark, rebuilt at each publication as every session's set is brought
+forward, so an item placed under a new term or a new label joins it when that publication
+reaches the session. Every `read-all` session at one watermark shares one cached union. The
+visible set is that union minus the overlay, so a deletion or a suppression applies to it as to
+any session. It satisfies every view's, group's, layer's and artifact's own label and every
+layer's default label, including a label no item carries, and an artifact's membership
+requirement still applies. Its item card shows, of each label, what a session holding every term
+is shown.
+
+Flushing and compacting need `write`, as a write does, because a write sent with `?wait=visible`
+flushes. They do not need `admin`, so an ingest pipeline, which ends a commit with a flush, holds
+`write` and nothing more. The service's status needs `admin`.
 
 `authorise-as` is the permission an integrator's backend holds. It replaces the session credential.
 A session it mints for a principal carries that principal's terms, and that principal's `read` and
-`write`. A viewer who may annotate can therefore annotate through the integrator's application,
-and the write is recorded as that viewer's. Postgres's `SET ROLE` and Elasticsearch's `run_as`
+`write`. **Not built yet:** writes with a session token, and the audit log. No route takes a
+write with a session token, so a viewer cannot annotate through the integrator's application, and
+no write is recorded as any viewer's. When both are built, a viewer who may annotate can annotate
+through the integrator's application, and the write is recorded as that viewer's. Postgres's `SET ROLE` and Elasticsearch's `run_as`
 also give the caller the target's privileges. The session never carries the target's `admin`,
-`authorise-as` or `bypass`, so a compromised backend can act as any viewer and cannot change who
-exists, what they are granted, or write outside a viewer's terms.
+`authorise-as`, `read-all` or `write-all`, so a compromised backend can act as any viewer and
+cannot change who exists, what they are granted, read past a viewer's terms, or write outside
+them.
 
-`bypass` is a flag on a principal. A principal with `write` and `bypass` writes against the whole
-corpus. It is intended for ingest pipelines that authenticate as themselves.
+A session a principal authorises for itself, at login, carries its `read`, `write`, `read-all`
+and `write-all`. No session carries `admin` or `authorise-as`.
 
 ## From a credential to terms
 
@@ -128,7 +191,8 @@ holds.
 - An administrator declares **role mappings** for a provider: a claim path and an exact value
   mapped to a local group, such as `groups[*]: tessera-admins -> admins`. An identity whose
   `groups` claim holds `tessera-admins` receives the group's permissions and the terms granted to
-  it. It never receives `bypass`. The mapping reads the claim itself and ignores the terms the
+  it, `read-all` and `write-all` among them where the group holds them. The mapping reads the
+  claim itself and ignores the terms the
   claim rules produce. The identity still holds those terms: with the standard rule it also holds
   the term `tessera-admins`. A mapping matches a whole value exactly, and only in the claim it
   names. A `department` claim that users can edit, set to `tessera-admins`, does not match.
@@ -198,20 +262,21 @@ Each distinct label, after normalisation, gets a **label id**, and each item car
 The label id is the item's permission signature: the build sorts entity ids by it, so the items
 that share a label form one contiguous range. Item cards, masked writes and compaction read it.
 
-Which postings an item appears in depends on the label's shape.
+Which postings an item appears in depends on the operands of its labels, read as one disjunction
+and normalised.
 
-- A **disjunction of terms**, such as `user:ann|user:bob|group:x` or a single term, is indexed
-  under each of its terms, as terms are indexed in the current system. Holding any one of them admits the item, so
-  the union of the held terms' postings is exactly the set these labels admit. Per-document sharing
-  produces labels of this shape.
-- **Any other label**, one holding a conjunction, is indexed under its label id and evaluated
-  through the DAG below.
+- A **term** among the operands, such as each term of `user:ann|user:bob|group:x`, is indexed
+  under itself. Holding any one of them admits the item, so the union of the held terms' postings
+  is exactly the set these operands admit. Per-document sharing produces labels of this shape.
+- A **conjunction** among the operands, such as `b&c` in `a|(b&c)`, is indexed under a key of its
+  own and evaluated through the DAG below. A disjunction inside it is not expanded.
 
 A probe of the two layouts measured authorise on a corpus of 9.3 million per-document labels at
 100 to 800 ms through the DAG and 1.4 to 95 ms through term postings, and on 500,000 compartmented
 labels at 20 to 95 ms through the DAG, which term postings cannot express
-([probe](../probes/2026-09-30-label-dag-authorise/results.md)). Indexing each label by its shape
-takes the faster figure for each.
+([probe](../probes/2026-09-30-label-dag-authorise/results.md)). Indexing terms in postings and
+only conjunctions through the DAG takes the faster figure for each. The probe indexed whole labels,
+and the per-operand rule has not been measured separately.
 
 Normalisation flattens nested conjunctions and disjunctions, sorts and removes duplicate operands,
 and applies absorption, so that `a|(a&b)` becomes `a`. Two equivalent labels that normalise
@@ -221,12 +286,22 @@ affects no access decision.
 Label ids are internal, as term ids are, and no response carries one. A compaction retires a label
 id whose items have all been removed.
 
+**As built:** an item carries a list of labels, as the access column and `access` always allowed,
+and admits a principal who satisfies any one of them. Its labels other than `public` are read as
+one disjunction and normalised, so a list of labels and one label writing the same disjunction are
+indexed alike, and a conjunction another operand absorbs is not indexed. Each term among the
+operands is a key, and each conjunction among them is one key of its own, whose dictionary ordinal
+is that conjunction's id; `public` is a key beside them. The permission signature is the item's
+sorted set of keys, so two items share a signature exactly when their labels give them the same
+keys. The DAG is derived from those keys in the dictionary, and nothing else stores it. **Not
+built yet:** retiring a key at compaction; the dictionary keeps every key it has issued.
+
 ### The expression DAG
 
-Every label that holds a conjunction is compiled into one shared directed acyclic graph. A leaf is a term. An inner node is
-an AND or an OR over its children. Structurally identical subexpressions are one node, so `secret`
-appears once however many labels mention it. Each node records its parents, and each label id
-points at its root node.
+Every conjunction indexed under a key of its own is compiled into one shared directed acyclic
+graph. A leaf is a term. An inner node is an AND or an OR over its children. Structurally identical
+subexpressions are one node, so `secret` appears once however many conjunctions mention it. Each
+node records its parents, and each conjunction's id points at its root node.
 
 ```mermaid
 flowchart BT
@@ -250,15 +325,15 @@ The DAG's size is linear in the total size of the distinct expressions, so an ex
 disjuncts costs space in proportion to its length. Converting to disjunctive normal form would cost
 space exponential in the number of disjuncts. A label that holds a conjunction and is longer than a
 configured number of nodes is
-refused when it is written, with the count in the message.
+refused when it is written, with the count in the message. **Not built yet:** configuring the
+number; it is 1,024.
 
 ### Authorising
 
 At authorise, the service marks each of the credential's terms true and propagates upwards through
 the DAG. An OR node becomes true when its first child does. An AND node keeps a count and becomes
 true when every child has. The authorised set is the union of the postings of the credential's
-terms, which admit every item whose label is a disjunction of terms, and the postings of every
-label in the DAG whose root became true.
+terms, and the postings of every conjunction in the DAG whose root became true.
 
 The pass visits only the nodes reachable from the credential's terms. A label that mentions none of
 them cannot be true, because the expressions have no negation, so it is never visited. The cost is
@@ -275,16 +350,22 @@ figures are paid at session start and never by a map request.
 
 - A label created by ingest after a session authorised is evaluated against that session's stored
   terms by the background refresh, and joins its authorised set if true. A term unknown at
-  authorise then widens the session once it appears.
-- An item card shows, of the item's label, one clause the viewer satisfies. Walking the true nodes
-  from the label's root gives it. The card never shows the whole expression, which could name terms
-  the viewer does not hold.
+  authorise then widens the session once it appears. **Not built yet:** the session keeps the keys
+  it resolved at authorise, so it sees less than its terms admit until it authorises again, never
+  more. The engine can tell, from the keys promoted since, whether a session is behind, and
+  nothing outside its tests asks.
+- An item card reads the item's labels as one disjunction, as they are indexed. It shows each held
+  term among the operands, and, for each conjunction among them that the viewer satisfies, one
+  clause of it in held terms: at each disjunction the satisfied operand with fewest terms, then the
+  first in byte order (built). A held term that appears only inside a conjunction is not shown on
+  its own. The card never shows the whole of a conjunction, which could name terms the viewer does
+  not hold.
 - Containment for cluster labels reasons about sets of entities and their signatures, and applies
   unchanged with label ids as the signatures.
-- The plugin trait in `tessera-plugin` is removed. The two functions it held become the parser on
-  the item side and the catalogue on the credential side. Both use one vocabulary, so the service
+- The plugin trait in `tessera-plugin` is removed (built). The two functions it held become the
+  parser on the item side and the catalogue on the credential side. Both use one vocabulary, so the service
   can report terms that some label names and no grant or claim rule can produce, and the reverse.
-- The bundle's format changes and its version is bumped.
+- The bundle's format changes and its version is bumped (built: 30, and the WAL's 32).
 - Pages in `docs/system/` that this note changes, and which are rewritten when it is built:
   - [write-path](system/write-path.md), where an item's permission signature is its sorted list of
     terms. Here it is the label id.
@@ -324,7 +405,12 @@ system.
 
 ## Writes
 
-A write is masked by the writer's own terms unless the writer has `bypass`.
+A write is masked by the writer's own terms unless the writer holds `write-all`. **Not built
+yet:** the mask. A principal with `write` writes against the whole corpus whether or not it holds
+`write-all`, and every rule in this section is the design for masked writes. A write is therefore
+trusted with every item, as the operator is. While writes are unmasked, a principal with `write`
+can upsert an item it cannot see, by its unique value, and change its label. Granting `write`
+therefore grants what `read-all` grants wherever a view has a unique field.
 
 - Deleting, suppressing or unsuppressing an item whose label the writer does not satisfy returns
   the answer for an item that does not exist, and does the same work.
@@ -347,10 +433,22 @@ root node upwards, so the writer's authorised set is never built.
 ## Bootstrap
 
 The operator credential, read from the file or environment variable named in `tessera.toml`,
-authenticates a built-in superuser that has every permission and `bypass`. The superuser is not in
-the catalogue. The API cannot disable it or change its credential. Changing the file and restarting
-rotates it. An empty catalogue therefore still has an administrator, who creates the first local
-principals and grants.
+authenticates a built-in superuser that has every permission, `read-all` and `write-all`
+included. The superuser is not in the catalogue. The API cannot disable it or change its
+credential. Changing the file and restarting rotates it. An empty catalogue therefore still has an
+administrator, who creates the first local principals and grants. The service refuses to start
+when the credential is empty or holds only white space, since an empty bearer would then
+authenticate as the superuser.
+
+On the session listener the operator credential has two forms of its own, which an API key holding
+`authorise-as` may not use.
+
+- `{"terms": [...]}` mints a session holding exactly those terms and `read`, for no principal of
+  the catalogue. Nothing is stored, so no catalogue change ends it. A local operator uses it to
+  read as a set of terms without creating principals.
+- `{"read_all": true}` mints a session of the superuser itself. It carries `read` and `read-all`,
+  so its authorised set is every item. The Python client's `db.viewer()` with no terms reads with
+  it.
 
 ## Surfaces
 
@@ -360,7 +458,7 @@ the CLI each reach all of them:
 - create, disable and delete a local principal, and set its password;
 - create and revoke an API key;
 - create and delete a group, and add and remove members;
-- grant and revoke terms and permissions, and set `bypass`;
+- grant and revoke terms and permissions;
 - declare, change and remove an OIDC provider and its claim rules;
 - list a principal's sessions, and end them.
 
@@ -375,9 +473,9 @@ The three listeners stay, and each accepts the credentials of the callers it ser
 
 | Listener | Accepts | Serves |
 |---|---|---|
-| Viewer | A session token. A password, an API key or an OIDC access token at the login endpoint, which returns a session token. | Viewer requests, and writes made with a session token that carries `write`. |
-| Session | A principal with `authorise-as`, by API key. | `POST /session/authorise`, naming the principal to authorise, and `POST /session/revoke`. |
-| Control | An API key, an OIDC access token, or the operator credential. | Writes, and the catalogue's verbs. |
+| Viewer | A session token. A password, an API key or an OIDC access token at the login endpoint, which returns a session token. | Viewer requests. Not built yet: writes made with a session token that carries `write`. The viewer listener serves no writes. |
+| Session | A principal with `authorise-as`, by API key, or the operator credential. | `POST /session/authorise`, naming the principal to authorise, and with the operator credential a set of terms or the superuser itself, and `POST /session/revoke`. |
+| Control | An API key, an OIDC access token, or the operator credential. | Writes, flush and compaction, status, and the catalogue's verbs. |
 
 An OIDC access token on the control listener is checked as it is at login, and its permissions come
 from its role mappings, so administration can be granted through single sign-on.
@@ -387,7 +485,7 @@ belongs to an integrator's backend and is not exposed to a browser.
 
 ## Audit
 
-Each authorise, each refused authentication and each catalogue change is appended to an audit log
+**Not built yet:** the audit log. Nothing below is recorded. Each authorise, each refused authentication and each catalogue change is appended to an audit log
 kept outside the catalogue. An authorise record holds the time, the principal, the kind of
 credential and the API key's prefix where there is one, the listener, and the number of terms the
 session resolved to. It does not hold the terms, which can themselves be sensitive. A catalogue
@@ -403,7 +501,12 @@ change records who made it and what it changed.
   NIST SP 800-63B requires for a password that is the only factor. No composition rule is applied.
 - Ten failed password attempts for one name within fifteen minutes refuse further attempts for that
   name until the fifteen minutes have passed. A refused attempt answers as a wrong password does.
-  Both numbers are configurable.
+  Both numbers are configurable. The limit counts attempts per name, from any address, so anyone
+  who knows a principal's name can lock it out of password login by sending ten wrong passwords
+  every fifteen minutes. The principal's API keys and its sessions are unaffected. Per-address
+  limiting is not built.
+- Password checks run at most one per compute thread at once, with as many waiting; past that a
+  login by password is answered `429`.
 
 ## Where the code lives
 
@@ -411,5 +514,7 @@ A new crate, `tessera-catalogue`, holds the SQLite catalogue, credential checks 
 from a principal to its terms and permissions. It depends on nothing that can see a row id or an
 entity id, and `scripts/check-layers.sh` denies it `tessera-store`, `tessera-authz` and
 `tessera-engine`. The server depends on it and hands the engine a set of terms. The expression
-parser, normalisation and the DAG belong in `tessera-authz`, beside the index they replace.
-`tessera-plugin` is deleted.
+parser, normalisation and the DAG are in `tessera-access`, which depends on no other crate of the
+workspace, and the catalogue reads a granted term by its rule for a held term (built). The index
+keys and the postings behind them are in `tessera-authz` (built). `tessera-plugin` is deleted
+(built).

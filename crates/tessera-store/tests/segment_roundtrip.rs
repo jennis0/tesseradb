@@ -5,7 +5,6 @@
 use std::fs;
 use std::io::Read;
 use std::sync::Arc;
-use tessera_plugin::Plugin;
 
 use arrow::array::{Array, ArrayRef, Float32Array, UInt16Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -461,7 +460,6 @@ fn a_manifest_without_an_identity_object_is_a_typed_error() {
     let json = serde_json::json!({
         "bundle_format": 2,
         "created_at": "2026-07-28T00:00:00Z",
-        "data_plugin_hash": tessera_plugin::Passthrough::new().data_plugin_hash(),
         "small_term_threshold": 32,
         "entity_id_high_water": 0,
         "views": [],
@@ -483,7 +481,6 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
     let json = serde_json::json!({
         "bundle_format": 7,
         "created_at": "2026-08-30T00:00:00Z",
-        "data_plugin_hash": tessera_plugin::Passthrough::new().data_plugin_hash(),
         "vocabularies": [],
         "small_term_threshold": 32,
         "entity_id_high_water": 0,

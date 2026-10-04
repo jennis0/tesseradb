@@ -41,7 +41,8 @@ pub struct Options {
     pub log: PathBuf,
     pub viewer_url: String,
     pub session_url: String,
-    /// The session credential itself, read from the environment by the caller.
+    /// The session plane's credential, the operator credential or an API key holding
+    /// `authorise-as`, read from the environment by the caller.
     pub credential: String,
     pub viewers: usize,
     pub stagger: Duration,
@@ -788,13 +789,12 @@ mod tests {
     use arrow::array::{Float64Array, UInt32Array, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use base64::Engine as _;
     use parquet::arrow::ArrowWriter;
     use serde_json::{json, Value};
 
     use super::{plan, replay, Options, Pace};
 
-    const CREDENTIAL: &str = "replay-session-secret";
+    const CREDENTIAL: &str = "replay-operator-secret";
     const ROWS: u64 = 200;
 
     fn write_parquet(path: &Path, columns: Vec<(&str, DataType, arrow::array::ArrayRef)>) {
@@ -908,8 +908,7 @@ mod tests {
             schema,
         })
         .unwrap();
-        std::fs::write(dir.join("session.cred"), CREDENTIAL).unwrap();
-        std::fs::write(dir.join("operator.cred"), "replay-operator-secret").unwrap();
+        std::fs::write(dir.join("operator.cred"), CREDENTIAL).unwrap();
         let toml = dir.join("tessera.toml");
         std::fs::write(
             &toml,
@@ -918,20 +917,19 @@ mod tests {
             path = "bundle"
             cache = "cache"
             wal = "wal.log"
-            [plugin]
-            module = "builtin:passthrough"
             [disclosure]
             token_max_lifetime = 3600
             [serve]
             viewer = "127.0.0.1:0"
             session = "127.0.0.1:0"
             control = "127.0.0.1:0"
-            session_credential_file = "session.cred"
             operator_credential_file = "operator.cred"
             request_log = "requests.jsonl"
             compute_admission = 1
             compute_queue = 4
             admission_timeout_ms = 60000
+            [catalogue]
+            dir = "catalogue"
             "#,
         )
         .unwrap();
@@ -1019,12 +1017,11 @@ mod tests {
         }
     }
 
-    async fn authorise(client: &reqwest::Client, session: &str, terms: &str) -> Value {
-        let auth_data = base64::engine::general_purpose::STANDARD.encode(terms);
+    async fn authorise(client: &reqwest::Client, session: &str, term: &str) -> Value {
         client
             .post(format!("{session}/session/authorise"))
             .bearer_auth(CREDENTIAL)
-            .json(&json!({ "auth_data": auth_data }))
+            .json(&json!({ "terms": [term] }))
             .send()
             .await
             .unwrap()
@@ -1043,10 +1040,10 @@ mod tests {
         let log = tmp.path().join("requests.jsonl");
         let viewport = json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200});
         // Term 0 sees every point and term 1 none, so the two principals' viewports differ.
-        for terms in [r#"{"terms":["0"]}"#, r#"{"terms":["1"]}"#] {
+        for term in ["0", "1"] {
             let server = start(&toml).await;
             let client = reqwest::Client::new();
-            let auth = authorise(&client, &server.session, terms).await;
+            let auth = authorise(&client, &server.session, term).await;
             assert_eq!(auth["token_id"], 0, "each run numbers its sessions from 0");
             client
                 .post(format!("{}/v1/viewport", server.viewer))
@@ -1118,17 +1115,7 @@ mod tests {
 
         // Record: authorise, meta, a viewport, a category the bundle lacks, and a revoke.
         let client = reqwest::Client::new();
-        let auth_data = base64::engine::general_purpose::STANDARD.encode(r#"{"terms":["0"]}"#);
-        let auth: Value = client
-            .post(format!("{session}/session/authorise"))
-            .bearer_auth(CREDENTIAL)
-            .json(&json!({ "auth_data": auth_data }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let auth = authorise(&client, &session, "0").await;
         let token = auth["token"].as_str().unwrap();
         let viewport = json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5});
         for request in [
@@ -1190,9 +1177,8 @@ mod tests {
             assert_eq!(line["status"], line["recorded"]["status"], "{line}");
         }
         assert!(!written(".jsonl").contains(token));
-        assert_eq!(
-            state.sessions.lock().stats().retained,
-            0,
+        assert!(
+            state.sessions.lock().list(|_| true).is_empty(),
             "each copy's revoke names the session that copy minted"
         );
         let summary: Value = serde_json::from_str(&written(".summary.json")).unwrap();
@@ -1243,7 +1229,7 @@ mod tests {
                 .map_err(|e| e.to_string())
         });
         wait_until("the replayed session", || {
-            state.sessions.lock().stats().retained == 1
+            state.sessions.lock().list(|_| true).len() == 1
         })
         .await;
         let held = state.compute_gate.admit().await.unwrap();

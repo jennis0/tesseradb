@@ -269,9 +269,64 @@ async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
     assert_versions_survive_restarts(server, &tmp).await;
 }
 
+/// Every side-manifest of each partition under the prefix `dir`'s bundle `CURRENT` names, by
+/// partition, highest-numbered first.
+fn side_manifests(dir: &std::path::Path) -> Vec<Vec<std::path::PathBuf>> {
+    let bundle = dir.join("bundle");
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("CURRENT")).unwrap()).unwrap();
+    let partitions = bundle.join(current["prefix"].as_str().unwrap()).join("partitions");
+    let mut out = Vec::new();
+    for partition in std::fs::read_dir(partitions).unwrap().flatten() {
+        let mut numbered: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(partition.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let n = name.strip_prefix("SEGMENTS-")?.strip_suffix(".json")?.parse().ok()?;
+                Some((n, entry.path()))
+            })
+            .collect();
+        numbered.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+        out.push(numbered.into_iter().map(|(_, path)| path).collect());
+    }
+    out
+}
+
+/// The layers one side-manifest names, sorted.
+fn layers_named_by(path: &std::path::Path) -> Vec<String> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let mut names: Vec<String> = manifest["layers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|layer| layer["declaration"]["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The layers the newest side-manifest of each partition under the current prefix names, sorted
+/// and distinct.
+fn published_layers(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = side_manifests(dir)
+        .iter()
+        .filter_map(|manifests| manifests.first())
+        .flat_map(|path| layers_named_by(path))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Register a and b, drop b, optionally flush and fold so the log rotates past those records,
 /// then register c and crash before any side-manifest names it. Returns the layer versions served
 /// before the crash and after it.
+///
+/// The executor publishes a write's side-manifest after acknowledging it, so the drop's own
+/// publication is awaited before the pause is armed. Armed earlier, the pause parks the executor
+/// on the drop's publication, and the registration of c is never accepted.
 async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(String, u64)>, Vec<(String, u64)>) {
     use tessera_lifecycle::faults::{PauseAction, PauseSite};
     let tmp = TempDir::new().unwrap();
@@ -282,6 +337,12 @@ async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(Strin
     if fold {
         flush_and_fold(&server, None).await;
     }
+    wait_until(
+        "a side-manifest naming the drop",
+        std::time::Duration::from_secs(60),
+        async || published_layers(tmp.path()) == ["clusters/a"],
+    )
+    .await;
 
     faults.arm_pause(PauseSite::BeforeManifestPublish, PauseAction::Stall);
     register(&server, declaration("clusters/c", None)).await;
@@ -293,6 +354,14 @@ async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(Strin
     .await;
     let before = layer_versions(&server).await;
     assert_eq!(before.len(), 2);
+    assert_eq!(published_layers(tmp.path()), ["clusters/a"]);
+    for path in side_manifests(tmp.path()).iter().flatten() {
+        assert!(
+            !layers_named_by(path).iter().any(|name| name == "clusters/c"),
+            "the executor is parked on the publication of c, so {} does not name it",
+            path.display()
+        );
+    }
     let crashed = crash_copy(&tmp);
     faults.release();
     server.shutdown().await;

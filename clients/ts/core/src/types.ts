@@ -1,18 +1,83 @@
 import type {Table} from 'apache-arrow';
 
 /**
- * A viewer session, as {@link TesseraClient.authorise} returns it.
+ * A session minted on the session plane, as {@link TesseraClient.authorise} returns it.
  *
  * @category Requests and responses
  */
-export type Session = {
-  /** The bearer token every viewer route takes. It is a credential. */
-  token: string;
+export type Session = Login & {
   /** The session's handle for {@link TesseraClient.revoke}. It is not a credential. */
   tokenId: number;
-  /** When the token expires, in seconds since the Unix epoch: the time of the request plus the server's `token_max_lifetime_secs`. */
+};
+
+/**
+ * A session, as {@link TesseraClient.login} returns it.
+ *
+ * @category Requests and responses
+ */
+export type Login = {
+  /** The bearer token every viewer route takes. It is a credential. */
+  token: string;
+  /**
+   * When the session ends, in seconds since the Unix epoch: the earliest of the server's
+   * `token_max_lifetime` after the request, the expiry of the API key it was authorised with, and
+   * the `exp` of the access token it was authorised with. A catalogue change can end it sooner.
+   */
   expiresAt: number;
 };
+
+/**
+ * The one credential {@link TesseraClient.login} sends.
+ *
+ * @category Requests and responses
+ */
+export type LoginCredential =
+  | {
+      /** A local principal's name. */
+      principal: string;
+      /** Its password. */
+      password: string;
+    }
+  | {
+      /** An API key, `tsk_<prefix>_<secret>`. */
+      apiKey: string;
+    }
+  | {
+      /** An OIDC access token a declared provider issued. */
+      accessToken: string;
+    };
+
+/**
+ * Whom {@link TesseraClient.authorise} mints a session for.
+ *
+ * @category Requests and responses
+ */
+export type AuthoriseTarget =
+  | {
+      /** A local principal, by name. */
+      principal: string;
+    }
+  | {
+      /** The access token of an OIDC identity, as its provider issued it. */
+      accessToken: string;
+    }
+  | {
+      /**
+       * The terms the session holds, with `read` and no other permission, for no principal of the
+       * catalogue. Only the operator credential may name them. Each is trimmed and an empty one is
+       * dropped.
+       */
+      terms: string[];
+    }
+  | {
+      /**
+       * A session of the superuser itself, holding `read` and `read-all`: its authorised set is
+       * every item, including an item a flush places under a new term or label after the session
+       * was minted, deletions and suppressions still apply, and it satisfies every label. Only the
+       * operator credential may ask for it.
+       */
+      readAll: true;
+    };
 
 /**
  * The extent of a view's data coordinates. Each axis maps onto 32-bit grid units: `0` at the
@@ -1199,9 +1264,11 @@ export type ItemDetail = {
    */
   scoped: Record<string, Record<string, unknown>>;
   /**
-   * The item's access labels that this session satisfies, sorted. It never lists the item's other
-   * labels, so it says which of the viewer's grants admit the item. It does not say how the item
-   * is labelled. An empty list is an answer.
+   * Why this session sees the item, as label text, sorted. The item's labels are read as one
+   * disjunction: each held term among its operands, and one satisfied clause of each conjunction
+   * among them.
+   * A held term that appears only inside a conjunction is not listed on its own. Every term is one the
+   * session holds. It does not say how the item is labelled. An empty list is an answer.
    */
   labels: string[];
 };
@@ -1376,7 +1443,8 @@ export type ItemsRequest = {
   /**
    * System columns, after the fields, in this order. `position` is `tessera:x` and `tessera:y`
    * (`float64`) in the view's coordinates, so degrees on a geographic view. `labels` is
-   * `tessera:labels` (`list<utf8>`), the item's labels this principal holds, sorted.
+   * `tessera:labels` (`list<utf8>`), the clauses of each item's labels that this principal
+   * satisfies, as the item card gives them.
    */
   systemFields?: ('position' | 'labels')[];
   /** The viewport's filter. Only the items matching it are returned, unless `keepUnmatched` is set. */

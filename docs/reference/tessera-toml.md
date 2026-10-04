@@ -26,16 +26,6 @@ What `tessera build` and `tessera check` read.
 | --- | --- | --- | --- |
 | `schema` | string (a path) | `"schema.toml"` | The corpus declaration. `--config` names another. |
 
-## `[plugin]`
-
-The authorisation plugin, which turns an access label into the terms a viewer's token is checked against.
-
-The table is required.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `module` | string | required | The plugin. This build has one, `builtin:passthrough`, which makes each access label its own term, and refuses any other name. |
-
 ## `[disclosure]`
 
 How long a viewer's token lasts.
@@ -44,7 +34,7 @@ The table is required.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `token_max_lifetime` | integer | required | The lifetime, in seconds, of every viewer token `POST /session/authorise` issues. A token past it is refused with 403. With `0`, a token has expired when it is issued. |
+| `token_max_lifetime` | integer | required | The longest a session lasts, in seconds. A session ends sooner when the API key it was authorised with expires, or when the OIDC access token it was authorised with does. A token past its session's end is refused with 403. With `0`, a session has ended when it is issued. |
 
 ## `[serve]`
 
@@ -53,15 +43,13 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `viewer` | string | not set | The viewer plane's address and port, such as `"127.0.0.1:8141"`: `/v1/meta`, `/v1/viewport`, `/v1/items`, `/v1/artifacts` and `/v1/categories`, for requests carrying a viewer token. `tessera serve` refuses to start without it, and `tessera health` probes it. Port 0 takes a free port, which the server prints when it starts. |
-| `session` | string | not set | The session plane's address and port: `POST /session/authorise`, which issues viewer tokens, and `POST /session/revoke`. `tessera serve` refuses to start without it. |
+| `session` | string | not set | The session plane's address and port: `POST /session/authorise`, where a principal holding `authorise-as` mints a session for another principal by API key, and `POST /session/revoke`. `tessera serve` refuses to start without it. |
 | `control` | string | not set | The control plane's address and port, or `"unix:<path>"` for a Unix socket: ingest, deletion and suppression, declarations, flush, compaction and status, all under `/control`. `tessera serve` refuses to start without it. A relative socket path is read from the server's working directory, not from this file's directory, and a file already at the path is removed. |
-| `session_credential_file` | string (a path) | not set | A file holding the session credential, the bearer token the session plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and when neither this nor `session_credential_env` is set. When both are set, the file is used. |
-| `session_credential_env` | string | not set | An environment variable holding the session credential. `tessera serve` refuses to start when it is unset. |
-| `operator_credential_file` | string (a path) | not set | A file holding the operator credential, the bearer token every request to the control plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and when neither this nor `operator_credential_env` is set. When both are set, the file is used. |
-| `operator_credential_env` | string | not set | An environment variable holding the operator credential. `tessera serve` refuses to start when it is unset. |
+| `operator_credential_file` | string (a path) | not set | A file holding the operator credential. It authenticates the built-in superuser, which holds every permission, `read-all` and `write-all` among them, and is not in the catalogue, so an empty catalogue still has an administrator. Its contents are trimmed. Changing the file and restarting rotates it. `tessera serve` refuses to start when the file cannot be read or holds only white space, and when neither this nor `operator_credential_env` is set. When both are set, the file is used. |
+| `operator_credential_env` | string | not set | An environment variable holding the operator credential, trimmed as the file is. `tessera serve` refuses to start when it is unset or holds only white space. |
 | `cors_origins` | array of strings | `[]` | Browser origins, such as `"https://maps.example.org"`, whose pages may call the viewer plane with a viewer token. `"*"` is refused. |
 | `cors_loopback` | boolean | `false` | Admit a page served from `localhost`, `127.0.0.1` or `[::1]`, on any port, to the viewer plane, as for a notebook whose port is not known in advance. |
-| `dev_cors_origins` | array of strings | `[]` | Browser origins whose pages may call both the viewer plane and the session plane, so a page in development can hold the session credential. The server logs a warning at start when it is set. `"*"` is refused. |
+| `dev_cors_origins` | array of strings | `[]` | Browser origins whose pages may call both the viewer plane and the session plane, so a page in development can hold an API key that mints sessions for other principals. The server logs a warning at start when it is set. `"*"` is refused. |
 | `compute_threads` | integer | the number of CPUs the process may use | Threads in the pool that computes responses. |
 | `compute_admission` | integer | four per compute thread | Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and single-artifact reads, `/v1/artifacts/browse`, `/v1/aggregate`, a `/v1/categories/{column}/suggest` with `view` and `counts=true`, and `/session/authorise`, never the control plane. |
 | `compute_queue` | integer | twice `compute_admission` | Requests that may wait for an admission slot beyond those running. A request finding no place is refused with 429 at once. `compute_admission` and `compute_queue` together may not exceed 2305843009213693951. |
@@ -78,7 +66,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `stream_write_stall_ms` | integer | `10000` | Milliseconds a streamed response waits for a client that has stopped reading before it cuts the response off. |
 | `stream_deadline_ms` | integer | `60000` | Milliseconds a streamed response may run. A viewport response is cut off at it. A bulk read ends at it with a cursor to resume from. |
 | `stage_timing` | boolean | `false` | Add each stage's timing, as `stage_ns`, to the last frame of a viewport response. It has an effect only in a binary built with the `bench-timing` feature. |
-| `request_log` | string (a path) | not set | A file to append one JSON line to for each viewer-plane and session-plane request other than `/healthz` and `/readyz`: when it started, its route and body, the session's `token_id`, its status, bytes sent, time to headers and to the end of the body, how long it waited for admission, and whether the client went away before the body ended. Request bodies are written, including `/session/authorise`'s `auth_data`, so that a session can be replayed, and the file is created readable by its owner only. Tokens and the credentials in headers are never written. The file is written by its own thread and flushed whenever it has caught up, and a restarted server appends to it, marking its lines with a new `run`. `tessera-bench replay` sends a log back at a server. Unset, nothing is logged. |
+| `request_log` | string (a path) | not set | A file to append one JSON line to for each viewer-plane and session-plane request other than `/healthz` and `/readyz`: when it started, its route and body, the session's `token_id`, its status, bytes sent, time to headers and to the end of the body, how long it waited for admission, and whether the client went away before the body ended. Request bodies are written, including `/session/authorise`'s, so that a session can be replayed, and the file is created readable by its owner only. Tokens and the credentials in headers are never written. The file is written by its own thread and flushed whenever it has caught up, and a restarted server appends to it, marking its lines with a new `run`. `tessera-bench replay` sends a log back at a server. Unset, nothing is logged. |
 | `max_region_vertices` | integer | `10000` | The most vertices a `region` filter's polygon may have. A filter with more is refused with 422. |
 | `max_region_cells` | integer | `262144` | The most boundary cells a `region` filter is resolved to at one zoom level. Past it the filter is answered for a cover of the polygon, which the `x-tessera-region` header reports, rather than refused. |
 | `region_cache_bytes` | integer | `268435456` (256 MiB) | Bytes of resolved `region` filters kept for reuse, shared by every viewer. |
@@ -137,3 +125,15 @@ Writes through the control plane: the limits on each request, and when buffered 
 | `compaction_after_deletions` | integer or `"off"` | the value of `overlay_soft_limit` | At any hour, compact when this many deleted items wait to be removed, or `"off"`. |
 | `compaction_dead_rows_fraction` | number or `"off"` | `0.2` | At any hour, compact when deleted items waiting to be removed reach this fraction of the stored rows, or `"off"`. |
 | `compaction_dead_bytes_ratio` | number or `"off"` | `1.0` | At any hour, compact when the bundle's unreferenced bytes on disc reach this ratio of the bytes its manifests name, or `"off"`. |
+
+## `[catalogue]`
+
+The identity catalogue: who may authenticate, with what, and the OIDC providers whose access tokens are accepted. `tessera build` reads none of it.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `dir` | string (a path) | not set | The directory holding the catalogue, a SQLite database of local principals, their password hashes and API keys, groups, grants and the providers declared through the API. It lives outside the bundle, so principals and grants carry across a rebuild. It is created, readable by the service's user alone, when absent. `tessera serve` refuses to start without it, or when another process holds it open. |
+| `min_password_length` | integer | `15` | The fewest characters a password may hold when it is set. At least 1. |
+| `failed_attempt_limit` | integer | `10` | Failed password attempts for one name within `failed_attempt_window` after which further attempts for that name are refused, answered as a wrong password is, until the oldest leaves the window. |
+| `failed_attempt_window` | integer | `900` | The window, in seconds, over which failed password attempts are counted. |
+| `providers` | array of tables | `[]` | OIDC providers the service starts with, each a table of `name`, `issuer`, `audience`, `jwks_url`, and optional `claim_rules` (each `{ claim, template }`) and `role_mappings` (each `{ claim, value, group }`). A provider declared here is listed by the API and cannot be changed or removed through it; edit this file and restart. The service refuses to start when a name is declared here and in the catalogue, or twice here. A `jwks_url` is `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`; the environment variable `TESSERA_ALLOW_INSECURE_JWKS=1` accepts any other `http` URL. |

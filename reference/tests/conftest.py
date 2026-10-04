@@ -21,7 +21,6 @@ import pytest
 
 from oracle.harness import (  # noqa: F401 (re-exported for tests importing directly from here)
     OPERATOR_CREDENTIAL,
-    SESSION_CREDENTIAL,
     Server,
     ensure_cli_built,
     ensure_fixture_bundle,

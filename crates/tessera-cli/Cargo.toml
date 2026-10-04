@@ -61,8 +61,6 @@ tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# The records test authorises its token as a client does, with `auth_data` in base64.
-base64 = { workspace = true }
 # The check verb's payload test round-trips stdout through the type `PUT /control/layers` takes:
 # a body that will not deserialise there is not a payload, whatever it looks like.
 serde_json = { workspace = true }

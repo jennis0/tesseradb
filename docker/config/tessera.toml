@@ -11,9 +11,6 @@ wal   = "/var/lib/tessera/wal.log"
 [build]
 schema = "schema.toml"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -24,5 +21,9 @@ token_max_lifetime = 3600
 viewer  = "0.0.0.0:8080"
 session = "0.0.0.0:8081"
 control = "0.0.0.0:8082"
-session_credential_file  = "/run/secrets/tessera_session"
 operator_credential_file = "/run/secrets/tessera_operator"
+
+# Principals, their passwords and API keys, groups, grants and OIDC providers. It lives beside the
+# bundle in the volume and carries across a rebuild.
+[catalogue]
+dir = "/var/lib/tessera/catalogue"

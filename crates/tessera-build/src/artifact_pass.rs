@@ -49,7 +49,6 @@ use std::time::Instant;
 use croaring::Bitmap;
 use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
-use tessera_plugin::Plugin;
 use tessera_store::derived::{resolve_segment, HeldShape, ShapeIndex};
 use tessera_store::read::SegmentData;
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
@@ -654,20 +653,12 @@ const MANIFEST_N: u64 = 0;
 /// identical file and one entry per view. The fold composes for every level in one call
 /// (`Executor::write_containment_partitions`) and this does the same, which is why the level list
 /// here is the store's rather than one view's drawn layers.
-///
-/// **The gate first**: under any plugin but the builtin the partition is not sound at all, so
-/// nothing is composed and nothing is written — the same gate the fold applies, taken from the same
-/// manifest field.
 pub fn containment(
     store: &ArtifactStore,
     prefix_dir: &Path,
     partition: &str,
-    data_plugin_hash: &str,
     index: &mut DerivedIndex,
 ) -> Vec<tessera_store::manifest::DerivedExtent> {
-    if data_plugin_hash != tessera_plugin::Passthrough::new().data_plugin_hash() {
-        return Vec::new();
-    }
     let postings_path = prefix_dir
         .join("partitions")
         .join(partition)

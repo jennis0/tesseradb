@@ -3,7 +3,7 @@
 //! there instead.
 //!
 //! A node is ready when its write executor is running and no partition has stepped down. The
-//! bundle's digests, its segment manifests and the plugin are checked at startup, which fails
+//! bundle's digests and its segment manifests are checked at startup, which fails
 //! without them; nothing reopens a bundle at runtime, so they need no check here. An executor
 //! hung inside `fsync` still reports running, so this can answer 200 while writes block.
 //!

@@ -12,7 +12,6 @@ mod common;
 use tempfile::TempDir;
 
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_server::state::ComputeGate;
 use tessera_spatial::tiles_for_bbox;
 
@@ -452,7 +451,6 @@ async fn h_config_missing_disclosure_refuses_to_start() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = standard_fixture(tmp.path());
 
-    std::env::set_var("TESSERA_TEST_H_SESSION", SESSION_CREDENTIAL);
     std::env::set_var("TESSERA_TEST_H_OPERATOR", OPERATOR_CREDENTIAL);
 
     let toml_text = format!(
@@ -461,13 +459,10 @@ async fn h_config_missing_disclosure_refuses_to_start() {
         path = "{bundle}"
         cache = "{cache}"
         wal = "{wal}"
-        [plugin]
-        module = "builtin:passthrough"
         [serve]
         viewer = "127.0.0.1:0"
         session = "127.0.0.1:0"
         control = "127.0.0.1:0"
-        session_credential_env = "TESSERA_TEST_H_SESSION"
         operator_credential_env = "TESSERA_TEST_H_OPERATOR"
         "#,
         bundle = bundle_root.display(),
@@ -861,14 +856,14 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
         .unwrap();
     assert_eq!(meta_resp.status(), 200, "/v1/meta must never be gated");
 
-    // `/session/revoke`: session-plane credential, never gated. Revokes the SECOND session
+    // `/session/revoke`: an `authorise-as` key, never gated. Revokes the SECOND session
     // (minted before saturation, above) so the slow request's own `Arc<Session>` — cloned
     // into its `spawn_blocking` closure before this point — is unaffected either way; this
     // assertion is purely about the revoke endpoint's own responsiveness under a saturated gate.
     let revoke_resp = server
         .client
         .post(server.session_url("/session/revoke"))
-        .bearer_auth(SESSION_CREDENTIAL)
+        .bearer_auth(&server.integrator_key)
         .json(&serde_json::json!({ "token_id": second_token_id }))
         .send()
         .await
@@ -1300,7 +1295,6 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         &bundle_root,
         &tmp.path().join("cache-1"),
         &tmp.path().join("wal-1.log"),
-        Passthrough::new(),
         config_1,
     )
     .expect("engine should open against a freshly built bundle");
@@ -1308,7 +1302,6 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         &bundle_root,
         &tmp.path().join("cache-8"),
         &tmp.path().join("wal-8.log"),
-        Passthrough::new(),
         config_8,
     )
     .expect("engine should open against a freshly built bundle");
@@ -1425,7 +1418,6 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
         &bundle_root,
         &tmp.path().join("cache-1"),
         &tmp.path().join("wal-1.log"),
-        Passthrough::new(),
         config_1,
     )
     .expect("engine should open against a freshly built bundle");
@@ -1433,7 +1425,6 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
         &bundle_root,
         &tmp.path().join("cache-8"),
         &tmp.path().join("wal-8.log"),
-        Passthrough::new(),
         config_8,
     )
     .expect("engine should open against a freshly built bundle");

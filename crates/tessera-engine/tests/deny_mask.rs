@@ -36,7 +36,6 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: tick_secs,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
@@ -326,7 +325,6 @@ fn engine_flushing_only_on_request(
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,

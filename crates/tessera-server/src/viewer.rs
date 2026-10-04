@@ -34,6 +34,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     let cors = crate::cors::viewer_layer(&state);
     let state_for_log = state.request_log.is_some().then(|| Arc::clone(&state));
     let router = Router::new()
+        .route("/v1/login", post(crate::login::login))
+        .route("/v1/logout", post(crate::login::logout))
         .route("/v1/meta", get(meta))
         .route("/v1/categories/{column}", get(categories))
         .route(

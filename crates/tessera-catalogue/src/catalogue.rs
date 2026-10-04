@@ -55,7 +55,6 @@ pub struct PrincipalInfo {
     pub name: String,
     pub kind: PrincipalKind,
     pub disabled: bool,
-    pub bypass: bool,
     pub has_password: bool,
     /// Terms granted directly, without those of its groups.
     pub terms: BTreeSet<String>,
@@ -114,13 +113,12 @@ pub struct Authenticated {
     pub api_key: Option<String>,
 }
 
-/// What a session holds: its terms, its permissions and whether it writes against the whole
-/// corpus. The reserved term `public`, which every session holds, is not listed.
+/// What a session holds: its terms and its permissions. The reserved term `public`, which every
+/// session holds, is not listed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Resolution {
     pub terms: BTreeSet<String>,
     pub permissions: PermissionSet,
-    pub bypass: bool,
     /// The catalogue's generation this was resolved at.
     pub generation: u64,
 }
@@ -129,7 +127,6 @@ pub(crate) struct PrincipalRec {
     pub id: i64,
     pub kind: PrincipalKind,
     pub disabled: bool,
-    pub bypass: bool,
     pub permissions: PermissionSet,
     pub password: Option<String>,
     pub terms: BTreeSet<String>,
@@ -199,6 +196,23 @@ impl State {
         match grantee {
             Grantee::Principal(p) => only_principal(p),
             Grantee::Group(g) => self.affected_by_group(g),
+        }
+    }
+
+    /// Refuses `p` when another provider has its issuer and audience. Two such providers would
+    /// both accept one token, and which claim rules and role mappings applied would depend on
+    /// the order they were tried in.
+    pub(crate) fn check_issuer_audience(&self, p: &Provider) -> Result<(), Error> {
+        match self
+            .providers
+            .values()
+            .find(|(o, _)| o.name != p.name && o.issuer == p.issuer && o.audience == p.audience)
+        {
+            Some((other, _)) => Err(Error::SameIssuer {
+                provider: p.name.clone(),
+                other: other.name.clone(),
+            }),
+            None => Ok(()),
         }
     }
 
@@ -347,7 +361,6 @@ impl Catalogue {
                         id,
                         kind,
                         disabled: false,
-                        bypass: false,
                         permissions: PermissionSet::EMPTY,
                         password: None,
                         terms: BTreeSet::new(),
@@ -360,42 +373,27 @@ impl Catalogue {
     }
 
     pub fn disable_principal(&self, name: &str) -> Result<Affected, Error> {
-        self.set_flag(name, "disabled", true)
+        self.set_disabled(name, true)
     }
 
     pub fn enable_principal(&self, name: &str) -> Result<Affected, Error> {
-        self.set_flag(name, "disabled", false)
+        self.set_disabled(name, false)
     }
 
-    /// Whether `principal` writes against the whole corpus, where it also holds `write`.
-    pub fn set_bypass(&self, principal: &str, bypass: bool) -> Result<Affected, Error> {
-        self.set_flag(principal, "bypass", bypass)
-    }
-
-    fn set_flag(&self, name: &str, column: &'static str, value: bool) -> Result<Affected, Error> {
+    fn set_disabled(&self, name: &str, value: bool) -> Result<Affected, Error> {
         let name = name.trim().to_owned();
         self.affecting(|st, tx| {
             let p = st.principal(&name)?;
-            let current = if column == "disabled" {
-                p.disabled
-            } else {
-                p.bypass
-            };
-            if current == value {
+            if p.disabled == value {
                 return Ok((nothing(), Affected::default()));
             }
             tx.execute(
-                &format!("UPDATE principal SET {column} = ?1 WHERE id = ?2"),
+                "UPDATE principal SET disabled = ?1 WHERE id = ?2",
                 params![value, p.id],
             )?;
             let affected = only_principal(&name);
             let apply: Apply = Some(Box::new(move |st| {
-                let p = st.principals.get_mut(&name).expect("validated");
-                if column == "disabled" {
-                    p.disabled = value;
-                } else {
-                    p.bypass = value;
-                }
+                st.principals.get_mut(&name).expect("validated").disabled = value;
             }));
             Ok((apply, affected))
         })
@@ -741,14 +739,34 @@ impl Catalogue {
 
     /// Grants a term, trimmed. `public` and an empty term are refused.
     pub fn grant_term(&self, to: Grantee<'_>, term: &str) -> Result<Affected, Error> {
-        self.term_grant(to, names::term(term)?, true)
+        self.grant_terms(to, &[term])
     }
 
     pub fn revoke_term(&self, from: Grantee<'_>, term: &str) -> Result<Affected, Error> {
-        self.term_grant(from, term.trim().to_owned(), false)
+        self.revoke_terms(from, &[term])
     }
 
-    fn term_grant(&self, who: Grantee<'_>, term: String, grant: bool) -> Result<Affected, Error> {
+    /// Grants every term in one transaction, each checked as [`Catalogue::grant_term`] checks
+    /// one. One refused term refuses them all.
+    pub fn grant_terms(&self, to: Grantee<'_>, terms: &[&str]) -> Result<Affected, Error> {
+        let terms = terms
+            .iter()
+            .map(|t| names::term(t))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        self.term_grant(to, terms, true)
+    }
+
+    pub fn revoke_terms(&self, from: Grantee<'_>, terms: &[&str]) -> Result<Affected, Error> {
+        let terms = terms.iter().map(|t| t.trim().to_owned()).collect();
+        self.term_grant(from, terms, false)
+    }
+
+    fn term_grant(
+        &self,
+        who: Grantee<'_>,
+        terms: BTreeSet<String>,
+        grant: bool,
+    ) -> Result<Affected, Error> {
         let owned = trimmed(who);
         let who = owned.as_grantee();
         self.affecting(|st, tx| {
@@ -762,7 +780,11 @@ impl Catalogue {
                     (g.id, &g.terms, "group_term", "group_id")
                 }
             };
-            if held.contains(&term) == grant {
+            let changed: Vec<String> = terms
+                .into_iter()
+                .filter(|t| held.contains(t) != grant)
+                .collect();
+            if changed.is_empty() {
                 return Ok((nothing(), Affected::default()));
             }
             let sql = if grant {
@@ -770,7 +792,10 @@ impl Catalogue {
             } else {
                 format!("DELETE FROM {table} WHERE {column} = ?1 AND term = ?2")
             };
-            tx.execute(&sql, params![id, term])?;
+            let mut statement = tx.prepare(&sql)?;
+            for term in &changed {
+                statement.execute(params![id, term])?;
+            }
             let affected = st.affected_by_grantee(&who);
             let owner = OwnedGrantee::from(who);
             let apply: Apply = Some(Box::new(move |st| {
@@ -780,10 +805,12 @@ impl Catalogue {
                     }
                     OwnedGrantee::Group(n) => &mut st.groups.get_mut(n).expect("validated").terms,
                 };
-                if grant {
-                    held.insert(term);
-                } else {
-                    held.remove(&term);
+                for term in changed {
+                    if grant {
+                        held.insert(term);
+                    } else {
+                        held.remove(&term);
+                    }
                 }
             }));
             Ok((apply, affected))
@@ -857,6 +884,7 @@ impl Catalogue {
                 }
                 None => {}
             }
+            st.check_issuer_audience(&p)?;
             write_provider(tx, &p)?;
             Ok((provider_apply(p), Affected::default()))
         })
@@ -867,6 +895,7 @@ impl Catalogue {
         let p = provider.validated(self.allow_insecure_jwks)?;
         self.affecting(|st, tx| {
             self.writable_provider(st, &p.name)?;
+            st.check_issuer_audience(&p)?;
             tx.execute("DELETE FROM provider WHERE name = ?1", params![p.name])?;
             write_provider(tx, &p)?;
             let affected = only_provider(&p.name);
@@ -931,7 +960,6 @@ impl Catalogue {
         let mut out = Resolution {
             terms: p.terms.clone(),
             permissions: p.permissions,
-            bypass: p.bypass,
             generation: st.generation,
         };
         st.add_group_grants(&p.groups, &mut out);
@@ -949,7 +977,7 @@ impl Catalogue {
     /// The terms and permissions a session for an OIDC identity holds, from `claims` as accepted
     /// from a token of `provider`: the terms its claim rules produce, and the terms and
     /// permissions granted to each existing local group named by a role mapping whose claim
-    /// holds the mapping's value. It never holds `bypass`. `None` when the provider is unknown.
+    /// holds the mapping's value. `None` when the provider is unknown.
     pub fn resolve_claims(&self, provider: &str, claims: &Value) -> Option<Resolution> {
         let st = self.state.read();
         let (p, _) = st.providers.get(provider.trim())?;
@@ -971,13 +999,15 @@ fn only_provider(name: &str) -> Affected {
     }
 }
 
-/// Validates the configured providers and adds them, refusing one declared twice.
+/// Validates the configured providers and adds them, refusing one declared twice or sharing
+/// another's issuer and audience.
 fn add_config_providers(state: &mut State, options: &Options) -> Result<(), Error> {
     for p in &options.config_providers {
         let p = p.validated(options.allow_insecure_jwks)?;
         if state.providers.contains_key(&p.name) {
             return Err(Error::DeclaredTwice { provider: p.name });
         }
+        state.check_issuer_audience(&p)?;
         state.providers.insert(p.name.clone(), (p, true));
     }
     Ok(())
@@ -1046,7 +1076,6 @@ fn principal_info(name: &str, p: &PrincipalRec) -> PrincipalInfo {
         name: name.to_owned(),
         kind: p.kind,
         disabled: p.disabled,
-        bypass: p.bypass,
         has_password: p.password.is_some(),
         terms: p.terms.clone(),
         permissions: p.permissions,

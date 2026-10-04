@@ -188,7 +188,6 @@ fn open(root: &std::path::Path, tmp: &std::path::Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         tessera_engine::EngineConfig {
             theta_target_marks: 16,
             ..config()

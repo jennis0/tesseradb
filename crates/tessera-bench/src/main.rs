@@ -332,7 +332,7 @@ enum Command {
 
     /// Send a log written by `[serve] request_log` back at a server, as one viewer or as many,
     /// and report each route's latency beside the latency the log recorded. Each copy authorises
-    /// its own sessions by re-sending the recorded `auth_data`. Needs no fixtures.
+    /// its own sessions by re-sending the recorded `/session/authorise` body. Needs no fixtures.
     Replay {
         /// The request log.
         #[arg(long)]
@@ -341,7 +341,8 @@ enum Command {
         viewer_url: String,
         #[arg(long)]
         session_url: String,
-        /// The environment variable holding the session credential.
+        /// The environment variable holding the session plane's credential: the operator
+        /// credential, or an API key whose principal holds `authorise-as`.
         #[arg(long)]
         credential_env: String,
         /// Copies of the recorded sessions to run at once, each with its own sessions.
@@ -418,7 +419,7 @@ fn main() -> std::process::ExitCode {
         };
         let result = std::env::var(&credential_env)
             .map_err(|_| {
-                format!("{credential_env} is not set; export the session credential in it").into()
+                format!("{credential_env} is not set; export the session plane's credential in it").into()
             })
             .and_then(|credential| {
                 arms::replay::run(

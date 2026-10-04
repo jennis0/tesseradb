@@ -393,10 +393,11 @@ def test_a_committed_database_reopens_and_takes_the_next_commit(tmp_path):
 
 
 
-def test_a_padded_label_serves_trimmed_and_a_control_character_is_kept_at_each_commit(served):
-    """The server reads the labels the SDK sends: surrounding spaces are trimmed and an empty label
-    is no label, while U+001F is not white space and stays part of the label, on the build and on
-    a later commit alike."""
+def test_a_padded_label_serves_trimmed_and_a_conjunction_needs_both_terms_at_each_commit(served):
+    """The server reads the labels the SDK sends: surrounding spaces are trimmed, an empty label is
+    no label, and a label holding a conjunction is satisfied by a reader holding both of its terms,
+    on the build and on a later commit alike. The operator's reader, which holds `read-all`, sees
+    every item."""
 
     def labelled(first: int) -> pa.Table:
         ids = [f"p{i}" for i in range(first, first + 3)]
@@ -405,7 +406,7 @@ def test_a_padded_label_serves_trimmed_and_a_control_character_is_kept_at_each_c
                 "id": ids,
                 "x": [float(i) for i in range(first, first + 3)],
                 "y": [1.0] * 3,
-                "access": [[" red ", ""], ["\x1fred"], ["  "]],
+                "access": [[" red ", ""], ["red&blue"], ["  "]],
             }
         )
 
@@ -417,13 +418,13 @@ def test_a_padded_label_serves_trimmed_and_a_control_character_is_kept_at_each_c
     db = served(first_commit)
 
     def counts():
-        return {t: db.viewer([t]).view("map").count() for t in ("red", "\x1fred", "sealed")}
+        readers = {"red": ["red"], "both": ["red", "blue"], "sealed": ["sealed"]}
+        return {name: db.viewer(terms).view("map").count() for name, terms in readers.items()}
 
-    assert counts() == {"red": 1, "\x1fred": 1, "sealed": 1}
+    assert counts() == {"red": 1, "both": 2, "sealed": 1}
 
     db.insert("map", labelled(10), x="x", y="y", access="access")
     report = db.commit()
     assert report.ok, report
-    assert counts() == {"red": 2, "\x1fred": 2, "sealed": 2}
-    assert {"red", "\x1fred", "sealed"} <= set(db.terms)
-    assert not {" red ", "", "  "} & set(db.terms)
+    assert counts() == {"red": 2, "both": 4, "sealed": 2}
+    assert db.viewer().view("map").count() == 6

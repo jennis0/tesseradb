@@ -2,6 +2,10 @@
 
 use super::*;
 use super::out::flat_families;
+use rustc_hash::FxHashMap;
+use tessera_access::{conjunction_text, Label};
+
+use crate::session::SatisfiedKeys;
 
 /// `POST /v1/items/{handle}`'s payload: a visible item's full record — every declared field that
 /// carries a value, by declared name. Names, not tags: a blob field's tag is a declaration position and an index internal, resolved to the
@@ -11,11 +15,11 @@ use super::out::flat_families;
 pub struct ItemOut {
     /// Present fields only, in declaration order — an absent field is absent, not null.
     pub fields: Vec<ItemField>,
-    /// The satisfied terms only: the intersection of this item's own term set with the asking
-    /// session's satisfied set, presented through the plugin, sorted by the presented string.
-    /// Never the item's full label set. Taken against [`Session::satisfied_descriptors`], which
-    /// holds only the descriptors the credential presented, so a term outside the grant has no
-    /// name to be served under.
+    /// Why the asking session sees this item. Its labels are read as one disjunction, whose
+    /// operands are terms and conjunctions ([`tessera_authz::index_keys`]). Each held term among
+    /// them is named, and one satisfied clause of each satisfied conjunction, each written as label
+    /// text, sorted. A held term that appears only inside a conjunction is not named on its own. Every term is one the credential holds, so no clause the session does
+    /// not satisfy and no term it does not hold is named. Never the item's whole label.
     pub labels: Vec<String>,
     /// The views this item holds a row in that this session may reach, sorted by id, each with
     /// the position that view places it at. A view the gate refuses is absent, exactly as a view
@@ -87,25 +91,23 @@ impl Engine {
         )
     }
 
-    /// The drill-down's `labels` array: this entity's own terms, intersected with the session's
-    /// satisfied set, presented through the plugin. Satisfied-only, twice over: the intersection
-    /// reads [`Session::satisfied_descriptors`], which holds exactly the descriptors the
-    /// credential presented, plus `public`, so there is no descriptor in scope for a term outside
-    /// the grant even if the intersection were written wrongly. Nothing here reads the bundle
-    /// dictionary, so there is no route from an ordinal to a descriptor that bypasses the session.
-    /// Reached only after the visibility verdict, like every other read in [`Engine::item`]: the
-    /// transpose is never probed for an entity the principal cannot see. An entity the transpose
-    /// does not hold answers `[]` rather than refusing: it hides a label rather than inventing
-    /// one, reachable only while a prefix predates the transpose. Not built: plugin routing
-    /// beyond the built-in one. `present_terms` is answered by
-    /// `builtin:passthrough`, whose descriptors are the caller's own label strings.
+    /// The drill-down's `labels` array: why this session sees the entity, as the clauses of its
+    /// labels that the session satisfies, each written as label text and sorted. Each index key
+    /// of the entity's that the session satisfies offers one clause: a term offers itself, and a
+    /// conjunction its [`Label::witness`]. Every term
+    /// written is one the credential holds, so the clauses the session does not satisfy and the
+    /// terms it does not hold are never named. Reached only after the visibility verdict, like
+    /// every other read in [`Engine::item`]: the transpose is never probed for an entity the
+    /// principal cannot see. An entity the transpose does not hold answers `[]`. `parsed` holds
+    /// the conjunction behind each key read so far, so a page of rows parses each one once.
     pub(crate) fn labels_for(
         &self,
         generation: &Generation,
         session: &Session,
         entity: u32,
+        parsed: &mut FxHashMap<TermId, Option<Label>>,
     ) -> Result<Vec<String>> {
-        let Some(terms) = generation
+        let Some(keys) = generation
             .filter_columns
             .entity_terms()
             .terms_of(entity)
@@ -113,39 +115,31 @@ impl Engine {
         else {
             return Ok(Vec::new());
         };
-        let descriptors: Vec<Vec<u8>> = terms
-            .into_iter()
-            .filter_map(|term| {
-                session
-                    .satisfied_descriptors()
-                    .get(&TermId::new(term))
-                    .cloned()
-            })
-            .collect();
-        if descriptors.is_empty() {
-            return Ok(Vec::new());
+        let held = |term: &str| session.holds(term);
+        let mut clauses = Vec::new();
+        for key in keys.into_iter().map(TermId::new) {
+            if !session.satisfied().holds_key(key) {
+                continue;
+            }
+            let clause = match session.term_of(key, &generation.dict) {
+                Some(term) => Some(conjunction_text(&[String::from_utf8_lossy(term).as_ref()])),
+                None => parsed
+                    .entry(key)
+                    .or_insert_with(|| {
+                        generation
+                            .dict
+                            .descriptor(key)
+                            .and_then(tessera_authz::label::label_of_key)
+                            .and_then(|text| Label::parse(text, usize::MAX).ok())
+                    })
+                    .as_ref()
+                    .and_then(|label| label.witness(&held).map(|terms| conjunction_text(&terms))),
+            };
+            clauses.extend(clause);
         }
-        let mut labels = self
-            .plugin
-            .present_terms(&descriptors)
-            .map_err(EngineError::Plugin)?;
-        // One string per descriptor: more strings would put on the wire a label answering to no
-        // term this session satisfies. Fewer is refused too: positional is the contract, so a
-        // short list means the caller cannot say which label it failed to present.
-        if labels.len() != descriptors.len() {
-            return Err(EngineError::Plugin(tessera_plugin::PluginError::Malformed(
-                format!(
-                    "present_terms returned {} strings for {} descriptors; the mapping is \
-                     positional, and a longer list would serve a label answering to no term this \
-                     session satisfies",
-                    labels.len(),
-                    descriptors.len()
-                ),
-            )));
-        }
-        labels.sort_unstable();
-        labels.dedup();
-        Ok(labels)
+        clauses.sort_unstable();
+        clauses.dedup();
+        Ok(clauses)
     }
 
     /// `POST /v1/items/{handle}`: invert `id` to its number and the entity holding it, test
@@ -225,7 +219,7 @@ impl Engine {
         let fields = record_fields(&generation, segment, local, entity_raw)?;
         Ok(Some(ItemOut {
             fields,
-            labels: self.labels_for(&generation, session, entity_raw)?,
+            labels: self.labels_for(&generation, session, entity_raw, &mut FxHashMap::default())?,
             views,
             scoped,
         }))

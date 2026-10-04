@@ -21,8 +21,8 @@ import {createInterface} from 'node:readline';
 export type Served = {
   viewerUrl: string;
   sessionUrl: string;
-  sessionCredential: string;
   controlUrl: string;
+  /** The operator credential, which mints a session for the terms a test names. */
   operatorCredential: string;
   stop(): void;
 };
@@ -94,9 +94,6 @@ wal   = ".tessera/wal.log"
 [build]
 schema = "schema.toml"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -104,8 +101,10 @@ token_max_lifetime = 3600
 viewer                   = "127.0.0.1:0"
 session                  = "127.0.0.1:0"
 control                  = "127.0.0.1:0"
-session_credential_file  = ".tessera/session.cred"
 operator_credential_file = ".tessera/operator.cred"
+
+[catalogue]
+dir = ".tessera/catalogue"
 `;
 
 /** Resolves with the three bound addresses from the child's `listening` line, or rejects. */
@@ -160,8 +159,6 @@ export async function start(
     const secrets = join(directory, '.tessera');
     mkdirSync(join(secrets, 'cache'), {recursive: true});
     chmodSync(secrets, 0o700);
-    const sessionCredential = randomBytes(24).toString('hex');
-    writeFileSync(join(secrets, 'session.cred'), `${sessionCredential}\n`, {mode: 0o600});
     const operatorCredential = randomBytes(24).toString('hex');
     writeFileSync(join(secrets, 'operator.cred'), `${operatorCredential}\n`, {mode: 0o600});
     const deployment = join(directory, 'tessera.toml');
@@ -189,7 +186,6 @@ export async function start(
       return {
         viewerUrl: `http://${at.viewer}`,
         sessionUrl: `http://${at.session}`,
-        sessionCredential,
         controlUrl: `http://${at.control}`,
         operatorCredential,
         stop

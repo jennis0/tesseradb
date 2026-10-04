@@ -14,7 +14,6 @@ build is via the CLI subprocess, same as before).
 
 from __future__ import annotations
 
-import base64
 import functools
 import hashlib
 import json
@@ -32,7 +31,6 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_BIN = REPO_ROOT / "target" / "release" / "tessera"
 
-SESSION_CREDENTIAL = "reference-oracle-session-secret"
 OPERATOR_CREDENTIAL = "reference-oracle-operator-secret"
 
 DEFAULT_POINTS = "data/scaled/geometry.parquet"
@@ -186,6 +184,22 @@ def ensure_cli_built() -> None:
     )
 
 
+def build_argv(deployment: Path, out: Path, *args: str) -> list[str]:
+    """The `tessera build` invocation [`cli_build`] runs, for a recipe to record. `args` follow
+    `--out`."""
+    return [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(out), *args]
+
+
+def cli_build(deployment: Path, out: Path, *args: str, capture_output: bool = False) -> None:
+    """Build the bundle `deployment` describes into `out`, raising `CalledProcessError` if the
+    build fails. The caller runs [`ensure_cli_built`] first."""
+    subprocess.run(  # nosemgrep: our own binary and fixture paths, as a list, with no shell
+        build_argv(deployment, out, *args),
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=capture_output,
+    )
+
 
 def write_deployment(path: Path, *, bundle: Path, schema: Path) -> Path:
     """Write the `tessera.toml` a build is invoked against, and hand back its path.
@@ -210,9 +224,6 @@ wal   = "{bundle}.wal"
 [build]
 schema = "{schema}"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -228,8 +239,8 @@ control = "127.0.0.1:45721"
 def run_build(args: list[str]) -> subprocess.CompletedProcess:
     """Run `tessera build` and hand back the completed process, refusal or not.
 
-    The fixture builders above and in `catalogue.py` run the CLI with `check=True`, because for
-    them a failed build is a broken harness. The schema-refusal catalogue is the opposite test:
+    The fixture builders build through [`cli_build`], which raises, because for them a failed
+    build is a broken harness. The schema-refusal catalogue is the opposite test:
     the refusal *is* the subject (records §2; decision 0013's naming discipline), so the caller
     asserts on the exit status and the message rather than having them converted into a
     `CalledProcessError`. Output is captured — stderr is where the CLI reports a refusal — and
@@ -330,7 +341,11 @@ def ensure_fixture_bundle(
         bundle=bundle_root,
         schema=_fixture_config_path(bundle_root),
     )
-    subprocess.run(args, cwd=REPO_ROOT, check=True)
+    cli_build(
+        _fixture_deployment_path(bundle_root),
+        bundle_root,
+        *_fixture_build_args(points=points, pairs=pairs, limit=limit),
+    )
     write_recipe(bundle_root, wanted)
 
 
@@ -399,18 +414,15 @@ def _fixture_build_argv(
     extent: str,
     view_id: str,
 ) -> list[str]:
-    args = [
-        str(CLI_BIN),
-        "build",
-        "--deployment",
-        str(_fixture_deployment_path(bundle_root)),
-        "--file",
-        f"points={points}",
-        "--file",
-        f"pairs={pairs}",
-        "--out",
-        str(bundle_root),
-    ]
+    return build_argv(
+        _fixture_deployment_path(bundle_root),
+        bundle_root,
+        *_fixture_build_args(points=points, pairs=pairs, limit=limit),
+    )
+
+
+def _fixture_build_args(*, points: str, pairs: str, limit: int | None) -> list[str]:
+    args = ["--file", f"points={points}", "--file", f"pairs={pairs}"]
     if limit is not None:
         args += ["--limit", str(limit)]
     return args
@@ -521,22 +533,22 @@ class Server:
         viewer_port: int,
         session_port: int,
         control_port: int,
-        session_credential: str = SESSION_CREDENTIAL,
         operator_credential: str = OPERATOR_CREDENTIAL,
     ):
         self.viewer_base = f"http://127.0.0.1:{viewer_port}"
         self.session_base = f"http://127.0.0.1:{session_port}"
         self.control_base = f"http://127.0.0.1:{control_port}"
-        self.session_credential = session_credential
         self.operator_credential = operator_credential
 
     def authorise(self, terms: list[str]) -> dict:
-        auth_data = base64.b64encode(json.dumps({"terms": terms}).encode()).decode()
+        """A session holding exactly `terms` and `read`, minted with the operator credential. The
+        server holds a term trimmed, and drops one that is empty, holds a control character or is
+        `public`."""
         resp = requests.post(
             f"{self.session_base}/session/authorise",
-            headers={"Authorization": f"Bearer {self.session_credential}"},
-            json={"auth_data": auth_data},
-            timeout=10,
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            json={"terms": terms},
+            timeout=60,
         )
         resp.raise_for_status()
         return resp.json()
@@ -747,6 +759,17 @@ class Server:
         resp.raise_for_status()
         return resp.json()
 
+    def refreshed(self, timeout: float = 60.0) -> None:
+        """Wait until no session refresh is running. A publication arms the refresh of every
+        resident session as it lands, and until that refresh reaches a session its reads serve the
+        previous generation's rows beside the current generation's deletions."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.status()["write_executor"]["flush"]["refresh_in_flight"]:
+                return
+            time.sleep(0.05)
+        raise TimeoutError(f"a session refresh was still running after {timeout}s")
+
     def flush(self, timeout: float = 60.0) -> None:
         """Ask for a flush and **wait for one to complete** (contracts §3.4).
 
@@ -844,9 +867,6 @@ path = "{bundle_root}"
 cache = "{cache_dir}"
 wal = "{wal_path}"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -854,7 +874,6 @@ token_max_lifetime = 3600
 viewer = "127.0.0.1:{viewer_port}"
 session = "127.0.0.1:{session_port}"
 control = "127.0.0.1:{control_port}"
-session_credential_env = "TESSERA_REFERENCE_SESSION_CRED"
 operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
 max_k = {max_k}
 k_min = {k_min}
@@ -865,6 +884,7 @@ theta_target_marks = {theta_target_marks}
         config_text += f"max_underlay_cells = {max_underlay_cells}\n"
     if serve_extra:
         config_text += serve_extra.rstrip() + "\n"
+    config_text += f'\n[catalogue]\ndir = "{tmp_dir / "catalogue"}"\n'
     config_path = tmp_dir / "tessera.toml"
     config_path.write_text(config_text)
     return config_path
@@ -920,7 +940,6 @@ def spawn_server(
     )
 
     env = os.environ.copy()
-    env["TESSERA_REFERENCE_SESSION_CRED"] = SESSION_CREDENTIAL
     env["TESSERA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
     if env_extra:
         env.update(env_extra)

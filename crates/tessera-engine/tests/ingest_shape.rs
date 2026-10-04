@@ -81,7 +81,6 @@ fn engine(tmp: &std::path::Path, root: &std::path::Path, window: usize) -> Engin
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             // **The row trigger off.** This cell drives publication itself — it pins `B`

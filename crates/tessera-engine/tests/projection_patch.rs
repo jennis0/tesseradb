@@ -42,7 +42,6 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str, tick_secs
         root,
         &tmp.join(format!("cache-{wal}")),
         &tmp.join(format!("{wal}.log")),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: tick_secs,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
@@ -69,7 +68,6 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str) -> Engine
         root,
         &tmp.join(format!("cache-{wal}")),
         &tmp.join(format!("{wal}.log")),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,

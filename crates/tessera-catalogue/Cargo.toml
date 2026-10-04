@@ -5,6 +5,8 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+# The rule for a term a credential holds.
+tessera-access = { path = "../tessera-access" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 subtle = "2.6"

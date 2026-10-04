@@ -443,8 +443,7 @@ impl Engine {
         self.level_contents.stats()
     }
 
-    /// Containment partitions this engine has composed. Stays at zero under any plugin but the
-    /// builtin, since containment then runs on the masked-count route instead.
+    /// Containment partitions this engine has composed.
     pub fn artifact_containment_partitions(&self) -> u64 {
         self.artifact_projections.partitions()
     }

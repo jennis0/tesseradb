@@ -26,7 +26,6 @@ use tessera_engine::viewport::{PointRows, ViewportRequest};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
 use tessera_lifecycle::UnallocatedRow;
-use tessera_plugin::Passthrough;
 use tessera_spatial::tiler::ScalarType;
 use tessera_types::EntityId;
 
@@ -200,7 +199,6 @@ fn open(root: &Path, tmp: &Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         config(),
     )
     .expect("the engine opens");

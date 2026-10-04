@@ -44,6 +44,7 @@ DEFINITIONAL = (
 DRIVERS = ("harness", "journal")
 FIXTURE_BUILDERS = (
     "catalogue", "canary_fixture", "label_fixture", "multiview", "artifact_label_fixture",
+    "expression_fixture",
 )
 CLASSIFIED = set(DEFINITIONAL) | set(DRIVERS) | set(FIXTURE_BUILDERS)
 

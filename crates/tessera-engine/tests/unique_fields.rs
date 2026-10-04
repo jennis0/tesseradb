@@ -195,7 +195,6 @@ fn engine_with(fx: &Fixture, config: EngineConfig) -> Engine {
         &fx.root,
         &fx.tmp.path().join("cache"),
         &fx.tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config,
     )
     .expect("the engine opens");

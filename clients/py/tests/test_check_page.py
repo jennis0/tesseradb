@@ -56,7 +56,6 @@ def deployment(directory: Path, declaration: str) -> str:
         "[bundle]\n"
         'path = "bundle"\ncache = "cache"\nwal = "wal.log"\n\n'
         '[build]\nschema = "schema.toml"\n\n'
-        '[plugin]\nmodule = "builtin:passthrough"\n\n'
         "[disclosure]\ntoken_max_lifetime = 3600\n",
         encoding="utf-8",
     )

@@ -496,6 +496,28 @@ impl Engine {
         self.switches.write_check_hold_wanted.store(true, Ordering::SeqCst);
     }
 
+    /// Lower the number of terms a flush may carry the dictionary to, so a small fixture reaches
+    /// the bound promotion enforces.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_max_distinct_terms_for_test(&self, terms: u64) {
+        self.switches.max_distinct_terms.store(terms, Ordering::Relaxed);
+    }
+
+    /// Park every ingest call on entry, on the thread its handler runs on, until unparked.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_ingest_parked_for_test(&self, parked: bool) {
+        self.switches.ingest_parked.store(parked, Ordering::SeqCst);
+    }
+
+    /// How many ingest calls are waiting at [`Self::set_ingest_parked_for_test`]'s hold.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn ingest_parked_for_test(&self) -> u64 {
+        self.switches.ingest_parked_count.load(Ordering::SeqCst)
+    }
+
     /// Whether a batch is waiting at [`Self::hold_next_write_check_for_test`]'s hold.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]

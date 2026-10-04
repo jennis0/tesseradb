@@ -275,7 +275,7 @@ impl Engine {
                 // returns the identical projection. Nothing is cached across sessions.
                 let inputs = crate::projection::ProjectionInputs {
                     fragment: &fragment,
-                    satisfied: session.satisfied_sorted(),
+                    satisfied: session.grant().keys(),
                     postings: &generation.postings,
                     deltas: &generation.delta_postings,
                     images: view_data.term_images.as_deref(),
@@ -287,7 +287,7 @@ impl Engine {
                 SessionGeometry {
                     fragment: Arc::clone(&fragment),
                     projection: Arc::new(projection),
-                    satisfied_sorted: Arc::clone(session.satisfied_sorted()),
+                    grant: session.grant().clone(),
                     auth_data_hash: session.auth_data_hash(),
                 }
             })

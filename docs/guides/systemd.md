@@ -66,9 +66,6 @@ wal   = "state/wal/wal.log"
 [build]
 schema = "corpus/corpus.toml"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -76,12 +73,16 @@ token_max_lifetime = 3600
 viewer  = "127.0.0.1:9151"
 session = "127.0.0.1:9152"
 control = "unix:/run/tessera/control.sock"
-session_credential_file  = "secrets/session.secret"
 operator_credential_file = "secrets/operator.secret"
+
+[catalogue]
+dir = "state/catalogue"
 ```
 
-The paths under `[bundle]`, `schema` and both credential files are read relative to the directory
-`tessera.toml` is in, wherever the server is started from.
+The paths under `[bundle]`, `schema`, the credential file and the catalogue's directory are read
+relative to the directory `tessera.toml` is in, wherever the server is started from. The catalogue
+holds the deployment's users, groups, API keys and grants. The server creates it on its first
+start, readable by the `tessera` user alone.
 
 In the tutorial the control address, which takes writes to the corpus, was a TCP port on
 `127.0.0.1`. Any program on the machine can connect to that, and only the operator credential keeps
@@ -103,14 +104,13 @@ this guide leaves out keep their defaults.
     with its default in
     [`defaults.rs`](https://github.com/jennis0/tesseradb/blob/main/crates/tessera-config/src/defaults.rs).
 
-## Create the credentials
+## Create the credential
 
-The server will not start without the session and operator credentials `tessera.toml` names. They
-use the tutorial's file names:
+The server will not start without the operator credential `tessera.toml` names. It uses the
+tutorial's file name:
 
 ```console
 tessera$ umask 077
-tessera$ openssl rand -hex 32 > secrets/session.secret
 tessera$ openssl rand -hex 32 > secrets/operator.secret
 ```
 
@@ -154,8 +154,9 @@ tessera serve: No such file or directory (os error 2)
 ```
 
 In a second `tessera` shell, ask the viewer address whether the server is ready, and ask the session
-address for a token the way your backend will. Under the passthrough plugin, `auth_data` is base64
-of a JSON object whose `terms` list the access labels to grant.
+address for a token. Your backend will ask with an API key whose principal holds `authorise-as`,
+naming the principal to read as. The operator credential can instead name the access terms the
+token holds, which needs no principal in the catalogue:
 
 ```console
 tessera$ curl -sSi http://127.0.0.1:9151/readyz
@@ -164,9 +165,9 @@ content-length: 0
 date: Thu, 24 Sep 2026 09:26:04 GMT
 
 tessera$ curl -sS http://127.0.0.1:9152/session/authorise \
-  -H "authorization: Bearer $(cat secrets/session.secret)" \
+  -H "authorization: Bearer $(cat secrets/operator.secret)" \
   -H 'content-type: application/json' \
-  -d "{\"auth_data\": \"$(printf '{"terms": ["public"]}' | base64 -w0)\"}"
+  -d '{"terms": ["public"]}'
 {"token":"2546b15027f3b33d8639941a5406597e1ee2bf60715d46dbfb5e4268ac0547d1","token_id":0,"expires_at":1790245564}
 ```
 

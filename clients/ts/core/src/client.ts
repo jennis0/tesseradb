@@ -8,13 +8,12 @@ import {
   type PointsPart,
   type ViewportHead
 } from './decode.js';
-import {base64} from './control.js';
 import {createDecoder, type Decoder} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader, type Frame} from './frame.js';
 import {readAggregate, type PartialAggregate} from './aggregate.js';
 import {openRecords, type RecordsRead} from './records.js';
-import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, CountsSink, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, CountsSink, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, Login, LoginCredential, AuthoriseTarget, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
@@ -228,9 +227,11 @@ export type TesseraClientOptions = {
   /** The session listener's base URL, without a trailing slash. Routes under `/session/` are appended to it. */
   sessionUrl: string;
   /**
-   * The session credential, sent as the bearer token by `authorise` and `revoke`; no other method
-   * uses it. A browser page can reach the session listener only from an origin the deployment
-   * lists in `serve.dev_cors_origins`, a development setting.
+   * The bearer token `authorise` and `revoke` send; no other method uses it. It is an API key whose
+   * principal holds `authorise-as`, or the operator credential, which alone may name a session's
+   * terms. Either mints a session for any principal, so it belongs to an integrator's backend or an
+   * operator's script. A browser page can reach the session listener only from an origin the
+   * deployment lists in `serve.dev_cors_origins`, a development setting.
    */
   sessionCredential?: string;
   /**
@@ -294,59 +295,115 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /session/authorise`: mints a viewer session. The request's `auth_data` is base64 of the
-   * JSON `{"terms": [...]}`, the form the built-in `builtin:passthrough` auth plugin reads.
+   * `POST /v1/login`: mints a session for the principal the credential authenticates, which must
+   * hold `read`. The credential travels in the body, and no bearer is sent.
    *
-   * @param terms - The access labels to grant, under `builtin:passthrough`. Another auth plugin
-   *   reads them by its own rules.
-   * @returns The session: `token` for the viewer methods, `tokenId` for `revoke`, and `expiresAt`
-   *   in seconds since the Unix epoch.
-   * @throws `Error` when the options carry no `sessionCredential`.
-   * @throws {@link TesseraError} when the server refuses: `401` for a wrong session credential,
-   *   `422` where the auth plugin refuses `auth_data`, `429` under load.
+   * @param credential - Exactly one credential: a local principal's name and password, an API key,
+   *   or an OIDC access token.
+   * @returns The session: `token` for the viewer methods and `logout`, and `expiresAt` in seconds
+   *   since the Unix epoch.
+   * @throws {@link TesseraError} when the server refuses: `401` for every credential it does not
+   *   accept, `403` where the principal does not hold `read`, `429` under load.
    */
-  async authorise(terms: string[], signal?: AbortSignal): Promise<Session> {
-    if (!this.opts.sessionCredential) {
-      throw new Error('authorise needs a sessionCredential');
-    }
-    // The session plane reads `auth_data` as base64 of UTF-8 JSON.
-    const authData = base64(new TextEncoder().encode(JSON.stringify({terms})));
-    const response = await this.send(`${this.opts.sessionUrl}/session/authorise`, {
+  async login(credential: LoginCredential, signal?: AbortSignal): Promise<Login> {
+    const body =
+      'password' in credential
+        ? {password: {principal: credential.principal, password: credential.password}}
+        : 'apiKey' in credential
+          ? {api_key: credential.apiKey}
+          : {access_token: credential.accessToken};
+    const response = await this.send(`${this.opts.viewerUrl}/v1/login`, {
       method: 'POST',
-      headers: {
-        authorization: `Bearer ${this.opts.sessionCredential}`,
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify({auth_data: authData}),
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify(body),
       signal
     });
     if (!response.ok) await fail(response);
-    const body = (await response.json()) as {token: string; token_id: number; expires_at: number};
-    return {token: body.token, tokenId: body.token_id, expiresAt: body.expires_at};
+    const answer = (await response.json()) as {token: string; expires_at: number};
+    return {token: answer.token, expiresAt: answer.expires_at};
+  }
+
+  /**
+   * `POST /v1/logout`: ends the session of `token`.
+   *
+   * @throws {@link TesseraError} when the server refuses: `401` or `403` for a token whose session
+   *   has already ended.
+   */
+  async logout(token: string, signal?: AbortSignal): Promise<void> {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/logout`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${token}`},
+      signal
+    });
+    if (!response.ok) await fail(response);
+  }
+
+  /**
+   * `POST /session/authorise`: mints a session with the `sessionCredential` option. For a principal,
+   * the session carries the target's terms and its `read` and `write`, and the target must hold
+   * `read`. For `terms`, which only the operator credential may name, the session holds those terms
+   * and `read`. A term is trimmed, and one that is empty, holds a control character or is `public`
+   * is not held.
+   *
+   * @param target - The local principal to act as, by name, the OIDC identity whose access token is
+   *   passed on, or the terms the session holds.
+   * @returns The session: `token` for the viewer methods, `tokenId` for `revoke`, and `expiresAt`
+   *   in seconds since the Unix epoch.
+   * @throws `Error` when the options carry no `sessionCredential`.
+   * @throws {@link TesseraError} when the server refuses: `401` for a credential it does not
+   *   accept, `403` where the key's principal does not hold `authorise-as`, the target does not
+   *   hold `read`, or a key names `terms`, `404` where `principal` names no enabled principal,
+   *   `422` for an access token it does not accept, `429` under load.
+   */
+  async authorise(target: AuthoriseTarget, signal?: AbortSignal): Promise<Session> {
+    const credential = this.requireSessionCredential('authorise');
+    const body =
+      'principal' in target
+        ? {principal: target.principal}
+        : 'terms' in target
+          ? {terms: target.terms}
+          : 'readAll' in target
+            ? {read_all: true}
+            : {access_token: target.accessToken};
+    const response = await this.send(`${this.opts.sessionUrl}/session/authorise`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${credential}`, 'content-type': 'application/json'},
+      body: JSON.stringify(body),
+      signal
+    });
+    if (!response.ok) await fail(response);
+    const answer = (await response.json()) as {token: string; token_id: number; expires_at: number};
+    return {token: answer.token, tokenId: answer.token_id, expiresAt: answer.expires_at};
   }
 
   /**
    * `POST /session/revoke`: ends the session `tokenId` names, so the token itself is not sent
-   * again. An id naming no live session is not refused.
+   * again. An API key ends a session a key of its own principal minted, and the operator credential
+   * ends any session. An id naming no such live session is not refused.
    *
    * @throws `Error` when the options carry no `sessionCredential`.
-   * @throws {@link TesseraError} when the server refuses: `401` for a wrong session credential,
-   *   `422` for a malformed request.
+   * @throws {@link TesseraError} when the server refuses: `401` for a credential it does not
+   *   accept, `403` where the key's principal does not hold `authorise-as`, `422` for a malformed
+   *   request.
    */
   async revoke(tokenId: number, signal?: AbortSignal): Promise<void> {
-    if (!this.opts.sessionCredential) {
-      throw new Error('revoke needs a sessionCredential');
-    }
+    const credential = this.requireSessionCredential('revoke');
     const response = await this.send(`${this.opts.sessionUrl}/session/revoke`, {
       method: 'POST',
-      headers: {
-        authorization: `Bearer ${this.opts.sessionCredential}`,
-        'content-type': 'application/json'
-      },
+      headers: {authorization: `Bearer ${credential}`, 'content-type': 'application/json'},
       body: JSON.stringify({token_id: tokenId}),
       signal
     });
     if (!response.ok) await fail(response);
+  }
+
+  private requireSessionCredential(verb: string): string {
+    if (!this.opts.sessionCredential) {
+      throw new Error(
+        `${verb} needs the sessionCredential option: an API key whose principal holds authorise-as, or the operator credential`
+      );
+    }
+    return this.opts.sessionCredential;
   }
 
   /**
@@ -909,7 +966,9 @@ export class TesseraClient {
   /**
    * `POST /v1/items/{tessera_id}`: one item's whole record. `fields` is keyed by column name, with
    * a category given as its vocabulary key and a column the item has no value for left out.
-   * `labels` lists the item's access labels this session satisfies and no others. `views` and
+   * `labels` is why this session sees the item: its labels read as one disjunction, each held term
+   * among its operands and one satisfied clause of each conjunction among them, as label text, and
+   * nothing else. A held term that appears only inside a conjunction is not listed. `views` and
    * `scoped` cover only the views this principal may reach.
    *
    * @param tesseraId - The item's `tessera_id`, as a viewport result's `ids` carries it.

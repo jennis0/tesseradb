@@ -7,17 +7,13 @@
 //! group's and can never widen it — the relation decision 0089 gives an artifact to its layer,
 //! and the I12 direction.
 //!
-//! **Satisfaction is intersection** (§6.1): the gate's labels resolve through the plugin to a set
-//! of descriptors, one per label (decision 0132), and the gate is satisfied iff that set
-//! **intersects** the descriptors the principal's credential resolved to. It is deliberately *not* the conservative label join's required-set
-//! reading: under that reading a disjunctive gate (`["finance", "legal"]`) yields an empty
-//! required set and every principal passes, which is a fail-open on exactly what the gate
-//! protects. Intersection gives a disjunctive gate its intended meaning.
+//! **A gate is a list of access labels, and a principal satisfying any one of them passes.** Each
+//! label is an expression evaluated against the terms the principal's credential holds, so a
+//! gate wanting two terms together is the one label `finance&legal`, and a gate wanting either is
+//! `finance|legal` or the two-element list.
 //!
-//! **`public` never reaches the plugin.** It is stored as `None` — the absence of a gate — because
-//! it is the one label every principal holds inside the trust boundary (decision 0088, term 0),
-//! and asking caller-supplied code to confirm that would make the corpus's only universal label
-//! depend on the plugin agreeing.
+//! **`public` is stored as `None`**, the absence of a gate, because it is the one label every
+//! principal holds.
 //!
 //! **Resolved once, at authorise, over every view of every group, whatever the outcome.** The
 //! result is the immutable [`VisibleViews`] a session carries for its whole life, so the
@@ -32,7 +28,6 @@
 use std::collections::HashMap;
 
 use rustc_hash::FxHashSet;
-use tessera_plugin::Plugin;
 use tessera_store::manifest::Manifest;
 
 /// The views and the groups one session may reach (`views.md` §6) — resolved at authorise and
@@ -81,25 +76,26 @@ impl VisibleViews {
     }
 }
 
-/// Evaluate every view of every group against a principal's credential descriptors (`views.md` §6).
+/// Evaluate every view of every group against the terms a principal's credential holds, which
+/// `held` answers for one term at a time (`views.md` §6).
 ///
 /// **Every view is evaluated whatever the outcome**, which is what makes the answer a set rather
 /// than a decision procedure: the cost is paid once, at authorise, in exchange for a request path
-/// that never asks the plugin anything and never walks a roster.
-///
-/// **A label the plugin cannot read fails the view closed** rather than failing the whole
-/// authorise. The build and the create operation both put a label through this same plugin call
-/// before storing it, so this can only fire where a bundle is served under a *different* plugin
-/// from the one that accepted its labels — and denying one view is the narrow answer to that,
-/// where refusing the credential would deny a corpus its principal is otherwise entitled to.
-pub(crate) fn resolve(
-    manifest: &Manifest,
-    credentials: &FxHashSet<Vec<u8>>,
-    plugin: &dyn Plugin,
+/// that never evaluates a label and never walks a roster. A stored label that does not parse
+/// admits nobody.
+pub(crate) fn resolve<'m>(
+    manifest: &'m Manifest,
+    held: &dyn Fn(&str) -> bool,
 ) -> VisibleViews {
-    // One plugin call per **distinct gate**, not per view: a group of forty quarters under one
+    // One evaluation per **distinct gate**, not per view: a group of forty quarters under one
     // gate asks once. The memo is scoped to this resolution, so nothing survives into the session.
-    let mut memo: HashMap<&[String], bool> = HashMap::new();
+    let mut memo: HashMap<&'m [String], bool> = HashMap::new();
+    let mut passes = |labels: Option<&'m [String]>| -> bool {
+        let Some(labels) = labels else { return true };
+        *memo
+            .entry(labels)
+            .or_insert_with(|| tessera_access::admits(labels, &held))
+    };
 
     let mut groups: FxHashSet<String> = FxHashSet::default();
     // Which group a view id belongs to, for the outer bound below. Built from the rosters rather
@@ -108,12 +104,7 @@ pub(crate) fn resolve(
     // they are (`views.md` §3.3), so each of them takes *its own* group's gate.
     let mut owner: HashMap<String, &str> = HashMap::new();
     for group in &manifest.groups {
-        if passes(
-            &mut memo,
-            group.visibility.as_deref(),
-            credentials,
-            plugin,
-        ) {
+        if passes(group.visibility.as_deref()) {
             groups.insert(group.name.clone());
         }
         for view in &group.views {
@@ -134,12 +125,7 @@ pub(crate) fn resolve(
         // **The view's own half, from the descriptor.** For a view of a group this is the roster
         // record's own label, which `Manifest::validate_groups` holds equal to it — one input, so
         // a view's own gate is read the same way whether the view is a plain one or a group's.
-        if !passes(
-            &mut memo,
-            view.visibility.as_deref(),
-            credentials,
-            plugin,
-        ) {
+        if !passes(view.visibility.as_deref()) {
             continue;
         }
         // **The group's half, where there is a group**: a gate-failed group takes its whole roster
@@ -154,30 +140,3 @@ pub(crate) fn resolve(
     VisibleViews { views, groups }
 }
 
-/// Does one of `labels` name a term this principal holds? `None` is `public` — satisfied by
-/// construction, inside the trust boundary, and never through the plugin (decision 0088).
-///
-/// Each label is one element of the plugin's list call, never split: a gate declared as
-/// `"finance,legal"` is one term with a comma in it, and a gate wanting both is the
-/// two-element list. The descriptors are compared with the credential's own, as a layer's and an
-/// artifact's are, so a label no item carries is still one a credential can hold.
-fn passes<'a>(
-    memo: &mut HashMap<&'a [String], bool>,
-    labels: Option<&'a [String]>,
-    credentials: &FxHashSet<Vec<u8>>,
-    plugin: &dyn Plugin,
-) -> bool {
-    let Some(labels) = labels else { return true };
-    if let Some(&known) = memo.get(labels) {
-        return known;
-    }
-    let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
-    let verdict = match plugin.terms_of_labels(&descriptors) {
-        // **Intersection, not the required set** — see this module's own doc for why the
-        // conservative label join is fail-open on a disjunctive gate.
-        Ok(descriptors) => descriptors.iter().any(|d| credentials.contains(d)),
-        Err(_) => false,
-    };
-    memo.insert(labels, verdict);
-    verdict
-}

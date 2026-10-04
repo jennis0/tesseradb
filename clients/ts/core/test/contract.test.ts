@@ -98,7 +98,9 @@ const NOT_REACHED = new Map([
  * operation, keyed by the operation's id.
  */
 const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<unknown>> = {
-  authorise: (c, signal) => c.authorise(['t'], signal),
+  login: (c, signal) => c.login({apiKey: 'key'}, signal),
+  logout: (c, signal) => c.logout('tok', signal),
+  authorise: (c, signal) => c.authorise({principal: 'ann'}, signal),
   revoke: (c, signal) => c.revoke(7, signal),
   meta: (c, signal) => c.meta('tok', signal),
   categories: (c, signal) => c.categories('tok', 'archive', {signal}),
@@ -131,7 +133,31 @@ const CONTROL_CALLS: Record<string, (c: Control) => Promise<unknown>> = {
   declareLayer: (c) => c.declareLayer({}),
   dropLayer: (c) => c.dropLayer('clusters'),
   publish: (c) => c.publish('clusters', {artifacts: []}),
-  grow: (c) => c.grow('clusters', {artifacts: []})
+  grow: (c) => c.grow('clusters', {artifacts: []}),
+  listPrincipals: (c) => c.listPrincipals(),
+  showPrincipal: (c) => c.showPrincipal('ann'),
+  createPrincipal: (c) => c.createPrincipal('ann', 'person'),
+  changePrincipal: (c) => c.changePrincipal('ann', {disabled: true}),
+  deletePrincipal: (c) => c.deletePrincipal('ann'),
+  setPassword: (c) => c.setPassword('ann', 'a long enough password'),
+  clearPassword: (c) => c.clearPassword('ann'),
+  listKeys: (c) => c.listKeys('ann'),
+  createKey: (c) => c.createKey('ann'),
+  revokeKey: (c) => c.revokeKey('abc'),
+  listGroups: (c) => c.listGroups(),
+  showGroup: (c) => c.showGroup('readers'),
+  createGroup: (c) => c.createGroup('readers'),
+  deleteGroup: (c) => c.deleteGroup('readers'),
+  addMember: (c) => c.addMember('readers', 'ann'),
+  removeMember: (c) => c.removeMember('readers', 'ann'),
+  grant: (c) => c.grant({principal: 'ann', terms: ['a', 'b']}),
+  revokeGrant: (c) => c.revokeGrant({principal: 'ann', permission: 'read'}),
+  listProviders: (c) => c.listProviders(),
+  showProvider: (c) => c.showProvider('corp'),
+  putProvider: (c) => c.putProvider('corp', {issuer: 'https://i', audience: 'a', jwks_url: 'https://i/keys'}),
+  dropProvider: (c) => c.dropProvider('corp'),
+  listSessions: (c) => c.listSessions({principal: 'ann'}),
+  endSessions: (c) => c.endSessions({token_id: 7})
 };
 
 const methodOf = (operation: string) => REACHED_AS[operation] ?? operation;
@@ -177,7 +203,7 @@ describe('the client against the HTTP contract', () => {
       return new Response(JSON.stringify({error: 'contract', detail: 'recorded'}), {status: 422});
     });
     const client = new TesseraClient({viewerUrl: origins.viewer!, sessionUrl: origins.session!, sessionCredential: 'cred'});
-    const control = new Control({controlUrl: origins.control!, operatorCredential: 'operator'});
+    const control = new Control({controlUrl: origins.control!, credential: 'operator'});
     for (const op of ops.filter((o) => !NOT_REACHED.has(o.id))) {
       const method = methodOf(op.id);
       const call: (() => Promise<unknown>) | undefined =
@@ -219,8 +245,10 @@ describe('the client against the HTTP contract', () => {
       expect(sent, method).toHaveLength(1);
       expect(sent[0]!.headers['x-host'], method).toBe('embed');
       // The verb's own credential replaces the host's header of the same name, whatever its case.
-      expect(sent[0]!.headers.authorization, method).toMatch(/^Bearer (tok|cred)$/);
-      if (sent[0]!.method === 'POST') expect(sent[0]!.headers['content-type'], method).toBe('application/json');
+      // Login sends its credential in the body, so the host's header is sent unchanged.
+      expect(sent[0]!.headers.authorization, method).toMatch(method === 'login' ? /^Bearer host$/ : /^Bearer (tok|cred)$/);
+      // Logout sends no body.
+      if (sent[0]!.method === 'POST' && method !== 'logout') expect(sent[0]!.headers['content-type'], method).toBe('application/json');
       expect(sent[0]!.signal, method).toBe(signal);
     }
   });

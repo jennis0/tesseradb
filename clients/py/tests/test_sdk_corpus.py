@@ -198,7 +198,6 @@ def check_committed(tessera: str, declaration: Path, directory: Path) -> str:
         "[bundle]\n"
         'path = "bundle"\ncache = "cache"\nwal = "wal.log"\n\n'
         f'[build]\nschema = "{declaration}"\n\n'
-        '[plugin]\nmodule = "builtin:passthrough"\n\n'
         "[disclosure]\ntoken_max_lifetime = 3600\n"
     )
     done = subprocess.run(
@@ -405,7 +404,7 @@ def test_the_committed_database_is_served_and_close_stops_the_child(tmp_path):
         for address in (report.viewer, report.session, report.control):
             assert address and address.startswith("127.0.0.1:")
             assert not address.endswith(":0")
-        token = authorise(db.session_url, db.session_credential, ["public"])
+        token = authorise(db.session_url, db.operator_credential, terms=["public"])
         assert token.token and token.seconds_left > 0
         meta = json.loads(
             urllib.request.urlopen(

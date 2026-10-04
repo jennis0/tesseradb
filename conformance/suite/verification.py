@@ -99,7 +99,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 
 from oracle import morton
-from oracle.harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
+from oracle.harness import CLI_BIN, REPO_ROOT, cli_build, ensure_cli_built, write_deployment
 
 from .battery import Categories, Item, Meta, Recorded, Viewport
 from .canonical import Json, Streamed
@@ -254,8 +254,8 @@ def materialise_corpus(
 
 
 def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
-    """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
-    (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output.
+    """`tessera build` over the materialised inputs, invoked as the catalogue's is
+    (`oracle.harness.cli_build`): a deployment file naming the declaration and the output.
     Every file names its items by the unique field `id`, the item's number `e`, which is also what
     the denies address items by.
 
@@ -270,16 +270,7 @@ def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
     deployment = write_deployment(
         files.schema.parent / "tessera.toml", bundle=bundle_root, schema=files.schema
     )
-    subprocess.run(
-        [
-            str(CLI_BIN), "build",
-            "--deployment", str(deployment),
-            "--out", str(bundle_root),
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-    )
+    cli_build(deployment, bundle_root, capture_output=True)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -450,7 +441,7 @@ def terms_of(files: CorpusFiles, es: Iterable[int]) -> dict[int, frozenset[int]]
     relation for the built prefix, the posted ingest batch's `access` labels beyond it.
 
     The `access` column is a list, one label per element, and each element is one descriptor
-    verbatim — `builtin:passthrough`'s rule at both entry points (decision 0129). Nothing here
+    verbatim, at both entry points (decision 0129). Nothing here
     splits a label."""
     import pyarrow.parquet as pq
 

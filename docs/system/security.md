@@ -9,32 +9,68 @@ A viewer holds a valid session token and can make as many requests with it as th
 the adversary the properties below are built against: a legitimate user with any grant, who can
 ask anything and read every response, but cannot forge a credential or bypass authorisation.
 
-A viewer's token is worth exactly what the plugin behind it decides to grant. `POST
-/session/authorise` takes a credential and returns a token, and an operator's own credential gates
-who may call that route at all. The plugin's two functions, supplied by the operator, decide what
-a presented credential is worth: the one implementation that exists today trusts a bare claim as
-presented, so the session credential is the only thing standing between an untrusted caller and
-read access to everything a term can name. The plugin runs inside the trusted computing base, and
-its output is what every later check in this chapter tests against.
+A viewer's token is worth exactly the terms its principal resolved to when the session was minted.
+The identity catalogue decides them: a local principal holds the terms granted to it and to its
+groups, and an OIDC identity the terms its provider's claim rules produce from a token whose
+signature, issuer, audience and lifetime the server has checked. A session is minted at
+`POST /v1/login` from a password, an API key or an access token, or at `POST /session/authorise`
+by an API key whose principal holds `authorise-as`, which acts as any principal. That key belongs
+to an integrator's backend; whoever holds it reads everything any principal may. A session minted
+through `authorise-as` carries the target's terms and its `read` and `write`, and never its
+`read-all`, so the key reads what each principal's terms admit and no more. The catalogue and
+the server's credential checks are inside the trusted computing base. The terms they resolve, and
+the access labels those terms satisfy, are what every later check in this chapter tests against.
 
-A token reflects the credential presented at authorisation and nothing later. If a viewer's grant
-changes, an open token keeps its old terms until the viewer re-authorises; the only bound on how
-long that can take is the deployment's configured token lifetime, or an explicit
-`POST /session/revoke`.
+A principal holding `read-all`, granted directly, through a group or through an OIDC role
+mapping, authorises a session for itself that satisfies every index key, including one promoted
+after the session was authorised. Its authorised set is every item listed under any key at the
+corpus's current watermark, rebuilt at each publication, so it is every item the corpus holds, and
+an item a flush places joins it when that publication reaches the session. The overlay is
+subtracted from it at every request, so a deletion or suppression applies to it. It satisfies
+every view's, group's, layer's and artifact's own label and every layer's default label, and an
+artifact's membership requirement still applies to it. The operator credential mints such a
+session for the superuser on the session plane, and may also mint one holding a set of terms it
+names.
+
+A session holds the terms resolved when it was minted. A catalogue change that could change them,
+or the principal's permissions, ends the session: a grant, a membership, a disabled or deleted
+principal, a password set or cleared, a revoked key, or a changed provider. A session also ends at
+its key's expiry, its access token's `exp`, the deployment's configured token lifetime, a logout or
+a revocation. An OIDC identity's claims are trusted as its provider asserts them; a change at the
+provider reaches a session only when the session's token expires.
 
 A bundle holder holds the built artifact on disk: the manifest with the bundle's identity key, the
 full term index and the geometry. Nothing here defends against this party.
 
-An operator drives the control plane: ingest, deletion, suppression and compaction. The design
-treats this party as trusted, and every route on the control plane, without exception, requires
-the operator's own credential.
+An operator drives the control plane: ingest, deletion, suppression, compaction and the catalogue.
+Every route on the control plane, without exception, requires a credential: the operator
+credential, which authenticates a built-in superuser holding every permission, an API key, or an
+OIDC access token. Writes, flush and compaction need `write`. Status and the catalogue need
+`admin`. **Not built yet:** writes masked by the writer's own terms
+([users and access](../users-and-access.md#writes)). Until they are built, every principal with
+`write` writes against the whole corpus, with or without `write-all`, and is trusted with every
+item, as the operator is: a write can change or name an item the writer cannot see. A principal
+with `write` can upsert an item it cannot see, by its unique value, and change its label, so
+granting `write` grants what `read-all` grants wherever a view has a unique field.
+
+`admin` can grant any permission to any principal, itself included. A principal holding `admin`
+can therefore give itself `read-all` and `write-all` and read and write every item, so `admin` is
+trusted as the operator is. A role mapping that gives an OIDC identity a group holding `admin`
+extends that trust to whoever the identity provider says is in the mapped claim.
+
+The operator credential is refused at startup when it is empty, since an empty bearer would
+authenticate as the superuser. A password is checked over whatever transport reaches the viewer
+listener, which serves plain HTTP, so a deployment that takes passwords terminates TLS in front of
+it. Failed password attempts are limited per name, so anyone who knows a principal's name can
+lock it out of password login with ten wrong attempts every fifteen minutes; its API keys and
+sessions are unaffected.
 
 Every cache that holds a viewer's visible set, or a quantity computed from it, is keyed to one
-session and is never read by another session, with two exceptions keyed on the set of terms the
-credential resolved to. The authorised set is shared by every session whose credential resolved to
-the same terms. The per-artifact counts, centroids and boxes of an annotation layer stored by row
-are shared by every session with the same terms whose visible set was composed from the same
-inputs. That key names each input to the visible set: the term set, the build of the authorised set
+session and is never read by another session, with two exceptions keyed on the session's grant:
+the index keys it satisfies, or every key for a session that reads every item. The authorised set
+is shared by every session with the same grant. The per-artifact counts, centroids and boxes of an
+annotation layer stored by row are shared by every session with the same grant whose visible set
+was composed from the same inputs. That key names each input to the visible set: the grant, the build of the authorised set
 the session's projection came from, the generation that projection was built at, the segment set,
 which every flush and compaction replaces, and a counter that every accepted deletion, suppression,
 lift and ingest moves. A request reads both once, at its start, so a request that starts after a
@@ -56,13 +92,14 @@ flowchart LR
   end
 
   subgraph trusted["inside the boundary"]
-    session["session plane<br/>turns a credential into a token<br/>that names the viewer's terms"]
+    session["login and session plane<br/>turn a credential into a token<br/>holding the principal's terms"]
     serve["tessera serve<br/>composes the visible set every request,<br/>answers only from inside it"]
-    control["control plane<br/>operator: ingest, delete,<br/>suppress, compact"]
+    control["control plane<br/>write: ingest, delete, suppress,<br/>flush, compact;<br/>admin: catalogue, status"]
     bundle["bundle and log on disc<br/>everything, including the<br/>identifier key"]
   end
 
-  issuer["the integrating application"] -- "session credential" --> session
+  issuer["the integrating application"] -- "authorise-as key" --> session
+  client -- "password, API key<br/>or access token" --> session
   session -- "token" --> client
   client -- "token + query" --> serve
   serve -- "counts, samples, labels:<br/>from the visible set only" --> client
@@ -72,8 +109,8 @@ flowchart LR
   holder["a bundle holder"] -. "has everything;<br/>no property below holds against them" .-> bundle
 ```
 
-*What crosses each boundary. A viewer receives responses computed inside its own visible set; an
-operator's writes are trusted; a bundle holder already has everything the server has.*
+*What crosses each boundary. A viewer receives responses computed inside its own visible set; a
+writer is trusted; a bundle holder already has everything the server has.*
 
 ## Every quantity is computed from the viewer's own visible set
 
@@ -81,9 +118,11 @@ A served quantity MUST be computed from inside the requesting viewer's visible s
 a density cell, a cluster's shape or a label taken over the whole corpus and then checked against
 that set before display is a defect, not a filtered view.
 
-An item carries a set of terms, and a token satisfies the set of terms its credential resolved to.
-An item is in the authorised set when the two sets intersect, and the authorised set is built once
-per session, at authorisation. The visible set is the authorised set minus the overlay, the record
+An item carries access labels, each an expression over terms such as `secret&(team_a|team_b)`,
+and a token holds the terms its credential names. An item is in the authorised set when the token's
+terms satisfy one of its labels, and the authorised set is built once per session, at
+authorisation ([access control](access-control.md#how-labels-are-indexed)). The expressions have no
+negation, so holding more terms never admits fewer items. The visible set is the authorised set minus the overlay, the record
 of every item currently hidden by a deletion or a suppression, composed at the start of every
 request, before anything reads it. Everything that counts, draws or labels an item reads that one
 set. A filter narrows which of the visible set is drawn or counted into the filtered set, and can
@@ -170,8 +209,8 @@ may not see gives the same answer, with the same status and the same shape, as a
 holds. The item card route does the same for a `tessera_id`: an item the viewer may not see and an
 identifier naming nothing both answer `404 unknown`.
 
-The control plane answers differently, because its caller is the operator, who is trusted with
-every item. An ingest row carrying a unique value names the item that holds it, whether or not any
+The control plane answers differently, because its caller is a writer, who is trusted with every
+item until writes are masked. An ingest row carrying a unique value names the item that holds it, whether or not any
 viewer can see that item, and the receipt answers its `tessera_id`. An ingest row whose values name
 two items, as one setting a unique value another item holds does, is refused and listed by its
 position and reason; in a strict batch the batch is refused with `409`, naming the values and the
@@ -198,8 +237,8 @@ complete as a response and says that the read is not ([serving](serving.md#bulk-
 ## Reading in bulk
 
 `POST /v1/items` and `POST /v1/artifacts` answer under the properties above. Every page composes
-the visible set again, an item's labels are the ones the viewer holds, as on the item card, and an
-artifact is served on its layer's terms, as on the viewport. An item's unique values are fields like
+the visible set again, an item's labels are the clauses of its labels the viewer satisfies, as on
+the item card, and an artifact is served on its layer's terms, as on the viewport. An item's unique values are fields like
 any other, returned only on request, in that item's own row.
 
 A read of items whose filter bounds its matches through a unique field's index or an artifact's
@@ -209,10 +248,12 @@ follows its size, so a value held only by an item the viewer cannot see drives t
 a value nobody holds, with the same rows, counts and pages. The index lookup's own time can differ
 between a value that is held and one that is not, which the timing row below covers.
 
-**Stored order shows which items share a full set of terms.** A read of items in stored order
-returns a viewer's items in the order of their entity ids. Within each build batch and each ingest
-window, entity ids are assigned in order of each item's full set of access terms, the units its
-access labels resolve to, including terms the viewer does not hold. Within one set, a build orders
+**Stored order shows which items share a full set of index keys.** A read of items in stored
+order returns a viewer's items in the order of their entity ids. Within each build batch and each
+ingest window, entity ids are assigned in order of each item's full set of index keys: its labels
+read as one disjunction, each term among its operands, and one key for each conjunction among them
+([access control](access-control.md#how-labels-are-indexed)), including keys the viewer does not
+satisfy. Within one set, a build orders
 items by their map cell in the build's anchor view and then by source order, and an ingest orders
 them in the order its window received them, so a viewer who reads positions or unique values can see
 where one set ends and the next begins.
@@ -220,12 +261,13 @@ where one set ends and the next begins.
 An edit moves an item to a new entity, taken in the window that commits it, so an edited item
 reads as one arriving in that window.
 
-A viewer therefore learns which of their visible items share a full set of access terms, and
+A viewer therefore learns which of their visible items share a full set of index keys, and
 roughly in which batch or window each arrived or was last edited. Where two such groups show the
-same labels the viewer holds, the viewer learns that the items of at least one of them carry terms
-the viewer does not hold, which is what the item card withholds by serving only the labels the viewer holds. The
-sets are ordered by the terms' internal numbers, which follow the order in which terms first
-appeared, so the order of the sets hints at which terms the viewer does not hold appeared first.
+same clauses on the item card, the viewer learns that the items of at least one of them carry a key
+the viewer does not satisfy, which is what the item card withholds by serving only clauses the
+viewer satisfies. The sets are ordered by the keys' internal numbers, which follow the order in
+which keys first appeared, so the order of the sets hints at which keys the viewer does not satisfy
+appeared first.
 The viewer learns no term's name, no count of the items they cannot see, and nothing about any one
 item outside their visible set. Map order discloses none of this grouping and serves every field
 stored order serves. **Not built yet:** restricting stored order to some viewers. Every viewer may
@@ -282,8 +324,8 @@ reason given, and one, the per-tile timing channel, remains open.
 | A lower bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count from below | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |
 | That an item they were never entitled to see has been deleted, when a permissive annotation layer's membership set loses it | Under a layer declared permissive, content generated from a deleted item keeps serving until compaction removes the deleted member from the generating set. At that point the content stops serving for every viewer who satisfies the surviving members, including one who never satisfied the original generating set, telling them an item they were never entitled to see has been deleted | Medium | Bounded by the caller's own declaration: strict is the default and never shrinks, so an undeclared layer never signals this. Permissive is a caller's choice for a set where losing one member changes nothing the content asserts | C7 |
-| Which of their visible items share a full set of access terms, and so, where two such groups show the same labels the viewer holds, that items in at least one of them carry terms the viewer does not hold; roughly in which build batch or ingest window each arrived or was last edited; and a hint of the order in which terms they do not hold first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full term set, and their positions or unique values show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
-| That another session holding the same terms, which includes every anonymous viewer of a public deployment, recently authorised or read a layer's level in this view; and, weakly, how busy sessions under other grants are | Two caches are shared by every session whose credential resolved to the same terms: the authorised set, built at authorisation, and the per-artifact counts, centroids and boxes of a layer stored by row, built on a level's first read. A read the cache already holds answers in milliseconds and one that builds it takes up to seconds, so the time an authorisation or a level's first response takes says whether another such session asked for it since the last write. Eviction is least recently used across all grants, so an entry that was expected to be held and has to be built again says other sessions have been busy | Low | It discloses activity and nothing about any item: the shared entry is computed from a visible set equal to the asker's own, and an entry built before a deletion, suppression, ingest or compaction is never read after it | none |
+| Which of their visible items share a full set of index keys, and so, where two such groups show the same clauses on the item card, that items in at least one of them carry a key the viewer does not satisfy; roughly in which build batch or ingest window each arrived or was last edited; and a hint of the order in which keys they do not satisfy first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full key set, and their positions or unique values show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
+| That another session with the same grant, which includes every anonymous viewer of a public deployment, recently authorised or read a layer's level in this view; and, weakly, how busy sessions under other grants are | Two caches are shared by every session with the same grant: the authorised set, built at authorisation, and the per-artifact counts, centroids and boxes of a layer stored by row, built on a level's first read. A read the cache already holds answers in milliseconds and one that builds it takes up to seconds, so the time an authorisation or a level's first response takes says whether another such session asked for it since the last write. Eviction is least recently used across all grants, so an entry that was expected to be held and has to be built again says other sessions have been busy | Low | It discloses activity and nothing about any item: the shared entry is computed from a visible set equal to the asker's own, and an entry built before a deletion, suppression, ingest or compaction is never read after it | none |
 
 A caller-declared quantity the service serves as declared, rather than a viewer's own inference, is
 not a residual channel and does not appear above: a caller-declared generating set, an authored
@@ -297,7 +339,6 @@ membership-requirement declaration are covered under what this does not claim, b
 | Cryptographic strength of the `tessera_id` | Not needed. The permutation hides a lower bound on the number of hidden items, a low-severity channel. The grouping by access it would also hide is disclosed by a stored-order read. An adversary who recovered the key would be back at that channel and nothing more. |
 | A defence against a bundle holder | Anyone holding the bundle has the key, the term index and the coordinates. None of the properties above are claimed against them. |
 | Isolation of partitions | **Not built yet.** The design specifies that a partition a token cannot reach must contribute nothing to an answer, and a partition the system cannot reach through failure must be treated as an error rather than an empty contribution. A deployment today has one partition, so neither case can arise, and neither rule has anything to test it. |
-| Agreement between the two authorisation functions | Nothing checks that the function deriving terms from an item's access label and the one deriving terms from a viewer's credentials agree about what a term means. The only plugin that exists passes strings through unchanged, so they cannot disagree; a check needs a plugin whose functions could. |
 | Verification of what an operator declares | A vocabulary value, a layer's or an artifact's own access label, or supplied artifact content that the operator declares visible is served as declared. The service cannot check provenance. An item with no access label of its own is visible to nobody unless the declaration names a default label, in which case an unlabelled item is treated as if it carried that label and nothing wider. |
 | Quantification of the timing channel | Open in the register: correlating a tile's service time with the viewer's own visible count leaves a residual nobody has quantified, so it is recorded rather than closed. |
 | Protection of data at rest | This chapter covers what a viewer can learn from responses. Data on disc has a different adversary. |
@@ -307,7 +348,7 @@ membership-requirement declaration are covered under what this does not claim, b
 
 | Property | How it is checked | What is not covered |
 |---|---|---|
-| Every quantity computed from the viewer's own visible set | Compared, value for value, against an independent second implementation across three planted states, over the three surfaces the comparison covers: tiles, the points batch and the density layer's masked per-cell counts. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found | Served artifacts travel on their own frame and are not part of this comparison. Both the differential and the manual assessment ran only against the plugin that passes credentials through unchanged; no route has been checked against a plugin whose two functions could disagree |
+| Every quantity computed from the viewer's own visible set | Compared, value for value, against an independent second implementation across three planted states, over the three surfaces the comparison covers: tiles, the points batch and the density layer's masked per-cell counts. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found | Served artifacts travel on their own frame and are not part of this comparison. The three-surface differential and the manual assessment ran over corpora whose items each carry single terms. A second differential covers access expressions on a built bundle: over items carrying conjunctions, disjunctions with a conjunction among their operands, several labels each, a conjunction another label absorbs and a quoted term, it compares which items a bulk read returns to each of fifteen principals, the `labels` beside each, and each item's card, with an oracle that parses and evaluates each item's own labels. It does not compare tiles or counts over such a corpus. Labels holding a conjunction written by ingest are checked by Rust tests of the engine over a flush and a restart |
 | A derived artifact served on the terms its layer declares | Compared against an independent implementation with two viewers differing by exactly one item inside an artifact's member set, under the strictest requirement, and the difference asserted before anything downstream rests on it. An artifact's own label is compared against an independent implementation over a built bundle and a service the artifacts were published into, across a restart and a fold; and a viewer lacking a label is shown to get byte-identical answers, on every viewer route, from a deployment holding the artifact and one that never published it | The other membership requirements are covered by Rust tests rather than the differential suite |
 | Samples taken after masking | Compared against an independent implementation with a wrong-shaped stand-in, a sample taken in storage order rather than from the visible set, that the comparison is required to disagree with | None |
 | A client never sees an entity id | Scanned across every wire surface, including the density layer's sub-cell counts, and the logs, for a byte pattern matching the underlying identity, with a planted true positive on every scan confirming the scan itself works. The scan covers both bulk reads, each read whole across responses and the items read in both orders, and every cursor they issue, whose decoded bytes are swept at every offset | A cursor's bytes are swept for 8-byte values only |

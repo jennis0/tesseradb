@@ -59,6 +59,49 @@ pub fn build_fragment_with_deltas(
     Ok(fragment)
 }
 
+/// What a fragment is the union of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Grant {
+    /// The postings of these index keys, ascending and distinct.
+    Keys(Arc<Vec<TermId>>),
+    /// Every posting the base and the live tiers carry, so every index key that exists: the
+    /// grant of a session that satisfies every label.
+    Every,
+}
+
+impl Grant {
+    /// The keys a [`Grant::Keys`] names, and none for [`Grant::Every`].
+    pub fn keys(&self) -> &[TermId] {
+        match self {
+            Grant::Keys(keys) => keys,
+            Grant::Every => &[],
+        }
+    }
+}
+
+/// [`build_fragment_with_deltas`] for `grant`.
+pub fn build_grant_with_deltas(
+    grant: &Grant,
+    postings: &PostingsReader,
+    deltas: &[Arc<DeltaTier>],
+) -> io::Result<Bitmap> {
+    let Grant::Every = grant else {
+        return build_fragment_with_deltas(grant.keys(), postings, deltas);
+    };
+    let mut sources = Vec::new();
+    for ordinal in 0..postings.term_count() {
+        sources.extend(postings.posting_at(ordinal)?);
+    }
+    for tier in deltas {
+        for ordinal in tier.ordinals() {
+            sources.extend(tier.posting_at(ordinal)?);
+        }
+    }
+    let mut fragment = union_postings(sources);
+    fragment.run_optimize();
+    Ok(fragment)
+}
+
 /// Append each of `terms`' postings, the base's where `base` is given, then every tier's, to
 /// `sources`. Never appends a tier's whole term set, only the terms given.
 fn collect_postings<'a>(
@@ -123,13 +166,13 @@ pub fn delta_entities(terms: &[TermId], deltas: &[Arc<DeltaTier>]) -> io::Result
     Ok(entities)
 }
 
-/// The canonical cache key: SHA-256 over `bundle_identity ‖ auth_plugin_hash ‖ watermark ‖
-/// sorted, deduplicated term_id u32 LEs`. Term ids are bundle-relative ordinals, so a persistent
-/// cache directory reused across bundle rebuilds, or across an auth plugin upgrade, would
+/// The canonical cache key: SHA-256 over `bundle_identity ‖ rule_hash ‖ watermark ‖ sorted,
+/// deduplicated term_id u32 LEs`. Term ids are bundle-relative ordinals, so a persistent cache
+/// directory reused across bundle rebuilds, or across a change to the authorisation rule, would
 /// otherwise serve a frozen fragment naming a different entity set.
 fn canonical_key(
     bundle_identity: &[u8; 32],
-    auth_plugin_hash: &[u8; 32],
+    rule_hash: &[u8; 32],
     terms: &[TermId],
     watermark: u64,
 ) -> [u8; 32] {
@@ -137,14 +180,42 @@ fn canonical_key(
     sorted.sort_unstable();
     sorted.dedup();
 
-    let mut hasher = Sha256::new();
-    hasher.update(bundle_identity);
-    hasher.update(auth_plugin_hash);
-    hasher.update(watermark.to_le_bytes());
+    let mut hasher = key_prefix(bundle_identity, rule_hash, watermark);
     for term in &sorted {
         hasher.update(term.to_le_bytes());
     }
     hasher.finalize().into()
+}
+
+/// What [`Grant::Every`]'s key hashes after the watermark. Nine bytes, so no list of four-byte
+/// term ids hashes the same input.
+const EVERY_KEY: &[u8] = b"every key";
+
+/// The canonical cache key for `grant`: [`canonical_key`] for a list of keys, and for
+/// [`Grant::Every`] the bundle, the rule and the watermark followed by [`EVERY_KEY`], so every
+/// such session at one watermark shares one entry.
+fn grant_key(
+    bundle_identity: &[u8; 32],
+    rule_hash: &[u8; 32],
+    grant: &Grant,
+    watermark: u64,
+) -> [u8; 32] {
+    match grant {
+        Grant::Keys(keys) => canonical_key(bundle_identity, rule_hash, keys, watermark),
+        Grant::Every => {
+            let mut hasher = key_prefix(bundle_identity, rule_hash, watermark);
+            hasher.update(EVERY_KEY);
+            hasher.finalize().into()
+        }
+    }
+}
+
+fn key_prefix(bundle_identity: &[u8; 32], rule_hash: &[u8; 32], watermark: u64) -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(bundle_identity);
+    hasher.update(rule_hash);
+    hasher.update(watermark.to_le_bytes());
+    hasher
 }
 
 fn hex_encode(bytes: &[u8; 32]) -> String {
@@ -352,9 +423,9 @@ impl CacheWeight for FrozenFragment {
 
 /// Frozen fragments, held in memory and persisted under a directory.
 ///
-/// An entry is named by its canonical key: SHA-256 over the bundle identity, the auth plugin's
-/// hash, the watermark and the sorted, deduplicated granted terms. Term ids are ordinals of one
-/// bundle, so a key narrower than that would serve one bundle's entity set under another's.
+/// An entry is named by its canonical key: SHA-256 over the bundle identity, the authorisation
+/// rule's hash, the watermark and the sorted, deduplicated granted terms. Term ids are ordinals of
+/// one bundle, so a key narrower than that would serve one bundle's entity set under another's.
 ///
 /// On disk an entry is `<hex key>.frag`, the `Frozen` bitmap bytes, and `<hex key>.meta`, which
 /// holds `watermark: u64 LE ‖ frozen_len: u64 LE ‖ sha256(frozen_bytes)`. Each file is written to
@@ -366,7 +437,7 @@ impl CacheWeight for FrozenFragment {
 pub struct FragmentCache {
     dir: PathBuf,
     bundle_identity: [u8; 32],
-    auth_plugin_hash: [u8; 32],
+    rule_hash: [u8; 32],
     slots: SingleFlightCache<[u8; 32], FrozenFragment>,
     rebuilds: AtomicU64,
 }
@@ -415,32 +486,32 @@ impl From<io::Error> for FragmentCacheError {
 }
 
 impl FragmentCache {
-    /// `dir` is the engine's local cache directory for this bundle/auth-plugin pair, never a
+    /// `dir` is the engine's local cache directory for this bundle and authorisation rule, never a
     /// path inside the bundle itself. Does not touch the filesystem; `get_or_build` creates
     /// `dir` and any missing ancestors on first write.
     ///
     /// The in-memory tier's byte bound is not a constructor argument; it arrives through
     /// [`Self::set_memory_bound`]. A cache built this way is unbounded, which is correct for
     /// tests and benches; `tessera_server::prepare` makes sure a server never gets one.
-    pub fn new(dir: &Path, bundle_identity: [u8; 32], auth_plugin_hash: [u8; 32]) -> Self {
+    pub fn new(dir: &Path, bundle_identity: [u8; 32], rule_hash: [u8; 32]) -> Self {
         FragmentCache {
             dir: dir.to_path_buf(),
             bundle_identity,
-            auth_plugin_hash,
+            rule_hash,
             slots: SingleFlightCache::new(u64::MAX),
             rebuilds: AtomicU64::new(0),
         }
     }
 
-    /// An empty cache over the same directory and auth plugin under a new bundle identity, which
-    /// is what a compaction's publication installs. Every slot is keyed under the old identity,
-    /// so none carries over; the persisted pairs become unreachable and are left to
+    /// An empty cache over the same directory and authorisation rule under a new bundle identity,
+    /// which is what a compaction's publication installs. Every slot is keyed under the old
+    /// identity, so none carries over; the persisted pairs become unreachable and are left to
     /// [`Self::sweep`]. The byte bound and the wait budget carry over.
     pub fn rotate(&self, bundle_identity: [u8; 32]) -> Self {
         FragmentCache {
             dir: self.dir.clone(),
             bundle_identity,
-            auth_plugin_hash: self.auth_plugin_hash,
+            rule_hash: self.rule_hash,
             slots: {
                 let slots = SingleFlightCache::new(self.slots.stats().bound_bytes);
                 slots.set_wait_budget_ms(self.slots.wait_budget_ms());
@@ -506,12 +577,12 @@ impl FragmentCache {
         self.slots.set_wait_budget_ms(wait_budget_ms);
     }
 
-    /// The canonical cache key for `satisfied` under this cache's bundle and plugin identity, the
+    /// The canonical cache key for `satisfied` under this cache's bundle and rule identity, the
     /// only way to name an entry from outside and so what [`Self::evict`] takes.
     pub fn canonical_key_for(&self, satisfied: &[TermId], watermark: u64) -> [u8; 32] {
         canonical_key(
             &self.bundle_identity,
-            &self.auth_plugin_hash,
+            &self.rule_hash,
             satisfied,
             watermark,
         )
@@ -558,7 +629,7 @@ impl FragmentCache {
     pub fn path_of(&self, satisfied: &[TermId], watermark: u64) -> PathBuf {
         self.frag_path(&canonical_key(
             &self.bundle_identity,
-            &self.auth_plugin_hash,
+            &self.rule_hash,
             satisfied,
             watermark,
         ))
@@ -581,11 +652,25 @@ impl FragmentCache {
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let key = self.canonical_key_for(satisfied, watermark);
+        self.get_or_build_grant(
+            &Grant::Keys(Arc::new(satisfied.to_vec())),
+            postings,
+            deltas,
+            watermark,
+        )
+    }
+
+    /// [`Self::get_or_build`] for `grant`.
+    pub fn get_or_build_grant(
+        &self,
+        grant: &Grant,
+        postings: &PostingsReader,
+        deltas: &[Arc<DeltaTier>],
+        watermark: u64,
+    ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
+        let key = grant_key(&self.bundle_identity, &self.rule_hash, grant, watermark);
         self.slots
-            .get_or_try_build(key, || {
-                self.open_or_build(&key, satisfied, postings, deltas, watermark)
-            })
+            .get_or_try_build(key, || self.open_or_build(&key, grant, postings, deltas, watermark))
             .map_err(|e| match e {
                 SingleFlightError::Building => FragmentCacheError::Building,
                 SingleFlightError::Build(io_err) => FragmentCacheError::Io(io_err),
@@ -602,10 +687,28 @@ impl FragmentCache {
         watermark: u64,
         cancel: &dyn Cancel,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let key = self.canonical_key_for(satisfied, watermark);
+        self.get_or_build_grant_waiting(
+            &Grant::Keys(Arc::new(satisfied.to_vec())),
+            postings,
+            deltas,
+            watermark,
+            cancel,
+        )
+    }
+
+    /// [`Self::get_or_build_waiting`] for `grant`.
+    pub fn get_or_build_grant_waiting(
+        &self,
+        grant: &Grant,
+        postings: &PostingsReader,
+        deltas: &[Arc<DeltaTier>],
+        watermark: u64,
+        cancel: &dyn Cancel,
+    ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
+        let key = grant_key(&self.bundle_identity, &self.rule_hash, grant, watermark);
         self.slots
             .get_or_try_build_waiting(key, cancel, || {
-                self.open_or_build(&key, satisfied, postings, deltas, watermark)
+                self.open_or_build(&key, grant, postings, deltas, watermark)
             })
             .map_err(|e| match e {
                 WaitingBuildError::Wait(WaitEnded::Budget) => FragmentCacheError::Building,
@@ -619,7 +722,7 @@ impl FragmentCache {
     fn open_or_build(
         &self,
         key: &[u8; 32],
-        satisfied: &[TermId],
+        grant: &Grant,
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
@@ -632,7 +735,7 @@ impl FragmentCache {
             return Ok(frozen);
         }
         create_private_dir_all(&self.dir)?;
-        let bitmap = build_fragment_with_deltas(satisfied, postings, deltas)?;
+        let bitmap = build_grant_with_deltas(grant, postings, deltas)?;
         self.rebuilds.fetch_add(1, Ordering::Relaxed);
         FrozenFragment::build_and_persist(
             &frag_path,
@@ -749,6 +852,29 @@ mod tests {
                 "seed {seed}: the fragment is not the pointwise union of its terms' postings"
             );
         }
+    }
+
+    /// Every key's fragment is the union of every posting, including a key only a tier carries,
+    /// and is filed under one entry per watermark whatever keys exist.
+    #[test]
+    fn every_key_is_the_union_of_every_posting_under_one_entry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let Corpus { base, mut tiers } = random_corpus(3);
+        tiers[1].push((40, vec![9_000, 9_001]));
+        let (reader, opened) = readers(temp.path(), &base, &tiers);
+
+        let built = build_grant_with_deltas(&Grant::Every, &reader, &opened).unwrap();
+        let every: Vec<TermId> = (0..=40).map(TermId::new).collect();
+        assert_eq!(built.to_vec(), expected_union(&every, &base, &tiers).to_vec());
+
+        let cache = FragmentCache::new(&temp.path().join("cache"), [1; 32], [2; 32]);
+        let first = cache.get_or_build_grant(&Grant::Every, &reader, &opened, 7).unwrap();
+        let second = cache.get_or_build_grant(&Grant::Every, &reader, &[], 7).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.rebuild_count(), 1);
+        let keys = Grant::Keys(Arc::new(every));
+        cache.get_or_build_grant(&keys, &reader, &opened, 7).unwrap();
+        assert_eq!(cache.rebuild_count(), 2, "a list of every key is a different entry");
     }
 
     /// The residual is inside the fragment and covers everything the kept terms' base postings

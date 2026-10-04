@@ -15,7 +15,6 @@ services:
       - ./config:/etc/tessera:ro
       - tessera-data:/var/lib/tessera
     secrets:
-      - tessera_session
       - tessera_operator
     ports:
       - "8080:8080"
@@ -27,7 +26,5 @@ volumes:
   tessera-data:
 
 secrets:
-  tessera_session:
-    file: ./secrets/tessera_session
   tessera_operator:
     file: ./secrets/tessera_operator

@@ -18,6 +18,12 @@ if cargo tree -p tessera-cache --prefix none -e normal --depth 1 | tail -n +2 | 
   echo "FORBIDDEN: tessera-cache may depend on no other crate in the workspace"
   fail=1
 fi
+# The label grammar and its DAG sit below every crate that reads a label or a credential's terms,
+# the identity catalogue among them, which may see no crate that knows a row id or an entity id.
+if cargo tree -p tessera-access --prefix none -e normal --depth 1 | tail -n +2 | grep '^tessera-'; then
+  echo "FORBIDDEN: tessera-access may depend on no other crate in the workspace"
+  fail=1
+fi
 deny tessera-server tessera-store     # server sees engine API types only
 deny tessera-server tessera-authz
 deny tessera-wire tessera-store
@@ -101,7 +107,7 @@ fi
 # extension module built as a cdylib, so there is no rlib for a workspace crate to link even if one
 # tried, and an edge into it would put the interpreter's ABI underneath the binary.
 for leaf in bench python; do
-  for c in types plugin cache authz store spatial lifecycle engine wire config server build cli; do
+  for c in access types cache authz store spatial lifecycle engine wire config server build cli; do
     # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
     # manifests discuss the harness in comments, and a substring grep flags its own documentation.
     if grep -nE "^[[:space:]]*tessera-$leaf[[:space:]]*=|\.\./tessera-$leaf" \

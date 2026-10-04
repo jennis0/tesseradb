@@ -25,7 +25,6 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 
 /// Whether a refusal's detail names the row index and the column the caller sent.
 fn names_cell(detail: &str, row: usize, column: &str) -> bool {
@@ -149,7 +148,6 @@ fn engine_over(bundle: &Path, dir: &Path) -> Engine {
         bundle,
         &dir.join("cache"),
         &dir.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             // Not the harness default: a flush is pulled by hand below and must publish every
             // buffered row, so the tick's own row trigger is left out of the way.

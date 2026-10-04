@@ -51,22 +51,13 @@
 //! per **served candidate** is correct without it and is viewport-bounded: it costs one bitmap
 //! intersection over a generating set, for the artifacts a viewport actually reaches.
 //!
-//! # Where it is sound, and where it is not built
+//! # Why term signatures are enough
 //!
-//! The expression is over **term signatures**, which is sound exactly when authorisation is
-//! signature-shaped: an entity is visible iff its own term set meets the principal's. That is true
-//! of the builtin plugin by construction — `build_fragment` unions postings over the satisfied
-//! terms and does nothing else — and **unverifiable for a foreign one**, which is
-//! `2026-08-21-artifact-layout-selection.md` §9's constraint 10 and reaches **I5** and **I6**. A
-//! plugin whose answer depends on something other than the satisfied term set breaks the
-//! equivalence the whole structure rests on, and no plugin exists to test it against.
-//!
-//! Settled fail-closed: **under any plugin but the builtin the partition is not built at all**,
-//! and containment stays on the masked-count route, which asks `M_auth` itself and so cannot
-//! depend on the shape of the rule that produced it. [`signature_shaped`] is the gate,
-//! `Engine::open` says so in the log, and the flag is read where the partition is built rather
-//! than cached, so a generation carrying a different manifest cannot inherit a decision made for
-//! an earlier one.
+//! The expression is over **term signatures**: an entity's set of index keys. Authorisation is
+//! signature-shaped, since an entity is visible iff its keys meet the principal's satisfied set,
+//! and `build_fragment` unions postings over that set and does nothing else. Each conjunction an item's
+//! labels hold at the top level is one key of its own, which the satisfied set holds exactly when
+//! the principal satisfies the conjunction ([`tessera_authz::LabelIndex`]).
 //!
 //! # What is canonical, and what is not
 //!
@@ -88,45 +79,25 @@ use std::io;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
-use tessera_plugin::Plugin;
 use tessera_store::derived::{
     compose_containment, generating_entities, PostingSlice, SignatureIndex,
 };
 use tessera_store::membership::ContainmentPack;
 use tessera_types::TermId;
 
-/// Whether a bundle's declared data plugin is the builtin one, and so whether authorisation is
-/// signature-shaped for the purposes above.
-///
-/// **The manifest's hash is the right thing to read**, not the served plugin's, because
-/// `Engine::open` already refuses a bundle whose manifest disagrees with the plugin serving it:
-/// the two are equal by the time anything here runs, and the manifest is what a partition build
-/// has to hand.
-pub fn signature_shaped(manifest_data_plugin_hash: &str) -> bool {
-    manifest_data_plugin_hash == tessera_plugin::Passthrough::new().data_plugin_hash()
-}
+use crate::session::SatisfiedKeys;
 
-/// What composing a partition needs from the generation, with its gate attached.
-///
-/// **The gate travels with the inputs rather than being applied at the call sites**, of which
-/// there are four. A decision taken separately in four places is one that drifts in one of them,
-/// and the one it drifts in serves containment answers under a plugin whose rule nobody checked.
+/// What composing a partition needs from the generation.
 pub struct PartitionSource<'a> {
     /// The base postings — the build's `terms/postings.arrow`, which no flush rewrites.
     pub postings: &'a PostingsReader,
-    /// The bundle manifest's declared data plugin. `Engine::open` has already refused a bundle
-    /// whose manifest disagrees with the plugin serving it, so this is both.
-    pub data_plugin_hash: &'a str,
 }
 
 impl PartitionSource<'_> {
-    pub fn signature_shaped(&self) -> bool {
-        signature_shaped(self.data_plugin_hash)
-    }
 }
 
 /// Build a [`SignatureIndex`] over `postings` — the one adapter between the postings format and
@@ -272,14 +243,14 @@ impl ContainmentPartition {
     /// `satisfied_rank`'s: the loop stops at the first clause that fails, which is a fact about the
     /// artifact's own composition and not about how close the viewer came — and the expression is
     /// shared by every principal that reaches it.
-    fn satisfied_by(&self, id: u32, satisfied: &FxHashSet<TermId>) -> bool {
+    fn satisfied_by(&self, id: u32, satisfied: &dyn SatisfiedKeys) -> bool {
         let lo = self.pack.expression_at(id as usize) as usize;
         let clauses = self.pack.word(lo);
         let mut at = lo + 1;
         for _ in 0..clauses {
             let len = self.pack.word(at) as usize;
             let met =
-                (at + 1..at + 1 + len).any(|w| satisfied.contains(&TermId::new(self.pack.word(w))));
+                (at + 1..at + 1 + len).any(|w| satisfied.holds_key(TermId::new(self.pack.word(w))));
             if !met {
                 return false;
             }
@@ -297,7 +268,7 @@ impl ContainmentPartition {
     /// candidate*, which would make it whole-population work per artifact.
     pub fn answer_for_one<'a>(
         &'a self,
-        satisfied: &'a FxHashSet<TermId>,
+        satisfied: &'a dyn SatisfiedKeys,
     ) -> ContainmentAnswers<'a> {
         ContainmentAnswers {
             partition: self,
@@ -307,7 +278,7 @@ impl ContainmentPartition {
     }
 
     /// This principal's answers over the whole level, ready to be asked per candidate.
-    pub fn answers<'a>(&'a self, satisfied: &'a FxHashSet<TermId>) -> ContainmentAnswers<'a> {
+    pub fn answers<'a>(&'a self, satisfied: &'a dyn SatisfiedKeys) -> ContainmentAnswers<'a> {
         let memo = if self.expressions() <= dense_limit(self.pairs()) {
             // **The union route, in the form this stage can take.** With few distinct expressions
             // the whole table is cheaper to settle once than to memoise: every candidate that
@@ -381,7 +352,7 @@ enum Memo {
 /// One principal's view of one level's partition.
 pub struct ContainmentAnswers<'a> {
     partition: &'a ContainmentPartition,
-    satisfied: &'a FxHashSet<TermId>,
+    satisfied: &'a dyn SatisfiedKeys,
     memo: Memo,
 }
 
@@ -421,6 +392,7 @@ impl ContainmentAnswers<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustc_hash::FxHashSet;
 
     fn satisfied(terms: &[u32]) -> FxHashSet<TermId> {
         terms.iter().map(|t| TermId::new(*t)).collect()

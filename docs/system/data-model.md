@@ -7,8 +7,8 @@ an item is drawn and how it is queried, never what the item is or who may see it
 
 ## What an item carries
 
-An item is one record in the corpus. It carries an access label, a string the operator declares
-per item and resolves to the [terms that decide who may see it](access-control.md#terms-and-access-labels),
+An item is one record in the corpus. It carries an access label, an expression over the
+[terms that decide who may see it](access-control.md#terms-and-access-labels) that the operator declares per item,
 and a value, present or absent, for every field the corpus declares. The operator addresses an item
 again by its `tessera_id` or by the value of a field declared [unique](#unique-fields): a DOI, an
 accession number, a GeoNames id.
@@ -109,7 +109,7 @@ Four identifiers name an item or a view, one for each party that needs to addres
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
 
 The entity id is the server's own internal key: a dense integer, assigned as items are committed,
-in an order that groups together the items sharing the same access terms. A build numbers its items
+in an order that groups together the items sharing the same index keys. A build numbers its items
 in batches sized to its memory budget, each a dense range sorted that way, and a build that fits in
 one batch sorts the whole corpus as one range. A later ingest commits its own new items above what
 already exists, in a range sorted the same way within itself but appended after the corpus already

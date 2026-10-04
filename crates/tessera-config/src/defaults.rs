@@ -150,3 +150,9 @@ pub const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const DEFAULT_MASKED_COUNT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 pub const DEFAULT_FRAGMENT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// `[catalogue]`'s defaults: NIST SP 800-63B's minimum for a password that is the only factor,
+/// and ten failures for one name in fifteen minutes.
+pub const DEFAULT_MIN_PASSWORD_LENGTH: usize = 15;
+pub const DEFAULT_FAILED_ATTEMPT_LIMIT: u32 = 10;
+pub const DEFAULT_FAILED_ATTEMPT_WINDOW_SECS: u64 = 900;

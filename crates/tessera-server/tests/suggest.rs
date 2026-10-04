@@ -300,7 +300,6 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         engine_config,
     )
     .expect("engine should open against a freshly built bundle");
@@ -308,6 +307,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
     engine
         .start_write_executor(1024)
         .expect("the write executor starts once per engine");
+    let (catalogue, integrator_key, catalogue_dir) = test_identity();
     let state = Arc::new(tessera_server::state::AppState {
         engine,
         sessions: parking_lot::Mutex::new(tessera_server::state::SessionRegistry::default()),
@@ -333,42 +333,17 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         },
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
         compute_gate: generous_test_gate(),
+        password_gate: generous_password_gate(),
         bulk_gate: generous_bulk_gate(),
         ingest_admission: tessera_server::state::IngestAdmission::new(64),
-        session_credential: SESSION_CREDENTIAL.to_string(),
+        catalogue,
+        oidc: tessera_server::oidc::Verifier::new(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         request_log: None,
         faults: Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new()),
     });
 
-    let viewer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let viewer_addr = viewer_listener.local_addr().unwrap();
-    let session_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let session_addr = session_listener.local_addr().unwrap();
-    let control_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let control_addr = control_listener.local_addr().unwrap();
-    let viewer_router = tessera_server::viewer::router(Arc::clone(&state));
-    let session_router = tessera_server::session::router(Arc::clone(&state));
-    let control_router = tessera_server::control::router(Arc::clone(&state));
-    let serve_tasks = vec![
-        tokio::spawn(async move {
-            let _ = axum::serve(viewer_listener, viewer_router).await;
-        }),
-        tokio::spawn(async move {
-            let _ = axum::serve(session_listener, session_router).await;
-        }),
-        tokio::spawn(async move {
-            let _ = axum::serve(control_listener, control_router).await;
-        }),
-    ];
-    let server = TestServer {
-        viewer_addr,
-        session_addr,
-        control_addr,
-        client: reqwest::Client::new(),
-        state,
-        serve_tasks,
-    };
+    let server = serve_state(state, integrator_key, Some(catalogue_dir)).await;
 
     let token = token_for(&server, &["0"]).await;
 

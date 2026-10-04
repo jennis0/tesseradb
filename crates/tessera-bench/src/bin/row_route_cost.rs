@@ -54,7 +54,6 @@ use std::path::{Path, PathBuf};
 use tessera_engine::filter::{FilterExpr, FilterOperand};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_store::read::open_bundle;
 use tessera_types::AttrLocalId;
 
@@ -131,7 +130,6 @@ fn open_engine(root: &Path, threads: usize, tag: &str) -> Result<Engine, Box<dyn
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 5000,

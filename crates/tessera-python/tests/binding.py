@@ -21,9 +21,6 @@ path  = "bundle"
 cache = "cache"
 wal   = "wal.log"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 

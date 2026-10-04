@@ -17,10 +17,10 @@
 //! Term descriptors are resolved through [`DescriptorResolver`]: the bundle dictionary first,
 //! then a deterministic in-memory extension interned in replay order for descriptors the
 //! dictionary has never seen. A term that lives only in the extension is unsatisfiable by any
-//! session's `satisfied` set (which is computed from the auth plugin's grant against terms the
-//! *auth* side knows about — an in-memory-only *data*-side term id is never handed to a viewer's
-//! credential evaluation), so this is fail-closed, not fail-open: a novel descriptor can buffer
-//! an item, but cannot make it visible, until the next build assigns it a durable term id.
+//! session's `satisfied` set (which is resolved from a credential's terms against the
+//! dictionary the session authorised at, so an in-memory-only id is never in it), so this is
+//! fail-closed, not fail-open: a novel descriptor can buffer an item, but cannot make it
+//! visible, until the next build assigns it a durable term id.
 //!
 //! **Extension ids are allocated from the top of the `u32` range downward**,
 //! never from `dict.len()` upward: a downward-from-`u32::MAX` extension id can never collide with
@@ -68,7 +68,7 @@ impl std::fmt::Debug for DescriptorResolver<'_> {
 }
 
 /// Extension ids count down from here — see this module's doc for why the top of the range,
-/// never `dict.len()` upward. The plugin ABI's `declared_bounds().max_distinct_terms`
+/// never `dict.len()` upward. [`tessera_authz::MAX_DISTINCT_TERMS`]
 /// (200,000,000) is the largest a real dictionary is sized for; this leaves a margin of roughly
 /// 4.09 billion ids between the highest extension id ever handed out in a single session and the
 /// highest ordinal a dictionary could plausibly reach, so exhausting it would require an
@@ -76,10 +76,10 @@ impl std::fmt::Debug for DescriptorResolver<'_> {
 /// over time.
 const EXTENSION_ID_START: u32 = u32::MAX;
 
-/// Compile-time guarantee that the extension range starts strictly above the plugin ABI's
-/// declared `max_distinct_terms` bound (200,000,000) — a real dictionary is never sized to reach
+/// Compile-time guarantee that the extension range starts strictly above
+/// [`tessera_authz::MAX_DISTINCT_TERMS`] — a real dictionary is never sized to reach
 /// anywhere near this range, so an extension id can never be mistaken for one.
-const _: () = assert!(EXTENSION_ID_START > 200_000_000);
+const _: () = assert!(EXTENSION_ID_START as u64 > tessera_authz::MAX_DISTINCT_TERMS);
 
 impl<'a> DescriptorResolver<'a> {
     pub fn new(dict: &'a Dict) -> Self {
@@ -576,11 +576,11 @@ mod tests {
     }
 
     /// Extension ids must never be able to collide with a dictionary ordinal,
-    /// however large the dictionary grows — encoded as a property over dictionaries up to the ABI's
-    /// declared `max_distinct_terms` bound (200,000,000), far below where extension ids start.
+    /// however large the dictionary grows — encoded as a property over dictionaries up to
+    /// [`tessera_authz::MAX_DISTINCT_TERMS`], far below where extension ids start.
     #[test]
     fn extension_ids_never_collide_with_a_dictionary_sized_up_to_the_declared_bound() {
-        const MAX_DISTINCT_TERMS: u32 = 200_000_000; // R6 declared_bounds().max_distinct_terms
+        const MAX_DISTINCT_TERMS: u32 = tessera_authz::MAX_DISTINCT_TERMS as u32;
 
         // The compile-time assertion next to `EXTENSION_ID_START`'s definition already proves
         // `EXTENSION_ID_START > MAX_DISTINCT_TERMS` unconditionally; a real dictionary this large

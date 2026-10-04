@@ -19,15 +19,15 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use rustc_hash::FxHashSet;
 
 use tessera_authz::FrozenFragment;
 use tessera_lifecycle::{BufferedItem, IngestBuffer, Overlay};
 use tessera_roaring::for_each_run_in;
 use tessera_store::{Bundle, RowSpace};
-use tessera_types::{EntityId, TermId};
+use tessera_types::EntityId;
 
 use crate::projection::RowProjection;
+use crate::session::SatisfiedKeys;
 use crate::DenyMask;
 
 /// An attribute filter's matching rows, with the part of row space they answer for: the per-tile
@@ -493,7 +493,7 @@ impl DecodeSource<'_> {
 pub(crate) fn verdict(
     overlay: &Overlay,
     buffer: &IngestBuffer,
-    satisfied: &FxHashSet<TermId>,
+    satisfied: &dyn SatisfiedKeys,
     entity: EntityId,
 ) -> Option<bool> {
     verdict_of(overlay, satisfied, entity, buffer.get(entity))
@@ -504,7 +504,7 @@ pub(crate) fn verdict(
 /// both taking the first non-join row of the entity's list.
 pub(crate) fn verdict_of(
     overlay: &Overlay,
-    satisfied: &FxHashSet<TermId>,
+    satisfied: &dyn SatisfiedKeys,
     entity: EntityId,
     item: Option<&BufferedItem>,
 ) -> Option<bool> {
@@ -515,7 +515,7 @@ pub(crate) fn verdict_of(
     // An entity's postings are written by the flush of its own row, and the buffer holds that row
     // only until then (replay drops a row its view already holds), so an item here is never an
     // entity the fragment covers.
-    item.map(|item| item.terms.iter().any(|t| satisfied.contains(t)))
+    item.map(|item| item.terms.iter().any(|t| satisfied.holds_key(*t)))
 }
 
 /// Derive the row-space deny mask from the authoritative entity-space stores:
@@ -584,11 +584,11 @@ pub fn buffered_rows_of(buffer: &IngestBuffer, row_space: &RowSpace) -> Vec<Enti
 /// Compose the effective mask for one request. See this module's doc for the precedence rule
 /// and the clamp rationale. `base` is already the frozen fragment's row-space projection, so the
 /// fragment itself is not a parameter: an entity with no verdict falls through directly to it.
-/// `satisfied` is the viewer's granted term set, already resolved to `TermId`s by the auth
-/// plugin path; `row_space` is used only for per-entity `row_of` lookups (O(log k), not the
+/// `satisfied` is the set of index keys the viewer satisfies, resolved to `TermId`s at
+/// authorise; `row_space` is used only for per-entity `row_of` lookups (O(log k), not the
 /// O(bound) `project` cost).
 pub fn compose(
-    satisfied: &FxHashSet<TermId>,
+    satisfied: &dyn SatisfiedKeys,
     overlay: &Overlay,
     buffer: &IngestBuffer,
     base: Arc<RowProjection>,
@@ -687,7 +687,7 @@ fn entity_as_u32(entity: EntityId) -> u32 {
 /// way.
 pub fn visible_to(
     fragment: &FrozenFragment,
-    satisfied: &FxHashSet<TermId>,
+    satisfied: &dyn SatisfiedKeys,
     overlay: &Overlay,
     buffer: &IngestBuffer,
     entity: EntityId,
@@ -707,6 +707,8 @@ mod walk_tests {
 
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+    use rustc_hash::FxHashSet;
+    use tessera_types::TermId;
     use tessera_lifecycle::wal::WalRow;
     use tessera_lifecycle::ChangeOp;
     use tessera_store::write::write_permutation;

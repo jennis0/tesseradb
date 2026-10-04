@@ -135,7 +135,7 @@ pub(crate) struct DependencyContext<'a> {
     mask: &'a crate::compose::EffectiveMask,
     reachable: &'a tessera_lifecycle::ResolvedLayers,
     /// Each target layer's label test for this viewer, settled once per request: a named default
-    /// is put through the plugin once rather than once per candidate.
+    /// is evaluated once rather than once per candidate.
     labels: std::cell::RefCell<rustc_hash::FxHashMap<String, crate::artifacts::LabelGate<'a>>>,
     /// The first error a dependency's verdict met. The verdict is a `bool` asked from inside
     /// another verdict, so the error waits here for [`Self::finish`].
@@ -1049,7 +1049,7 @@ impl Engine {
     ) -> Result<Walked> {
         // Built once per request: the same segment list for every artifact in the response.
         let locator = crate::derived::RowLocator::new(served.segments.clone());
-        // The postings and plugin are the generation's, not the layer's.
+        // The postings are the generation's, not the layer's.
         let source = served.generation.partition_source();
         let pass = ArtifactPass {
             served,

@@ -18,9 +18,12 @@ use tessera_engine::EngineError;
 pub enum ApiError {
     /// 401: missing, malformed, or unrecognised bearer credential.
     BadCredential,
-    /// 403: a recognised token whose `expires_at` has passed. The engine does not check expiry;
+    /// 403: a recognised session token whose session has ended, by its deadline passing or by a
+    /// revocation or a catalogue change. The engine does not check either;
     /// `AppState::authenticated_session` does.
     ExpiredToken,
+    /// 403: an accepted credential that does not hold the permission the route needs.
+    Forbidden(String),
     /// 404: a named view, unique value, or handle this bundle/session has never heard of.
     Unknown(String),
     /// 409: the request conflicts with what is already held, such as a batch id replayed with a
@@ -65,6 +68,12 @@ pub enum ShedCause {
     SingleFlight,
     /// A suggestion walk is already in flight for this session.
     SuggestInFlight,
+    /// `serve.compute_threads` password checks were already running and as many waiting.
+    /// `Retry-After` is [`RETRY_AFTER_SECS`].
+    PasswordGate,
+    /// The catalogue changed each time a session was about to be registered. `Retry-After` is
+    /// [`RETRY_AFTER_SECS`].
+    CatalogueChanging,
 }
 
 impl ShedCause {
@@ -72,6 +81,9 @@ impl ShedCause {
         match self {
             ShedCause::ComputeGate => {
                 "the server is at its compute-admission bound; retry shortly".to_string()
+            }
+            ShedCause::PasswordGate => {
+                "the server is checking as many passwords as it admits; retry shortly".to_string()
             }
             ShedCause::BulkGate => {
                 "the server is at its bulk-read admission bound; retry shortly".to_string()
@@ -87,6 +99,9 @@ impl ShedCause {
                 .to_string(),
             ShedCause::SuggestInFlight => "a suggestion request for this session is already in \
                  flight; retry shortly"
+                .to_string(),
+            ShedCause::CatalogueChanging => "the catalogue changed while the session was being \
+                 authorised; retry shortly"
                 .to_string(),
         }
     }
@@ -115,8 +130,11 @@ impl ApiError {
             ApiError::ExpiredToken => (
                 StatusCode::FORBIDDEN,
                 "expired-token",
-                "session token has expired or was revoked".to_string(),
+                "the session has ended: its token expired, was revoked, or a change to what \
+                 authorised it ended it; authorise again"
+                    .to_string(),
             ),
+            ApiError::Forbidden(detail) => (StatusCode::FORBIDDEN, "forbidden", detail.clone()),
             ApiError::Unknown(detail) => (StatusCode::NOT_FOUND, "unknown", detail.clone()),
             ApiError::Conflict(detail) => (StatusCode::CONFLICT, "conflict", detail.clone()),
             ApiError::Contract(detail) => {
@@ -151,6 +169,7 @@ impl ApiError {
             ApiError::Backpressure { retry_after_s, .. } => Some(*retry_after_s),
             ApiError::BadCredential
             | ApiError::ExpiredToken
+            | ApiError::Forbidden(_)
             | ApiError::Unknown(_)
             | ApiError::Conflict(_)
             | ApiError::Contract(_)
@@ -258,7 +277,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
             ApiError::FailClosed(format!("column '{column}' cannot be suggested over"))
         }
         // Everything else is the deployment's fault, and its text can name a path, a segment, a
-        // bundle file or what the plugin said (`Malformed`, `Plugin`, `Wal`, an unreadable filter
+        // bundle file (`Malformed`, `Wal`, an unreadable filter
         // artefact in `FilterRefused`), so it is logged and never sent.
         other => {
             tracing::error!(detail = %other, "an engine failure; answering fail-closed");
@@ -714,13 +733,12 @@ mod tests {
     }
 
     /// An engine failure whose text is the deployment's answers a 500 whose body carries none of
-    /// that text: a bundle file, a plugin, a filter artefact and a derived column's postings.
+    /// that text: a bundle file, a filter artefact and a derived column's postings.
     #[test]
     fn engine_failures_send_none_of_their_internal_text() {
         let secret = "/srv/bundles/p0/seg-0007/records.blob entity 144999";
         for e in [
             EngineError::Malformed(secret.to_string()),
-            EngineError::Plugin(tessera_plugin::PluginError::Malformed(secret.to_string())),
             EngineError::FilterRefused(secret.to_string()),
             EngineError::Io(std::io::Error::other(secret)),
             EngineError::SegmentWithoutRowBase {

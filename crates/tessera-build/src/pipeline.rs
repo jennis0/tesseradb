@@ -105,14 +105,14 @@
 //! mutation implausible, and an adversary who can rewrite build inputs mid-run is outside this
 //! defence's scope.)
 //!
-//! **The labelling plugin is `builtin:passthrough`.** [`build_dictionary`] exploits the fact that
-//! passthrough's label rule is *decomposable*: an item's descriptors are its source terms taken
-//! one at a time, so a term's descriptor can be derived from the term alone and the whole item
-//! never has to be assembled. That is a property of passthrough, not of the plugin
-//! ABI — a plugin that derived descriptors from the item's terms as a whole would be mislabelled by
-//! this shortcut, and mislabelled authorisation data is the one failure mode this system exists
-//! to prevent. [`require_decomposable_labelling`] refuses to run against any other plugin rather
-//! than assume it decomposes (I2, fail closed).
+//! **An item's index keys are those of its row's labels read together.** [`build_dictionary`]
+//! relies on a source term being one dictionary key, derived from the source term alone, so the
+//! whole item never has to be assembled. [`crate::plan_access`] makes it one: each distinct label is
+//! read once into the keys it is indexed under ([`tessera_authz::index_keys`]), and the scan visits
+//! a row's keys in place of its labels. A row whose labels are several and name a conjunction is
+//! read again as one disjunction, because a conjunction one label names may be absorbed by another.
+//! Each key is a term or a conjunction, and a principal satisfies the item exactly when it holds or
+//! satisfies one of them.
 //!
 //! ## Byte-for-byte identity is the correctness condition
 //!
@@ -151,7 +151,6 @@ use tessera_filter::{
     Codes, ColumnKind, RecordFieldRef, RecordValueRef, ValueColumnWriter, RECORD_BLOCKS_FILE,
     RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
-use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
@@ -914,9 +913,6 @@ fn build_bundle(
     route: crate::ExtentRoute,
 ) -> Result<BuildReport> {
     let mut timer = StageTimer::new(observer);
-    let plugin = Passthrough::new();
-    require_decomposable_labelling(&plugin)?;
-    let bounds = plugin.declared_bounds();
 
     // ---- 1. pass zero: which item each row of each file names (`crate::ids`) -----------
     // An item's *ordinal* is the number the identity rule gave it, in creation order: the order
@@ -1344,7 +1340,7 @@ fn build_bundle(
                 cursor += 1;
             }
             let sig = &packed[start..cursor];
-            if sig.len() > bounds.max_terms_per_item as usize {
+            if sig.len() > tessera_authz::MAX_KEYS_PER_ITEM {
                 // A declared bound is a *declaration*: record it and carry on. Dropping
                 // terms here would silently widen the item's visibility (I2/I3).
                 over_bound_items += 1;
@@ -1504,9 +1500,9 @@ fn build_bundle(
         .collect::<Result<_>>()?;
     if over_bound_items > 0 {
         eprintln!(
-            "warning: {over_bound_items} item(s) exceed the plugin's declared \
-             max_terms_per_item ({}); no term was dropped",
-            bounds.max_terms_per_item
+            "warning: {over_bound_items} item(s) are indexed under more than {} keys; no key \
+             was dropped",
+            tessera_authz::MAX_KEYS_PER_ITEM
         );
     }
 
@@ -2076,7 +2072,6 @@ fn build_bundle(
             &artifact_store,
             &args.out.join(crate::PREFIX),
             crate::PHASH,
-            &plugin.data_plugin_hash(),
             &mut derived_index,
         );
         published_layers.store = artifact_store;
@@ -2115,7 +2110,6 @@ fn build_bundle(
             other_paths,
             unique,
         },
-        &plugin,
         n,
         term_count,
         pair_count,
@@ -5474,51 +5468,6 @@ struct ViewGeometry {
     rows: u64,
 }
 
-/// Refuse to run unless the configured plugin labels items the way this pipeline assumes.
-///
-/// The dictionary pass derives each term's descriptor from the term id alone, which is only
-/// sound when the plugin's label rule is decomposable — when `terms_of_labels` over a term list
-/// yields exactly one descriptor per element, in order. `builtin:passthrough` (R6) is defined
-/// that way; nothing in the plugin ABI requires it, and a plugin that derived descriptors from
-/// the item's terms as a whole (a rule engine, a normaliser, anything that folds terms together)
-/// would be silently mislabelled here — every posting would name the wrong term, which is a
-/// disclosure, not a bug in a performance path.
-///
-/// So this is checked twice over, and fails closed: the plugin must *be* passthrough by its
-/// declared `data_plugin_hash`, and it must *behave* decomposably on a probe term list. The hash
-/// check is what will still hold when `build` grows a plugin parameter; the probe is what
-/// catches a passthrough whose rule was changed without its hash being bumped.
-fn require_decomposable_labelling(plugin: &impl Plugin) -> Result<()> {
-    let reference = Passthrough::new();
-    if plugin.data_plugin_hash() != reference.data_plugin_hash() {
-        return Err(BuildError::Invalid(format!(
-            "the streaming build derives each term's descriptor from the term alone, which is \
-             only valid for builtin:passthrough's decomposable label rule; this plugin declares \
-             data_plugin_hash {} (expected {}). Build through `build_in_memory`, which routes \
-             every item's label through the plugin, or teach the pipeline this plugin's rule.",
-            plugin.data_plugin_hash(),
-            reference.data_plugin_hash()
-        )));
-    }
-    let probe: Vec<Vec<u8>> = vec![b"11".to_vec(), b"7".to_vec(), b"4096".to_vec()];
-    let descriptors = plugin.terms_of_labels(&probe)?;
-    if descriptors != probe {
-        return Err(BuildError::Invalid(format!(
-            "the plugin's label rule is not decomposable: the term list {:?} yielded {:?}, not \
-             one descriptor per term, in order",
-            probe
-                .iter()
-                .map(|d| String::from_utf8_lossy(d).into_owned())
-                .collect::<Vec<_>>(),
-            descriptors
-                .iter()
-                .map(|d| String::from_utf8_lossy(d).into_owned())
-                .collect::<Vec<_>>()
-        )));
-    }
-    Ok(())
-}
-
 /// What [`build_dictionary`] establishes in its single pass over the pairs relation.
 struct Dictionary {
     /// Source term ids, ascending — with `term_ids` in parallel, the source-term → term-id map
@@ -5619,8 +5568,8 @@ fn build_dictionary(
         .collect();
     order.sort_unstable();
 
-    // A source term's descriptor is what `builtin:passthrough` yields for it (R6): the decimal
-    // for the exploded relation's integer ids, the term itself for a field-sourced view.
+    // A source term's descriptor is its index key: the decimal for the exploded relation's
+    // integer ids, and a key a label gives an item for a field-sourced view.
     // Streamed, not interned: the descriptors here are distinct by construction (one per
     // distinct source term) and arrive in term-id order, which is `DictStreamWriter`'s exact
     // contract — at T = 117M an interner is gigabytes of pointless ownership.

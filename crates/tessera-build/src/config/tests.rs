@@ -552,11 +552,10 @@ fn a_point_default_may_not_be_inherited() {
 
 /// A view's own gate is a list of labels the manifest records and `Engine::authorise` evaluates
 /// (`views.md` §6, decision 0132): one label written as a string, several as a list, each
-/// element one term taken verbatim. What is refused is a list the plugin cannot read, an empty
-/// element, or a list naming no terms at all — a gate satisfied by nobody, the view being
-/// reachable by no principal including the author.
+/// element an access expression stored as its canonical text. What is refused is a label that is
+/// not an expression, an empty element, or a list naming no labels at all.
 #[test]
-fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
+fn a_views_own_visibility_is_a_list_of_access_expressions() {
     let gate_of = |declared: &str| {
         let text = with_line(SEVERITY, "").replace(
             "name             = \"s0\"",
@@ -570,14 +569,14 @@ fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
         "one label reaches the compiled view as a one-element list"
     );
     assert_eq!(
-        gate_of("\"finance,legal\""),
-        Some(vec!["finance,legal".to_string()]),
-        "a comma inside a label is part of the label: one term, not two"
+        gate_of("\"legal&(finance)\""),
+        Some(vec!["finance&legal".to_string()]),
+        "a label is stored as its canonical text"
     );
     assert_eq!(
         gate_of("[\"finance\", \"legal\"]"),
         Some(vec!["finance".to_string(), "legal".to_string()]),
-        "a list declares one term per element"
+        "a list declares one label per element"
     );
     assert_eq!(gate_of("[\"public\"]"), None, "`public` as the whole list is no gate");
 
@@ -587,9 +586,11 @@ fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
             &format!("name             = \"s0\"\nvisibility       = {declared}"),
         ))
     };
-    // The rules are tested in `tessera_plugin::check_visibility`; here, that the build applies them.
+    // The rules are tested in `tessera_access::declared_visibility`; here, that the build
+    // applies them.
     refusal("[]");
     refusal("[\"public\", \"finance\"]");
+    refusal("\"finance,legal\"");
 }
 
 /// `public` is the documented default and the current behaviour, so writing it records nothing
@@ -1157,7 +1158,10 @@ fn an_access_label_may_not_be_spelled_inherited() {
         "visibility                = \"inherited\"",
     );
     let message = err(&text);
-    assert!(message.contains("`visibility` is `inherited`"), "{message}");
+    assert!(
+        message.contains("`visibility`") && message.contains("`inherited`"),
+        "{message}"
+    );
 
     // ...and it is legal where it is not a label: the member default.
     let text = with_layer("").replace(
@@ -2179,18 +2183,30 @@ fn an_inline_artifact_declaring_both_members_and_excluding_is_refused() {
     );
 }
 
-/// **A comma is an ordinary byte in an access label.** The build hands the plugin a term *list*,
-/// so a declared label spelling `ir:analyst,ir:legal` is one term reaching one principal — the
-/// holder of that whole string, never the holder of either half.
+/// **A default label is an access expression**, stored as its canonical text. A term holding a
+/// comma is written in quotes; written bare, the comma is refused, so a label never means two
+/// terms by accident.
 #[test]
-fn an_access_label_may_contain_a_comma_and_is_one_term() {
-    let text = ACQUIRED.replace("default = \"public\"", "default = \"ir:analyst,ir:legal\"");
+fn a_default_label_is_an_access_expression() {
+    let text = ACQUIRED.replace("default = \"public\"", "default = \"ir:legal&ir:analyst\"");
     let config = bound_ok(&text, &[]);
     assert_eq!(
         config.views[0].point_visibility.default.as_deref(),
-        Some("ir:analyst,ir:legal"),
-        "carried whole, not split at the comma"
+        Some("ir:analyst&ir:legal"),
     );
+    let quoted = ACQUIRED.replace(
+        "default = \"public\"",
+        "default = '\"ir:analyst,ir:legal\"'",
+    );
+    assert_eq!(
+        bound_ok(&quoted, &[]).views[0]
+            .point_visibility
+            .default
+            .as_deref(),
+        Some("\"ir:analyst,ir:legal\""),
+    );
+    let bare = ACQUIRED.replace("default = \"public\"", "default = \"ir:analyst,ir:legal\"");
+    bound_err(&bare, &[]);
 }
 
 /// **A point's label comes from a field or from a source, never both** (§1).
@@ -2417,7 +2433,10 @@ fn an_access_label_spelled_inherited_is_refused_in_the_sugar_too() {
         "  membership                = \"enumerated\"\n  visibility = \"inherited\"",
     );
     let message = err(&text);
-    assert!(message.contains("`visibility` is `inherited`"), "{message}");
+    assert!(
+        message.contains("`visibility`") && message.contains("`inherited`"),
+        "{message}"
+    );
 }
 
 /// What the sugar never supplies is what a caller must write. It fills in the mechanical keys — the

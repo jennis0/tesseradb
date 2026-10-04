@@ -30,7 +30,6 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         root,
         &tmp.join("cache-reader"),
         &tmp.join("wal-reader.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,

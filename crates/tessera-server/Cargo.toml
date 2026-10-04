@@ -21,11 +21,12 @@ fault-injection = ["tessera-engine/fault-injection", "tessera-lifecycle/fault-in
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
+tessera-access = { path = "../tessera-access" }
 tessera-config = { path = "../tessera-config" }
 tessera-engine = { path = "../tessera-engine" }
 tessera-wire = { path = "../tessera-wire" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
-tessera-plugin = { path = "../tessera-plugin" }
+tessera-catalogue = { path = "../tessera-catalogue" }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["full"] }
@@ -45,6 +46,11 @@ sha2 = { workspace = true }
 base64 = "0.22"
 arrow = { workspace = true }
 rustc-hash = "1"
+# OIDC access tokens: the signature against the provider's JWKS, then issuer, audience and
+# lifetime. Its ring backend is already in the tree through rustls.
+jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
+# Fetching a provider's JWKS.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 # Self dev-dependency, the same shape as tessera-lifecycle's and tessera-engine's: this crate's
@@ -59,6 +65,7 @@ tempfile = { workspace = true }
 tessera-build = { path = "../tessera-build" }
 tessera-spatial = { path = "../tessera-spatial" }
 parquet = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonschema = { version = "0.51", default-features = false }
 serde_yaml_ng = "0.10"
+# Signs the OIDC access tokens the auth tests present.
+ring = "0.17"

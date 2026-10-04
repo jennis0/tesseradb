@@ -17,18 +17,20 @@ docker build --build-arg TESSERA_BUILD_COMMIT=$(git rev-parse HEAD) -t tessera .
 | Path in the container | What it holds | Mount |
 |---|---|---|
 | `/etc/tessera` | `tessera.toml`, `schema.toml` and the source files `schema.toml` names | read-only |
-| `/var/lib/tessera` | the bundle, the write-ahead log and the cache | a named volume |
-| `/run/secrets/tessera_session`, `/run/secrets/tessera_operator` | the session and operator credentials | read-only |
+| `/var/lib/tessera` | the bundle, the write-ahead log, the cache and the identity catalogue | a named volume |
+| `/run/secrets/tessera_operator` | the operator credential | read-only |
 
-The working directory is `/etc/tessera`, so `tessera build` and `tessera serve` find `tessera.toml` there with no flags. [config/tessera.toml](config/tessera.toml) is a starting point: it puts the bundle, log and cache in `/var/lib/tessera`, binds the three listeners on every interface, and reads the credentials from `/run/secrets`. A source in `schema.toml` is named by a path relative to `schema.toml`, so the source files sit beside it.
+The working directory is `/etc/tessera`, so `tessera build` and `tessera serve` find `tessera.toml` there with no flags. [config/tessera.toml](config/tessera.toml) is a starting point: it puts the bundle, log, cache and catalogue in `/var/lib/tessera`, binds the three listeners on every interface, and reads the operator credential from `/run/secrets`. A source in `schema.toml` is named by a path relative to `schema.toml`, so the source files sit beside it.
 
 | Port | Plane | Who reaches it |
 |---|---|---|
 | 8080 | viewer | browsers and clients, with a token |
-| 8081 | session | the application that mints tokens, with the session credential |
-| 8082 | control | the operator, with the operator credential; it takes every write |
+| 8081 | session | the application that mints tokens for its users, with an API key holding `authorise-as` |
+| 8082 | control | writers and administrators, with the operator credential, an API key or an OIDC access token |
 
-Publishing a port to the host's loopback keeps it off the network. Other containers on the same Docker network still reach every port, including control, which still needs the operator credential.
+Publishing a port to the host's loopback keeps it off the network. Other containers on the same Docker network still reach every port, including control, which still needs a credential.
+
+The three listeners serve plain HTTP, and the starting config binds them on `0.0.0.0`. A password sent to `POST /v1/login` on the viewer port, an API key and every session token cross the network as they are sent. The server accepts a password over plain HTTP, so a deployment reached from outside the host terminates TLS in front of the viewer port, and in front of the session and control ports where they leave the host: a reverse proxy, a load balancer or a TLS sidecar, as [the TLS guide](../docs/guides/tls.md) describes.
 
 ## Run it with Compose
 
@@ -38,7 +40,6 @@ Publishing a port to the host's loopback keeps it off the network. Other contain
 cd docker
 cp /path/to/schema.toml /path/to/*.parquet config/
 mkdir -p secrets
-openssl rand -hex 32 > secrets/tessera_session
 openssl rand -hex 32 > secrets/tessera_operator
 
 docker compose run --rm tessera build

@@ -106,7 +106,6 @@ from oracle.harness import (
     CLI_BIN,
     OPERATOR_CREDENTIAL,
     REPO_ROOT,
-    SESSION_CREDENTIAL,
     Server,
     ensure_cli_built,
     free_port,
@@ -364,9 +363,6 @@ path = "{bundle_root}"
 cache = "{cache_dir}"
 wal = "{wal_path}"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -374,7 +370,6 @@ token_max_lifetime = 3600
 viewer = "127.0.0.1:{viewer_port}"
 session = "127.0.0.1:{session_port}"
 control = "127.0.0.1:{control_port}"
-session_credential_env = "TESSERA_REFERENCE_SESSION_CRED"
 operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
 max_k = 1000000
 k_min = 2
@@ -387,6 +382,9 @@ flush_max_age_secs = 86400
 compaction_window_start = "off"
 {fold_lines}
 {batch_lines}
+
+[catalogue]
+dir = "{cache_dir.parent / 'catalogue'}"
 """
 
 #: How large a single `/control/ingest` batch may be, when a plan asks for one.
@@ -650,7 +648,6 @@ class SuiteHarness:
             )
         )
         env = os.environ.copy()
-        env["TESSERA_REFERENCE_SESSION_CRED"] = SESSION_CREDENTIAL
         env["TESSERA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
         argv = [str(binary), "serve", "--deployment", str(config_path)]
         if self.profile.memory_max is not None:

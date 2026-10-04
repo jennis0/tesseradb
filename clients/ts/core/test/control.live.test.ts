@@ -31,9 +31,9 @@ let pair: bigint;
 beforeAll(async () => {
   served = await start();
   if (typeof served === 'string') return;
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.sessionCredential});
-  control = new Control({controlUrl: served.controlUrl, operatorCredential: served.operatorCredential});
-  token = (await client.authorise([TERM])).token;
+  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential});
+  control = new Control({controlUrl: served.controlUrl, credential: served.operatorCredential});
+  token = (await client.authorise({terms: [TERM]})).token;
   meta = await client.meta(token);
 }, 120_000);
 
@@ -81,11 +81,11 @@ function notes(): Uint8Array {
   return tableToIPC(table, 'stream');
 }
 
-/** What the session holding `TERM` is served: the visible count and the ids of the points. */
-async function seen(): Promise<{visible: bigint; ids: bigint[]}> {
+/** What a session, by default the one holding `TERM`, is served: the visible count and the ids of the points. */
+async function seen(as: string = token): Promise<{visible: bigint; ids: bigint[]}> {
   const q = meta.views.find((v) => v.id === 's0')!.quantisation;
   const request: ViewportRequest = {view: 's0', zoom: 2, bbox: [q.xMin, q.yMin, q.xMax, q.yMax], k: 100};
-  const {result} = await client.viewport(token, request);
+  const {result} = await client.viewport(as, request);
   return {visible: result.tiles.reduce((sum, t) => sum + t.visible, 0n), ids: [...result.ids]};
 }
 
@@ -119,7 +119,7 @@ describe('Control against a live server', () => {
     expect(again).toMatchObject({status: 200, body: {rows: 4, created: 0, unchanged: 4}});
     expect(again.body.tessera_ids).toEqual(inserted.body.tessera_ids);
     await flushed();
-    token = (await client.authorise([TERM])).token;
+    token = (await client.authorise({terms: [TERM]})).token;
     const after = await seen();
     expect(after.visible).toBe(4n);
     expect(after.ids).toHaveLength(4);
@@ -253,7 +253,7 @@ describe('Control against a live server', () => {
   it('declares a plain view and a view group, creates a view of the group and drops it, each read back from /v1/meta', async (ctx) => {
     live(ctx);
     // A session resolves the views it may reach when it is authorised.
-    const metaNow = async () => client.meta((await client.authorise([TERM])).token);
+    const metaNow = async () => client.meta((await client.authorise({terms: [TERM]})).token);
     const extent = {x: [0, 100], y: [0, 100]};
     expect(await control.declareView('ts-plain', {extent}, {wait: true})).toMatchObject({status: 201, body: {visible: true}});
     expect((await metaNow()).views.map((v) => v.id)).toContain('ts-plain');
@@ -328,9 +328,80 @@ describe('Control against a live server', () => {
 
   it('revokes a session, after which its token is refused', async (ctx) => {
     live(ctx);
-    const session = await client.authorise([TERM]);
+    const session = await client.authorise({terms: [TERM]});
     await client.meta(session.token);
     await client.revoke(session.tokenId);
-    await expect(client.meta(session.token)).rejects.toMatchObject({status: 401});
+    await expect(client.meta(session.token)).rejects.toMatchObject({status: 403, code: 'expired-token'});
+  });
+
+  it("mints the operator's own session, which reads every item, and refuses it to a key", async (ctx) => {
+    live(ctx);
+    const own = await client.authorise({readAll: true});
+    const narrow = await client.authorise({terms: [TERM]});
+    expect((await seen(own.token)).visible).toBeGreaterThanOrEqual((await seen(narrow.token)).visible);
+    await client.revoke(own.tokenId);
+    await client.revoke(narrow.tokenId);
+  });
+
+  it('manages a principal, its credentials and its sessions through the catalogue', async (ctx) => {
+    live(ctx);
+    const name = 'ts-live-ann';
+    const password = 'a password long enough for the minimum';
+    expect((await control.createPrincipal(name, 'person')).status).toBe(200);
+    expect((await control.createPrincipal(name, 'person')).status).toBe(409);
+    expect((await control.grant({principal: name, permission: 'read'})).ok).toBe(true);
+    expect((await control.grant({principal: name, terms: [TERM, 'ts-live-other']})).ok).toBe(true);
+    expect((await control.revokeGrant({principal: name, term: 'ts-live-other'})).ok).toBe(true);
+    expect((await control.setPassword(name, password)).ok).toBe(true);
+    const shown = await control.showPrincipal(name);
+    expect(shown.body).toMatchObject({terms: [TERM], permissions: ['read'], has_password: true});
+
+    // A password login reads what the principal's terms admit: the rows labelled TERM.
+    const byPassword = await client.login({principal: name, password});
+    expect((await seen(byPassword.token)).visible).toBe((await seen()).visible);
+    await expect(client.login({principal: name, password: 'not the password at all'})).rejects.toMatchObject({status: 401});
+
+    // A key login, then a grant, which ends both sessions.
+    const issued = await control.createKey(name);
+    const byKey = await client.login({apiKey: String(issued.body.key)});
+    const listed = await control.listSessions({principal: name});
+    expect(listed.body.sessions).toHaveLength(2);
+    expect((await control.grant({principal: name, term: 'ts-live-third'})).body.sessions_ended).toBe(2);
+    await expect(client.meta(byKey.token)).rejects.toMatchObject({status: 403});
+
+    // An integrator's key, whose principal holds `authorise-as`, mints a session for the principal
+    // and revokes it; it may not name terms.
+    expect((await control.createPrincipal('ts-live-portal', 'service')).ok).toBe(true);
+    expect((await control.grant({principal: 'ts-live-portal', permission: 'authorise-as'})).ok).toBe(true);
+    const portalKey = String((await control.createKey('ts-live-portal')).body.key);
+    const {viewerUrl, sessionUrl} = served as Served;
+    const portal = new TesseraClient({viewerUrl, sessionUrl, sessionCredential: portalKey});
+    const minted = await portal.authorise({principal: name});
+    expect((await seen(minted.token)).visible).toBe((await seen()).visible);
+    await portal.revoke(minted.tokenId);
+    await expect(client.meta(minted.token)).rejects.toMatchObject({status: 403, code: 'expired-token'});
+    await expect(portal.authorise({terms: [TERM]})).rejects.toMatchObject({status: 403});
+    await expect(portal.authorise({readAll: true})).rejects.toMatchObject({status: 403});
+    expect((await control.deletePrincipal('ts-live-portal')).ok).toBe(true);
+
+    // Logout ends the session it is sent with, and ending by principal ends the rest.
+    const again = await client.login({apiKey: String(issued.body.key)});
+    await client.logout(again.token);
+    await expect(client.meta(again.token)).rejects.toMatchObject({status: 403});
+    await client.login({principal: name, password});
+    expect((await control.endSessions({principal: name})).body.sessions_ended).toBe(1);
+
+    // A group's terms reach its members; a revoked key and a disabled principal log in no more.
+    expect((await control.createGroup('ts-live-group')).ok).toBe(true);
+    expect((await control.addMember('ts-live-group', name)).ok).toBe(true);
+    expect((await control.showGroup('ts-live-group')).body.members).toEqual([name]);
+    expect((await control.listKeys(name)).body).toEqual({keys: [expect.objectContaining({prefix: issued.body.prefix})]});
+    expect((await control.revokeKey(String(issued.body.prefix))).ok).toBe(true);
+    await expect(client.login({apiKey: String(issued.body.key)})).rejects.toMatchObject({status: 401});
+    expect((await control.changePrincipal(name, {disabled: true})).ok).toBe(true);
+    await expect(client.login({principal: name, password})).rejects.toMatchObject({status: 401});
+    expect((await control.deleteGroup('ts-live-group')).ok).toBe(true);
+    expect((await control.deletePrincipal(name)).ok).toBe(true);
+    expect((await control.showPrincipal(name)).status).toBe(404);
   });
 });

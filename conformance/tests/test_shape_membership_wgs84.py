@@ -30,7 +30,6 @@ unprojected view.
 from __future__ import annotations
 
 import math
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -39,8 +38,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from oracle.harness import (
-    CLI_BIN,
-    REPO_ROOT,
+    cli_build,
     ensure_cli_built,
     join_attribute_toml,
     spawn_server,
@@ -308,18 +306,7 @@ def build_bundle(work: Path, points) -> Path:
     config.write_text(config_toml())
     bundle = work / "bundle"
     deployment = write_deployment(work / "tessera.toml", bundle=bundle, schema=config)
-    subprocess.run(
-        [
-            str(CLI_BIN),
-            "build",
-            "--deployment",
-            str(deployment),
-            "--out",
-            str(bundle),
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-    )
+    cli_build(deployment, bundle)
     return bundle
 
 

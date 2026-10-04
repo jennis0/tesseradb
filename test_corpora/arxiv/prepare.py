@@ -425,18 +425,17 @@ wal   = ".tessera/wal.log"
 [build]
 schema = "corpus.toml"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
+
+[catalogue]
+dir = ".tessera/catalogue"
 
 [serve]
 viewer  = "127.0.0.1:8091"
 session = "127.0.0.1:8092"
 control = "127.0.0.1:8093"
 max_k   = 5000
-session_credential_env  = "TESSERA_ARXIV_SESSION_CRED"
 operator_credential_env = "TESSERA_ARXIV_OPERATOR_CRED"
 
 # Development only: the origin the demo viewer is served from (client-interaction §7). Without
@@ -450,7 +449,7 @@ dev_cors_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
     # above is the only place those two paths are written, so the `mkdir` belongs beside it.
     (out / ".tessera").mkdir(exist_ok=True)
 
-    # The two plane credentials are minted once, each only if absent, so a rerun keeps the
+    # The operator credential is minted once, only if absent, so a rerun keeps the
     # values a running client already holds.
     import secrets
 
@@ -459,7 +458,7 @@ dev_cors_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
     held = {line.split("=", 1)[0] for line in lines if "=" in line}
     minted = [
         f"{var}={secrets.token_hex(16)}"
-        for var in ("TESSERA_ARXIV_SESSION_CRED", "TESSERA_ARXIV_OPERATOR_CRED")
+        for var in ("TESSERA_ARXIV_OPERATOR_CRED",)
         if var not in held
     ]
     if minted:

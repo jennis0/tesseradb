@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod identity;
 mod records;
 
 use clap::{Parser, Subcommand};
@@ -302,11 +303,11 @@ enum Command {
     /// again.
     ///
     /// It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would
-    /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the session or
-    /// operator credential is not set or its file cannot be read. Under `[serve]`,
-    /// `session_credential_file` or `session_credential_env` names the file or environment
-    /// variable holding the session credential, and `operator_credential_file` or
-    /// `operator_credential_env` the operator's. It also refuses when the bundle cannot be read
+    /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the operator
+    /// credential is not set, is empty, or its file cannot be read: under `[serve]`,
+    /// `operator_credential_file` or `operator_credential_env` names the file or environment
+    /// variable holding it. It refuses when `[catalogue] dir` is not set, or the catalogue there
+    /// cannot be opened or is held open by another process. It also refuses when the bundle cannot be read
     /// and when the write-ahead log fails its checksum. An address that cannot be bound, such as
     /// one already in use, stops it with exit 1 after the bundle has opened.
     Serve {
@@ -314,6 +315,64 @@ enum Command {
         /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
+    },
+    /// Log in on the viewer plane and print the session token and its `expires_at` as JSON.
+    ///
+    /// The password, API key or OIDC access token is read from the first line of stdin, never
+    /// from an argument. The principal must hold `read`.
+    ///
+    /// For example, `tessera login --server http://127.0.0.1:8080 --principal ann <
+    /// password.txt`.
+    Login(identity::LoginArgs),
+    /// End a session on the viewer plane. The session token is read from `TESSERA_TOKEN`, never
+    /// from an argument.
+    Logout(identity::LogoutArgs),
+    /// Mint and revoke sessions on the session plane, and list and end sessions on the control
+    /// plane.
+    ///
+    /// The session plane's verbs read their credential from `TESSERA_API_KEY`: an API key holding
+    /// `authorise-as`, or the operator credential, which alone may name the session's terms or ask
+    /// for a session reading every item.
+    /// The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
+    Session {
+        #[command(subcommand)]
+        command: identity::SessionCommand,
+    },
+    /// Manage local principals on the control plane: people and services.
+    ///
+    /// Every verb reads the control plane's credential from `TESSERA_CREDENTIAL`, which is the
+    /// operator credential, an API key or an OIDC access token, and needs `admin`. Each prints the
+    /// server's JSON answer; a change answers how many sessions it ended.
+    Principal {
+        #[command(subcommand)]
+        command: identity::PrincipalCommand,
+    },
+    /// Manage API keys on the control plane. The credential is read as `tessera principal` reads
+    /// it.
+    Key {
+        #[command(subcommand)]
+        command: identity::KeyCommand,
+    },
+    /// Manage local groups and their members on the control plane. The credential is read as
+    /// `tessera principal` reads it.
+    Group {
+        #[command(subcommand)]
+        command: identity::GroupCommand,
+    },
+    /// Grant a term or a permission to a principal or a group, on the control plane.
+    ///
+    /// A term says what the grantee may see, and a permission what it may do. The sessions the
+    /// grant affects end, so they pick it up when they authorise again. The credential is read as
+    /// `tessera principal` reads it.
+    Grant(identity::GrantArgs),
+    /// Revoke a term or a permission from a principal or a group, on the control plane. The
+    /// credential is read as `tessera principal` reads it.
+    RevokeGrant(identity::GrantArgs),
+    /// Manage OIDC providers on the control plane. The credential is read as `tessera principal`
+    /// reads it.
+    Provider {
+        #[command(subcommand)]
+        command: identity::ProviderCommand,
     },
 }
 
@@ -359,7 +418,7 @@ enum CorpusCommand {
         #[arg(long)]
         zoom: u8,
         /// The principal's grant, in the mask catalogue's term-set encoding: comma-separated
-        /// decimal term descriptors (the `builtin:passthrough` label form).
+        /// decimal terms.
         #[arg(long)]
         grant: String,
         /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).
@@ -1606,6 +1665,15 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Command::Login(args) => identity::login(args),
+        Command::Logout(args) => identity::logout(args),
+        Command::Session { command } => identity::session(command),
+        Command::Principal { command } => identity::principal(command),
+        Command::Key { command } => identity::key(command),
+        Command::Group { command } => identity::group(command),
+        Command::Grant(args) => identity::grant(args, false),
+        Command::RevokeGrant(args) => identity::grant(args, true),
+        Command::Provider { command } => identity::provider(command),
         Command::Items(args) => records::items(args),
         Command::Artifacts(args) => records::artifacts(args),
         Command::Health {
@@ -1669,14 +1737,15 @@ fn main() -> ExitCode {
             // **The blocking pool is sized here, from the config's declared consumers**, and this
             // is the only place in the process where that number exists.
             //
-            // It is sized explicitly rather than left at tokio's default (512) because two things
-            // depend on it and neither states it: the viewer plane's `spawn_blocking` closures,
-            // bounded by `compute_admission`, and `/control/ingest`'s, bounded by
+            // It is sized explicitly rather than left at tokio's default (512) because three things
+            // depend on it and none states it: the viewer plane's `spawn_blocking` closures,
+            // bounded by `compute_admission` and `bulk_admission`, password checks at login,
+            // bounded by `password_admission`, and `/control/ingest`'s, bounded by
             // `ingest_admission`. A tokio release or an embedder's own builder could move that
             // default in silence, and an admitted viewport would then queue behind ingest closures
             // in the shared FIFO with no timeout — hanging rather than shedding.
             //
-            // Derived rather than asserted-against: `serving_blocking_threads` covers both bounds
+            // Derived rather than asserted-against: `serving_blocking_threads` covers every bound
             // plus a reserve, so there is no configuration in which an admitted request finds no
             // thread.
             let blocking_threads = tessera_config::serving_blocking_threads(&prepared.config);

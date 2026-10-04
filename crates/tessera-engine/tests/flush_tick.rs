@@ -25,7 +25,6 @@ fn engine_with_triggers(
         root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs,
             flush_max_items,
@@ -48,7 +47,6 @@ fn engine_with_tick(
         root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs,
             ..config()
@@ -229,7 +227,6 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,

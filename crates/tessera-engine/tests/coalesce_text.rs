@@ -286,7 +286,6 @@ fn a_window_of_text_layers_becomes_one_and_answers_identically() {
             &root,
             &dir.path().join("cache"),
             &dir.path().join("wal.log"),
-            tessera_plugin::Passthrough::new(),
             config_uncapped(),
         )
         .expect("the engine opens against the text fixture");
@@ -403,7 +402,6 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
             &root,
             &dir.path().join("cache"),
             &dir.path().join("wal.log"),
-            tessera_plugin::Passthrough::new(),
             config_uncapped(),
         )
         .expect("the engine opens against the text fixture");

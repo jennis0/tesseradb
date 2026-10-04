@@ -123,8 +123,8 @@ struct Target {
     /// The viewer plane's address, such as `http://127.0.0.1:8080`.
     #[arg(long, value_name = "URL")]
     server: String,
-    /// A session token, as the session plane's `/session/authorise` issues one. Without it the
-    /// token is read from `TESSERA_TOKEN`, and with neither the read is refused.
+    /// A session token, as `tessera login` or `tessera session authorise` prints one. Without it
+    /// the token is read from `TESSERA_TOKEN`, and with neither the read is refused.
     #[arg(long)]
     token: Option<String>,
     /// The file to write. Without it, or with `-`, the output goes to stdout.

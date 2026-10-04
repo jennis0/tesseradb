@@ -30,7 +30,6 @@ use clap::Parser;
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_store::read::open_bundle;
 
 /// Server defaults, so this measures a deployment somebody runs (see `arms::viewport`).
@@ -124,7 +123,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.fixture,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 5000,

@@ -428,7 +428,7 @@ def sent(r: dict) -> tuple:
     """What a request sent, without the per-session parts: its step, route and body."""
     body = r.get("body")
     if r["path"] == "/session/authorise":
-        body = "<auth_data>" if body else body
+        body = "<body>" if body else body
     return (r.get("step"), r["method"], r["path"], body)
 
 
@@ -508,7 +508,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = tomllib.loads((directory / "tessera.toml").read_text())
     serve = settings["serve"]
     env = dict(os.environ) | read_env_file(directory / ".env")
-    cred = env[serve["session_credential_env"]]
+    cred = env[serve["operator_credential_env"]]
     args.viewer = args.viewer or f"http://{serve['viewer']}"
     args.session = args.session or f"http://{serve['session']}"
     if not args.ranks:

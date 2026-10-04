@@ -12,6 +12,7 @@ pub enum ConfigError {
     MissingDisclosureSection,
     MissingDisclosureKey(&'static str),
     MissingCredential(&'static str),
+    EmptyCredential(&'static str),
     CredentialFileUnreadable {
         which: &'static str,
         path: PathBuf,
@@ -21,7 +22,7 @@ pub enum ConfigError {
         key: &'static str,
         value: String,
     },
-    UnsupportedPlugin(String),
+    PluginTable,
     /// `tower_http`'s `AllowOrigin::list` panics on a wildcard.
     CorsWildcard {
         key: &'static str,
@@ -81,8 +82,6 @@ impl std::fmt::Display for ConfigError {
                  \x20   wal   = \".tessera/wal.log\"\n\n\
                  \x20   [build]\n\
                  \x20   schema = \"schema.toml\"\n\n\
-                 \x20   [plugin]\n\
-                 \x20   module = \"builtin:passthrough\"\n\n\
                  \x20   [disclosure]\n\
                  \x20   token_max_lifetime = 3600\n\n\
                  \x20   [serve]\n\
@@ -105,6 +104,11 @@ impl std::fmt::Display for ConfigError {
                 "there is no {which} credential; set `{which}_credential_file` or \
                  `{which}_credential_env` under [serve] and put the secret in that file or variable"
             ),
+            ConfigError::EmptyCredential(which) => write!(
+                f,
+                "the {which} credential is empty, and an empty bearer would authenticate as the \
+                 superuser; put a long random secret in the file or variable"
+            ),
             ConfigError::CredentialFileUnreadable {
                 which,
                 path,
@@ -120,10 +124,10 @@ impl std::fmt::Display for ConfigError {
                 "serve.{key} = \"{value}\" is not a listen address; write an address and port such \
                  as \"127.0.0.1:8080\" (the control plane also takes \"unix:<path>\")"
             ),
-            ConfigError::UnsupportedPlugin(module) => write!(
+            ConfigError::PluginTable => write!(
                 f,
-                "plugin.module = \"{module}\" is not available in this build; write \
-                 `module = \"builtin:passthrough\"`"
+                "tessera.toml has a [plugin] table, which Tessera does not read; delete the \
+                 table and its `module` line"
             ),
             ConfigError::CorsWildcard { key } => write!(
                 f,

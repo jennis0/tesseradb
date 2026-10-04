@@ -139,7 +139,6 @@ impl Fixture {
             &self.root,
             &self.cache,
             &self.wal,
-            tessera_plugin::Passthrough::new(),
             config,
         )
         .expect("the engine opens");

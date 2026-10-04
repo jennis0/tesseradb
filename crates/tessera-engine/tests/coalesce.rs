@@ -61,7 +61,6 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             // Long, so every flush in this test is one an operator asked for: the coalesce is
             // selected on the tick either way, and a background tick landing mid-assertion would
@@ -305,7 +304,6 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,

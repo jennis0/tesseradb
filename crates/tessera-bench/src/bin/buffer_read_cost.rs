@@ -48,7 +48,6 @@ use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{ChangeOp, WalRow};
 use tessera_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
-use tessera_plugin::Passthrough;
 use tessera_store::read::open_bundle;
 use tessera_types::{EntityId, TermId};
 
@@ -548,7 +547,6 @@ fn open_engine(fx: &Fixture, scratch: &Path, tag: &str) -> Result<Engine, Box<dy
         &fx.root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             // Server defaults, so this measures a deployment somebody runs.

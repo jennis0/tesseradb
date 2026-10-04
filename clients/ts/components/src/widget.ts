@@ -55,7 +55,7 @@ export type WidgetModel = {
   send(content: unknown, callbacks?: unknown, buffers?: ArrayBuffer[]): void;
 };
 
-/** What the kernel sends the page. `expires_at` is seconds since the epoch, as `/session/authorise` reports it, or `null` when unknown. */
+/** What the kernel sends the page. `expires_at` is seconds since the epoch, as `/v1/login` and `/session/authorise` report it, or `null` when unknown. */
 export type KernelMessage =
   | {type: 'token'; token: string; expires_at: number | null}
   | {type: 'refused'; detail: string};

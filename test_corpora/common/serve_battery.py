@@ -24,7 +24,7 @@ and counted in `eviction_failed` instead.
 
     python -m test_corpora.common.serve_battery \\
         --viewer http://127.0.0.1:8151 --session http://127.0.0.1:8152 \\
-        --session-cred "$CRED" --bundle /path/to/bundle --cache /path/to/.tessera/cache \\
+        --control http://127.0.0.1:8153 --operator-cred "$CRED" --bundle /path/to/bundle --cache /path/to/.tessera/cache \\
         --ranks /path/to/branch-ranks.json --server-pid 1234 --out serve-nocap.json \\
         [--cap-bytes 6442450944 --cgroup /sys/fs/cgroup/user.slice/.../scope]
 """
@@ -32,7 +32,7 @@ and counted in `eviction_failed` instead.
 from __future__ import annotations
 
 import argparse
-import base64
+import hashlib
 import io
 import json
 import math
@@ -85,19 +85,74 @@ SHED_ERRORS = (
 # ---------------------------------------------------------------------------------------------
 
 
-def authorise(session_base: str, cred: str, terms: Sequence[str], timeout: float = 60.0):
-    """`session/authorise` for one term set. Returns `(token, wall seconds)`."""
-    auth_data = base64.b64encode(json.dumps({"terms": list(terms)}).encode()).decode()
-    t0 = time.perf_counter()
-    r = requests.post(
-        f"{session_base}/session/authorise",
-        headers={"Authorization": f"Bearer {cred}"},
-        json={"auth_data": auth_data},
-        timeout=timeout,
-    )
-    dt = time.perf_counter() - t0
-    r.raise_for_status()
-    return r.json()["token"], dt
+class Sessions:
+    """Mints a session for a term set: a local principal holding `read` and the terms, created on
+    the control plane with the operator credential where absent and named by a digest of the
+    terms, and a session minted for it on the session plane by the service principal
+    `measurement`, which holds `authorise-as`.
+    """
+
+    INTEGRATOR = "measurement"
+
+    def __init__(self, session_base: str, control_base: str, operator_credential: str):
+        self.session_base = session_base
+        self.control_base = control_base
+        self.operator_credential = operator_credential
+        self._key: str | None = None
+        self._made: set[str] = set()
+
+    def _control(self, path: str, body: dict) -> requests.Response:
+        return requests.post(
+            f"{self.control_base}{path}",
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            json=body,
+            timeout=600,
+        )
+
+    def _create(self, name: str, kind: str) -> None:
+        r = self._control("/control/principals", {"name": name, "kind": kind})
+        if r.status_code != 409:
+            r.raise_for_status()
+
+    def principal(self, terms: Sequence[str]) -> str:
+        """The principal holding `read` and `terms`. `public` is held by every session and
+        granted to none."""
+        held = sorted({t.strip() for t in terms if t.strip() and t.strip().lower() != "public"})
+        name = "holding-" + hashlib.sha256(json.dumps(held).encode()).hexdigest()[:16]
+        if name not in self._made:
+            self._create(name, "person")
+            self._control("/control/grants", {"principal": name, "permission": "read"}).raise_for_status()
+            self._control("/control/grants", {"principal": name, "terms": held}).raise_for_status()
+            self._made.add(name)
+        return name
+
+    def key(self) -> str:
+        """An API key of `measurement`, created once per instance."""
+        if self._key is None:
+            self._create(self.INTEGRATOR, "service")
+            self._control(
+                "/control/grants", {"principal": self.INTEGRATOR, "permission": "authorise-as"}
+            ).raise_for_status()
+            r = self._control(f"/control/principals/{self.INTEGRATOR}/keys", {})
+            r.raise_for_status()
+            self._key = r.json()["key"]
+        return self._key
+
+    def authorise(self, terms: Sequence[str], timeout: float = 60.0):
+        """`session/authorise` for the principal holding one term set. Returns `(token, wall
+        seconds)`, the seconds timing the authorise alone."""
+        principal = self.principal(terms)
+        key = self.key()
+        t0 = time.perf_counter()
+        r = requests.post(
+            f"{self.session_base}/session/authorise",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"principal": principal},
+            timeout=timeout,
+        )
+        dt = time.perf_counter() - t0
+        r.raise_for_status()
+        return r.json()["token"], dt
 
 
 def meta(viewer_base: str, token: str, timeout: float = 30.0) -> dict:
@@ -604,7 +659,7 @@ class Battery:
     def _fresh_token(self, terms: Sequence[str]) -> str | None:
         """A new session. `None` once the server has died — the caller stops rather than raising."""
         try:
-            token, _ = authorise(self.args.session, self.args.session_cred, terms)
+            token, _ = self.args.sessions.authorise(terms)
             return token
         except requests.exceptions.RequestException as e:
             self._record_death("session/authorise", e, terms)
@@ -843,7 +898,7 @@ class Battery:
 
         # The 100% principal first: the denominator of every coverage figure.
         all_terms = sorted(r["term"] for r in ranks)
-        broad_token, broad_authorise_s = authorise(args.session, args.session_cred, all_terms)
+        broad_token, broad_authorise_s = args.sessions.authorise(all_terms)
         selection = self.request_shape(broad_token)
         whole = self.whole_extent(broad_token)
         total_rows = int((whole["counts"] or {}).get("visible") or 0)
@@ -863,7 +918,7 @@ class Battery:
                 f"{rung['terms']}"
             )
             try:
-                token, authorise_s = authorise(args.session, args.session_cred, rung["terms"])
+                token, authorise_s = args.sessions.authorise(rung["terms"])
             except requests.exceptions.RequestException as e:
                 self._record_death("session/authorise", e, rung["terms"])
                 break
@@ -1005,7 +1060,11 @@ def battery_figures(cells: Sequence[dict]) -> dict:
 def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--viewer", help="a running server's viewer base URL")
     ap.add_argument("--session")
-    ap.add_argument("--session-cred")
+    ap.add_argument("--control", help="a running server's control base URL")
+    ap.add_argument(
+        "--operator-cred",
+        help="its operator credential, which creates the principals each session is minted for",
+    )
     ap.add_argument("--bundle", help="the bundle directory, for eviction")
     ap.add_argument("--cache", default=None, help="the deployment's cache directory")
     ap.add_argument("--ranks", help="the rung's branch-ranks.json; defaults to <boot-rung>/branch-ranks.json")
@@ -1075,6 +1134,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = ap.parse_args(argv)
     started = time.time()
     served = None
+    if not args.boot_rung:
+        args.sessions = Sessions(args.session, args.control, args.operator_cred)
     if args.boot_rung:
         from .deployment import Deployment
 
@@ -1094,7 +1155,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         served.start()
         open_s = round(time.time() - open_at, 2)
         args.viewer, args.session = served.viewer, served.session
-        args.session_cred = served.credential("session")
+        args.sessions = Sessions(served.session, served.control, served.operator_credential())
         args.bundle, args.cache = str(bundle), str(served.cache)
         args.server_pid = served.pid
         args.cgroup = str(served.cgroup) if served.cgroup else None

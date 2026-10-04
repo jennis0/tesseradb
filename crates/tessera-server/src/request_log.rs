@@ -12,9 +12,9 @@
 //! Each line carries the run, a random id taken when the log is opened, since `token_id`s start
 //! again in each process.
 //!
-//! Request bodies are written, including `/session/authorise`'s, whose `auth_data` is what
-//! replaying a session needs; the file is created readable by its owner only. Never written: the
-//! bearer token, the session credential, any other header, and every response body. The
+//! Request bodies are written, including `/session/authorise`'s, which is what replaying a session
+//! needs; the file is created readable by its owner only. Never written: the bearer token, the
+//! session plane's credential, any other header, and every response body. The
 //! `token_id` an authorisation issued is noted by the handler rather than read from the response.
 
 use std::fs::File;

@@ -20,7 +20,6 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_engine::Engine;
 use tessera_lifecycle::faults::FaultSwitchboard;
-use tessera_plugin::Passthrough;
 
 /// Long enough for a slow machine and short enough to fail rather than hang.
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -345,7 +344,6 @@ async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         config,
     )
     .expect("engine should open against a freshly built bundle");

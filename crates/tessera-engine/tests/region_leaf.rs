@@ -487,7 +487,6 @@ fn merge_engine(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         tessera_engine::EngineConfig {
             flush_max_age_secs: 3600,
             // **The row trigger off.** This cell drives publication itself — it pins `B`

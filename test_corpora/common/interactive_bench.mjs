@@ -15,7 +15,7 @@ const plan = JSON.parse(readFileSync(planPath, 'utf8'));
 const {createStore, TesseraClient, inlineDecoder} = await import(plan.core);
 const {tableFromIPC} = await import(plan.arrow);
 const cred = process.env.TESSERA_BENCH_SESSION_CRED;
-if (!cred) throw new Error('set TESSERA_BENCH_SESSION_CRED to the deployment session credential');
+if (!cred) throw new Error('set TESSERA_BENCH_SESSION_CRED to the deployment operator credential');
 
 const now = () => performance.timeOrigin + performance.now();
 
@@ -234,7 +234,7 @@ const client = new TesseraClient({viewerUrl: plan.viewer, sessionUrl: plan.sessi
 async function open(principal, label, keepIds) {
   step = {id: `${principal.label}/${label}`};
   const t0 = now();
-  const session = await client.authorise(principal.terms);
+  const session = await client.authorise({terms: principal.terms});
   const tToken = now();
   const meta = await client.meta(session.token);
   const view = meta.views[0];

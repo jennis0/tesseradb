@@ -24,8 +24,8 @@ let meta: Meta;
 beforeAll(async () => {
   served = await start();
   if (typeof served === 'string') return;
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.sessionCredential});
-  session = await client.authorise(TERMS);
+  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential});
+  session = await client.authorise({terms: TERMS});
   meta = await client.meta(session.token);
 }, 120_000);
 
@@ -123,7 +123,7 @@ describe('TesseraClient against a live server', () => {
 
   it('counts nothing for a principal holding none of the corpus’s labels', async (ctx) => {
     live(ctx);
-    const nobody = await client.authorise([]);
+    const nobody = await client.authorise({terms: []});
     const response = await client.viewport(nobody.token, whole({k: 50}));
     expect(total(response.result.tiles, 'visible')).toBe(0n);
     expect(response.result.ids.length).toBe(0);

@@ -36,7 +36,7 @@ import {
   tableToIPC,
   vectorFromArray
 } from 'apache-arrow';
-import {base64} from '../core/src/control.ts';
+import {authorise} from './operator.ts';
 import {start} from '../core/test/served.ts';
 
 const FIXTURES = join(import.meta.dirname, '..', 'core', 'test', 'fixtures');
@@ -68,13 +68,7 @@ const total = (table, name) => column(table, name).reduce((sum, v) => sum + Numb
 
 /** A session for `terms` on `served`, and the three viewer routes the goldens come from. */
 async function session(served, terms) {
-  const authorised = await fetch(`${served.sessionUrl}/session/authorise`, {
-    method: 'POST',
-    headers: {authorization: `Bearer ${served.sessionCredential}`, 'content-type': 'application/json'},
-    body: JSON.stringify({auth_data: base64(new TextEncoder().encode(JSON.stringify({terms})))})
-  });
-  if (!authorised.ok) throw new Error(`authorise: ${authorised.status} ${await authorised.text()}`);
-  const {token} = await authorised.json();
+  const {token} = await authorise(served.sessionUrl, served.operatorCredential, {terms});
   const call = async (path, body) => {
     const response = await fetch(`${served.viewerUrl}${path}`, {
       method: body === undefined ? 'GET' : 'POST',

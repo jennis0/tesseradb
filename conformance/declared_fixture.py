@@ -30,7 +30,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -39,7 +38,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
-from oracle.harness import CLI_BIN, OPERATOR_CREDENTIAL, REPO_ROOT, write_deployment
+from oracle.harness import OPERATOR_CREDENTIAL, cli_build, write_deployment
 from suite.battery import (
     ArtifactCard,
     Browse,
@@ -282,16 +281,7 @@ class Deployment:
         self.bundle = work / "bundle"
         schema = corpus.write(work / "corpus")
         deployment = write_deployment(work / "tessera-build.toml", bundle=self.bundle, schema=schema)
-        subprocess.run(
-            [
-                str(CLI_BIN), "build",
-                "--deployment", str(deployment),
-                "--out", str(self.bundle),
-            ],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-        )
+        cli_build(deployment, self.bundle, capture_output=True)
         run_dir = work / "run"
         run_dir.mkdir(exist_ok=True)
         self.harness = SuiteHarness(

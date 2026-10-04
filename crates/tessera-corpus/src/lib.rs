@@ -30,8 +30,8 @@
 //! Each item has one or two terms from a space of 16 levels with 64 terms each. Level `L` is
 //! chosen with probability `2^-(L+1)`, so a term at level `L` covers about `n / 2^(L+1) / 64`
 //! items, and term sizes range from dense to nearly single. A term's descriptor is its decimal
-//! string, which is the form `builtin:passthrough` expects, so a [`Grant`] here and an access
-//! label on the server name the same items. [`Corpus::with_terms_per_level`] changes the number
+//! string, which is the form an access label and a session's terms take, so a [`Grant`] here
+//! and an access label on the server name the same items. [`Corpus::with_terms_per_level`] changes the number
 //! of terms per level. The number of levels stays 16.
 
 pub mod artifacts;

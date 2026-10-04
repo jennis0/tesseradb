@@ -7,9 +7,7 @@ use std::collections::HashMap;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use tessera_authz::label::Scratch;
-use tessera_authz::{Label, Labels, Shape, DEFAULT_MAX_NODES};
-use tessera_types::{LabelId, TermId};
+use tessera_access::{Label, LabelId, Labels, Scratch, DEFAULT_MAX_NODES};
 
 const TERMS: [&str; 8] = ["a", "b.c", "d e", "f", "g:h", "\"i\\", "a ", " f"];
 
@@ -79,16 +77,10 @@ fn holds(tree: &Tree, held: u32) -> bool {
     }
 }
 
-/// Term ids are issued in reverse order of the terms' text, so no ordering can agree by accident.
-fn term_id(term: &str) -> TermId {
-    let i = TERMS.iter().position(|&t| t == term);
-    TermId::new(100 - i.expect("a term the generator wrote") as u32)
-}
-
-fn held_ids(held: u32) -> Vec<TermId> {
+fn held_names(held: u32) -> Vec<&'static str> {
     (0..TERMS.len())
         .filter(|t| held & (1 << t) != 0)
-        .map(|t| TermId::new(100 - t as u32))
+        .map(|t| TERMS[t])
         .collect()
 }
 
@@ -108,7 +100,7 @@ fn cases(labels: &mut Labels) -> Vec<Case> {
             let (before, after) = (space(&mut rng), space(&mut rng));
             let label = Label::parse(&format!("{before}{text}{after}"), DEFAULT_MAX_NODES)
                 .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-            let id = labels.intern(&label, term_id);
+            let id = labels.intern(label.expr().expect("the generator writes no `public`"));
             Case {
                 tree,
                 text,
@@ -123,21 +115,12 @@ fn cases(labels: &mut Labels) -> Vec<Case> {
 fn authorise_agrees_with_direct_evaluation_for_every_credential() {
     let mut labels = Labels::new();
     let cases = cases(&mut labels);
-    let compound = cases
-        .iter()
-        .filter(|c| labels.shape(c.id) == Shape::Compound)
-        .count();
-    assert!(
-        compound > cases.len() / 4,
-        "{compound} of {} labels are compound",
-        cases.len()
-    );
     let mut scratch = Scratch::default();
     for held in 0u32..1 << TERMS.len() {
         let mut out = Vec::new();
-        labels.authorise(&held_ids(held), &mut scratch, &mut out);
+        labels.authorise(held_names(held), &mut scratch, &mut out);
         for case in &cases {
-            let expected = holds(&case.tree, held) && labels.shape(case.id) == Shape::Compound;
+            let expected = holds(&case.tree, held);
             assert_eq!(
                 out.contains(&case.id),
                 expected,
@@ -153,21 +136,17 @@ fn every_evaluation_agrees_with_direct_evaluation() {
     let mut labels = Labels::new();
     let cases = cases(&mut labels);
     for held in 0u32..1 << TERMS.len() {
-        let ids = held_ids(held);
-        let by_id = |t: TermId| ids.contains(&t);
+        let names = held_names(held);
+        let by_name = |t: &str| names.contains(&t);
         for case in &cases {
             let expected = holds(&case.tree, held);
             let context = format!("{} held={held:08b}", case.text);
-            assert_eq!(labels.satisfied(case.id, &by_id), expected, "{context}");
-            assert_eq!(
-                case.label.satisfied_by(&|t| by_id(term_id(t))),
-                expected,
-                "{context}"
-            );
-            let witness = labels.witness(case.id, &by_id);
-            assert_eq!(witness.is_some(), expected, "{context}");
-            let only_witness = witness.unwrap_or_default();
-            assert!(only_witness.iter().all(|&t| by_id(t)), "{context}");
+            assert_eq!(labels.satisfied(case.id, &by_name), expected, "{context}");
+            assert_eq!(case.label.satisfied_by(&by_name), expected, "{context}");
+            let only_witness = case.label.witness(&by_name);
+            assert_eq!(only_witness.is_some(), expected, "{context}");
+            let only_witness = only_witness.unwrap_or_default();
+            assert!(only_witness.iter().all(|t| by_name(t)), "{context}");
             assert!(
                 !expected || labels.satisfied(case.id, &|t| only_witness.contains(&t)),
                 "{context}"
@@ -199,11 +178,10 @@ fn a_space_inside_quotes_makes_another_term() {
     let bare = Label::parse(" a ", DEFAULT_MAX_NODES).unwrap();
     assert_ne!(quoted, bare);
     let (quoted, bare) = (
-        labels.intern(&quoted, term_id),
-        labels.intern(&bare, term_id),
+        labels.intern(quoted.expr().unwrap()),
+        labels.intern(bare.expr().unwrap()),
     );
     assert_ne!(quoted, bare);
-    let only_a = held_ids(1);
-    assert!(labels.satisfied(bare, &|t| only_a.contains(&t)));
-    assert!(!labels.satisfied(quoted, &|t| only_a.contains(&t)));
+    assert!(labels.satisfied(bare, &|t| t == "a"));
+    assert!(!labels.satisfied(quoted, &|t| t == "a"));
 }

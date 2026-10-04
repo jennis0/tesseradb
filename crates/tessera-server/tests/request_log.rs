@@ -8,11 +8,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use common::{wait_until, write_deployment, OPERATOR_CREDENTIAL, SESSION_CREDENTIAL};
+use common::{wait_until, write_deployment, OPERATOR_CREDENTIAL};
 use tessera_server::state::AppState;
 
 /// A server prepared from the deployment at `deployment`, as `tessera serve` prepares one, with
@@ -69,11 +68,10 @@ impl Running {
     }
 
     async fn authorise(&self, client: &reqwest::Client) -> Value {
-        let auth_data = base64::engine::general_purpose::STANDARD.encode(r#"{"terms":["0"]}"#);
         let resp = client
             .post(format!("{}/session/authorise", self.session))
-            .bearer_auth(SESSION_CREDENTIAL)
-            .json(&json!({ "auth_data": auth_data }))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({ "terms": ["0"] }))
             .send()
             .await
             .unwrap();
@@ -218,10 +216,7 @@ async fn each_request_is_one_line_with_its_session_and_no_secret() {
         assert!(line["headers_us"].as_u64().unwrap() <= line["end_us"].as_u64().unwrap());
     }
     // The body the replayer re-sends to mint the same principal.
-    assert_eq!(
-        authorise["body"]["auth_data"],
-        base64::engine::general_purpose::STANDARD.encode(r#"{"terms":["0"]}"#)
-    );
+    assert_eq!(authorise["body"]["terms"], json!(["0"]));
     assert_eq!(viewport["body"], serde_json::from_str::<Value>(VIEWPORT).unwrap());
     assert_eq!(meta["bytes"], meta_bytes);
     assert_eq!(viewport["bytes"], viewport_bytes);
@@ -236,10 +231,10 @@ async fn each_request_is_one_line_with_its_session_and_no_secret() {
     assert_eq!(abandoned["token_id"], token_id);
 
     let text = std::fs::read_to_string(&log).unwrap();
-    for secret in [token.as_str(), SESSION_CREDENTIAL, OPERATOR_CREDENTIAL] {
+    for secret in [token.as_str(), OPERATOR_CREDENTIAL] {
         assert!(!text.contains(secret), "the log must not hold {secret:?}");
     }
-    // It holds `auth_data`, so only its owner may read it.
+    // It holds authorise bodies, so only its owner may read it.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -286,17 +281,18 @@ async fn a_deployment_naming_no_log_writes_none() {
     drop(client);
     server.stop().await;
 
-    // The server's own files are the cache and the write-ahead log; nothing else is new.
+    // The server's own files are the cache, the catalogue and the write-ahead log; nothing else is
+    // new.
     let new: Vec<_> = std::fs::read_dir(tmp.path())
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .filter(|name| !before.contains(name))
         .filter(|name| {
             let name = name.to_string_lossy();
-            name != "cache" && !name.starts_with("wal")
+            name != "cache" && name != "catalogue" && !name.starts_with("wal")
         })
         .collect();
-    assert!(new.is_empty(), "no file but the cache and log: {new:?}");
+    assert!(new.is_empty(), "no file but the server's own: {new:?}");
 }
 
 /// A body larger than the log keeps is logged by its size alone.

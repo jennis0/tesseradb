@@ -179,18 +179,17 @@ wal   = ".tessera/wal.log"
 [build]
 schema = "corpus.toml"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
+
+[catalogue]
+dir = ".tessera/catalogue"
 
 [serve]
 viewer  = "127.0.0.1:8101"
 session = "127.0.0.1:8102"
 control = "127.0.0.1:8103"
 max_k   = 5000
-session_credential_env  = "TESSERA_MESH_SESSION_CRED"
 operator_credential_env = "TESSERA_MESH_OPERATOR_CRED"
 
 dev_cors_origins = ["http://localhost:5174", "http://127.0.0.1:5174"]
@@ -202,7 +201,7 @@ dev_cors_origins = ["http://localhost:5174", "http://127.0.0.1:5174"]
     held = {line.split("=", 1)[0] for line in lines if "=" in line}
     minted = [
         f"{var}={secrets.token_hex(16)}"
-        for var in ("TESSERA_MESH_SESSION_CRED", "TESSERA_MESH_OPERATOR_CRED")
+        for var in ("TESSERA_MESH_OPERATOR_CRED",)
         if var not in held
     ]
     if minted:

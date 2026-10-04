@@ -192,7 +192,7 @@ class Batches:
         self._pages = self._read(reader, rest, frames)
 
     def _read(self, reader: "Viewer", rest: dict, frames):
-        import pyarrow.ipc as ipc
+        from pyarrow import ipc
 
         what = f"POST /v1/{self._route}"
         while True:
@@ -278,7 +278,7 @@ class Batches:
 def _tables(payloads: Sequence[bytes]):
     """The Arrow streams of one frame kind joined in arrival order, or `None` if there were none."""
     import pyarrow as pa
-    import pyarrow.ipc as ipc
+    from pyarrow import ipc
 
     tables = [ipc.open_stream(payload).read_all() for payload in payloads]
     return pa.concat_tables(tables) if tables else None
@@ -728,17 +728,19 @@ class Selection:
 class Viewer:
     """A reader of one Tessera database: an address and a token that says what it may see.
 
-    A reader holds a set of access terms, the labels its token grants. Each item carries labels
-    too, and the reader sees an item when they share one. Every count, map and record a reader
-    is given is computed over the items it may see, so two readers can get different answers
-    from the same database.
+    A reader holds a set of access terms: those granted to the principal it reads as, or those the
+    operator named for it. Each item carries access labels, expressions over terms such as
+    `secret&(team_a|team_b)`, and the reader sees an item when its terms satisfy one of them.
+    Every count, map and record a reader is given is computed over the items it may see, so two
+    readers can get different answers from the same database.
 
     Get one with `connect(url, token)` for a database someone else runs, or with
     `db.viewer(terms)` for one of your own.
 
     - `url`: the address of the database's viewer plane, where readers read.
     - `token`: a token as a string, a `Token`, or a function that returns either. A function is
-      called again when the token it gave is close to expiry.
+      called again when the token it gave is close to expiry, and when the server says its
+      session has ended, as a catalogue change ends it.
     - `terms`: the access terms the token was made for, if known. It is kept for display.
     """
 
@@ -762,8 +764,8 @@ class Viewer:
     def token(self) -> Token:
         """The token this reader sends, replaced with a fresh one when it is close to expiry.
 
-        A `Token` from `authorise` renews itself. A function given as the token is called again.
-        A plain string is sent as it is until the server refuses it.
+        A `Token` from `login` or `authorise` renews itself. A function given as the token is
+        called again. A plain string is sent as it is until the server refuses it.
         """
         held = self._token
         if held is not None and (held.seconds_left is None or held.seconds_left > TOKEN_MARGIN):
@@ -839,8 +841,10 @@ class Viewer:
         - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
 
         The record has `fields` (the item's values by column name, missing where it has none),
-        `labels` (the item's access labels that this reader also holds), `views` (the views
-        this reader can find it in). An item this reader may not see is refused exactly as one that
+        `labels` (why this reader sees the item: its labels read as one disjunction, each held term
+        among its operands and one satisfied clause of each conjunction among them, as label
+        text; a held term that appears only inside a conjunction is not listed), `views`
+        (the views this reader can find it in). An item this reader may not see is refused exactly as one that
         does not exist.
 
             v.item(sample.column("tessera_id")[0].as_py())
@@ -877,7 +881,8 @@ class Viewer:
           named `"<column>@<key>"` to say which of the group's views to read it in.
         - `system_fields`: any of `"position"`, the columns `tessera:x` and `tessera:y` in the
           view's coordinates (degrees for a geographic view), and `"labels"`, the column
-          `tessera:labels` holding the item's labels this reader also holds.
+          `tessera:labels` holding, for each item, the clauses of its labels that this reader
+          satisfies, as `item` gives them.
         - `filters`: a filter expression, as `Selection.filter` takes one. Only the items that
           match are returned.
         - `keep_unmatched`: return every item, with a `tessera:matched` column saying whether it
@@ -1048,7 +1053,7 @@ class Viewer:
             v.aggregate("papers", [{"cells": {"depth": 6}}], filters={"year": {"eq": 2023}}, reference={})
         """
         import pyarrow as pa
-        import pyarrow.ipc as ipc
+        from pyarrow import ipc
 
         request: dict = {"view": view, "groupings": list(groupings)}
         if filters is not None:
@@ -1332,21 +1337,41 @@ class Viewer:
 
     def _open(self, method: str, path: str, body: Optional[dict]):
         """One request: the answer, open for its body to be read as it arrives, or a refusal with
-        what the server said."""
-        request = urllib.request.Request(
-            self.url + path,
-            data=None if body is None else json.dumps(body).encode(),
-            method=method,
-            headers={
-                "authorization": f"Bearer {self.token().token}",
-                **({} if body is None else {"content-type": "application/json"}),
-            },
-        )
-        try:
-            return urllib.request.urlopen(request, timeout=120)
-        except urllib.error.HTTPError as refused:
-            detail = refused.read().decode(errors="replace")[:1000]
-            raise Refusal(f"{method} {path} refused ({refused.code}): {detail}") from None
+        what the server said.
+
+        A `403 expired-token` says the session ended before its expiry, as a catalogue change
+        ends it. Where this reader can get another token, it gets one and sends the request once
+        more.
+        """
+        for attempt in (0, 1):
+            request = urllib.request.Request(
+                self.url + path,
+                data=None if body is None else json.dumps(body).encode(),
+                method=method,
+                headers={
+                    "authorization": f"Bearer {self.token().token}",
+                    **({} if body is None else {"content-type": "application/json"}),
+                },
+            )
+            try:
+                return urllib.request.urlopen(request, timeout=120)
+            except urllib.error.HTTPError as refused:
+                detail = refused.read().decode(errors="replace")[:1000]
+                if attempt == 0 and refused.code == 403 and "expired-token" in detail:
+                    if self._forget():
+                        continue
+                raise Refusal(f"{method} {path} refused ({refused.code}): {detail}") from None
+
+    def _forget(self) -> bool:
+        """Drop the held token so the next request gets another; `False` where none can be got."""
+        held = self._token
+        if held is not None and held.renew is not None:
+            self._token = held.renew()
+            return True
+        if callable(self._source) and not isinstance(self._source, Token):
+            self._token = minted(self._source)
+            return True
+        return False
 
     def __repr__(self) -> str:
         terms = "" if self.terms is None else f", terms={self.terms!r}"
@@ -1360,10 +1385,10 @@ def connect(url: str, token: TokenSource) -> Viewer:
     - `token`: the token its operator issued you, as a string, a `Token`, or a function that
       returns either. A function is called again when its token is close to expiry.
 
-    The reader can read and map. It cannot write, and it cannot read as anyone else, since both
-    need credentials only the operator holds.
+    The reader can read and map what the token's terms admit.
 
         v = tesseradb.connect("https://maps.example/viewer", token=my_token)
         v.view("papers").count()
+        v = tesseradb.connect(url, lambda: tesseradb.login(url, api_key=my_key))
     """
     return Viewer(url, token)

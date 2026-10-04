@@ -50,8 +50,8 @@ The container sees these at fixed paths.
 | In the container | What it holds | Mounted from |
 |---|---|---|
 | `/etc/tessera` | `tessera.toml`, the declaration and the Parquet files it names | `config/`, read-only |
-| `/var/lib/tessera` | the bundle, the write-ahead log and the cache | the volume |
-| `/run/secrets/session.secret`, `/run/secrets/operator.secret` | the two credentials | one file each from `secrets/`, read-only |
+| `/var/lib/tessera` | the bundle, the write-ahead log, the cache and the catalogue | the volume |
+| `/run/secrets/operator.secret` | the operator credential | a file from `secrets/`, read-only |
 
 ## Write tessera.toml
 
@@ -66,9 +66,6 @@ wal   = "/var/lib/tessera/wal.log"
 [build]
 schema = "corpus.toml"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -76,19 +73,23 @@ token_max_lifetime = 3600
 viewer  = "0.0.0.0:8080"
 session = "0.0.0.0:8081"
 control = "0.0.0.0:8082"
-session_credential_file  = "/run/secrets/session.secret"
 operator_credential_file = "/run/secrets/operator.secret"
+
+[catalogue]
+dir = "/var/lib/tessera/catalogue"
 ```
 
-The bundle, the log and the cache all go into the volume, the only place in the container the server
-can write. `token_max_lifetime` is how long a browser's token lasts, as [Addresses and
+The bundle, the log, the cache and the catalogue of users, API keys and grants all go into the
+volume, the only place in the container the server can write. `token_max_lifetime` is how long a browser's token lasts, as [Addresses and
 credentials](operating.md#addresses-and-credentials) explains.
 
 The three addresses listen on every interface inside the container. Other containers on the same
 Docker network can reach them there, and so can any process on the host, through the container's
 address on Docker's bridge network. Publishing a port in `compose.yaml` decides what else can reach
 it. The operator credential is what keeps everyone who can reach the control port from changing
-the corpus.
+the corpus. Every address serves plain HTTP, and the server accepts a password sent to the viewer
+address over it, so anything that reaches the viewer address from off the host goes through a TLS
+proxy.
 
 ## Write compose.yaml
 
@@ -105,7 +106,6 @@ services:
       - ./config:/etc/tessera:ro
       - tessera-data:/var/lib/tessera
     secrets:
-      - session.secret
       - operator.secret
     ports:
       - "127.0.0.1:9161:8080"
@@ -117,8 +117,6 @@ volumes:
   tessera-data:
 
 secrets:
-  session.secret:
-    file: ./secrets/session.secret
   operator.secret:
     file: ./secrets/operator.secret
 ```
@@ -139,22 +137,21 @@ reboots. It does not restart a container because it reports itself unhealthy. Fo
 the behaviour you want, for the reason [When a write to the log
 fails](operating.md#when-a-write-to-the-log-fails) gives.
 
-## Create the credentials
+## Create the credential
 
-The server needs both credentials [Addresses and
+The server needs the operator credential [Addresses and
 credentials](operating.md#addresses-and-credentials) describes before it will start. Compose mounts
-each file into the container with the owner and mode it has on the host, and the server runs as
-user 65532. Make each file readable by you and by group 65532, and by no one else:
+the file into the container with the owner and mode it has on the host, and the server runs as
+user 65532. Make the file readable by you and by group 65532, and by no one else:
 
 ```console
 $ chmod 700 secrets
-$ openssl rand -hex 32 > secrets/session.secret
 $ openssl rand -hex 32 > secrets/operator.secret
-$ chmod 640 secrets/session.secret secrets/operator.secret
-$ sudo chgrp 65532 secrets/session.secret secrets/operator.secret
+$ chmod 640 secrets/operator.secret
+$ sudo chgrp 65532 secrets/operator.secret
 ```
 
-You can still read the files yourself, which the `curl` examples below rely on. Compose's longer
+You can still read the file yourself, which the `curl` examples below rely on. Compose's longer
 secret syntax has `uid`, `gid` and `mode` settings that would do this without `sudo`, but with a
 secret read from a file Compose ignores them:
 
@@ -162,11 +159,11 @@ secret read from a file Compose ignores them:
 time="2026-09-24T10:19:51+01:00" level=warning msg="secrets `uid`, `gid` and `mode` are not supported, they will be ignored"
 ```
 
-If the server can't read a credential, it stops, and the restart policy starts it again, over and
+If the server can't read the credential, it stops, and the restart policy starts it again, over and
 over. The log shows why each time:
 
 ```text
-tessera serve: refused to start: cannot read the session credential file /run/secrets/session.secret (Permission denied (os error 13)); name a readable file, relative to tessera.toml's directory or absolute
+tessera serve: refused to start: cannot read the operator credential file /run/secrets/operator.secret (Permission denied (os error 13)); name a readable file, relative to tessera.toml's directory or absolute
 ```
 
 ## Build the bundle
@@ -210,14 +207,15 @@ NAME                       IMAGE     COMMAND                  SERVICE   CREATED 
 tessera-docker-tessera-1   tessera   "/usr/local/bin/tess…"   tessera   7 seconds ago   Up 7 seconds (healthy)   127.0.0.1:9161->8080/tcp, 127.0.0.1:9162->8081/tcp, 127.0.0.1:9163->8082/tcp
 ```
 
-From the host, ask for a token the way your application's backend will. Under the passthrough
-plugin, `auth_data` is base64 of a JSON object whose `terms` list the access labels to grant.
+From the host, ask for a token. Your application's backend will ask with an API key whose
+principal holds `authorise-as`, naming the principal to read as. The operator credential can
+instead name the access terms the token holds, which needs no principal in the catalogue:
 
 ```console
 $ curl -sS http://127.0.0.1:9162/session/authorise \
-  -H "authorization: Bearer $(cat secrets/session.secret)" \
+  -H "authorization: Bearer $(cat secrets/operator.secret)" \
   -H 'content-type: application/json' \
-  -d "{\"auth_data\": \"$(printf '{"terms": ["public"]}' | base64 -w0)\"}"
+  -d '{"terms": ["public"]}'
 {"token":"37306e2d578bcf30b6685f8d4230224f2fbe304a1e140c0f6a7a57f29c813a08","token_id":0,"expires_at":1790245619}
 ```
 

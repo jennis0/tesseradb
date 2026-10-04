@@ -1474,7 +1474,6 @@ fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
         &fx.bundle,
         &cache,
         &wal,
-        tessera_plugin::Passthrough::new(),
         live_theta,
     )
     .expect("engine should open against a freshly built bundle");

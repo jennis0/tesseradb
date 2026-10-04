@@ -23,6 +23,7 @@ fault-injection = ["tessera-lifecycle/fault-injection"]
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
+tessera-access = { path = "../tessera-access" }
 tessera-authz = { path = "../tessera-authz" }
 # The single-flight cache behind the row-projection, region and occupancy caches. Shared with
 # tessera-authz, which sits below this crate.
@@ -43,7 +44,6 @@ tessera-filter = { path = "../tessera-filter" }
 # instead would put that choice in a second place, free to drift from the artefact.
 tessera-analyse = { path = "../tessera-analyse" }
 tessera-filter-write = { path = "../tessera-filter-write" }
-tessera-plugin = { path = "../tessera-plugin" }
 croaring = { workspace = true }
 arc-swap = { workspace = true }
 # D-D: the engine's shared compute pool for the intra-request tile-loop sweep. No `tokio`

@@ -1523,9 +1523,10 @@ def test_a_labelled_insert_into_a_held_layer_leaves_the_declaration_and_the_rout
     assert "c9" not in [row[1] for row in artifact_rows_of(db)]
 
 
-def test_the_databases_own_viewer_holds_a_layers_named_default(served, corpus):
-    """`viewer()` and `token()` with no terms hold every label the database was given, a layer's
-    named default among them, so an artifact taking that default is served to its own principal."""
+def test_the_databases_own_viewer_satisfies_a_layers_named_default(served, corpus):
+    """`viewer()` and `token()` with no terms read with the operator's own token, which holds
+    `read-all` and satisfies every label, a layer's named default among them, so an artifact taking
+    that default is served to it."""
     def declare(db):
         clustering(db)
         db.declare_layer("teams", kind="flat", artifact_visibility="red")

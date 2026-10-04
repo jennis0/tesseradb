@@ -85,9 +85,6 @@ path = "{bundle_root}"
 cache = "{cache_dir}"
 wal = "{wal_path}"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -96,7 +93,6 @@ viewer = "127.0.0.1:{viewer_port}"
 session = "127.0.0.1:{session_port}"
 control = "127.0.0.1:{control_port}"
 max_k = {max_k}
-session_credential_env = "TESSERA_REFERENCE_SESSION_CRED"
 operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
 """
     overrides = {
@@ -109,6 +105,7 @@ operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
         if value is not None:
             config_text += f"{key} = {value}\n"
 
+    config_text += f'\n[catalogue]\ndir = "{tmp_dir / "catalogue"}"\n'
     config_path = tmp_dir / "tessera.toml"
     config_path.write_text(config_text)
     return config_path
@@ -153,7 +150,6 @@ def spawn_with_long_boot_deadline(
     import os
 
     env = os.environ.copy()
-    env["TESSERA_REFERENCE_SESSION_CRED"] = harness.SESSION_CREDENTIAL
     env["TESSERA_REFERENCE_OPERATOR_CRED"] = harness.OPERATOR_CREDENTIAL
 
     log_file = open(log_path, "ab")

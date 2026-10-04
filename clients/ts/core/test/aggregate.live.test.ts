@@ -29,8 +29,8 @@ beforeAll(async () => {
     if (String(url).endsWith('/v1/aggregate')) requests += 1;
     return fetch(url, init);
   };
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.sessionCredential, fetch: counting});
-  session = await client.authorise(TERMS);
+  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential, fetch: counting});
+  session = await client.authorise({terms: TERMS});
   meta = await client.meta(session.token);
 }, 120_000);
 

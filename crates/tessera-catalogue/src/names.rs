@@ -5,25 +5,25 @@ use crate::Error;
 
 /// The term every session holds. It is added where a credential is evaluated, and no grant or
 /// claim rule may name it in any case.
-pub const PUBLIC: &str = "public";
+pub use tessera_access::PUBLIC;
 
-/// Trims a term. An empty term, a term holding a control character, and a term equal to
-/// `public` ignoring ASCII case are refused.
+/// Trims a term, by the rule a session applies to the terms it holds
+/// ([`tessera_access::held_term`]). An empty term, a term holding a control character, and a term
+/// equal to `public` ignoring ASCII case are refused.
 pub fn term(raw: &str) -> Result<String, Error> {
     let t = raw.trim();
-    if t.is_empty() {
-        return Err(Error::Invalid(
+    match tessera_access::held_term(t) {
+        Some(t) => Ok(t.to_owned()),
+        None if t.is_empty() => Err(Error::Invalid(
             "a term is empty after trimming; write at least one visible character".into(),
-        ));
-    }
-    if t.eq_ignore_ascii_case(PUBLIC) {
-        return Err(Error::Invalid(format!(
+        )),
+        None if t.eq_ignore_ascii_case(PUBLIC) => Err(Error::Invalid(format!(
             "`{t}` is the reserved term `public`, which is compared ignoring case and which \
              every session holds; grant a different term"
-        )));
+        ))),
+        None => Err(no_control("term", t)
+            .expect_err("a term is refused only when empty, `public` or holding a control character")),
     }
-    no_control("term", t)?;
-    Ok(t.to_owned())
 }
 
 /// Trims the name of a principal, a group or a provider. An empty name, a name holding a

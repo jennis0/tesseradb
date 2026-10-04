@@ -33,7 +33,6 @@ use tessera_engine::region::RegionDecomposition;
 use tessera_engine::shapes::{Bounds, ShapeF64, Space};
 use tessera_engine::viewport::{segments_with_row_bases, ViewportRequest};
 use tessera_engine::{Engine, EngineConfig, DEFAULT_MAX_REGION_CELLS};
-use tessera_plugin::Passthrough;
 use tessera_types::RowId;
 
 type BoxError = Box<dyn std::error::Error>;
@@ -133,7 +132,6 @@ fn main() -> Result<(), BoxError> {
         &args.bundle,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 1_000,
