@@ -143,6 +143,12 @@ export type StoreOptions = {
    * to, met by drawing ancestors in place of their descendants, and the most it tags the points
    * with; omitted, the cut is unbounded. `heldTiles` is how many tiles of artifacts the store keeps
    * per view, the least recently drawn leaving first; it defaults to `4096`.
+   *
+   * Artifacts are asked for by tile at a fixed depth, map zoom + 2 with the zoom rounded down, which
+   * is a tile of 128 to 256 pixels. One request names at most 558 tiles, the most a 3840 by 2160
+   * screen touches at that depth, or the deployment's `max_tiles_per_request` where that is fewer; a
+   * larger screen is asked for at zoom + 1, then at zoom, until its tiles fit. So the tiles in view
+   * times `perTile` bounds the artifacts one level draws. The depth does not follow the points'.
    */
   artifacts?: {perTile?: number; budget?: number; heldTiles?: number};
   /**
@@ -1167,9 +1173,6 @@ export function createStore(options: StoreOptions): Store {
       heldTiles: options.artifacts?.heldTiles ?? DEFAULT_HELD_TILES,
       prefetch: options.prefetch ?? true,
       token: () => tokens.get(),
-      // The projection's depth, which is set before the presenter's own `frame`; a view that is
-      // not current reads its presenter's.
-      depth: () => (current() ? projections.view.depth : undefined) ?? ownPresenter?.frame?.depth,
       maxTiles: m.maxTilesPerRequest,
       table,
       // The point path's filters, region included, so an artifact's `matched` bit counts members
@@ -1415,11 +1418,6 @@ export function createStore(options: StoreOptions): Store {
       standIn: frame.standIn,
       count: {shown: frame.exactDrawn, total: Number(visible), exact: true}
     });
-    // The channel needs a drawn depth to ask at, so the first frame is when it can first ask.
-    if (current && !current.channel.hasView && lastView && current.presenter.view) {
-      const v = current.presenter.view;
-      current.channel.schedule({target: v.view.target, zoom: v.view.zoom}, v.width, v.height);
-    }
     replaceProjection('tiles', {tiles: frame.tiles});
     region.answer({
       marks: {bands: frame.exact, standIn: frame.standIn},

@@ -1,5 +1,6 @@
 import {describe, expect, it, vi} from 'vitest';
 import {
+  ARTIFACT_TILES_PER_REQUEST,
   ArtifactChannel,
   declaredLevelsAt,
   requestLevels,
@@ -8,17 +9,17 @@ import {
 } from '../src/artifactChannel.js';
 import {SessionArtifactTable} from '../src/artifactTable.js';
 import {TesseraClient, type TileSink} from '../src/client.js';
-import {GRID32, mortonOfTile} from '../src/coords.js';
+import {GRID32, WORLD_SIZE, mortonOfTile} from '../src/coords.js';
 import type {Artifact, Layer, Quantisation, ViewportArtifactsRequest} from '../src/types.js';
 import {artifact, layer, manualClock, settle, tileAnswers} from './support.js';
 
 const Q: Quantisation = {xMin: 0, xMax: 100, yMin: 0, yMax: 100};
 
 /**
- * The view every test starts from. At depth 5 a tile is 16 world units, and this box covers tiles
- * x 2..3 and y 2..3.
+ * The view every test starts from, a 200 by 150 screen at zoom 3, so asked at depth 5. At depth 5 a
+ * tile is 16 world units, and this box covers tiles x 2..3 and y 2..3.
  */
-const view = {target: [50, 50, 0] as [number, number, number], zoom: 4};
+const view = {target: [50, 50, 0] as [number, number, number], zoom: 3};
 const DEPTH = 5;
 const at = (x: number, y: number) => mortonOfTile(x, y, DEPTH);
 const VIEW_TILES = [at(2, 2), at(3, 2), at(2, 3), at(3, 3)];
@@ -41,7 +42,6 @@ function channel(client: TesseraClient, over: Partial<ArtifactChannelOptions> = 
     view: 's0',
     quantisation: Q,
     token: async () => 'tok',
-    depth: () => DEPTH,
     perTile: 8,
     heldTiles: 100,
     prefetch: false,
@@ -62,9 +62,9 @@ describe('the artifact channel asks by tile', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch, clock} = channel(client);
     ch.setLayer('clusters/x');
-    ch.schedule(view, 400, 300);
-    ch.schedule(view, 400, 300);
-    ch.schedule(view, 400, 300);
+    ch.schedule(view, 200, 150);
+    ch.schedule(view, 200, 150);
+    ch.schedule(view, 200, 150);
     expect(viewportArtifacts).not.toHaveBeenCalled();
     expect(clock.pending).toBe(1);
     clock.fire();
@@ -72,11 +72,11 @@ describe('the artifact channel asks by tile', () => {
     expect(viewportArtifacts).toHaveBeenCalledTimes(1);
   });
 
-  it('names the tiles of the view at the drawn depth, the quota it was given and the layers, and no filter or budget it was not given', async () => {
+  it('names the tiles of the view at map zoom + 2, the quota it was given and the layers, and no filter or budget it was not given', async () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     const req = asked(viewportArtifacts);
     expect(req).toMatchObject({view: 's0', zoom: DEPTH, layers: ['clusters/x'], perTile: 8});
@@ -91,7 +91,7 @@ describe('the artifact channel asks by tile', () => {
     const {ch} = channel(client);
     ch.setLayer('clusters/x');
     // Centred inside tile (3, 3).
-    ch.refresh({target: [56, 56, 0], zoom: 4}, 400, 300);
+    ch.refresh({target: [56, 56, 0], zoom: 3}, 200, 150);
     await settle();
     expect(asked(viewportArtifacts).tiles![0]).toBe(at(3, 3));
   });
@@ -100,19 +100,19 @@ describe('the artifact channel asks by tile', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch, table} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     const ordinal = table.ordinalOf('clusters/x', at(2, 2) + 100n);
 
     // One tile to the right: x 3..4, so only x = 4 is new.
-    ch.refresh({target: [66, 50, 0], zoom: 4}, 400, 300);
+    ch.refresh({target: [66, 50, 0], zoom: 3}, 200, 150);
     await settle();
     expect([...asked(viewportArtifacts, 1).tiles!].sort()).toEqual([at(4, 2), at(4, 3)].sort());
     expect(served(ch)).toEqual([at(3, 2), at(4, 2), at(3, 3), at(4, 3)].map((t) => t + 100n).sort((a, b) => (a < b ? -1 : 1)));
 
     // Back: every tile is held, nothing is asked, and the artifact keeps its ordinal.
     const version = table.version;
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(viewportArtifacts).toHaveBeenCalledTimes(2);
     expect(table.version).toBe(version);
@@ -123,7 +123,7 @@ describe('the artifact channel asks by tile', () => {
     const {client} = fakeClient((tile) => [cluster(1n, {matched: tile === at(3, 3), parentIds: tile === at(2, 2) ? [9n] : []})]);
     const {ch} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(ch.current.artifacts).toHaveLength(1);
     expect(ch.current.artifacts[0]).toMatchObject({tesseraId: 1n, matched: true, parentIds: [9n]});
@@ -133,7 +133,7 @@ describe('the artifact channel asks by tile', () => {
     const {client} = fakeClient();
     const {ch, states} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     // Drawn at the first tile and at each doubling after it.
     const loading = states.filter((s) => s.status === 'loading').map((s) => s.artifacts.length);
@@ -144,10 +144,10 @@ describe('the artifact channel asks by tile', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     viewportArtifacts.mockRejectedValueOnce(Object.assign(new Error('gone'), {code: 'refused', detail: 'gone'}));
-    ch.refresh({target: [66, 50, 0], zoom: 4}, 400, 300);
+    ch.refresh({target: [66, 50, 0], zoom: 3}, 200, 150);
     await settle();
     expect(ch.current.status).toBe('refused');
     expect(ch.current.artifacts).toEqual([]);
@@ -158,7 +158,7 @@ describe('the artifact channel asks by tile', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch} = channel(client, {perTile: null});
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(viewportArtifacts).not.toHaveBeenCalled();
     expect(ch.current.status).toBe('refused');
@@ -169,14 +169,14 @@ describe('the artifact channel asks by tile', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     ch.setLayer(null);
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(ch.current).toMatchObject({status: 'idle', artifacts: []});
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(viewportArtifacts).toHaveBeenCalledTimes(1);
     expect(ch.current.artifacts).toHaveLength(4);
@@ -189,10 +189,10 @@ describe('what the held tiles answer', () => {
     const {client, viewportArtifacts} = fakeClient(undefined, () => keys);
     const {ch, table} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     keys = {identityKey: 'ik', contentKey: 'ck2'};
-    ch.refresh({target: [66, 50, 0], zoom: 4}, 400, 300);
+    ch.refresh({target: [66, 50, 0], zoom: 3}, 200, 150);
     await settle();
     // The new tiles came under a new key, so the old ones were dropped and those of the view asked
     // for again.
@@ -202,7 +202,7 @@ describe('what the held tiles answer', () => {
     expect(table.live).toBe(4);
     expect(table.ordinalOf('clusters/x', at(2, 2) + 100n)).toBe(0);
     keys = {identityKey: 'other', contentKey: 'ck2'};
-    ch.refresh({target: [50, 82, 0], zoom: 4}, 400, 300);
+    ch.refresh({target: [50, 82, 0], zoom: 3}, 200, 150);
     await settle();
     expect(ch.heldTiles).toBe(4);
     expect(served(ch)).toEqual([at(2, 4), at(3, 4), at(2, 5), at(3, 5)].map((t) => t + 100n).sort((a, b) => (a < b ? -1 : 1)));
@@ -212,7 +212,7 @@ describe('what the held tiles answer', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     ch.observeContentKey('ck');
     expect(viewportArtifacts).toHaveBeenCalledTimes(1);
@@ -227,15 +227,15 @@ describe('what the held tiles answer', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch} = channel(client, {filters: () => filter});
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     filter = {archive: {in: ['cs']}};
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(asked(viewportArtifacts, 1)).toMatchObject({filters: filter});
     expect(asked(viewportArtifacts, 1).tiles).toHaveLength(4);
     filter = null;
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(viewportArtifacts).toHaveBeenCalledTimes(2);
   });
@@ -244,10 +244,10 @@ describe('what the held tiles answer', () => {
     const {client, viewportArtifacts} = fakeClient((tile, req) => (req.layers as string[]).map((l) => cluster(tile, {layer: l})));
     const {ch} = channel(client, {declarations: [...FLAT, layer('clusters/y')]});
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     ch.setLayers(['clusters/x', 'clusters/y']);
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(asked(viewportArtifacts, 1)).toMatchObject({layers: ['clusters/x', 'clusters/y']});
     expect(asked(viewportArtifacts, 1).tiles).toHaveLength(4);
@@ -258,18 +258,18 @@ describe('what the held tiles answer', () => {
     const tiered = layer('admin', {
       hierarchy: {kind: 'tiered', pruneChildren: false},
       levels: [
-        {level: 0, title: '', zoom: [0, 4]},
-        {level: 1, title: '', zoom: [5, 16]}
+        {level: 0, title: '', zoom: [0, 3]},
+        {level: 1, title: '', zoom: [4, 16]}
       ]
     });
     const {client, viewportArtifacts} = fakeClient((tile, req) => (req.levels as number[]).map((level) => cluster(tile * 10n + BigInt(level), {layer: 'admin', rung: level})));
     const {ch} = channel(client, {declarations: [tiered]});
     ch.setLayer('admin');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(asked(viewportArtifacts)).toMatchObject({levels: [0]});
     expect(ch.current.artifacts.every((a) => a.rung === 0)).toBe(true);
-    ch.refresh({...view, zoom: 5}, 800, 600);
+    ch.refresh({...view, zoom: 4}, 400, 300);
     await settle();
     expect(asked(viewportArtifacts, 1)).toMatchObject({levels: [1]});
     expect(ch.current.artifacts.every((a) => a.rung === 1)).toBe(true);
@@ -279,9 +279,9 @@ describe('what the held tiles answer', () => {
     const {client} = fakeClient();
     const {ch, table} = channel(client, {heldTiles: 5});
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
-    ch.refresh({target: [82, 50, 0], zoom: 4}, 400, 300);
+    ch.refresh({target: [82, 50, 0], zoom: 3}, 200, 150);
     await settle();
     expect(ch.heldTiles).toBe(5);
     // The view's four are held, and the fifth is the most recent of the old view's.
@@ -298,12 +298,12 @@ describe('a treed layer', () => {
     const {client, viewportArtifacts} = fakeClient(() => [], undefined, treed);
     const {ch} = channel(client, {declarations: TREED, budget: 48});
     ch.setLayer('tree');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(asked(viewportArtifacts)).toMatchObject({layers: ['tree'], budget: 48});
     expect(served(ch)).toEqual([1n, 2n]);
     // Its cut answers one request, so the same view asks again.
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(viewportArtifacts).toHaveBeenCalledTimes(2);
     expect(asked(viewportArtifacts, 1).tiles).toHaveLength(4);
@@ -313,7 +313,7 @@ describe('a treed layer', () => {
     const {client, viewportArtifacts} = fakeClient(() => [], undefined, () => [cluster(1n, {layer: 'tree'})]);
     const {ch} = channel(client, {declarations: TREED});
     ch.setLayer('tree');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect('budget' in asked(viewportArtifacts)).toBe(false);
   });
@@ -324,7 +324,7 @@ describe('the idle prefetch', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch, clock} = channel(client, {prefetch: true});
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     const shown = ch.current.artifacts;
     clock.fire();
@@ -340,7 +340,7 @@ describe('the idle prefetch', () => {
     // Nothing is left to fetch, so nothing is armed.
     expect(clock.pending).toBe(0);
     // A pan onto the ring draws from what was fetched.
-    ch.refresh({target: [66, 50, 0], zoom: 4}, 400, 300);
+    ch.refresh({target: [66, 50, 0], zoom: 3}, 200, 150);
     await settle();
     expect(viewportArtifacts).toHaveBeenCalledTimes(3);
   });
@@ -367,7 +367,7 @@ describe('the idle prefetch', () => {
     const {ch, clock, table} = channel(client, {prefetch: true});
     channelRef = ch;
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     clock.fire();
     await settle();
@@ -381,10 +381,10 @@ describe('the idle prefetch', () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch, clock} = channel(client, {prefetch: true, settleMs: 200, idleMs: 1500});
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     expect(clock.pending).toBe(1);
-    ch.schedule(view, 400, 300);
+    ch.schedule(view, 200, 150);
     // The settle timer is armed again and the idle one is gone; firing the settle asks nothing new.
     expect(clock.pending).toBe(1);
     clock.fire();
@@ -407,7 +407,7 @@ describe('a tag no held tile carries', () => {
     }));
     const {ch, table} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     // The point path named it, with nothing but its identity.
     const [ordinal] = table.take([{tesseraId: 77n, layer: 'clusters/x', parentIds: []}]);
@@ -426,7 +426,7 @@ describe('a tag no held tile carries', () => {
     artifacts.mockImplementation(async () => ({async *[Symbol.asyncIterator]() {}}));
     const {ch, table, clock} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     const [ordinal] = table.take([{tesseraId: 77n, layer: 'clusters/x', parentIds: []}]);
     await ch.lookUp([ordinal!]);
@@ -442,7 +442,7 @@ describe('a tag no held tile carries', () => {
     const {client, artifacts} = fakeClient();
     const {ch, table} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
+    ch.refresh(view, 200, 150);
     await settle();
     await ch.lookUp([table.ordinalOf('clusters/x', at(2, 2) + 100n)]);
     expect(artifacts).not.toHaveBeenCalled();
@@ -485,16 +485,136 @@ describe('the declared-map mirror', () => {
   });
 });
 
-describe('the depth clamp', () => {
-  it('asks no deeper than max_tiles_per_request allows for the view it was handed', async () => {
+
+describe('the depth asked', () => {
+  const centre = [WORLD_SIZE / 2, WORLD_SIZE / 2, 0] as [number, number, number];
+
+  it('is map zoom + 2, the zoom rounded down, within 0 and 16', async () => {
+    const depths: number[] = [];
+    for (const zoom of [-1.5, 0, 0.9, 3, 3.7, 7, 13.99, 14, 15.5]) {
+      const {client, viewportArtifacts} = fakeClient();
+      const {ch} = channel(client);
+      ch.setLayer('clusters/x');
+      ch.refresh({target: centre, zoom}, 1280, 720);
+      await settle();
+      depths.push(asked(viewportArtifacts).zoom);
+    }
+    expect(depths).toEqual([0, 2, 2, 5, 5, 9, 15, 16, 16]);
+  });
+
+  it('asks for a 3840 by 2160 screen at zoom + 2, wherever the camera is', async () => {
     const {client, viewportArtifacts} = fakeClient();
-    // A frame drawn at depth 10 while the camera sits at the full extent would ask for 2^20 tiles,
-    // which the server refuses.
-    const {ch} = channel(client, {depth: () => 10, maxTiles: 4096});
+    const {ch} = channel(client);
     ch.setLayer('clusters/x');
-    ch.refresh({target: [256, 256, 0], zoom: 0}, 512, 512);
+    for (const [x, y] of [[256, 256], [256.3, 255.9], [100.05, 400.11]] as const) {
+      ch.refresh({target: [x, y, 0], zoom: 5}, 3840, 2160);
+      await settle();
+    }
+    for (const call of viewportArtifacts.mock.calls) {
+      expect(call[1].zoom).toBe(7);
+      expect(call[1].tiles!.length).toBeLessThanOrEqual(ARTIFACT_TILES_PER_REQUEST);
+    }
+  });
+
+  it('steps a larger screen down to a coarser depth until its tiles fit', async () => {
+    const {client, viewportArtifacts} = fakeClient();
+    const {ch} = channel(client);
+    ch.setLayer('clusters/x');
+    // At zoom + 2 and zoom + 1 this screen touches more tiles than the cap; at zoom it does not.
+    ch.refresh({target: centre, zoom: 5}, 10_000, 5000);
     await settle();
-    // 4^6 = 4096 tiles over the whole world fits; 4^7 does not.
-    expect(asked(viewportArtifacts).zoom).toBe(6);
+    expect(asked(viewportArtifacts)).toMatchObject({zoom: 5});
+    expect(asked(viewportArtifacts).tiles!.length).toBeLessThanOrEqual(ARTIFACT_TILES_PER_REQUEST);
+  });
+
+  it('takes the deployment’s max_tiles_per_request as the cap where it is fewer', async () => {
+    const {client, viewportArtifacts} = fakeClient();
+    const {ch} = channel(client, {maxTiles: 16});
+    ch.setLayer('clusters/x');
+    ch.refresh({target: centre, zoom: 5}, 1280, 720);
+    await settle();
+    expect(asked(viewportArtifacts).zoom).toBe(5);
+    expect(asked(viewportArtifacts).tiles!.length).toBeLessThanOrEqual(16);
+  });
+
+  it('asks for at most the cap on a zoom out to the world, and nothing at the depth the last view was asked at', async () => {
+    const {client, viewportArtifacts} = fakeClient();
+    const {ch, clock} = channel(client, {prefetch: true});
+    ch.setLayer('clusters/x');
+    ch.refresh({target: [300.1, 200.7, 0], zoom: 14}, 3840, 2160);
+    await settle();
+    ch.refresh({target: centre, zoom: 0}, 3840, 2160);
+    await settle();
+    // The world at depth 2 is 16 tiles, then the idle ring (none: the view is the world) and the
+    // parent depth.
+    while (clock.pending > 0) {
+      clock.fire();
+      await settle();
+    }
+    const calls = viewportArtifacts.mock.calls.map((c) => c[1]);
+    expect(calls[1]).toMatchObject({zoom: 2});
+    expect(calls[1]!.tiles).toHaveLength(16);
+    expect(calls.slice(2).map((c) => c.zoom)).toEqual([1]);
+    for (const c of calls) expect(c.tiles!.length).toBeLessThanOrEqual(ARTIFACT_TILES_PER_REQUEST);
+  });
+
+  it('keeps every prefetch within the cap', async () => {
+    const {client, viewportArtifacts} = fakeClient();
+    const {ch, clock} = channel(client, {prefetch: true, maxTiles: 20});
+    ch.setLayer('clusters/x');
+    ch.refresh({target: centre, zoom: 6}, 1280, 720);
+    await settle();
+    for (let i = 0; i < 6 && clock.pending > 0; i++) {
+      clock.fire();
+      await settle();
+    }
+    expect(viewportArtifacts.mock.calls.length).toBeGreaterThan(2);
+    for (const call of viewportArtifacts.mock.calls) expect(call[1].tiles!.length).toBeLessThanOrEqual(20);
+  });
+
+  it('sends nothing for a pan inside the tiles held, and only the new tiles, centre first, for a pan beyond them', async () => {
+    const {client, viewportArtifacts} = fakeClient();
+    const {ch} = channel(client);
+    ch.setLayer('clusters/x');
+    ch.refresh(view, 200, 150);
+    await settle();
+    // Still x 2..3, y 2..3 at depth 5.
+    ch.refresh({target: [52, 49, 0], zoom: 3.4}, 200, 150);
+    await settle();
+    expect(viewportArtifacts).toHaveBeenCalledTimes(1);
+    // Two tiles down: y 4..5 is new. The centre is in (3, 5), and (2, 4) is farthest from it.
+    ch.refresh({target: [50, 82, 0], zoom: 3}, 200, 150);
+    await settle();
+    const tiles = asked(viewportArtifacts, 1).tiles!;
+    expect([...tiles].sort()).toEqual([at(2, 4), at(3, 4), at(2, 5), at(3, 5)].sort());
+    expect(tiles[0]).toBe(at(3, 5));
+    expect(tiles[3]).toBe(at(2, 4));
+  });
+
+  it('names no whole level above the world’s own depth across a camera script', async () => {
+    const {client, viewportArtifacts} = fakeClient();
+    const {ch, clock} = channel(client);
+    ch.setLayer('clusters/x');
+    const script: [number, number, number][] = [
+      [256, 256, 0],
+      [200, 180, 3],
+      [200, 180, 6],
+      [205, 180, 6],
+      [200.4, 180.2, 9],
+      [200.41, 180.21, 14],
+      [256, 256, 0],
+      [200, 180, 9],
+      [256, 256, 3]
+    ];
+    for (const [x, y, zoom] of script) {
+      ch.schedule({target: [x, y, 0], zoom}, 1280, 720);
+      clock.fire();
+      await settle();
+    }
+    expect(viewportArtifacts.mock.calls.map((c) => c[1].zoom)).toEqual([2, 5, 8, 8, 11, 16, 2, 11, 5]);
+    for (const [i, call] of viewportArtifacts.mock.calls.entries()) {
+      const {zoom, tiles} = call[1];
+      if (zoom > 2) expect(tiles!.length, `request ${i} at depth ${zoom}`).toBeLessThan(4 ** zoom);
+    }
   });
 });

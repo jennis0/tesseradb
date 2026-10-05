@@ -638,6 +638,36 @@ describe('setLayers before meta', () => {
   });
 });
 
+describe('the depth artifacts are asked at', () => {
+  it('follows the camera’s zoom alone: a zoom in and back out to the world asks at map zoom + 2 each time', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    // Every point request answered over every tile it spans, so the points are drawn deep.
+    const {client, viewportArtifacts} = fakeClient((req) => responseCovering(req, 'ck'));
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
+    await clock.advance(1);
+    store.setLayers(['clusters/a']);
+    const settle = async () => {
+      await clock.advance(600);
+      scheduler.flush();
+      await clock.advance(600);
+      scheduler.flush();
+    };
+    // 800 pixels over 0.512 world units: zoom 10.6.
+    store.setView({bbox: [50, 100, 50.1, 100.2], width: 800, height: 800});
+    await settle();
+    const deep = viewportArtifacts.mock.calls.length;
+    // The whole world in 800 pixels: zoom 0.6.
+    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    await settle();
+    const calls = viewportArtifacts.mock.calls.map((c) => c[1]);
+    expect(deep).toBeGreaterThan(0);
+    expect(calls.slice(0, deep).every((c) => c.zoom === 12)).toBe(true);
+    expect(calls.slice(deep).map((c) => c.zoom)).toEqual([2]);
+    expect(calls[deep]!.tiles).toHaveLength(16);
+  });
+});
+
 describe('the colours are rebuilt when the table moves and not per response', () => {
   it('reuses the same colour map when a settle names no artifact the session had not held', async () => {
     const clock = fakeClock();
