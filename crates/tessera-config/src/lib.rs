@@ -424,8 +424,9 @@ struct RawServe {
     ///
     /// Default: `1073741824` (1 GiB).
     fragment_cache_bytes: Option<u64>,
-    /// Bytes of artifact counts, centroids and boxes kept for annotation layers stored by row,
-    /// shared by every viewer with the same grant.
+    /// Bytes of artifact counts, centroids and boxes kept in memory for annotation layers stored
+    /// by row, shared by every viewer with the same grant: 4 B an artifact for counts alone, 40 B
+    /// with a centroid and 296 B with a box, per grant and level.
     ///
     /// Default: `268435456` (256 MiB).
     masked_count_cache_bytes: Option<u64>,
