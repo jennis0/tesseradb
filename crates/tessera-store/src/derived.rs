@@ -658,8 +658,10 @@ fn write_row_members(
     }
     // A bucket closes before the ordinal that would take it past the target, so one holds a run
     // of ordinals near the target, or a single ordinal over it.
+    // Each ordinal's bucket is looked up rather than searched for, since every pair takes one.
     let target = crate::partition::PARTITION_BUCKET_RECORDS;
     let mut boundaries = vec![0u32];
+    let mut bucket_of = vec![0u32; ordinals as usize];
     let mut held = 0u64;
     for (ordinal, &count) in counts.iter().enumerate() {
         if held > 0 && held + count > target {
@@ -667,11 +669,12 @@ fn write_row_members(
             held = 0;
         }
         held += count;
+        bucket_of[ordinal] = (boundaries.len() - 1) as u32;
     }
-    let mut partition = crate::partition::Partition::create(
+    let mut partition = crate::partition::Partition::create_routed(
         scratch,
         name,
-        boundaries.clone(),
+        boundaries.len(),
         ROW_ORDINAL_RECORD,
         entries,
     )?;
@@ -683,10 +686,11 @@ fn write_row_members(
         let mut record = [0u8; ROW_ORDINAL_RECORD];
         record[..4].copy_from_slice(&ordinal.to_le_bytes());
         record[4..].copy_from_slice(&row.to_le_bytes());
-        if let Err(error) = partition.push(&record) {
+        if let Err(error) = partition.push_to(bucket_of[ordinal as usize] as usize, &record) {
             pushed = Err(error);
         }
     });
+    drop(bucket_of);
     pushed?;
     let mut store = partition.finish()?;
     let record = |bytes: &[u8]| {
