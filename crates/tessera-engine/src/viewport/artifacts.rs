@@ -1432,7 +1432,7 @@ impl Engine {
         // identity projection, whose point is that the derived sweep decides nothing about which
         // rows are served. Held per principal between requests: the cache key names the
         // principal so a hit never answers for a different one.
-        let mut derived = if !full || layer.declared_derived.is_empty() {
+        let derived = if !full || layer.declared_derived.is_empty() {
             crate::derived::DerivedContent::default()
         } else {
             let key = crate::derived::cache::DerivedKey {
@@ -1460,18 +1460,6 @@ impl Engine {
                 .clone(),
             }
         };
-        let shape_guard_fired = full
-            && ask.computed.selects(crate::derived::ComputedProperty::Hull)
-            && self.drawn_shape(
-                declaration,
-                served.name,
-                name,
-                number,
-                ordinal,
-                supplied.authored.as_ref(),
-                &mut derived,
-                Some(ask.zoom),
-            );
         let parents: Vec<(String, u32, u32)> = rows
             .parents(ordinal)
             .iter()
@@ -1503,7 +1491,8 @@ impl Engine {
             target: None,
             matched,
             highlighted,
-            shape_guard_fired,
+            // A shape is served by identifier alone.
+            shape_guard_fired: false,
         });
         Ok(())
     }
