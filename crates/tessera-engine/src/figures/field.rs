@@ -132,11 +132,7 @@ pub(crate) fn by_value(a: &(Number, u32), b: &(Number, u32), reversed: bool) -> 
         (_, true) => std::cmp::Ordering::Greater,
         _ => std::cmp::Ordering::Equal,
     };
-    let ordered = if reversed {
-        ordered.reverse()
-    } else {
-        ordered
-    };
+    let ordered = if reversed { ordered.reverse() } else { ordered };
     ordered.then(a.1.cmp(&b.1))
 }
 
@@ -278,7 +274,10 @@ impl Engine {
         let left = base.count - d.count;
         let (low, high) = match (&deny, left) {
             (_, 0) => (None, None),
-            (None, _) => (base.low.first().map(|v| v.0), base.high.first().map(|v| v.0)),
+            (None, _) => (
+                base.low.first().map(|v| v.0),
+                base.high.first().map(|v| v.0),
+            ),
             (Some(deny), _) => {
                 let kept = |side: &[(Number, u32)]| {
                     side.iter()

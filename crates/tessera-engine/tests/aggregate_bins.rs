@@ -27,12 +27,12 @@ use common::*;
 use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::filter::{FilterExpr, FilterOperand, RegionLeaf, Scalar};
+use tessera_engine::IngestRequest;
 use tessera_engine::{
     AggregateCaps, AggregateHead, AggregateRefused, AggregateRequest, AggregateSink,
     AggregateTrailer, By, Engine, EngineError, Grouping, PageEnd, RecordsLimits, Reference,
     Session, SinkResult, TableHead, ViewportRequest,
 };
-use tessera_engine::IngestRequest;
 use tessera_lifecycle::command::IngestRow;
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
 use tessera_lifecycle::UnallocatedRow;
@@ -308,8 +308,10 @@ fn build_bundle(dir: &Path, items: &[Item]) -> PathBuf {
 
 /// A bundle of `items`, each view holding the items listed beside it.
 fn build_views(dir: &Path, items: &[Item], views: &[(&str, &[Item])]) -> PathBuf {
-    let open: Vec<(&str, &[Item], Option<Vec<String>>)> =
-        views.iter().map(|&(view, held)| (view, held, None)).collect();
+    let open: Vec<(&str, &[Item], Option<Vec<String>>)> = views
+        .iter()
+        .map(|&(view, held)| (view, held, None))
+        .collect();
     build_gated_views(dir, items, &open)
 }
 
@@ -1290,7 +1292,10 @@ fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
             }
         }
     }
-    assert!(sampled_tables > 0 && exact_tables > 0, "both ways of counting are reached");
+    assert!(
+        sampled_tables > 0 && exact_tables > 0,
+        "both ways of counting are reached"
+    );
     assert!(entries_read > 0, "a sample is read from the bands");
 }
 
@@ -1378,7 +1383,11 @@ fn default_edges_are_exact_however_the_set_is_counted() {
     let area = [100.0, 100.0, 140.0, 140.0];
     let in_area = |i: &Item| in_box(i, area);
     let few: Vec<&Item> = fx.visible(true, &in_area).collect();
-    assert!(!few.is_empty() && few.len() as u64 <= s, "the region holds {} items", few.len());
+    assert!(
+        !few.is_empty() && few.len() as u64 <= s,
+        "the region holds {} items",
+        few.len()
+    );
     for column in COLUMNS {
         let exact = edges_of(&table(&fx.engine, &session, request(&[bins(column, 12, None)])).1);
         let groupings = [sampled(column, 12, None, s)];
@@ -1413,16 +1422,19 @@ fn default_edges_are_exact_however_the_set_is_counted() {
                 .collect()
         };
         let (seen, everything) = (finite(&visible_sample), finite(&all));
-        let outside = everything.iter().any(|&v| {
-            seen.iter().all(|&w| less(w, v)) || seen.iter().all(|&w| less(v, w))
-        });
+        let outside = everything
+            .iter()
+            .any(|&v| seen.iter().all(|&w| less(w, v)) || seen.iter().all(|&w| less(v, w)));
         assert!(outside, "{column}: the extremes lie outside the sample");
         for item in &all {
             if let Some(v) = item.value(column).filter(|v| match v {
                 Val::F(f) => f.is_finite(),
                 _ => true,
             }) {
-                assert!(!less(v, exact[0]) && !less(exact[exact.len() - 1], v), "{column}");
+                assert!(
+                    !less(v, exact[0]) && !less(exact[exact.len() - 1], v),
+                    "{column}"
+                );
             }
         }
     }
@@ -1463,7 +1475,10 @@ fn invisible_items_never_enter_a_sample() {
         (tables, band_entries)
     };
     let (subset, entries) = read(&fx.session(false));
-    assert!(entries > 0, "the subset viewer's sample is read from the bands");
+    assert!(
+        entries > 0,
+        "the subset viewer's sample is read from the bands"
+    );
     assert_ne!(
         subset,
         read(&fx.session(true)).0,
@@ -1761,11 +1776,17 @@ fn a_sample_read_partly_from_the_band_and_partly_by_scanning_is_the_oracles() {
     assert_eq!(tessera_store::bands::band_below(cut), Some(7));
     let sample = sample_of(&items, s, &ids);
     let scanned = sample.iter().filter(|i| i.source >= INGESTED).count();
-    assert!(scanned > 0, "the flushed segment's set has items below the cut");
+    assert!(
+        scanned > 0,
+        "the flushed segment's set has items below the cut"
+    );
     for column in COLUMNS {
         let groupings = [sampled(column, 10, None, s)];
         let (head, rows, entries) = read_table(&fx.engine, &session, request(&groupings));
-        assert!(entries > 0, "{column}: the built segment is read from the band");
+        assert!(
+            entries > 0,
+            "{column}: the built segment is read from the band"
+        );
         assert_eq!(head.sample.unwrap().items, sample.len() as u64, "{column}");
         let edges = edges_of(&rows);
         let want = scaled(
@@ -1896,7 +1917,14 @@ fn summary_of(
 /// The default edges of `column` in `view`, checked against `items`, the items the viewer may see
 /// there: every finite value lies within them, and the first and last bins hold one, so the edges
 /// are the readable ones around the smallest and largest value.
-fn check_edges(engine: &Engine, session: &Session, view: &str, column: &str, items: &[&Item], what: &str) {
+fn check_edges(
+    engine: &Engine,
+    session: &Session,
+    view: &str,
+    column: &str,
+    items: &[&Item],
+    what: &str,
+) {
     for sample in [None, Some(5)] {
         let groupings = [Grouping {
             by: Some(By::Bins {
@@ -1929,7 +1957,8 @@ fn check_edges(engine: &Engine, session: &Session, view: &str, column: &str, ite
         }
         let bins = edges.len() - 1;
         let inside = |b: usize, v: Val| {
-            !less(v, edges[b]) && (less(v, edges[b + 1]) || (b + 1 == bins && same(v, edges[b + 1])))
+            !less(v, edges[b])
+                && (less(v, edges[b + 1]) || (b + 1 == bins && same(v, edges[b + 1])))
         };
         assert!(
             finite.iter().any(|&v| inside(0, v)) && finite.iter().any(|&v| inside(bins - 1, v)),
@@ -1950,20 +1979,42 @@ fn a_summary_is_the_oracles_over_the_whole_visible_set() {
         for column in COLUMNS {
             let what = format!("{column}, broad {broad}");
             let want = oracle(&all, column);
-            assert!(want.count > 0 && want.none > 0, "{what}: the fixture has both");
-            for filter in [None, Some(fx.kind_is("b")), Some(bbox(area[0], area[1], area[2], area[3]))] {
-                assert_eq!(summary_of(&fx.engine, &session, "s0", column, filter), want, "{what}");
+            assert!(
+                want.count > 0 && want.none > 0,
+                "{what}: the fixture has both"
+            );
+            for filter in [
+                None,
+                Some(fx.kind_is("b")),
+                Some(bbox(area[0], area[1], area[2], area[3])),
+            ] {
+                assert_eq!(
+                    summary_of(&fx.engine, &session, "s0", column, filter),
+                    want,
+                    "{what}"
+                );
             }
             check_edges(&fx.engine, &session, "s0", column, &all, &what);
         }
         // A summary beside other groupings is one table of its own, after the one before it.
-        let groupings = [bins("rank", 5, None), summary("rank"), Grouping { by: None, cells: None, area: None }];
+        let groupings = [
+            bins("rank", 5, None),
+            summary("rank"),
+            Grouping {
+                by: None,
+                cells: None,
+                area: None,
+            },
+        ];
         let mut req = request(&groupings);
         req.filter = Some(fx.kind_is("a"));
         let (collect, _) = respond(&fx.engine, &session, req).unwrap();
         assert_eq!(collect.tables.len(), 3);
         assert_eq!(collect.tables[1].groups, None);
-        assert_eq!(collect.tables[1].total, fx.visible(broad, &|i| i.kind == "a").count() as u64);
+        assert_eq!(
+            collect.tables[1].total,
+            fx.visible(broad, &|i| i.kind == "a").count() as u64
+        );
         assert_eq!(figures_of(&collect.pages[1].1), oracle(&all, "rank"));
     }
 }
@@ -1982,7 +2033,10 @@ fn a_summary_that_cannot_be_served_is_refused() {
         }
     };
     assert_eq!(
-        refused(Grouping { cells: Some(4), ..summary("rank") }),
+        refused(Grouping {
+            cells: Some(4),
+            ..summary("rank")
+        }),
         AggregateRefused::SummaryWithCells
     );
     for column in ["kind", "flag", "nothing"] {
@@ -2004,7 +2058,11 @@ fn invisible_items_move_no_figure() {
     let broad = fx.session(true);
     for column in COLUMNS {
         let seen = summary_of(&fx.engine, &all, "s0", column, None);
-        assert_eq!(seen, summary_of(&alone.engine, &only, "s0", column, None), "{column}");
+        assert_eq!(
+            seen,
+            summary_of(&alone.engine, &only, "s0", column, None),
+            "{column}"
+        );
         let everything = summary_of(&fx.engine, &broad, "s0", column, None);
         assert!(
             everything.min != seen.min && everything.max != seen.max,
@@ -2030,12 +2088,19 @@ fn a_value_in_a_view_the_viewer_cannot_reach_moves_no_edge() {
         item.when = Some(date(2050 + i64::from(sign) * 250, 1, 1));
         assert!(item.subset);
     }
-    let s0: Vec<Item> = items.iter().filter(|i| !outside.contains(&i.source)).cloned().collect();
+    let s0: Vec<Item> = items
+        .iter()
+        .filter(|i| !outside.contains(&i.source))
+        .cloned()
+        .collect();
     let tmp = tempfile::tempdir().unwrap();
     let root = build_gated_views(
         tmp.path(),
         &items,
-        &[("s0", &s0, None), ("s1", &items, Some(vec!["0".to_string()]))],
+        &[
+            ("s0", &s0, None),
+            ("s1", &items, Some(vec!["0".to_string()])),
+        ],
     );
     let engine = engine_at(tmp.path(), &root, 3600);
     let subset = engine.authorise(&subset_credential()).unwrap();
@@ -2085,7 +2150,11 @@ fn the_figures_are_the_oracles_through_every_change() {
     let check = |engine: &Engine, items: &[Item], fates: &HashMap<u64, Fate>, when: &str| {
         for broad in [true, false] {
             let session = engine
-                .authorise(&if broad { full_coverage_credential() } else { subset_credential() })
+                .authorise(&if broad {
+                    full_coverage_credential()
+                } else {
+                    subset_credential()
+                })
                 .unwrap();
             let visible: Vec<&Item> = items
                 .iter()
@@ -2114,8 +2183,12 @@ fn the_figures_are_the_oracles_through_every_change() {
     };
     let change = |engine: &Engine, sources: &[u64], op: ChangeOp| {
         for &source in sources {
-            let entity = item_of_id(engine, source).unwrap().expect("the item exists");
-            engine.accept_change(entity, op).expect("the change is accepted");
+            let entity = item_of_id(engine, source)
+                .unwrap()
+                .expect("the item exists");
+            engine
+                .accept_change(entity, op)
+                .expect("the change is accepted");
         }
     };
     {
@@ -2217,7 +2290,21 @@ fn the_figures_are_the_oracles_through_every_change() {
         check(&engine, &items, &fates, "edited");
 
         // The items holding each viewer's extremes, base and ingested, suppressed, then lifted.
-        let extremes: Vec<u64> = vec![1, 2, 4, 5, 8, 10, 11, 13, 14, 16, INGESTED + 3, INGESTED + 6, edited];
+        let extremes: Vec<u64> = vec![
+            1,
+            2,
+            4,
+            5,
+            8,
+            10,
+            11,
+            13,
+            14,
+            16,
+            INGESTED + 3,
+            INGESTED + 6,
+            edited,
+        ];
         let shown = summary_of(
             &engine,
             &engine.authorise(&full_coverage_credential()).unwrap(),

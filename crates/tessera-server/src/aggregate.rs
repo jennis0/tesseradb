@@ -15,17 +15,18 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::Value;
 
+use tessera_engine::filter::Family;
 use tessera_engine::{
     AggregateCaps, AggregateHead, AggregateRefused, AggregateRequest, AggregateSink, By,
     CancelToken, EngineError, Grouping, PageEnd, Pick, RecordsLimits, RecordsSink, RecordsTrailer,
-    Reference,
-    SinkResult, TableHead,
+    Reference, SinkResult, TableHead,
 };
-use tessera_engine::filter::Family;
 use tessera_wire::table_head_frame;
 
 use crate::error::ApiError;
-use crate::records::{bulk_read, limits, view_and_filter, CompressionReq, FrameSink, Lane, Opening, Read};
+use crate::records::{
+    bulk_read, limits, view_and_filter, CompressionReq, FrameSink, Lane, Opening, Read,
+};
 use crate::state::{ApiJson, AppState, ViewerSession};
 use crate::viewer::{check_bbox, field_column, FieldColumn, FilterParser};
 
@@ -158,7 +159,16 @@ pub(crate) async fn aggregate(
     let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_aggregate(state, session, req, cancel, sink)
     };
-    bulk_read(state, session, Lane::Compute, "aggregate", "", compression, read).await
+    bulk_read(
+        state,
+        session,
+        Lane::Compute,
+        "aggregate",
+        "",
+        compression,
+        read,
+    )
+    .await
 }
 
 fn run_aggregate(
@@ -301,24 +311,23 @@ fn by_of(
             if by.sample.is_some() && by.bins.is_none() {
                 return bad("`sample` goes with `bins`; send `bins` beside it, or leave it out");
             }
-            let pick = match (by.bins, by.top, &by.values) {
-                _ if by.summary => None,
-                (Some(_), None, None) => None,
-                (Some(_), _, _) => {
-                    return bad("`by` carries `bins` beside `top` or `values`; send one")
-                }
-                (None, Some(top), None) => Some(Pick::Top(top)),
-                (None, None, Some(values)) => Some(Pick::Named(values.clone())),
-                (None, Some(_), Some(_)) => {
-                    return bad("`by` carries both `top` and `values`; send one")
-                }
-                (None, None, None) => {
-                    return bad(
+            let pick =
+                match (by.bins, by.top, &by.values) {
+                    _ if by.summary => None,
+                    (Some(_), None, None) => None,
+                    (Some(_), _, _) => {
+                        return bad("`by` carries `bins` beside `top` or `values`; send one")
+                    }
+                    (None, Some(top), None) => Some(Pick::Top(top)),
+                    (None, None, Some(values)) => Some(Pick::Named(values.clone())),
+                    (None, Some(_), Some(_)) => {
+                        return bad("`by` carries both `top` and `values`; send one")
+                    }
+                    (None, None, None) => return bad(
                         "`by` on a field carries none of `top`, `values`, `bins` and `summary`; \
                          send one",
-                    )
-                }
-            };
+                    ),
+                };
             let (column, family, integer) =
                 match field_column(meta, field, view, session.visible_views())? {
                     FieldColumn::Resolved {
@@ -428,19 +437,23 @@ fn in_callers_words(e: EngineError, asked: &[GroupingReq], sent: &[Grouping]) ->
         }
         _ => return e,
     };
-    let spelling = asked.iter().zip(sent).find_map(|(asked, sent)| match &sent.by {
-        Some(By::Field {
-            column: resolved, ..
-        })
-        | Some(By::Bins {
-            column: resolved, ..
-        })
-        | Some(By::Summary { column: resolved }) if resolved == column =>
-        {
-            asked.by.as_ref().and_then(|by| by.field.clone())
-        }
-        _ => None,
-    });
+    let spelling = asked
+        .iter()
+        .zip(sent)
+        .find_map(|(asked, sent)| match &sent.by {
+            Some(By::Field {
+                column: resolved, ..
+            })
+            | Some(By::Bins {
+                column: resolved, ..
+            })
+            | Some(By::Summary { column: resolved })
+                if resolved == column =>
+            {
+                asked.by.as_ref().and_then(|by| by.field.clone())
+            }
+            _ => None,
+        });
     match spelling {
         Some(field) => EngineError::AggregateRefused(rename(field)),
         None => e,

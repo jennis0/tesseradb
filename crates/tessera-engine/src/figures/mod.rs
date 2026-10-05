@@ -70,8 +70,8 @@ use crate::viewport::ServedView;
 use crate::Engine;
 
 pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity};
-pub(crate) use field::{by_value, FieldFigures, FieldRead, FieldTally, Number};
 pub use cache::{FiguresStats, DEFAULT_DISK_BYTES, DEFAULT_GIVE_WAY_MS};
+pub(crate) use field::{by_value, FieldFigures, FieldRead, FieldTally, Number};
 
 use cache::{
     Counters, DenyKey, FiguresKey, FragmentCounts, FragmentKey, LevelAddress, Tail, TailKey,
@@ -960,7 +960,11 @@ fn write_labels(
 /// What a correction for `subtracted`, the mask's `minus` below `base_rows`, is a function of
 /// beside its fragment: the view's deny version, and the overlay's version where the mask also
 /// subtracts buffered rows the viewer fails below the base, which no deny version follows.
-fn deny_version(served: &ServedView<'_>, base_rows: u32, subtracted: &Bitmap) -> (u64, Option<u64>) {
+fn deny_version(
+    served: &ServedView<'_>,
+    base_rows: u32,
+    subtracted: &Bitmap,
+) -> (u64, Option<u64>) {
     let mut denied = served.denied.clone();
     denied.remove_range(base_rows..);
     let failing = !subtracted.is_subset(&denied);
