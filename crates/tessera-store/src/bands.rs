@@ -117,9 +117,10 @@ pub fn band_of(tessera_id: u64) -> u32 {
 }
 
 /// The narrowest band holding every identity below `cut`, or `None` where that band is wider than
-/// [`FIRST_BAND`] and so is not written.
+/// [`FIRST_BAND`] and so is not written. The largest identity below `cut` is `cut - 1`, and every
+/// smaller one has at least its leading zeros.
 pub fn band_below(cut: u64) -> Option<u32> {
-    Some(cut.leading_zeros()).filter(|&band| band >= FIRST_BAND)
+    Some(cut.saturating_sub(1).leading_zeros()).filter(|&band| band >= FIRST_BAND)
 }
 
 /// Whether the bands copy a column that is not drawn: an indexed number or timestamp column. Every
@@ -986,6 +987,23 @@ impl Bands {
         })
     }
 
+    /// Band `band`'s entries from the first whose row is at least `from`, looked up by row in
+    /// ascending row order.
+    pub fn entries_from(&self, band: u32, from: u32) -> BandEntries<'_> {
+        let span = self.band(band);
+        let rows = &self.rows()[span.clone()];
+        BandEntries {
+            rows,
+            start: span.start,
+            at: rows.partition_point(|&r| r < from),
+        }
+    }
+
+    /// The entry of segment row `row` in band `band`, where the band holds it.
+    pub fn entry_of_row(&self, band: u32, row: u32) -> Option<usize> {
+        self.entries_from(band, row).entry(row)
+    }
+
     /// Check every entry against the segment it was written for: each band holds exactly the rows
     /// whose identity has that many leading zeros, in row order, with the row's own identity, code
     /// and residual, and each copy holds the row's stored value. What `tessera verify --deep`
@@ -1086,6 +1104,62 @@ impl Bands {
             }
         }
         Ok(())
+    }
+
+    /// Check the indexed copy `name`, declared as `declared`, against the value of each entry's
+    /// entity: `value_of(row)` is that value, [`ScalarValue::Null`] where the entity has none, or
+    /// `None` where the row is not checked. What `tessera verify --deep` asks of each indexed
+    /// copy, after [`Bands::check_against`] has checked the entries' rows.
+    pub fn check_indexed_against(
+        &self,
+        name: &str,
+        declared: ScalarType,
+        mut value_of: impl FnMut(u32) -> Option<ScalarValue>,
+    ) -> std::result::Result<(), String> {
+        let copy = self
+            .copy(name)
+            .ok_or_else(|| format!("the bands hold no copy of '{name}'"))?;
+        if copy.held.is_none() || CopyType::of_type(declared) != Some(copy.ty) {
+            return Err(format!(
+                "copy '{name}' is a {:?} copy where the bundle declares an indexed {declared:?}",
+                copy.ty
+            ));
+        }
+        for (e, &row) in self.rows().iter().enumerate() {
+            let Some(expected) = value_of(row) else {
+                continue;
+            };
+            let copied = match copy.holds(e) {
+                true => copy.value_at(e),
+                false => ScalarValue::Null,
+            };
+            if !scalar_bits_equal(&expected, &copied) {
+                return Err(format!(
+                    "copy '{name}', entry {e}: holds {copied:?} and row {row}'s item holds \
+                     {expected:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One band's entries, looked up by row with a cursor that only moves forward.
+#[derive(Debug, Clone)]
+pub struct BandEntries<'a> {
+    rows: &'a [u32],
+    start: usize,
+    at: usize,
+}
+
+impl BandEntries<'_> {
+    /// The entry of segment row `row`, where the band holds it. Each row asked must be at least
+    /// the one asked before it; the cursor steps over the entries between them.
+    pub fn entry(&mut self, row: u32) -> Option<usize> {
+        while self.rows.get(self.at).is_some_and(|&r| r < row) {
+            self.at += 1;
+        }
+        (self.rows.get(self.at) == Some(&row)).then_some(self.start + self.at)
     }
 }
 
@@ -1393,6 +1467,78 @@ mod tests {
             };
             assert_eq!(held, expected, "entry {e}, item {i}");
         }
+    }
+
+    /// An entry is found by its row, alone or by a cursor moving forward, and a row the band does
+    /// not hold has none.
+    #[test]
+    fn an_entry_is_found_by_its_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        segment(dir.path(), 400);
+        let bands = Bands::open(dir.path(), 400).unwrap();
+        for j in bands.bands() {
+            let span = bands.band(j);
+            let held: std::collections::HashMap<u32, usize> = bands.rows()[span.clone()]
+                .iter()
+                .enumerate()
+                .map(|(at, &row)| (row, span.start + at))
+                .collect();
+            let mut cursor = bands.entries_from(j, 100);
+            for row in 0..400 {
+                assert_eq!(bands.entry_of_row(j, row), held.get(&row).copied(), "band {j}");
+                if row >= 100 && row % 3 != 1 {
+                    assert_eq!(cursor.entry(row), held.get(&row).copied(), "band {j}");
+                }
+            }
+        }
+    }
+
+    /// The indexed copy holds each entry's item's value, and a value that is not its item's is
+    /// found; a row the caller does not check is skipped.
+    #[test]
+    fn an_indexed_copy_is_checked_against_its_items_values() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rows = segment(dir.path(), 400);
+        let bands = Bands::open(dir.path(), 400).unwrap();
+        let item_of = |row: u32| {
+            let id = rows[row as usize].tessera_id.raw();
+            ((u64::MAX >> id.leading_zeros()) - id) as usize
+        };
+        bands
+            .check_indexed_against("year", ScalarType::I16, |row| Some(year_of(item_of(row))))
+            .unwrap();
+        let wrong = bands.rows()[0];
+        let changed = |row: u32| match row == wrong {
+            true => Some(ScalarValue::I16(-1)),
+            false => Some(year_of(item_of(row))),
+        };
+        assert!(bands
+            .check_indexed_against("year", ScalarType::I16, changed)
+            .is_err());
+        let skipped = |row: u32| (row != wrong).then(|| year_of(item_of(row)));
+        bands
+            .check_indexed_against("year", ScalarType::I16, skipped)
+            .unwrap();
+        assert!(bands
+            .check_indexed_against("year", ScalarType::I32, |row| Some(year_of(item_of(row))))
+            .is_err());
+        assert!(bands
+            .check_indexed_against("count", ScalarType::U16, |_| None)
+            .is_err());
+    }
+
+    /// The band below a cut holds every identity below it, and the next band does not.
+    #[test]
+    fn the_band_below_a_cut_is_the_narrowest_holding_it() {
+        for cut in [2u64, 3, 1 << 50, (1 << 50) + 1, (1 << 57) - 1, 1 << 57, 1 << 58, u64::MAX] {
+            let band = cut.saturating_sub(1).leading_zeros();
+            assert_eq!(band_below(cut), (band >= FIRST_BAND).then_some(band), "{cut}");
+            // Every identity below the cut has at least `band` leading zeros, and one has exactly.
+            assert_eq!(band_of(cut - 1), band, "{cut}");
+            assert!((0..cut).step_by((cut / 7).max(1) as usize).all(|id| band_of(id) >= band));
+        }
+        assert_eq!(band_below(1 << 58), Some(6));
+        assert_eq!(band_below((1 << 58) + 1), None);
     }
 
     #[test]

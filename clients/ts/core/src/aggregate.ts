@@ -131,13 +131,14 @@ function tableHeadOf(payload: Uint8Array): Omit<AggregateTable, 'rows'> {
 
 function sampleOf(raw: unknown): AggregateSample | null {
   if (raw === undefined || raw === null) return null;
-  const sample = raw as {sampled?: unknown; items?: unknown; reference_items?: unknown};
-  if (typeof sample.sampled !== 'boolean' || !Number.isInteger(sample.items)) {
-    throw new Error('a table head\'s `sample` has no `sampled` or `items`, which the contract requires; the server and this client are from different versions');
+  const sample = raw as {sampled?: unknown; items?: unknown; reference_items?: unknown; edges_sampled?: unknown};
+  if (typeof sample.sampled !== 'boolean' || !Number.isInteger(sample.items) || typeof sample.edges_sampled !== 'boolean') {
+    throw new Error('a table head\'s `sample` has no `sampled`, `items` or `edges_sampled`, which the contract requires; the server and this client are from different versions');
   }
   return {
     sampled: sample.sampled,
     items: sample.items as number,
-    referenceItems: Number.isInteger(sample.reference_items) ? (sample.reference_items as number) : null
+    referenceItems: Number.isInteger(sample.reference_items) ? (sample.reference_items as number) : null,
+    edgesSampled: sample.edges_sampled
   };
 }

@@ -104,6 +104,24 @@ pub struct DeclaredScalar {
 }
 
 impl DeclaredScalar {
+    /// Whether the identity bands copy this column beside the render columns
+    /// ([`crate::bands::copied_beside`]).
+    pub fn band_copied(&self) -> bool {
+        crate::bands::copied_beside(
+            self.arrow_type,
+            self.vocabulary.is_some(),
+            self.index,
+            self.render,
+        )
+    }
+
+    /// Whether every row of an item, in every view, carries this column's value: a drawn column,
+    /// and one the bands copy. A row adding an item to another view, and an edit's row in each
+    /// view after the first, carry these columns and leave the rest to the item's first row.
+    pub fn carried_on_join_row(&self) -> bool {
+        self.render || self.band_copied()
+    }
+
     /// The arrow type an ingest batch must present this column at: **`utf8` for all three string
     /// families** — a category whatever its code width, a keyword, and a text column — and the
     /// storage type for everything else.
@@ -1261,9 +1279,7 @@ impl Manifest {
         self.declared_scalars
             .iter()
             .enumerate()
-            .filter(|(_, d)| {
-                crate::bands::copied_beside(d.arrow_type, d.vocabulary.is_some(), d.index, d.render)
-            })
+            .filter(|(_, d)| d.band_copied())
             .map(|(index, _)| index)
     }
 

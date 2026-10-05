@@ -629,14 +629,14 @@ impl Engine {
                 })
                 .collect::<Result<_, AcceptError>>()?;
             let first = rows.is_empty();
-            // A join row carries the rendered values alone, as a row adding an item in place
-            // does: the item's own row holds the rest.
+            // A join row carries what every row carries, as a row adding an item in place does:
+            // the item's own row holds the rest.
             let scalars: Vec<WalScalar> = match first {
                 true => scalars.clone(),
                 false => declared
                     .iter()
                     .zip(&scalars)
-                    .map(|(d, value)| match d.render {
+                    .map(|(d, value)| match d.carried_on_join_row() {
                         true => value.clone(),
                         false => WalScalar::Null,
                     })
@@ -876,14 +876,14 @@ impl Engine {
         if !adding {
             return Ok(membership());
         }
-        // The row a view gains carries the item's values. A rendered value is read from the item
-        // where the row leaves it out, so the view renders what the item's other views do.
+        // The row a view gains carries the item's values. A value every row carries is read from
+        // the item where the row leaves it out, so the view holds what the item's other views do.
         let scalars: Vec<WalScalar> = declared
             .iter()
             .enumerate()
             .map(|(position, d)| match row.scalars.get(position) {
                 Some(value) if carried(position) => value.clone(),
-                _ if d.render => {
+                _ if d.carried_on_join_row() => {
                     joined::held_entity_value(generation, entity, position, d, buffered, &mut blob)
                         .unwrap_or(WalScalar::Null)
                 }

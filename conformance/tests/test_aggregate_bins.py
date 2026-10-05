@@ -527,12 +527,30 @@ def identities(deployment) -> dict[int, int]:
 
 
 def sample_of(items: list[int], s: int, ids: dict[int, int]) -> list[int]:
-    """The items the contract counts with sample size `s`: every item of a set of at most `s`,
-    and otherwise those whose `tessera_id` is below `floor(s * 2^64 / N)`."""
+    """The items the contract counts with sample size `s` where it samples: every item of a set
+    of at most `s`, and otherwise those whose `tessera_id` is below `floor(s * 2^64 / N)`."""
     if len(items) <= s:
         return items
     cut = (s << 64) // len(items)
     return [i for i in items if ids[i] < cut]
+
+
+def exact_by_size(items: list[int], s: int) -> bool:
+    """Whether the contract counts every item whatever the set's rows: a set of at most `s`
+    items, or one whose cut is above 2^58, wider than any identity band."""
+    return len(items) <= s or (s << 64) // len(items) > 1 << 58
+
+
+def counted(items: list[int], s: int, ids: dict[int, int], head_items: int, what: str) -> list[int]:
+    """The items a table counted: every item where the head counts them all, and otherwise the
+    contract's sample. Which of the two the server chose is the head's to say, beyond
+    `exact_by_size`."""
+    if head_items == len(items):
+        return items
+    taken = sample_of(items, s, ids)
+    assert not exact_by_size(items, s), f"{what}: a set the size alone counts whole was sampled"
+    assert head_items == len(taken), f"{what}: {head_items} items, neither every item nor the sample"
+    return taken
 
 
 def scale(count: int, n: int, taken: int) -> int:
@@ -544,26 +562,29 @@ def scale(count: int, n: int, taken: int) -> int:
 @pytest.mark.parametrize("column", [c.name for c in COLUMNS])
 def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities, principal, column):
     """With `sample`, each count is the oracle's count among the set's items below the cut,
-    scaled to the set, and the reference is sampled at its own cut; the default edges are the
-    readable edges of the visible set's sample and hold still under every filter; and the head
-    says how many items were counted. The oracle draws every sample from the principal's visible
-    items alone, so an item it cannot see that entered a sample, moved `total` or moved an edge
-    would show here."""
+    scaled to the set, or every item's count where the head says the set was counted whole; the
+    reference is counted the same way at its own cut; the default edges are the readable edges of
+    the visible set's sample, or of every visible item, as the head says, and hold still under
+    every filter. The oracle draws every sample from the principal's visible items alone, so an
+    item it cannot see that entered a sample, moved `total` or moved an edge would show here."""
     token = deployment.server.authorise(list(fx.PRINCIPALS[principal]))["token"]
     seen = visible(principal)
-    for s in (25, 300):
-        reference = sample_of(seen, s, identities)
-        edges = default_edges(column, reference, 10)
+    for s in (5, 25, 300):
         held = None
         for name, (filters, keep) in FILTERS.items():
             items = [i for i in seen if keep(i)]
-            taken = sample_of(items, s, identities)
             body = {"view": fx.WORLD, "reference": {},
                     "groupings": [{"by": {"field": column, "bins": 10, "sample": s}}]}
             if filters is not None:
                 body["filters"] = filters
             head, rows = read_table(deployment.server, token, body)
             what = f"{principal} / {column} / sample {s} / filter {name}"
+            sample = head["sample"]
+            taken = counted(items, s, identities, sample["items"], what)
+            reference = counted(seen, s, identities, sample["reference_items"], what)
+            if principal == "everyone" and name == "none" and s < 300:
+                assert len(taken) < len(items), f"{what}: the whole view is sampled"
+            edges = default_edges(column, reference, 10)
             _, raw = expected(column, edges, taken, reference)
             want_rows = [
                 (g, lo, hi, scale(c, len(items), len(taken)), scale(r, len(seen), len(reference)))
@@ -571,10 +592,11 @@ def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities,
             ]
             assert rows == want_rows, f"{what}: served {rows}, expected {want_rows}"
             assert (head["total"], head["reference_total"]) == (len(items), len(seen)), what
-            assert head["sample"] == {
-                "sampled": len(items) > s or len(seen) > s,
+            assert sample == {
+                "sampled": len(taken) < len(items) or len(reference) < len(seen),
                 "items": len(taken),
                 "reference_items": len(reference),
+                "edges_sampled": len(reference) < len(seen),
             }, f"{what}: {head}"
             served = [(r[1], r[2]) for r in rows if r[0] == "listed"]
             assert held is None or served == held, f"{what}: the edges moved"
@@ -587,11 +609,14 @@ def test_a_sample_as_large_as_the_set_is_exact(deployment):
     grouping = {"field": "rank", "bins": 12}
     exact = read_table(deployment.server, token,
                        {"view": fx.WORLD, "reference": {}, "groupings": [{"by": grouping}]})
-    whole = read_table(deployment.server, token,
-                       {"view": fx.WORLD, "reference": {}, "groupings": [{"by": {**grouping, "sample": n}}]})
-    assert "sample" not in exact[0]
-    assert whole[0].pop("sample") == {"sampled": False, "items": n, "reference_items": n}
-    assert whole == exact
+    for s in (n, n // 60):
+        whole = read_table(deployment.server, token,
+                           {"view": fx.WORLD, "reference": {}, "groupings": [{"by": {**grouping, "sample": s}}]})
+        assert "sample" not in exact[0]
+        assert whole[0].pop("sample") == {
+            "sampled": False, "items": n, "reference_items": n, "edges_sampled": False,
+        }, s
+        assert whole == exact, s
 
 
 def test_a_sample_that_cannot_be_served_is_refused(deployment):

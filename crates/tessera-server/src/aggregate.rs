@@ -125,6 +125,7 @@ impl AggregateSink for FrameSink {
             json["sample"] = serde_json::json!({
                 "sampled": sample.sampled,
                 "items": sample.items,
+                "edges_sampled": sample.edges_sampled,
             });
             if let Some(items) = sample.reference_items {
                 json["sample"]["reference_items"] = items.into();

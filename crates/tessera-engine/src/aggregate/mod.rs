@@ -166,13 +166,16 @@ pub struct TableHead {
 /// How a histogram asked for with a sample size was counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableSample {
-    /// Whether the counts are scaled from a sample; `false` where the set held no more items than
-    /// the sample size and every item was counted.
+    /// Whether the counts are scaled from a sample; `false` where every item was counted, because
+    /// the set held no more items than the sample size or the sample would read no less.
     pub sampled: bool,
     /// The items counted in the set: `total` where not sampled.
     pub items: u64,
     /// The items counted in the reference set, where one was given.
     pub reference_items: Option<u64>,
+    /// Whether the default edges were drawn from the visible set's sample; `false` where the
+    /// request gave a range or every visible item was read.
+    pub edges_sampled: bool,
 }
 
 /// Where a response is delivered: the head once, then for each table its head and its pages. A
@@ -213,6 +216,8 @@ pub struct AggregateTimings {
     pub entities_crossed: u64,
     /// Cells counted by range, or chunks of rows walked by the pass.
     pub cells_walked: u64,
+    /// Identity band entries read for sampled histograms.
+    pub band_entries: u64,
     /// For each table a page counted cells for, how: `ranges` or `pass`.
     pub methods: Vec<(u32, &'static str)>,
 }

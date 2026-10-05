@@ -1035,9 +1035,12 @@ class Viewer:
           more than `s` items is counted over its items whose `tessera_id` is below one cut,
           `s / total` of the identity range, about `s` of them, each count scaled to the set's
           `total`; default edges then come from the visible set's own sample. A set of at most
-          `s` items is counted exactly. A histogram's table is always one page. `"cells"` divides the set, or each group, into the view's cells at a depth
-          from 0 to 32, `{"depth": d}`, optionally only those meeting a box, `{"depth": d,
-          "area": [x0, y0, x1, y1]}`; a grouping by bins takes no cells.
+          `s` items is counted exactly, and so is a set the server would read no less of by
+          sampling: one where `s` is more than one item in 64, or whose items are too few of the
+          view's rows. A histogram's table is always one page. `"cells"` divides the set, or each
+          group, into the view's cells at a depth from 0 to 32, `{"depth": d}`, optionally only
+          those meeting a box, `{"depth": d, "area": [x0, y0, x1, y1]}`; a grouping by bins takes
+          no cells.
         - `filters`: the set counted, as `Selection.filter` takes an expression. Without it, every
           item this reader may see in the view.
         - `reference`: a second set to compare with, drawn from what this reader may see. `{}` is
@@ -1053,10 +1056,12 @@ class Viewer:
         `tessera.head` is the table's figures as JSON: `grouping`, `total` (the items in the set),
         `reference_total` with a reference, `groups` (the groups in the set before the cut to
         `top` or the names given) with `"by"`, and with a `"sample"` the object `sample`:
-        `sampled` (whether any count is scaled), `items` (the set's items counted) and, with a
-        reference, `reference_items`. `tessera.recomposed` is `"true"` where a page counted
-        a different state of the database from the page before it, and `tessera.region` is the
-        server's region verdict where a filter had a `region` leaf.
+        `sampled` (whether any count is scaled), `items` (the set's items counted), with a
+        reference `reference_items`, and `edges_sampled` (whether the default edges came from the
+        visible set's sample, which they can where the set is counted exactly).
+        `tessera.recomposed` is `"true"` where a page counted a different state of the database
+        from the page before it, and `tessera.region` is the server's region verdict where a
+        filter had a `region` leaf.
 
         The server answers a page at a time, and each response ends with a cursor for the next.
         This requests responses until none is left and joins each table's pages. A refusal of the

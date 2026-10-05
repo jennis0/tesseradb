@@ -145,31 +145,18 @@ def test_a_number_in_bins(db):
 
 
 def test_a_sampled_number_in_bins(db):
-    """With a sample of 8 of the twenty, the counts are the items whose `tessera_id` is below
-    8/20 of the identity range, scaled by twenty over how many they are; a sample of twenty counts
-    every item, as no sample does."""
-    items = db.items("map", ["n"])
-    cut = (8 << 64) // 20
-    taken = [n for n, i in zip(items.column("n").to_pylist(), items.column("tessera_id").to_pylist()) if i < cut]
+    """A sample of 8 of the twenty is more than one item in 64, which no identity band holds, so
+    every item is counted, as no sample does, and the head says so; so does a sample of twenty.
+    Without a range, the head says whether the edges came from a sample."""
     grouping = {"field": "n", "bins": 2, "range": [0, 10]}
-    (sampled,) = db.aggregate("map", [{"by": {**grouping, "sample": 8}}])
-    assert head(sampled)["sample"] == {"sampled": True, "items": len(taken)}
-
-    def scaled(c):
-        return (c * 20 * 2 + len(taken)) // (2 * len(taken)) if taken else 0
-
-    expected = [
-        ("listed", 0, 5, scaled(sum(0 <= n < 5 for n in taken))),
-        ("listed", 5, 10, scaled(sum(5 <= n <= 10 for n in taken))),
-        ("rest", None, None, scaled(sum(n > 10 for n in taken))),
-    ]
-    assert [(r["group"], r["lower"], r["upper"], r["count"]) for r in rows(sampled)] == [
-        row for row in expected if row[0] == "listed" or row[3] > 0
-    ]
-    (whole,) = db.aggregate("map", [{"by": {**grouping, "sample": 20}}])
     (exact,) = db.aggregate("map", [{"by": grouping}])
-    assert head(whole)["sample"] == {"sampled": False, "items": 20}
-    assert rows(whole) == rows(exact)
+    assert "sample" not in head(exact)
+    for s in (8, 20):
+        (counted,) = db.aggregate("map", [{"by": {**grouping, "sample": s}}])
+        assert head(counted)["sample"] == {"sampled": False, "items": 20, "edges_sampled": False}
+        assert rows(counted) == rows(exact)
+    (drawn,) = db.aggregate("map", [{"by": {"field": "n", "bins": 2, "sample": 8}}])
+    assert head(drawn)["sample"] == {"sampled": False, "items": 20, "edges_sampled": False}
 
 
 def test_a_refusal_says_what_the_server_said(db):

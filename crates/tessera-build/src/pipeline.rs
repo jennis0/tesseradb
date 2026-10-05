@@ -1965,18 +1965,14 @@ fn build_bundle(
                     values: &scoped_render[column].values,
                 });
             }
-            let indexed: Vec<crate::assembly::RenderColumn<'_>> = args
-                .schema
-                .attributes
-                .iter()
-                .zip(attributes_by_entity.iter())
-                .filter(|(attribute, _)| crate::band_copied(attribute))
-                .map(|(attribute, values)| crate::assembly::RenderColumn {
-                    name: attribute.name.clone(),
-                    ty: attribute.ty,
-                    values,
-                })
-                .collect();
+            let indexed: Vec<crate::assembly::RenderColumn<'_>> =
+                crate::band_copied_columns(&args.schema)
+                    .map(|(at, attribute)| crate::assembly::RenderColumn {
+                        name: attribute.name.clone(),
+                        ty: attribute.ty,
+                        values: &attributes_by_entity[at],
+                    })
+                    .collect();
             let job = crate::assembly::Assembly {
                 view_dir: &view_dir,
                 view: &view.view_id,

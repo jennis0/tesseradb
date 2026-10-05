@@ -1332,14 +1332,20 @@ paths:
         one for the whole set: no tile, cell or group has a floor or a cap. `N` is `total`, the
         set's exact size. The reference set is sampled the same way at its own cut, and `lift`
         is taken from the scaled counts. Where `N` is at most `sample`, every item is counted
-        and the counts are exact. Without `range`, the edges are drawn as above from the values
-        of the items of the visible set below its own cut, every item this principal may see in
-        `view` whatever `filters`, `reference` and any region say, so they too stay put as the
-        filters or the viewport change; a value outside that sample's span is counted in `rest`.
-        The sample is drawn from inside the principal's visible set, so an item it may not see is
-        never counted, never moves `N` and never moves an edge. The table head's `sample` says
-        how the table was counted. A larger `sample` gives counts nearer the exact ones, at the
-        cost of reading more items.
+        and the counts are exact. Every item is also counted, exactly, wherever the sample would
+        read no less: where the cut is above 2^58, `sample` being more than about one item in 64
+        of the set, and where the set's items are so few of the view's rows that testing the
+        view's rows below the cut against the set costs as much as reading the set's own values.
+        The server decides the second from counts it holds before reading anything. Without
+        `range`, the edges are drawn as above from the values of the visible set, every item this
+        principal may see in `view` whatever `filters`, `reference` and any region say, counted
+        by the same rule: its items below its own cut where it is sampled, and every item where
+        it is not. They stay put as the filters or the viewport change, and a value outside a
+        sample's span is counted in `rest`. The edges can come from the visible set's sample
+        where the set itself is counted exactly. The sample is drawn from inside the principal's
+        visible set, so an item it may not see is never counted, never moves `N` and never moves
+        an edge. The table head's `sample` says how the table was counted. A larger `sample`
+        gives counts nearer the exact ones, at the cost of reading more items.
 
         A histogram's table is always one page, of its bins, `rest` and `none`, whatever
         `page_rows` and `serve.aggregate_page_bytes` say, so its edges and counts are drawn
@@ -5475,12 +5481,12 @@ components:
         sample:
           type: object
           additionalProperties: false
-          required: [sampled, items]
           description: Present exactly when the grouping has `bins` with `sample`.
+          required: [sampled, items, edges_sampled]
           properties:
             sampled:
               type: boolean
-              description: Whether any count is scaled from a sample; `false` where the set, and the reference set if any, held no more items than `sample` and every item was counted.
+              description: Whether any count is scaled from a sample; `false` where every item of the set, and of the reference set if any, was counted, because each held no more items than `sample` or the sample would have read no less (see **Sampled bins**).
             items:
               type: integer
               minimum: 0
@@ -5489,6 +5495,9 @@ components:
               type: integer
               minimum: 0
               description: The items of the reference set counted. Present exactly when the request carries `reference`.
+            edges_sampled:
+              type: boolean
+              description: Whether the default edges were drawn from the visible set's sample. It can be `true` where `sampled` is `false`, the set being counted exactly and the larger visible set sampled; `false` where the grouping gives a `range`.
 
     ItemRequest:
       type: object

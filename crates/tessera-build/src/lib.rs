@@ -2135,13 +2135,22 @@ pub(crate) fn band_copied(attribute: &crate::config::Attribute) -> bool {
     )
 }
 
-/// The columns the identity bands copy beside the render columns, in declared order.
-fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+/// The columns the identity bands copy beside the render columns, in declared order, each with its
+/// position in the declaration.
+pub(crate) fn band_copied_columns(
+    schema: &crate::config::Schema,
+) -> impl Iterator<Item = (usize, &crate::config::Attribute)> {
     schema
         .attributes
         .iter()
-        .filter(|a| band_copied(a))
-        .map(|a| (a.name.clone(), a.ty))
+        .enumerate()
+        .filter(|(_, a)| band_copied(a))
+}
+
+/// The columns the identity bands copy beside the render columns, in declared order.
+fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+    band_copied_columns(schema)
+        .map(|(_, a)| (a.name.clone(), a.ty))
         .collect()
 }
 

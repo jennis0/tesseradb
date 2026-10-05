@@ -98,17 +98,16 @@ impl SegmentCursor {
                 self.seg_id, copy.ty
             )));
         }
-        let span = self.bands.band(crate::bands::FIRST_BAND);
-        let rows = &self.bands.rows()[span.clone()];
-        let at = rows.partition_point(|&r| (r as usize) < row);
-        if rows.get(at).is_none_or(|&r| r as usize != row) {
+        let Some(e) = u32::try_from(row)
+            .ok()
+            .and_then(|row| self.bands.entry_of_row(crate::bands::FIRST_BAND, row))
+        else {
             return Err(malformed(format!(
                 "{op}: segment '{}' has no band entry for row {}, whose identity puts it in a \
                  band; run `tessera verify --deep` on the bundle and rebuild it",
                 self.seg_id, row
             )));
-        }
-        let e = span.start + at;
+        };
         Ok(if copy.holds(e) {
             copy.value_at(e)
         } else {
