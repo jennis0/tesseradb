@@ -1282,17 +1282,20 @@ paths:
         with no value. A bin holds the values from its `lower` edge up to but not including its
         `upper` edge, and the last bin also holds its `upper` edge, so a filter's `range` with
         `gte` the lower edge and `lt` the upper matches exactly a bin's items, and `lte` for the
-        last. On an integer or timestamp field the edges are whole numbers, worked out exactly,
-        and every value is compared with them exactly.
+        last. On a timestamp field, and on an integer field unless a bound of `range` is
+        fractional, the edges are whole numbers, worked out exactly, and every value is compared
+        with them exactly.
 
         With `range` on a float field, where `lower` and `upper` are multiples of one readable
         width (below) `n` widths apart, the edges are those multiples; otherwise edge `i` of `n`
         is `lower × (1 − i/n) + upper × (i/n)` in `float64`, the last exactly `upper`. Where those
         edges do not rise, as in a range a few `float64` values wide, the table has one bin from
-        `lower` to `upper`. On an integer or timestamp field the bounds are whole numbers, and
-        edge `i` is `lower + floor((upper − lower) × i / n)`; an edge past what the edge column
-        holds is served as that column's smallest or largest value, and the bins are counted as
-        served. `rest` holds the values outside the range.
+        `lower` to `upper`. On an integer field where either bound is fractional, the bins are cut
+        as on a float field, the values compared with them as `float64`, and the edges served as
+        `float64`. On a timestamp field the bounds are whole microseconds, and on an integer field
+        with whole bounds, as there, edge `i` is `lower + floor((upper − lower) × i / n)`; an edge
+        past what the edge column holds is served as that column's smallest or largest value, and
+        the bins are counted as served. `rest` holds the values outside the range.
 
         Without `range`, the edges are readable values around the smallest and largest value
         among every item this principal may see in `view`, whatever `filters`, `reference` and any
@@ -1322,32 +1325,37 @@ paths:
         field binned by months or years, whose bins differ in width, and where an edge was served
         as its column's smallest or largest value.
 
-        The edges are fixed at the table's first page and carried in the cursor.
+        A histogram's table is always one page, of its bins, `rest` and `none`, whatever
+        `page_rows` and `serve.aggregate_page_bytes` say, so its edges and counts are drawn
+        together, under one state of the corpus. Beside groupings that page, the tables still
+        come in order, and the histogram's page counts as one of the response's `pages`.
 
-        **Columns**, in this order, each only where stated: `group` (`dictionary<int8, utf8>`,
-        with `by`): `listed`, `rest` or `none`. `key` (with `by`): a field's vocabulary key as
+        **Columns**, in this order, each only where stated: `group` (`dictionary<int8, utf8>`, with
+        `by`): `listed`, `rest` or `none`. `key` (with `by`): a field's vocabulary key as
         `dictionary<int32, utf8>`, or an artifact's `tessera_id` as `uint64`; null on `rest` and
         `none`. `title` (`dictionary<int32, utf8>`, with `by` on a field): the value's title as
         `/v1/categories` gives it, null where it has none. `lower` and `upper` (with `bins`, in
-        place of `key` and `title`): the bin's edges, `int64` on a signed integer field, `uint64`
-        on an unsigned one, `float64` on a float field and `timestamp[us, UTC]` on a timestamp
-        field; null on `rest` and `none`. `cell` (`uint64`, with `cells`): the first `2·depth` bits of the item's 64-bit Morton position, right-aligned; at a depth of
-        16 or less it is the tile code the viewport uses at that zoom. `count` (`uint64`): the
-        items of the set in the row's group and cell. `reference_count` (`uint64`, with
-        `reference`): the same over the reference set. `lift` (`float64`, with `reference`):
-        `(count / total) / (reference_count / reference_total)`, null where `reference_count` or
-        `total` is 0.
+        place of `key` and `title`): the bin's edges, `int64` on a signed integer field, `uint64` on
+        an unsigned one, `float64` on a float field and on an integer field whose `range` has a
+        fractional bound, and `timestamp[us, UTC]` on a timestamp field; null on `rest` and `none`.
+        `cell` (`uint64`, with `cells`): the first `2·depth` bits of the item's 64-bit Morton
+        position, right-aligned; at a depth of 16 or less it is the tile code the viewport uses at
+        that zoom. `count` (`uint64`): the items of the set in the row's group and cell.
+        `reference_count` (`uint64`, with `reference`): the same over the reference set. `lift`
+        (`float64`, with `reference`): `(count / total) / (reference_count / reference_total)`, null
+        where `reference_count` or `total` is 0.
 
-        **Reading a whole result.** A response carries at most `pages` pages and runs within its
-        own byte budget, `serve.aggregate_response_bytes` (16 MiB by default), and the bulk
-        reads' time budget. A page holds at most `page_rows` rows and `serve.aggregate_page_bytes`
-        (4 MiB by default); one can hold fewer rows than `page_rows` before the table ends. Both
-        budgets count the Arrow column bytes of the rows; the framing, the schema, the dictionary
-        messages and buffer padding add a little to each page on the wire. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every
-        page composes the visible set again, so a deletion or suppression accepted during a read
-        applies from the next page, and the pages of one table can count different states of a
-        changing corpus. Which groups a table lists under `top` is fixed at its first page and
-        carried in the cursor.
+        **Reading a whole result.** A response carries at most `pages` pages and runs within its own
+        byte budget, `serve.aggregate_response_bytes` (16 MiB by default), and the bulk reads' time
+        budget. A page, a histogram's apart, holds at most `page_rows` rows and
+        `serve.aggregate_page_bytes` (4 MiB by default); one can hold fewer rows than `page_rows`
+        before the table ends. Both budgets count the Arrow column bytes of the rows; the framing,
+        the schema, the dictionary messages and buffer padding add a little to each page on the
+        wire. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every page
+        composes the visible set again, so a deletion or suppression accepted during a read applies
+        from the next page, and the pages of one table can count different states of a changing
+        corpus. Which groups a table lists under `top` is fixed at its first page and carried in the
+        cursor. A histogram is one page, so no edge is carried.
 
         **Cursor.** As `POST /v1/items`' cursor, bound also to this route and to the request's
         `filters`, `reference` and `groupings`: a cursor sent with any of them changed is `422`.
@@ -1419,7 +1427,7 @@ paths:
             - an unknown key, a missing `view` or `groupings`, no grouping, or more than `selection.max_aggregate_groupings`;
             - `by` naming neither or both of `field` and `layer`, or carrying neither or both of `top` and `values` or `artifacts`, or `values` on a layer, or `artifacts` or `level` on a field;
             - `top` of 0 or above `selection.max_aggregate_top`; `values` or `artifacts` empty or longer than `selection.max_aggregate_named`; an `artifacts` entry that is not a `tessera_id`;
-            - `bins` beside `top` or `values`, or on a layer; `range` without `bins`; `bins` of 0 or above `selection.max_aggregate_bins`; a `range` whose lower bound is not below its upper, or that is not two numbers; a fractional bound on an integer or timestamp field; `bins` with `cells`;
+            - `bins` beside `top` or `values`, or on a layer; `range` without `bins`; `bins` of 0 or above `selection.max_aggregate_bins`; a `range` whose lower bound is not below its upper, or that is not two numbers; a fractional bound on a timestamp field; `bins` with `cells`;
             - `bins` on a field that is not a number or timestamp, each kind with its own detail; on a `bool`, with a detail saying it has no bins; and on a number or timestamp field declared with neither `index` nor `render`, with a detail saying to name a number or timestamp field declared with `index` or `render`;
             - an unknown field, and a field that is not a category, each with its own detail; a category declared with none of `index`, `render` or a `derived` vocabulary, with a detail saying to declare it with `index` or `render`;
             - a layer outside the list `/v1/meta` publishes to this principal; no `level` on a layer with several, a `level` the layer does not hold, or one given on a layer with a single level;
@@ -5391,7 +5399,7 @@ components:
               maxItems: 2
               items:
                 $ref: "#/components/schemas/NumericComparand"
-              description: "`[lower, upper]`, with `lower` below `upper`, in the field's own units: on an integer field, whole numbers; on a timestamp field, whole microseconds since the Unix epoch. Absent is readable edges around the values every item this principal may see in `view` holds."
+              description: "`[lower, upper]`, with `lower` below `upper`, in the field's own units: on a timestamp field, whole microseconds since the Unix epoch. On an integer field, a fractional bound has the bins cut, and served, in `float64`. Absent is readable edges around the values every item this principal may see in `view` holds."
         - type: object
           additionalProperties: false
           required: [layer, top]

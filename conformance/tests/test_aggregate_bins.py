@@ -20,7 +20,10 @@ The oracle derives, from the contract's rules alone and in exact arithmetic:
 - **Counts**: each item of the set placed by comparing its value with the served edges, a bin
   holding its lower edge and not its upper, the last bin both; NaN in `rest`; no value in `none`.
 - **Edge types**: `int64` on a signed integer field, `uint64` on an unsigned one, `float64` on a
-  float field and `timestamp[us, UTC]` on a timestamp field.
+  float field and on an integer field whose range has a fractional bound, and `timestamp[us, UTC]`
+  on a timestamp field.
+- **One page**: a histogram arrives as one page whatever `page_rows` says, alone or between
+  groupings that page.
 
 Each table is compared row for row, with every principal, under no filter and two filters, against
 a reference of the whole visible set. The edges must be the same under every filter.
@@ -266,8 +269,13 @@ def _readable(k: float, m: float, e: int) -> float:
     return k * m * 10.0**e if e >= 0 else k * m / 10.0 ** (-e)
 
 
+def _fractional(bound) -> bool:
+    return isinstance(bound, float) and not bound.is_integer()
+
+
 def range_edges(column: str, lower, upper, n: int) -> list:
-    if column in TIMESTAMPS or column in INTEGERS:
+    """A range's edges; on an integer field with a fractional bound, cut as on a float field."""
+    if column in TIMESTAMPS or (column in INTEGERS and not (_fractional(lower) or _fractional(upper))):
         lower, upper = int(lower), int(upper)
         return [lower + (upper - lower) * i // n for i in range(n + 1)]
     lower, upper = float(lower), float(upper)
@@ -321,34 +329,41 @@ def expected(column: str, edges: list, items: list[int], reference: list[int]):
 # ---------------------------------------------------------------------------------------------
 
 
+def edge_type(by: dict) -> pa.DataType:
+    """The type a histogram's edges are served as, by the field and its range."""
+    if by["field"] in INTEGERS and any(_fractional(b) for b in by.get("range", [])):
+        return pa.float64()
+    return EDGE_TYPES[by["field"]]
+
+
+def table_rows(batches: list, want_type: pa.DataType) -> list[tuple]:
+    rows = []
+    for records in batches:
+        batch = ipc.open_stream(io.BytesIO(records)).read_next_batch()
+        columns = {}
+        for name in batch.schema.names:
+            column = batch.column(name)
+            if name in ("lower", "upper"):
+                assert column.type == want_type, (name, column.type)
+            if pa.types.is_timestamp(column.type):
+                column = column.cast(pa.int64())
+            columns[name] = column.to_pylist()
+        assert "key" not in columns and "title" not in columns
+        rows += list(zip(columns["group"], columns["lower"], columns["upper"],
+                         columns["count"], columns["reference_count"]))
+    return rows
+
+
 def read_table(server, token: str, body: dict) -> tuple[dict, list[tuple]]:
-    edge_type = EDGE_TYPES[body["groupings"][0]["by"]["field"]]
-    head = None
-    rows: list[tuple] = []
-    body = dict(body)
-    for _ in range(1000):
-        resp = server.aggregate(token, **body)
-        assert resp.status_code == 200, resp.text
-        decoded = split_aggregate_frames(resp.content)
-        for table_head, pages in decoded.tables:
-            head = head or table_head
-            for records, _end in pages:
-                batch = ipc.open_stream(io.BytesIO(records)).read_next_batch()
-                columns = {}
-                for name in batch.schema.names:
-                    column = batch.column(name)
-                    if name in ("lower", "upper"):
-                        assert column.type == edge_type, (name, column.type)
-                    if pa.types.is_timestamp(column.type):
-                        column = column.cast(pa.int64())
-                    columns[name] = column.to_pylist()
-                assert "key" not in columns and "title" not in columns
-                rows += list(zip(columns["group"], columns["lower"], columns["upper"],
-                                 columns["count"], columns["reference_count"]))
-        if decoded.trailer["next"] is None:
-            return {k: v for k, v in head.items() if k not in ("grouping", "resumed")}, rows
-        body["cursor"] = decoded.trailer["next"]
-    raise AssertionError("a read that never ends")
+    """A request of one histogram, which is answered in one page whatever `page_rows` says."""
+    resp = server.aggregate(token, **body)
+    assert resp.status_code == 200, resp.text
+    decoded = split_aggregate_frames(resp.content)
+    assert decoded.trailer["next"] is None, "a histogram is one response"
+    [(head, pages)] = decoded.tables
+    assert len(pages) == 1, f"a histogram is one page, not {len(pages)}"
+    rows = table_rows([records for records, _end in pages], edge_type(body["groupings"][0]["by"]))
+    return {k: v for k, v in head.items() if k not in ("grouping", "resumed")}, rows
 
 
 # ---------------------------------------------------------------------------------------------
@@ -396,6 +411,8 @@ RANGES = [
     ("rank", -100, 100, 8),
     # 201 values in 8 bins: widths of 25 and 26.
     ("rank", -100, 101, 8),
+    # A fractional bound: the bins are cut, and served, in float64.
+    ("rank", -100.5, 99, 7),
     ("weight", 0, 200.5, 3),
     # Multiples of 0.25 that the values, sixteenths, sit on.
     ("weight", 0.25, 2.25, 8),
@@ -435,6 +452,39 @@ def test_a_value_past_2_to_the_53_is_placed_by_its_exact_bin(deployment):
     assert rows[1][3] >= 1, "the value's own bin holds it"
 
 
+def test_a_histogram_is_one_page_between_groupings_that_page(deployment):
+    """A grouping by cells pages two rows at a time on either side of two histograms: each
+    histogram still arrives as one page, the same table it is read alone, and the response's
+    `pages` counts it as one."""
+    token = deployment.server.authorise(list(fx.PRINCIPALS["two"]))["token"]
+    histograms = [{"by": {"field": "rank", "bins": 37}}, {"by": {"field": "seen", "bins": 10}}]
+    cells = {"cells": {"depth": 6}}
+    groupings = [cells, histograms[0], cells, histograms[1]]
+    alone = [
+        read_table(deployment.server, token, {"view": fx.WORLD, "reference": {}, "groupings": [h]})
+        for h in histograms
+    ]
+    body = {"view": fx.WORLD, "reference": {}, "groupings": groupings, "page_rows": 2, "pages": 3}
+    pages_of: dict[int, list] = {}
+    heads: dict[int, dict] = {}
+    for _ in range(10_000):
+        resp = deployment.server.aggregate(token, **body)
+        assert resp.status_code == 200, resp.text
+        decoded = split_aggregate_frames(resp.content)
+        assert sum(len(pages) for _head, pages in decoded.tables) <= 3
+        for head, pages in decoded.tables:
+            heads.setdefault(head["grouping"], head)
+            pages_of.setdefault(head["grouping"], []).extend(records for records, _end in pages)
+        if decoded.trailer["next"] is None:
+            break
+        body["cursor"] = decoded.trailer["next"]
+    assert len(pages_of[0]) > 1 and len(pages_of[2]) > 1, "the cells page"
+    for g, h, (head, rows) in ((1, histograms[0], alone[0]), (3, histograms[1], alone[1])):
+        assert len(pages_of[g]) == 1, f"grouping {g} in {len(pages_of[g])} pages"
+        served = {k: v for k, v in heads[g].items() if k not in ("grouping", "resumed")}
+        assert (served, table_rows(pages_of[g], edge_type(h["by"]))) == (head, rows)
+
+
 def test_a_grouping_by_bins_that_cannot_be_served_is_refused(deployment):
     token = deployment.server.authorise(list(fx.PRINCIPALS["everyone"]))["token"]
     for by in (
@@ -443,7 +493,6 @@ def test_a_grouping_by_bins_that_cannot_be_served_is_refused(deployment):
         {"field": "score", "bins": 4, "range": [3, 3]},
         {"field": "score", "bins": 4, "range": [3, 1]},
         {"field": "seen", "bins": 4, "range": [0.5, 9]},
-        {"field": "rank", "bins": 4, "range": [0, 9.5]},
         {"field": "nothing", "bins": 4},
     ):
         resp = deployment.server.aggregate(token, view=fx.WORLD, groupings=[{"by": by}])

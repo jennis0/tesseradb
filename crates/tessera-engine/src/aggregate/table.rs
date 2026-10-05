@@ -376,9 +376,7 @@ impl Plan {
                     Outer::Field(field) => {
                         (field.groups(cx, position.chosen.as_deref(), timings)?, None)
                     }
-                    Outer::Bins(bins) => {
-                        (bins.groups(cx, position.chosen.as_deref(), timings)?, None)
-                    }
+                    Outer::Bins(bins) => (bins.groups(cx, timings)?, None),
                     Outer::Layer(layer) => {
                         let (groups, served) =
                             layer.groups(cx, position.chosen.as_deref(), timings)?;
@@ -474,7 +472,12 @@ impl Plan {
         };
         let total: usize = runs.iter().map(Run::len).sum();
         let fits = max_page_bytes.saturating_sub(dictionary).saturating_mul(8) / row_bits;
-        let most = total.min(limit).min(fits.max(1));
+        // A histogram is one page, whatever the page's limits: its edges are drawn once, and no
+        // more bins than `max_aggregate_bins` can be asked for.
+        let most = match self.outer {
+            Outer::Bins(_) => total,
+            _ => total.min(limit).min(fits.max(1)),
+        };
         // A long run goes out as its own page, sent as the columns it was counted into.
         let (page, rest) = split_runs(
             runs,

@@ -12,8 +12,8 @@ use crate::error::{EngineError, Result};
 pub(super) struct Position {
     /// The table in progress, or the number of tables once every one is sent.
     pub(super) table: u32,
-    /// The groups the table in progress lists, fixed at its first page: codes, bin edges, or
-    /// artifacts' entities. `None` before the table's first page.
+    /// The groups the table in progress lists, fixed at its first page: codes, or artifacts'
+    /// entities. `None` before the table's first page.
     pub(super) chosen: Option<Vec<u64>>,
     /// The next group to send, as a position in `chosen` followed by the rest and none.
     pub(super) group: u32,

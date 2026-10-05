@@ -1025,13 +1025,14 @@ class Viewer:
           [key, ...]}`, or by the artifacts of one level of a layer, `{"layer": name, "level": k,
           "top": n}` or `{"layer": name, "level": k, "artifacts": [tessera_id, ...]}`, or counts
           a number or timestamp field in bins, `{"field": name, "bins": n}`. With `"range":
-          [lower, upper]` the bins cut that range into `n` equal widths, an integer's in whole
-          numbers and a timestamp's in whole microseconds since the Unix epoch; without it the
-          edges are readable values around the values of every item this reader may see in the
-          view, whatever the filters, in at most `n` bins. Sending a first answer's first `lower`
-          and last `upper` back as the range, with the number of bins it returned, gives the same
-          edges without the pass that finds them, except for a timestamp binned by months or
-          years. `"cells"` divides the set, or each group, into the view's cells at a depth
+          [lower, upper]` the bins cut that range into `n` equal widths: an integer's in whole
+          numbers, or in floats where either bound is fractional, and a timestamp's in whole
+          microseconds since the Unix epoch; without it the edges are readable values around the
+          values of every item this reader may see in the view, whatever the filters, in at most
+          `n` bins. Sending a first answer's first `lower` and last `upper` back as the range,
+          with the number of bins it returned, gives the same edges without the pass that finds
+          them, except for a timestamp binned by months or years. A histogram's table is always
+          one page. `"cells"` divides the set, or each group, into the view's cells at a depth
           from 0 to 32, `{"depth": d}`, optionally only those meeting a box, `{"depth": d,
           "area": [x0, y0, x1, y1]}`; a grouping by bins takes no cells.
         - `filters`: the set counted, as `Selection.filter` takes an expression. Without it, every
@@ -1042,14 +1043,15 @@ class Viewer:
 
         A table's columns are, where they apply: `group` (`listed`, `rest` or `none`), `key` (a
         category's key or an artifact's `tessera_id`), `title`, `lower` and `upper` (a bin's edges:
-        an integer on an integer field, exactly, a float on a float field and a UTC timestamp on a
-        timestamp field; a bin holds `lower` up to but not including `upper`, and the last bin also
-        holds its `upper`), `cell` (the cell's Morton prefix), `count`, `reference_count` and
-        `lift`. Its schema metadata `tessera.head` is the table's figures as JSON: `grouping`,
-        `total` (the items in the set), `reference_total` with a reference, and `groups` (the groups
-        in the set before the cut to `top` or the names given) with `"by"`. `tessera.recomposed` is
-        `"true"` where a page counted a different state of the database from the page before it, and
-        `tessera.region` is the server's region verdict where a filter had a `region` leaf.
+        an integer on an integer field, exactly, a float on a float field or on an integer field
+        whose range has a fractional bound and a UTC timestamp on a timestamp field; a bin holds
+        `lower` up to but not including `upper`, and the last bin also holds its `upper`), `cell`
+        (the cell's Morton prefix), `count`, `reference_count` and `lift`. Its schema metadata
+        `tessera.head` is the table's figures as JSON: `grouping`, `total` (the items in the set),
+        `reference_total` with a reference, and `groups` (the groups in the set before the cut to
+        `top` or the names given) with `"by"`. `tessera.recomposed` is `"true"` where a page counted
+        a different state of the database from the page before it, and `tessera.region` is the
+        server's region verdict where a filter had a `region` leaf.
 
         The server answers a page at a time, and each response ends with a cursor for the next.
         This requests responses until none is left and joins each table's pages. A refusal of the

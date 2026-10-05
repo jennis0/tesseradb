@@ -5,7 +5,7 @@
 //! That default is taken over the whole visible set and never over the filtered set, the
 //! reference or a region, so the edges hold still while a filter or the viewport changes. It is
 //! taken inside the visible set, so an item the viewer may not see moves no edge. The edges are
-//! fixed at the table's first page and carried in the cursor.
+//! drawn once: a histogram is served in one page, whatever the page's limits.
 //!
 //! A bin holds the values from its lower edge up to but not including its upper edge, and the
 //! last bin also holds its upper edge. `rest` counts the items whose value lies in no bin: outside
@@ -13,7 +13,8 @@
 //!
 //! An integer or timestamp field's edges are whole numbers, worked out and compared in `i128`, so
 //! every value is placed exactly and a `range` filter between two edges matches exactly the bin's
-//! items. A float field's edges are `f64`.
+//! items. A float field's edges are `f64`, and so are an integer field's where a bound of its
+//! range is fractional.
 //!
 //! Readable edges are multiples of 1, 2, 2.5 or 5 times a power of ten, whole numbers on an
 //! integer field. On a timestamp field they fall on whole seconds, minutes, hours, days, weeks
@@ -108,25 +109,6 @@ impl Edges {
             Edges::Ints(edges) => Edge::Int(edges[at]),
         }
     }
-
-    /// The edges as the cursor carries them: a float's bits, or an integer's low 64 bits, which
-    /// hold any edge of an `int64` or `uint64` column.
-    fn encode(&self) -> Vec<u64> {
-        match self {
-            Edges::Floats(edges) => edges.iter().map(|e| e.to_bits()).collect(),
-            Edges::Ints(edges) => edges.iter().map(|&e| e as u64).collect(),
-        }
-    }
-
-    fn decode(kind: Kind, carried: &[u64]) -> Edges {
-        match kind {
-            Kind::Float => Edges::Floats(carried.iter().map(|&e| f64::from_bits(e)).collect()),
-            Kind::Unsigned => Edges::Ints(carried.iter().map(|&e| i128::from(e)).collect()),
-            Kind::Signed | Kind::Timestamp => {
-                Edges::Ints(carried.iter().map(|&e| i128::from(e as i64)).collect())
-            }
-        }
-    }
 }
 
 impl Bins {
@@ -170,25 +152,23 @@ impl Bins {
         if !held && !drawn {
             return Err(not_binnable());
         }
-        let range = match (kind, range) {
-            (Kind::Float, range) => range,
-            (_, None) => None,
-            (_, Some((lower, upper))) => {
-                let whole = |bound: Scalar| match bound {
-                    Scalar::Int(i) => Some(Scalar::Int(i)),
-                    Scalar::Float(f) if f.fract() == 0.0 => Some(Scalar::Int(f as i128)),
-                    Scalar::Float(_) => None,
-                };
-                let fractional = || {
-                    EngineError::AggregateRefused(AggregateRefused::FractionalBound(
-                        column.to_string(),
+        let whole = |bound: Scalar| match bound {
+            Scalar::Int(i) => Some(Scalar::Int(i)),
+            Scalar::Float(f) if f.fract() == 0.0 => Some(Scalar::Int(f as i128)),
+            Scalar::Float(_) => None,
+        };
+        let (kind, range) = match (kind, range) {
+            (Kind::Float, range) | (_, range @ None) => (kind, range),
+            (kind, Some((lower, upper))) => match (whole(lower), whole(upper)) {
+                (Some(lower), Some(upper)) => (kind, Some((lower, upper))),
+                (_, _) if kind == Kind::Timestamp => {
+                    return Err(EngineError::AggregateRefused(
+                        AggregateRefused::FractionalTime(column.to_string()),
                     ))
-                };
-                Some((
-                    whole(lower).ok_or_else(fractional)?,
-                    whole(upper).ok_or_else(fractional)?,
-                ))
-            }
+                }
+                // An integer field binned by a fractional bound is cut, and served, in float.
+                (_, _) => (Kind::Float, Some((lower, upper))),
+            },
         };
         Ok(Bins {
             column: column.to_string(),
@@ -209,19 +189,12 @@ impl Bins {
         !self.held
     }
 
-    /// The table's groups under `cx`: its bins, with the edges `chosen` carries where the table
-    /// has begun, then `rest` and `none`, each with its counts in the set and the reference.
-    pub(super) fn groups(
-        &self,
-        cx: &Cx<'_>,
-        chosen: Option<&[u64]>,
-        timings: &mut AggregateTimings,
-    ) -> Result<Groups> {
+    /// The table's groups under `cx`: its bins, then `rest` and `none`, each with its counts in
+    /// the set and the reference. A histogram is served in one page, so its edges are drawn here
+    /// and never carried to another.
+    pub(super) fn groups(&self, cx: &Cx<'_>, timings: &mut AggregateTimings) -> Result<Groups> {
         let counting = std::time::Instant::now();
-        let edges = match chosen {
-            Some(chosen) => Edges::decode(self.kind, chosen),
-            None => self.edges(cx)?,
-        };
+        let edges = self.edges(cx)?;
         let set = self.counts(cx, &cx.sets.set, &edges)?;
         let reference = match &cx.sets.reference {
             Some(reference) => Some(self.counts(cx, reference, &edges)?),
@@ -238,7 +211,7 @@ impl Bins {
             }
         };
         Ok(Groups {
-            chosen: edges.encode(),
+            chosen: Vec::new(),
             sizes: of(Some(&set))
                 .into_iter()
                 .zip(of(reference.as_ref()))
@@ -459,7 +432,7 @@ struct Counts {
 }
 
 /// A value as a pass compares it: `i128` for an integer or a timestamp, which holds every stored
-/// integer exactly, and `f64` for a float.
+/// integer exactly, and `f64` for a float or for an integer binned by a fractional bound.
 trait Num: Copy + PartialOrd + Send + Sync {
     fn int(x: i128) -> Self;
     fn float(x: f64) -> Self;
@@ -498,8 +471,8 @@ trait Num: Copy + PartialOrd + Send + Sync {
     }
 }
 
-// A field's kind decides which of the two a pass uses, so an integer never reaches `float` and a
-// float never reaches `int`.
+// A table's kind decides which of the two a pass uses, so a float never reaches `int`; an integer
+// reaches `float` only where a fractional bound has its bins cut in float.
 impl Num for i128 {
     fn int(x: i128) -> Self {
         x

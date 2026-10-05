@@ -614,11 +614,21 @@ fn edges_of(rows: &[Row]) -> Vec<Val> {
         .collect()
 }
 
+fn same(a: Val, b: Val) -> bool {
+    match (a, b) {
+        (Val::I(a), Val::F(b)) | (Val::F(b), Val::I(a)) => a as f64 == b,
+        (a, b) => a == b,
+    }
+}
+
 fn less(a: Val, b: Val) -> bool {
     match (a, b) {
         (Val::F(a), Val::F(b)) => a < b,
         (Val::I(a), Val::I(b)) => a < b,
         (Val::T(a), Val::T(b)) => a < b,
+        // An integer against a float edge, where a fractional bound has the bins cut in float.
+        (Val::I(a), Val::F(b)) => (a as f64) < b,
+        (Val::F(a), Val::I(b)) => a < b as f64,
         _ => panic!("a value and an edge of different kinds"),
     }
 }
@@ -634,7 +644,7 @@ fn expected(edges: &[Val], items: &[&Item], reference: Option<&[&Item]>, column:
         (0..bins)
             .find(|&b| {
                 !less(v, edges[b])
-                    && (less(v, edges[b + 1]) || (b + 1 == bins && v == edges[b + 1]))
+                    && (less(v, edges[b + 1]) || (b + 1 == bins && same(v, edges[b + 1])))
             })
             .unwrap_or(bins)
     };
@@ -873,88 +883,106 @@ fn a_range_cuts_equal_bins_and_counts_what_is_outside_as_rest() {
     let edges = edges_of(&rows);
     assert_eq!(edges, [-10, -4, 3, 10].map(Val::I));
     assert_eq!(rows, expected(&edges, &items, None, "rank"));
+
+    // A fractional bound has an integer field's bins cut, and served, in float.
+    let groupings = [bins("rank", 4, Some((Scalar::Float(-0.5), Scalar::Int(1))))];
+    let (_, rows) = table(&fx.engine, &session, request(&groupings));
+    let edges = edges_of(&rows);
+    assert_eq!(edges, [-0.5, -0.125, 0.25, 0.625, 1.0].map(Val::F));
+    assert_eq!(rows, expected(&edges, &items, None, "rank"));
 }
 
-/// **A table's pages joined are the table read whole**, and **its edges are held across pages**
-/// while the item holding the largest value is suppressed between them; a fresh request then
-/// draws narrower edges. **A cursor opens only for the request it was issued for.**
+/// The pages of each grouping of one request, read through every response, `between` called after
+/// each response with how many there have been.
+fn read_paged(
+    engine: &Engine,
+    session: &Session,
+    req: AggregateRequest<'_>,
+    between: &mut dyn FnMut(usize),
+) -> Vec<Vec<Vec<Row>>> {
+    let mut tables: Vec<Vec<Vec<Row>>> = vec![Vec::new(); req.groupings.len()];
+    let mut cursor: Option<String> = None;
+    let mut responses = 0;
+    loop {
+        let this = AggregateRequest {
+            cursor: cursor.as_deref(),
+            ..req.clone()
+        };
+        let (collect, trailer) = respond(engine, session, this).unwrap();
+        for (g, batch, _) in &collect.pages {
+            // A grouping by cells alone has no `group`; only its pages are counted.
+            let grouped = batch.column_by_name("group").is_some();
+            tables[*g as usize].push(if grouped { rows_of(batch) } else { Vec::new() });
+        }
+        responses += 1;
+        between(responses);
+        match trailer.next {
+            None => return tables,
+            Some(next) => cursor = Some(next),
+        }
+    }
+}
+
+/// **A histogram is one page, whatever `page_rows` says**, beside a grouping by cells that pages
+/// through, and it is the table read alone. **Its edges are drawn when its page is**, so a
+/// suppression accepted while an earlier table pages leaves no edge bounding the suppressed value.
+/// **A cursor opens only for the request it was issued for.**
 #[test]
-fn pages_join_and_hold_their_edges() {
+fn a_histogram_is_one_page_beside_groupings_that_page() {
     let fx = fixture();
     let engine = &fx.engine;
     let session = fx.session(true);
-    let groupings = [bins("rank", 20, None), bins("seen", 6, None)];
-    let whole: Vec<(TableHead, Vec<Row>)> = (0..2)
-        .map(|g| table(engine, &session, request(&groupings[g..g + 1])))
-        .collect();
+    let cells = Grouping {
+        by: None,
+        cells: Some(10),
+        area: None,
+    };
+    let groupings = [bins("rank", 20, None), cells.clone(), bins("seen", 6, None)];
+    let alone = |g: usize| table(engine, &session, request(&groupings[g..g + 1])).1;
+    let (rank, seen) = (alone(0), alone(2));
+    assert!(rank.len() > 7 && seen.len() > 1);
     for page_rows in [1u32, 2, 7] {
         let mut req = request(&groupings);
         req.page_rows = Some(page_rows);
         req.pages = Some(1);
-        let mut joined: Vec<Vec<Row>> = vec![Vec::new(), Vec::new()];
-        let mut cursor: Option<String> = None;
-        loop {
-            let this = AggregateRequest {
-                cursor: cursor.as_deref(),
-                ..req.clone()
-            };
-            let (collect, trailer) = respond(engine, &session, this).unwrap();
-            for (g, batch, _) in &collect.pages {
-                joined[*g as usize].extend(rows_of(batch));
-            }
-            match trailer.next {
-                None => break,
-                Some(next) => cursor = Some(next),
-            }
-        }
-        assert_eq!(joined[0], whole[0].1, "{page_rows} rows a page");
-        assert_eq!(joined[1], whole[1].1, "{page_rows} rows a page");
+        let tables = read_paged(engine, &session, req, &mut |_| {});
+        assert_eq!(tables[0], vec![rank.clone()], "{page_rows} rows a page");
+        assert_eq!(tables[2], vec![seen.clone()], "{page_rows} rows a page");
+        assert!(tables[1].len() > 1, "the cells page through");
     }
 
-    let groupings = [bins("rank", 20, None)];
+    // The largest rank is suppressed while the cells page; the histogram after them is drawn
+    // without it.
+    let groupings = [cells, bins("rank", 20, None)];
     let mut req = request(&groupings);
     req.page_rows = Some(2);
     req.pages = Some(1);
-    let (first, trailer) = respond(engine, &session, req.clone()).unwrap();
-    let first = rows_of(&first.pages[0].1);
-    let before = edges_of(&whole[0].1);
     let largest = item_of_id(engine, 8)
         .unwrap()
         .expect("the item holding the largest rank");
-    engine.accept_change(largest, ChangeOp::Suppress).unwrap();
-    let fresh = edges_of(&table(engine, &session, request(&groupings)).1);
-    assert_ne!(
-        fresh, before,
-        "the largest value no longer reaches the edges"
-    );
-
-    let token = trailer.next.clone().unwrap();
-    req.cursor = Some(&token);
-    req.pages = None;
-    let (rest, trailer) = respond(engine, &session, req).unwrap();
-    assert!(trailer.recomposed && rest.tables[0].resumed);
-    let resumed: Vec<Row> = first
-        .into_iter()
-        .chain(rest.pages.iter().flat_map(|(_, b, _)| rows_of(b)))
-        .collect();
-    assert_eq!(
-        edges_of(&resumed),
-        before,
-        "the resumed table keeps its edges"
-    );
+    let tables = read_paged(engine, &session, req.clone(), &mut |responses| {
+        if responses == 1 {
+            engine.accept_change(largest, ChangeOp::Suppress).unwrap();
+        }
+    });
     let shown: Vec<&Item> = fx.visible(true, &|i| i.source != 8).collect();
-    assert_eq!(
-        resumed[2..],
-        expected(&before, &shown, None, "rank")[2..],
-        "the pages after the suppression count without it"
+    let after = &tables[1][0];
+    let edges = edges_of(after);
+    assert_ne!(
+        edges,
+        edges_of(&rank),
+        "the suppressed value reaches no edge"
     );
+    assert_eq!(after, &expected(&edges, &shown, None, "rank"));
 
+    let (_, trailer) = respond(engine, &session, req).unwrap();
+    let token = trailer.next.expect("the cells page on");
     for other in [
         bins("rank", 19, None),
         bins("rank", 20, Some((Scalar::Int(0), Scalar::Int(10)))),
         bins("score", 20, None),
     ] {
-        let others = [other];
+        let others = [groupings[0].clone(), other];
         let mut refused = request(&others);
         refused.cursor = Some(&token);
         assert!(
@@ -963,7 +991,7 @@ fn pages_join_and_hold_their_edges() {
                 Err(EngineError::CursorRefused)
             ),
             "{:?}",
-            others[0]
+            others[1]
         );
     }
 }
@@ -1018,12 +1046,10 @@ fn a_grouping_by_bins_that_cannot_be_served_is_refused() {
         refused(bins("flag", 4, None)),
         AggregateRefused::BinsOnBool("flag".to_string())
     );
-    for column in ["seen", "rank"] {
-        assert_eq!(
-            refused(bins(column, 4, Some((Scalar::Float(0.5), Scalar::Int(10))))),
-            AggregateRefused::FractionalBound(column.to_string())
-        );
-    }
+    assert_eq!(
+        refused(bins("seen", 4, Some((Scalar::Float(0.5), Scalar::Int(10))))),
+        AggregateRefused::FractionalTime("seen".to_string())
+    );
 }
 
 /// **Items ingested and flushed are binned**, and a value past the old largest widens the

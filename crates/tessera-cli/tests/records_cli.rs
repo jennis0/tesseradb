@@ -822,8 +822,8 @@ fn the_format_is_named_or_refused_before_any_request() {
 }
 
 /// `tessera aggregate` writes the one table its grouping asks for, as the same read over HTTP
-/// gives it, for a histogram and a breakdown, carried across responses from its cursor; and
-/// arguments that are not JSON send nothing.
+/// gives it: a histogram, which is one page however small the pages asked for, and a breakdown,
+/// carried across responses from its cursor; and arguments that are not JSON send nothing.
 #[test]
 fn an_aggregate_read_is_the_table_over_http() {
     let served = serve();
@@ -832,14 +832,16 @@ fn an_aggregate_read_is_the_table_over_http() {
             r#"{"by": {"field": "seen_at", "bins": 12}}"#,
             json!({ "by": { "field": "seen_at", "bins": 12 } }),
             "histogram.arrows",
+            false,
         ),
         (
             r#"{"by": {"field": "bay", "top": 3}}"#,
             json!({ "by": { "field": "bay", "top": 3 } }),
             "breakdown.parquet",
+            true,
         ),
     ];
-    for (grouping, parsed, name) in reads {
+    for (grouping, parsed, name, pages) in reads {
         let body = json!({
             "view": "s0",
             "groupings": [parsed],
@@ -849,7 +851,7 @@ fn an_aggregate_read_is_the_table_over_http() {
             "pages": 1,
         });
         let (whole, responses) = served.http_read("aggregate", &body);
-        assert!(responses > 1, "{name}: the read spans several responses, {} rows", rows(&whole));
+        assert_eq!(responses > 1, pages, "{name}: {responses} responses, {} rows", rows(&whole));
         let out = served.dir.path().join(name);
         let done = served.run(&[
             "aggregate",

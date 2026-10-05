@@ -379,8 +379,8 @@ fn in_callers_words(e: EngineError, asked: &[GroupingReq], sent: &[Grouping]) ->
         EngineError::AggregateRefused(AggregateRefused::BinsOnBool(column)) => {
             (column, AggregateRefused::BinsOnBool)
         }
-        EngineError::AggregateRefused(AggregateRefused::FractionalBound(column)) => {
-            (column, AggregateRefused::FractionalBound)
+        EngineError::AggregateRefused(AggregateRefused::FractionalTime(column)) => {
+            (column, AggregateRefused::FractionalTime)
         }
         _ => return e,
     };

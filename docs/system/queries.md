@@ -501,7 +501,8 @@ field's values in the visible set before the counts; a client that sends the fir
 edges back as the range, with the number of bins it returned, gets the same edges without that pass,
 except for a timestamp binned by months or years. An integer's or a timestamp's edges are whole
 numbers worked out exactly, served as integers, so a value past 2^53 is placed as exactly as a small
-one. A grouping by bins has no cell level.
+one; a range with a fractional bound has an integer field's bins cut and served as floats. A
+grouping by bins has no cell level.
 
 A cell at depth `d` is the first `2d` bits of an item's 64-bit Morton position. At depths up to 16
 a cell is a tile of the map at that zoom, and its count is the tile's matched count; deeper cells
@@ -517,12 +518,13 @@ set's items, or by one pass over the set's rows reading each row's position.
 The response is framed as a bulk read is, with a table head before each table's first page, and a
 table larger than a page continues through a cursor. Every page composes the visible set again, so a
 deletion or suppression accepted during a read applies from the next page. The groups a table lists
-under `top`, and the edges of its bins, are fixed at its first page and carried in the cursor, so a
-table read across a changing corpus keeps its groups, and a response's trailer says when a page
-counted a different state of the corpus from the page before it. Every request runs under the
-viewport's admission, and each response is held to a byte budget of its own, 16 MiB by default in
-pages of 4 MiB, so what one request holds is bounded however large its table; a larger table
-continues through the cursor. A request stops its work when the client disconnects.
+under `top` are fixed at its first page and carried in the cursor, so a table read across a changing
+corpus keeps its groups, and a response's trailer says when a page counted a different state of the
+corpus from the page before it. A histogram is always one page, whatever the page size, so its edges
+and counts are drawn together and no edge outlives the state it was drawn from. Every request runs
+under the viewport's admission, and each response is held to a byte budget of its own, 16 MiB by
+default in pages of 4 MiB, so what one request holds is bounded however large its table; a larger
+table continues through the cursor. A request stops its work when the client disconnects.
 
 **Not built yet:** minimum, maximum and mean of number and timestamp fields; bins of a number
 or timestamp field within cells; breakdowns of keyword fields and of integer fields by value; a

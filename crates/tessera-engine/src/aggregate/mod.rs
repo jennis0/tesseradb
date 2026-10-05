@@ -7,7 +7,8 @@
 //! [`Engine::aggregate_stream`] serves one response: a head, then each grouping's table in order,
 //! each table a head and pages of rows, then a trailer. Every page composes the visible set again
 //! from the latest generation, so a deletion or suppression accepted during a read applies from
-//! the next page. Which groups a table lists is fixed at its first page and carried in the cursor.
+//! the next page. Which groups a table lists under `top` is fixed at its first page and carried in
+//! the cursor; a histogram is served in one page.
 //!
 //! Rows carry vocabulary keys, bin edges, artifacts' `tessera_id`s and cell prefixes. A code, an ordinal or an
 //! entity id reaches the caller only inside a sealed cursor.
@@ -224,8 +225,8 @@ pub enum AggregateRefused {
     ZeroBins,
     /// A range whose lower bound is not below its upper bound.
     EmptyRange,
-    /// A fractional bound on an integer or timestamp field's range.
-    FractionalBound(String),
+    /// A fractional bound on a timestamp field's range.
+    FractionalTime(String),
     /// A histogram with a cell level.
     BinsWithCells,
     DepthPast32(u8),
@@ -283,10 +284,10 @@ impl std::fmt::Display for AggregateRefused {
                 "field '{field}' is a bool, which has no bins; count true and false with a filter \
                  on each"
             ),
-            AggregateRefused::FractionalBound(field) => write!(
+            AggregateRefused::FractionalTime(field) => write!(
                 f,
-                "field '{field}' holds integers or whole microseconds, so its range is whole; \
-                 give integers"
+                "field '{field}' holds timestamps, so its range is whole microseconds; give \
+                 integers"
             ),
             AggregateRefused::BinsWithCells => write!(
                 f,
