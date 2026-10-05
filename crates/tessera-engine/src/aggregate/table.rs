@@ -99,6 +99,8 @@ pub(super) struct Groups {
     pub(super) titles: Option<Vec<Option<String>>>,
     /// The groups with an item in the set, before the cut.
     pub(super) distinct: u64,
+    /// On a histogram asked for with a sample size, how it was counted.
+    pub(super) sample: Option<super::TableSample>,
 }
 
 /// A listed group's key as a row carries it.
@@ -279,7 +281,8 @@ impl Plan {
                 column,
                 bins,
                 range,
-            }) => Outer::Bins(Bins::of(generation, column, *bins, *range)?),
+                sample,
+            }) => Outer::Bins(Bins::of(generation, column, *bins, *range, *sample)?),
             Some(By::Layer { layer, level, pick }) => Outer::Layer(Layer::of(
                 engine, session, generation, view, layer, *level, pick,
             )?),
@@ -392,6 +395,7 @@ impl Plan {
             reference_total: cx.sets.reference.as_ref().map(|r| r.size()),
             groups: (!matches!(self.outer, Outer::None)).then_some(groups.distinct),
             resumed: position.chosen.is_some(),
+            sample: groups.sample,
         };
         let limit = page_rows as usize;
         let switches = &cx.engine.switches;
@@ -1196,6 +1200,7 @@ impl Groups {
             keys: Vec::new(),
             titles: None,
             distinct: 1,
+            sample: None,
         }
     }
 }

@@ -171,7 +171,7 @@ fn cross(cx: &Cx<'_>, rows: &Bitmap) -> Result<Bitmap> {
 }
 
 /// The entities of `rows`, on the engine's pool.
-fn crossing(engine: &Engine, open: &OpenView<'_>, rows: &Bitmap) -> Result<Bitmap> {
+pub(super) fn crossing(engine: &Engine, open: &OpenView<'_>, rows: &Bitmap) -> Result<Bitmap> {
     let row_space = &open.served.data.row_space;
     engine
         .pool

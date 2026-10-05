@@ -331,6 +331,7 @@ impl Layer {
                 keys,
                 titles: None,
                 distinct: counts.iter().filter(|&&n| n > 0).count() as u64,
+                sample: None,
             },
             served,
         ))

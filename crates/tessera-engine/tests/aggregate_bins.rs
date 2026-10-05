@@ -38,6 +38,9 @@ use tessera_spatial::shape::{ShapeF64, Space};
 
 const N: u64 = 3_000;
 
+/// The first source id of an item a test ingests.
+const INGESTED: u64 = 1_000_000;
+
 /// `score` is drawn and indexed, `weight` and `seen` indexed alone, `rank` and `when` drawn alone.
 /// `flag` is an indexed bool, which has no bins.
 const SCHEMA: &str = r#"
@@ -494,6 +497,7 @@ fn bins(column: &str, n: u32, range: Option<(Scalar, Scalar)>) -> Grouping {
             column: column.to_string(),
             bins: n,
             range,
+            sample: None,
         }),
         cells: None,
         area: None,
@@ -1050,6 +1054,241 @@ fn a_grouping_by_bins_that_cannot_be_served_is_refused() {
         refused(bins("seen", 4, Some((Scalar::Float(0.5), Scalar::Int(10))))),
         AggregateRefused::FractionalTime("seen".to_string())
     );
+    assert_eq!(
+        refused(sampled("score", 4, None, 0)),
+        AggregateRefused::ZeroSample
+    );
+}
+
+// ---- sampled histograms ---------------------------------------------------------------------
+
+fn sampled(column: &str, n: u32, range: Option<(Scalar, Scalar)>, sample: u64) -> Grouping {
+    let mut grouping = bins(column, n, range);
+    if let Some(By::Bins { sample: s, .. }) = &mut grouping.by {
+        *s = Some(sample);
+    }
+    grouping
+}
+
+/// The cut a set of `n` items is sampled below with sample size `s`, as the contract states it.
+fn cut_of(s: u64, n: u64) -> Option<u64> {
+    (n > s).then(|| ((u128::from(s) << 64) / u128::from(n)) as u64)
+}
+
+/// Each item's `tessera_id`, from the entity its unique `id` names.
+fn identities(fx: &Fx) -> HashMap<u64, u64> {
+    fx.items
+        .iter()
+        .map(|item| {
+            // An ingested item holds the `id` of its key.
+            let entity = match item.source.checked_sub(INGESTED) {
+                Some(i) => item_of_key(&fx.engine, &format!("binned-{i}")),
+                None => item_of_id(&fx.engine, item.source).unwrap(),
+            }
+            .expect("every item holds its id");
+            (item.source, test_key().forward(0, entity).unwrap().raw())
+        })
+        .collect()
+}
+
+/// The items of `items` the oracle samples at sample size `s`, and the factor nothing: the cut is
+/// taken over the set's size.
+fn sample_of<'a>(items: &[&'a Item], s: u64, ids: &HashMap<u64, u64>) -> Vec<&'a Item> {
+    match cut_of(s, items.len() as u64) {
+        None => items.to_vec(),
+        Some(cut) => items
+            .iter()
+            .copied()
+            .filter(|item| ids[&item.source] < cut)
+            .collect(),
+    }
+}
+
+/// `rows`' counts scaled from a sample of `taken` items to a set of `n`, to the nearest whole
+/// number with a half rounded up, as the contract states it.
+fn scaled(mut rows: Vec<Row>, n: u64, taken: u64, reference: Option<(u64, u64)>) -> Vec<Row> {
+    let scale = |c: u64, n: u64, taken: u64| match taken {
+        0 => 0,
+        t => ((u128::from(c) * u128::from(n) * 2 + u128::from(t)) / (2 * u128::from(t))) as u64,
+    };
+    for row in &mut rows {
+        row.count = scale(row.count, n, taken);
+        if let (Some(r), Some((rn, rt))) = (row.reference.as_mut(), reference) {
+            *r = scale(*r, rn, rt);
+        }
+    }
+    rows
+}
+
+/// **A sampled histogram counts exactly the set's items below one cut and scales them**, read
+/// from the bands or by scanning, on every route a field's values are read by: a drawn column, an
+/// indexed one copied in the bands, and one both drawn and indexed. With a range the edges are
+/// fixed, so every count is checked against the oracle's; without one the edges are drawn from the
+/// visible set's sample, cover every value in it, and hold still under a filter.
+#[test]
+fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
+    let fx = fixture();
+    let ids = identities(&fx);
+    let area = [100.0, 200.0, 600.0, 750.0];
+    for broad in [true, false] {
+        let session = fx.session(broad);
+        let all: Vec<&Item> = fx.visible(broad, &|_| true).collect();
+        // 30 is below the widest band and is read from the bands; 400 is wider and is scanned.
+        for s in [30, 400] {
+            for column in COLUMNS {
+                let mut held: Option<Vec<Val>> = None;
+                let filters: [(&str, Option<FilterExpr>, Keep); 3] = [
+                    ("none", None, &|_| true),
+                    ("kind", Some(fx.kind_is("b")), &|i| i.kind == "b"),
+                    (
+                        "region",
+                        Some(bbox(area[0], area[1], area[2], area[3])),
+                        &|i| in_box(i, area),
+                    ),
+                ];
+                for (name, filter, keep) in filters {
+                    let what = format!("{column}, broad {broad}, sample {s}, filter {name}");
+                    let items: Vec<&Item> = fx.visible(broad, keep).collect();
+                    let sample = sample_of(&items, s, &ids);
+                    let reference = sample_of(&all, s, &ids);
+
+                    // Default edges, from the visible set's sample.
+                    let groupings = [sampled(column, 12, None, s)];
+                    let mut req = request(&groupings);
+                    req.filter = filter.clone();
+                    req.reference = Some(Reference::Visible);
+                    let (head, rows) = table(&fx.engine, &session, req);
+                    let edges = edges_of(&rows);
+                    for item in &reference {
+                        if let Some(v) = item.value(column).filter(|v| match v {
+                            Val::F(f) => f.is_finite(),
+                            _ => true,
+                        }) {
+                            assert!(
+                                !less(v, edges[0]) && !less(edges[edges.len() - 1], v),
+                                "{what}: {v:?} outside {edges:?}"
+                            );
+                        }
+                    }
+                    match &held {
+                        None => held = Some(edges.clone()),
+                        Some(held) => assert_eq!(held, &edges, "{what}: the edges moved"),
+                    }
+                    let n = items.len() as u64;
+                    let v = all.len() as u64;
+                    let want = scaled(
+                        expected(&edges, &sample, Some(&reference), column),
+                        n,
+                        sample.len() as u64,
+                        Some((v, reference.len() as u64)),
+                    );
+                    assert_eq!(rows, want, "{what}");
+                    assert_eq!(head.total, n, "{what}");
+                    assert_eq!(
+                        head.sample,
+                        Some(tessera_engine::TableSample {
+                            sampled: n > s || v > s,
+                            items: sample.len() as u64,
+                            reference_items: Some(reference.len() as u64),
+                        }),
+                        "{what}"
+                    );
+
+                    // A range.
+                    let range = Some((Scalar::Int(-50), Scalar::Int(150)));
+                    let range = match column {
+                        "seen" | "when" => Some((
+                            Scalar::Int(i128::from(date(2016, 1, 1))),
+                            Scalar::Int(i128::from(date(2026, 1, 1))),
+                        )),
+                        _ => range,
+                    };
+                    let groupings = [sampled(column, 10, range, s)];
+                    let mut req = request(&groupings);
+                    req.filter = filter;
+                    let (_, rows) = table(&fx.engine, &session, req);
+                    let edges = edges_of(&rows);
+                    let want = scaled(
+                        expected(&edges, &sample, None, column),
+                        n,
+                        sample.len() as u64,
+                        None,
+                    );
+                    assert_eq!(rows, want, "{what}, in a range");
+                }
+            }
+        }
+    }
+}
+
+/// **A set no larger than the sample size is counted whole**, and says so; without a sample size
+/// the head says nothing of one.
+#[test]
+fn a_set_within_the_sample_size_is_counted_exactly() {
+    let fx = fixture();
+    let session = fx.session(true);
+    let exact = table(&fx.engine, &session, request(&[bins("rank", 12, None)]));
+    let within = table(
+        &fx.engine,
+        &session,
+        request(&[sampled("rank", 12, None, N)]),
+    );
+    assert_eq!(exact.1, within.1);
+    assert_eq!(exact.0.sample, None);
+    assert_eq!(
+        within.0.sample,
+        Some(tessera_engine::TableSample {
+            sampled: false,
+            items: exact.0.total,
+            reference_items: None,
+        })
+    );
+}
+
+/// **Items the viewer may not see never enter the sample, never change the set's size and never
+/// move a default edge.** The subset viewer's sampled tables are the broad viewer's once every
+/// item the subset viewer may not see is suppressed: the same items, under the same identities.
+/// Some of those items lie below the cut, and they hold every field's smallest and largest value.
+#[test]
+fn invisible_items_never_enter_a_sample() {
+    let fx = fixture();
+    let ids = identities(&fx);
+    let s = 400;
+    let hidden: Vec<&Item> = fx.items.iter().filter(|i| !i.subset).collect();
+    let visible = fx.visible(false, &|_| true).count() as u64;
+    let cut = cut_of(s, visible).unwrap();
+    assert!(
+        hidden.iter().filter(|i| ids[&i.source] < cut).count() > 10,
+        "the fixture hides items below the cut"
+    );
+    // A sample of 30 is read from the bands, one of 400 by scanning.
+    let read = |session: &Session| {
+        [30, s]
+            .into_iter()
+            .flat_map(|s| COLUMNS.iter().map(move |column| (s, column)))
+            .map(|(s, column)| {
+                let groupings = [sampled(column, 12, None, s)];
+                let mut req = request(&groupings);
+                req.filter = Some(fx.kind_is("a"));
+                req.reference = Some(Reference::Visible);
+                table(&fx.engine, session, req)
+            })
+            .collect::<Vec<_>>()
+    };
+    let subset = read(&fx.session(false));
+    assert_ne!(
+        subset,
+        read(&fx.session(true)),
+        "the hidden items change the broad viewer's tables"
+    );
+    for item in &hidden {
+        let entity = item_of_id(&fx.engine, item.source).unwrap().unwrap();
+        fx.engine
+            .accept_change(entity, ChangeOp::Suppress)
+            .expect("the suppression is accepted");
+    }
+    assert_eq!(subset, read(&fx.session(true)));
+    assert_eq!(read(&fx.session(false)), subset);
 }
 
 /// **Items ingested and flushed are binned**, and a value past the old largest widens the
@@ -1063,7 +1302,7 @@ fn a_flushed_ingest_is_binned() {
     let rows: Vec<UnallocatedRow> = (0..30u64)
         .map(|i| {
             let item = Item {
-                source: 1_000_000 + i,
+                source: INGESTED + i,
                 kind: "a",
                 score: (i % 4 != 0).then_some(1_000.0 + i as f64),
                 weight: Some(i as f32),
@@ -1140,4 +1379,23 @@ fn a_flushed_ingest_is_binned() {
     let groupings = [bins("score", 12, None)];
     let edges = edges_of(&table(&fx.engine, &session, request(&groupings)).1);
     assert!(matches!(edges[edges.len() - 1], Val::F(hi) if hi >= 1_029.0));
+
+    // The flushed segment's bands copy its indexed columns, so a sample drawn through them is the
+    // oracle's, the flushed items among it.
+    let ids = identities(&fx);
+    let items: Vec<&Item> = fx.visible(true, &|_| true).collect();
+    for column in COLUMNS {
+        let groupings = [sampled(column, 10, None, 40)];
+        let (head, rows) = table(&fx.engine, &session, request(&groupings));
+        let sample = sample_of(&items, 40, &ids);
+        let edges = edges_of(&rows);
+        let want = scaled(
+            expected(&edges, &sample, None, column),
+            items.len() as u64,
+            sample.len() as u64,
+            None,
+        );
+        assert_eq!(rows, want, "{column}");
+        assert_eq!(head.sample.unwrap().items, sample.len() as u64);
+    }
 }

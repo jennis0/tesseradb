@@ -96,11 +96,13 @@ pub enum By {
     Field { column: String, pick: Pick<String> },
     /// The values of a number or timestamp field, as a resolved column name, counted in at most
     /// `bins` bins of `range`, or with no range in readable bins around the values of the items
-    /// the viewer may see in the view.
+    /// the viewer may see in the view. With `sample`, counted over about that many of the set's
+    /// items and scaled to the set, where the set holds more ([`bins`]'s module doc).
     Bins {
         column: String,
         bins: u32,
         range: Option<(Scalar, Scalar)>,
+        sample: Option<u64>,
     },
     /// The artifacts of one level of a layer. `level` is required on a layer with several levels
     /// and refused on one with a single level.
@@ -157,6 +159,20 @@ pub struct TableHead {
     pub groups: Option<u64>,
     /// Whether the table continues from a cursor.
     pub resumed: bool,
+    /// On a histogram asked for with a sample size, how its counts were taken.
+    pub sample: Option<TableSample>,
+}
+
+/// How a histogram asked for with a sample size was counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableSample {
+    /// Whether the counts are scaled from a sample; `false` where the set held no more items than
+    /// the sample size and every item was counted.
+    pub sampled: bool,
+    /// The items counted in the set: `total` where not sampled.
+    pub items: u64,
+    /// The items counted in the reference set, where one was given.
+    pub reference_items: Option<u64>,
 }
 
 /// Where a response is delivered: the head once, then for each table its head and its pages. A
@@ -223,6 +239,8 @@ pub enum AggregateRefused {
     /// A grouping by bins of a `bool` field.
     BinsOnBool(String),
     ZeroBins,
+    /// A sample size of 0.
+    ZeroSample,
     /// A range whose lower bound is not below its upper bound.
     EmptyRange,
     /// A fractional bound on a timestamp field's range.
@@ -275,6 +293,10 @@ impl std::fmt::Display for AggregateRefused {
                  with index or render"
             ),
             AggregateRefused::ZeroBins => write!(f, "bins is 0; ask for at least one bin"),
+            AggregateRefused::ZeroSample => write!(
+                f,
+                "sample is 0; ask for at least one item, or leave sample out to count every item"
+            ),
             AggregateRefused::EmptyRange => write!(
                 f,
                 "the range is empty or reversed; give [lower, upper] with lower below upper"
@@ -580,8 +602,16 @@ fn refuse_groupings(groupings: &[Grouping], caps: &AggregateCaps) -> Result<()> 
         }
         let (top, named) = match &grouping.by {
             None => continue,
-            Some(By::Bins { bins, range, .. }) => {
+            Some(By::Bins {
+                bins,
+                range,
+                sample,
+                ..
+            }) => {
                 refuse_bins(*bins, range.as_ref(), grouping.cells.is_some(), caps)?;
+                if *sample == Some(0) {
+                    return refused(AggregateRefused::ZeroSample);
+                }
                 continue;
             }
             Some(By::Field { pick, .. }) => match pick {
