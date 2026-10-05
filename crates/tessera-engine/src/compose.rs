@@ -403,6 +403,11 @@ impl EffectiveMask {
         self.minus.is_empty() && self.plus.is_empty() && self.filter.is_none()
     }
 
+    /// The session's row projection this mask was composed over.
+    pub(crate) fn projection(&self) -> &Arc<RowProjection> {
+        &self.base
+    }
+
     /// The three bitmaps composition produced, and whether a filter narrows them.
     // Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
     #[doc(hidden)]

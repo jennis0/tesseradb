@@ -311,6 +311,16 @@ impl ArtifactRows {
     /// can make two memberships overlap, which a label column cannot express, and the level then
     /// serves artifact-major, answering identically.
     pub(super) fn amend_derived(&mut self, added: &[(u32, u32)], row_count: u32) -> bool {
+        self.amend_derived_kept(added, row_count).is_none()
+    }
+
+    /// [`Self::amend_derived`], answering with the pairs the column took where it took them, and
+    /// `None` where the level lost its column.
+    pub(super) fn amend_derived_kept(
+        &mut self,
+        added: &[(u32, u32)],
+        row_count: u32,
+    ) -> Option<Vec<(u32, u32)>> {
         self.derived_over(None, added, row_count)
     }
 
@@ -321,7 +331,7 @@ impl ArtifactRows {
         span: Option<(u32, u32)>,
         added: &[(u32, u32)],
         row_count: u32,
-    ) -> bool {
+    ) -> Option<Vec<(u32, u32)>> {
         // A column-only form has no row form to re-derive from, so the extents take the same delta
         // the column does: widening by `added` is exact where rows are only added ([`TileIndex::amend`]).
         if self.membership.rows_held() {
@@ -330,17 +340,19 @@ impl ArtifactRows {
             Arc::make_mut(&mut self.index).amend(added, self.membership.len() as u32, row_count);
         }
         let Some(column) = &mut self.column else {
-            return false;
+            return Some(Vec::new());
         };
         let took = match span {
-            Some((lo, hi)) => Arc::make_mut(column).rebase(lo, hi, added, row_count),
-            None => Arc::make_mut(column).amend(added, row_count),
+            Some((lo, hi)) => Arc::make_mut(column)
+                .rebase(lo, hi, added, row_count)
+                .then(Vec::new),
+            None => Arc::make_mut(column).amend_kept(added, row_count),
         };
-        if took {
-            return false;
+        if took.is_some() {
+            return took;
         }
         self.lose_column();
-        true
+        None
     }
 
     /// Every artifact's membership rebased over the extent at `start` — what a row-space merge does
@@ -413,7 +425,7 @@ impl ArtifactRows {
     /// [`Self::amend_derived`] for a rebase: the tile index re-derived, the column's labels in
     /// `lo..hi` given up and `added` taken in their place ([`RowColumn::rebase`]).
     pub(super) fn rebase_derived(&mut self, lo: u32, hi: u32, added: &[(u32, u32)], row_count: u32) -> bool {
-        self.derived_over(Some((lo, hi)), added, row_count)
+        self.derived_over(Some((lo, hi)), added, row_count).is_none()
     }
 
     /// The refused amendment's posture, on a form that holds its own bitmaps: the level goes back

@@ -203,6 +203,83 @@ pub struct RowColumn {
     /// labels alone ([`Self::open_labels`]) and on an attribute predicate's, whose labels are a value
     /// column's rather than a stored membership's.
     members: Option<crate::row_members::LevelMembers>,
+    /// **Which base labels this column carries**, unique in the process: a column composed, opened,
+    /// recomposed or claimed for a new form takes a new one, and a copy made to amend in place
+    /// keeps it. Two columns with one identity hold the same base labels up to the growth steps
+    /// one of them has taken further ([`Self::steps`]), so counts taken over one column's base rows
+    /// are brought forward by the steps rather than counted again.
+    identity: u64,
+    /// **The base labels each level-version move added**, in order: what a cached count over the
+    /// base rows takes to follow a growth or a publication without walking the rows again. One
+    /// step per publication of the form this column serves, empty where the move added no base
+    /// label.
+    steps: Vec<GrowthStep>,
+}
+
+/// The base labels one publication added to a column, between two versions of its level.
+#[derive(Debug, Clone)]
+pub struct GrowthStep {
+    pub from: u64,
+    pub to: u64,
+    /// `(row, ordinal)`, every row below the base, none of them a pair the column carried before.
+    pub pairs: Arc<[(u32, u32)]>,
+}
+
+/// A process-unique [`RowColumn::identity`].
+fn next_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How many of an artifact's most extreme rows a pass keeps on each side of its box.
+pub const RESERVE: usize = 8;
+
+/// One artifact's reserve: per side of the box, `x` low, `y` low, `x` high and `y` high, up to
+/// [`RESERVE`] rows as sort keys, most extreme first and [`RESERVE_EMPTY`] past the last. A key is
+/// the coordinate, turned round on the high sides so a smaller key is always more extreme, above
+/// the row, which breaks ties: [`reserve_key`] and [`reserve_row`].
+pub type Reserve = [[u64; RESERVE]; 4];
+
+/// A reserve slot holding no row.
+pub const RESERVE_EMPTY: u64 = u64::MAX;
+
+/// The reserve key of a row at `(x, y)` on `side`.
+#[inline]
+pub fn reserve_key(side: usize, row: u32, (x, y): (u32, u32)) -> u64 {
+    let along = match side {
+        0 => x,
+        1 => y,
+        2 => u32::MAX - x,
+        _ => u32::MAX - y,
+    };
+    (u64::from(along) << 32) | u64::from(row)
+}
+
+/// The coordinate on `side` a reserve key holds.
+#[inline]
+pub fn reserve_value(side: usize, key: u64) -> u32 {
+    let along = (key >> 32) as u32;
+    match side {
+        0 | 1 => along,
+        _ => u32::MAX - along,
+    }
+}
+
+/// The row a reserve key names.
+#[inline]
+pub fn reserve_row(key: u64) -> u32 {
+    key as u32
+}
+
+/// Keep `key` among `side`'s most extreme, if it is.
+#[inline]
+pub fn reserve_offer(side: &mut [u64; RESERVE], key: u64) {
+    if key >= side[RESERVE - 1] {
+        return;
+    }
+    let at = side.partition_point(|&held| held < key);
+    side.copy_within(at..RESERVE - 1, at + 1);
+    side[at] = key;
 }
 
 /// What one pass over a viewer's visible rows folded up, per ordinal: see
@@ -220,23 +297,27 @@ pub struct LevelAccumulation {
     pub sums: Vec<[u64; 2]>,
     /// `[x_min, y_min, x_max, y_max]` over the placed rows.
     pub boxes: Vec<[u32; 4]>,
+    /// Per ordinal, the placed rows at the extremes of its box, where the pass was asked for them.
+    pub reserves: Vec<Reserve>,
 }
 
 impl LevelAccumulation {
-    fn empty(ordinals: usize, geometry: bool) -> Self {
+    fn empty(ordinals: usize, geometry: bool, reserve: bool) -> Self {
         let placed = if geometry { ordinals } else { 0 };
+        let reserved = if geometry && reserve { ordinals } else { 0 };
         LevelAccumulation {
             counts: vec![0; ordinals],
             placed: vec![0; placed],
             sums: vec![[0; 2]; placed],
             boxes: vec![[u32::MAX, u32::MAX, 0, 0]; placed],
+            reserves: vec![[[RESERVE_EMPTY; RESERVE]; 4]; reserved],
         }
     }
 
     /// One visible row labelled `ordinal`, at `position` where a segment places it. An ordinal
     /// past the level is dropped, as [`RowColumn::candidates`] drops it.
     #[inline]
-    fn add(&mut self, ordinal: u32, position: Option<(u32, u32)>) {
+    fn add(&mut self, row: u32, ordinal: u32, position: Option<(u32, u32)>) {
         let i = ordinal as usize;
         let Some(count) = self.counts.get_mut(i) else {
             return;
@@ -254,6 +335,11 @@ impl LevelAccumulation {
             b[1] = b[1].min(y);
             b[2] = b[2].max(x);
             b[3] = b[3].max(y);
+            if let Some(reserve) = self.reserves.get_mut(i) {
+                for (side, held) in reserve.iter_mut().enumerate() {
+                    reserve_offer(held, reserve_key(side, row, (x, y)));
+                }
+            }
         }
     }
 
@@ -273,6 +359,13 @@ impl LevelAccumulation {
             a[1] = a[1].min(b[1]);
             a[2] = a[2].max(b[2]);
             a[3] = a[3].max(b[3]);
+        }
+        for (a, b) in self.reserves.iter_mut().zip(&other.reserves) {
+            for (held, offered) in a.iter_mut().zip(b) {
+                for &key in offered.iter().take_while(|&&key| key != RESERVE_EMPTY) {
+                    reserve_offer(held, key);
+                }
+            }
         }
         self
     }
@@ -754,6 +847,9 @@ impl RowColumn {
             // none. Carrying one here would understate the proportional criterion's denominator.
             added: None,
             members: self.members.clone(),
+            // The tail is above the base, so the base labels are the base column's.
+            identity: self.identity,
+            steps: self.steps.clone(),
         }
     }
 
@@ -778,6 +874,11 @@ impl RowColumn {
     /// executor thread, where it blocks every ingest and every deny, for one entity joining three
     /// artifacts (`2026-09-03-post-flush-artifact-frames.md`).
     pub fn amend(&mut self, pairs: &[(u32, u32)], row_count: u32) -> bool {
+        self.amend_kept(pairs, row_count).is_some()
+    }
+
+    /// [`Self::amend`], answering with the pairs it added, ascending, or `None` where it refused.
+    pub fn amend_kept(&mut self, pairs: &[(u32, u32)], row_count: u32) -> Option<Vec<(u32, u32)>> {
         let label_form = matches!(*self.pack, Pack::Label(_));
         let mut batch: Vec<(u32, u32)> = pairs.to_vec();
         batch.sort_unstable();
@@ -797,7 +898,7 @@ impl RowColumn {
             }
             // `kept` is ascending by row, so a second claim inside the batch is the pair before.
             if label_form && (occupied || kept.last().is_some_and(|(r, _)| *r == row)) {
-                return false;
+                return None;
             }
             kept.push((row, ordinal));
         }
@@ -822,8 +923,73 @@ impl RowColumn {
         if let Some(members) = &mut self.members {
             members.grow(&kept);
         }
-        added.merge(kept);
-        true
+        added.merge(kept.clone());
+        Some(kept)
+    }
+
+    /// Record that the level moved from version `from` to `to`, adding `pairs` — what an amendment
+    /// kept — of which only those below the base are steps' business. Consecutive moves that
+    /// added nothing below the base are held as one.
+    pub fn record_step(&mut self, from: u64, to: u64, pairs: &[(u32, u32)]) {
+        let base_rows = self.base_rows();
+        let below: Vec<(u32, u32)> = pairs
+            .iter()
+            .copied()
+            .filter(|(row, _)| *row < base_rows)
+            .collect();
+        if let Some(last) = self.steps.last_mut() {
+            if below.is_empty() && last.pairs.is_empty() && last.to == from {
+                last.to = to;
+                return;
+            }
+        }
+        self.steps.push(GrowthStep {
+            from,
+            to,
+            pairs: below.into(),
+        });
+    }
+
+    /// The base labels added between level versions `from` and `to`, step by step, or `None` where
+    /// this column's steps do not run from the one to the other. A step that added labels is
+    /// taken whole or not at all; one that added none may be entered or left part of the way.
+    pub fn steps_between(&self, from: u64, to: u64) -> Option<Vec<&GrowthStep>> {
+        let mut at = from;
+        let mut out = Vec::new();
+        for step in &self.steps {
+            if at >= to {
+                break;
+            }
+            if step.to <= at {
+                continue;
+            }
+            if step.from > at {
+                return None;
+            }
+            if step.pairs.is_empty() {
+                at = step.to.min(to);
+                continue;
+            }
+            if step.from != at || step.to > to {
+                return None;
+            }
+            out.push(step);
+            at = step.to;
+        }
+        (at == to).then_some(out)
+    }
+
+    /// See [`Self::identity`]'s field.
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// This column under an identity of its own: for a copy that will be amended apart from the
+    /// column it was copied from.
+    pub fn renewed(mut self) -> Self {
+        self.identity = next_identity();
+        self.steps.clear();
+        self
     }
 
     /// **Give up every label in `lo..hi` and take `pairs` in their place** — what a row-space merge
@@ -1092,13 +1258,29 @@ impl RowColumn {
         places: Option<&[Placement<'_>]>,
         before_chunk: &(dyn Fn() -> bool + Sync),
     ) -> Option<LevelAccumulation> {
-        self.accumulate_in_chunks(visible, places, CHUNK_ROWS, before_chunk)
+        self.accumulate_in_chunks(visible, u32::MAX, places, false, CHUNK_ROWS, before_chunk)
+    }
+
+    /// [`Self::accumulate`] over the rows of `visible` below `below` alone, keeping each artifact's
+    /// [`RESERVE`] most extreme rows per side of its box where `reserve` asks and `places` are
+    /// given.
+    pub fn accumulate_below(
+        &self,
+        visible: &Bitmap,
+        below: u32,
+        places: Option<&[Placement<'_>]>,
+        reserve: bool,
+        before_chunk: &(dyn Fn() -> bool + Sync),
+    ) -> Option<LevelAccumulation> {
+        self.accumulate_in_chunks(visible, below, places, reserve, CHUNK_ROWS, before_chunk)
     }
 
     fn accumulate_in_chunks(
         &self,
         visible: &Bitmap,
+        below: u32,
         places: Option<&[Placement<'_>]>,
+        reserve: bool,
         chunk_rows: u32,
         before_chunk: &(dyn Fn() -> bool + Sync),
     ) -> Option<LevelAccumulation> {
@@ -1106,8 +1288,12 @@ impl RowColumn {
         use std::sync::{Mutex, PoisonError};
 
         let ordinals = self.len();
-        let empty = || LevelAccumulation::empty(ordinals, places.is_some());
-        let (Some(first), Some(last)) = (visible.minimum(), visible.maximum()) else {
+        let empty = || LevelAccumulation::empty(ordinals, places.is_some(), reserve);
+        let last = match below.checked_sub(1) {
+            Some(ceiling) => visible.maximum().map(|last| last.min(ceiling)),
+            None => None,
+        };
+        let (Some(first), Some(last)) = (visible.minimum().filter(|&f| f < below), last) else {
             return Some(empty());
         };
         let places = places.unwrap_or(&[]);
@@ -1119,7 +1305,7 @@ impl RowColumn {
         (u64::from(first) / chunk..u64::from(last) / chunk + 1)
             .into_par_iter()
             .for_each(|c| {
-                let (lo, end) = (c * chunk, (c + 1) * chunk);
+                let (lo, end) = (c * chunk, ((c + 1) * chunk).min(u64::from(below)));
                 let lo = u32::try_from(lo).expect("a chunk starts at or below the mask's last row");
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) || !before_chunk() {
                     stopped.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1135,7 +1321,7 @@ impl RowColumn {
                     for_each_row_in(rows, lo, end, |row| {
                         let position = place(places, row);
                         for (_, ordinal) in added.at(row) {
-                            acc.add(*ordinal, position);
+                            acc.add(row, *ordinal, position);
                         }
                     });
                 }
@@ -1195,7 +1381,7 @@ impl RowColumn {
                         None => (run_end, None),
                     };
                     self.labels_in(row, piece_end, |r, ordinal| {
-                        acc.add(ordinal, here.map(|p| p.position(r)));
+                        acc.add(r, ordinal, here.map(|p| p.position(r)));
                     });
                     row = piece_end;
                 }
@@ -1288,6 +1474,8 @@ impl RowColumn {
             tail: None,
             added: None,
             members: None,
+            identity: next_identity(),
+            steps: Vec::new(),
         }
     }
 
@@ -2093,30 +2281,97 @@ mod tests {
                 // addressed, which carry no label.
                 let mask = sampled_mask(seed, column.row_count() + 70, num, den);
                 assert!(mask.maximum().is_some_and(|last| last >= column.row_count()) || num < den);
-                let mut expected = LevelAccumulation::empty(ordinals, true);
-                for row in mask.iter() {
-                    let position = reference_position(row);
-                    column.for_each_label(row, |ordinal| expected.add(ordinal, position));
+                // Every row, and the rows below a bound inside the column.
+                for below in [u32::MAX, column.row_count() / 2] {
+                    let mut expected = LevelAccumulation::empty(ordinals, true, true);
+                    // Each artifact's placed rows by side, every one of them, to read the reserve
+                    // against.
+                    let mut sides: Vec<[Vec<u64>; 4]> = vec![Default::default(); ordinals];
+                    for row in mask.iter().take_while(|&row| row < below) {
+                        let position = reference_position(row);
+                        column.for_each_label(row, |ordinal| {
+                            expected.add(row, ordinal, position);
+                            if let (Some(at), Some(sides)) = (position, sides.get_mut(ordinal as usize)) {
+                                for (side, keys) in sides.iter_mut().enumerate() {
+                                    keys.push(reserve_key(side, row, at));
+                                }
+                            }
+                        });
+                    }
+                    for (ordinal, sides) in sides.iter_mut().enumerate() {
+                        for (side, keys) in sides.iter_mut().enumerate() {
+                            keys.sort_unstable();
+                            let held: Vec<u64> = expected.reserves[ordinal][side]
+                                .iter()
+                                .copied()
+                                .take_while(|&key| key != RESERVE_EMPTY)
+                                .collect();
+                            assert_eq!(held, keys[..keys.len().min(RESERVE)], "ordinal {ordinal}");
+                        }
+                    }
+                    for chunk in [1u32, 7, 64, 333, CHUNK_ROWS] {
+                        let what = format!("{:?} seed={seed} chunk={chunk} below={below}", column.layout());
+                        let got = column
+                            .accumulate_in_chunks(&mask, below, Some(&places), true, chunk, &|| true)
+                            .unwrap();
+                        assert_eq!(got.counts, expected.counts, "{what}");
+                        assert_eq!(got.placed, expected.placed, "{what}");
+                        assert_eq!(got.sums, expected.sums, "{what}");
+                        assert_eq!(got.boxes, expected.boxes, "{what}");
+                        assert_eq!(got.reserves, expected.reserves, "{what}");
+                        let counts = column
+                            .accumulate_in_chunks(&mask, below, None, false, chunk, &|| true)
+                            .unwrap();
+                        assert_eq!(counts.counts, expected.counts, "{what}");
+                        assert!(counts.placed.is_empty() && counts.sums.is_empty());
+                    }
+                    if below != u32::MAX {
+                        continue;
+                    }
+                    assert!(
+                        num < den
+                            || expected.placed.iter().sum::<u32>()
+                                < expected.counts.iter().sum::<u32>(),
+                        "some visible rows are unplaced, or the placed count is not being tested"
+                    );
                 }
-                for chunk in [1u32, 7, 64, 333, CHUNK_ROWS] {
-                    let what = format!("{:?} seed={seed} chunk={chunk}", column.layout());
-                    let got = column.accumulate_in_chunks(&mask, Some(&places), chunk, &|| true).unwrap();
-                    assert_eq!(got.counts, expected.counts, "{what}");
-                    assert_eq!(got.placed, expected.placed, "{what}");
-                    assert_eq!(got.sums, expected.sums, "{what}");
-                    assert_eq!(got.boxes, expected.boxes, "{what}");
-                    let counts = column.accumulate_in_chunks(&mask, None, chunk, &|| true).unwrap();
-                    assert_eq!(counts.counts, expected.counts, "{what}");
-                    assert!(counts.placed.is_empty() && counts.sums.is_empty());
-                }
-                assert!(
-                    num < den
-                        || expected.placed.iter().sum::<u32>()
-                            < expected.counts.iter().sum::<u32>(),
-                    "some visible rows are unplaced, or the placed count is not being tested"
-                );
             }
         }
+    }
+
+    /// **A column's steps lead from one level version to another only along what it recorded**:
+    /// the base pairs of each move, in order, each taken whole.
+    #[test]
+    fn steps_lead_only_along_what_the_column_recorded() {
+        let membership = rows_of(&[Some(&[0, 1]), Some(&[4]), Some(&[])]);
+        let mut column = composed_over_base(&membership, 8, 12, ServingLayout::RowMajorList)
+            .expect("a list column takes anything");
+        let kept = column.amend_kept(&[(2, 1), (9, 2), (0, 0)], 12).expect("a list column takes it");
+        assert_eq!(kept, vec![(2, 1), (9, 2)], "a pair the column carried is not kept");
+        column.record_step(3, 4, &kept);
+        column.record_step(4, 5, &[]);
+        column.record_step(5, 6, &[]);
+        let kept = column.amend_kept(&[(5, 2)], 12).unwrap();
+        column.record_step(6, 7, &kept);
+
+        let pairs_of = |column: &RowColumn, from: u64, to: u64| -> Option<Vec<(u32, u32)>> {
+            column
+                .steps_between(from, to)
+                .map(|steps| steps.iter().flat_map(|s| s.pairs.iter().copied()).collect())
+        };
+        let pairs = |from, to| pairs_of(&column, from, to);
+        assert_eq!(pairs(3, 7), Some(vec![(2, 1), (5, 2)]), "rows above the base are not steps'");
+        assert_eq!(pairs(4, 7), Some(vec![(5, 2)]));
+        assert_eq!(pairs(5, 7), Some(vec![(5, 2)]), "4 to 6 added nothing, so 5 is inside it");
+        assert_eq!(pairs(3, 5), Some(vec![(2, 1)]));
+        assert_eq!(pairs(7, 7), Some(Vec::new()));
+        assert_eq!(pairs(2, 7), None, "nothing was recorded from 2");
+        assert_eq!(pairs(3, 8), None, "nothing reaches 8");
+        column.record_step(7, 9, &[(1, 2)]);
+        assert_eq!(pairs_of(&column, 8, 9), None, "a step that added labels is taken whole");
+        let renewed = column.clone().renewed();
+        assert_ne!(renewed.identity(), column.identity());
+        assert_eq!(renewed.steps_between(3, 7).map(|s| s.len()), None);
     }
 
     /// **Candidacy is the histogram's non-zero ordinals, over whatever set the two are given.**

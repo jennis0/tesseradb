@@ -269,27 +269,10 @@ pub struct ArtifactProjections {
     scratch: std::path::PathBuf,
 }
 
-/// Whether this layer's derived content is an accumulation over the mask — a centroid or a
-/// bounding box, which are the two [`crate::histogram::MaskedGeometry`] answers. A layer that
-/// declares neither pays nothing for one.
-pub fn derives_accumulated_geometry(declaration: &LayerDeclaration) -> bool {
-    declaration
-        .content
-        .computed
-        .iter()
-        .filter_map(|name| crate::derived::ComputedProperty::parse(name))
-        .any(|p| {
-            matches!(
-                p,
-                crate::derived::ComputedProperty::Centroid | crate::derived::ComputedProperty::Box
-            )
-        })
-}
-
 /// Whether a level of this layer may be served from its column alone — the one place the rule is
 /// stated, so two callers cannot decide it differently and flip the level's form between requests.
 /// A layer that derives a `hull` is excluded: a hull needs one artifact's rows materialised, unlike
-/// the accumulations ([`crate::histogram::MaskedGeometry`]) a column-only level otherwise serves.
+/// the figures ([`crate::figures::Figures`]) a column-only level otherwise serves.
 pub fn serves_column_only(declaration: &LayerDeclaration) -> bool {
     !declaration
         .content
@@ -691,6 +674,20 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .get(&(view.to_string(), layer.to_string(), level))
             .map(|held| Arc::clone(&held.rows))
+    }
+
+    /// The form held for one `(view, layer, level)` and the level version it is at, where one is.
+    pub(crate) fn held_form_at(
+        &self,
+        view: &str,
+        layer: &str,
+        level: u32,
+    ) -> Option<(Arc<ArtifactRows>, u64)> {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(view.to_string(), layer.to_string(), level))
+            .map(|held| (Arc::clone(&held.rows), held.key.level_version))
     }
 
     /// File `held` under `address` unless what is there is later on either term — the segments

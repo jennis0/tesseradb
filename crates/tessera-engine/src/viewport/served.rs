@@ -24,9 +24,9 @@ pub(crate) struct ServedView<'a> {
     pub(crate) segments: Vec<(&'a SegmentData, u32)>,
     /// This view's `deleted ∪ suppressed` in row space.
     pub(crate) denied: &'a croaring::Bitmap,
-    pub(crate) mask_identity: crate::histogram::MaskIdentity,
+    pub(crate) mask_identity: crate::figures::MaskIdentity,
     /// The request's cancellation, which a wait on another request's build observes.
     pub(crate) cancel: Option<crate::CancelToken>,
     /// Whether the request is drawing points, which a masked-count build gives way to.
-    pub(crate) turn: crate::histogram::DrawingTurn,
+    pub(crate) turn: crate::figures::DrawingTurn,
 }

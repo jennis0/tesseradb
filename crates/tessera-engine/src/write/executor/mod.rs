@@ -383,6 +383,7 @@ impl Executor {
 
         // After the swap, so a missing projection after a fold is an ordinary cache miss.
         if rotation.is_some() {
+            self.deps.figures.sweep(next.bundle_identity());
             self.deps.refresh.spawn(next);
         }
 

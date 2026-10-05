@@ -1217,6 +1217,10 @@ pub(crate) struct MaintenanceDeps {
     /// artefact rather than a per-session value, so leaving it to the first request after the flip
     /// is a stall of tens of seconds for whoever arrives first.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The figures, for the two things this thread asks of them: bringing the denied rows' labels
+    /// forward after a deny is acknowledged, and sweeping the cache directory when a compaction
+    /// rotates the bundle identity.
+    pub(crate) figures: Arc<crate::figures::FiguresCache>,
     /// The region decompositions (`crate::region`), pruned of superseded generations at every
     /// geometry swap exactly as the row-projection cache is: a row-space artefact keyed on a
     /// generation is unusable after it, and only retention is left to do.

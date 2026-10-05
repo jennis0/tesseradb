@@ -19,7 +19,7 @@ use crate::cancel::CancelToken;
 use crate::compose::{EffectiveMask, MaskedSet, WholeMask};
 use crate::error::Result;
 use crate::filter::{FilterExpr, RoutedFilter};
-use crate::histogram::MaskedCounts;
+use crate::figures::Figures;
 use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::viewport::ServedView;
@@ -140,15 +140,17 @@ impl Engine {
                 crate::artifacts::serves_column_only(&layer.declaration),
             )
         });
-        let counts = self.masked_counts(
+        let counts = self.figures(
             served,
             name,
             level,
             level_version,
             &rows,
             mask,
-            (geometry && crate::artifacts::derives_accumulated_geometry(&layer.declaration))
-                .then_some(&served.segments[..]),
+            match geometry {
+                true => crate::figures::Geometry::declared(&layer.declaration),
+                false => crate::figures::Geometry::None,
+            },
         )?;
         let contents = match layer.runs.get(level as usize) {
             Some(runs) if !layer.declaration.content.supplied.is_empty() => {
@@ -196,7 +198,7 @@ pub(crate) fn check_level(
 pub(crate) struct ReadLevel {
     pub(crate) level: u32,
     pub(crate) rows: Arc<ArtifactRows>,
-    pub(crate) counts: Option<Arc<MaskedCounts>>,
+    pub(crate) counts: Option<Arc<Figures>>,
     /// Each artifact's visible members matching the filter, on a level served from its column;
     /// set from [`ReadLevel::filtered_counts`].
     pub(crate) filtered: Option<Arc<Vec<u32>>>,

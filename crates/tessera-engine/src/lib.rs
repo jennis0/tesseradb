@@ -35,7 +35,7 @@ pub mod gate;
 mod generation;
 mod geometry;
 mod ingest;
-pub mod histogram;
+pub mod figures;
 pub mod layout;
 pub mod membership_column;
 mod merge;

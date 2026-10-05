@@ -848,7 +848,7 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
     let second = ask(&engine);
     assert_eq!(first, second);
     assert!(
-        engine.masked_count_cache_stats().hits > 0,
+        engine.figures_stats().hits > 0,
         "a second request over the same level must read the held histogram"
     );
 
@@ -952,7 +952,7 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
         "a cache that admits nothing is slower, not wrong"
     );
     assert_eq!(
-        engine.masked_count_cache_stats().entries,
+        engine.figures_stats().entries,
         0,
         "and nothing is held"
     );
@@ -1580,7 +1580,7 @@ fn sessions_with_one_term_set_share_the_counts_and_a_suppression_reaches_the_nex
         Some(ServingLayout::ArtifactMajor),
     );
     fold(&engine);
-    let builds = || engine.masked_count_cache_stats().misses;
+    let builds = || engine.figures_stats().misses;
 
     let first = engine.authorise(&full_coverage_credential()).unwrap();
     let seen = flat_served(&engine, &first);
@@ -1616,7 +1616,7 @@ fn sessions_with_one_term_set_share_the_counts_and_a_suppression_reaches_the_nex
     engine
         .accept_change(fx.member(400), ChangeOp::Suppress)
         .unwrap();
-    let before_rebuild = builds();
+    let before_suppression = builds();
     let corrected = flat_served(&engine, &second);
     let p0 = Some("p0".to_string());
     assert_eq!(
@@ -1625,13 +1625,11 @@ fn sessions_with_one_term_set_share_the_counts_and_a_suppression_reaches_the_nex
         "the request after the suppression is served the corrected count"
     );
     assert_ne!(corrected[&p0].centroid, None);
-    let rebuilt = builds() - before_rebuild;
-    assert!(rebuilt > 0);
     assert_eq!(flat_served(&engine, &first), corrected);
     assert_eq!(
-        builds() - before_rebuild,
-        rebuilt,
-        "and the first session reads the rebuilt entry"
+        builds(),
+        before_suppression,
+        "the suppression is subtracted from the shared counts, which are not built again"
     );
 }
 
@@ -1656,17 +1654,17 @@ fn concurrent_requests_with_one_term_set_wait_for_one_build() {
     engine.hold_next_masked_count_build_for_test();
     let first = ask(std::sync::Arc::clone(&engine));
     wait_until("the held build never started", wait, || {
-        engine.masked_count_cache_stats().misses > 0
+        engine.figures_stats().misses > 0
     });
     let second = ask(std::sync::Arc::clone(&engine));
     wait_until("the second request never waited for the build", wait, || {
-        engine.masked_count_cache_stats().waiters > 0
+        engine.figures_stats().waiters > 0
     });
     engine.release_masked_count_build_for_test();
     let (first, second) = (first.join().unwrap(), second.join().unwrap());
     assert!(!first.is_empty());
     assert_eq!(first, second);
-    let stats = engine.masked_count_cache_stats();
+    let stats = engine.figures_stats();
     assert_eq!(
         stats.misses as usize, stats.entries,
         "every key the two requests read was built once"
@@ -1714,7 +1712,7 @@ fn a_points_request_does_not_wait_for_a_count_build() {
         std::thread::spawn(move || flat_served(&engine, &session))
     };
     wait_until("the held build never started", wait, || {
-        engine.masked_count_cache_stats().misses > 0
+        engine.figures_stats().misses > 0
     });
     let (done, finished) = std::sync::mpsc::channel();
     let pointer = {
@@ -1733,11 +1731,12 @@ fn a_points_request_does_not_wait_for_a_count_build() {
     );
 }
 
-/// **A suppression accepted while a build is in flight is never served that build.** The build
-/// began under the pre-suppression overlay; every request that starts after the acknowledgement
-/// reads a key of its own, so it neither reads the held result nor waits for it.
+/// **A suppression accepted while a build is in flight is subtracted from it for every request that
+/// starts after the acknowledgement.** The build counts the grant's rows whatever the overlay
+/// holds; a request that starts after the suppression waits for it and subtracts the suppressed
+/// row, read at its own start.
 #[test]
-fn a_build_in_flight_at_a_suppression_is_not_served_after_it() {
+fn a_build_in_flight_at_a_suppression_is_corrected_for_it() {
     let fx = fixture();
     let engine = std::sync::Arc::new(published(
         &fx,
@@ -1756,23 +1755,27 @@ fn a_build_in_flight_at_a_suppression_is_not_served_after_it() {
         })
     };
     wait_until("the held build never started", wait, || {
-        engine.masked_count_cache_stats().misses > 0
+        engine.figures_stats().misses > 0
     });
 
     // Source id 400 is a visible member of `p0`.
     engine
         .accept_change(fx.member(400), ChangeOp::Suppress)
         .unwrap();
-    let after = engine.authorise(&full_coverage_credential()).unwrap();
-    let corrected = flat_served(&engine, &after);
-    assert_eq!(
-        engine.masked_count_cache_stats().waiters,
-        0,
-        "the request after the suppression did not wait on the held build"
-    );
+    let corrected = {
+        let engine = std::sync::Arc::clone(&engine);
+        std::thread::spawn(move || {
+            let after = engine.authorise(&full_coverage_credential()).unwrap();
+            flat_served(&engine, &after)
+        })
+    };
+    wait_until("the request after the suppression never waited for the build", wait, || {
+        engine.figures_stats().waiters > 0
+    });
 
     engine.release_masked_count_build_for_test();
     let held = before.join().unwrap();
+    let corrected = corrected.join().unwrap();
     assert_eq!(
         corrected[&p0].masked_count,
         held[&p0].masked_count - 1,
@@ -1884,11 +1887,11 @@ fn a_build_whose_callers_have_gone_stops() {
         })
     };
     wait_until("the build never started", std::time::Duration::from_secs(60), || {
-        engine.masked_count_cache_stats().misses > 0
+        engine.figures_stats().misses > 0
     });
     gone.cancel();
     let answered = finished.recv_timeout(std::time::Duration::from_secs(60));
-    let held = engine.masked_count_cache_stats().entries;
+    let held = engine.figures_stats().entries;
     engine.release_drawing_for_test();
     builder.join().unwrap();
     assert!(drawer.join().unwrap() > 0);

@@ -672,6 +672,11 @@ impl ArtifactRows {
         self.column.as_deref()
     }
 
+    /// [`Self::column`], shared, for a structure that outlives the borrow of this form.
+    pub(crate) fn column_shared(&self) -> Option<&Arc<RowColumn>> {
+        self.column.as_ref()
+    }
+
     /// Candidacy for one viewport, on whichever route this level's layout takes: which artifacts
     /// could have a member this viewer can see inside the viewport. `counts` is this level's
     /// masked-count histogram where the request already built one ([`crate::Engine::masked_counts`]).
@@ -681,7 +686,7 @@ impl ArtifactRows {
     pub fn candidacy(
         &self,
         viewport: &crate::tile_index::Viewport<'_>,
-        counts: Option<&crate::histogram::MaskedCounts>,
+        counts: Option<&crate::figures::Figures>,
     ) -> Candidacy {
         // The column arm answers against `viewport ∩ M_auth`, exact for the masked question too;
         // the indexed arm is a candidate generator and every ordinal it returns still pays a probe.
@@ -1129,7 +1134,7 @@ mod tests {
         // Empties ordinal 4 entirely, so it is in the comparison.
         let mut mask: Bitmap = (0..600u32).filter(|r| r % 4 != 3).collect();
         mask.remove_range(200..250);
-        let counts = crate::histogram::MaskedCounts::new(column.histogram_over(&mask));
+        let counts = crate::figures::Figures::of_counts(column.histogram_over(&mask));
         assert_eq!(counts.get(4), 0, "ordinal 4 has no visible row");
 
         let whole = Bitmap::from_range(0..600);
@@ -1157,7 +1162,7 @@ mod tests {
     fn a_viewport_missing_one_visible_row_does_not_cover_the_mask() {
         let (rows, column) = row_major_level();
         let mask: Bitmap = (0..600u32).collect();
-        let counts = crate::histogram::MaskedCounts::new(column.histogram_over(&mask));
+        let counts = crate::figures::Figures::of_counts(column.histogram_over(&mask));
 
         // Every row but one, and the one left out is the only visible row of ordinal 11 in view.
         let mut almost = Bitmap::from_range(0..600);

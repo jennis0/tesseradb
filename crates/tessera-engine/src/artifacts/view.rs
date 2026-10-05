@@ -14,7 +14,7 @@ use tessera_types::EntityId;
 
 use crate::compose::MaskedSet;
 use crate::containment::ContainmentAnswers;
-use crate::histogram::MaskedCounts;
+use crate::figures::Figures;
 
 use super::*;
 
@@ -142,7 +142,7 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     /// This session's masked counts over the level, where it is served row-major, held per
     /// `(session, layer)` and byte-budgeted. `None` on an artifact-major level, which answers
     /// `|membership ∩ M_auth|` one artifact at a time and has no per-session structure to buy.
-    pub counts: Option<Arc<MaskedCounts>>,
+    pub counts: Option<Arc<Figures>>,
 }
 
 impl<M: MaskedSet> ArtifactView<'_, M> {

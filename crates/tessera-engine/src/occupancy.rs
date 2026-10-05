@@ -777,7 +777,7 @@ fn ln_q32(v: u64) -> u64 {
 /// one principal's θ from another's occupancy.
 ///
 /// Every term is a reason the composed mask or the row space moved, and the set is
-/// [`crate::histogram::MaskIdentity`]'s plus the view and the depth:
+/// [`crate::figures::MaskIdentity`]'s plus the view and the depth:
 ///
 /// - **`token_id`** — the count is inside one principal's mask, and is never shared across
 ///   principals. Never the bearer token, and never reused within a process

@@ -11,7 +11,8 @@ pub use dict::{
 };
 pub use fragment::{
     build_fragment, build_fragment_with_deltas, build_grant_with_deltas, delta_entities,
-    residual_fragment, FragmentCache, FragmentCacheError, FrozenFragment, Grant,
+    residual_fragment, write_private_atomically, FragmentCache, FragmentCacheError, FrozenFragment,
+    Grant,
 };
 pub use label::{index_keys, LabelIndex};
 pub use postings::{
