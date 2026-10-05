@@ -835,6 +835,12 @@ fn an_aggregate_read_is_the_table_over_http() {
             false,
         ),
         (
+            r#"{"by": {"field": "seen_at", "bins": 12, "sample": 5}}"#,
+            json!({ "by": { "field": "seen_at", "bins": 12, "sample": 5 } }),
+            "sampled.arrows",
+            false,
+        ),
+        (
             r#"{"by": {"field": "bay", "top": 3}}"#,
             json!({ "by": { "field": "bay", "top": 3 } }),
             "breakdown.parquet",
@@ -872,6 +878,12 @@ fn an_aggregate_read_is_the_table_over_http() {
         ]);
         assert!(done.status.success(), "{}", done.stderr);
         assert!(done.stderr.contains("\"total\""), "the head is printed: {}", done.stderr);
+        assert_eq!(
+            done.stderr.contains("\"sampled\""),
+            parsed["by"].get("sample").is_some(),
+            "a sampled head says how it was counted: {}",
+            done.stderr
+        );
         assert_eq!(plain(&read_output(&out)), plain(&whole), "{name}");
         let bodies = served.proxy.bodies();
         assert_eq!(bodies.len(), responses);

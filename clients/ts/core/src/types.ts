@@ -1663,12 +1663,18 @@ export type Grouping = {
  * an edge was served as its column's smallest or largest value. At most
  * `meta.selection.maxAggregateBins`; a grouping by bins takes no `cells`.
  *
+ * With `bins` and a `sample`, a set of more than `sample` items is counted over its items whose
+ * `tessera_id` is below one cut, `sample / total` of the identity range, about `sample` of them, and
+ * each count is scaled to the set's `total`. Default edges are then drawn from the visible set's
+ * sample. The table's {@link AggregateTable.sample} says how it was counted. A set of at most
+ * `sample` items is counted exactly.
+ *
  * @category Requests and responses
  */
 export type AggregateBy =
   | {field: string; top: number}
   | {field: string; values: string[]}
-  | {field: string; bins: number; range?: [number | bigint, number | bigint]}
+  | {field: string; bins: number; range?: [number | bigint, number | bigint]; sample?: number}
   | {layer: string; level?: number; top: number}
   | {layer: string; level?: number; artifacts: bigint[]};
 
@@ -1719,8 +1725,24 @@ export type AggregateTable = {
    * grouping has no `by`.
    */
   groups: number | null;
+  /** How a histogram asked for with a `sample` was counted; `null` on any other grouping. */
+  sample: AggregateSample | null;
   /** The rows of every page read, joined in order. */
   rows: Table;
+};
+
+/**
+ * How a histogram asked for with a `sample` was counted.
+ *
+ * @category Requests and responses
+ */
+export type AggregateSample = {
+  /** Whether any count is scaled from a sample; `false` where every item was counted. */
+  sampled: boolean;
+  /** The items of the set counted: `total` where the set was not sampled. */
+  items: number;
+  /** The items of the reference set counted; `null` where the request carried no `reference`. */
+  referenceItems: number | null;
 };
 
 /**

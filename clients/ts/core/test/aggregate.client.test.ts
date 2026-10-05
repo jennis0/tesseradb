@@ -138,9 +138,9 @@ describe('TesseraClient.aggregate', () => {
     const {client} = clientFor(TWO);
     const result = await client.aggregate('tok', REQUEST);
     expect(result.tables.map(({rows, ...head}) => head)).toEqual([
-      {grouping: 0, total: 10, referenceTotal: null, groups: null},
+      {grouping: 0, total: 10, referenceTotal: null, groups: null, sample: null},
       // The figures of the first head, whose page ranked the groups.
-      {grouping: 1, total: 10, referenceTotal: null, groups: 5}
+      {grouping: 1, total: 10, referenceTotal: null, groups: 5, sample: null}
     ]);
     expect(rowsOf(result.tables[0]!.rows)).toEqual([{count: 10n}]);
     expect(rowsOf(result.tables[1]!.rows)).toEqual([
@@ -164,6 +164,15 @@ describe('TesseraClient.aggregate', () => {
     expect(first.tables[1]!.rows.numRows).toBe(2);
     const rest = await client.aggregate('tok', {...REQUEST, cursor: first.next!});
     expect(rest.tables.map((t) => [t.grouping, t.total, t.rows.numRows])).toEqual([[1, 11, 2]]);
+  });
+
+  it('sends a histogram\'s sample size and reads how its table was counted', async () => {
+    const table = new Table({count: u64([7n])});
+    const head = {grouping: 0, total: 900, reference_total: 1000, groups: 1, resumed: false, sample: {sampled: true, items: 96, reference_items: 101}};
+    const {client, sent} = clientFor({'': () => chunked(responseOf([{head, pages: [{table, next: null}]}], null))});
+    const result = await client.aggregate('tok', {view: 's0', reference: {}, groupings: [{by: {field: 'year', bins: 10, sample: 100}}]});
+    expect(sent[0]!.body).toMatchObject({groupings: [{by: {field: 'year', bins: 10, sample: 100}}]});
+    expect(result.tables[0]!.sample).toEqual({sampled: true, items: 96, referenceItems: 101});
   });
 
   it('carries the reference columns and a layer key as they arrive', async () => {

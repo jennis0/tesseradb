@@ -28,7 +28,7 @@ async function setUp(maxAggregateCells = SELECTION.maxAggregateCells, viewport: 
     if (refusal) throw refusal;
     const depth = req.groupings[0]!.cells!.depth;
     return {
-      tables: [{grouping: 0, total: 9, referenceTotal: null, groups: null, rows: tableFromArrays({cell: BigUint64Array.from([mortonOfTile(1, 1, depth)]), count: BigUint64Array.from([9n])})}],
+      tables: [{grouping: 0, total: 9, referenceTotal: null, groups: null, sample: null, rows: tableFromArrays({cell: BigUint64Array.from([mortonOfTile(1, 1, depth)]), count: BigUint64Array.from([9n])})}],
       region: null,
       recomposed: false,
       identityKey: 'ik',

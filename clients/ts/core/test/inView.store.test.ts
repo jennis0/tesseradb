@@ -33,7 +33,7 @@ function narrows(expr: FilterExpr | undefined): boolean {
 function counted(req: AggregateRequest): AggregateResult {
   const total = narrows(req.filters) ? 250 : 1_000;
   return {
-    tables: req.groupings.map((_, grouping) => ({grouping, total, referenceTotal: req.reference === undefined ? null : 1_000, groups: null, rows: new Table()})),
+    tables: req.groupings.map((_, grouping) => ({grouping, total, referenceTotal: req.reference === undefined ? null : 1_000, groups: null, sample: null, rows: new Table()})),
     region: {exact: true, depth: null},
     recomposed: false,
     identityKey: 'ik',
