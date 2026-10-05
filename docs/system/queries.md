@@ -504,6 +504,28 @@ numbers worked out exactly, served as integers, so a value past 2^53 is placed a
 one; a range with a fractional bound has an integer field's bins cut and served as floats. A
 grouping by bins has no cell level.
 
+A grouping by bins can ask for a sample size. Where the set holds more items than that, the counts
+are taken over the set's items whose `tessera_id` lies below one cut, the sample size over the
+set's exact count of the identity range, so about that many items, and each count is scaled by the
+set's count over the items counted, to the nearest whole number. The cut is the same for the whole
+set: no tile, cell or group has a floor or a cap, so a region dense in items is counted in
+proportion to its density. Identities are a keyed permutation, so the items below a cut are a
+uniform sample of the set. The reference is sampled the same way at its own cut, and without a
+range the edges are drawn from the visible set's sample, so they still hold still as the filters
+change. The table head says whether a count was scaled, how many items of the set were counted, and
+of the reference. A set no larger than the sample size is counted exactly.
+
+The items below a cut are read from the identity bands, which hold each segment's rows with the
+smallest identities, a band about half the size of the one before it. Each segment's band copies the
+values of every drawn column and of every indexed number and timestamp column, so a sampled item's
+value is read beside its identity rather than from a column at a scattered row. Each piece of a
+segment is read from the band, testing each entry against the set, or by scanning the set's own
+rows' identities, whichever the band's entry count and the set's row count, both known before
+anything is read, say costs less: a narrow viewer's set is scanned, a broad one's read from the
+band. A sample larger than about one item in 64 is wider than any band and is scanned. Measured on
+the 3.5-billion-item GBIF bundle, a 100,000-item sample of the whole map takes 4 ms from the bands
+where a scan of the identity column takes 18 to 20 seconds.
+
 A cell at depth `d` is the first `2d` bits of an item's 64-bit Morton position. At depths up to 16
 a cell is a tile of the map at that zoom, and its count is the tile's matched count; deeper cells
 divide a tile down to the stored position. A cell level can name an area, a bbox as the viewport

@@ -308,7 +308,12 @@ that does not exist. The artifacts of a layer are listed on the terms the viewpo
 tested against the visible set and never the filtered set, and an item held only by an artifact
 withheld from the viewer counts as `none`, so a withheld artifact cannot show through `rest`. A
 histogram with no range takes its edges from the smallest and largest value among the items the
-viewer may see in the view, so an item the viewer may not see moves no edge. Rows carry vocabulary
+viewer may see in the view, so an item the viewer may not see moves no edge. A sampled histogram
+counts the set's items below one cut on `tessera_id`, taken from the set's composed count, and its
+default edges come from the visible set's items below that set's own cut; the identity bands
+decide only which rows are read, and every entry read is tested against the set before it is
+counted. So an item the viewer may not see is never in a sample, never moves the count the cut is
+taken from, and never moves an edge. Rows carry vocabulary
 keys, bin edges, `tessera_id`s and cell prefixes; the codes and ordinals the engine counts with
 travel only inside the sealed cursor. Where a field keeps a record of which items carry each value,
 a value's count is read from that record over the whole corpus and intersected with the visible set,
