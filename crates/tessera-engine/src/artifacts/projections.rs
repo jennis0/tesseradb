@@ -608,7 +608,8 @@ impl ArtifactProjections {
     ///
     /// The manifest's layout tag is checked against the file's own magic rather than trusted over
     /// it: a mis-described file refuses at the first bytes, landing here as a drop and a
-    /// recomposition rather than a misread column.
+    /// recomposition rather than a misread column. A column is adopted only with the member file
+    /// written beside it, and a recomposition writes both.
     pub fn adopt_columns(
         &self,
         prefix_dir: &std::path::Path,
@@ -641,7 +642,26 @@ impl ArtifactProjections {
                 continue;
             }
             let path = prefix_dir.join(&extent.path);
-            let column = match RowColumn::open(&path, layout) {
+            let members = extents.iter().find(|m| {
+                m.form == tessera_store::manifest::DerivedForm::RowMembers
+                    && m.view == extent.view
+                    && m.layer == extent.layer
+                    && m.level == extent.level
+                    && m.level_version == extent.level_version
+                    && m.incarnation == extent.incarnation
+            });
+            let Some(members) = members else {
+                tracing::error!(
+                    layer = %extent.layer,
+                    level = extent.level,
+                    view = %view,
+                    path = %extent.path,
+                    "ALARM: a row-major column named by the manifest has no member file beside it; \
+                     the level is recomposed on first use"
+                );
+                continue;
+            };
+            let column = match RowColumn::open(&path, &prefix_dir.join(&members.path), layout) {
                 Ok(column) => column,
                 Err(error) => {
                     // A fault rather than a cadence: the manifest names a file the prefix should

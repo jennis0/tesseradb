@@ -729,7 +729,7 @@ fn histogram_shard(
     let budget = (args.histogram_budget_gb * 1e9) as u64;
     let opened = if n == 1 {
         args.n1_row_column.as_ref().map(|path| {
-            let column = RowColumn::open(path, ServingLayout::RowMajorList)
+            let column = RowColumn::open_labels(path, ServingLayout::RowMajorList)
                 .expect("the supplied list column opens");
             assert_eq!(
                 column.row_count(),

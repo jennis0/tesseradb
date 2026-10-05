@@ -767,7 +767,7 @@ impl PersistedPieces<'_> {
                 );
                 return None;
             }
-            let column = match RowColumn::open(&prefix_dir.join(&extent.path), layout) {
+            let column = match RowColumn::open_labels(&prefix_dir.join(&extent.path), layout) {
                 Ok(column) => column,
                 Err(error) => {
                     tracing::warn!(

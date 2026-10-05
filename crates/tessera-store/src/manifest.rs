@@ -1751,6 +1751,9 @@ pub enum DerivedForm {
     RowColumn {
         layout: ServingLayout,
     },
+    /// The members by artifact and the coverings of the [`Self::RowColumn`] with the same
+    /// coordinates ([`crate::row_members`]), written from that column's labels whenever it is.
+    RowMembers,
     /// The rows of one segment. A `seg_id` is never reused, so the file answers for that segment
     /// in every generation that carries it; `row_count` catches a file written for another.
     ShapeRows {
@@ -1778,6 +1781,7 @@ impl DerivedForm {
             DerivedForm::Containment => "containment",
             DerivedForm::TileIndex => "tile-index",
             DerivedForm::RowColumn { .. } => "row-column",
+            DerivedForm::RowMembers => "row-members",
             DerivedForm::ShapeRows { .. } => "shape-rows",
             DerivedForm::ShapeHeld => "shape-held",
             DerivedForm::LevelLabels => "labels",
@@ -2558,6 +2562,7 @@ mod tests {
                 },
                 Some("s0"),
             ),
+            entry(DerivedForm::RowMembers, Some("s0")),
             entry(
                 DerivedForm::ShapeRows {
                     seg_id: "base".to_string(),

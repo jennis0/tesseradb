@@ -1563,8 +1563,9 @@ fn main() -> ExitCode {
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
                              record(s), {} record blob row(s), {} scoped render lane(s), {} \
-                             Morton cell(s), {} band entr(ies), {} band label cop(ies), {} unique \
-                             index entr(ies), {} edited item(s) over {} row(s)",
+                             Morton cell(s), {} band entr(ies), {} band label cop(ies), {} row \
+                             member file(s), {} unique index entr(ies), {} edited item(s) over {} \
+                             row(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
@@ -1574,6 +1575,7 @@ fn main() -> ExitCode {
                             report.cells,
                             report.band_entries,
                             report.band_label_copies,
+                            report.row_member_files,
                             report.unique_entries,
                             report.edited_pairs,
                             report.edited_rows
