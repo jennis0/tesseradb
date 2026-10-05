@@ -74,6 +74,19 @@ describe('aggregates against a live server', () => {
     expect(identityKey).not.toBe('');
   });
 
+  it('counts a timestamp field in bins whose edges stay put under a filter', async (ctx) => {
+    live(ctx);
+    const bins = {by: {field: 'submitted_at', bins: 12}};
+    const all = await client.aggregate(session.token, {view: 's0', groupings: [bins]});
+    const cs = await client.aggregate(session.token, {view: 's0', filters: CS, groupings: [bins]});
+    const edges = (table: Table) => [...table.getChild('lower')!].filter((v) => v !== null);
+    expect(edges(cs.tables[0]!.rows)).toEqual(edges(all.tables[0]!.rows));
+    expect(edges(all.tables[0]!.rows).length).toBeGreaterThan(0);
+    expect(edges(all.tables[0]!.rows).length).toBeLessThanOrEqual(12);
+    // Each item is in one bin, in `rest` or in `none`.
+    expect(sum(cs.tables[0]!.rows)).toBe(BigInt(await matched(CS)));
+  });
+
   it('reads in one call over many small responses what one response carries', async (ctx) => {
     live(ctx);
     const request: AggregateRequest = {view: 's0', reference: {}, groupings: [{by: {field: 'archive', top: 2}, cells: {depth: 3}}, {cells: {depth: 5}}]};

@@ -296,8 +296,8 @@ written into a new Arrow batch, and a request for `zstd` compresses that new bat
 ## Counting by group
 
 `POST /v1/aggregate` counts how the viewer's items are distributed across the values of a
-category field, the artifacts of a layer and the cells of the map, and it answers under the
-properties above. Every page composes the visible set again, and the set and the reference set it
+category field, bins of a number or timestamp field, the artifacts of a layer and the cells of the
+map, and it answers under the properties above. Every page composes the visible set again, and the set and the reference set it
 is compared with are both drawn from it, so every count, total and lift is taken over items the
 viewer may see, and a deletion or suppression applies from the next page.
 
@@ -306,8 +306,10 @@ and is never counted in `rest`. A named value the viewer may not see gets no row
 value that does not exist. The artifacts of a layer are listed on the terms the viewport serves
 them on, tested against the visible set and never the filtered set, and an item held only by an
 artifact withheld from the viewer counts as `none`, so a withheld artifact cannot show through
-`rest`. Rows carry vocabulary keys, `tessera_id`s and cell prefixes; the codes and ordinals the
-engine counts with travel only inside the sealed cursor. Where a field keeps a record of which items
+`rest`. A histogram with no range takes its edges from the smallest and largest value among the items
+the viewer may see in the view, so an item the viewer may not see moves no edge. Rows carry
+vocabulary keys, bin edges, `tessera_id`s and cell prefixes; the codes and ordinals the engine
+counts with travel only inside the sealed cursor. Where a field keeps a record of which items
 carry each value, a value's count is read from that record over the whole corpus and intersected
 with the visible set, which puts this route in the timing row below.
 

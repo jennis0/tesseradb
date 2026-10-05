@@ -224,9 +224,11 @@ the items the selection counts.
 | TypeScript | `client.aggregate(token, request)` | every response read through the cursor, one Arrow table per grouping with its head's figures, whether a page counted a changed corpus, and the region verdict |
 | TypeScript store | `store.setAggregate(id, {groupings, reference, without, highlighted})` | the `aggregates` projection, each entry answered over the store's current filters and selected region and asked again when either, or the view, changes; a request the next one supersedes is aborted |
 | Python | `viewer.aggregate(view, groupings, filters, reference)`, `db.aggregate` and `selection.aggregate` | one `pyarrow` table per grouping, the head's figures in its schema metadata |
+| CLI | `tessera aggregate --view <view> --grouping <json>` | one grouping's table, read through the cursor and written as Arrow IPC or Parquet, its head on stderr |
 
-The store sends a reference only where the component registered one, as a filter expression or as
-the whole visible set. It chooses no grouping. A registration can name one column in `without`, as
+Every surface sends a grouping as the caller wrote it, a histogram's `bins` and `range` included,
+and none adds a default. The store sends a reference only where the component registered one, as a
+filter expression or as the whole visible set. It chooses no grouping. A registration can name one column in `without`, as
 the filter draft keys its controls, and the store then sends its filters less that column's
 control. A category control uses this to list its own values: with its clause set, the values it
 excludes are still counted, and every other clause, the `member_of` clauses and the selected

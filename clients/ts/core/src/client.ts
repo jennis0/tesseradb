@@ -498,6 +498,7 @@ export class TesseraClient {
         maxAggregateGroupings: m.selection.max_aggregate_groupings,
         maxAggregateTop: m.selection.max_aggregate_top,
         maxAggregateNamed: m.selection.max_aggregate_named,
+        maxAggregateBins: m.selection.max_aggregate_bins,
         maxAggregateCells: m.selection.max_aggregate_cells
       },
       maxTilesPerRequest: m.selection.max_tiles_per_request,
@@ -1255,6 +1256,7 @@ const SELECTION_FIELDS = [
   'max_aggregate_groupings',
   'max_aggregate_top',
   'max_aggregate_named',
+  'max_aggregate_bins',
   'max_aggregate_cells'
 ] as const;
 
@@ -1345,6 +1347,7 @@ type RawMeta = {
     max_aggregate_groupings: number;
     max_aggregate_top: number;
     max_aggregate_named: number;
+    max_aggregate_bins: number;
     max_aggregate_cells: number;
   };
 };

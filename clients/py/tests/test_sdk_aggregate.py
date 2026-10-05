@@ -119,6 +119,30 @@ def test_a_viewer_reads_every_response_and_joins_each_tables_pages(db, monkeypat
     assert [head(t) for t in several] == [head(t) for t in whole]
 
 
+def test_a_number_in_bins(db):
+    """`n` runs from 0 to 19: four readable bins of five hold it, with the same edges under a
+    filter, and a range of two bins, whose last holds its upper edge, leaves the others in
+    `rest`."""
+    (whole,) = db.aggregate("map", [{"by": {"field": "n", "bins": 4}}])
+    edges = [(0.0, 5.0), (5.0, 10.0), (10.0, 15.0), (15.0, 20.0)]
+    assert [(r["group"], r["lower"], r["upper"], r["count"]) for r in rows(whole)] == [
+        ("listed", lo, hi, 5) for lo, hi in edges
+    ]
+    assert head(whole) == {"grouping": 0, "total": 20, "groups": 4}
+    (part,) = db.aggregate(
+        "map", [{"by": {"field": "n", "bins": 4}}], filters={"n": {"range": {"lt": 10}}}, reference={}
+    )
+    assert [(r["lower"], r["upper"], r["count"], r["reference_count"]) for r in rows(part)] == [
+        (lo, hi, 5 if lo < 10 else 0, 5) for lo, hi in edges
+    ]
+    (ranged,) = db.aggregate("map", [{"by": {"field": "n", "bins": 2, "range": [0, 10]}}])
+    assert [(r["group"], r["lower"], r["upper"], r["count"]) for r in rows(ranged)] == [
+        ("listed", 0.0, 5.0, 5),
+        ("listed", 5.0, 10.0, 6),
+        ("rest", None, None, 9),
+    ]
+
+
 def test_a_refusal_says_what_the_server_said(db):
     with pytest.raises(Refusal, match="422"):
         db.aggregate("map", [{"by": {"field": "title", "top": 2}}])

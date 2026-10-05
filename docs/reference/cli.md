@@ -175,6 +175,33 @@ For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --l
 | `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
 | `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. A format that disagrees with the extension of `--out` is refused. |
 
+## `tessera aggregate`
+
+```text
+tessera aggregate [OPTIONS] --view <VIEW> --grouping <JSON> --server <URL>
+```
+
+Count how the items a session token may see in one view are distributed, by one grouping, from a running server, and write the table as Arrow IPC or Parquet.
+
+The grouping is `POST /v1/aggregate`'s, as JSON: `{}` is the size of the set; `{"by": {"field": "venue", "top": 10}}` the ten commonest values of a category field; `{"by": {"field": "year", "bins": 20}}` a histogram of a number or timestamp field; `{"by": {"layer": "clusters", "top": 10}}` the largest artifacts of a layer; `{"cells": {"depth": 8}}` a density surface. The read is carried across responses, and written, as `tessera items` carries and writes one. The table's head, with the set's total, is printed on stderr at the end.
+
+For example, `tessera aggregate --server http://127.0.0.1:8080 --view papers --grouping '{"by": {"field": "submitted_at", "bins": 12}}' --format ipc > submitted.arrows`.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--view` | `VIEW` |  | The view the counts are taken in. An item with no position in it is not counted. |
+| `--grouping` | `JSON` |  | One grouping as JSON, such as `{"by": {"field": "year", "bins": 20}}`. `{}` is the size of the set. |
+| `--filters` | `JSON` |  | A filter expression as JSON. Only the items that match are counted. |
+| `--reference` | `JSON` |  | A second set to compare each count with, as a filter expression in JSON; `{}` is every item the token may see in the view. The table then has `reference_count` and `lift`. |
+| `--page-rows` | `N` |  | Rows in a page, at most the server's `selection.max_page_rows`, which applies without it. 0 is refused. |
+| `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. 0 is refused. |
+| `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
+| `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
+| `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
+| `--token` | `TOKEN` |  | A session token, as `tessera login` or `tessera session authorise` prints one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
+| `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
+| `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. A format that disagrees with the extension of `--out` is refused. |
+
 ## `tessera serve`
 
 ```text

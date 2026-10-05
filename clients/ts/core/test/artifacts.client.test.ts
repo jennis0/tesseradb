@@ -113,6 +113,7 @@ describe('/v1/meta', () => {
     max_aggregate_groupings: 16,
     max_aggregate_top: 1000,
     max_aggregate_named: 1000,
+    max_aggregate_bins: 1000,
     max_aggregate_cells: 1_048_576
   };
   const body = {
@@ -180,6 +181,7 @@ describe('/v1/meta', () => {
         maxAggregateGroupings: 16,
         maxAggregateTop: 1000,
         maxAggregateNamed: 1000,
+        maxAggregateBins: 1000,
         maxAggregateCells: 1_048_576
       },
       maxTilesPerRequest: 4096,

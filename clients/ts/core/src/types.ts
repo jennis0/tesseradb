@@ -612,6 +612,8 @@ export type Meta = {
     maxAggregateTop: number;
     /** The most `values` or `artifacts` an aggregate grouping may name. */
     maxAggregateNamed: number;
+    /** The largest `bins` of an aggregate grouping. */
+    maxAggregateBins: number;
     /** The most cells an aggregate grouping's cell level may list: the cells at its `depth` in its `area`. */
     maxAggregateCells: number;
   };
@@ -1639,19 +1641,28 @@ export type Grouping = {
 
 /**
  * A grouping's outer level: the values of a category field or the artifacts of one level of a
- * layer, as the `top` groups by count or as the groups named.
+ * layer, as the `top` groups by count or as the groups named; or the values of a number or
+ * timestamp field in `bins`, a histogram.
  *
- * A `field` is a category declared with `index` or `render`, or one with a `derived` vocabulary; a
- * group-scoped field resolves under the request's view as a filter leaf on it does, or is pinned as
- * `<field>@<key>`. A `layer` is one `/v1/meta` publishes to this principal, and `level` is required
- * on a layer with several levels and refused on one with a single level. A named value or artifact
- * this principal would not be listed gets no row.
+ * With `top` or `values`, a `field` is a category declared with `index` or `render`, or one with a
+ * `derived` vocabulary; with `bins`, a number or timestamp field declared with `index` or `render`.
+ * A group-scoped field resolves under the request's view as a filter leaf on it does, or is pinned
+ * as `<field>@<key>`. A `layer` is one `/v1/meta` publishes to this principal, and `level` is
+ * required on a layer with several levels and refused on one with a single level. A named value or
+ * artifact this principal would not be listed gets no row.
+ *
+ * With `bins` and a `range`, `[lower, upper]` is cut into `bins` equal bins, on a timestamp field in
+ * whole microseconds since the Unix epoch; a `bigint` bound is sent exactly. Without a `range`, the
+ * edges are readable values around the values of every item this principal may see in the view,
+ * whatever the filters say, in at most `bins` bins, so they stay put as the filters and the
+ * viewport change. At most `meta.selection.maxAggregateBins`; a grouping by bins takes no `cells`.
  *
  * @category Requests and responses
  */
 export type AggregateBy =
   | {field: string; top: number}
   | {field: string; values: string[]}
+  | {field: string; bins: number; range?: [number | bigint, number | bigint]}
   | {layer: string; level?: number; top: number}
   | {layer: string; level?: number; artifacts: bigint[]};
 
@@ -1678,10 +1689,14 @@ export type AggregateCells = {
  *
  * The columns are, in this order and each only where stated: `group` (`listed`, `rest` or `none`,
  * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null on
- * `rest` and `none`); `title` (the value's title, with `by` on a field); `cell` (a `bigint`, the
- * first `2·depth` bits of the Morton position, with `cells`); `count` (a `bigint`); and with a
- * reference, `reference_count` (a `bigint`) and `lift` (a number, null where either count it
- * divides by is 0).
+ * `rest` and `none`); `title` (the value's title, with `by` on a field); in place of `key` and
+ * `title` with `bins`, `lower` and `upper` (a bin's edges: a number on a number field, a timestamp
+ * in milliseconds since the Unix epoch, as Arrow reads one, on a timestamp field; null on `rest`
+ * and `none`); `cell` (a `bigint`, the first
+ * `2·depth` bits of the Morton position, with `cells`); `count` (a `bigint`); and with a reference,
+ * `reference_count` (a `bigint`) and `lift` (a number, null where either count it divides by is
+ * 0). A bin holds the values from `lower` up to but not including `upper`, and the last bin also
+ * holds its `upper`; `rest` holds the values in no bin and `none` the items with no value.
  *
  * @category Requests and responses
  */

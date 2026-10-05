@@ -1282,17 +1282,31 @@ paths:
         with no value. A bin holds the values from its `lower` edge up to but not including its
         `upper` edge, and the last bin also holds its `upper` edge, so a filter's `range` with
         `gte` the lower edge and `lt` the upper matches exactly a bin's items, and `lte` for the
-        last. With `range`, the bins cut `[lower, upper]` into `bins` equal widths, on a timestamp
-        field whole microseconds whose widths differ by at most one, and `rest` holds the values
-        outside it. Without `range`, the edges are readable values around the smallest and
-        largest value among every item this principal may see in `view`, whatever `filters`,
-        `reference` and any region say, so they stay put as the filters or the viewport change:
-        on a number field, multiples of 1, 2, 2.5 or 5 times a power of ten, whole numbers on an
-        integer field, with as many bins as cover the values and at most `bins`; on a timestamp
-        field, whole seconds, minutes, hours, days, weeks from Monday, months or years in UTC,
-        the finest that needs at most `bins`. `rest` then holds only NaN and infinite values. A
-        principal with no visible value gets no bin. The edges are fixed at the table's first
-        page and carried in the cursor.
+        last. An integer is compared with an edge exactly.
+
+        With `range`, edge `i` of `n` is `lower + (upper - lower) * (i / n)` in `float64` on a
+        number field, the last exactly `upper`, and `lower + floor((upper - lower) * i / n)`
+        microseconds on a timestamp field; `rest` holds the values outside the range.
+
+        Without `range`, the edges are readable values around the smallest and largest value
+        among every item this principal may see in `view`, whatever `filters`, `reference` and any
+        region say, so they stay put as the filters or the viewport change. A principal with no
+        visible value gets no bin, and `rest` holds only NaN and infinite values. On a number
+        field the bins share one width, `1`, `2`, `2.5` or `5` times a power of ten and a whole
+        number on an integer field, the narrowest that needs at most `bins` bins; the first edge
+        is the multiple of the width at or below the smallest value, and the last the first
+        multiple at or above the largest, or above it on an integer field. Where every visible
+        value is the same, the width is the largest power of ten at or below its magnitude, or 1
+        for 0. On a timestamp field the width is the finest of 1, 2 or 5 times a power of ten
+        microseconds up to 500,000; 1, 2, 5, 10, 15 or 30 seconds or minutes; 1, 2, 3, 6 or 12
+        hours; 1 or 2 days; a week; 1, 2, 3 or 6 months; and 1, 2 or 5 times a power of ten years,
+        that needs at most `bins` bins. A fixed width's bins start at multiples of it from
+        1970-01-01T00:00Z, a week's on Mondays, a month's on the first of a month whose number
+        from January of year 0 is a multiple of the width, and a year's on 1 January of a year
+        that is a multiple of the width, in UTC. The last edge is above the largest value. Where
+        every visible value is the same instant, its bin is its day.
+
+        The edges are fixed at the table's first page and carried in the cursor.
 
         **Columns**, in this order, each only where stated: `group` (`dictionary<int8, utf8>`,
         with `by`): `listed`, `rest` or `none`. `key` (with `by`): a field's vocabulary key as

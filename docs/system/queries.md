@@ -468,6 +468,7 @@ A grouping has an outer level, an inner level, both or neither:
 |---|---|
 | neither | one row: the size of the set, which equals the viewport's matched count over the view |
 | the values of a category field | one row per value, with `rest` and `none` |
+| bins of a number or timestamp field | one row per bin, a histogram, with `rest` and `none` |
 | the artifacts of one level of a layer | one row per artifact, with `rest` and `none` |
 | cells of the view at a depth from 0 to 32 | one row per non-empty cell, a density surface |
 | values or artifacts, then cells | a density surface for each group |
@@ -484,6 +485,21 @@ set. A value or an artifact is listed on the same terms as everywhere else: a va
 vocabulary only where the viewer can see an item carrying it, an artifact only where the viewport
 would serve it, tested against the viewer's whole visible set whatever the filter.
 
+A grouping by bins counts a number or timestamp field declared with `index` or `render` in at
+most the number of bins asked for, each row carrying the bin's lower and upper edge. A bin holds
+the values from its lower edge up to but not including its upper edge, and the last bin also holds
+its upper edge, so a `range` filter between two edges selects exactly one bin's items. `rest`
+counts the values in no bin and `none` the items with no value. With a range, the bins cut it into
+equal widths and `rest` holds the values outside it. With no range, the edges are readable values
+around the smallest and largest value among every item the viewer may see in the view: multiples
+of 1, 2, 2.5 or 5 times a power of ten for a number, whole numbers for an integer, and whole
+seconds, minutes, hours, days, weeks from Monday, months or years in UTC for a timestamp, the finest
+that needs no more bins than were asked for. The filter, the reference and any region play no
+part in them, so a client drawing the same field over the viewport and over the filtered set gets
+the same edges for both, and the edges stay put as the filters change. Finding them costs one more
+pass over the field's values in the visible set before the counts. A grouping by bins has no cell
+level.
+
 A cell at depth `d` is the first `2d` bits of an item's 64-bit Morton position. At depths up to 16
 a cell is a tile of the map at that zoom, and its count is the tile's matched count; deeper cells
 divide a tile down to the stored position. A cell level can name an area, a bbox as the viewport
@@ -498,17 +514,17 @@ set's items, or by one pass over the set's rows reading each row's position.
 The response is framed as a bulk read is, with a table head before each table's first page, and a
 table larger than a page continues through a cursor. Every page composes the visible set again,
 so a deletion or suppression accepted during a read applies from the next page. The groups a
-table lists under `top` are fixed at its first page and carried in the cursor, so a table read
-across a changing corpus keeps its groups, and a response's trailer says when a page counted a
+table lists under `top`, and the edges of its bins, are fixed at its first page and carried in the
+cursor, so a table read across a changing corpus keeps its groups, and a response's trailer says when a page counted a
 different state of the corpus from the page before it. Every request runs under the viewport's
 admission, and each response is held to a byte budget of its own, 16 MiB by default in pages of
 4 MiB, so what one request holds is bounded however large its table; a larger table continues
 through the cursor. A request stops its work when the client disconnects.
 
-**Not built yet:** histograms, minimum, maximum and mean of number and timestamp fields;
-breakdowns of keyword and integer fields; a grouping of one kind inside another of the same kind,
-such as cells within cells; and counts across views. A caller asks for each such figure through
-`/v1/items` and computes it.
+**Not built yet:** minimum, maximum and mean of number and timestamp fields; bins of a number
+or timestamp field within cells; breakdowns of keyword fields and of integer fields by value; a
+grouping of one kind inside another of the same kind, such as cells within cells; and counts
+across views. A caller asks for each such figure through `/v1/items` and computes it.
 
 The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps
 each aggregate a component registers with `Store.setAggregate` counted over the store's current
@@ -516,8 +532,8 @@ filters and selected region, asking again when either changes. The Python client
 `Viewer.aggregate`, `Database.aggregate` and `Selection.aggregate`, each table a `pyarrow.Table`.
 Both follow the cursor until the result is whole.
 
-There is no command-line command for this route. It is reached over HTTP and through the
-TypeScript and Python clients.
+`tessera aggregate` reads one grouping's table from a running server and writes it as Arrow
+IPC or Parquet, following the cursor as `tessera items` does.
 
 ## What is not built
 
