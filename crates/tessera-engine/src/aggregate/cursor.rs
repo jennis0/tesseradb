@@ -126,10 +126,7 @@ pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8;
                 format!("layer {layer:?} {level:?} {}", pick_text(pick))
             }
         };
-        part(format!(
-            "{by} cells {:?} area {:?}",
-            grouping.cells, grouping.area
-        ));
+        part(format!("{by} cells {:?} area {:?}", grouping.cells, grouping.area));
     }
     part(format!("{layers:?}"));
     hasher.finalize().into()

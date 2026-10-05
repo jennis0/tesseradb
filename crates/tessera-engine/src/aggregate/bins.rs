@@ -370,10 +370,8 @@ impl Bins {
             let scale = |c: u64| match items {
                 0 => 0,
                 _ if items == n => c,
-                _ => {
-                    ((u128::from(c) * u128::from(n) * 2 + u128::from(items))
-                        / (2 * u128::from(items))) as u64
-                }
+                _ => ((u128::from(c) * u128::from(n) * 2 + u128::from(items))
+                    / (2 * u128::from(items))) as u64,
             };
             let counts = Counts {
                 bins: hist.bins.into_iter().map(scale).collect(),
@@ -385,21 +383,11 @@ impl Bins {
         // With no bin, every value is in `rest`.
         Ok(match edges {
             Edges::Floats(edges) if bins > 0 => counts(
-                self.tally(
-                    cx,
-                    set,
-                    || Histogram::new(&edges[..bins], edges[bins]),
-                    timings,
-                )?,
+                self.tally(cx, set, || Histogram::new(&edges[..bins], edges[bins]), timings)?,
                 n,
             ),
             Edges::Ints(edges) if bins > 0 => counts(
-                self.tally(
-                    cx,
-                    set,
-                    || Histogram::new(&edges[..bins], edges[bins]),
-                    timings,
-                )?,
+                self.tally(cx, set, || Histogram::new(&edges[..bins], edges[bins]), timings)?,
                 n,
             ),
             Edges::Floats(_) => counts(
@@ -480,8 +468,9 @@ impl Numbers {
                         // A banded entry's value from the copy, where the segment has one.
                         let copied = |local: u32, e: usize| {
                             copy.map(|copy| {
-                                (copy.holds(e) && (copy.held.is_some() || present.contains(local)))
-                                    .then(|| copy.value_at(e))
+                                (copy.holds(e)
+                                    && (copy.held.is_some() || present.contains(local)))
+                                .then(|| copy.value_at(e))
                             })
                         };
                         // A row's value from the drawn column, where the segment has it.
