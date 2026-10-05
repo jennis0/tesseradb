@@ -79,6 +79,8 @@ struct Args {
 struct Tally {
     rows: u64,
     pages: u64,
+    /// Items in the set, from the last table head.
+    total: u64,
     /// The first and last edge of the last histogram page read.
     edges: Option<(Scalar, Scalar)>,
     /// Summed over every response of the read.
@@ -95,7 +97,8 @@ impl AggregateSink for Tally {
         Ok(())
     }
 
-    fn table(&mut self, _: &TableHead) -> SinkResult {
+    fn table(&mut self, head: &TableHead) -> SinkResult {
+        self.total = head.total;
         Ok(())
     }
 
@@ -387,6 +390,7 @@ fn main() -> Result<(), BoxError> {
                     "case": name,
                     "region": filter.is_some(),
                     "rows": tally.rows,
+                    "items": tally.total,
                     "pages": tally.pages,
                     "ms": {"median": ms(median), "fastest": ms(lo), "slowest": ms(hi)},
                     "last_run_ms": {

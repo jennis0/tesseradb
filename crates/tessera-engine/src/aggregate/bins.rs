@@ -33,6 +33,9 @@ use crate::error::{EngineError, Result};
 use crate::filter::Scalar;
 use crate::Generation;
 
+/// Entity ids one piece of a pass over a field's per-entity values spans.
+const ENTITY_PIECE: u64 = 1 << 20;
+
 /// A number or timestamp field as one request bins it.
 pub(super) struct Bins {
     column: String,
@@ -308,8 +311,8 @@ impl Bins {
     }
 
     /// One pass over the values of `set`'s items into a tally, and how many items have no value:
-    /// through the field's per-entity values where the set's entities are at hand or the field is
-    /// not drawn, and otherwise over the set's rows.
+    /// through the field's per-entity values where the field is not drawn or the set is held as
+    /// entities, and otherwise over the set's rows, which the whole visible set always is.
     fn pass<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
@@ -317,8 +320,12 @@ impl Bins {
         empty: impl Fn() -> T + Sync + Send,
     ) -> Result<(T, u64)> {
         cx.check_cancelled()?;
-        if self.held && (set.has_entities() || !self.drawn) {
-            return self.pass_entities(cx, set.entities(cx)?, empty);
+        if self.held && (!self.drawn || (set.has_entities() && !set.is_whole())) {
+            let entities = set.entities(cx)?;
+            return Ok(cx
+                .engine
+                .pool
+                .install(|| self.pass_entities(cx, entities, empty)));
         }
         Ok(cx
             .engine
@@ -326,28 +333,46 @@ impl Bins {
             .install(|| self.pass_rows(set.cells(cx), cx.segments(), empty)))
     }
 
+    /// The field's per-entity values of `entities`, layer by layer in parallel pieces of entity
+    /// space, then the buffered rows.
     fn pass_entities<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
         entities: &croaring::Bitmap,
-        empty: impl Fn() -> T,
-    ) -> Result<(T, u64)> {
-        let mut tally = empty();
-        let mut valued = 0u64;
+        empty: impl Fn() -> T + Sync + Send,
+    ) -> (T, u64) {
         let layers = cx
             .generation
             .filter_columns
             .value_layers(&self.column)
             .expect("a held field has value layers");
-        for layer in layers.base().into_iter().chain(layers.extents()) {
-            let _ = layer.for_each_record_value_in(entities, |_, value| {
-                valued += 1;
-                if let Some(x) = K::of_record(&value) {
-                    tally.add(x);
-                }
-                Ok::<(), ()>(())
-            });
-        }
+        let layers: Vec<&tessera_filter::ValueColumn> =
+            layers.base().into_iter().chain(layers.extents()).collect();
+        let end = entities.maximum().map_or(0, |last| u64::from(last) + 1);
+        let pieces: Vec<(usize, std::ops::Range<u64>)> = (0..layers.len())
+            .flat_map(|l| {
+                (0..end.div_ceil(ENTITY_PIECE))
+                    .map(move |p| (l, p * ENTITY_PIECE..((p + 1) * ENTITY_PIECE).min(end)))
+            })
+            .collect();
+        let (mut tally, mut valued) = pieces
+            .par_iter()
+            .fold(
+                || (empty(), 0u64),
+                |(mut tally, mut valued), (l, range)| {
+                    let mut piece = croaring::Bitmap::from_range(range.start as u32..range.end as u32);
+                    piece.and_inplace(entities);
+                    let _ = layers[*l].for_each_record_value_in(&piece, |_, value| {
+                        valued += 1;
+                        if let Some(x) = K::of_record(&value) {
+                            tally.add(x);
+                        }
+                        Ok::<(), ()>(())
+                    });
+                    (tally, valued)
+                },
+            )
+            .reduce(|| (empty(), 0), |(a, m), (b, n)| (a.merge(b), m + n));
         crate::categories::buffered_values(
             &cx.generation.bundle.manifest,
             &cx.generation.buffer,
@@ -362,7 +387,7 @@ impl Bins {
                 }
             },
         );
-        Ok((tally, entities.cardinality().saturating_sub(valued)))
+        (tally, entities.cardinality().saturating_sub(valued))
     }
 
     /// The drawn column's values over a set's rows, in one parallel pass. A row the column's
