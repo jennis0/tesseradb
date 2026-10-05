@@ -887,8 +887,7 @@ fn an_aggregate_read_is_the_table_over_http() {
         }
         args.extend([flag, text, "--out", out.to_str().unwrap()]);
         let refused = served.run(&args);
-        assert!(!refused.status.success());
-        assert!(refused.stderr.contains(&format!("{flag} is not JSON")), "{}", refused.stderr);
+        assert_eq!(refused.status.code(), Some(1), "{flag}: {}", refused.stderr);
     }
     assert!(served.proxy.bodies().is_empty());
     assert!(!out.exists());

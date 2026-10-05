@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{
-    Array, DictionaryArray, Float32Array, Float64Array, Int32Array, StringArray,
-    TimestampMicrosecondArray, UInt32Array, UInt64Array,
+    Array, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int32Array, Int64Array,
+    StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Int8Type, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -39,6 +39,7 @@ use tessera_spatial::shape::{ShapeF64, Space};
 const N: u64 = 3_000;
 
 /// `score` is drawn and indexed, `weight` and `seen` indexed alone, `rank` and `when` drawn alone.
+/// `flag` is an indexed bool, which has no bins.
 const SCHEMA: &str = r#"
 [[vocabulary]]
 name       = "kind"
@@ -80,6 +81,11 @@ type   = "timestamp_us"
 render = true
 
 [[attribute]]
+name  = "flag"
+type  = "bool"
+index = true
+
+[[attribute]]
 name   = "id"
 type   = "u64"
 field  = "entity_id"
@@ -103,7 +109,20 @@ fn date(year: i64, month: u32, day: u32) -> i64 {
             days -= if leap(y) { 366 } else { 365 };
         }
     }
-    let lengths = [31, if leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let lengths = [
+        31,
+        if leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     days += lengths[..(month - 1) as usize].iter().sum::<i64>();
     (days + i64::from(day) - 1) * DAY
 }
@@ -133,6 +152,7 @@ struct Item {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Val {
     F(f64),
+    I(i128),
     T(i64),
 }
 
@@ -141,7 +161,7 @@ impl Item {
         match column {
             "score" => self.score.map(Val::F),
             "weight" => self.weight.map(|w| Val::F(f64::from(w))),
-            "rank" => self.rank.map(|r| Val::F(f64::from(r))),
+            "rank" => self.rank.map(|r| Val::I(i128::from(r))),
             "seen" => self.seen.map(Val::T),
             "when" => self.when.map(Val::T),
             _ => panic!("no column {column}"),
@@ -200,24 +220,48 @@ fn write_points(path: &Path, items: &[Item]) {
         Field::new("score", DataType::Float64, true),
         Field::new("weight", DataType::Float32, true),
         Field::new("rank", DataType::Int32, true),
-        Field::new("seen", DataType::Timestamp(TimeUnit::Microsecond, None), true),
-        Field::new("when", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+        Field::new(
+            "seen",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new(
+            "when",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new("flag", DataType::Boolean, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(UInt64Array::from_iter_values(items.iter().map(|i| i.source))),
-            Arc::new(Float64Array::from_iter_values(items.iter().map(|i| i.position.0))),
-            Arc::new(Float64Array::from_iter_values(items.iter().map(|i| i.position.1))),
+            Arc::new(UInt64Array::from_iter_values(
+                items.iter().map(|i| i.source),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                items.iter().map(|i| i.position.0),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                items.iter().map(|i| i.position.1),
+            )),
             Arc::new(StringArray::from_iter_values(items.iter().map(|i| i.kind))),
-            Arc::new(Float64Array::from(items.iter().map(|i| i.score).collect::<Vec<_>>())),
-            Arc::new(Float32Array::from(items.iter().map(|i| i.weight).collect::<Vec<_>>())),
-            Arc::new(Int32Array::from(items.iter().map(|i| i.rank).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(
+                items.iter().map(|i| i.score).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float32Array::from(
+                items.iter().map(|i| i.weight).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int32Array::from(
+                items.iter().map(|i| i.rank).collect::<Vec<_>>(),
+            )),
             Arc::new(TimestampMicrosecondArray::from(
                 items.iter().map(|i| i.seen).collect::<Vec<_>>(),
             )),
             Arc::new(TimestampMicrosecondArray::from(
                 items.iter().map(|i| i.when).collect::<Vec<_>>(),
+            )),
+            Arc::new(BooleanArray::from_iter(
+                items.iter().map(|i| Some(i.source.is_multiple_of(2))),
             )),
         ],
     )
@@ -486,9 +530,27 @@ fn rows_of(batch: &RecordBatch) -> Vec<Row> {
             return None;
         }
         Some(match column.data_type() {
-            DataType::Float64 => {
-                Val::F(column.as_any().downcast_ref::<Float64Array>().unwrap().value(i))
-            }
+            DataType::Float64 => Val::F(
+                column
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .value(i),
+            ),
+            DataType::Int64 => Val::I(i128::from(
+                column
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(i),
+            )),
+            DataType::UInt64 => Val::I(i128::from(
+                column
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .value(i),
+            )),
             DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) if &**tz == "UTC" => Val::T(
                 column
                     .as_any()
@@ -555,6 +617,7 @@ fn edges_of(rows: &[Row]) -> Vec<Val> {
 fn less(a: Val, b: Val) -> bool {
     match (a, b) {
         (Val::F(a), Val::F(b)) => a < b,
+        (Val::I(a), Val::I(b)) => a < b,
         (Val::T(a), Val::T(b)) => a < b,
         _ => panic!("a value and an edge of different kinds"),
     }
@@ -628,9 +691,11 @@ fn bin_counts_are_the_oracles_and_the_edges_hold_still() {
             let filters: [(&str, Option<FilterExpr>, Keep); 3] = [
                 ("none", None, &|_| true),
                 ("kind", Some(fx.kind_is("b")), &|i| i.kind == "b"),
-                ("region", Some(bbox(area[0], area[1], area[2], area[3])), &|i| {
-                    in_box(i, area)
-                }),
+                (
+                    "region",
+                    Some(bbox(area[0], area[1], area[2], area[3])),
+                    &|i| in_box(i, area),
+                ),
             ];
             for (name, filter, keep) in filters {
                 let mut req = request(&groupings);
@@ -644,7 +709,7 @@ fn bin_counts_are_the_oracles_and_the_edges_hold_still() {
                 for item in &all {
                     if let Some(v) = item.value(column).filter(|v| match v {
                         Val::F(f) => f.is_finite(),
-                        Val::T(_) => true,
+                        Val::I(_) | Val::T(_) => true,
                     }) {
                         assert!(
                             !less(v, edges[0]) && !less(edges[edges.len() - 1], v),
@@ -661,7 +726,11 @@ fn bin_counts_are_the_oracles_and_the_edges_hold_still() {
                 assert_eq!(head.total, items.len() as u64, "{what}");
                 assert_eq!(
                     head.groups,
-                    Some(rows.iter().filter(|r| r.edges.is_some() && r.count > 0).count() as u64)
+                    Some(
+                        rows.iter()
+                            .filter(|r| r.edges.is_some() && r.count > 0)
+                            .count() as u64
+                    )
                 );
             }
         }
@@ -669,8 +738,8 @@ fn bin_counts_are_the_oracles_and_the_edges_hold_still() {
 }
 
 /// **Readable edges**: on a number field, multiples of a step of 1, 2, 2.5 or 5 times a power of
-/// ten; on an integer field, whole numbers; on a timestamp field, the first of a month or a
-/// Monday or a whole day.
+/// ten; on an integer field, whole numbers served as integers; on a timestamp field, the first of
+/// a month or a Monday or a whole day.
 #[test]
 fn default_edges_are_readable() {
     let fx = fixture();
@@ -683,8 +752,9 @@ fn default_edges_are_readable() {
         let edges: Vec<f64> = edges(column, n)
             .into_iter()
             .map(|v| match v {
-                Val::F(f) => f,
-                Val::T(_) => panic!("a number field's edge"),
+                Val::F(f) if column != "rank" => f,
+                Val::I(i) if column == "rank" => i as f64,
+                other => panic!("{column}: an edge {other:?}"),
             })
             .collect();
         let step = edges[1] - edges[0];
@@ -697,18 +767,25 @@ fn default_edges_are_readable() {
             "{column}: a step of {step}"
         );
         for e in &edges {
-            assert!(((e / step) - (e / step).round()).abs() < 1e-6, "{column}: {e} off {step}");
-        }
-        if column == "rank" {
-            assert!(edges.iter().all(|e| e.fract() == 0.0), "{edges:?}");
+            assert!(
+                ((e / step) - (e / step).round()).abs() < 1e-6,
+                "{column}: {e} off {step}"
+            );
         }
     }
     // Three years of `seen` in at most 10 bins: half years.
     let seen = edges("seen", 10);
-    assert!(seen.iter().all(|v| matches!(v, Val::T(t) if month_start(*t))), "{seen:?}");
+    assert!(
+        seen.iter()
+            .all(|v| matches!(v, Val::T(t) if month_start(*t))),
+        "{seen:?}"
+    );
     // Two hundred hours of `when` in at most 12 bins: whole days.
     let when = edges("when", 12);
-    assert!(when.iter().all(|v| matches!(v, Val::T(t) if t % DAY == 0)), "{when:?}");
+    assert!(
+        when.iter().all(|v| matches!(v, Val::T(t) if t % DAY == 0)),
+        "{when:?}"
+    );
 }
 
 /// **Items the viewer may not see move no edge and no count.** The subset viewer's tables over
@@ -733,7 +810,11 @@ fn invisible_items_move_no_edge_and_no_count() {
             assert_eq!(rows, rows_alone, "{column} in {n} bins");
             assert_eq!(
                 (head.total, head.reference_total, head.groups),
-                (head_alone.total, head_alone.reference_total, head_alone.groups)
+                (
+                    head_alone.total,
+                    head_alone.reference_total,
+                    head_alone.groups
+                )
             );
         }
     }
@@ -741,18 +822,24 @@ fn invisible_items_move_no_edge_and_no_count() {
     let broad = fx.session(true);
     let groupings = [bins("score", 12, None)];
     let edges = edges_of(&table(&fx.engine, &broad, request(&groupings)).1);
-    assert!(matches!((edges[0], edges[edges.len() - 1]), (Val::F(lo), Val::F(hi)) if lo <= -300.0 && hi >= 500.0));
+    assert!(
+        matches!((edges[0], edges[edges.len() - 1]), (Val::F(lo), Val::F(hi)) if lo <= -300.0 && hi >= 500.0)
+    );
 }
 
-/// **A range is cut into equal bins**, a timestamp's into whole microseconds, and **the values
-/// outside it are `rest`**.
+/// **A range is cut into equal bins**, an integer's and a timestamp's into whole numbers, and
+/// **the values outside it are `rest`**.
 #[test]
 fn a_range_cuts_equal_bins_and_counts_what_is_outside_as_rest() {
     let fx = fixture();
     let session = fx.session(true);
     let items: Vec<&Item> = fx.visible(true, &|_| true).collect();
 
-    let groupings = [bins("score", 5, Some((Scalar::Int(0), Scalar::Float(50.0))))];
+    let groupings = [bins(
+        "score",
+        5,
+        Some((Scalar::Int(0), Scalar::Float(50.0))),
+    )];
     let (_, rows) = table(&fx.engine, &session, request(&groupings));
     let edges = edges_of(&rows);
     assert_eq!(edges, [0.0, 10.0, 20.0, 30.0, 40.0, 50.0].map(Val::F));
@@ -776,11 +863,15 @@ fn a_range_cuts_equal_bins_and_counts_what_is_outside_as_rest() {
     );
     assert_eq!(rows, expected(&edges, &items, None, "seen"));
 
-    // An integer field against fractional edges: an integer is in the bin whose edges hold it.
-    let groupings = [bins("rank", 4, Some((Scalar::Float(-0.5), Scalar::Float(1.5))))];
+    // An integer field's range is cut into whole widths that differ by at most one.
+    let groupings = [bins(
+        "rank",
+        3,
+        Some((Scalar::Int(-10), Scalar::Float(10.0))),
+    )];
     let (_, rows) = table(&fx.engine, &session, request(&groupings));
     let edges = edges_of(&rows);
-    assert_eq!(edges, [-0.5, 0.0, 0.5, 1.0, 1.5].map(Val::F));
+    assert_eq!(edges, [-10, -4, 3, 10].map(Val::I));
     assert_eq!(rows, expected(&edges, &items, None, "rank"));
 }
 
@@ -827,10 +918,15 @@ fn pages_join_and_hold_their_edges() {
     let (first, trailer) = respond(engine, &session, req.clone()).unwrap();
     let first = rows_of(&first.pages[0].1);
     let before = edges_of(&whole[0].1);
-    let largest = item_of_id(engine, 8).unwrap().expect("the item holding the largest rank");
+    let largest = item_of_id(engine, 8)
+        .unwrap()
+        .expect("the item holding the largest rank");
     engine.accept_change(largest, ChangeOp::Suppress).unwrap();
     let fresh = edges_of(&table(engine, &session, request(&groupings)).1);
-    assert_ne!(fresh, before, "the largest value no longer reaches the edges");
+    assert_ne!(
+        fresh, before,
+        "the largest value no longer reaches the edges"
+    );
 
     let token = trailer.next.clone().unwrap();
     req.cursor = Some(&token);
@@ -841,7 +937,11 @@ fn pages_join_and_hold_their_edges() {
         .into_iter()
         .chain(rest.pages.iter().flat_map(|(_, b, _)| rows_of(b)))
         .collect();
-    assert_eq!(edges_of(&resumed), before, "the resumed table keeps its edges");
+    assert_eq!(
+        edges_of(&resumed),
+        before,
+        "the resumed table keeps its edges"
+    );
     let shown: Vec<&Item> = fx.visible(true, &|i| i.source != 8).collect();
     assert_eq!(
         resumed[2..],
@@ -858,7 +958,10 @@ fn pages_join_and_hold_their_edges() {
         let mut refused = request(&others);
         refused.cursor = Some(&token);
         assert!(
-            matches!(respond(engine, &session, refused), Err(EngineError::CursorRefused)),
+            matches!(
+                respond(engine, &session, refused),
+                Err(EngineError::CursorRefused)
+            ),
             "{:?}",
             others[0]
         );
@@ -871,11 +974,13 @@ fn pages_join_and_hold_their_edges() {
 fn a_grouping_by_bins_that_cannot_be_served_is_refused() {
     let fx = fixture();
     let session = fx.session(true);
-    let refused = |grouping: Grouping| {
-        match respond(&fx.engine, &session, request(std::slice::from_ref(&grouping))) {
-            Err(EngineError::AggregateRefused(why)) => why,
-            other => panic!("{grouping:?} answered {:?}", other.map(|(_, t)| t)),
-        }
+    let refused = |grouping: Grouping| match respond(
+        &fx.engine,
+        &session,
+        request(std::slice::from_ref(&grouping)),
+    ) {
+        Err(EngineError::AggregateRefused(why)) => why,
+        other => panic!("{grouping:?} answered {:?}", other.map(|(_, t)| t)),
     };
     assert_eq!(refused(bins("score", 0, None)), AggregateRefused::ZeroBins);
     assert!(matches!(
@@ -890,9 +995,15 @@ fn a_grouping_by_bins_that_cannot_be_served_is_refused() {
     for range in [
         (Scalar::Int(5), Scalar::Int(5)),
         (Scalar::Float(5.5), Scalar::Int(5)),
-        (Scalar::Int(i128::from(i64::MAX)), Scalar::Int(i128::from(i64::MAX) - 1)),
+        (
+            Scalar::Int(i128::from(i64::MAX)),
+            Scalar::Int(i128::from(i64::MAX) - 1),
+        ),
     ] {
-        assert_eq!(refused(bins("score", 4, Some(range))), AggregateRefused::EmptyRange);
+        assert_eq!(
+            refused(bins("score", 4, Some(range))),
+            AggregateRefused::EmptyRange
+        );
     }
     let mut celled = bins("score", 4, None);
     celled.cells = Some(3);
@@ -904,9 +1015,15 @@ fn a_grouping_by_bins_that_cannot_be_served_is_refused() {
         );
     }
     assert_eq!(
-        refused(bins("seen", 4, Some((Scalar::Float(0.5), Scalar::Int(10))))),
-        AggregateRefused::FractionalTime("seen".to_string())
+        refused(bins("flag", 4, None)),
+        AggregateRefused::BinsOnBool("flag".to_string())
     );
+    for column in ["seen", "rank"] {
+        assert_eq!(
+            refused(bins(column, 4, Some((Scalar::Float(0.5), Scalar::Int(10))))),
+            AggregateRefused::FractionalBound(column.to_string())
+        );
+    }
 }
 
 /// **Items ingested and flushed are binned**, and a value past the old largest widens the
@@ -944,6 +1061,7 @@ fn a_flushed_ingest_is_binned() {
                     item.rank.map_or(WalScalar::Null, WalScalar::I32),
                     item.seen.map_or(WalScalar::Null, WalScalar::TimestampUs),
                     item.when.map_or(WalScalar::Null, WalScalar::TimestampUs),
+                    WalScalar::Bool(item.source.is_multiple_of(2)),
                     WalScalar::U64(key_id(&format!("binned-{i}"))),
                 ],
                 terms: fx.engine.resolve_terms(&[b"0".to_vec()]),
@@ -964,7 +1082,11 @@ fn a_flushed_ingest_is_binned() {
             let groupings = [bins(column, 12, None)];
             let (head, rows) = table(&fx.engine, &session, request(&groupings));
             let edges = edges_of(&rows);
-            assert_eq!(rows, expected(&edges, &items, None, column), "{when}, {column}");
+            assert_eq!(
+                rows,
+                expected(&edges, &items, None, column),
+                "{when}, {column}"
+            );
             assert_eq!(head.total, items.len() as u64, "{when}");
         }
     };
@@ -979,11 +1101,15 @@ fn a_flushed_ingest_is_binned() {
         item.flushed = true;
     }
     let all = fx.visible(true, &|_| true).count() as u64;
-    wait_until("the map to show the flushed items", Duration::from_secs(60), || {
-        let request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize * 2);
-        let tiles = fx.engine.viewport(&session, request).unwrap().tiles;
-        tiles.iter().map(|t| t.matched).sum::<u64>() == all
-    });
+    wait_until(
+        "the map to show the flushed items",
+        Duration::from_secs(60),
+        || {
+            let request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize * 2);
+            let tiles = fx.engine.viewport(&session, request).unwrap().tiles;
+            tiles.iter().map(|t| t.matched).sum::<u64>() == all
+        },
+    );
     check(&fx, "after the flush");
     let groupings = [bins("score", 12, None)];
     let edges = edges_of(&table(&fx.engine, &session, request(&groupings)).1);

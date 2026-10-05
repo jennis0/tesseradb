@@ -9,9 +9,11 @@
 //!
 //! A bin holds the values from its lower edge up to but not including its upper edge, and the
 //! last bin also holds its upper edge. `rest` counts the items whose value lies in no bin: outside
-//! a range the request gave, or NaN, or infinite. `none` counts the items with no value. An
-//! integer is compared with an edge exactly, through the smallest integer at or above the edge,
-//! so a `range` filter between two edges matches exactly the bin's items.
+//! a range the request gave, or NaN, or infinite. `none` counts the items with no value.
+//!
+//! An integer or timestamp field's edges are whole numbers, worked out and compared in `i128`, so
+//! every value is placed exactly and a `range` filter between two edges matches exactly the bin's
+//! items. A float field's edges are `f64`.
 //!
 //! Readable edges are multiples of 1, 2, 2.5 or 5 times a power of ten, whole numbers on an
 //! integer field. On a timestamp field they fall on whole seconds, minutes, hours, days, weeks
@@ -48,10 +50,13 @@ pub(super) struct Bins {
     range: Option<(Scalar, Scalar)>,
 }
 
-/// How a field's values are compared with an edge.
+/// How a field's values are compared with an edge, and the type its edges are served as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Integer,
+pub(super) enum Kind {
+    /// A signed integer, its edges `int64`.
+    Signed,
+    /// An unsigned integer, its edges `uint64`.
+    Unsigned,
     Float,
     /// Microseconds since the Unix epoch, with edges in the same unit.
     Timestamp,
@@ -61,49 +66,65 @@ impl Kind {
     fn of(ty: ScalarType) -> Option<Kind> {
         use ScalarType as T;
         Some(match ty {
-            T::U8 | T::U16 | T::U32 | T::U64 | T::I8 | T::I16 | T::I32 | T::I64 => Kind::Integer,
+            T::U8 | T::U16 | T::U32 | T::U64 => Kind::Unsigned,
+            T::I8 | T::I16 | T::I32 | T::I64 => Kind::Signed,
             T::F32 | T::F64 => Kind::Float,
             T::TimestampUs => Kind::Timestamp,
             _ => return None,
         })
     }
+
+    /// Edges moved inside the span the served column holds. No stored value lies outside that
+    /// span, so the move takes no value into another bin.
+    fn clamp(self, edges: Vec<i128>) -> Vec<i128> {
+        let (lo, hi) = match self {
+            Kind::Unsigned => (0, i128::from(u64::MAX)),
+            _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        };
+        edges.into_iter().map(|e| e.clamp(lo, hi)).collect()
+    }
 }
 
-/// A table's bin edges, ascending, one more than its bins; none where it has no bin.
+/// A table's bin edges, ascending, one more than its bins; none where it has no bin. An integer
+/// or timestamp field's edges are whole and within its served column's span.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Edges {
-    Numbers(Vec<f64>),
-    Times(Vec<i64>),
+    Floats(Vec<f64>),
+    Ints(Vec<i128>),
 }
 
 impl Edges {
     fn bins(&self) -> usize {
         let edges = match self {
-            Edges::Numbers(edges) => edges.len(),
-            Edges::Times(edges) => edges.len(),
+            Edges::Floats(edges) => edges.len(),
+            Edges::Ints(edges) => edges.len(),
         };
         edges.saturating_sub(1)
     }
 
     fn edge(&self, at: usize) -> Edge {
         match self {
-            Edges::Numbers(edges) => Edge::Number(edges[at]),
-            Edges::Times(edges) => Edge::Time(edges[at]),
+            Edges::Floats(edges) => Edge::Float(edges[at]),
+            Edges::Ints(edges) => Edge::Int(edges[at]),
         }
     }
 
-    /// The edges as the cursor carries them.
+    /// The edges as the cursor carries them: a float's bits, or an integer's low 64 bits, which
+    /// hold any edge of an `int64` or `uint64` column.
     fn encode(&self) -> Vec<u64> {
         match self {
-            Edges::Numbers(edges) => edges.iter().map(|e| e.to_bits()).collect(),
-            Edges::Times(edges) => edges.iter().map(|&e| e as u64).collect(),
+            Edges::Floats(edges) => edges.iter().map(|e| e.to_bits()).collect(),
+            Edges::Ints(edges) => edges.iter().map(|&e| e as u64).collect(),
         }
     }
 
     fn decode(kind: Kind, carried: &[u64]) -> Edges {
         match kind {
-            Kind::Timestamp => Edges::Times(carried.iter().map(|&e| e as i64).collect()),
-            _ => Edges::Numbers(carried.iter().map(|&e| f64::from_bits(e)).collect()),
+            Kind::Float => Edges::Floats(carried.iter().map(|&e| f64::from_bits(e)).collect()),
+            Kind::Unsigned => Edges::Ints(carried.iter().map(|&e| i128::from(e)).collect()),
+            Kind::Signed | Kind::Timestamp => {
+                Edges::Ints(carried.iter().map(|&e| i128::from(e as i64)).collect())
+            }
         }
     }
 }
@@ -134,6 +155,11 @@ impl Bins {
                 (family.arrow_type, family.vocabulary.is_some())
             }
         };
+        if ty == ScalarType::Bool {
+            return Err(EngineError::AggregateRefused(AggregateRefused::BinsOnBool(
+                column.to_string(),
+            )));
+        }
         let kind = Kind::of(ty)
             .filter(|_| !vocabulary)
             .ok_or_else(not_binnable)?;
@@ -145,14 +171,16 @@ impl Bins {
             return Err(not_binnable());
         }
         let range = match (kind, range) {
-            (Kind::Timestamp, Some((lower, upper))) => {
+            (Kind::Float, range) => range,
+            (_, None) => None,
+            (_, Some((lower, upper))) => {
                 let whole = |bound: Scalar| match bound {
                     Scalar::Int(i) => Some(Scalar::Int(i)),
                     Scalar::Float(f) if f.fract() == 0.0 => Some(Scalar::Int(f as i128)),
                     Scalar::Float(_) => None,
                 };
                 let fractional = || {
-                    EngineError::AggregateRefused(AggregateRefused::FractionalTime(
+                    EngineError::AggregateRefused(AggregateRefused::FractionalBound(
                         column.to_string(),
                     ))
                 };
@@ -161,7 +189,6 @@ impl Bins {
                     whole(upper).ok_or_else(fractional)?,
                 ))
             }
-            (_, range) => range,
         };
         Ok(Bins {
             column: column.to_string(),
@@ -173,9 +200,8 @@ impl Bins {
         })
     }
 
-    /// Whether the field holds timestamps, whose edges are timestamps too.
-    pub(super) fn timestamps(&self) -> bool {
-        self.kind == Kind::Timestamp
+    pub(super) fn kind(&self) -> Kind {
+        self.kind
     }
 
     /// Whether counting this field needs a set's rows rather than its entities.
@@ -213,7 +239,10 @@ impl Bins {
         };
         Ok(Groups {
             chosen: edges.encode(),
-            sizes: of(Some(&set)).into_iter().zip(of(reference.as_ref())).collect(),
+            sizes: of(Some(&set))
+                .into_iter()
+                .zip(of(reference.as_ref()))
+                .collect(),
             always: vec![true; bins],
             keys: (0..bins)
                 .map(|b| Key::Bin(edges.edge(b), edges.edge(b + 1)))
@@ -229,12 +258,12 @@ impl Bins {
         let n = self.bins;
         if let Some((lower, upper)) = self.range {
             return Ok(match self.kind {
-                Kind::Timestamp => Edges::Times(equal_times(int_of(lower), int_of(upper), n)),
-                _ => Edges::Numbers(equal_numbers(
+                Kind::Float => Edges::Floats(equal_floats(
                     tessera_filter::as_f64(lower),
                     tessera_filter::as_f64(upper),
                     n,
                 )),
+                kind => Edges::Ints(kind.clamp(equal_ints(int_of(lower), int_of(upper), n))),
             });
         }
         // The visible set, which no filter or region narrows.
@@ -247,67 +276,43 @@ impl Bins {
             built = Set::whole(cx.open);
             &built
         };
-        Ok(match self.kind {
-            Kind::Integer => match self.pass(cx, visible, Extremes::<i128>::default)?.0.span {
-                None => Edges::Numbers(Vec::new()),
-                Some((min, max)) => Edges::Numbers(readable_numbers(
-                    min as f64,
-                    max as f64,
-                    n,
-                    true,
-                    &|lower, upper| lower.ceil() as i128 <= min && upper.floor() as i128 >= max,
-                )),
-            },
-            Kind::Float => match self.pass(cx, visible, Extremes::<f64>::default)?.0.span {
-                None => Edges::Numbers(Vec::new()),
-                Some((min, max)) => Edges::Numbers(readable_numbers(
-                    min,
-                    max,
-                    n,
-                    false,
-                    &|lower, upper| lower <= min && upper >= max,
-                )),
-            },
-            Kind::Timestamp => match self.pass(cx, visible, Extremes::<i128>::default)?.0.span {
-                None => Edges::Times(Vec::new()),
-                Some((min, max)) => Edges::Times(readable_times(min as i64, max as i64, n)),
-            },
-        })
+        if self.kind == Kind::Float {
+            let span = self.pass(cx, visible, Extremes::<f64>::default)?.0.span;
+            return Ok(Edges::Floats(
+                span.map_or_else(Vec::new, |(min, max)| readable_floats(min, max, n)),
+            ));
+        }
+        let span = self.pass(cx, visible, Extremes::<i128>::default)?.0.span;
+        Ok(Edges::Ints(match span {
+            None => Vec::new(),
+            Some((min, max)) if self.kind == Kind::Timestamp => {
+                readable_times(min as i64, max as i64, n)
+            }
+            Some((min, max)) => self.kind.clamp(readable_ints(min, max, n)),
+        }))
     }
 
     /// How many items of `set` fall in each bin of `edges`, in none, and have no value.
     fn counts(&self, cx: &Cx<'_>, set: &Set, edges: &Edges) -> Result<Counts> {
         let bins = edges.bins();
-        let counted = match (self.kind, edges) {
-            (Kind::Float, Edges::Numbers(edges)) if bins > 0 => {
-                let (lowers, upper) = (&edges[..bins], edges[bins]);
-                let (hist, none) = self.pass(cx, set, || Histogram::new(lowers, upper))?;
-                (hist.bins, hist.rest, none)
+        fn counts<K>((hist, none): (Histogram<'_, K>, u64)) -> Counts {
+            Counts {
+                bins: hist.bins,
+                rest: hist.rest,
+                none,
             }
-            (Kind::Integer, Edges::Numbers(edges)) if bins > 0 => {
-                let lowers: Vec<i128> = edges[..bins].iter().map(|e| e.ceil() as i128).collect();
-                let upper = edges[bins].floor() as i128;
-                let (hist, none) = self.pass(cx, set, || Histogram::new(&lowers, upper))?;
-                (hist.bins, hist.rest, none)
+        }
+        // With no bin, every value is in `rest`.
+        Ok(match edges {
+            Edges::Floats(edges) if bins > 0 => {
+                counts(self.pass(cx, set, || Histogram::new(&edges[..bins], edges[bins]))?)
             }
-            (Kind::Timestamp, Edges::Times(edges)) if bins > 0 => {
-                let lowers: Vec<i128> = edges[..bins].iter().map(|&e| i128::from(e)).collect();
-                let upper = i128::from(edges[bins]);
-                let (hist, none) = self.pass(cx, set, || Histogram::new(&lowers, upper))?;
-                (hist.bins, hist.rest, none)
+            Edges::Ints(edges) if bins > 0 => {
+                counts(self.pass(cx, set, || Histogram::new(&edges[..bins], edges[bins]))?)
             }
-            // With no bin, every value is in `rest`.
-            (Kind::Float, _) => {
-                let (hist, none) = self.pass(cx, set, || Histogram::<f64>::new(&[], 0.0))?;
-                (hist.bins, hist.rest, none)
-            }
-            _ => {
-                let (hist, none) = self.pass(cx, set, || Histogram::<i128>::new(&[], 0))?;
-                (hist.bins, hist.rest, none)
-            }
-        };
-        let (bins, rest, none) = counted;
-        Ok(Counts { bins, rest, none })
+            Edges::Floats(_) => counts(self.pass(cx, set, || Histogram::<f64>::new(&[], 0.0))?),
+            Edges::Ints(_) => counts(self.pass(cx, set, || Histogram::<i128>::new(&[], 0))?),
+        })
     }
 
     /// One pass over the values of `set`'s items into a tally, and how many items have no value:
@@ -333,8 +338,8 @@ impl Bins {
             .install(|| self.pass_rows(set.cells(cx), cx.segments(), empty)))
     }
 
-    /// The field's per-entity values of `entities`, layer by layer in parallel pieces of entity
-    /// space, then the buffered rows.
+    /// The field's per-entity values of `entities`, in parallel pieces of entity space, each
+    /// piece's entities walked through every layer, then the buffered rows.
     fn pass_entities<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
@@ -349,26 +354,27 @@ impl Bins {
         let layers: Vec<&tessera_filter::ValueColumn> =
             layers.base().into_iter().chain(layers.extents()).collect();
         let end = entities.maximum().map_or(0, |last| u64::from(last) + 1);
-        let pieces: Vec<(usize, std::ops::Range<u64>)> = (0..layers.len())
-            .flat_map(|l| {
-                (0..end.div_ceil(ENTITY_PIECE))
-                    .map(move |p| (l, p * ENTITY_PIECE..((p + 1) * ENTITY_PIECE).min(end)))
-            })
-            .collect();
-        let (mut tally, mut valued) = pieces
-            .par_iter()
+        let (mut tally, mut valued) = (0..end.div_ceil(ENTITY_PIECE))
+            .into_par_iter()
             .fold(
                 || (empty(), 0u64),
-                |(mut tally, mut valued), (l, range)| {
-                    let mut piece = croaring::Bitmap::from_range(range.start as u32..range.end as u32);
+                |(mut tally, mut valued), p| {
+                    let range = p * ENTITY_PIECE..((p + 1) * ENTITY_PIECE).min(end);
+                    let mut piece =
+                        croaring::Bitmap::from_range(range.start as u32..range.end as u32);
                     piece.and_inplace(entities);
-                    let _ = layers[*l].for_each_record_value_in(&piece, |_, value| {
-                        valued += 1;
-                        if let Some(x) = K::of_record(&value) {
-                            tally.add(x);
-                        }
-                        Ok::<(), ()>(())
-                    });
+                    if piece.is_empty() {
+                        return (tally, valued);
+                    }
+                    for layer in &layers {
+                        let _ = layer.for_each_record_value_in(&piece, |_, value| {
+                            valued += 1;
+                            if let Some(x) = K::of_record(&value) {
+                                tally.add(x);
+                            }
+                            Ok::<(), ()>(())
+                        });
+                    }
                     (tally, valued)
                 },
             )
@@ -441,10 +447,7 @@ impl Bins {
                     (tally, none)
                 },
             )
-            .reduce(
-                || (empty(), 0),
-                |(a, m), (b, n)| (a.merge(b), m + n),
-            )
+            .reduce(|| (empty(), 0), |(a, m), (b, n)| (a.merge(b), m + n))
     }
 }
 
@@ -546,10 +549,7 @@ impl<K: Num> Tally<K> for Extremes<K> {
         }
         self.span = Some(match self.span {
             None => (x, x),
-            Some((lo, hi)) => (
-                if x < lo { x } else { lo },
-                if x > hi { x } else { hi },
-            ),
+            Some((lo, hi)) => (if x < lo { x } else { lo }, if x > hi { x } else { hi }),
         });
     }
 
@@ -617,52 +617,90 @@ fn int_of(bound: Scalar) -> i128 {
     }
 }
 
-/// `[lower, upper]` cut into `n` bins of equal width.
-fn equal_numbers(lower: f64, upper: f64, n: u32) -> Vec<f64> {
-    let width = upper - lower;
-    (0..=n)
+/// `[lower, upper]` cut into `n` bins of equal width. Where the bounds are multiples of a readable
+/// width `n` widths apart, the edges are those multiples, as readable edges are drawn, so a first
+/// answer's outer edges sent back as a range give its edges again. Otherwise each inner edge is
+/// weighed between the two bounds, so none passes the float range. A range too narrow for its
+/// edges to rise is one bin.
+fn equal_floats(lower: f64, upper: f64, n: u32) -> Vec<f64> {
+    if let Some(edges) = readable_cut(lower, upper, n) {
+        return edges;
+    }
+    let edges: Vec<f64> = (0..=n)
         .map(|i| match i {
             0 => lower,
             i if i == n => upper,
-            i => lower + width * (f64::from(i) / f64::from(n)),
+            i => {
+                let t = f64::from(i) / f64::from(n);
+                lower * (1.0 - t) + upper * t
+            }
         })
-        .collect()
+        .collect();
+    if edges.windows(2).all(|w| w[0] < w[1]) {
+        edges
+    } else {
+        vec![lower, upper]
+    }
 }
 
-/// `[lower, upper]` in microseconds cut into `n` bins whose widths differ by at most one.
-fn equal_times(lower: i128, upper: i128, n: u32) -> Vec<i64> {
-    let clamp = |x: i128| x.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+/// `k` times the readable step `m` times ten to the `e`, as every readable edge is computed.
+fn readable(k: f64, m: f64, e: i32) -> f64 {
+    if e >= 0 {
+        k * m * 10f64.powi(e)
+    } else {
+        k * m / 10f64.powi(-e)
+    }
+}
+
+/// The edges of `[lower, upper]` in `n` bins where both bounds are, exactly, multiples of one
+/// readable step `n` steps apart.
+fn readable_cut(lower: f64, upper: f64, n: u32) -> Option<Vec<f64>> {
+    let n = f64::from(n);
+    let near = (upper / n - lower / n).log10().floor();
+    if !near.is_finite() {
+        return None;
+    }
+    let near = near as i32;
+    for e in near - 1..=near + 1 {
+        for m in MANTISSAS {
+            let first = (lower / readable(1.0, m, e)).round();
+            let edge = |i: f64| readable(first + i, m, e);
+            if edge(0.0) == lower && edge(n) == upper {
+                let edges: Vec<f64> = (0..=n as u32).map(|i| edge(f64::from(i))).collect();
+                return edges.windows(2).all(|w| w[0] < w[1]).then_some(edges);
+            }
+        }
+    }
+    None
+}
+
+/// `[lower, upper]` cut into `n` bins of whole widths that differ by at most one.
+fn equal_ints(lower: i128, upper: i128, n: u32) -> Vec<i128> {
+    // Far past any served column's span, so the arithmetic below cannot overflow.
+    let far = 1i128 << 100;
+    let (lower, upper) = (lower.clamp(-far, far), upper.clamp(-far, far));
     let n = i128::from(n);
-    (0..=n)
-        .map(|i| clamp(lower + (upper - lower) * i / n))
-        .collect()
+    let (whole, part) = ((upper - lower) / n, (upper - lower) % n);
+    (0..=n).map(|i| lower + whole * i + part * i / n).collect()
 }
 
 /// The mantissas of a readable step, each times a power of ten.
 const MANTISSAS: [f64; 4] = [1.0, 2.0, 2.5, 5.0];
 
 /// At most `n` bins of one readable width covering `[min, max]`, starting at a multiple of the
-/// width. On an integer field the width is a whole number and the last bin's upper edge is past
-/// `max`, so each bin holds the same count of integers. `covers` says whether a first and last
-/// edge hold every value exactly, which rounding at a large magnitude can prevent; a width that
-/// fails it is passed over for a wider one.
-fn readable_numbers(
-    min: f64,
-    max: f64,
-    n: u32,
-    integer: bool,
-    covers: &dyn Fn(f64, f64) -> bool,
-) -> Vec<f64> {
+/// width. A width whose edges round at a large magnitude so that they no longer cover the values,
+/// or pass the float range, is passed over for a wider one.
+///
+/// With one bin, values either side of 0 have no readable width: 0 is a multiple of every width,
+/// so a bin starting at a multiple below 0 ends at or below 0. Those values, and a span no
+/// readable width covers within the float range, are cut into equal bins.
+fn readable_floats(min: f64, max: f64, n: u32) -> Vec<f64> {
+    let bins_asked = n;
     let n = f64::from(n);
-    let scale = |x: f64, e: i32| {
-        if e >= 0 {
-            x * 10f64.powi(e)
-        } else {
-            x / 10f64.powi(-e)
-        }
-    };
+    // The span divided first so that it stays finite; a subnormal span starts at the smallest
+    // power of ten a float holds.
     let start = if max > min {
-        ((max - min) / n).log10().floor() as i32 - 1
+        ((max / n - min / n).log10().floor() as i32).max(-324) - 1
     } else if min != 0.0 {
         min.abs().log10().floor() as i32
     } else {
@@ -670,11 +708,8 @@ fn readable_numbers(
     };
     for e in start..start.saturating_add(40) {
         for m in MANTISSAS {
-            let step = scale(m, e);
-            if integer && (step < 1.0 || step.fract() != 0.0) {
-                continue;
-            }
-            let edge = |k: f64| scale(k * m, e);
+            let step = readable(1.0, m, e);
+            let edge = |k: f64| readable(k, m, e);
             let mut first = (min / step).floor();
             // Past 2^52 multiples a step is below the values' precision.
             if first.is_nan() || first.abs() >= 4_503_599_627_370_496.0 {
@@ -683,21 +718,8 @@ fn readable_numbers(
             if edge(first) > min {
                 first -= 1.0;
             }
-            let reach = |bins: f64| {
-                let last = edge(first + bins);
-                if integer {
-                    last > max
-                } else {
-                    last >= max
-                }
-            };
-            let mut bins = if integer {
-                ((max - edge(first)) / step).floor() + 1.0
-            } else {
-                ((max - edge(first)) / step).ceil()
-            }
-            .max(1.0);
-            while !reach(bins) && bins <= n {
+            let mut bins = ((max - edge(first)) / step).ceil().max(1.0);
+            while edge(first + bins) < max && bins <= n {
                 bins += 1.0;
             }
             if bins.is_nan() || bins > n {
@@ -708,15 +730,52 @@ fn readable_numbers(
                 .collect();
             let rising = edges.windows(2).all(|w| w[0] < w[1]);
             let last = edges[edges.len() - 1];
-            if rising && edges.iter().all(|e| e.is_finite()) && covers(edges[0], last) {
+            if rising && edges.iter().all(|e| e.is_finite()) && edges[0] <= min && last >= max {
                 return edges;
             }
         }
     }
-    // One bin over values either side of 0, which no multiple of a width starts below, or a span
-    // no readable width covers within the float range.
-    let upper = if integer { max + 1.0 } else { max };
-    equal_numbers(min, upper, n as u32)
+    equal_floats(min, max, bins_asked)
+}
+
+/// At most `n` bins of the narrowest readable whole width covering `min..=max`, starting at a
+/// multiple of the width, the last bin's upper edge past `max` so each bin spans the same count of
+/// integers. A single value is binned by the largest power of ten at or below it.
+///
+/// With one bin, values either side of 0 have no readable width, as in [`readable_floats`], and
+/// are one bin from `min` to `max + 1`.
+fn readable_ints(min: i128, max: i128, n: u32) -> Vec<i128> {
+    let n = i128::from(n);
+    let narrowest = if min == max {
+        let mut power = 1u128;
+        while power * 10 <= min.unsigned_abs() {
+            power *= 10;
+        }
+        power as i128
+    } else {
+        1
+    };
+    let mut ten: i128 = 1;
+    loop {
+        // 1, 2, 2.5 and 5 times `ten`, as a numerator and a denominator.
+        for (times, per) in [(1, 1), (2, 1), (5, 2), (5, 1)] {
+            let Some(width) = ten.checked_mul(times).filter(|w| w % per == 0) else {
+                continue;
+            };
+            let width = width / per;
+            if width < narrowest {
+                continue;
+            }
+            let (first, last) = (min.div_euclid(width), max.div_euclid(width));
+            if last - first < n {
+                return (first..=last + 1).map(|k| k * width).collect();
+            }
+        }
+        match ten.checked_mul(10) {
+            Some(next) => ten = next,
+            None => return vec![min, max + 1],
+        }
+    }
 }
 
 const SECOND: i64 = 1_000_000;
@@ -728,7 +787,10 @@ const DAY: i64 = 24 * HOUR;
 #[derive(Debug, Clone, Copy)]
 enum Step {
     /// A fixed width in microseconds, its bins starting at a multiple of it after `offset`.
-    Fixed { width: i64, offset: i64 },
+    Fixed {
+        width: i64,
+        offset: i64,
+    },
     Months(i64),
     Years(i64),
 }
@@ -781,8 +843,7 @@ fn time_steps() -> impl Iterator<Item = Step> {
 
 /// At most `n` bins of the finest readable width covering `[min, max]` in microseconds, the last
 /// bin's upper edge past `max`. A single instant is binned by its day.
-fn readable_times(min: i64, max: i64, n: u32) -> Vec<i64> {
-    let n = i128::from(n);
+fn readable_times(min: i64, max: i64, n: u32) -> Vec<i128> {
     let finest = if min == max {
         time_steps()
             .position(|s| matches!(s, Step::Fixed { width: DAY, .. }))
@@ -790,21 +851,22 @@ fn readable_times(min: i64, max: i64, n: u32) -> Vec<i64> {
     } else {
         0
     };
+    let (lower, upper) = (i128::from(min), i128::from(max));
     time_steps()
         .skip(finest)
-        .find_map(|step| step_edges(step, min, max, n))
-        .unwrap_or_else(|| equal_times(i128::from(min), i128::from(max) + 1, n as u32))
+        .find_map(|step| step_edges(step, min, max, i128::from(n)))
+        .unwrap_or_else(|| Kind::Timestamp.clamp(equal_ints(lower, upper + 1, n)))
 }
 
 /// The edges of `step`'s bins from the one holding `min` to the one holding `max`, where they
-/// number at most `n` and every edge is an `i64`.
-fn step_edges(step: Step, min: i64, max: i64, n: i128) -> Option<Vec<i64>> {
+/// number at most `n` and every edge is within an `i64`.
+fn step_edges(step: Step, min: i64, max: i64, n: i128) -> Option<Vec<i128>> {
     let (first, last) = (step_index(step, min), step_index(step, max));
     if last - first + 1 > n {
         return None;
     }
     (first..=last + 1)
-        .map(|k| step_start(step, k).and_then(|edge| i64::try_from(edge).ok()))
+        .map(|k| step_start(step, k).filter(|&edge| i64::try_from(edge).is_ok()))
         .collect()
 }
 
@@ -812,12 +874,16 @@ fn step_edges(step: Step, min: i64, max: i64, n: i128) -> Option<Vec<i64>> {
 /// or year 0.
 fn step_index(step: Step, t: i64) -> i128 {
     match step {
-        Step::Fixed { width, offset } => (i128::from(t) - i128::from(offset)).div_euclid(i128::from(width)),
+        Step::Fixed { width, offset } => {
+            (i128::from(t) - i128::from(offset)).div_euclid(i128::from(width))
+        }
         Step::Months(k) => {
             let (year, month) = civil_from_days(t.div_euclid(DAY));
             (i128::from(year) * 12 + i128::from(month - 1)).div_euclid(i128::from(k))
         }
-        Step::Years(k) => i128::from(civil_from_days(t.div_euclid(DAY)).0).div_euclid(i128::from(k)),
+        Step::Years(k) => {
+            i128::from(civil_from_days(t.div_euclid(DAY)).0).div_euclid(i128::from(k))
+        }
     }
 }
 
@@ -869,18 +935,20 @@ fn civil_from_days(days: i64) -> (i64, i64) {
 mod tests {
     use super::*;
 
-    fn date(year: i64, month: i64, day: i64) -> i64 {
-        days_from_civil(year, month, day) * DAY
+    fn date(year: i64, month: i64, day: i64) -> i128 {
+        i128::from(days_from_civil(year, month, day) * DAY)
     }
 
-    fn integers(min: i128, max: i128, n: u32) -> Vec<f64> {
-        readable_numbers(min as f64, max as f64, n, true, &|lower, upper| {
-            lower.ceil() as i128 <= min && upper.floor() as i128 >= max
-        })
-    }
-
-    fn floats(min: f64, max: f64, n: u32) -> Vec<f64> {
-        readable_numbers(min, max, n, false, &|lower, upper| lower <= min && upper >= max)
+    fn rising_and_covering<T: PartialOrd + Copy + std::fmt::Debug>(edges: &[T], min: T, max: T) {
+        assert!(edges.len() >= 2, "{edges:?}");
+        assert!(
+            edges.windows(2).all(|w| w[0] < w[1]),
+            "{edges:?} do not rise"
+        );
+        assert!(
+            edges[0] <= min && edges[edges.len() - 1] >= max,
+            "{edges:?} miss {min:?}..{max:?}"
+        );
     }
 
     #[test]
@@ -891,75 +959,249 @@ mod tests {
             assert!(first <= days && days - first < 31, "{days}: {year}-{month}");
         }
         assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(days_from_civil(2000, 3, 1) - days_from_civil(2000, 2, 1), 29);
-        assert_eq!(days_from_civil(1900, 3, 1) - days_from_civil(1900, 2, 1), 28);
+        assert_eq!(
+            days_from_civil(2000, 3, 1) - days_from_civil(2000, 2, 1),
+            29
+        );
+        assert_eq!(
+            days_from_civil(1900, 3, 1) - days_from_civil(1900, 2, 1),
+            28
+        );
         assert_eq!(civil_from_days(-1), (1969, 12));
     }
 
     #[test]
-    fn readable_number_edges_cover_the_values_in_at_most_the_bins_asked_for() {
-        assert_eq!(floats(0.13, 0.87, 10), (1..=9).map(|k| f64::from(k) / 10.0).collect::<Vec<_>>());
-        assert_eq!(floats(-3.0, 47.0, 5), vec![-20.0, 0.0, 20.0, 40.0, 60.0]);
-        assert_eq!(integers(1, 5, 10), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(integers(0, 99, 10), (0..=10).map(|k| f64::from(k) * 10.0).collect::<Vec<_>>());
-        assert_eq!(integers(7, 7, 4), vec![7.0, 8.0]);
-        assert_eq!(floats(3.7, 3.7, 4), vec![3.0, 4.0]);
-        for (min, max, n) in [(0.0, 1e-9, 7), (-1e300, 1e300, 3), (1e15 + 0.1, 1e15 + 0.3, 20), (5.0, 5.000001, 1)] {
-            let edges = floats(min, max, n);
-            assert!(edges.len() >= 2 && edges.len() <= n as usize + 1, "{min} {max} {n}: {edges:?}");
-            assert!(edges[0] <= min && edges[edges.len() - 1] >= max, "{edges:?}");
+    fn readable_float_edges_cover_the_values_in_at_most_the_bins_asked_for() {
+        let tenths: Vec<f64> = (1..=9).map(|k| f64::from(k) / 10.0).collect();
+        assert_eq!(readable_floats(0.13, 0.87, 10), tenths);
+        assert_eq!(
+            readable_floats(-3.0, 47.0, 5),
+            vec![-20.0, 0.0, 20.0, 40.0, 60.0]
+        );
+        assert_eq!(readable_floats(3.7, 3.7, 4), vec![3.0, 4.0]);
+        let cases = [
+            (0.0, 1e-9, 7),
+            (-1e300, 1e300, 3),
+            (1e15 + 0.1, 1e15 + 0.3, 20),
+            (5.0, 5.000001, 1),
+            (-f64::MAX, f64::MAX, 1),
+            (-f64::MAX, f64::MAX, 2),
+            (-f64::MAX, f64::MAX, 5),
+            (-1e308, 1e308, 1),
+            (5e-324, 1e-323, 10),
+            (0.0, f64::MAX, 3),
+        ];
+        for (min, max, n) in cases {
+            let edges = readable_floats(min, max, n);
+            assert!(edges.len() <= n as usize + 1, "{min} {max} {n}: {edges:?}");
+            assert!(edges.iter().all(|e| e.is_finite()), "{edges:?}");
+            rising_and_covering(&edges, min, max);
         }
-        for (min, max) in [(0i128, u64::MAX as i128), (1 << 63, (1 << 63) + 100), (-5, -5)] {
-            let edges = integers(min, max, 20);
-            assert!(edges.len() >= 2 && edges.len() <= 21, "{edges:?}");
-            assert!(edges[0].ceil() as i128 <= min && edges[edges.len() - 1].floor() as i128 >= max);
+        // One bin either side of 0 is the values' span.
+        assert_eq!(readable_floats(-0.5, 2.0, 1), vec![-0.5, 2.0]);
+        // A single value at the float range's end is one bin holding it.
+        assert_eq!(
+            readable_floats(f64::MAX, f64::MAX, 3),
+            vec![f64::MAX, f64::MAX]
+        );
+    }
+
+    #[test]
+    fn a_float_range_is_cut_into_rising_edges_or_is_one_bin() {
+        assert_eq!(
+            equal_floats(0.0, 50.0, 5),
+            vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0]
+        );
+        let edges = equal_floats(-1e308, 1e308, 4);
+        assert_eq!((edges.len(), edges[2]), (5, 0.0));
+        rising_and_covering(&edges, -1e308, 1e308);
+        for n in [2, 3, 7, 1000] {
+            let edges = equal_floats(-f64::MAX, f64::MAX, n);
+            assert_eq!(edges.len(), n as usize + 1);
+            rising_and_covering(&edges, -f64::MAX, f64::MAX);
+        }
+        // Too narrow to cut: one bin.
+        assert_eq!(equal_floats(5e-324, 1e-323, 4), vec![5e-324, 1e-323]);
+        let next = f64::from_bits(1.0f64.to_bits() + 1);
+        assert_eq!(equal_floats(1.0, next, 3), vec![1.0, next]);
+    }
+
+    #[test]
+    fn readable_integer_edges_are_exact_whole_widths() {
+        assert_eq!(readable_ints(1, 5, 10), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            readable_ints(0, 99, 10),
+            (0..=10).map(|k| k * 10).collect::<Vec<_>>()
+        );
+        assert_eq!(readable_ints(0, 99, 4), vec![0, 25, 50, 75, 100]);
+        assert_eq!(readable_ints(7, 7, 4), vec![7, 8]);
+        assert_eq!(readable_ints(1234, 1234, 3), vec![1000, 2000]);
+        assert_eq!(readable_ints(-5, -5, 3), vec![-5, -4]);
+        // Past 2^53, every edge is still the exact integer.
+        let big = 1i128 << 60;
+        assert_eq!(
+            readable_ints(big, big + 3, 10),
+            (0..=4).map(|k| big + k).collect::<Vec<_>>()
+        );
+        // One bin either side of 0: the values' span, its upper edge past the largest.
+        assert_eq!(readable_ints(-3, 5, 1), vec![-3, 6]);
+        for (min, max, n) in [
+            (0, i128::from(u64::MAX), 20),
+            (i128::from(i64::MIN), i128::from(i64::MAX), 7),
+            (1 << 63, (1 << 63) + 100, 20),
+            (-1, 0, 1),
+        ] {
+            let edges = readable_ints(min, max, n);
+            assert!(edges.len() <= n as usize + 1, "{edges:?}");
+            rising_and_covering(&edges, min, max + 1);
+            let width = edges[1] - edges[0];
+            assert!(
+                edges.windows(2).all(|w| w[1] - w[0] == width) || n == 1,
+                "{edges:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_integer_range_is_cut_exactly_and_held_within_the_served_column() {
+        let big = 1i128 << 63;
+        assert_eq!(
+            equal_ints(big, big + 100, 4),
+            vec![big, big + 25, big + 50, big + 75, big + 100]
+        );
+        let top = (1i128 << 54) + 3;
+        let edges = equal_ints(0, top, 4);
+        assert_eq!((edges[0], edges[4]), (0, top));
+        assert!(edges.windows(2).all(|w| (w[1] - w[0] - top / 4).abs() <= 1));
+        assert_eq!(equal_ints(0, 10, 4), vec![0, 2, 5, 7, 10]);
+        // Bounds no column holds neither overflow nor leave the served span.
+        let edges = Kind::Unsigned.clamp(equal_ints(-10, i128::MAX, 3));
+        assert_eq!(
+            edges,
+            vec![
+                0,
+                i128::from(u64::MAX),
+                i128::from(u64::MAX),
+                i128::from(u64::MAX)
+            ]
+        );
+        let edges = Kind::Signed.clamp(equal_ints(i128::MIN, i128::MAX, 2));
+        assert_eq!(edges, vec![i128::from(i64::MIN), 0, i128::from(i64::MAX)]);
+    }
+
+    #[test]
+    fn readable_edges_sent_back_as_a_range_are_cut_again() {
+        for (min, max, n) in [
+            (0.13, 0.87, 10),
+            (-3.0, 47.0, 5),
+            (1e-7, 3.3e-6, 17),
+            (-123.456, 0.001, 30),
+            (1e12, 7.77e14, 9),
+            (0.3, 0.3, 2),
+        ] {
+            let edges = readable_floats(min, max, n);
+            let bins = edges.len() as u32 - 1;
+            assert_eq!(
+                equal_floats(edges[0], edges[bins as usize], bins),
+                edges,
+                "{min} {max}"
+            );
+        }
+        for (min, max, n) in [
+            (1, 5, 10),
+            (0, 99, 4),
+            (-1_000_003, 7, 13),
+            (1 << 60, (1 << 60) + 3, 2),
+        ] {
+            let edges = readable_ints(min, max, n);
+            let bins = edges.len() as u32 - 1;
+            assert_eq!(
+                equal_ints(edges[0], edges[bins as usize], bins),
+                edges,
+                "{min} {max}"
+            );
         }
     }
 
     #[test]
     fn readable_time_edges_fall_on_the_calendar() {
+        let years = |from: i64, to: i64| (from..=to).map(|y| date(y, 1, 1)).collect::<Vec<_>>();
+        let at = |t: i128| t as i64;
         // Three years and a bit, in at most 5 bins: years.
-        let edges = readable_times(date(2019, 5, 3), date(2022, 2, 1), 5);
-        assert_eq!(edges, (2019..=2023).map(|y| date(y, 1, 1)).collect::<Vec<_>>());
+        let edges = readable_times(at(date(2019, 5, 3)), at(date(2022, 2, 1)), 5);
+        assert_eq!(edges, years(2019, 2023));
         // The same in at most 20 bins: two months each, from January, March, May and so on.
-        let edges = readable_times(date(2019, 5, 3), date(2022, 2, 1), 20);
-        assert_eq!((edges[0], edges[1], edges.len()), (date(2019, 5, 1), date(2019, 7, 1), 18));
-        let edges = readable_times(date(2019, 5, 3), date(2022, 2, 1), 5);
-        assert_eq!(edges, (2019..=2023).map(|y| date(y, 1, 1)).collect::<Vec<_>>());
+        let edges = readable_times(at(date(2019, 5, 3)), at(date(2022, 2, 1)), 20);
+        assert_eq!(
+            (edges[0], edges[1], edges.len()),
+            (date(2019, 5, 1), date(2019, 7, 1), 18)
+        );
         // Ten months: months.
-        let edges = readable_times(date(2021, 3, 15), date(2021, 12, 31) + HOUR, 12);
-        assert_eq!(edges, (3..=12).map(|m| date(2021, m, 1)).chain([date(2022, 1, 1)]).collect::<Vec<_>>());
+        let edges = readable_times(at(date(2021, 3, 15)), at(date(2021, 12, 31)) + HOUR, 12);
+        let months: Vec<i128> = (3..=12)
+            .map(|m| date(2021, m, 1))
+            .chain([date(2022, 1, 1)])
+            .collect();
+        assert_eq!(edges, months);
         // Five weeks in at most 6 bins: weeks from Monday.
-        let edges = readable_times(date(2024, 1, 3), date(2024, 2, 4), 6);
+        let edges = readable_times(at(date(2024, 1, 3)), at(date(2024, 2, 4)), 6);
         assert_eq!(edges[0], date(2024, 1, 1));
-        assert!(edges.windows(2).all(|w| w[1] - w[0] == 7 * DAY));
+        assert!(edges.windows(2).all(|w| w[1] - w[0] == i128::from(7 * DAY)));
         // A day in hours.
-        let edges = readable_times(date(2024, 6, 1) + 30 * MINUTE, date(2024, 6, 1) + 23 * HOUR, 24);
-        assert_eq!(edges.first(), Some(&date(2024, 6, 1)));
-        assert_eq!(edges.len(), 25);
+        let day = at(date(2024, 6, 1));
+        let edges = readable_times(day + 30 * MINUTE, day + 23 * HOUR, 24);
+        assert_eq!((edges[0], edges.len()), (date(2024, 6, 1), 25));
         // One instant: its day.
-        assert_eq!(readable_times(date(2024, 6, 1) + HOUR, date(2024, 6, 1) + HOUR, 10), vec![date(2024, 6, 1), date(2024, 6, 2)]);
+        assert_eq!(
+            readable_times(day + HOUR, day + HOUR, 10),
+            vec![date(2024, 6, 1), date(2024, 6, 2)]
+        );
         // Before the epoch, and the widest span an i64 holds.
-        let edges = readable_times(date(1900, 7, 1), date(1960, 1, 1), 10);
-        assert_eq!(edges, (0..=7).map(|k| date(1900 + 10 * k, 1, 1)).collect::<Vec<_>>());
+        let edges = readable_times(at(date(1900, 7, 1)), at(date(1960, 1, 1)), 10);
+        assert_eq!(
+            edges,
+            (0..=7)
+                .map(|k| date(1900 + 10 * k, 1, 1))
+                .collect::<Vec<_>>()
+        );
         let edges = readable_times(i64::MIN, i64::MAX, 3);
-        assert!(edges.len() >= 2 && edges.len() <= 4 && edges[0] <= i64::MIN + 1);
+        assert!(edges.len() >= 2 && edges.len() <= 4 && edges[0] <= i128::from(i64::MIN) + 1);
+        assert!(edges.iter().all(|&e| i64::try_from(e).is_ok()));
     }
 
     #[test]
     fn a_value_falls_in_the_bin_whose_edges_hold_it_and_the_last_bin_is_closed() {
         let edges = [0.0, 0.5, 1.0, 1.5];
         let mut floats = Histogram::new(&edges[..3], edges[3]);
-        for x in [-0.1, 0.0, 0.49, 0.5, 1.4999, 1.5, 1.50001, f64::NAN, f64::INFINITY] {
+        for x in [
+            -0.1,
+            0.0,
+            0.49,
+            0.5,
+            1.4999,
+            1.5,
+            1.50001,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
             floats.add(x);
         }
         assert_eq!((floats.bins.clone(), floats.rest), (vec![2, 1, 2], 4));
-        // An integer against the same edges: [0, 0.5) holds 0, [0.5, 1) holds nothing.
-        let lowers: Vec<i128> = edges[..3].iter().map(|e| e.ceil() as i128).collect();
-        let mut ints = Histogram::new(&lowers, edges[3].floor() as i128);
-        for x in [-1, 0, 1, 2] {
+        // Integers past 2^63 against exact edges.
+        let big = 1i128 << 63;
+        let edges = equal_ints(big, big + 100, 4);
+        let mut ints = Histogram::new(&edges[..4], edges[4]);
+        for x in [
+            big - 1,
+            big,
+            big + 5,
+            big + 24,
+            big + 25,
+            big + 100,
+            big + 101,
+        ] {
             ints.add(x);
         }
-        assert_eq!((ints.bins.clone(), ints.rest), (vec![1, 0, 1], 2));
+        assert_eq!((ints.bins.clone(), ints.rest), (vec![3, 1, 0, 1], 2));
     }
 }

@@ -1651,11 +1651,16 @@ export type Grouping = {
  * required on a layer with several levels and refused on one with a single level. A named value or
  * artifact this principal would not be listed gets no row.
  *
- * With `bins` and a `range`, `[lower, upper]` is cut into `bins` equal bins, on a timestamp field in
- * whole microseconds since the Unix epoch; a `bigint` bound is sent exactly. Without a `range`, the
- * edges are readable values around the values of every item this principal may see in the view,
- * whatever the filters say, in at most `bins` bins, so they stay put as the filters and the
- * viewport change. At most `meta.selection.maxAggregateBins`; a grouping by bins takes no `cells`.
+ * With `bins` and a `range`, `[lower, upper]` is cut into `bins` equal bins. On an integer field
+ * the bounds and edges are whole numbers, and on a timestamp field whole microseconds since the
+ * Unix epoch; a `bigint` bound is sent exactly. Without a `range`, the edges are readable values
+ * around the values of every item this principal may see in the view, whatever the filters say,
+ * in at most `bins` bins, so they stay put as the filters and the viewport change. Sending the
+ * first answer's first `lower` and last `upper` back as the `range`, with `bins` set to the number
+ * of bins it returned, gives the same bins and skips the pass over the visible set, except on a
+ * timestamp field binned by months or years and where an edge was served as its column's smallest
+ * or largest value. At most `meta.selection.maxAggregateBins`; a grouping by bins takes no
+ * `cells`.
  *
  * @category Requests and responses
  */
@@ -1688,15 +1693,15 @@ export type AggregateCells = {
  * its rows.
  *
  * The columns are, in this order and each only where stated: `group` (`listed`, `rest` or `none`,
- * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null on
- * `rest` and `none`); `title` (the value's title, with `by` on a field); in place of `key` and
- * `title` with `bins`, `lower` and `upper` (a bin's edges: a number on a number field, a timestamp
- * in milliseconds since the Unix epoch, as Arrow reads one, on a timestamp field; null on `rest`
- * and `none`); `cell` (a `bigint`, the first
- * `2·depth` bits of the Morton position, with `cells`); `count` (a `bigint`); and with a reference,
- * `reference_count` (a `bigint`) and `lift` (a number, null where either count it divides by is
- * 0). A bin holds the values from `lower` up to but not including `upper`, and the last bin also
- * holds its `upper`; `rest` holds the values in no bin and `none` the items with no value.
+ * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null
+ * on `rest` and `none`); `title` (the value's title, with `by` on a field); in place of `key` and
+ * `title` with `bins`, `lower` and `upper` (a bin's edges: a `bigint` on an integer field, a number
+ * on a float field, and a timestamp in milliseconds since the Unix epoch, as Arrow reads one, on a
+ * timestamp field; null on `rest` and `none`); `cell` (a `bigint`, the first `2·depth` bits of the
+ * Morton position, with `cells`); `count` (a `bigint`); and with a reference, `reference_count` (a
+ * `bigint`) and `lift` (a number, null where either count it divides by is 0). A bin holds the
+ * values from `lower` up to but not including `upper`, and the last bin also holds its `upper`;
+ * `rest` holds the values in no bin and `none` the items with no value.
  *
  * @category Requests and responses
  */

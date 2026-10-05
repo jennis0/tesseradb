@@ -228,19 +228,19 @@ the items the selection counts.
 
 Every surface sends a grouping as the caller wrote it, a histogram's `bins` and `range` included,
 and none adds a default. The store sends a reference only where the component registered one, as a
-filter expression or as the whole visible set. It chooses no grouping. A registration can name one column in `without`, as
-the filter draft keys its controls, and the store then sends its filters less that column's
-control. A category control uses this to list its own values: with its clause set, the values it
-excludes are still counted, and every other clause, the `member_of` clauses and the selected
-region still narrow them. A registration can also name one layer in `withoutMembersOf`, and the
-store then leaves out that layer's `member_of` clauses in the filter position; a cluster control
-uses this to keep counting the clusters its own clauses exclude. A registration with
+filter expression or as the whole visible set. It chooses no grouping. A registration can name one
+column in `without`, as the filter draft keys its controls, and the store then sends its filters
+less that column's control. A category control uses this to list its own values: with its clause
+set, the values it excludes are still counted, and every other clause, the `member_of` clauses and
+the selected region still narrow them. A registration can also name one layer in `withoutMembersOf`,
+and the store then leaves out that layer's `member_of` clauses in the filter position; a cluster
+control uses this to keep counting the clusters its own clauses exclude. A registration with
 `highlighted` has the store join its highlight to the filters, so each count is the viewport's
 highlighted count over the same items. The region is always sent, and nothing is left out unless a
-registration names it. A `429` or `503`
-is sent again as the map's own requests are, after the same backoff or the server's
-`Retry-After` where that is longer, and a newer change cancels the wait. `selection.aggregate` sends the selection's filters
-and box as the request's `filters`, so every grouping's total is the selection's count.
+registration names it. A `429` or `503` is sent again as the map's own requests are, after the same
+backoff or the server's `Retry-After` where that is longer, and a newer change cancels the wait.
+`selection.aggregate` sends the selection's filters and box as the request's `filters`, so every
+grouping's total is the selection's count.
 
 The map draws density from this route. `DensityCounter` in `@tesseradb/deck` registers one
 grouping of cells with the store, at the depth whose cells come nearest a chosen size on screen at

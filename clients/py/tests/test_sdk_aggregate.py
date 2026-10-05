@@ -14,7 +14,7 @@ import urllib.request
 
 import pytest
 
-pytest.importorskip("pyarrow")
+pa = pytest.importorskip("pyarrow")
 
 from conftest import post  # noqa: E402
 from tesseradb import PartialRead, Refusal, connect  # noqa: E402
@@ -120,14 +120,15 @@ def test_a_viewer_reads_every_response_and_joins_each_tables_pages(db, monkeypat
 
 
 def test_a_number_in_bins(db):
-    """`n` runs from 0 to 19: four readable bins of five hold it, with the same edges under a
-    filter, and a range of two bins, whose last holds its upper edge, leaves the others in
-    `rest`."""
+    """`n`, a `u32`, runs from 0 to 19: four readable bins of five hold it, their edges `uint64`,
+    with the same edges under a filter, and a range of two bins, whose last holds its upper edge,
+    leaves the others in `rest`."""
     (whole,) = db.aggregate("map", [{"by": {"field": "n", "bins": 4}}])
-    edges = [(0.0, 5.0), (5.0, 10.0), (10.0, 15.0), (15.0, 20.0)]
+    edges = [(0, 5), (5, 10), (10, 15), (15, 20)]
     assert [(r["group"], r["lower"], r["upper"], r["count"]) for r in rows(whole)] == [
         ("listed", lo, hi, 5) for lo, hi in edges
     ]
+    assert whole.schema.field("lower").type == pa.uint64()
     assert head(whole) == {"grouping": 0, "total": 20, "groups": 4}
     (part,) = db.aggregate(
         "map", [{"by": {"field": "n", "bins": 4}}], filters={"n": {"range": {"lt": 10}}}, reference={}
@@ -137,8 +138,8 @@ def test_a_number_in_bins(db):
     ]
     (ranged,) = db.aggregate("map", [{"by": {"field": "n", "bins": 2, "range": [0, 10]}}])
     assert [(r["group"], r["lower"], r["upper"], r["count"]) for r in rows(ranged)] == [
-        ("listed", 0.0, 5.0, 5),
-        ("listed", 5.0, 10.0, 6),
+        ("listed", 0, 5, 5),
+        ("listed", 5, 10, 6),
         ("rest", None, None, 9),
     ]
 

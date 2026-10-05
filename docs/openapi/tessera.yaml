@@ -1251,13 +1251,13 @@ paths:
         level, `cells`. With neither, its table is one row: the size of the set. `by` names a
         category `field` or the artifacts of a `layer`, and lists `top` groups by count or the
         groups named in `values` or `artifacts`; or it names a number or timestamp `field` and
-        counts its values in `bins`, a histogram, which takes no `cells`. `cells` divides the set, or each group, into the
-        cells of `view` at `depth`: depths 0 to 16 are the cells of the map's tiles at that zoom,
-        and 17 to 32 divide them down to the stored position. `cells.area` is a bbox in the form
-        and units the viewport's `bbox` takes, absent for the view's whole extent, and an area
-        partly outside the extent is clamped to the edge cells as the viewport's `bbox` is; only
-        the cells at `depth` that intersect it are listed, as a viewport lists tiles for its `bbox`, each
-        with all of its items. The table head's `total`, `reference_total` and `groups`, and the
+        counts its values in `bins`, a histogram, which takes no `cells`. `cells` divides the set,
+        or each group, into the cells of `view` at `depth`: depths 0 to 16 are the cells of the
+        map's tiles at that zoom, and 17 to 32 divide them down to the stored position.
+        `cells.area` is a bbox in the form and units the viewport's `bbox` takes, absent for the
+        view's whole extent, and an area partly outside the extent is clamped to the edge cells as
+        the viewport's `bbox` is; only the cells at `depth` that intersect it are listed, as a
+        viewport lists tiles for its `bbox`, each with all of its items. The table head's `total`, `reference_total` and `groups`, and the
         counts that rank `top`, stay the whole set's. The cells at `depth` in the area, a matter of
         geometry alone, may number at most `selection.max_aggregate_cells`, however many groups
         the grouping has.
@@ -1282,11 +1282,17 @@ paths:
         with no value. A bin holds the values from its `lower` edge up to but not including its
         `upper` edge, and the last bin also holds its `upper` edge, so a filter's `range` with
         `gte` the lower edge and `lt` the upper matches exactly a bin's items, and `lte` for the
-        last. An integer is compared with an edge exactly.
+        last. On an integer or timestamp field the edges are whole numbers, worked out exactly,
+        and every value is compared with them exactly.
 
-        With `range`, edge `i` of `n` is `lower + (upper - lower) * (i / n)` in `float64` on a
-        number field, the last exactly `upper`, and `lower + floor((upper - lower) * i / n)`
-        microseconds on a timestamp field; `rest` holds the values outside the range.
+        With `range` on a float field, where `lower` and `upper` are multiples of one readable
+        width (below) `n` widths apart, the edges are those multiples; otherwise edge `i` of `n`
+        is `lower × (1 − i/n) + upper × (i/n)` in `float64`, the last exactly `upper`. Where those
+        edges do not rise, as in a range a few `float64` values wide, the table has one bin from
+        `lower` to `upper`. On an integer or timestamp field the bounds are whole numbers, and
+        edge `i` is `lower + floor((upper − lower) × i / n)`; an edge past what the edge column
+        holds is served as that column's smallest or largest value, and the bins are counted as
+        served. `rest` holds the values outside the range.
 
         Without `range`, the edges are readable values around the smallest and largest value
         among every item this principal may see in `view`, whatever `filters`, `reference` and any
@@ -1297,15 +1303,24 @@ paths:
         is the multiple of the width at or below the smallest value, and the last the first
         multiple at or above the largest, or above it on an integer field. Where every visible
         value is the same, the width is the largest power of ten at or below its magnitude, or 1
-        for 0. One bin over values either side of 0 has no such width, and runs from the smallest
-        value to the largest, or to one above it on an integer field. On a timestamp field the width is the finest of 1, 2 or 5 times a power of ten
-        microseconds up to 500,000; 1, 2, 5, 10, 15 or 30 seconds or minutes; 1, 2, 3, 6 or 12
-        hours; 1 or 2 days; a week; 1, 2, 3 or 6 months; and 1, 2 or 5 times a power of ten years,
-        that needs at most `bins` bins. A fixed width's bins start at multiples of it from
-        1970-01-01T00:00Z, a week's on Mondays, a month's on the first of a month whose number
-        from January of year 0 is a multiple of the width, and a year's on 1 January of a year
-        that is a multiple of the width, in UTC. The last edge is above the largest value. Where
-        every visible value is the same instant, its bin is its day.
+        for 0. With `bins` of 1, values either side of 0 have no such width, since 0 is a multiple
+        of every width; their one bin runs from the smallest value to the largest, or to one above
+        it on an integer field. On a float field, values whose readable edges would pass the
+        `float64` range are cut as a `range` from the smallest to the largest would be. On a
+        timestamp field the width is the finest of 1, 2 or 5 times a power of ten microseconds up
+        to 500,000; 1, 2, 5, 10, 15 or 30 seconds or minutes; 1, 2, 3, 6 or 12 hours; 1 or 2 days;
+        a week; 1, 2, 3 or 6 months; and 1, 2 or 5 times a power of ten years, that needs at most
+        `bins` bins. A fixed width's bins start at multiples of it from 1970-01-01T00:00Z, a
+        week's on Mondays, a month's on the first of a month whose number from January of year 0
+        is a multiple of the width, and a year's on 1 January of a year that is a multiple of the
+        width, in UTC. The last edge is above the largest value. Where every visible value is the
+        same instant, its bin is its day.
+
+        Default edges cost a pass over the values of every item this principal may see in `view`.
+        Sending the first answer's first `lower` and last `upper` back as `range`, with `bins` the
+        number of bins it returned, gives the same edges without that pass, except on a timestamp
+        field binned by months or years, whose bins differ in width, and where an edge was served
+        as its column's smallest or largest value.
 
         The edges are fixed at the table's first page and carried in the cursor.
 
@@ -1314,9 +1329,9 @@ paths:
         `dictionary<int32, utf8>`, or an artifact's `tessera_id` as `uint64`; null on `rest` and
         `none`. `title` (`dictionary<int32, utf8>`, with `by` on a field): the value's title as
         `/v1/categories` gives it, null where it has none. `lower` and `upper` (with `bins`, in
-        place of `key` and `title`): the bin's edges, `float64` on a number field and
-        `timestamp[us, UTC]` on a timestamp field; null on `rest` and `none`. `cell` (`uint64`, with `cells`): the
-        first `2·depth` bits of the item's 64-bit Morton position, right-aligned; at a depth of
+        place of `key` and `title`): the bin's edges, `int64` on a signed integer field, `uint64`
+        on an unsigned one, `float64` on a float field and `timestamp[us, UTC]` on a timestamp
+        field; null on `rest` and `none`. `cell` (`uint64`, with `cells`): the first `2·depth` bits of the item's 64-bit Morton position, right-aligned; at a depth of
         16 or less it is the tile code the viewport uses at that zoom. `count` (`uint64`): the
         items of the set in the row's group and cell. `reference_count` (`uint64`, with
         `reference`): the same over the reference set. `lift` (`float64`, with `reference`):
@@ -1404,8 +1419,8 @@ paths:
             - an unknown key, a missing `view` or `groupings`, no grouping, or more than `selection.max_aggregate_groupings`;
             - `by` naming neither or both of `field` and `layer`, or carrying neither or both of `top` and `values` or `artifacts`, or `values` on a layer, or `artifacts` or `level` on a field;
             - `top` of 0 or above `selection.max_aggregate_top`; `values` or `artifacts` empty or longer than `selection.max_aggregate_named`; an `artifacts` entry that is not a `tessera_id`;
-            - `bins` beside `top` or `values`, or on a layer; `range` without `bins`; `bins` of 0 or above `selection.max_aggregate_bins`; a `range` whose lower bound is not below its upper, or that is not two numbers; a fractional bound on a timestamp field; `bins` with `cells`;
-            - `bins` on a field that is not a number or timestamp, each kind with its own detail, and on a number or timestamp field declared with neither `index` nor `render`, or a `bool`, with a detail saying to name a number or timestamp field declared with `index` or `render`;
+            - `bins` beside `top` or `values`, or on a layer; `range` without `bins`; `bins` of 0 or above `selection.max_aggregate_bins`; a `range` whose lower bound is not below its upper, or that is not two numbers; a fractional bound on an integer or timestamp field; `bins` with `cells`;
+            - `bins` on a field that is not a number or timestamp, each kind with its own detail; on a `bool`, with a detail saying it has no bins; and on a number or timestamp field declared with neither `index` nor `render`, with a detail saying to name a number or timestamp field declared with `index` or `render`;
             - an unknown field, and a field that is not a category, each with its own detail; a category declared with none of `index`, `render` or a `derived` vocabulary, with a detail saying to declare it with `index` or `render`;
             - a layer outside the list `/v1/meta` publishes to this principal; no `level` on a layer with several, a `level` the layer does not hold, or one given on a layer with a single level;
             - `depth` above 32, whatever its size; an `area` that is not `[x0, y0, x1, y1]` with `x0 ≤ x1`, `y0 ≤ y1`, all finite;
@@ -5376,7 +5391,7 @@ components:
               maxItems: 2
               items:
                 $ref: "#/components/schemas/NumericComparand"
-              description: "`[lower, upper]`, with `lower` below `upper`, in the field's own units: on a timestamp field, whole microseconds since the Unix epoch. Absent is readable edges around the values every item this principal may see in `view` holds."
+              description: "`[lower, upper]`, with `lower` below `upper`, in the field's own units: on an integer field, whole numbers; on a timestamp field, whole microseconds since the Unix epoch. Absent is readable edges around the values every item this principal may see in `view` holds."
         - type: object
           additionalProperties: false
           required: [layer, top]

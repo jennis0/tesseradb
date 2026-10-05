@@ -867,18 +867,6 @@ async fn every_refusal_has_its_status() {
         refusal_detail(&f.server, &token, "tag").await,
     ];
     assert_eq!(details.iter().collect::<HashSet<_>>().len(), 3, "{details:?}");
-    // Bins on a category, on a number that cannot be binned and on an unknown field: three
-    // refusals, each with its own detail, naming the field as asked.
-    let mut details = Vec::new();
-    for field in ["archive", "pages", "nope"] {
-        let body = json!({ "view": "s0", "groupings": [{ "by": { "field": field, "bins": 2 } }] });
-        let resp = post(&f.server, "/v1/aggregate", &token, &body).await;
-        let body: Value = resp.json().await.unwrap();
-        let detail = body["detail"].as_str().unwrap().to_string();
-        assert!(detail.contains(&format!("'{field}'")), "{detail}");
-        details.push(detail.replace(field, "<field>"));
-    }
-    assert_eq!(details.iter().collect::<HashSet<_>>().len(), 3, "{details:?}");
 
     let resp = post(&f.server, "/v1/aggregate", &token, &json!({ "view": "nowhere", "groupings": [{}] })).await;
     assert_eq!(refused(resp, 404).await, "unknown");

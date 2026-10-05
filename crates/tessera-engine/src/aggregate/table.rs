@@ -9,8 +9,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanBufferBuilder, DictionaryArray, Float64Array, Int32Array, Int8Array,
-    StringArray, TimestampMicrosecondArray, UInt64Array,
+    Array, ArrayRef, BooleanBufferBuilder, DictionaryArray, Float64Array, Int32Array, Int64Array,
+    Int8Array, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::buffer::{NullBuffer, ScalarBuffer};
 use arrow::datatypes::{Field as ArrowField, Int32Type, Int8Type, Schema};
@@ -19,7 +19,7 @@ use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 
 use super::artifacts::{Layer, Served};
-use super::bins::Bins;
+use super::bins::{Bins, Kind};
 use super::cursor::Position;
 use super::set::Cx;
 use super::values::Field;
@@ -110,11 +110,11 @@ pub(super) enum Key {
     Bin(Edge, Edge),
 }
 
-/// A bin's edge: a number, or a timestamp in microseconds since the Unix epoch.
+/// A bin's edge: a float, or an integer or a timestamp in microseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Edge {
-    Number(f64),
-    Time(i64),
+    Float(f64),
+    Int(i128),
 }
 
 /// What one page of a table counted that the next page of the same response can take while the
@@ -635,26 +635,35 @@ impl Plan {
                         _ => None,
                     };
                     for (name, upper) in [("lower", false), ("upper", true)] {
-                        let edges: ArrayRef = match bins.timestamps() {
-                            true => Arc::new(
+                        let float = |g| match edge(g, upper) {
+                            Some(Edge::Float(x)) => x,
+                            _ => 0.0,
+                        };
+                        // An integer edge is within its served column's span.
+                        let int = |g| match edge(g, upper) {
+                            Some(Edge::Int(x)) => x,
+                            _ => 0,
+                        };
+                        let valid = on_listed.clone();
+                        let edges: ArrayRef = match bins.kind() {
+                            Kind::Float => {
+                                Arc::new(Float64Array::new(repeated(runs, float).into(), valid))
+                            }
+                            Kind::Signed => Arc::new(Int64Array::new(
+                                repeated(runs, |g| int(g) as i64).into(),
+                                valid,
+                            )),
+                            Kind::Unsigned => Arc::new(UInt64Array::new(
+                                repeated(runs, |g| int(g) as u64).into(),
+                                valid,
+                            )),
+                            Kind::Timestamp => Arc::new(
                                 TimestampMicrosecondArray::new(
-                                    repeated(runs, |g| match edge(g, upper) {
-                                        Some(Edge::Time(t)) => t,
-                                        _ => 0,
-                                    })
-                                    .into(),
-                                    on_listed.clone(),
+                                    repeated(runs, |g| int(g) as i64).into(),
+                                    valid,
                                 )
                                 .with_timezone("UTC"),
                             ),
-                            false => Arc::new(Float64Array::new(
-                                repeated(runs, |g| match edge(g, upper) {
-                                    Some(Edge::Number(x)) => x,
-                                    _ => 0.0,
-                                })
-                                .into(),
-                                on_listed.clone(),
-                            )),
                         };
                         push(name, edges, true);
                     }

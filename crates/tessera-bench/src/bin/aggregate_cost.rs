@@ -4,8 +4,9 @@
 //! no level, value groupings, histograms, density surfaces, value by cell and an artifact
 //! grouping, each with no filter and under a polygon, beside the viewport request over the same
 //! set at zoom 4 and the whole extent. A histogram is timed with its default edges, which read
-//! the whole visible set's values first, and with the range those edges span, which does not. The principal holds every term in the bundle's dictionary. The engine's pool is
-//! `--threads` wide.
+//! the whole visible set's values first, and with the range those edges span, which does not.
+//! The principal holds every term in the bundle's dictionary. The engine's pool is `--threads`
+//! wide.
 //!
 //! Every figure is the median of `--repeat` runs, with the fastest and slowest beside it, after one
 //! run that is not counted. Each case also reports its last run's time by stage: composing the
@@ -28,7 +29,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::array::{Array, AsArray};
-use arrow::datatypes::{DataType, Float64Type, TimestampMicrosecondType};
+use arrow::datatypes::{
+    DataType, Float64Type, Int64Type, TimestampMicrosecondType, UInt64Type,
+};
 use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use serde_json::{json, Value};
@@ -115,6 +118,12 @@ impl AggregateSink for Tally {
             }?;
             Some(match column.data_type() {
                 DataType::Float64 => Scalar::Float(column.as_primitive::<Float64Type>().value(i)),
+                DataType::Int64 => {
+                    Scalar::Int(i128::from(column.as_primitive::<Int64Type>().value(i)))
+                }
+                DataType::UInt64 => {
+                    Scalar::Int(i128::from(column.as_primitive::<UInt64Type>().value(i)))
+                }
                 _ => Scalar::Int(i128::from(
                     column.as_primitive::<TimestampMicrosecondType>().value(i),
                 )),

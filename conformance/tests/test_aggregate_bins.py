@@ -14,9 +14,13 @@ The oracle derives, from the contract's rules alone and in exact arithmetic:
   narrowest width of 1, 2, 2.5 or 5 times a power of ten that needs at most `bins` bins, from the
   multiple at or below the smallest value; on a timestamp field the finest calendar width that
   does, its bins starting where the contract says, read off Python's own calendar.
-- **Edges of a range**, by the contract's formula.
+- **Edges of a range**, by the contract's formula: on an integer or timestamp field in exact
+  integer arithmetic, so a bound and a value past 2^53 are placed exactly; on a float field the
+  readable multiples where the bounds are two of them, and otherwise the weighed formula.
 - **Counts**: each item of the set placed by comparing its value with the served edges, a bin
   holding its lower edge and not its upper, the last bin both; NaN in `rest`; no value in `none`.
+- **Edge types**: `int64` on a signed integer field, `uint64` on an unsigned one, `float64` on a
+  float field and `timestamp[us, UTC]` on a timestamp field.
 
 Each table is compared row for row, with every principal, under no filter and two filters, against
 a reference of the whole visible set. The edges must be the same under every filter.
@@ -121,6 +125,14 @@ COLUMNS = [
 BY_NAME = {c.name: c for c in COLUMNS}
 TIMESTAMPS = {"seen", "when"}
 INTEGERS = {"rank", "big"}
+EDGE_TYPES = {
+    "score": pa.float64(),
+    "weight": pa.float64(),
+    "rank": pa.int64(),
+    "big": pa.uint64(),
+    "seen": pa.timestamp("us", tz="UTC"),
+    "when": pa.timestamp("us", tz="UTC"),
+}
 
 FILTERS = {
     "none": (None, lambda i: True),
@@ -164,12 +176,14 @@ def _power_at_or_below(x: Fraction) -> int:
     return e
 
 
-def readable_numbers(lo, hi, n: int, integer: bool) -> list[float]:
+def readable_numbers(lo, hi, n: int, integer: bool) -> list:
+    """Readable edges, exact integers on an integer field and the nearest `float64` otherwise."""
+    out = int if integer else float
     lo, hi = Fraction(lo), Fraction(hi)
     if lo == hi:
         width = Fraction(10) ** _power_at_or_below(abs(lo)) if lo else Fraction(1)
         first = math.floor(lo / width) * width
-        return [float(first), float(first + width)]
+        return [out(first), out(first + width)]
     start = _power_at_or_below((hi - lo) / n) - 1
     for e in range(start, start + 40):
         for m in MANTISSAS:
@@ -182,10 +196,11 @@ def readable_numbers(lo, hi, n: int, integer: bool) -> list[float]:
             else:
                 bins = max(1, math.ceil((hi - first) / width))
             if bins <= n:
-                return [float(first + k * width) for k in range(bins + 1)]
-    # One bin over values either side of 0, which no multiple of a width starts below.
-    assert n == 1 and lo < 0 < hi, "no readable width"
-    return [float(lo), float(hi + 1 if integer else hi)]
+                return [out(first + k * width) for k in range(bins + 1)]
+    # With one bin, values either side of 0 have no readable width, since 0 is a multiple of
+    # every width.
+    assert n == 1 and lo < 0 <= hi, "no readable width"
+    return [out(lo), out(hi + 1 if integer else hi)]
 
 
 def _calendar_steps():
@@ -246,11 +261,25 @@ def default_edges(column: str, items: list[int], n: int) -> list:
     return readable_numbers(min(values), max(values), n, column in INTEGERS)
 
 
+def _readable(k: float, m: float, e: int) -> float:
+    """A readable edge as the contract computes one in `float64`."""
+    return k * m * 10.0**e if e >= 0 else k * m / 10.0 ** (-e)
+
+
 def range_edges(column: str, lower, upper, n: int) -> list:
-    if column in TIMESTAMPS:
+    if column in TIMESTAMPS or column in INTEGERS:
+        lower, upper = int(lower), int(upper)
         return [lower + (upper - lower) * i // n for i in range(n + 1)]
     lower, upper = float(lower), float(upper)
-    return [lower if i == 0 else upper if i == n else lower + (upper - lower) * (i / n) for i in range(n + 1)]
+    for e in range(-30, 31):
+        for m in (1.0, 2.0, 2.5, 5.0):
+            first = round(lower / _readable(1.0, m, e))
+            if _readable(first, m, e) == lower and _readable(first + n, m, e) == upper:
+                return [_readable(first + i, m, e) for i in range(n + 1)]
+    return [
+        lower if i == 0 else upper if i == n else lower * (1 - i / n) + upper * (i / n)
+        for i in range(n + 1)
+    ]
 
 
 def place(value, edges: list) -> int | None:
@@ -293,6 +322,7 @@ def expected(column: str, edges: list, items: list[int], reference: list[int]):
 
 
 def read_table(server, token: str, body: dict) -> tuple[dict, list[tuple]]:
+    edge_type = EDGE_TYPES[body["groupings"][0]["by"]["field"]]
     head = None
     rows: list[tuple] = []
     body = dict(body)
@@ -307,8 +337,9 @@ def read_table(server, token: str, body: dict) -> tuple[dict, list[tuple]]:
                 columns = {}
                 for name in batch.schema.names:
                     column = batch.column(name)
+                    if name in ("lower", "upper"):
+                        assert column.type == edge_type, (name, column.type)
                     if pa.types.is_timestamp(column.type):
-                        assert column.type == pa.timestamp("us", tz="UTC"), column.type
                         column = column.cast(pa.int64())
                     columns[name] = column.to_pylist()
                 assert "key" not in columns and "title" not in columns
@@ -354,29 +385,54 @@ def test_default_bins_are_the_oracles_and_hold_still(deployment, principal, colu
         assert value(low) < edges[0] and edges[-1] < value(high), f"{column}: {edges}"
 
 
-RANGES = {
-    "score": (-10, 10.5, 4),
-    "rank": (-100, 100, 8),
-    "weight": (0, 200.5, 3),
-    "big": ("9223372036854775808", "9223872036854775808", 5),
-    "seen": (_us(2019), _us(2020) + 1, 6),
-    "when": (str(_us(2024, 5, 2)), _us(2024, 5, 3), 24),
-}
+def _a_big_value() -> int:
+    """A `big` value the `two` principal sees, past 2^63."""
+    return next(v for i in visible("two") if (v := BY_NAME["big"].value(i)) is not None)
 
 
-@pytest.mark.parametrize("column", list(RANGES))
-def test_a_range_is_the_oracles(deployment, column):
+RANGES = [
+    ("score", -10, 10.5, 4),
+    ("score", -10, 10, 4),
+    ("rank", -100, 100, 8),
+    # 201 values in 8 bins: widths of 25 and 26.
+    ("rank", -100, 101, 8),
+    ("weight", 0, 200.5, 3),
+    # Multiples of 0.25 that the values, sixteenths, sit on.
+    ("weight", 0.25, 2.25, 8),
+    ("big", "9223372036854775808", "9223872036854775808", 5),
+    # Bounds that no power of two divides, past 2^63, in bins whose widths differ by one.
+    ("big", "9223372036854775809", "9223872036854775810", 7),
+    ("seen", _us(2019), _us(2020) + 1, 6),
+    ("when", str(_us(2024, 5, 2)), _us(2024, 5, 3), 24),
+]
+
+
+@pytest.mark.parametrize("case", RANGES, ids=lambda c: f"{c[0]}-{c[1]}-{c[2]}-{c[3]}")
+def test_a_range_is_the_oracles(deployment, case):
+    column, lower, upper, n = case
     token = deployment.server.authorise(list(fx.PRINCIPALS["two"]))["token"]
     seen = visible("two")
-    lower, upper, n = RANGES[column]
     body = {"view": fx.WORLD, "reference": {}, "filters": FILTERS["rank"][0],
             "groupings": [{"by": {"field": column, "bins": n, "range": [lower, upper]}}]}
     head, rows = read_table(deployment.server, token, body)
-    edges = range_edges(column, int(lower) if isinstance(lower, str) else lower,
-                        int(upper) if isinstance(upper, str) else upper, n)
+    edges = range_edges(column, lower, upper, n)
     want_head, want_rows = expected(column, edges, [i for i in seen if FILTERS["rank"][1](i)], seen)
-    assert (head, rows) == (want_head, want_rows), column
-    assert any(r[0] == "rest" for r in rows), f"{column}: the range leaves values outside it"
+    assert (head, rows) == (want_head, want_rows), case
+    assert any(r[0] == "rest" for r in rows), f"{case}: the range leaves values outside it"
+
+
+def test_a_value_past_2_to_the_53_is_placed_by_its_exact_bin(deployment):
+    """Bins one wide around a `u64` value past 2^63: the value is in its own bin, which no `float64`
+    edge could tell apart from its neighbours."""
+    token = deployment.server.authorise(list(fx.PRINCIPALS["two"]))["token"]
+    seen = visible("two")
+    v = _a_big_value()
+    body = {"view": fx.WORLD, "reference": {},
+            "groupings": [{"by": {"field": "big", "bins": 3, "range": [str(v - 1), str(v + 2)]}}]}
+    head, rows = read_table(deployment.server, token, body)
+    assert [(r[1], r[2]) for r in rows if r[0] == "listed"] == [(v - 1, v), (v, v + 1), (v + 1, v + 2)]
+    assert (head, rows) == expected("big", [v - 1, v, v + 1, v + 2], seen, seen)
+    assert rows[1][3] >= 1, "the value's own bin holds it"
 
 
 def test_a_grouping_by_bins_that_cannot_be_served_is_refused(deployment):
@@ -387,6 +443,7 @@ def test_a_grouping_by_bins_that_cannot_be_served_is_refused(deployment):
         {"field": "score", "bins": 4, "range": [3, 3]},
         {"field": "score", "bins": 4, "range": [3, 1]},
         {"field": "seen", "bins": 4, "range": [0.5, 9]},
+        {"field": "rank", "bins": 4, "range": [0, 9.5]},
         {"field": "nothing", "bins": 4},
     ):
         resp = deployment.server.aggregate(token, view=fx.WORLD, groupings=[{"by": by}])

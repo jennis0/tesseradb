@@ -21,12 +21,13 @@ use tessera_engine::{
     Reference,
     SinkResult, TableHead,
 };
+use tessera_engine::filter::Family;
 use tessera_wire::table_head_frame;
 
 use crate::error::ApiError;
 use crate::records::{bulk_read, limits, view_and_filter, CompressionReq, FrameSink, Lane, Opening, Read};
 use crate::state::{ApiJson, AppState, ViewerSession};
-use crate::viewer::{category_column, check_bbox, CategoryColumn, FilterParser};
+use crate::viewer::{check_bbox, field_column, FieldColumn, FilterParser};
 
 /// The request body. Every field but `view` and `groupings` may be left out; an unknown one is a
 /// `422`.
@@ -274,29 +275,65 @@ fn by_of(
             if by.range.is_some() && by.bins.is_none() {
                 return bad("`range` goes with `bins`; send `bins` beside it, or leave it out");
             }
-            if let Some(bins) = by.bins {
-                if by.top.is_some() || by.values.is_some() {
-                    return bad("`by` carries `bins` beside `top` or `values`; send one");
+            let pick = match (by.bins, by.top, &by.values) {
+                (Some(_), None, None) => None,
+                (Some(_), _, _) => {
+                    return bad("`by` carries `bins` beside `top` or `values`; send one")
                 }
-                return bins_of(meta, view, session, field, bins, by.range.as_ref());
-            }
-            let pick = match (by.top, &by.values) {
-                (Some(top), None) => Pick::Top(top),
-                (None, Some(values)) => Pick::Named(values.clone()),
-                (Some(_), Some(_)) => return bad("`by` carries both `top` and `values`; send one"),
-                (None, None) => return bad("`by` carries neither `top` nor `values`; send one"),
+                (None, Some(top), None) => Some(Pick::Top(top)),
+                (None, None, Some(values)) => Some(Pick::Named(values.clone())),
+                (None, Some(_), Some(_)) => {
+                    return bad("`by` carries both `top` and `values`; send one")
+                }
+                (None, None, None) => {
+                    return bad("`by` carries neither `top` nor `values`; send one")
+                }
             };
-            match category_column(meta, field, view, session.visible_views())? {
-                CategoryColumn::Resolved(column) => Ok(By::Field { column, pick }),
-                CategoryColumn::NotCategory => Err(ApiError::Contract(format!(
+            let (column, family, integer) =
+                match field_column(meta, field, view, session.visible_views())? {
+                    FieldColumn::Resolved {
+                        column,
+                        family,
+                        integer,
+                    } => (column, family, integer),
+                    FieldColumn::Unknown => {
+                        return Err(ApiError::Contract(format!(
+                            "field '{field}' is unknown; name a field /v1/meta publishes"
+                        )))
+                    }
+                    FieldColumn::Unpinned { group } => {
+                        return Err(ApiError::Contract(format!(
+                            "field '{field}' is scoped to view group '{group}' and view '{view}' \
+                             is not one of its views; pin the view it means as '{field}@<key>'"
+                        )))
+                    }
+                };
+            match (pick, by.bins, family) {
+                (Some(pick), _, Family::Category) => Ok(By::Field { column, pick }),
+                (Some(_), _, _) => Err(ApiError::Contract(format!(
                     "field '{field}' is not a category; name a category field"
                 ))),
-                CategoryColumn::Unknown => Err(ApiError::Contract(format!(
-                    "field '{field}' is unknown; name a field /v1/meta publishes"
+                (None, Some(bins), Family::Numeric) => {
+                    let range = match &by.range {
+                        None => None,
+                        Some([lower, upper]) => Some((
+                            crate::filter_dto::numeric_value(field, lower, integer)?,
+                            crate::filter_dto::numeric_value(field, upper, integer)?,
+                        )),
+                    };
+                    Ok(By::Bins {
+                        column,
+                        bins,
+                        range,
+                    })
+                }
+                (None, _, Family::Category) => Err(ApiError::Contract(format!(
+                    "field '{field}' is a category; bins go with a number or timestamp field, \
+                     and a category takes top or values"
                 ))),
-                CategoryColumn::Unpinned { group } => Err(ApiError::Contract(format!(
-                    "field '{field}' is scoped to view group '{group}' and view '{view}' is not \
-                     one of its views; pin the view it means as '{field}@<key>'"
+                (None, _, _) => Err(ApiError::Contract(format!(
+                    "field '{field}' is not a number or timestamp; name a number or timestamp \
+                     field for bins"
                 ))),
             }
         }
@@ -330,64 +367,6 @@ fn by_of(
     }
 }
 
-/// A grouping by bins of `field`, a number or timestamp field resolved under `view`, with its
-/// range read as a filter's `range` reads its bounds.
-fn bins_of(
-    meta: &tessera_engine::EngineMeta,
-    view: &str,
-    session: &tessera_engine::Session,
-    field: &str,
-    bins: u32,
-    range: Option<&[Value; 2]>,
-) -> Result<By, ApiError> {
-    let (column, integer) = match meta.resolve_category_column(field, view, session.visible_views()) {
-        tessera_engine::LeafColumn::Resolved {
-            column,
-            family: tessera_engine::filter::Family::Numeric,
-            integer,
-            ..
-        } => (column, integer),
-        tessera_engine::LeafColumn::Resolved {
-            family: tessera_engine::filter::Family::Category,
-            ..
-        } => {
-            return Err(ApiError::Contract(format!(
-                "field '{field}' is a category; bins go with a number or timestamp field, and a \
-                 category takes top or values"
-            )))
-        }
-        tessera_engine::LeafColumn::Resolved { .. } => {
-            return Err(ApiError::Contract(format!(
-                "field '{field}' is not a number or timestamp; name a number or timestamp field \
-                 for bins"
-            )))
-        }
-        _ => {
-            return match category_column(meta, field, view, session.visible_views())? {
-                CategoryColumn::Unpinned { group } => Err(ApiError::Contract(format!(
-                    "field '{field}' is scoped to view group '{group}' and view '{view}' is not \
-                     one of its views; pin the view it means as '{field}@<key>'"
-                ))),
-                _ => Err(ApiError::Contract(format!(
-                    "field '{field}' is unknown; name a field /v1/meta publishes"
-                ))),
-            }
-        }
-    };
-    let range = match range {
-        None => None,
-        Some([lower, upper]) => Some((
-            crate::filter_dto::numeric_value(field, lower, integer)?,
-            crate::filter_dto::numeric_value(field, upper, integer)?,
-        )),
-    };
-    Ok(By::Bins {
-        column,
-        bins,
-        range,
-    })
-}
-
 /// A refusal naming a field the engine was given resolved, named as the caller spelled it.
 fn in_callers_words(e: EngineError, asked: &[GroupingReq], sent: &[Grouping]) -> EngineError {
     let (column, rename): (&String, fn(String) -> AggregateRefused) = match &e {
@@ -397,8 +376,11 @@ fn in_callers_words(e: EngineError, asked: &[GroupingReq], sent: &[Grouping]) ->
         EngineError::AggregateRefused(AggregateRefused::NotBinnable(column)) => {
             (column, AggregateRefused::NotBinnable)
         }
-        EngineError::AggregateRefused(AggregateRefused::FractionalTime(column)) => {
-            (column, AggregateRefused::FractionalTime)
+        EngineError::AggregateRefused(AggregateRefused::BinsOnBool(column)) => {
+            (column, AggregateRefused::BinsOnBool)
+        }
+        EngineError::AggregateRefused(AggregateRefused::FractionalBound(column)) => {
+            (column, AggregateRefused::FractionalBound)
         }
         _ => return e,
     };

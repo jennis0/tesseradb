@@ -216,14 +216,16 @@ pub enum AggregateRefused {
     /// Not a category field this deployment can count: undeclared, not a category, or a category
     /// with no per-value record and not drawn.
     NotCountable(String),
-    /// Not a number or timestamp field this deployment can bin: a `bool`, or a number declared
-    /// with neither `index` nor `render`.
+    /// Not a number or timestamp field this deployment can bin: not a number, or a number
+    /// declared with neither `index` nor `render`.
     NotBinnable(String),
+    /// A grouping by bins of a `bool` field.
+    BinsOnBool(String),
     ZeroBins,
     /// A range whose lower bound is not below its upper bound.
     EmptyRange,
-    /// A fractional bound on a timestamp field's range.
-    FractionalTime(String),
+    /// A fractional bound on an integer or timestamp field's range.
+    FractionalBound(String),
     /// A histogram with a cell level.
     BinsWithCells,
     DepthPast32(u8),
@@ -276,10 +278,15 @@ impl std::fmt::Display for AggregateRefused {
                 f,
                 "the range is empty or reversed; give [lower, upper] with lower below upper"
             ),
-            AggregateRefused::FractionalTime(field) => write!(
+            AggregateRefused::BinsOnBool(field) => write!(
                 f,
-                "field '{field}' holds timestamps, so its range is whole microseconds; give \
-                 integers"
+                "field '{field}' is a bool, which has no bins; count true and false with a filter \
+                 on each"
+            ),
+            AggregateRefused::FractionalBound(field) => write!(
+                f,
+                "field '{field}' holds integers or whole microseconds, so its range is whole; \
+                 give integers"
             ),
             AggregateRefused::BinsWithCells => write!(
                 f,
