@@ -299,7 +299,10 @@ impl RowMembersPack {
                 }
                 continue;
             }
-            if !offset.is_multiple_of(ALIGN as usize) || offset < end || offset + len > payload_len {
+            let ends = offset.checked_add(len).filter(|e| *e <= payload_len);
+            let Some(ends) =
+                ends.filter(|_| offset.is_multiple_of(ALIGN as usize) && offset >= end)
+            else {
                 return Err(malformed(
                     path,
                     format!(
@@ -307,8 +310,8 @@ impl RowMembersPack {
                          payload"
                     ),
                 ));
-            }
-            end = offset + len;
+            };
+            end = ends;
         }
         let mut previous = 0u64;
         for ordinal in 0..=ordinals {
@@ -495,6 +498,13 @@ mod tests {
         assert!(
             RowMembersPack::open(&path).is_err(),
             "a range past the rows"
+        );
+        let mut hostile = bytes.clone();
+        hostile[HEADER_LEN..HEADER_LEN + 8].copy_from_slice(&(u64::MAX - 31).to_le_bytes());
+        std::fs::write(&path, &hostile).unwrap();
+        assert!(
+            RowMembersPack::open(&path).is_err(),
+            "an offset that overflows"
         );
     }
 }

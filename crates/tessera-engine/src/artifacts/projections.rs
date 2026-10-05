@@ -643,12 +643,7 @@ impl ArtifactProjections {
             }
             let path = prefix_dir.join(&extent.path);
             let members = extents.iter().find(|m| {
-                m.form == tessera_store::manifest::DerivedForm::RowMembers
-                    && m.view == extent.view
-                    && m.layer == extent.layer
-                    && m.level == extent.level
-                    && m.level_version == extent.level_version
-                    && m.incarnation == extent.incarnation
+                m.form == tessera_store::manifest::DerivedForm::RowMembers && m.same_level(extent)
             });
             let Some(members) = members else {
                 tracing::error!(
@@ -657,7 +652,7 @@ impl ArtifactProjections {
                     view = %view,
                     path = %extent.path,
                     "ALARM: a row-major column named by the manifest has no member file beside it; \
-                     the level is recomposed on first use"
+                     it is not adopted and the level is recomposed on first use"
                 );
                 continue;
             };

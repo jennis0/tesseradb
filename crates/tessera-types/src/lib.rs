@@ -221,7 +221,7 @@ pub struct GenerationStamp {
 // 33: every row-major column has a member file beside it, holding each artifact's members over the
 // base rows and a covering of at most 32 row ranges. A 32 bundle lacks the files and is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
-// guard, not compatibility (decision 0048).
+// guard, not compatibility.
 pub const BUNDLE_FORMAT: u32 = 33;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;

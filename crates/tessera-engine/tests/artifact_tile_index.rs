@@ -1121,13 +1121,19 @@ fn a_transposed_row_form_is_the_projected_one() {
                     there.map(Bitmap::to_vec),
                     "{shape:?}/{layout:?}: the membership disagreed at ordinal {ordinal}"
                 );
-                // **The same containers, not merely the same set**, which is what makes
-                // `blocks_per_artifact` and every other statistic over the row form the same
+                // **Bit for bit, not merely set for set**, once the projection is run-optimised as
+                // the stored members are: the same containers in the same encoding, which is what
+                // makes `blocks_per_artifact` and every other statistic over the row form the same
                 // number whichever route built it.
+                let optimised = there.map(|rows| {
+                    let mut rows = rows.clone();
+                    rows.run_optimize();
+                    rows
+                });
                 assert_eq!(
-                    here.map(|rows| rows.statistics().n_containers),
-                    there.map(|rows| rows.statistics().n_containers),
-                    "{shape:?}/{layout:?}: the membership's containers differ at ordinal {ordinal}"
+                    here.map(|rows| rows.serialize::<croaring::Portable>()),
+                    optimised.map(|rows| rows.serialize::<croaring::Portable>()),
+                    "{shape:?}/{layout:?}: the encoded membership differs at ordinal {ordinal}"
                 );
                 assert_eq!(
                     transposed

@@ -177,7 +177,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         check_cut_index(phash, partition, &mut report)?;
         check_bands(&prefix_dir, phash, partition, &mut report)?;
         check_band_labels(&prefix_dir, partition, &mut report)?;
-        check_row_members(&prefix_dir, partition, &mut report)?;
+        check_row_members(root, &prefix_dir, partition, &mut report)?;
         check_unique_indexes(
             root,
             &prefix_dir,
@@ -804,27 +804,21 @@ fn check_band_labels(
 
 /// **Every row-major column has one member file beside it, and the file is what the column's
 /// labels give.** The members and coverings are written again from the column into a scratch
-/// directory and compared artifact by artifact. A refusal names the member file, or the column that
+/// directory beside the bundle and compared artifact by artifact. A refusal names the member file, or the column that
 /// has none.
 fn check_row_members(
+    root: &Path,
     prefix_dir: &Path,
     partition: &tessera_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    use tessera_store::manifest::{DerivedExtent, DerivedForm};
+    use tessera_store::manifest::DerivedForm;
     use tessera_store::row_members::RowMembersPack;
     let extents = &partition.manifest.derived_extents;
-    let same_level = |a: &DerivedExtent, b: &DerivedExtent| {
-        a.layer == b.layer
-            && a.level == b.level
-            && a.view == b.view
-            && a.level_version == b.level_version
-            && a.incarnation == b.incarnation
-    };
     for members in extents.iter().filter(|e| e.form == DerivedForm::RowMembers) {
         if !extents
             .iter()
-            .any(|e| matches!(e.form, DerivedForm::RowColumn { .. }) && same_level(e, members))
+            .any(|e| matches!(e.form, DerivedForm::RowColumn { .. }) && e.same_level(members))
         {
             return Err(disagrees(
                 prefix_dir.join(&members.path),
@@ -832,68 +826,63 @@ fn check_row_members(
             ));
         }
     }
-    let scratch =
-        std::env::temp_dir().join(format!("tessera-verify-members-{}", std::process::id()));
-    let checked = (|| {
-        for column in extents.iter() {
-            let DerivedForm::RowColumn { layout } = column.form else {
-                continue;
-            };
-            let column_path = prefix_dir.join(&column.path);
-            let mut beside = extents
-                .iter()
-                .filter(|e| e.form == DerivedForm::RowMembers && same_level(e, column));
-            let (Some(members), None) = (beside.next(), beside.next()) else {
-                return Err(disagrees(
-                    column_path,
-                    format!(
-                        "layer '{}' level {}'s column has no single member file beside it",
-                        column.layer, column.level
-                    ),
-                ));
-            };
-            let members_path = prefix_dir.join(&members.path);
-            let stored = RowMembersPack::open(&members_path).map_err(BuildError::Store)?;
-            let fresh_path =
-                tessera_store::derived::stage_row_members(&column_path, layout, &scratch)
-                    .map_err(BuildError::Store)?;
-            let fresh = RowMembersPack::open(&fresh_path);
-            let _ = fs::remove_file(&fresh_path);
-            let fresh = fresh.map_err(BuildError::Store)?;
-            if (stored.ordinals(), stored.rows()) != (fresh.ordinals(), fresh.rows()) {
+    // Beside the bundle, where the identity check's scratch goes: the writer spills 8 B a member
+    // entry of the level it is writing.
+    let scratch = crate::VerifyTmp::create(root)?;
+    let scratch = scratch.path();
+    for column in extents.iter() {
+        let DerivedForm::RowColumn { layout } = column.form else {
+            continue;
+        };
+        let column_path = prefix_dir.join(&column.path);
+        let mut beside = extents
+            .iter()
+            .filter(|e| e.form == DerivedForm::RowMembers && e.same_level(column));
+        let (Some(members), None) = (beside.next(), beside.next()) else {
+            return Err(disagrees(
+                column_path,
+                format!(
+                    "layer '{}' level {}'s column has no single member file beside it",
+                    column.layer, column.level
+                ),
+            ));
+        };
+        let members_path = prefix_dir.join(&members.path);
+        let stored = RowMembersPack::open(&members_path).map_err(BuildError::Store)?;
+        let fresh_path = tessera_store::derived::stage_row_members(&column_path, layout, scratch)
+            .map_err(BuildError::Store)?;
+        let fresh = RowMembersPack::open(&fresh_path);
+        let _ = fs::remove_file(&fresh_path);
+        let fresh = fresh.map_err(BuildError::Store)?;
+        if (stored.ordinals(), stored.rows()) != (fresh.ordinals(), fresh.rows()) {
+            return Err(disagrees(
+                members_path,
+                format!(
+                    "covers {} ordinals over {} rows and its column {} over {}",
+                    stored.ordinals(),
+                    stored.rows(),
+                    fresh.ordinals(),
+                    fresh.rows()
+                ),
+            ));
+        }
+        for ordinal in 0..fresh.ordinals() {
+            if stored.members(ordinal) != fresh.members(ordinal) {
                 return Err(disagrees(
                     members_path,
-                    format!(
-                        "covers {} ordinals over {} rows and its column {} over {}",
-                        stored.ordinals(),
-                        stored.rows(),
-                        fresh.ordinals(),
-                        fresh.rows()
-                    ),
+                    format!("holds other members for ordinal {ordinal} than its column labels"),
                 ));
             }
-            for ordinal in 0..fresh.ordinals() {
-                if stored.members(ordinal) != fresh.members(ordinal) {
-                    return Err(disagrees(
-                        members_path,
-                        format!("holds other members for ordinal {ordinal} than its column labels"),
-                    ));
-                }
-                if !stored.covering(ordinal).eq(fresh.covering(ordinal)) {
-                    return Err(disagrees(
-                        members_path,
-                        format!(
-                            "holds another covering for ordinal {ordinal} than its column gives"
-                        ),
-                    ));
-                }
+            if !stored.covering(ordinal).eq(fresh.covering(ordinal)) {
+                return Err(disagrees(
+                    members_path,
+                    format!("holds another covering for ordinal {ordinal} than its column gives"),
+                ));
             }
-            report.row_member_files += 1;
         }
-        Ok(())
-    })();
-    let _ = fs::remove_dir_all(&scratch);
-    checked
+        report.row_member_files += 1;
+    }
+    Ok(())
 }
 
 /// **A rendered group-scoped family's lane is present in every build segment of every view that

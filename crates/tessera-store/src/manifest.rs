@@ -1740,6 +1740,18 @@ pub struct DerivedExtent {
     pub form: DerivedForm,
 }
 
+impl DerivedExtent {
+    /// Whether `other` was written for the same level, version, view and incarnation: the
+    /// coordinates two files written together share.
+    pub fn same_level(&self, other: &DerivedExtent) -> bool {
+        self.layer == other.layer
+            && self.level == other.level
+            && self.level_version == other.level_version
+            && self.view == other.view
+            && self.incarnation == other.incarnation
+    }
+}
+
 /// Which structure a [`DerivedExtent`] holds, and what else a reader checks before adopting it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

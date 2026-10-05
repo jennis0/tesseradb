@@ -194,8 +194,11 @@ enum Command {
         /// the columns they index or copy, as must each level's band label copy; each group-scoped
         /// render column must be present in every segment; each unique column's index must be
         /// hashed against the manifest, name at most one live item for a value and agree with the
-        /// column's values in both directions; and `pairs.parquet`, when present, must match the
-        /// term lists it was written with. Run it on a bundle no running server is writing to.
+        /// column's values in both directions; each row-major column's member file must be what
+        /// its labels give; and `pairs.parquet`, when present, must match the term lists it was
+        /// written with. Run it on a bundle no running server is writing to. Writing the member
+        /// files again needs about 8 B per membership entry of the largest level free beside the
+        /// bundle, removed when the verify ends.
         #[arg(long)]
         deep: bool,
     },

@@ -671,20 +671,14 @@ fn write_row_members(
     if entries == 0 {
         return file.finish();
     }
-    // A bucket closes before the ordinal that would take it past the target, so one holds a run
-    // of ordinals near the target, or a single ordinal over it.
     // Each ordinal's bucket is looked up rather than searched for, since every pair takes one.
-    let target = crate::partition::PARTITION_BUCKET_RECORDS;
-    let mut boundaries = vec![0u32];
+    let boundaries = member_buckets(&counts, crate::partition::PARTITION_BUCKET_RECORDS);
     let mut bucket_of = vec![0u32; ordinals as usize];
-    let mut held = 0u64;
-    for (ordinal, &count) in counts.iter().enumerate() {
-        if held > 0 && held + count > target {
-            boundaries.push(ordinal as u32);
-            held = 0;
-        }
-        held += count;
-        bucket_of[ordinal] = (boundaries.len() - 1) as u32;
+    for (k, &lo) in boundaries.iter().enumerate() {
+        let hi = boundaries
+            .get(k + 1)
+            .map_or(ordinals as usize, |&hi| hi as usize);
+        bucket_of[lo as usize..hi].fill(k as u32);
     }
     let mut partition = crate::partition::Partition::create_routed(
         scratch,
@@ -762,6 +756,25 @@ fn write_row_members(
         store.delete(k)?;
     }
     file.finish()
+}
+
+/// The first ordinal of each bucket the member writer reads back in turn, from each ordinal's
+/// entry count. A bucket holds a run of ordinals of at most `target` entries between them, or a
+/// single ordinal of more, alone, which the writer builds as its rows stream rather than holding
+/// them.
+fn member_buckets(counts: &[u64], target: u64) -> Vec<u32> {
+    let mut boundaries = vec![0u32];
+    let mut held = 0u64;
+    for (ordinal, &count) in counts.iter().enumerate() {
+        let opened = *boundaries.last().expect("the first bucket opens at 0") as usize;
+        let over = held > 0 && held + count > target;
+        if (over || count > target) && ordinal > opened {
+            boundaries.push(ordinal as u32);
+            held = 0;
+        }
+        held += count;
+    }
+    boundaries
 }
 
 /// One artifact's bitmap and covering, built from its rows as they arrive ascending: each Roaring
@@ -2678,6 +2691,34 @@ mod derived_tests {
         .unwrap()
         .unwrap();
         let members = stage_row_members(&column, ServingLayout::RowMajorList, dir.path()).unwrap();
+        let pack = crate::row_members::RowMembersPack::open(&members).unwrap();
+        assert_members_match(&pack, &sets);
+    }
+
+    /// An artifact over the target is alone in its bucket, whatever empty ordinals come before or
+    /// after it, so the writer streams its rows rather than holding them.
+    #[test]
+    fn an_artifact_over_the_target_is_alone_in_its_bucket() {
+        assert_eq!(member_buckets(&[0, 0, 10], 4), vec![0, 2]);
+        assert_eq!(member_buckets(&[0, 0, 10, 0, 1, 1], 4), vec![0, 2, 3]);
+        assert_eq!(member_buckets(&[1, 2, 10, 3], 4), vec![0, 2, 3]);
+        assert_eq!(member_buckets(&[1, 2, 1, 3], 4), vec![0, 3]);
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let sets = vec![
+            Vec::new(),
+            Vec::new(),
+            (0..5_000u32).map(|r| r * 3).collect(),
+        ];
+        let column = project_row_column(
+            3,
+            15_000,
+            ServingLayout::RowMajorLabel,
+            dir.path(),
+            &walk_of(&sets),
+        )
+        .unwrap()
+        .unwrap();
+        let members = stage_row_members(&column, ServingLayout::RowMajorLabel, dir.path()).unwrap();
         let pack = crate::row_members::RowMembersPack::open(&members).unwrap();
         assert_members_match(&pack, &sets);
     }

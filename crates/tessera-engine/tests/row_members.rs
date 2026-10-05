@@ -5,8 +5,8 @@
 //! most 32 row ranges holding all of an artifact's members, cut at its widest gaps. The cases read
 //! what is stored after a build, a fold, a restart and a publication at runtime, and what the engine
 //! holds after a growth, a recomposition and a dropped column, each against the column's own labels
-//! transposed by hand. Where a covering was written fresh it is compared against the widest-gap
-//! split computed here; where a growth widened it, it must hold every member in at most 32 ranges.
+//! transposed by hand, and each covering must hold every member in at most 32 ranges. Which split
+//! a fresh covering takes is the writer's own test, beside it in `tessera-store`.
 
 mod common;
 
@@ -241,30 +241,6 @@ impl Fixture {
     }
 }
 
-/// The widest-gap covering, written the long way: every gap between consecutive members, the 31
-/// widest kept (the lower on a tie), and the span cut at them.
-fn widest_gap_covering(rows: &[u32]) -> Vec<(u32, u32)> {
-    let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else {
-        return Vec::new();
-    };
-    let mut gaps: Vec<(u32, u32)> = rows
-        .windows(2)
-        .filter(|w| w[1] > w[0] + 1)
-        .map(|w| (w[1] - w[0] - 1, w[0] + 1))
-        .collect();
-    gaps.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    gaps.truncate(COVERING_RANGES - 1);
-    gaps.sort_by_key(|g| g.1);
-    let mut out = Vec::new();
-    let mut lo = first;
-    for (length, start) in gaps {
-        out.push((lo, start - 1));
-        lo = start + length;
-    }
-    out.push((lo, last));
-    out
-}
-
 /// What one artifact's stored or held forms are: its members ascending, and its covering.
 type Forms = Vec<(Vec<u32>, Vec<(u32, u32)>)>;
 
@@ -297,9 +273,8 @@ fn assert_covers(covering: &[(u32, u32)], members: &[u32], what: &str) {
     }
 }
 
-/// The forms an engine holds beside a column, checked against its labels. `fresh` says the
-/// coverings were written whole rather than widened by a growth.
-fn held_forms(column: &RowColumn, fresh: bool, what: &str) -> Forms {
+/// The forms an engine holds beside a column, checked against its labels.
+fn held_forms(column: &RowColumn, what: &str) -> Forms {
     let members = column
         .members()
         .unwrap_or_else(|| panic!("{what}: a served column holds its members"));
@@ -310,15 +285,7 @@ fn held_forms(column: &RowColumn, fresh: bool, what: &str) -> Forms {
         let held: Vec<u32> = members.members(ordinal as u32).to_bitmap().iter().collect();
         assert_eq!(&held, rows, "{what}: ordinal {ordinal}'s members");
         let covering = members.covering(ordinal as u32);
-        if fresh {
-            assert_eq!(
-                covering,
-                widest_gap_covering(rows),
-                "{what}: ordinal {ordinal}'s covering"
-            );
-        } else {
-            assert_covers(&covering, rows, &format!("{what}: ordinal {ordinal}"));
-        }
+        assert_covers(&covering, rows, &format!("{what}: ordinal {ordinal}"));
         out.push((held, covering));
     }
     out
@@ -343,16 +310,7 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
         let beside: Vec<_> = manifest
             .derived_extents
             .iter()
-            .filter(|e| {
-                e.form == DerivedForm::RowMembers
-                    && (&e.layer, e.level, &e.view, e.level_version)
-                        == (
-                            &column.layer,
-                            column.level,
-                            &column.view,
-                            column.level_version,
-                        )
-            })
+            .filter(|e| e.form == DerivedForm::RowMembers && e.same_level(column))
             .collect();
         assert_eq!(
             beside.len(),
@@ -378,11 +336,10 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
                 column.layer
             );
             let covering: Vec<(u32, u32)> = pack.covering(ordinal).collect();
-            assert_eq!(
-                covering,
-                widest_gap_covering(rows),
-                "{} ordinal {ordinal}'s stored covering",
-                column.layer
+            assert_covers(
+                &covering,
+                rows,
+                &format!("{} ordinal {ordinal}'s stored covering", column.layer),
             );
             forms.push((held, covering));
         }
@@ -496,9 +453,48 @@ fn a_fold_after_ingest_and_growth_writes_the_forms_over_its_new_rows_and_a_resta
     );
     for layer in [LABEL, LIST, HULL] {
         let column = held_column(&engine, layer).expect("a row-major level holds its column");
-        let held = held_forms(&column, true, &format!("{layer} after the restart"));
+        let held = held_forms(&column, &format!("{layer} after the restart"));
         assert_eq!(held, stored[&(layer.to_string(), 0)], "{layer}");
     }
+}
+
+#[test]
+fn a_restart_after_a_growth_without_a_fold_completes_the_adopted_members() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .grow_memberships(
+            LABEL.into(),
+            0,
+            vec![IncomingGrowth::from_entities(
+                key(LABEL, 9),
+                fx.entities(CLAIMED..CLAIMED + 30),
+            )],
+        )
+        .expect("a growth into an artifact that exists");
+    tick(&engine);
+    drop(engine);
+
+    // The prefix still names the build's column and member file, written before the growth; the
+    // restart adopts both and brings them over the rows the growth added.
+    let engine = fx.open();
+    touch(&engine, &[LABEL]);
+    assert!(
+        engine.columns_adopted() > 0,
+        "the build's column was adopted"
+    );
+    assert_eq!(
+        engine.columns_composed(),
+        0,
+        "and completed rather than composed again"
+    );
+    let column = held_column(&engine, LABEL).expect("the level keeps its column");
+    let held = held_forms(&column, "after a restart past a growth");
+    assert_eq!(
+        held.iter().map(|(rows, _)| rows.len() as u64).sum::<u64>(),
+        CLAIMED + 30,
+        "the grown members are held beside the adopted column"
+    );
 }
 
 fn runtime_declaration(name: &str, layout: ServingLayout) -> LayerDeclaration {
@@ -553,7 +549,7 @@ fn a_level_published_at_runtime_holds_the_members_of_the_column_it_composes() {
     touch(&engine, &["late/label", "late/list"]);
     for name in ["late/label", "late/list"] {
         let column = held_column(&engine, name).expect("the level is served from a column");
-        let held = held_forms(&column, true, name);
+        let held = held_forms(&column, name);
         assert!(
             held.iter().any(|(rows, _)| !rows.is_empty()),
             "{name} holds members"
@@ -586,7 +582,7 @@ fn a_growth_after_the_build_holds_what_a_rebuild_with_it_stores() {
     tick(&engine);
     touch(&engine, &[LABEL]);
     let column = held_column(&engine, LABEL).expect("the level keeps its column");
-    let held = held_forms(&column, false, "after the growth");
+    let held = held_forms(&column, "after the growth");
 
     let rebuilt = stored_forms(&fixture_with(&grown).root);
     let rebuilt = &rebuilt[&(LABEL.to_string(), 0)];
@@ -627,7 +623,7 @@ fn a_column_recomposed_as_a_list_holds_its_new_members_and_a_dropped_one_takes_t
 
     let listed = held_column(&engine, LABEL).expect("a level served from its column keeps one");
     assert_eq!(listed.layout(), ServingLayout::RowMajorList);
-    let held = held_forms(&listed, true, "recomposed as a list");
+    let held = held_forms(&listed, "recomposed as a list");
     let row = held[0].0[0];
     assert!(
         held[1].0.contains(&row),
