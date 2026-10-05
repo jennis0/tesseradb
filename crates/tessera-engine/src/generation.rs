@@ -155,12 +155,54 @@ pub struct Generation {
     /// this generation holds, and the read path treats that as fail-closed rather than as "nothing
     /// denied".
     denied: Arc<DenyMask>,
+    /// **Derived**: per view, a version of [`Self::denied`]'s rows below the view's base, which
+    /// moves exactly when those rows change: at a deny, a lift or a compaction that touches them,
+    /// and never at an ingest or a flush. What a correction over the denied base rows is cached
+    /// under ([`crate::figures`]). Drawn from one counter for the process, so a version is never
+    /// reused for another set.
+    deny_versions: Arc<DenyVersions>,
     /// **Derived**: per view, the buffered entities [`crate::compose`]'s walk has anything to say
     /// about, so a request pays for those rather than for the whole buffer. Entity ids, never row
     /// ids, because a merge, coalesce or fold rewrites rows. The rule is
     /// [`crate::compose::derive_buffered_rows`] and only this module sets it; a view with no entry
     /// sends the walk back over the buffer, which is slow and never wrong.
     buffered_rows: Arc<crate::BufferedRows>,
+}
+
+/// Per view, the version of its denied base rows: see [`Generation::deny_version`].
+pub(crate) type DenyVersions = rustc_hash::FxHashMap<String, u64>;
+
+/// The deny versions for `denied` over `parts`' bundle: each view's carried from `previous` where
+/// its denied rows below the base are the same set over the same base, and a fresh one otherwise.
+/// A fold publishes a new prefix and renumbers the base, so nothing is carried across one.
+fn deny_versions(
+    previous: Option<&Generation>,
+    denied: &DenyMask,
+    parts: &GenerationParts,
+) -> Arc<DenyVersions> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let below = |rows: &croaring::Bitmap, base_rows: u32| {
+        let mut out = rows.clone();
+        out.remove_range(base_rows..);
+        out
+    };
+    let previous = previous.filter(|previous| previous.parts.prefix == parts.prefix);
+    let mut out = DenyVersions::default();
+    for partition in parts.bundle.partitions.values() {
+        for (view, view_data) in &partition.views {
+            let base_rows = view_data.row_space.base_rows();
+            let now = denied.get(view).map(|rows| below(rows, base_rows));
+            let carried = previous.and_then(|previous| {
+                let version = *previous.deny_versions.get(view)?;
+                let before = previous.denied.get(view).map(|rows| below(rows, base_rows));
+                (before == now).then_some(version)
+            });
+            let version = carried
+                .unwrap_or_else(|| NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            out.insert(view.clone(), version);
+        }
+    }
+    Arc::new(out)
 }
 
 impl std::ops::Deref for Generation {
@@ -179,11 +221,21 @@ impl Generation {
             &parts.buffer,
             &parts.bundle,
         ));
+        let deny_versions = deny_versions(None, &denied, &parts);
         Generation {
             parts,
             denied,
+            deny_versions,
             buffered_rows,
         }
+    }
+
+    /// The deny versions of a generation whose mask is `denied` over `parts`, following this one.
+    fn next_deny_versions(&self, denied: &Arc<DenyMask>, parts: &GenerationParts) -> Arc<DenyVersions> {
+        if Arc::ptr_eq(denied, &self.denied) && parts.prefix == self.parts.prefix {
+            return Arc::clone(&self.deny_versions);
+        }
+        deny_versions(Some(self), denied, parts)
     }
 
     /// A copy with `change` applied. The mask is derived again if the change replaced the bundle
@@ -205,9 +257,11 @@ impl Generation {
                 &parts.bundle,
             )),
         };
+        let deny_versions = self.next_deny_versions(&denied, &parts);
         Generation {
             parts,
             denied,
+            deny_versions,
             buffered_rows,
         }
     }
@@ -229,9 +283,11 @@ impl Generation {
             false => Arc::new(crate::compose::derive_denied(&parts.overlay, &parts.bundle)),
         };
         let buffered_rows = self.next_buffered_rows(&parts, inserted);
+        let deny_versions = self.next_deny_versions(&denied, &parts);
         Generation {
             parts,
             denied,
+            deny_versions,
             buffered_rows,
         }
     }
@@ -272,9 +328,12 @@ impl Generation {
             "the incremental deny mask does not equal a fresh derivation"
         );
         let buffered_rows = self.next_buffered_rows(&parts, inserted);
+        let denied = Arc::new(denied);
+        let deny_versions = self.next_deny_versions(&denied, &parts);
         Generation {
             parts,
-            denied: Arc::new(denied),
+            denied,
+            deny_versions,
             buffered_rows,
         }
     }
@@ -324,6 +383,11 @@ impl Generation {
     /// The row-space deny mask, per view.
     pub fn denied(&self) -> &DenyMask {
         &self.denied
+    }
+
+    /// See [`Self::deny_versions`]'s field. Zero for a view this generation does not carry.
+    pub(crate) fn deny_version(&self, view: &str) -> u64 {
+        self.deny_versions.get(view).copied().unwrap_or(0)
     }
 
     /// One view's buffered entities that have a row there — [`compose`](crate::compose::compose)'s

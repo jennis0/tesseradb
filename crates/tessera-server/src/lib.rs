@@ -118,6 +118,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     );
     // A separate setter, since only a corpus with a row-major layer needs this cache.
     engine.set_masked_count_cache_bytes(config.masked_count_cache_bytes);
+    engine.set_figures_disk_bytes(config.figures_disk_bytes);
     engine.set_masked_count_give_way_ms(config.masked_count_give_way_ms);
     engine.set_occupancy_cache_bytes(config.occupancy_cache_bytes);
     // The region leaf's cell budget, and the bound on decompositions cached across principals.

@@ -28,7 +28,7 @@ mod test_support;
 mod view;
 
 pub use projections::{
-    derives_accumulated_geometry, serves_column_only, ArtifactProjections, DeltaKind, DeltaRows,
+    serves_column_only, ArtifactProjections, DeltaKind, DeltaRows,
     LevelDelta, SegmentRows, SetPage, ROW_COLUMN_SCRATCH_DIR,
 };
 pub use rows::{

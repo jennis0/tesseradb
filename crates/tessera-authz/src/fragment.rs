@@ -279,6 +279,33 @@ fn create_private_file(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Write `bytes` to `path` so that a reader finds the whole file or none of it: written to a fresh
+/// temporary sibling, synced, renamed over `path`, and the directory synced. The directory and the
+/// file are owner-only where the platform allows, since a cache entry describes what one grant
+/// may see.
+pub fn write_private_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        create_private_dir_all(parent)?;
+    }
+    let tmp = tmp_sibling(path);
+    let written = (|| {
+        let mut f = create_private_file(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_data()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir_file) = File::open(parent) {
+            let _ = dir_file.sync_all();
+        }
+    }
+    Ok(())
+}
+
 /// A frozen, memory-mapped fragment reopened from the cache directory. `view()` borrows straight
 /// from the mapping: no copy, no per-lookup deserialisation cost beyond CRoaring's own
 /// pointer-fixup.
@@ -378,33 +405,12 @@ impl FrozenFragment {
 
         // Frag before meta, both fsynced before their rename: a present meta file is then a
         // trustworthy signal that the pair is complete.
-        let tmp_frag = tmp_sibling(frag_path);
-        {
-            let mut f = create_private_file(&tmp_frag)?;
-            f.write_all(frozen_bytes)?;
-            f.sync_data()?;
-        }
-        std::fs::rename(&tmp_frag, frag_path)?;
-
+        write_private_atomically(frag_path, frozen_bytes)?;
         let mut meta = Vec::with_capacity(META_LEN);
         meta.extend_from_slice(&watermark.to_le_bytes());
         meta.extend_from_slice(&frozen_len.to_le_bytes());
         meta.extend_from_slice(&digest);
-        let tmp_meta = tmp_sibling(meta_path);
-        {
-            let mut f = create_private_file(&tmp_meta)?;
-            f.write_all(&meta)?;
-            f.sync_data()?;
-        }
-        std::fs::rename(&tmp_meta, meta_path)?;
-
-        // Fsync the containing directory so both renames' directory-entry updates are durable.
-        if let Some(parent) = frag_path.parent() {
-            if let Ok(dir_file) = File::open(parent) {
-                let _ = dir_file.sync_all();
-            }
-        }
-
+        write_private_atomically(meta_path, &meta)?;
         Self::open(frag_path, meta_path, identity)
     }
 }

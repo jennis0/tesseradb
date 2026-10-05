@@ -98,7 +98,7 @@ pub struct Session {
     /// The terms the session holds, or `None` for a `read-all` session.
     held: Option<HeldTerms>,
     /// `sha256` over `grant`: what a cache shared by every session with this grant is keyed on
-    /// ([`crate::histogram::MaskIdentity::terms`]).
+    /// ([`crate::figures::MaskIdentity::terms`]).
     terms_digest: [u8; 32],
     /// Every view of every group this principal may reach, resolved once at authorise and fixed
     /// for the session's life. Every view is evaluated whatever the outcome, so a gate-failed name
@@ -374,6 +374,8 @@ impl Engine {
         self.occupancy.retain_keys(|key| key.token_id != token_id);
         self.derived_geometry.prune_token(token_id);
         self.suggest_sets.prune_token(token_id);
+        self.figures
+            .prune_tokens(&std::iter::once(token_id).collect());
         self.row_projection_cache.prune_token(token_id)
     }
 
@@ -391,6 +393,7 @@ impl Engine {
             .retain_keys(|key| !token_ids.contains(&key.token_id));
         self.derived_geometry.prune_tokens(token_ids);
         self.suggest_sets.prune_tokens(token_ids);
+        self.figures.prune_tokens(token_ids);
         self.row_projection_cache.prune_tokens(token_ids)
     }
 

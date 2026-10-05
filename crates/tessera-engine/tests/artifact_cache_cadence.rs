@@ -689,10 +689,10 @@ fn a_prune_drops_the_tokens_occupancy_and_shapes() {
         );
     }
 
-    let counts = engine.masked_count_cache_stats().entries;
+    let counts = engine.figures_stats().entries;
     assert!(counts > 0);
     engine.prune_token(doomed.token_id());
-    assert_eq!(engine.masked_count_cache_stats().entries, counts);
+    assert_eq!(engine.figures_stats().entries, counts);
 
     let after = per_session_entries(&engine);
     for (cache, ((&after, &both), &doomed)) in after

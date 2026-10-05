@@ -2839,7 +2839,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let projection_cache: tessera_engine::CacheStats = state.engine.row_projection_cache_stats();
     let projection_routes = state.engine.projection_builds_by_route();
     let fragment_cache: tessera_engine::FragmentCacheStats = live.fragment_cache;
-    let masked_counts = state.engine.masked_count_cache_stats();
+    let masked_counts = state.engine.figures_stats();
     let region_cache: tessera_engine::CacheStats = state.engine.region_cache_stats();
     let derived_cache = state.engine.derived_cache_stats();
     let suggest_sets = state.engine.suggest_set_stats();
@@ -3149,14 +3149,25 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "sweep_at": sessions.sweep_at,
         },
         // The per-session caches, pruned at revoke and at the expiry sweep, so an operator can
-        // tell cache residency from allocator slack. `masked_count_cache`, `derived_cache` and
-        // `suggest_sets` do not report their bound. Occupancy evictions are normal.
+        // tell cache residency from allocator slack, and the per-grant counts beside them.
+        // `masked_count_cache`, `derived_cache` and `suggest_sets` do not report their bound.
+        // Occupancy evictions are normal.
         "masked_count_cache": {
             "entries": masked_counts.entries,
             "bytes": masked_counts.resident_bytes,
             "hits": masked_counts.hits,
             "misses": masked_counts.misses,
             "evictions": masked_counts.evictions,
+            "fills": masked_counts.fills,
+            "loads": masked_counts.loads,
+            "exact": masked_counts.exact,
+            "reserve_spent": masked_counts.reserve_spent,
+            "not_admitted": masked_counts.not_admitted,
+            "labels_bytes": masked_counts.labels_bytes,
+            "labels_bound_bytes": masked_counts.labels_bound_bytes,
+            "labels_rows_read": masked_counts.labels_rows_read,
+            "disk_bytes": masked_counts.disk_bytes,
+            "disk_bound_bytes": masked_counts.disk_bound_bytes,
         },
         "region_cache": {
             "entries": region_cache.entries,

@@ -429,11 +429,19 @@ struct RawServe {
     ///
     /// Default: `1073741824` (1 GiB).
     fragment_cache_bytes: Option<u64>,
-    /// Bytes of artifact counts, centroids and boxes kept for annotation layers stored by row,
-    /// shared by every viewer with the same grant.
+    /// Bytes of artifact counts, centroids and boxes kept in memory for annotation layers stored
+    /// by row, shared by every viewer with the same grant. Per grant and level: 4 B an artifact
+    /// for counts alone, 40 B with a centroid and a box, and for a layer serving a box 4 B more and
+    /// 128 B for each artifact with more than sixteen placed rows.
     ///
-    /// Default: `268435456` (256 MiB).
+    /// Default: `1073741824` (1 GiB).
     masked_count_cache_bytes: Option<u64>,
+    /// Bytes of those counts, and of the labels of denied rows they are corrected with, kept in the
+    /// engine's cache directory so a restart reads them back. Past it, the files least recently
+    /// written or read are removed.
+    ///
+    /// Default: `8589934592` (8 GiB).
+    figures_disk_bytes: Option<u64>,
     /// Milliseconds a build of the counts for an annotation layer stored by row waits, from its
     /// first wait, while viewers are drawing points, so that their reads do not queue behind it.
     ///
@@ -699,6 +707,7 @@ pub struct Config {
     pub coalesce_width: usize,
     pub row_projection_cache_bytes: u64,
     pub masked_count_cache_bytes: u64,
+    pub figures_disk_bytes: u64,
     pub masked_count_give_way_ms: u64,
     pub occupancy_cache_bytes: u64,
     pub fragment_cache_bytes: u64,
@@ -1176,9 +1185,12 @@ fn parse(text: &str) -> Result<Config> {
         masked_count_cache_bytes: serve
             .masked_count_cache_bytes
             .unwrap_or(DEFAULT_MASKED_COUNT_CACHE_BYTES),
+        figures_disk_bytes: serve
+            .figures_disk_bytes
+            .unwrap_or(tessera_engine::figures::DEFAULT_DISK_BYTES),
         masked_count_give_way_ms: serve
             .masked_count_give_way_ms
-            .unwrap_or(tessera_engine::histogram::DEFAULT_GIVE_WAY_MS),
+            .unwrap_or(tessera_engine::figures::DEFAULT_GIVE_WAY_MS),
         occupancy_cache_bytes: serve
             .occupancy_cache_bytes
             .unwrap_or(tessera_engine::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES),

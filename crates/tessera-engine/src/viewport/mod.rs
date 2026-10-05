@@ -297,10 +297,10 @@ impl Engine {
 
         // From here to the last point, a masked-count build waits between chunks of its walk,
         // except while this request is blocked on its client.
-        let drawing = self.masked_counts.drawing(&served.turn);
+        let drawing = self.figures.drawing(&served.turn);
         let mut sending = Sending {
             sink: &mut *sink,
-            cache: &self.masked_counts,
+            cache: &self.figures,
             turn: &served.turn,
         };
         #[cfg(feature = "fault-injection")]
@@ -420,8 +420,8 @@ impl Engine {
 /// drawing, so a slow reader holds no build.
 struct Sending<'a> {
     sink: &'a mut dyn ViewportSink,
-    cache: &'a crate::histogram::MaskedCountCache,
-    turn: &'a crate::histogram::DrawingTurn,
+    cache: &'a crate::figures::FiguresCache,
+    turn: &'a crate::figures::DrawingTurn,
 }
 
 impl ViewportSink for Sending<'_> {

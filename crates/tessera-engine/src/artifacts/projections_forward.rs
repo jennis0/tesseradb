@@ -75,7 +75,13 @@ impl ArtifactProjections {
         // The copy alone; every arm below is timed by `elapsed_ms`.
         let cloned_ms = started.elapsed().as_millis() as u64;
         let applied = Self::applied(amended, &address, store, space, &pending, source);
-        let lost = amended.amend_derived(&applied.added, total_rows(space));
+        let kept = amended.amend_derived_kept(&applied.added, total_rows(space));
+        let lost = kept.is_none();
+        // The level moved from the form's version to `now`: a count over the column's base rows
+        // follows it by the labels this added.
+        if let (Some(kept), Some(column)) = (&kept, &mut amended.column) {
+            Arc::make_mut(column).record_step(key.level_version, now, kept);
+        }
         amended.covering(space);
         // Operator plane only: counts and durations, naming no artifact and no principal.
         tracing::info!(

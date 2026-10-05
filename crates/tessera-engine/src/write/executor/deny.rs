@@ -188,6 +188,11 @@ impl Executor {
                 reply.ack(());
             }
         }
+        // After the acknowledgement and on the figures' own thread: the next request finds the
+        // denied rows' labels brought forward rather than reading them.
+        self.deps
+            .figures
+            .refresh_denied(&self.generation.load(), &self.deps.artifact_projections);
     }
 
     /// A deny window's sync failed: rewrite its records and sync again, up to

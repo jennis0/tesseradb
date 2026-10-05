@@ -150,7 +150,11 @@ pub const DEFAULT_COALESCE_WIDTH: usize = 8;
 
 pub const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-pub const DEFAULT_MASKED_COUNT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+/// One grant's figures for one level take 4 B an artifact for counts, 40 B with a centroid's sums
+/// and a box, and a box layer's reserve 4 B more and 128 B for each artifact with more than sixteen
+/// placed rows. At 1.4×10⁶ artifacts a level that is at most 240 MB, so this holds four such
+/// grant-levels at the worst and eighteen of counts and sums alone.
+pub const DEFAULT_MASKED_COUNT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
 pub const DEFAULT_FRAGMENT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 

@@ -233,15 +233,14 @@ impl Engine {
             );
             let counts = match needs_counts {
                 false => None,
-                true => self.masked_counts(
-                        served,
-                        name,
-                        level,
-                        level_version,
-                        rows,
-                        mask,
-                    crate::artifacts::derives_accumulated_geometry(declaration)
-                        .then_some(&served.segments[..]),
+                true => self.figures(
+                    served,
+                    name,
+                    level,
+                    level_version,
+                    rows,
+                    mask,
+                    crate::figures::Geometry::declared(declaration),
                 )?,
             };
             let view = ArtifactView {
