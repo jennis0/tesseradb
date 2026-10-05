@@ -1740,6 +1740,18 @@ pub struct DerivedExtent {
     pub form: DerivedForm,
 }
 
+impl DerivedExtent {
+    /// Whether `other` was written for the same level, version, view and incarnation: the
+    /// coordinates two files written together share.
+    pub fn same_level(&self, other: &DerivedExtent) -> bool {
+        self.layer == other.layer
+            && self.level == other.level
+            && self.level_version == other.level_version
+            && self.view == other.view
+            && self.incarnation == other.incarnation
+    }
+}
+
 /// Which structure a [`DerivedExtent`] holds, and what else a reader checks before adopting it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1751,6 +1763,9 @@ pub enum DerivedForm {
     RowColumn {
         layout: ServingLayout,
     },
+    /// The members by artifact and the coverings of the [`Self::RowColumn`] with the same
+    /// coordinates ([`crate::row_members`]), written from that column's labels whenever it is.
+    RowMembers,
     /// The rows of one segment. A `seg_id` is never reused, so the file answers for that segment
     /// in every generation that carries it; `row_count` catches a file written for another.
     ShapeRows {
@@ -1778,6 +1793,7 @@ impl DerivedForm {
             DerivedForm::Containment => "containment",
             DerivedForm::TileIndex => "tile-index",
             DerivedForm::RowColumn { .. } => "row-column",
+            DerivedForm::RowMembers => "row-members",
             DerivedForm::ShapeRows { .. } => "shape-rows",
             DerivedForm::ShapeHeld => "shape-held",
             DerivedForm::LevelLabels => "labels",
@@ -2558,6 +2574,7 @@ mod tests {
                 },
                 Some("s0"),
             ),
+            entry(DerivedForm::RowMembers, Some("s0")),
             entry(
                 DerivedForm::ShapeRows {
                     seg_id: "base".to_string(),

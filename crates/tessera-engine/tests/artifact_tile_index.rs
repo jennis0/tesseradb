@@ -931,6 +931,15 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     )
     .expect("a partitioned level composes a label column");
     std::fs::write(tmp.path().join(column_rel), column.as_bytes()).unwrap();
+    std::fs::create_dir_all(tmp.path().join("partitions/default/row-members")).unwrap();
+    let members_rel = "partitions/default/row-members/row-members-000001-000.tsrm";
+    let members = tessera_store::derived::stage_row_members(
+        &tmp.path().join(column_rel),
+        ServingLayout::RowMajorLabel,
+        tmp.path(),
+    )
+    .expect("the column's members are written");
+    std::fs::rename(&members, tmp.path().join(members_rel)).unwrap();
 
     // The level before the fold's retirement and after it: the version moved by one.
     let mut before = fx.store.clone();
@@ -958,6 +967,15 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         form: tessera_store::manifest::DerivedForm::RowColumn {
             layout: ServingLayout::RowMajorLabel,
         },
+    };
+    let members_entry = |version: u64| tessera_store::manifest::DerivedExtent {
+        incarnation: Some(0),
+        path: members_rel.to_string(),
+        view: Some("s0".to_string()),
+        layer: LAYER.to_string(),
+        level: 0,
+        level_version: version,
+        form: tessera_store::manifest::DerivedForm::RowMembers,
     };
     let build = |projections: &ArtifactProjections,
                  prefix: &str,
@@ -1000,8 +1018,18 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
 
     // The column, for a row-major level, the same way.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    projections.adopt_columns(tmp.path(), "v00000", &[column_entry(10)], &before);
-    projections.adopt_columns(tmp.path(), "v00001", &[column_entry(11)], &store);
+    projections.adopt_columns(
+        tmp.path(),
+        "v00000",
+        &[column_entry(10), members_entry(10)],
+        &before,
+    );
+    projections.adopt_columns(
+        tmp.path(),
+        "v00001",
+        &[column_entry(11), members_entry(11)],
+        &store,
+    );
     let _ = build(&projections, "v00000", &store, ServingLayout::RowMajorLabel);
     assert_eq!(projections.columns_adopted(), 0);
     // The outgoing generation's request composed a column of its own, having nothing to claim;
@@ -1093,13 +1121,18 @@ fn a_transposed_row_form_is_the_projected_one() {
                     there.map(Bitmap::to_vec),
                     "{shape:?}/{layout:?}: the membership disagreed at ordinal {ordinal}"
                 );
-                // **Bit for bit, not merely set for set.** Both forms are written through the same
-                // container encoder (`tessera_roaring::Sink`), so the serialized bytes agree too —
-                // which is what makes `blocks_per_artifact` and every other statistic over the row
-                // form the same number whichever route built it.
+                // **Bit for bit, not merely set for set**, once the projection is run-optimised as
+                // the stored members are: the same containers in the same encoding, which is what
+                // makes `blocks_per_artifact` and every other statistic over the row form the same
+                // number whichever route built it.
+                let optimised = there.map(|rows| {
+                    let mut rows = rows.clone();
+                    rows.run_optimize();
+                    rows
+                });
                 assert_eq!(
                     here.map(|rows| rows.serialize::<croaring::Portable>()),
-                    there.map(|rows| rows.serialize::<croaring::Portable>()),
+                    optimised.map(|rows| rows.serialize::<croaring::Portable>()),
                     "{shape:?}/{layout:?}: the encoded membership differs at ordinal {ordinal}"
                 );
                 assert_eq!(

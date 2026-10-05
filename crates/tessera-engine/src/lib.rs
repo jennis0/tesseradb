@@ -45,6 +45,7 @@ pub mod records;
 mod refresh;
 pub mod region;
 pub mod row_column;
+pub mod row_members;
 pub mod select;
 pub mod session;
 pub mod shapes;

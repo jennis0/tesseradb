@@ -26,6 +26,7 @@ pub mod read;
 pub mod reclaim;
 pub mod render_presence;
 pub mod row_entity;
+pub mod row_members;
 pub mod scalar_column;
 mod segment_cursor;
 pub mod term_images;

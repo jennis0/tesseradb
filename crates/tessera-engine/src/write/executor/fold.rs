@@ -2090,6 +2090,38 @@ impl Executor {
                     };
                     match composed {
                         Ok(Some(path)) => {
+                            // A served column is filed only with its members beside it.
+                            if matches!(
+                                form,
+                                tessera_store::manifest::DerivedForm::RowColumn { .. }
+                            ) {
+                                match tessera_store::derived::stage_row_members(
+                                    &path,
+                                    composed_as,
+                                    scratch,
+                                ) {
+                                    Ok(members) => out.push((
+                                        view.clone(),
+                                        layer.clone(),
+                                        *level,
+                                        version,
+                                        tessera_store::manifest::DerivedForm::RowMembers,
+                                        members,
+                                    )),
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            layer = %layer,
+                                            level,
+                                            view = %view,
+                                            %error,
+                                            "a row-major column's members would not be written \
+                                             at the fold; that level derives both on first use"
+                                        );
+                                        let _ = std::fs::remove_file(&path);
+                                        continue;
+                                    }
+                                }
+                            }
                             let labelled = segment.filter(|_| {
                                 composed_as == tessera_types::layer::ServingLayout::RowMajorLabel
                             });
