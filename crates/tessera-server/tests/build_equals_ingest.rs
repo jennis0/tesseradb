@@ -820,17 +820,16 @@ async fn state(server: &TestServer, two_fields: bool) -> BTreeMap<String, Value>
             // the members it holds, by value.
             let resp = server
                 .client
-                .post(server.viewer_url("/v1/viewport"))
+                .post(server.viewer_url("/v1/artifacts/viewport"))
                 .bearer_auth(&token)
                 .json(&json!({
-                    "view": view, "zoom": 0, "bbox": [0.0, 0.0, 100.0, 100.0], "k": 1000,
-                    "layers": [LAYER],
+                    "view": view, "zoom": 0, "per_tile": 1000, "bbox": [0.0, 0.0, 100.0, 100.0], "layers": [LAYER],
                 }))
                 .send()
                 .await
                 .unwrap();
             assert_eq!(resp.status().as_u16(), 200);
-            let artifacts = decode_viewport_frames(&resp.bytes().await.unwrap())
+            let artifacts = decode_artifact_frames(&resp.bytes().await.unwrap())
                 .artifacts
                 .unwrap_or_default();
             let mut held = BTreeMap::new();

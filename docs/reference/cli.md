@@ -163,6 +163,7 @@ For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --l
 | `--level` | `LEVEL` |  | Only the artifacts at this level of a levelled layer. Refused on a layer with one level, and past the levels the layer holds. |
 | `--parent` | `TESSERA_ID` |  | Only the children of this artifact, by its `tessera_id`. Refused with `--q`. |
 | `--q` | `TEXT` |  | Only the artifacts whose key, or first text, contains this, ignoring case. Refused with `--parent`. |
+| `--ids` | `TESSERA_IDS` |  | Only the artifacts these `tessera_id`s name, comma-separated, such as the tags a points read returned. One the token is not served has no row, as one naming nothing does. |
 | `--filters` | `JSON` |  | A filter expression as JSON. Only the artifacts with a visible member that matches are returned, each with a `matched_count` column. |
 | `--keep-unmatched` |  |  | With `--filters`, return every artifact, those with no matching member included. |
 | `--count` |  |  | Count the artifacts served and those that match. The counts are printed on stderr at the end. Refused with `--cursor`. |

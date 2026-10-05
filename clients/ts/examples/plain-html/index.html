@@ -44,6 +44,8 @@
         explorer.setAttribute('viewer-url', location.origin);
         explorer.setAttribute('token', token);
         explorer.setAttribute('layout', 'overlay');
+        // The most clusters each level shows in one tile of the map, largest first.
+        explorer.setAttribute('artifacts-per-tile', '50');
         mount.append(explorer);
         document.getElementById('who').textContent = user;
       }

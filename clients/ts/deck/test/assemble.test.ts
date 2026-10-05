@@ -201,9 +201,7 @@ describe('assemble', () => {
       highlighted: null,
       pointsProjection: 'full',
       subCells: null,
-      membership: {},
-      artifacts: [],
-      artifactsIdentity: null
+      membership: {}
     };
     const bands = bandsOfResult(result, 2, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
 

@@ -21,7 +21,7 @@ use common::*;
 use parquet::arrow::ArrowWriter;
 use tessera_build::BuildArgs;
 use tessera_engine::row_column::RowColumn;
-use tessera_engine::{Engine, LayerSelection, ViewportRequest};
+use tessera_engine::{Engine, LayerSelection};
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_store::manifest::{DerivedForm, SegmentsManifest};
 use tessera_types::layer::{
@@ -356,9 +356,10 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
 fn touch(engine: &Engine, layers: &[&str]) {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(layers)),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                .layers(LayerSelection::Named(layers)),
         )
         .expect("a viewport naming the layers");
 }

@@ -27,14 +27,11 @@ pub enum LevelSelection<'a> {
     Named(&'a [u32]),
 }
 
-/// Which of a layer's declared computed properties a viewport answers for. Narrows the
-/// declaration and never widens it. Without it a client drawing one artifact's hull is served
-/// every artifact's hull — measured at 94% of a `k = 0` artifacts request's cost on a 2.42M-row
-/// corpus.
+/// Which of a layer's declared computed properties a response answers for. Narrows the
+/// declaration and never widens it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputedSelection<'a> {
-    /// Everything the layer declared — the absent request field, and what every client received
-    /// before there was a field.
+    /// Everything the layer declared — the absent request field.
     Declared,
     /// Exactly these, intersected with the declaration. **Empty is none**: a caller who names no
     /// property has asked for counts and no geometry, which is a real request and not a mistake.
@@ -51,20 +48,19 @@ impl ComputedSelection<'_> {
     }
 }
 
-/// Which columns of the artifacts frame a viewport answers with. The row set, the `matched`
-/// bits and the `rung` values are identical under either value; [`ArtifactRows::Identity`] skips
-/// payload production only, never candidacy, the verdict or the filter probe.
+/// Which columns a walk of a layer's artifacts produces. The row set, the `matched` bits and the
+/// `rung` values are identical under either value; [`ArtifactRows::Identity`] skips payload
+/// production only, never candidacy, the verdict or the filter probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ArtifactRows {
-    /// Every column — the default, and the answer a caller who has read nothing receives.
+pub(crate) enum ArtifactRows {
+    /// Every column.
     #[default]
     Full,
-    /// `layer`, `tessera_id`, `rung`, `matched` — for the caller that already holds the payload
-    /// columns and wants this filter's bits over the same rows.
+    /// `layer`, `tessera_id`, `rung`, `matched`: what tagging points from the walk reads.
     Identity,
 }
 
-/// Which columns each served point answers with, mirroring [`ArtifactRows`]. The row set and the
+/// Which columns each served point answers with. The row set and the
 /// `served` split are identical under every value: the served set never depends on which columns
 /// are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -116,36 +112,24 @@ pub struct ViewportRequest<'a> {
     /// selection threshold, which stays anchored on the unfiltered composed total. Otherwise
     /// artifacts would appear and vanish, and density would shift, as a viewer types.
     pub filter: Option<crate::filter::FilterExpr>,
-    /// Which annotation layers to answer for. `None` answers for every layer this principal
-    /// reaches; an empty slice answers for none. Narrows and never widens: a layer name this
-    /// principal does not reach is intersected out of the answer, the same as a name nobody
-    /// registered, so naming a layer is not a way to learn whether it exists.
+    /// The annotation layers whose artifacts tag the served points, one membership column each.
+    /// `None` answers for every layer this principal reaches; an empty slice answers for none.
+    /// Narrows and never widens: a layer name this principal does not reach is intersected out of
+    /// the answer, the same as a name nobody registered, so naming a layer is not a way to learn
+    /// whether it exists.
     ///
     /// [`ViewportRequest::new`] starts at [`LayerSelection::All`]. The wire's default is the
     /// opposite: an omitted `layers` on `/v1/viewport` means none, and `"all"` means every layer.
     pub layers: LayerSelection<'a>,
-    /// The client's artifact budget: how many artifacts it wants back at most. Honoured
-    /// structurally, never by sampling — a budget that cannot be met by serving everything is
-    /// met by serving ancestors instead of their descendants. Not a disclosure control: every
-    /// artifact here already passed its own existence test.
+    /// The artifact budget a layer tagged by walking its artifacts is cut to: met by tagging with
+    /// ancestors instead of their descendants, never by sampling.
     pub artifact_budget: Option<u32>,
-    /// Which of each named layer's levels to answer for. See [`LevelSelection`]. A request
-    /// bound, not a control: every artifact a level holds already passed its own existence
-    /// criterion.
+    /// Which of each named layer's levels tag the points. See [`LevelSelection`].
     pub levels: LevelSelection<'a>,
-    /// Which of each layer's declared computed properties to answer for. See
-    /// [`ComputedSelection`].
-    ///
-    /// [`ViewportRequest::new`] starts at [`ComputedSelection::Declared`], the wire's
-    /// absent-field meaning.
-    pub computed: ComputedSelection<'a>,
-    /// Which columns each served artifact answers with — see [`ArtifactRows`]. The row set is
-    /// identical under either value; [`ArtifactRows::Identity`] skips payload production only.
-    pub artifact_rows: ArtifactRows,
     /// The request's highlight expression, in the same grammar as [`Self::filter`]. Never
     /// changes which rows the response holds, and is evaluated against the same pre-filter mask
-    /// as the filter. Adds three conjunctions with the filter's candidate: a count per tile, a
-    /// bit per served point, a bit per served artifact.
+    /// as the filter. Adds two conjunctions with the filter's candidate: a count per tile and a
+    /// bit per served point.
     pub highlight: Option<crate::filter::FilterExpr>,
     /// Which columns each served point answers with — see [`PointRows`].
     pub point_rows: PointRows<'a>,
@@ -167,8 +151,6 @@ impl<'a> ViewportRequest<'a> {
             layers: LayerSelection::All,
             artifact_budget: None,
             levels: LevelSelection::Declared,
-            computed: ComputedSelection::Declared,
-            artifact_rows: ArtifactRows::Full,
             highlight: None,
             point_rows: PointRows::Full,
         }
@@ -186,22 +168,9 @@ impl<'a> ViewportRequest<'a> {
         self
     }
 
-    /// Answer for these computed properties of every layer that declares them. See
-    /// [`ComputedSelection`].
-    pub fn computed(mut self, computed: ComputedSelection<'a>) -> Self {
-        self.computed = computed;
-        self
-    }
-
     /// Answer for these levels of every named layer. See [`LevelSelection`].
     pub fn levels(mut self, levels: LevelSelection<'a>) -> Self {
         self.levels = levels;
-        self
-    }
-
-    /// Answer each artifact with these columns. See [`ArtifactRows`].
-    pub fn artifact_rows(mut self, rows: ArtifactRows) -> Self {
-        self.artifact_rows = rows;
         self
     }
 

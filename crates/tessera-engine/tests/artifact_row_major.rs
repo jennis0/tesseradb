@@ -241,12 +241,13 @@ fn sweep(engine: &Engine) -> Vec<(usize, usize, Vec<Served>)> {
         let session = engine.authorise(credential).unwrap();
         for (v, bbox) in VIEWPORTS.iter().enumerate() {
             let response = engine
-                .viewport(
+                .viewport_artifacts(
                     &session,
-                    ViewportRequest::new("s0", 0, *bbox, N_ITEMS as usize),
+                    tessera_engine::ViewportArtifactsRequest::new("s0", 0, *bbox, usize::MAX),
                 )
-                .expect("a viewport");
-            out.push((c, v, served(&response.artifacts)));
+                .expect("a viewport")
+                .artifacts();
+            out.push((c, v, served(&response)));
         }
     }
     out
@@ -606,13 +607,14 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
         for credential in [full_coverage_credential(), subset_credential()] {
             let session = engine.authorise(&credential).unwrap();
             let response = engine
-                .viewport(
+                .viewport_artifacts(
                     &session,
-                    ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+                    tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
                 )
-                .expect("a viewport");
-            assert!(!response.artifacts.is_empty());
-            for artifact in &response.artifacts {
+                .expect("a viewport")
+                .artifacts();
+            assert!(!response.is_empty());
+            for artifact in &response {
                 // ⊘ A cold drill-down on a row-major level pays the level's whole histogram; this
                 // is where that is exercised as well as asserted.
                 let alone = engine
@@ -790,18 +792,19 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
     for credential in [full_coverage_credential(), subset_credential()] {
         let looking = reopened.authorise(&credential).unwrap();
         let response = reopened
-            .viewport(
+            .viewport_artifacts(
                 &looking,
-                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
             )
-            .expect("a viewport");
-        assert!(!response.artifacts.is_empty());
+            .expect("a viewport")
+            .artifacts();
+        assert!(!response.is_empty());
         assert!(
-            response.artifacts.iter().any(|a| a.derived.centroid.is_some()),
+            response.iter().any(|a| a.derived.centroid.is_some()),
             "the layer derives a centroid, or this comparison asserts nothing"
         );
         let cold = reopened.authorise(&credential).unwrap();
-        for artifact in &response.artifacts {
+        for artifact in &response {
             let alone = reopened
                 .artifact(&cold, artifact.tessera_id, "s0", None)
                 .expect("the identifier resolves")
@@ -830,12 +833,12 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let ask = |engine: &Engine| -> BTreeMap<Option<String>, u64> {
         engine
-            .viewport(
+            .viewport_artifacts(
                 &session,
-                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
             )
             .expect("a viewport")
-            .artifacts
+            .artifacts()
             .into_iter()
             .filter(|a| a.layer == FLAT)
             .map(|a| (a.key, a.masked_count))
@@ -963,13 +966,13 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
 fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let response = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
-        .expect("a viewport over the whole map");
+        .expect("a viewport over the whole map")
+        .artifacts();
     let id = response
-        .artifacts
         .iter()
         .find(|a| a.layer == FLAT && a.key.as_deref() == Some(key))
         .expect("the artifact is served")
@@ -1275,12 +1278,12 @@ fn a_level_that_holds_no_rows_takes_every_write_through_its_column() {
     let region_matched = |engine: &Engine| -> Vec<(Option<String>, u64)> {
         let session = engine.authorise(&full_coverage_credential()).unwrap();
         let served = engine
-            .viewport(
+            .viewport_artifacts(
                 &session,
-                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
             )
             .expect("a viewport")
-            .artifacts;
+            .artifacts();
         served
             .iter()
             .map(|artifact| {
@@ -1556,12 +1559,13 @@ fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
 /// derived geometry, by key.
 fn flat_served(engine: &Engine, session: &tessera_engine::Session) -> BTreeMap<Option<String>, Served> {
     let response = engine
-        .viewport(
+        .viewport_artifacts(
             session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
-        .expect("a viewport");
-    served(&response.artifacts)
+        .expect("a viewport")
+        .artifacts();
+    served(&response)
         .into_iter()
         .filter(|a| a.layer == FLAT)
         .map(|a| (a.key.clone(), a))
@@ -1785,19 +1789,20 @@ fn a_build_in_flight_at_a_suppression_is_corrected_for_it() {
     assert_eq!(flat_served(&engine, &later), corrected);
 }
 
-/// A counts-only request for every layer's artifacts: its masked counts are read after its
-/// drawing span, so its builds are the ones that give way.
+/// A request for every layer's artifacts, which draws nothing, so its builds are the ones that
+/// give way.
 fn artifacts_only(
     engine: &Engine,
     session: &tessera_engine::Session,
     cancel: Option<tessera_engine::CancelToken>,
 ) -> Result<usize, tessera_engine::EngineError> {
     engine
-        .viewport(
+        .viewport_artifacts(
             session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).cancel(cancel),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                .cancel(cancel),
         )
-        .map(|response| response.artifacts.len())
+        .map(|response| response.artifacts().len())
 }
 
 /// A points request with no layers, held in its drawing span by the test hook, on its own thread.
@@ -1916,10 +1921,6 @@ impl tessera_engine::ViewportSink for StalledSink {
         _: Option<&[tessera_engine::SubCellCount]>,
     ) -> tessera_engine::SinkResult {
         let _ = self.0.recv();
-        Ok(())
-    }
-
-    fn artifacts(&mut self, _: &[ArtifactOut]) -> tessera_engine::SinkResult {
         Ok(())
     }
 

@@ -1,8 +1,9 @@
-import {decodeArtifacts, decodePoints, decodeViewport, type PointsPart, type ViewportHead} from './decode.js';
+import {decodeArtifactsFrame, decodePoints, decodeViewport, type ArtifactsFramePart, type PointsPart} from './decode.js';
 import type {ViewportResult} from './types.js';
 
 /**
- * Turns a `/v1/viewport` body into typed arrays. The default decodes in web workers, off the thread
+ * Turns a `/v1/viewport` body into typed arrays, and a `/v1/artifacts/viewport` frame into
+ * artifacts. The default decodes in web workers, off the thread
  * that draws; {@link inlineDecoder} decodes on the calling thread, for a test, a script or a
  * runtime without `Worker`. Pass one as a {@link TesseraClient}'s `decoder` option.
  *
@@ -15,8 +16,8 @@ export type Decoder = {
    * `Error` for a malformed body.
    */
   decode(bytes: Uint8Array, background?: boolean): Promise<ViewportResult>;
-  /** A response's artifacts frame, or none where it has none. @internal */
-  decodeArtifacts(frame: Uint8Array | null, background?: boolean): Promise<Pick<ViewportHead, 'artifacts' | 'artifactsIdentity'>>;
+  /** One kind-5 frame of a `/v1/artifacts/viewport` body, decoded alone. @internal */
+  decodeArtifacts(frame: Uint8Array, background?: boolean): Promise<ArtifactsFramePart>;
   /** One kind-3 frame, decoded alone. Each frame is an independent Arrow stream. @internal */
   decodePoints(frame: Uint8Array, background?: boolean): Promise<PointsPart>;
   /** Terminates the workers, if there are any, and rejects the decodes they hold. */
@@ -39,7 +40,7 @@ export function inlineDecoder(): Decoder {
   // Synchronous, so `background` has no effect.
   return {
     decode: async (bytes) => decodeViewport(bytes),
-    decodeArtifacts: async (frame) => decodeArtifacts(frame),
+    decodeArtifacts: async (frame) => decodeArtifactsFrame(frame),
     decodePoints: async (frame) => decodePoints([frame]),
     close: () => {},
     lastWorkerMs: null
@@ -202,8 +203,8 @@ export function workerDecoder(): Decoder | null {
       return send(
         {
           request: () => {
-            const bytes = frame ? detachable(frame) : null;
-            return {message: {kind: 'artifacts', bytes}, transfer: bytes ? [bytes] : []};
+            const buffer = detachable(frame);
+            return {message: {kind: 'artifacts', bytes: buffer}, transfer: [buffer]};
           },
           inline: () => inline.decodeArtifacts(frame)
         },

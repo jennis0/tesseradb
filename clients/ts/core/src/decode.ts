@@ -1,39 +1,12 @@
 import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
 import {CELLS_PER_WORLD_UNIT} from './coords.js';
 import {splitFramedStreams} from './frame.js';
-import type {Artifact, ArtifactIdentity, MembershipColumn, ScalarColumn, ScalarValues, Shape, SubCell, TileCounts, ViewportResult} from './types.js';
+import type {Artifact, MembershipColumn, ScalarColumn, ScalarValues, SubCell, TileCounts, ViewportResult} from './types.js';
 
 function u64Column(table: Table, name: string): BigUint64Array {
   const col = table.getChild(name);
   if (!col) throw new Error(`viewport payload has no column "${name}"`);
   return col.toArray() as BigUint64Array;
-}
-
-/** One ring of a shape on one axis: `uint32` vertex coordinates in grid units. */
-type Ring = {length: number; get(v: number): number | null};
-/** One part's rings on one axis. */
-type Rings = {length: number; get(r: number): Ring | null};
-/** One artifact's parts on one axis: the outer list of `list<list<list<uint32>>>`. */
-type Parts = {length: number; get(p: number): Rings | null};
-
-/**
- * A shape axis column, checked to be `list<list<list<uint32>>>` (parts, rings, vertices) before a
- * row is read, or `null` where the schema has no such column. The shape columns are omitted when no
- * served layer draws a shape. A column two levels deep comes from an older server; read three
- * levels deep it would draw a second part as a hole of the first, so it is refused.
- */
-function partsColumn(table: Table, name: string): {get(i: number): Parts | null} | null {
-  const col = table.getChild(name);
-  if (!col) return null;
-  const inner = (col.type as {children?: {type: DataType}[]}).children?.[0]?.type;
-  const innermost = (inner as {children?: {type: DataType}[]} | undefined)?.children?.[0]?.type;
-  if (col.type.typeId !== Type.List || inner?.typeId !== Type.List || innermost?.typeId !== Type.List) {
-    throw new Error(
-      `viewport artifacts column "${name}" is ${col.type}; a shape column is ` +
-        'list<list<list<uint32>>> (parts, rings, vertices), which a server older than this client does not send.'
-    );
-  }
-  return col as unknown as {get(i: number): Parts | null};
 }
 
 /**
@@ -415,145 +388,78 @@ export function decodeSubCells(payload: Uint8Array): SubCell[] {
   return subCells;
 }
 
+/** The columns of an artifacts frame, at fixed positions. */
+const ARTIFACT_COLUMNS = [
+  'layer',
+  'tessera_id',
+  'key',
+  'masked_count',
+  'centroid_x',
+  'centroid_y',
+  'box_min_x',
+  'box_min_y',
+  'box_max_x',
+  'box_max_y',
+  'content',
+  'parent_ids',
+  'rung',
+  'matched',
+  'highlighted',
+  'target',
+  'tile'
+] as const;
+
 /**
- * Decodes the kind-5 frame in whichever projection the server sent, read from the frame's schema.
- * The identity frame is exactly `(layer, tessera_id, rung, matched, highlighted)`; the full frame
- * has sixteen fixed columns with the two shape columns after them.
+ * One kind-5 frame of a `/v1/artifacts/viewport` body: its artifacts, and the tile its rows name,
+ * or `null` where it has no row or its rows name none, as the treed frame's do.
  */
-export function decodeArtifactsFrame(payload: Uint8Array): {
-  artifacts: Artifact[];
-  artifactsIdentity: ArtifactIdentity[] | null;
-} {
-  const artifacts: Artifact[] = [];
+export type ArtifactsFramePart = {tile: bigint | null; artifacts: Artifact[]};
+
+/**
+ * Decodes one kind-5 frame. Its seventeen columns are checked by name and position first: a
+ * column read from the wrong place would draw as data.
+ */
+export function decodeArtifactsFrame(payload: Uint8Array): ArtifactsFramePart {
   const t = tableFromIPC(payload);
+  const names = t.schema.fields.map((f) => f.name);
+  if (names.length !== ARTIFACT_COLUMNS.length || names.some((name, i) => name !== ARTIFACT_COLUMNS[i])) {
+    throw new Error(`artifacts frame columns are (${names.join(', ')}); this client reads (${ARTIFACT_COLUMNS.join(', ')}), and the server and this client are from different versions`);
+  }
+  const column = (name: (typeof ARTIFACT_COLUMNS)[number]) => t.getChild(name)!;
   // `layer` is dictionary-encoded (u16 keys over utf8); apache-arrow resolves the dictionary on
   // `.get()`.
-  const layer = t.getChild('layer')!;
-  if (t.schema.fields.length === 5) {
-    const tesseraId = u64Column(t, 'tessera_id');
-    const rung = t.getChild('rung');
-    const matched = t.getChild('matched');
-    const highlighted = t.getChild('highlighted');
-    if (rung == null || matched == null || highlighted == null) {
-      throw new Error(
-        'viewport artifacts frame has five columns but is not the identity projection: expected (layer, tessera_id, rung, matched, highlighted)'
-      );
-    }
-    const artifactsIdentity: ArtifactIdentity[] = [];
-    for (let i = 0; i < tesseraId.length; i++) {
-      artifactsIdentity.push({
-        layer: String(layer.get(i)),
-        tesseraId: tesseraId[i]!,
-        rung: Number(rung.get(i)),
-        matched: matched.get(i) === null ? null : Boolean(matched.get(i)),
-        highlighted: highlighted.get(i) === null ? null : Boolean(highlighted.get(i))
-      });
-    }
-    return {artifacts, artifactsIdentity};
-  }
-  const key = t.getChild('key')!;
+  const layer = column('layer');
+  const key = column('key');
   const tesseraId = u64Column(t, 'tessera_id');
   const maskedCount = u64Column(t, 'masked_count');
-  // Derived geometry, in the same grid units as `codes`. A null means the layer declares none; an
-  // artifact whose content could not be served is absent.
-  const centroidX = t.getChild('centroid_x')!;
-  const centroidY = t.getChild('centroid_y')!;
-  const boxMinX = t.getChild('box_min_x')!;
-  const boxMinY = t.getChild('box_min_y')!;
-  const boxMaxX = t.getChild('box_max_x')!;
-  const boxMaxY = t.getChild('box_max_y')!;
-  // `shape_x` and `shape_y` are read by name and may be absent, which reads as no artifact having a
-  // shape; a null row in a present pair means the layer draws none. The old `hull_x`/`hull_y`
-  // names are refused: read as absent, every cluster would draw as its box.
-  if (t.getChild('hull_x') || t.getChild('hull_y')) {
-    throw new Error(
-      'viewport artifacts frame carries `hull_x`/`hull_y` from a server older than this client; it expects `shape_x`/`shape_y` as parts of rings.'
-    );
-  }
-  const shapeX = partsColumn(t, 'shape_x');
-  const shapeY = partsColumn(t, 'shape_y');
-  // The two travel together; one alone has no reading.
-  if ((shapeX === null) !== (shapeY === null)) {
-    throw new Error('viewport artifacts frame carries one shape column and not the other');
-  }
-  // The content, positional to the layer's declared kinds. Empty means the layer declares no
-  // supplied content: an artifact whose content this principal may not read is absent.
-  const content = t.getChild('content')!;
-  // A parent appears only where it is also in this response, ascending by `tessera_id`. An empty
-  // list is a root, a flat artifact or a parent this principal was not served, and these are one
-  // value: telling the last apart would disclose an artifact they may not see. A tree serves at
-  // most one entry, a `dag` layer several.
-  const parentIds = t.getChild('parent_ids');
-  // The rung the client draws this artifact at: the declared level on a levelled layer, the
-  // parent-chain depth in this response on a treed one, 0 on a flat one.
-  const rung = t.getChild('rung');
-  // The filter bit. All null, or absent, where the request carried no filter, meaning no question
-  // was asked rather than no matches.
-  const matched = t.getChild('matched');
-  // The highlight bit, read the same way for the highlight.
-  const highlighted = t.getChild('highlighted');
-  // The `tessera_id` of the artifact in this frame this row is attached to, or null.
-  const target = t.getChild('target');
-  // A missing `rung`, `parent_ids` or `target` is a server this client does not match, and is
-  // refused: read as zero, empty or null it would draw the hierarchy flat or drop every attached
-  // label, and look like data.
-  if (rung == null) {
-    throw new Error(
-      'viewport artifacts frame has no `rung` column; this client expects one on every artifact row, which a server older than this client does not send.'
-    );
-  }
-  if (parentIds == null) {
-    throw new Error(
-      'viewport artifacts frame has no `parent_ids` column; this client expects a list of parent ids on every artifact row, which a server older than this client does not send.'
-    );
-  }
-  if (target == null) {
-    throw new Error(
-      'viewport artifacts frame has no `target` column; this client expects the attached artifact\'s `tessera_id`, or null, on every artifact row, which a server older than this client does not send.'
-    );
-  }
+  // Geometry in the same grid units as a point's code. A null means the layer declares none or the
+  // request's `computed` left it out; an artifact that could not be served is absent.
+  const centroidX = column('centroid_x');
+  const centroidY = column('centroid_y');
+  const boxMinX = column('box_min_x');
+  const boxMinY = column('box_min_y');
+  const boxMaxX = column('box_max_x');
+  const boxMaxY = column('box_max_y');
+  // Positional to the layer's declared content kinds; empty where it declares none.
+  const content = column('content');
+  // A parent appears only where it is also in this frame, ascending by `tessera_id`. An empty list
+  // is a root, a flat artifact or a parent this principal was not served, and these are one value.
+  const parentIds = column('parent_ids');
+  const rung = column('rung');
+  // Null where the request asked no such question, which is not the same as no match.
+  const matched = column('matched');
+  const highlighted = column('highlighted');
+  const target = column('target');
+  const tile = column('tile');
+  const artifacts: Artifact[] = [];
+  let frameTile: bigint | null = null;
   for (let i = 0; i < tesseraId.length; i++) {
     const cx = centroidX.get(i);
     const bx = boxMinX.get(i);
-    const sx = shapeX === null ? null : shapeX.get(i);
-    const sy = shapeY === null ? null : shapeY.get(i);
-    // The two axes are checked for the same structure at every level: a shorter x than y would draw
-    // a ring that closes early.
-    if ((sx === null) !== (sy === null)) {
-      throw new Error(`viewport artifact row ${i}: one shape axis is null and the other is not`);
-    }
-    let shape: Shape | null = null;
-    if (sx !== null && sy !== null) {
-      if (sx.length !== sy.length) {
-        throw new Error(`viewport artifact row ${i}: shape axes disagree on part count (${sx.length} and ${sy.length})`);
-      }
-      shape = [];
-      for (let p = 0; p < sx.length; p++) {
-        const px = sx.get(p);
-        const py = sy.get(p);
-        if (px === null || py === null) {
-          throw new Error(`viewport artifact row ${i}: shape part ${p} is null on one axis`);
-        }
-        if (px.length !== py.length) {
-          throw new Error(`viewport artifact row ${i}: shape axes disagree on the ring count of part ${p} (${px.length} and ${py.length})`);
-        }
-        const rings: [number, number][][] = [];
-        for (let r = 0; r < px.length; r++) {
-          const rx = px.get(r);
-          const ry = py.get(r);
-          if (rx === null || ry === null) {
-            throw new Error(`viewport artifact row ${i}: shape ring ${r} of part ${p} is null on one axis`);
-          }
-          if (rx.length !== ry.length) {
-            throw new Error(`viewport artifact row ${i}: shape axes disagree on the length of ring ${r} of part ${p} (${rx.length} and ${ry.length})`);
-          }
-          const ring: [number, number][] = [];
-          for (let v = 0; v < rx.length; v++) ring.push([Number(rx.get(v)), Number(ry.get(v))]);
-          rings.push(ring);
-        }
-        shape.push(rings);
-      }
-    }
+    const at = tile.get(i);
+    const rowTile = at === null ? null : BigInt(at as number);
+    if (i === 0) frameTile = rowTile;
+    else if (rowTile !== frameTile) throw new Error(`artifacts frame row ${i} names tile ${rowTile}, and row 0 names ${frameTile}; a frame answers one tile`);
     artifacts.push({
       layer: String(layer.get(i)),
       tesseraId: tesseraId[i]!,
@@ -561,44 +467,34 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
       key: key.get(i) === null ? null : String(key.get(i)),
       maskedCount: maskedCount[i]!,
       centroid: cx === null ? null : [Number(cx), Number(centroidY.get(i))],
-      box:
-        bx === null
-          ? null
-          : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
-      shape,
+      box: bx === null ? null : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
       content: Array.from(content.get(i) ?? [], (v) => String(v)),
       // A null cell is taken as the empty list, so no parent is invented.
       parentIds: Array.from(parentIds.get(i) ?? [], (v) => BigInt(v as bigint)),
       rung: Number(rung.get(i)),
-      matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i)),
-      highlighted: highlighted == null || highlighted.get(i) === null ? null : Boolean(highlighted.get(i)),
-      // Null is attached to nothing. A dependent whose target this response withheld is absent.
+      matched: matched.get(i) === null ? null : Boolean(matched.get(i)),
+      highlighted: highlighted.get(i) === null ? null : Boolean(highlighted.get(i)),
+      // Null is attached to nothing. A dependent whose target the response withheld is absent.
       target: target.get(i) === null ? null : BigInt(target.get(i) as bigint)
     });
   }
-  return {artifacts, artifactsIdentity: null};
+  return {tile: frameTile, artifacts};
 }
 
 /**
- * A response's head: the frames the server sends before any points frame, all in the first flush.
- * It is everything a client can draw before a point arrives, and what membership columns are
- * named through.
+ * The `/v1/artifacts/viewport` trailer, checked against the frames and rows the body carried. Its
+ * key set is closed, as the viewport trailer's is.
  */
-export type ViewportHead = {
-  tiles: TileCounts[];
-  subCells: SubCell[] | null;
-  artifacts: Artifact[];
-  artifactsIdentity: ArtifactIdentity[] | null;
-};
-
-/**
- * A response's artifacts: its artifacts frame decoded, or none where it has no such frame, which
- * is one answer whether no layer was asked for, none is reachable or none is in view. The
- * streaming client asks its decoder for this half of the head; it decodes the counts itself as
- * they land.
- */
-export function decodeArtifacts(payload: Uint8Array | null): Pick<ViewportHead, 'artifacts' | 'artifactsIdentity'> {
-  return payload ? decodeArtifactsFrame(payload) : {artifacts: [] as Artifact[], artifactsIdentity: null};
+export function checkArtifactsTrailer(payload: Uint8Array, frames: number, rows: number): Record<string, unknown> {
+  const trailer = JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>;
+  const keys = Object.keys(trailer).sort();
+  const expected = ['arrow_serialise_ns', 'frames', 'rows', 'stream_us'];
+  if (keys.length !== expected.length || keys.some((k, i) => k !== expected[i])) {
+    throw new Error(`artifacts trailer keys outside the closed set: ${keys.join(',')}`);
+  }
+  if (trailer['frames'] !== frames) throw new Error(`trailer claims ${trailer['frames']} artifacts frames, body carries ${frames}`);
+  if (trailer['rows'] !== rows) throw new Error(`trailer claims ${trailer['rows']} artifact rows, body carries ${rows}`);
+  return trailer;
 }
 
 /**
@@ -658,11 +554,5 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   const {ids, codes, positions, world, scalars, membership, highlighted, projection} = decodePoints(parts.points);
   checkTrailerCounts(trailer, parts.points.length, ids.length);
   const subCells = parts.subCells ? decodeSubCells(parts.subCells) : null;
-  // No artifacts frame means no layers, no layer this principal reaches, or none in view; these
-  // are one answer.
-  const {artifacts, artifactsIdentity} = parts.artifacts
-    ? decodeArtifactsFrame(parts.artifacts)
-    : {artifacts: [] as Artifact[], artifactsIdentity: null};
-
-  return {tiles, ids, codes, positions, world, scalars, membership, highlighted, pointsProjection: projection, subCells, artifacts, artifactsIdentity};
+  return {tiles, ids, codes, positions, world, scalars, membership, highlighted, pointsProjection: projection, subCells};
 }

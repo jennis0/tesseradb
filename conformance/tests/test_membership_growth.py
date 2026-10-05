@@ -70,7 +70,7 @@ def grow(server, **body) -> requests.Response:
 def served_count(server, terms: list[str]) -> int | None:
     """The layer's one artifact's `masked_count` for `terms`, or `None` where it is not served."""
     token = server.authorise(terms)["token"]
-    resp = server.viewport_request(token, VIEW_ID, 0, WHOLE_MAP, k=0, layers=[LAYER])
+    resp = server.artifacts_viewport_request(token, VIEW_ID, 0, WHOLE_MAP, layers=[LAYER])
     assert resp.status_code == 200, resp.text
     rows = [a for a in decode_viewport_artifacts(resp.content) if a.layer == LAYER]
     assert len(rows) <= 1, rows

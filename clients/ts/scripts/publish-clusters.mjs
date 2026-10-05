@@ -86,8 +86,8 @@ function frames(buf) {
   return out;
 }
 
-async function viewport(token, body) {
-  const r = await fetch(`${viewer}/v1/viewport`, {
+async function viewport(token, body, route = '/v1/viewport') {
+  const r = await fetch(`${viewer}${route}`, {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
     body: JSON.stringify(body)
@@ -129,6 +129,7 @@ if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.tex
 const meta = await metaResp.json();
 const view = meta.views[0].id;
 const q = meta.views[0].quantisation;
+const maxPerTile = meta.selection.max_artifacts_per_tile;
 
 console.log(`sampling points at depth ${SAMPLE_DEPTH}, k=${SAMPLE_K}, as the publishing principal`);
 const sampled = await viewport(token, {
@@ -354,16 +355,10 @@ if (presets) {
   const rows = [];
   for (const preset of presets) {
     const t = await authorise(preset.terms);
-    const served = await viewport(t, {
-      view,
-      zoom: 3,
-      bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
-      k: 1,
-      layers: [layerName]
-    });
-    const frame = served.find((f) => f.kind === 5);
+    // The whole map as one tile, at the deployment's largest quota, so each served cluster is listed.
+    const served = await viewport(t, {view, zoom: 0, tiles: [0], layers: [layerName], per_tile: maxPerTile}, '/v1/artifacts/viewport');
     const counts = new Map();
-    if (frame) {
+    for (const frame of served.filter((f) => f.kind === 5)) {
       const table = tableFromIPC(frame.payload);
       const masked = table.getChild('masked_count').toArray();
       const keys = table.getChild('key');

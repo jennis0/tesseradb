@@ -192,6 +192,8 @@ def _(mo):
     by its cluster in the `topics` layer. `layers` is the layers drawn over the points: here the
     `topics` clusters with their names. The two are independent, so a map can colour by one
     layer and draw another, or colour by a layer and draw nothing over it.
+    `artifacts_per_tile` is how many clusters of each level the map shows in each tile of the
+    map, the largest first; without it the map draws no cluster.
     Hover over a point to see its title, and zoom in to see more points.
     """)
     return
@@ -199,7 +201,7 @@ def _(mo):
 
 @app.cell
 def _(mo, simple):
-    mo.ui.anywidget(simple.map(colour_by="cluster:topics", layers=["topics"], height=520))
+    mo.ui.anywidget(simple.map(colour_by="cluster:topics", layers=["topics"], artifacts_per_tile=50, height=520))
     return
 
 
@@ -444,7 +446,7 @@ def _(mo):
 
 @app.cell
 def _(db, mo):
-    mo.ui.anywidget(db.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=520))
+    mo.ui.anywidget(db.map(view="papers", colour_by="cluster:topics", layers=["topics"], artifacts_per_tile=50, height=520))
     return
 
 
@@ -473,13 +475,13 @@ def _(db):
 
 @app.cell
 def _(astro, mo):
-    mo.ui.anywidget(astro.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=380))
+    mo.ui.anywidget(astro.map(view="papers", colour_by="cluster:topics", layers=["topics"], artifacts_per_tile=50, height=380))
     return
 
 
 @app.cell
 def _(learning, mo):
-    mo.ui.anywidget(learning.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=380))
+    mo.ui.anywidget(learning.map(view="papers", colour_by="cluster:topics", layers=["topics"], artifacts_per_tile=50, height=380))
     return
 
 
@@ -557,7 +559,7 @@ def _(mo):
 @app.cell
 def _(mo, papers, recent_cs):
     mo.ui.anywidget(papers.filter(recent_cs).map(colour_by="cluster:topics", layers=["topics"],
-                                                 height=440))
+                                                 artifacts_per_tile=50, height=440))
     return
 
 
@@ -636,7 +638,7 @@ def _(mo, years):
 @app.cell
 def _(db, mo, years):
     year_map = db.map(view=f"years:{years[-1]}", colour_by="cluster:topics", layers=["topics"],
-                      height=440)
+                      artifacts_per_tile=50, height=440)
     mo.ui.anywidget(year_map)
     return (year_map,)
 
@@ -686,7 +688,8 @@ def _(KMeans, db, points):
 @app.cell
 def _(db, mo, yearly_report, years):
     _ = yearly_report  # draws after the commit that adds the layer
-    mo.ui.anywidget(db.map(view=f"years:{years[-1]}", colour_by="cluster:yearly", height=440))
+    mo.ui.anywidget(db.map(view=f"years:{years[-1]}", colour_by="cluster:yearly", artifacts_per_tile=50,
+                           height=440))
     return
 
 
@@ -817,7 +820,7 @@ def _(mo):
 
     ```python
     v = td.connect("https://tessera.example/viewer", token=my_token)
-    v.map(colour_by="cluster:topics", layers=["topics"])
+    v.map(colour_by="cluster:topics", layers=["topics"], artifacts_per_tile=50)
     ```
     """)
     return

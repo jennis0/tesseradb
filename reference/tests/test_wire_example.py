@@ -48,17 +48,22 @@ def test_decodes_to_the_agreed_frames_counts_and_first_ids(name: str) -> None:
     want = expected[name]
     v = example.decode_viewport((FIXTURES / name).read_bytes())
     assert v.frames == want["frames"]
-    assert v.tiles.num_rows == want["tiles"]
+    assert (v.tiles.num_rows if v.tiles is not None else None) == want["tiles"]
     assert (v.sub_cells.num_rows if v.sub_cells is not None else None) == want["sub_cells"]
-    assert (v.artifacts.num_rows if v.artifacts is not None else None) == want["artifacts"]
+    artifact_rows = sum(t.num_rows for t in v.artifacts)
+    assert (artifact_rows if v.artifacts else None) == want["artifacts"]
     assert v.point_rows == want["points"]
-    assert v.trailer["points"] == want["points"]
+    # A viewport trailer counts the points, an artifacts trailer the artifact rows.
+    if v.tiles is not None:
+        assert v.trailer["points"] == want["points"]
+    else:
+        assert v.trailer["rows"] == artifact_rows
 
     first_point = example.first_rows(v.points, 1)
     got = str(first_point[0]["tessera_id"]) if first_point else None
     assert got == want["first_point_tessera_id"]
-    got_artifact = (str(v.artifacts.column("tessera_id")[0].as_py())
-                    if v.artifacts is not None else None)
+    first_artifact = example.first_rows(v.artifacts, 1)
+    got_artifact = str(first_artifact[0]["tessera_id"]) if first_artifact else None
     assert got_artifact == want["first_artifact_tessera_id"]
 
 

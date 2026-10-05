@@ -177,17 +177,16 @@ async fn an_artifacts_only_commit_is_served_once_the_counter_reaches_the_answer(
     let token = token_for(&server, &["0", "1"][..]).await;
     let resp = server
         .client
-        .post(server.viewer_url("/v1/viewport"))
+        .post(server.viewer_url("/v1/artifacts/viewport"))
         .bearer_auth(&token)
         .json(&json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
-            "layers": "all"
+            "view": "s0", "zoom": 0, "per_tile": 1000, "bbox": [0.0, 0.0, 1000.0, 1000.0], "layers": "all"
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    let artifacts = decode_viewport_frames(&resp.bytes().await.unwrap())
+    let artifacts = decode_artifact_frames(&resp.bytes().await.unwrap())
         .artifacts
         .expect("the frame carries the layer's artifacts");
     assert_eq!(
@@ -464,17 +463,16 @@ async fn artifacts_served(server: &TestServer) -> usize {
     let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
-        .post(server.viewer_url("/v1/viewport"))
+        .post(server.viewer_url("/v1/artifacts/viewport"))
         .bearer_auth(&token)
         .json(&json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
-            "layers": "all"
+            "view": "s0", "zoom": 0, "per_tile": 1000, "bbox": [0.0, 0.0, 1000.0, 1000.0], "layers": "all"
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    decode_viewport_frames(&resp.bytes().await.unwrap())
+    decode_artifact_frames(&resp.bytes().await.unwrap())
         .artifacts
         .map(|rows| rows.len())
         .unwrap_or(0)

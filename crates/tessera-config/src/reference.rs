@@ -201,10 +201,11 @@ fn each_default_the_reference_states_is_the_one_parse_applies() {
 }
 
 /// The keys whose default the page states in words, each checked by the test below.
-const WORDED: [&str; 5] = [
+const WORDED: [&str; 6] = [
     "serve.compute_threads",
     "serve.compute_admission",
     "serve.compute_queue",
+    "serve.artifact_admission",
     "serve.max_merged_segment_bytes",
     "ingest.compaction_after_deletions",
 ];
@@ -244,6 +245,7 @@ fn each_default_stated_in_words_is_the_one_parse_applies() {
     assert_eq!(config.compute_threads, cpus, "compute_threads");
     assert_eq!(config.compute_admission, 4 * cpus, "compute_admission");
     assert_eq!(config.compute_queue, 8 * cpus, "compute_queue");
+    assert_eq!(config.artifact_admission, cpus, "artifact_admission");
     assert_eq!(config.max_merged_segment_bytes, None);
     let merge_cap = tessera_engine::DEFAULT_MAX_MERGED_SEGMENT_BYTES.to_string();
     assert!(

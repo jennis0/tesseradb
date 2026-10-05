@@ -148,20 +148,20 @@ async fn served(server: &TestServer, terms: &[&str]) -> Vec<(String, Vec<String>
     let token = auth["token"].as_str().unwrap();
     let resp = server
         .client
-        .post(server.viewer_url("/v1/viewport"))
+        .post(server.viewer_url("/v1/artifacts/viewport"))
         .bearer_auth(token)
         .json(&json!({
             "view": "s0",
             "zoom": 0,
+            "per_tile": 1000,
             "bbox": [0.0, 0.0, 1000.0, 1000.0],
-            "k": 200,
             "layers": [TOPICS],
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    let mut rows: Vec<(String, Vec<String>)> = decode_viewport_frames(&resp.bytes().await.unwrap())
+    let mut rows: Vec<(String, Vec<String>)> = decode_artifact_frames(&resp.bytes().await.unwrap())
         .artifacts
         .unwrap_or_default()
         .into_iter()

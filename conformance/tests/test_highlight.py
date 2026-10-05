@@ -89,6 +89,13 @@ def body(server, token: str, zoom: int, bbox, **kw):
     return resp.content
 
 
+def artifacts_body(server, token: str, zoom: int, bbox, **kw):
+    """The `/v1/artifacts/viewport` body of the same request."""
+    resp = server.artifacts_viewport_request(token, VIEW_ID, zoom, bbox, **kw)
+    assert resp.status_code == 200, resp.text
+    return resp.content
+
+
 def tiles_of(content: bytes):
     tiles, _points = decode_viewport(content)
     return tiles
@@ -183,7 +190,7 @@ def test_the_artifact_bit_is_the_conjunctions_and_moves_nothing_else(highlight_s
     for terms in PRINCIPALS:
         token = server.authorise(terms)["token"]
         filters, highlight = below(3000), odd_ids()
-        plain = {a.tessera_id: a for a in decode_viewport_artifacts(body(server, token, 0, WHOLE_MAP, filters=filters))}
+        plain = {a.tessera_id: a for a in decode_viewport_artifacts(artifacts_body(server, token, 0, WHOLE_MAP, filters=filters))}
         assert plain, f"{terms}: the shape layers serve artifacts"
         assert all(a.highlighted is None for a in plain.values()), (
             f"{terms}: no highlight, and yet a bit — a false would answer a question nobody asked"
@@ -191,13 +198,13 @@ def test_the_artifact_bit_is_the_conjunctions_and_moves_nothing_else(highlight_s
         lit = {
             a.tessera_id: a
             for a in decode_viewport_artifacts(
-                body(server, token, 0, WHOLE_MAP, filters=filters, highlight=highlight)
+                artifacts_body(server, token, 0, WHOLE_MAP, filters=filters, highlight=highlight)
             )
         }
         conjoined = {
             a.tessera_id: a
             for a in decode_viewport_artifacts(
-                body(server, token, 0, WHOLE_MAP, filters={"all_of": [filters, highlight]})
+                artifacts_body(server, token, 0, WHOLE_MAP, filters={"all_of": [filters, highlight]})
             )
         }
         assert set(lit) == set(plain) == set(conjoined), f"{terms}: the served set moved"
@@ -349,7 +356,7 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
     served = {
         (a.layer, a.key): a
         for a in decode_viewport_artifacts(
-            body(server, token, 0, WHOLE_MAP, layers=[CLUSTERS, LABELS], filters=clause, highlight=clause)
+            artifacts_body(server, token, 0, WHOLE_MAP, layers=[CLUSTERS, LABELS], filters=clause, highlight=clause)
         )
         if a.layer in (CLUSTERS, LABELS)
     }

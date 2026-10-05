@@ -7,6 +7,7 @@
 
 mod address;
 mod aggregate;
+mod artifact_tiles;
 pub mod auth;
 pub mod control;
 pub mod cors;
@@ -168,6 +169,11 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         ),
         // `POST /v1/items` and `POST /v1/artifacts` only.
         bulk_gate: ComputeGate::for_bulk_reads(config.bulk_admission),
+        // `POST /v1/artifacts/viewport` only.
+        artifact_gate: ComputeGate::for_artifacts(
+            config.artifact_admission,
+            config.admission_timeout_ms,
+        ),
         // The viewer gate never covers the control plane, so writes have a limiter of their own.
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
         catalogue,

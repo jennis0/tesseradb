@@ -241,12 +241,12 @@ fn described_declaration() -> LayerDeclaration {
 fn artifacts_for(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
     let session = engine.authorise(credential).unwrap();
     engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
-        .artifacts
+        .artifacts()
 }
 
 /// **I8's headline arm.** A generating set is immutable once supplied: documents arriving later are

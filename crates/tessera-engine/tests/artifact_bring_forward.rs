@@ -18,7 +18,6 @@
 mod common;
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
 use tessera_lifecycle::{ChangeOp, IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
@@ -1459,12 +1458,12 @@ fn run_merge(engine: &Engine, watched: &[EntityId]) -> (Vec<Option<u32>>, Vec<Op
 fn served_to(engine: &Engine, credential: &[u8]) -> Vec<String> {
     let session = engine.authorise(credential).unwrap();
     let mut keys: Vec<String> = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
-        .artifacts
+        .artifacts()
         .into_iter()
         .filter_map(|a| a.key)
         .collect();

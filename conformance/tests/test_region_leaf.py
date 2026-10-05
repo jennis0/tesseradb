@@ -213,7 +213,7 @@ def test_the_leaf_by_artifact_is_its_masked_count_and_composes_with_a_category(r
     server, points = region_server
     for terms in PRINCIPALS:
         token = server.authorise(terms)["token"]
-        body = server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
+        body = server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP)
         served = [a for a in decode_viewport_artifacts(body) if a.layer in (SHAPES, BOXES)]
         assert served, f"principal {terms}: the shape layers serve artifacts"
         for artifact in served:
@@ -263,10 +263,10 @@ def test_an_unknown_a_suppressed_and_a_withheld_artifact_are_one_response(region
     # criterion and the artifact is withheld from them, while it is served to the others.
     broad = server.authorise(["1", "2"])["token"]
     narrow = server.authorise(["1"])["token"]
-    served = [a for a in decode_viewport_artifacts(server.viewport(broad, VIEW_ID, 0, WHOLE_MAP, k=100_000)) if a.layer == GATED]
+    served = [a for a in decode_viewport_artifacts(server.artifacts_viewport(broad, VIEW_ID, 0, WHOLE_MAP)) if a.layer == GATED]
     assert len(served) == 1 and served[0].masked_count > 0, served
     strip = served[0]
-    assert not [a for a in decode_viewport_artifacts(server.viewport(narrow, VIEW_ID, 0, WHOLE_MAP, k=100_000)) if a.layer == GATED]
+    assert not [a for a in decode_viewport_artifacts(server.artifacts_viewport(narrow, VIEW_ID, 0, WHOLE_MAP)) if a.layer == GATED]
 
     def bytes_of(token: str, leaf: dict) -> tuple[list, dict]:
         """The body's frames but the trailer, whose `stream_us` is a clock; and every header but

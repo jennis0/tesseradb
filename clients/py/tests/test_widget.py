@@ -152,7 +152,7 @@ def test_the_synced_surface_is_exactly_the_design_s(make):
     synced = set(Map.class_traits(sync=True)) - set(anywidget.AnyWidget.class_traits(sync=True))
     synced = {k for k in synced if not k.startswith("_")}  # `_esm` and `_css` are anywidget's
     assert synced == {
-        "url", "view", "explorer_layout", "height", "title_field",
+        "url", "view", "explorer_layout", "height", "title_field", "artifacts_per_tile",
         "bbox", "layers", "colour_by", "size_by", "size_min", "size_max", "size_scale", "filters",
         "selected", "selected_artifact", "region",
     }

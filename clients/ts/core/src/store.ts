@@ -1,6 +1,5 @@
 import {Aggregates, joinedAggregate, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
-import {artifactBudgetFor} from './artifactBudget.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
 import {tileRectOfBbox, type DepthChoice} from './budget.js';
@@ -135,6 +134,17 @@ export type StoreOptions = {
    * behaviour.
    */
   replica?: Pick<ReplicaOptions, 'cacheBytes' | 'cache' | 'revalidateAfterMs' | 'onPhase'>;
+  /**
+   * How the drawn layers' artifacts are asked for. `perTile` is the most artifacts one level shows
+   * in one tile, largest first, at most `meta.selection.maxArtifactsPerTile`; the store has no
+   * number of its own, so without it a drawn layer shows nothing, colouring by a layer
+   * (`setColourBy('cluster:<layer>')`) has no colours either, and the `artifacts` projection is
+   * `refused`, saying what to set. `budget` is the most artifacts a `nested` or `dag` layer is cut
+   * to, met by drawing ancestors in place of their descendants, and the most it tags the points
+   * with; omitted, the cut is unbounded. `heldTiles` is how many tiles of artifacts the store keeps
+   * per view, the least recently drawn leaving first; it defaults to `4096`.
+   */
+  artifacts?: {perTile?: number; budget?: number; heldTiles?: number};
   /**
    * A `/v1/meta` response the host has already read, so the store does not fetch it again. It must
    * have been read with this viewer's token: another viewer's meta lists layers and views this one
@@ -764,6 +774,9 @@ function noFrame(id: string): ViewProjection {
 /** How long the camera rests before the counts in view are asked for. */
 const IN_VIEW_REST_MS = 250;
 
+/** How many tiles of artifacts a view keeps where `artifacts.heldTiles` names no number. */
+const DEFAULT_HELD_TILES = 4096;
+
 const NO_STATUS: StatusProjection = {
   status: 'idle',
   sessionWarm: false,
@@ -1062,11 +1075,12 @@ export function createStore(options: StoreOptions): Store {
         const tok = await tokens.use();
         // The layers named put a membership column on each band, and the columns named are the
         // render columns it carries. A counts-only revalidation (`k = 0`) absorbs no points, so it
-        // names neither. The artifact budget and levels are the
-        // channel's, so a point's membership names an artifact of the cut the panels show.
+        // names neither. The budget and levels are the channel's, so a point's membership names an
+        // artifact of the cut the panels show.
         const zoom = ownPresenter?.view?.view.zoom ?? 0;
         const layers = req.k === 0 ? [] : pointLayers();
         const columns = req.k === 0 ? undefined : pointColumns(id);
+        const budget = options.artifacts?.budget;
         const response = await client.viewport(
           tok,
           {
@@ -1076,7 +1090,7 @@ export function createStore(options: StoreOptions): Store {
             highlight: requestHighlight(),
             layers,
             ...(columns === undefined ? {} : {pointRows: columns}),
-            ...(layers.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
+            ...(layers.length === 0 || budget === undefined ? {} : {artifactBudget: budget}),
             ...(layers.length === 0 || requestLevels(m.layers, layers, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layers, zoom)})
           },
           {
@@ -1147,6 +1161,11 @@ export function createStore(options: StoreOptions): Store {
       clock,
       view: id,
       quantisation: q,
+      projection: m.views.find((v) => v.id === id)?.projection ?? 'none',
+      perTile: options.artifacts?.perTile ?? null,
+      ...(options.artifacts?.budget === undefined ? {} : {budget: options.artifacts.budget}),
+      heldTiles: options.artifacts?.heldTiles ?? DEFAULT_HELD_TILES,
+      prefetch: options.prefetch ?? true,
       token: () => tokens.get(),
       // The projection's depth, which is set before the presenter's own `frame`; a view that is
       // not current reads its presenter's.
@@ -1512,11 +1531,15 @@ export function createStore(options: StoreOptions): Store {
     const bands = projections.marks.bands;
     const staleBands: Band[] = [];
     let current = 0;
+    // The tags in view, so those no held tile carries are read by identifier.
+    const tags = new Set<number>();
     for (const band of bands) {
       if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
+      for (const layer of layers) for (const ordinal of band.membership[layer]?.distinct ?? []) tags.add(ordinal);
       if (layers.every((layer) => resolves(band, layer, a.colours))) current++;
       else staleBands.push(band);
     }
+    if (tags.size > 0) void machinery.channel.lookUp(tags);
     const stale = staleBands.length;
     // While a switch settles nothing is asked for or recorded: asking reschedules the driver, which
     // would request a view the slider is passing through.

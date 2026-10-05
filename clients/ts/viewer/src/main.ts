@@ -418,6 +418,7 @@ function openSession(
     view: store.state.view,
     prefetch,
     driver: {prefetchLayers: config.prefetchLayers},
+    artifacts: {perTile: config.artifactsPerTile},
     replica: {
       // The absorb lane: the split and store phases per response, and the longest single slice.
       onPhase: (kind, ms, n) => {

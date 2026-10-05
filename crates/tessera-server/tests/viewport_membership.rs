@@ -132,8 +132,25 @@ async fn viewport(server: &TestServer, token: &str, layers: serde_json::Value) -
     resp.bytes().await.unwrap().to_vec()
 }
 
+/// The artifacts the tile route serves the same request, `None` where it serves none.
+async fn artifacts(
+    server: &TestServer,
+    token: &str,
+    layers: serde_json::Value,
+) -> Option<Vec<ArtifactRow>> {
+    let mut req = json!({
+        "view": "s0", "zoom": 0, "per_tile": 1000, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+    });
+    if !layers.is_null() {
+        req["layers"] = layers;
+    }
+    let resp = post_viewport_artifacts(server, token, &req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    decode_artifact_frames(&resp.bytes().await.unwrap()).artifacts
+}
+
 #[tokio::test]
-async fn a_request_naming_a_layer_gets_its_column_and_the_column_joins_the_artifacts_frame() {
+async fn a_request_naming_a_layer_gets_its_column_and_the_column_joins_the_artifacts_served() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register_and_plant(&server).await;
@@ -142,20 +159,9 @@ async fn a_request_naming_a_layer_gets_its_column_and_the_column_joins_the_artif
 
     let body = viewport(&server, token, json!([TREE])).await;
     let decoded = decode_viewport_frames(&body);
-    let served: BTreeSet<u64> = decoded
-        .artifacts
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(|a| a.tessera_id)
-        .collect();
-    let keys: BTreeSet<&str> = decoded
-        .artifacts
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|a| a.key.as_deref())
-        .collect();
+    let rows = artifacts(&server, token, json!([TREE])).await.unwrap_or_default();
+    let served: BTreeSet<u64> = rows.iter().map(|a| a.tessera_id).collect();
+    let keys: BTreeSet<&str> = rows.iter().filter_map(|a| a.key.as_deref()).collect();
     assert_eq!(keys, BTreeSet::from(["a1", "a2", "b"]));
 
     let points = decode_points(&body);
@@ -173,7 +179,7 @@ async fn a_request_naming_a_layer_gets_its_column_and_the_column_joins_the_artif
     for id in column.iter().flatten() {
         assert!(
             served.contains(id),
-            "the column names {id}, which the artifacts frame does not carry"
+            "the column names {id}, which the same request is not served"
         );
     }
     // The existing decoder, which reads the scalars positionally, is unaffected.
@@ -189,8 +195,7 @@ async fn an_empty_layer_list_gets_no_column_and_so_does_a_response_serving_nothi
     let token = auth["token"].as_str().unwrap();
 
     let body = viewport(&server, token, json!([])).await;
-    let decoded = decode_viewport_frames(&body);
-    assert!(decoded.artifacts.is_none(), "no artifacts frame");
+    assert!(artifacts(&server, token, json!([])).await.is_none(), "no artifact");
     let points = decode_points(&body);
     assert!(!points.ids.is_empty(), "points still flow");
     assert!(points.membership.is_empty(), "and carry no column: {:?}", points.names);
@@ -198,8 +203,7 @@ async fn an_empty_layer_list_gets_no_column_and_so_does_a_response_serving_nothi
     // A layer named that this principal does not reach — or that nobody registered — serves
     // nothing, so there is no column, by the same route.
     let body = viewport(&server, token, json!(["nobody/registered"])).await;
-    let decoded = decode_viewport_frames(&body);
-    assert!(decoded.artifacts.is_none());
+    assert!(artifacts(&server, token, json!(["nobody/registered"])).await.is_none());
     assert!(decode_points(&body).membership.is_empty());
 
     // A principal who sees nothing is served no point and no artifact — no points frame at all.
@@ -207,7 +211,7 @@ async fn an_empty_layer_list_gets_no_column_and_so_does_a_response_serving_nothi
     let token = auth["token"].as_str().unwrap();
     let body = viewport(&server, token, json!([TREE])).await;
     let decoded = decode_viewport_frames(&body);
-    assert!(decoded.artifacts.is_none());
+    assert!(artifacts(&server, token, json!([TREE])).await.is_none());
     assert!(decoded.points.is_empty());
 }
 
@@ -222,14 +226,15 @@ async fn omitted_layers_means_none_and_the_word_all_means_every_reachable_layer(
     let token = auth["token"].as_str().unwrap();
 
     let body = viewport(&server, token, serde_json::Value::Null).await;
-    let decoded = decode_viewport_frames(&body);
-    assert!(decoded.artifacts.is_none(), "omitted: no artifacts frame");
+    assert!(
+        artifacts(&server, token, serde_json::Value::Null).await.is_none(),
+        "omitted: no artifact"
+    );
     assert!(decode_points(&body).membership.is_empty(), "omitted: no column");
 
     let body = viewport(&server, token, json!("all")).await;
-    let decoded = decode_viewport_frames(&body);
     assert_eq!(
-        decoded.artifacts.as_deref().map(<[_]>::len),
+        artifacts(&server, token, json!("all")).await.as_deref().map(<[_]>::len),
         Some(3),
         "\"all\": every reachable layer's artifacts"
     );

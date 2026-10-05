@@ -619,6 +619,22 @@ fn an_artifacts_read_passes_its_own_arguments_and_is_the_read_over_http() {
     );
     assert!(rows(&children) > 0);
 
+    // By identifier: the rows of the ids named, and none for an id naming nothing.
+    let ids_of = |batches: &[RecordBatch]| -> Vec<u64> {
+        let column = plain(batches).column(0).clone();
+        let ids = column.as_any().downcast_ref::<arrow::array::UInt64Array>().unwrap();
+        let mut ids: Vec<u64> = ids.values().to_vec();
+        ids.sort_unstable();
+        ids
+    };
+    let all = ids_of(&flat);
+    let wanted = [all[0].to_string(), all[2].to_string(), "1".to_string()];
+    let named = artifacts(
+        &["--layer", "generator/flat", "--fields", "key", "--ids", &wanted.join(",")],
+        json!({"view": "s0", "layer": "generator/flat", "fields": ["key"], "ids": wanted}),
+    );
+    assert_eq!(ids_of(&named), [all[0], all[2]]);
+
     // A level on a layer with one level is the server's refusal, sent as asked.
     let refused = served.run(&[
         "artifacts",

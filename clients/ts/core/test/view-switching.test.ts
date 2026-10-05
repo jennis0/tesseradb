@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient} from '../src/client.js';
 import {createStore} from '../src/store.js';
 import type {ViewportPart, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, settle, tile, view, scalar} from './support.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, settle, tile, tileAnswers, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -35,11 +35,6 @@ type FakeRequest = {view: string; zoom: number; bbox?: [number, number, number, 
 
 /** A response answering every tile the request spans, so coverage is the client's arithmetic. */
 function responseCovering(req: FakeRequest, served = 3): ViewportResponse {
-  // One artifact per view, identified by the view that served it, so a projection carrying the
-  // wrong one shows here. Served only where the request named a layer.
-  const artifacts = (req.layers ?? []).length === 0
-    ? []
-    : [artifact(BigInt(META.views.findIndex((v) => v.id === req.view) + 1), {key: req.view, maskedCount: 5n})];
   // No membership column, so a band is colour-stale when a layer goes on while its view is held.
   const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: served}, () => 5)}};
   const q = META.views.find((v) => v.id === req.view)!.quantisation;
@@ -53,8 +48,14 @@ function responseCovering(req: FakeRequest, served = 3): ViewportResponse {
     for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) prefixes.push(mortonOfTile(x, y, req.zoom));
   }
   const tiles = prefixes.map((prefix) => tile(prefix, 1000n));
-  return response(servedResult(served, tiles, {scalars, artifacts}));
+  return response(servedResult(served, tiles, {scalars}));
 }
+
+/**
+ * One artifact per view in every tile, identified by the view that served it, so a projection
+ * carrying the wrong one shows here.
+ */
+const tilesOf = tileAnswers((_tile, req) => [artifact(BigInt(META.views.findIndex((v) => v.id === req.view) + 1), {key: req.view, maskedCount: 5n})]);
 
 /** The ground a view was asked about, over every piece its requests were split into. */
 function union(boxes: [number, number, number, number][]): [number, number, number, number] {
@@ -103,9 +104,11 @@ function open(opts: {
     }
   );
   const traces: {kind: string; fields: Record<string, number | string>}[] = [];
+  const viewportArtifacts = vi.fn(tilesOf);
   const client = {
     meta: async () => META,
     viewport,
+    viewportArtifacts,
     item: async () => ({fields: {}}),
     artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, shape: null}),
     categories: async () => [],
@@ -121,10 +124,11 @@ function open(opts: {
     scheduler: opts.scheduler,
     prefetch: opts.prefetch ?? false,
     replica: {revalidateAfterMs: Infinity},
+    artifacts: {perTile: 10},
     instruments: {onTrace: (kind, fields) => traces.push({kind, fields})}
   });
-  /** Every viewport request issued for one view. */
-  const asked = (id: string) => viewport.mock.calls.filter((c) => (c[1] as FakeRequest).view === id);
+  /** Every viewport request issued for one view, and every artifacts request. */
+  const asked = (id: string) => [...viewport.mock.calls, ...viewportArtifacts.mock.calls].filter((c) => (c[1] as FakeRequest).view === id);
   /** Holds the next `/v1/meta` read open, as a `clear` waiting for the next viewer's meta. */
   const holdMeta = () => Object.assign(client, {meta: () => new Promise<never>(() => {})});
   return {store, viewport, asked, traces, holdMeta};

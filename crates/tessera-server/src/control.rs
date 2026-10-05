@@ -2826,10 +2826,12 @@ fn parse_pause_site(name: &str) -> Result<tessera_lifecycle::faults::PauseSite, 
 /// one the bulk reads run under, `serve.bulk_admission`: its `admission`, its `queue` (always
 /// 0, so a read past the limit is refused at once), the reads `in_flight`, which hold their
 /// compute for the whole response, `waiting`, and the `shed_total` of 429s it answered.
+/// `artifacts` is the same for `POST /v1/artifacts/viewport`, `serve.artifact_admission`.
 async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiError> {
     // `shed_total` counts this gate's own sheds, not the engine's single-flight 429s.
     let gate = state.compute_gate.status();
     let bulk = state.bulk_gate.status();
+    let artifacts = state.artifact_gate.status();
     // The posture string is served only here, behind the credential; `/readyz` stays a bare
     // boolean. `ready` uses the probes' own `is_ready`, so they cannot disagree.
     let executor = state.engine.write_executor_stats();
@@ -2880,6 +2882,15 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "in_flight": bulk.in_flight,
             "waiting": bulk.waiting,
             "shed_total": bulk.shed_total,
+        },
+        // The artifact viewport's lane, `POST /v1/artifacts/viewport`, which holds its compute
+        // until its last tile.
+        "artifacts": {
+            "admission": artifacts.admission,
+            "queue": artifacts.queue,
+            "in_flight": artifacts.in_flight,
+            "waiting": artifacts.waiting,
+            "shed_total": artifacts.shed_total,
         },
         "write_executor": {
             "posture": executor.posture.as_str(),

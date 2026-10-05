@@ -5,7 +5,8 @@ import type {Band} from '../src/bands.js';
 import {tileXY} from '../src/coords.js';
 import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
-import type {Artifact, DeclaredScalar, Layer, Meta, TileCounts, ViewInfo, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Artifact, DeclaredScalar, Layer, Meta, TileCounts, ViewInfo, ViewportArtifactsFrame, ViewportArtifactsRequest, ViewportArtifactsResponse, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {TileSink} from '../src/client.js';
 
 /** The fixtures the core tests share, the fake clocks, and `settle`. */
 
@@ -199,7 +200,7 @@ export function band(depth: number, prefix: bigint, n: number, over: Partial<Ban
   };
 }
 
-/** A result with no tiles, points or artifacts, and whichever fields `over` names. */
+/** A result with no tiles or points, and whichever fields `over` names. */
 export function result(over: Partial<ViewportResult> = {}): ViewportResult {
   return {
     tiles: [],
@@ -212,8 +213,6 @@ export function result(over: Partial<ViewportResult> = {}): ViewportResult {
     highlighted: null,
     pointsProjection: 'full',
     subCells: null,
-    artifacts: [],
-    artifactsIdentity: null,
     ...over
   };
 }
@@ -252,6 +251,29 @@ export function response(res: ViewportResult = result(), over: Partial<ViewportR
   };
 }
 
+/**
+ * A fake `viewportArtifacts`: one frame per requested tile, holding what `rowsFor` gives it, each
+ * handed to the sink before the response resolves, under `ik` and `ck` unless `keys` says.
+ */
+export function tileAnswers(
+  rowsFor: (tile: bigint, req: ViewportArtifactsRequest) => Artifact[],
+  keys: () => {identityKey: string; contentKey: string} = () => ({identityKey: 'ik', contentKey: 'ck'}),
+  treed: (req: ViewportArtifactsRequest) => Artifact[] = () => []
+) {
+  return async (_token: string, req: ViewportArtifactsRequest, opts: {signal?: AbortSignal; onTile?: TileSink} = {}): Promise<ViewportArtifactsResponse> => {
+    const k = keys();
+    const frames: ViewportArtifactsFrame[] = [];
+    const walked = treed(req);
+    if (walked.length > 0) frames.push({treed: true, tile: null, artifacts: walked});
+    for (const tile of req.tiles ?? []) frames.push({treed: false, tile, artifacts: rowsFor(tile, req)});
+    for (const frame of frames) {
+      if (opts.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+      await opts.onTile?.(frame, k);
+    }
+    return {frames, timings: {serverUs: 0, admissionUs: 0, stageNs: null}, ...k, pin: k.contentKey, stale: false, region: null, bytes: 0};
+  };
+}
+
 /** An artifact on layer `l` at rung 0 with no geometry, parents or content. */
 export function artifact(tesseraId: bigint, over: Partial<Artifact> = {}): Artifact {
   return {
@@ -261,7 +283,6 @@ export function artifact(tesseraId: bigint, over: Partial<Artifact> = {}): Artif
     maskedCount: 1n,
     centroid: null,
     box: null,
-    shape: null,
     content: [],
     parentIds: [],
     rung: 0,
@@ -317,6 +338,7 @@ export const SELECTION: Meta['selection'] = {
   maxK: 5000,
   thetaTargetMarks: 10,
   maxUnderlayOffset: 0,
+  maxArtifactsPerTile: 1000,
   maxCategoryValues: 1000,
   maxRegionVertices: 10_000,
   maxRegionCells: 262_144,
@@ -359,7 +381,7 @@ export function headersOf(init?: RequestInit): Record<string, string> {
 }
 
 /** A framed body: `u8 kind, u32 LE length, payload` for each frame, in order. */
-export function framed(frames: readonly {kind: number; payload: Uint8Array}[]): Uint8Array {
+export function framed(frames: readonly {kind: number; payload: Uint8Array}[]): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(frames.reduce((n, f) => n + 5 + f.payload.byteLength, 0));
   const view = new DataView(out.buffer);
   let at = 0;

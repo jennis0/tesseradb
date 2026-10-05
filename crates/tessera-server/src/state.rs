@@ -284,7 +284,8 @@ impl Drop for GatePermits {
 /// bounds admitted requests and sheds at once when full; `compute` bounds running requests and
 /// sheds a caller that waits longer than `admission_timeout_ms`. Bulk reads run under their own
 /// admission limit, `serve.bulk_admission` ([`ComputeGate::for_bulk_reads`]), so a long read takes
-/// no slot from the viewport and item routes.
+/// no slot from the viewport and item routes, and so do the artifacts of a viewport,
+/// `serve.artifact_admission` ([`ComputeGate::for_artifacts`]).
 pub struct ComputeGate {
     pub compute_admission: usize,
     pub compute_queue: usize,
@@ -331,6 +332,18 @@ impl ComputeGate {
             admission,
             admission_timeout_ms,
             crate::error::ShedCause::PasswordGate,
+        )
+    }
+
+    /// The limit on `POST /v1/artifacts/viewport`: `admission` at once and as many waiting, each
+    /// for at most `admission_timeout_ms`. A response computes until its last tile, so it holds
+    /// its compute permit for the whole stream.
+    pub fn for_artifacts(admission: usize, admission_timeout_ms: u64) -> Self {
+        Self::with_cause(
+            admission,
+            admission,
+            admission_timeout_ms,
+            crate::error::ShedCause::ArtifactGate,
         )
     }
 
@@ -544,6 +557,9 @@ pub struct ServeLimits {
     pub max_region_cells: usize,
     /// `POST /v1/artifacts/browse`'s page ceiling and default. See `Config::max_browse_rows`.
     pub max_browse_rows: usize,
+    /// The largest `per_tile` of `POST /v1/artifacts/viewport`. See
+    /// `Config::max_artifacts_per_tile`.
+    pub max_artifacts_per_tile: usize,
     /// Row cap per `/control/ingest` request; over is 422, checked after the Arrow decode.
     pub ingest_max_batch_rows: usize,
     /// Buffered items at which `/control/ingest` answers 429. Distinct from `ingest_queue_bound`,
@@ -615,6 +631,7 @@ impl ServeLimits {
             max_region_vertices: config.max_region_vertices,
             max_region_cells: config.max_region_cells,
             max_browse_rows: config.max_browse_rows,
+            max_artifacts_per_tile: config.max_artifacts_per_tile,
             ingest_max_batch_rows: config.ingest_max_batch_rows,
             ingest_buffer_max_items: config.ingest_buffer_max_items,
             ingest_max_batch_bytes: config.ingest_max_batch_bytes,
@@ -658,6 +675,7 @@ impl Default for ServeLimits {
             max_region_vertices: c::DEFAULT_MAX_REGION_VERTICES,
             max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
             max_browse_rows: c::DEFAULT_MAX_BROWSE_ROWS,
+            max_artifacts_per_tile: c::DEFAULT_MAX_ARTIFACTS_PER_TILE,
             ingest_max_batch_rows: c::DEFAULT_INGEST_MAX_BATCH_ROWS,
             ingest_buffer_max_items: c::DEFAULT_INGEST_BUFFER_MAX_ITEMS,
             ingest_max_batch_bytes: c::DEFAULT_INGEST_MAX_BATCH_BYTES,
@@ -707,6 +725,9 @@ pub struct AppState {
     /// `serve.bulk_admission`, so a long read takes no slot from the viewport and item routes. The
     /// compute threads and the memory cap are shared.
     pub bulk_gate: ComputeGate,
+    /// `POST /v1/artifacts/viewport` only, under `serve.artifact_admission`, so a walk of a
+    /// viewport's artifacts takes no slot from the points beside it.
+    pub artifact_gate: ComputeGate,
     /// The control plane's own bound, so ingest is never throttled by what viewports consume.
     pub ingest_admission: IngestAdmission,
     /// Principals, credentials, groups, grants and OIDC providers.

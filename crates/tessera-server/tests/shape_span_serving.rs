@@ -147,26 +147,19 @@ async fn publish(
 async fn shape_in_view(server: &TestServer, view: &str) -> Vec<Vec<Vec<[u32; 2]>>> {
     let auth = authorise(server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&json!({
-            "view": view, "zoom": 0, "bbox": [0.0, 0.0, 1.0, 1.0], "k": 200,
-            "layers": "all", "computed": ["shape"]
-        }))
-        .send()
-        .await
-        .unwrap();
+    let body = json!({
+        "view": view, "zoom": 0, "per_tile": 1000, "bbox": [0.0, 0.0, 1.0, 1.0],
+        "layers": "all", "computed": []
+    });
+    let resp = post_viewport_artifacts(server, token, &body).await;
     assert_eq!(resp.status().as_u16(), 200);
-    decode_viewport_frames(&resp.bytes().await.unwrap())
+    let id = decode_artifact_frames(&resp.bytes().await.unwrap())
         .artifacts
-        .expect("the artifacts frame")
-        .into_iter()
-        .map(|row| row.shape.expect("a drawn geometry"))
-        .collect::<Vec<_>>()
+        .expect("an artifact is served")
         .pop()
         .expect("one artifact")
+        .tessera_id;
+    shape_by_id(server, token, view, id, 0).await.expect("a drawn geometry")
 }
 
 /// **One `wgs84` declaration, two frames, two canonical forms.** The publication answers with a

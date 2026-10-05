@@ -1,27 +1,28 @@
 import {
+  checkArtifactsTrailer,
   checkTrailerCounts,
   decodeSubCells,
   decodeTiles,
   decodeViewport,
   parseTrailer,
   stageNsOf,
-  type PointsPart,
-  type ViewportHead
+  type ArtifactsFramePart,
+  type PointsPart
 } from './decode.js';
 import {createDecoder, type Decoder} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader, type Frame} from './frame.js';
 import {readAggregate, type PartialAggregate} from './aggregate.js';
 import {openRecords, type RecordsRead} from './records.js';
-import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, CountsSink, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, Login, LoginCredential, AuthoriseTarget, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, CountsSink, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, Login, LoginCredential, AuthoriseTarget, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportArtifactsFrame, ViewportArtifactsRequest, ViewportArtifactsResponse, ViewportCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
  * {@link TesseraClient.viewport} decodes them. Parts arrive in the order the server sent them, and
  * the next part is not handed over until a returned promise settles.
  *
- * Each part's `result` holds whole tiles: the counts of the tiles whose points it carries, those
- * points, and the response's artifacts. Its `subCells` is `null`.
+ * Each part's `result` holds whole tiles: the counts of the tiles whose points it carries, and those
+ * points. Its `subCells` is `null`.
  *
  * @category HTTP client
  */
@@ -29,6 +30,16 @@ export type PartSink = (part: ViewportPart) => void | Promise<void>;
 
 /** A viewport body's counts, decoded. */
 type Counts = Pick<ViewportCounts, 'tiles' | 'subCells'>;
+
+/**
+ * Receives a `/v1/artifacts/viewport` response's frames, one at a time, as
+ * {@link TesseraClient.viewportArtifacts} decodes them, in wire order, with the response's keys, so
+ * a frame can be held under the right principal before the response resolves. The next frame is
+ * not handed over until a returned promise settles.
+ *
+ * @category HTTP client
+ */
+export type TileSink = (frame: ViewportArtifactsFrame, keys: {identityKey: string; contentKey: string}) => void | Promise<void>;
 
 /**
  * Decodes a viewport body's counts once they are whole: at the tiles frame, or at the sub-cells
@@ -485,6 +496,7 @@ export class TesseraClient {
         maxK: m.selection.max_k,
         thetaTargetMarks: m.selection.theta_target_marks,
         maxUnderlayOffset: m.selection.max_underlay_offset,
+        maxArtifactsPerTile: m.selection.max_artifacts_per_tile,
         maxCategoryValues: m.selection.max_category_values,
         maxRegionVertices: m.selection.max_region_vertices,
         maxRegionCells: m.selection.max_region_cells,
@@ -527,8 +539,8 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/viewport`: for one region at one depth, each tile's counts, a sample of up to `k`
-   * points per tile, and the served artifacts. A field of `req` left unset is left out of the
+   * `POST /v1/viewport`: for one region at one depth, each tile's counts and a sample of up to `k`
+   * points per tile, each point tagged with the artifacts of the layers `layers` names. A field of `req` left unset is left out of the
    * body, so the server's default applies: `k` defaults to `selection.kMaxMarks` from
    * {@link TesseraClient.meta}, and the server caps it at `selection.maxK`. `k = 0` asks for the
    * counts alone, which decode on this thread.
@@ -537,10 +549,10 @@ export class TesseraClient {
    * @param opts.background - Decode on the decoder's background worker, so a response the user is
    *   waiting for does not queue behind this one. Defaults to `false`.
    * @param opts.onPart - Receives the points as each points frame is decoded, before the body has
-   *   finished. With a sink the returned `result` carries the counts, sub-cells and artifacts and
-   *   no points. Not called for `k = 0`.
+   *   finished. With a sink the returned `result` carries the counts and sub-cells and no points.
+   *   Not called for `k = 0`.
    * @param opts.onCounts - Receives the tiles' counts, and the sub-cells where `underlayOffset` asked
-   *   for them, as soon as they land: before any artifact or point, and before the body has
+   *   for them, as soon as they land: before any point, and before the body has
    *   finished, with or without `onPart` and at any `k`. Called at most once. The returned
    *   `result` carries the same counts.
    * @returns The decoded result, the server's timings, the response's keys (`identityKey`,
@@ -557,8 +569,8 @@ export class TesseraClient {
   ): Promise<ViewportResponse> {
     const {signal, background = false, onPart, onCounts} = opts;
     // Each optional field is sent only when the caller set it, so an unset one takes the server's
-    // default. For `layers`, `levels` and `computed` an empty array is a request for none, which
-    // differs from leaving the field out.
+    // default. For `layers` and `levels` an empty array is a request for none, which differs from
+    // leaving the field out.
     const body: Record<string, unknown> = {view: req.view, zoom: req.zoom};
     if (req.bbox) body.bbox = req.bbox;
     // A tile prefix at depth 16 needs 32 bits, which a JSON number holds exactly.
@@ -570,9 +582,7 @@ export class TesseraClient {
     if (req.pointRows !== undefined) body.point_rows = req.pointRows;
     if (req.layers !== undefined) body.layers = req.layers;
     if (req.artifactBudget !== undefined) body.artifact_budget = req.artifactBudget;
-    if (req.artifactRows !== undefined) body.artifact_rows = req.artifactRows;
     if (req.levels !== undefined) body.levels = req.levels;
-    if (req.computed !== undefined) body.computed = req.computed;
     // The stamp is held as the string the server sent and travels as the object it parses to.
     if (req.stamp) body.pin = JSON.parse(req.stamp);
 
@@ -583,15 +593,7 @@ export class TesseraClient {
       signal
     });
     if (!response.ok) await fail(response);
-    const coordinates = {
-      identityKey: response.headers.get('x-tessera-identity-key') ?? '',
-      // The quotes are the entity-tag syntax and not part of the key.
-      contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
-      pin: response.headers.get('x-tessera-pin'),
-      stale: response.headers.get('x-tessera-stale') === '1',
-      // Absent unless the request carried a region leaf.
-      region: parseRegionVerdict(response.headers.get('x-tessera-region'))
-    };
+    const coordinates = coordinatesOf(response);
     this.decoder ??= this.opts.decoder ?? createDecoder();
     // A counts-only response (`k = 0`) has no points and decodes in milliseconds, so it decodes on
     // this thread rather than queueing behind a point decode in a worker lane. It has no points
@@ -608,12 +610,7 @@ export class TesseraClient {
     this.opts.onDecode?.(decoded.ms, decoded.bytes, decoded.points, decoded.workerMs);
     return {
       result: decoded.result,
-      timings: {
-        // The server's time to its first flush, not to the end of the stream.
-        serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
-        admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
-        stageNs: decoded.stageNs
-      },
+      timings: {...timingsOf(response), stageNs: decoded.stageNs},
       ...coordinates,
       columnsAsked,
       layersAsked,
@@ -678,11 +675,9 @@ export class TesseraClient {
     }
     const reader = response.body.getReader();
     const frames = new FrameReader();
-    // The counts are decoded here, once, as they land; the decoder decodes the artifacts frame.
+    // The counts are decoded here, once, as they land.
     const readCounts = countsReader(underlay);
     let counts: Counts | null = null;
-    let artifactsFrame: Uint8Array | null = null;
-    let decodingHead: Promise<ViewportHead> | null = null;
     let trailerBytes: Uint8Array | null = null;
     let bytes = 0;
     let flushes = 0;
@@ -703,28 +698,17 @@ export class TesseraClient {
     // is delivered after it, so an abandoned request does not keep filling the store.
     let abandoned = false;
 
-    // Called at the first points frame or the trailer, either of which completes the counts, since
-    // the grammar puts the tiles frame first. The artifacts frame follows every points frame, so a
-    // head started at the first points frame holds none, and the result takes them at the end.
-    let headArtifacts: Uint8Array | null = null;
-    const startHead = () => {
-      const whole = counts!;
-      if (decodingHead) return;
-      headArtifacts = artifactsFrame;
-      decodingHead = this.decoder!.decodeArtifacts(artifactsFrame, background).then((a) => ({...whole, ...a}));
-    };
     const deliver = (decoding: Promise<PointsPart>) => {
       delivering = delivering.then(async () => {
         const part = await decoding;
-        // Read here: the decoder reports the last reply's time, and the head's reply sets the same
-        // counter.
+        // Read here: the decoder reports the last reply's time.
         const frameMs = this.decoder!.lastWorkerMs;
         if (abandoned) return;
-        const decodedHead = await decodingHead!;
         if (frameMs !== null) workerMs = (workerMs ?? 0) + frameMs;
         const rows = part.ids.length;
         points += rows;
-        const run = tilesFor(decodedHead.tiles, tileAt, rows);
+        // The grammar puts the tiles frame before every points frame, so the counts are whole.
+        const run = tilesFor(counts!.tiles, tileAt, rows);
         tileAt = run.next;
         await onPart({
           result: {
@@ -732,11 +716,7 @@ export class TesseraClient {
             // The part's `projection` is the result's `pointsProjection`.
             ...part,
             pointsProjection: part.projection,
-            subCells: null,
-            // The artifacts that arrived before the part: none where the frame follows the
-            // points, and the table learns them from the result or from the artifact channel.
-            artifacts: decodedHead.artifacts,
-            artifactsIdentity: decodedHead.artifactsIdentity
+            subCells: null
           },
           ...coordinates
         });
@@ -755,19 +735,11 @@ export class TesseraClient {
             if (counts) onCounts?.({...counts, ...coordinates});
           }
           switch (frame.kind) {
-            case FRAME_ARTIFACTS:
-              artifactsFrame = frame.payload;
-              break;
             case FRAME_POINTS:
-              // The grammar puts every head frame before the first points frame, so the head is
-              // complete here and is decoded before the points.
-              startHead();
               flushes += 1;
               deliver(this.decoder!.decodePoints(frame.payload, background));
               break;
             case FRAME_TRAILER:
-              // A counts-only or empty response has no points frame to have started it.
-              startHead();
               trailerBytes = frame.payload;
               break;
           }
@@ -786,33 +758,138 @@ export class TesseraClient {
     await delivering;
     // Throws on a body that stopped inside a frame or without its trailer.
     frames.end();
-    const head = await decodingHead!;
-    const decodedHead =
-      artifactsFrame === headArtifacts ? head : {...head, ...(await this.decoder!.decodeArtifacts(artifactsFrame, background))};
+    const whole = counts!;
     const trailer = parseTrailer(trailerBytes!);
     checkTrailerCounts(trailer, flushes, points);
     // Every tile the server served points for has had them.
-    for (let i = tileAt; i < decodedHead.tiles.length; i++) {
-      if (decodedHead.tiles[i]!.served !== 0n) {
-        throw new Error(
-          `tile ${decodedHead.tiles[i]!.tile} was served ${decodedHead.tiles[i]!.served} points that no frame carried`
-        );
+    for (let i = tileAt; i < whole.tiles.length; i++) {
+      if (whole.tiles[i]!.served !== 0n) {
+        throw new Error(`tile ${whole.tiles[i]!.tile} was served ${whole.tiles[i]!.served} points that no frame carried`);
       }
     }
     return {
-      result: {
-        tiles: decodedHead.tiles,
-        ...emptyPoints(),
-        subCells: decodedHead.subCells,
-        artifacts: decodedHead.artifacts,
-        artifactsIdentity: decodedHead.artifactsIdentity
-      },
+      result: {tiles: whole.tiles, ...emptyPoints(), subCells: whole.subCells},
       bytes,
       points,
       ms: performance.now() - started,
       workerMs,
       stageNs: stageNsOf(trailer)
     };
+  }
+
+  /**
+   * `POST /v1/artifacts/viewport`: for one region at one depth, the artifacts of the named layers
+   * in each tile: those this principal is served that hold a member it can see inside the tile, at
+   * most `perTile` per level, largest first. An artifact in several tiles is in each tile's frame,
+   * with the same figures. A `nested` or `dag` layer is answered over every tile together, as one
+   * frame first. A field of `req` left unset is left out of the body, so the server's default
+   * applies; `perTile` has none and is always sent.
+   *
+   * @param opts.signal - Aborts the request and the read of its body.
+   * @param opts.background - Decode on the decoder's background worker, as for
+   *   {@link TesseraClient.viewport}.
+   * @param opts.onTile - Receives each frame as it is decoded, in wire order, before the body has
+   *   finished. A frame handed over is whole and correct even where the body later fails.
+   * @returns Every frame, the response's keys (`identityKey`, `contentKey`, `pin`, `stale`,
+   *   `region`), the server's timings and the body's size in `bytes`.
+   * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for a
+   *   malformed request or a `perTile` over `selection.maxArtifactsPerTile`, `429` under load.
+   * @throws `Error` when the body is malformed or ends before its trailer.
+   */
+  async viewportArtifacts(
+    token: string,
+    req: ViewportArtifactsRequest,
+    opts: {signal?: AbortSignal; background?: boolean; onTile?: TileSink} = {}
+  ): Promise<ViewportArtifactsResponse> {
+    const {signal, background = false, onTile} = opts;
+    const body: Record<string, unknown> = {view: req.view, zoom: req.zoom, per_tile: req.perTile};
+    if (req.bbox) body.bbox = req.bbox;
+    if (req.tiles) body.tiles = req.tiles.map(Number);
+    if (req.layers !== undefined) body.layers = req.layers;
+    if (req.levels !== undefined) body.levels = req.levels;
+    if (req.computed !== undefined) body.computed = req.computed;
+    if (req.filters) body.filters = req.filters;
+    if (req.highlight) body.highlight = req.highlight;
+    if (req.budget !== undefined) body.budget = req.budget;
+    if (req.stamp) body.pin = JSON.parse(req.stamp);
+
+    const started = performance.now();
+    const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/viewport`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+      body: jsonBody(body),
+      signal
+    });
+    if (!response.ok) await fail(response);
+    this.decoder ??= this.opts.decoder ?? createDecoder();
+    const decoder = this.decoder;
+    const coordinates = coordinatesOf(response);
+    const keys = {identityKey: coordinates.identityKey, contentKey: coordinates.contentKey};
+    // A frame of no rows names no tile, so a tile frame is matched to the request's tiles by
+    // position, as the server answers them: in order, with repeats removed.
+    const asked = req.tiles ? [...new Set(req.tiles)] : null;
+    const reader = new FrameReader('artifacts');
+    const out: ViewportArtifactsFrame[] = [];
+    let trailer: Uint8Array | null = null;
+    let bytes = 0;
+    let rows = 0;
+    let kind5 = 0;
+    let tileFrames = 0;
+    let workerMs: number | null = null;
+    let abandoned = false;
+    // Frames are decoded in the lanes in turn and handed over in wire order by awaiting each in turn.
+    let delivering: Promise<void> = Promise.resolve();
+    const deliver = (decoding: Promise<ArtifactsFramePart>, first: boolean) => {
+      delivering = delivering.then(async () => {
+        const part = await decoding;
+        const frameMs = decoder.lastWorkerMs;
+        if (abandoned) return;
+        if (frameMs !== null) workerMs = (workerMs ?? 0) + frameMs;
+        // The treed frame is first and holds a row; every row of a tile frame names its tile.
+        const treed = first && part.artifacts.length > 0 && part.tile === null;
+        const frame: ViewportArtifactsFrame = {treed, tile: treed ? null : (part.tile ?? asked?.[tileFrames] ?? null), artifacts: part.artifacts};
+        if (!treed) tileFrames += 1;
+        rows += part.artifacts.length;
+        out.push(frame);
+        await onTile?.(frame, keys);
+      });
+      delivering.catch(() => {});
+    };
+    try {
+      const consume = (chunk: Uint8Array) => {
+        bytes += chunk.byteLength;
+        for (const frame of reader.push(chunk)) {
+          if (frame.kind === FRAME_ARTIFACTS) {
+            kind5 += 1;
+            deliver(decoder.decodeArtifacts(frame.payload, background), kind5 === 1);
+          } else if (frame.kind === FRAME_TRAILER) {
+            trailer = frame.payload;
+          }
+        }
+      };
+      if (!response.body) consume(new Uint8Array(await response.arrayBuffer()));
+      else {
+        const body = response.body.getReader();
+        try {
+          for (;;) {
+            const {done, value} = await body.read();
+            if (done) break;
+            consume(value);
+          }
+        } catch (error) {
+          void body.cancel().catch(() => {});
+          throw error;
+        }
+      }
+    } catch (error) {
+      abandoned = true;
+      throw error;
+    }
+    await delivering;
+    reader.end();
+    checkArtifactsTrailer(trailer!, kind5, rows);
+    this.opts.onDecode?.(performance.now() - started, bytes, 0, workerMs);
+    return {frames: out, timings: {...timingsOf(response), stageNs: null}, ...coordinates, bytes};
   }
 
   /**
@@ -1243,6 +1320,7 @@ const SELECTION_FIELDS = [
   'theta_target_marks',
   'max_underlay_offset',
   'max_tiles_per_request',
+  'max_artifacts_per_tile',
   'max_category_values',
   'max_shape_vertices',
   'max_region_vertices',
@@ -1334,6 +1412,7 @@ type RawMeta = {
     theta_target_marks: number;
     max_underlay_offset: number;
     max_tiles_per_request: number;
+    max_artifacts_per_tile: number;
     max_category_values: number;
     max_shape_vertices: number;
     max_region_vertices: number;
@@ -1373,6 +1452,27 @@ type RawSuggest = {
   more: boolean;
   total?: number;
 };
+
+/** A viewport-shaped response's keys, from its headers. */
+function coordinatesOf(response: Response): Pick<ViewportResponse, 'identityKey' | 'contentKey' | 'pin' | 'stale' | 'region'> {
+  return {
+    identityKey: response.headers.get('x-tessera-identity-key') ?? '',
+    // The quotes are the entity-tag syntax and not part of the key.
+    contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
+    pin: response.headers.get('x-tessera-pin'),
+    stale: response.headers.get('x-tessera-stale') === '1',
+    // Absent unless the request carried a region leaf.
+    region: parseRegionVerdict(response.headers.get('x-tessera-region'))
+  };
+}
+
+/** The server's times from a viewport-shaped response's headers: to its first flush, not to its end. */
+function timingsOf(response: Response): Omit<ViewportResponse['timings'], 'stageNs'> {
+  return {
+    serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
+    admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0)
+  };
+}
 
 /** `{region}` where the response carries `x-tessera-region`, and nothing otherwise. */
 function regionOf(response: Response): {region?: RegionVerdict} {

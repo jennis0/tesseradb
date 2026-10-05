@@ -335,7 +335,7 @@ def _position(x: float, y: float) -> int:
 def test_every_artifact_table_is_the_oracles(member_server, terms):  # noqa: F811
     server, points = member_server
     token = server.authorise(terms)["token"]
-    served = decode_viewport_artifacts(server.viewport(token, SHAPES_VIEW, 0, WHOLE_MAP, k=100_000))
+    served = decode_viewport_artifacts(server.artifacts_viewport(token, SHAPES_VIEW, 0, WHOLE_MAP))
     ids = {(a.layer, a.key): a.tessera_id for a in served}
     position = {p[0]: _position(p[1], p[2]) for p in points}
     m_auth = {p[0] for p in visible(points, terms)}
@@ -389,8 +389,9 @@ def label_server(tmp_path_factory):
 
 def _served_ids(server, terms) -> dict[tuple[str, str], int]:
     token = server.authorise(terms)["token"]
-    body = server.viewport(token, lfx.VIEW_ID, 0, [0.0, 0.0, lfx.EXTENT_MAX, lfx.EXTENT_MAX],
-                           k=1000, artifact_budget=1000)
+    body = server.artifacts_viewport(
+        token, lfx.VIEW_ID, 0, [0.0, 0.0, lfx.EXTENT_MAX, lfx.EXTENT_MAX], budget=1000
+    )
     return {(a.layer, a.key): a.tessera_id for a in decode_viewport_artifacts(body)}
 
 

@@ -36,6 +36,10 @@ A reader holds a set of access terms and sees an item when its terms satisfy one
     options:
       heading_level: 3
 
+::: tesseradb._database.Database.viewport_artifacts
+    options:
+      heading_level: 3
+
 ::: tesseradb._database.Database.aggregate
     options:
       heading_level: 3

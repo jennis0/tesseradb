@@ -28,7 +28,7 @@ use parquet::arrow::ArrowWriter;
 use common::*;
 use tessera_build::config::{AccessInput, AccessSource};
 use tessera_build::BuildArgs;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, Session, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine, LayerSelection, Session};
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth, UnallocatedRow};
 use tessera_types::layer::{
@@ -469,13 +469,13 @@ fn layer_static(layer: &str) -> &'static str {
 
 fn served(engine: &Engine, session: &Session) -> Vec<ArtifactOut> {
     engine
-        .viewport(
+        .viewport_artifacts(
             session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize)
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(&[FLAT, LIST])),
         )
         .expect("a viewport naming the layers")
-        .artifacts
+        .artifacts()
 }
 
 /// For every principal and both layers, what is served against the model and the walk, through the

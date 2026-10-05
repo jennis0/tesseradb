@@ -30,7 +30,6 @@ use std::collections::BTreeMap;
 
 use common::*;
 use tessera_corpus::{Corpus, Grant};
-use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
@@ -88,12 +87,12 @@ fn served(
 ) -> BTreeMap<String, u64> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
-    let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
+    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
-        .viewport(&session, request)
+        .viewport_artifacts(&session, request)
         .expect("a viewport over the fixture")
-        .artifacts
+        .artifacts()
         .into_iter()
         .map(|artifact| {
             assert_eq!(
@@ -542,12 +541,12 @@ fn an_absolute_criterion_fires_on_an_attribute_predicate() {
 fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> tessera_types::TesseraId {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
-    let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
+    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
-        .viewport(&session, request)
+        .viewport_artifacts(&session, request)
         .expect("a viewport")
-        .artifacts
+        .artifacts()
         .into_iter()
         .find(|artifact| artifact.key.as_deref() == Some(key))
         .unwrap_or_else(|| panic!("{key} is not served"))

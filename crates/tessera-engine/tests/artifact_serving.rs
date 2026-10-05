@@ -207,24 +207,27 @@ fn a_cluster_outside_the_viewport_is_not_a_candidate() {
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let whole = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
-        .unwrap();
-    assert_eq!(whole.artifacts.len(), 1);
+        .unwrap()
+        .artifacts();
+    assert_eq!(whole.len(), 1);
 
     // A viewport whose tile list is empty resolves no rows at all, so nothing can intersect it.
     let nowhere = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize).tiles(Some(&[])),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                .tiles(Some(&[])),
         )
-        .unwrap();
-    assert!(nowhere.artifacts.is_empty());
+        .unwrap()
+        .artifacts();
+    assert!(nowhere.is_empty());
     // The count is over the whole membership either way — it does not move with the box, which is
     // what stops a viewer differencing two viewports for the members in between.
-    assert_eq!(whole.artifacts[0].masked_count, 300);
+    assert_eq!(whole[0].masked_count, 300);
 }
 
 /// **The two-transcription check.** Drill-down and the viewport call the same predicate, so they
@@ -311,15 +314,20 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let served = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(served.len(), 2);
+    let c0 = served
+        .iter()
+        .find(|a| a.key.as_deref() == Some("c0"))
+        .expect("c0 is served")
+        .tessera_id;
 
-    let entity = artifact_entity(&engine, served[0].tessera_id);
+    let entity = artifact_entity(&engine, c0);
     engine.accept_change(entity, ChangeOp::Suppress).unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(after.len(), 1, "suppression takes effect at the ack");
     assert_eq!(after[0].key.as_deref(), Some("c1"));
     assert!(engine
-        .artifact(&session, served[0].tessera_id, "s0", None)
+        .artifact(&session, c0, "s0", None)
         .unwrap()
         .is_none());
 
@@ -350,12 +358,12 @@ fn the_layer_selector_narrows_and_never_widens() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let answer = |layers: LayerSelection| {
         engine
-            .viewport(
+            .viewport_artifacts(
                 &session,
-                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize).layers(layers),
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(layers),
             )
             .unwrap()
-            .artifacts
+            .artifacts()
     };
 
     assert_eq!(
@@ -483,11 +491,17 @@ fn a_withheld_compact_cluster_has_its_count_recovered_from_the_underlay() {
             ViewportRequest::new("s0", 1, QUADRANT, N_ITEMS as usize),
         )
         .expect("a viewport over the cluster's own quadrant");
+    let served = engine
+        .viewport_artifacts(
+            &session,
+            tessera_engine::ViewportArtifactsRequest::new("s0", 1, QUADRANT, usize::MAX),
+        )
+        .expect("the artifacts over the cluster's own quadrant")
+        .artifacts();
 
     assert!(
-        view.artifacts.is_empty(),
-        "the criterion withholds it from this principal: {:?}",
-        view.artifacts
+        served.is_empty(),
+        "the criterion withholds it from this principal: {served:?}"
     );
     assert_eq!(
         view.tiles.len(),

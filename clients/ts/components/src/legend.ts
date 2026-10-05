@@ -761,8 +761,6 @@ export class TesseraLegend extends TesseraElement {
 
   /** The level chosen in the Level select; `null` chooses the level drawn by default. */
   @property({type: Number, attribute: 'cluster-level'}) accessor level: number | null = null;
-  /** The level drawn when none is chosen, named in the Level select's first entry; `null` names the deepest served. */
-  @property({type: Number, attribute: false}) accessor autoLevel: number | null = null;
 
   private chooseLevel(value: string): void {
     const level = value === '' ? null : Number(value);
@@ -839,8 +837,8 @@ export class TesseraLegend extends TesseraElement {
     }
     const levelsServed = [...rungs].sort((x, y) => x - y);
     const levelTitle = (l: number) => clusterMeta?.levels.find((x) => x.level === l)?.title ?? `Level ${l}`;
-    // The level drawn: the one chosen, else the explorer's, else the deepest served.
-    const drawnLevel = this.level ?? this.autoLevel ?? levelsServed.at(-1) ?? null;
+    // The level drawn: the one chosen, else the deepest served.
+    const drawnLevel = this.level ?? levelsServed.at(-1) ?? null;
     const options: ColourOption[] = [
       {value: '', title: 'None', kind: '', checked: colourBy === null, cluster: false},
       ...colourLayers(meta.layers).flatMap((decl): ColourOption[] => {
@@ -869,7 +867,7 @@ export class TesseraLegend extends TesseraElement {
       : nothing;
     const column = columns.find((c) => c.name === colourBy) ?? null;
     const menu = this.selectable && this.menuOpen ? this.colourMenu(options, column, colouring) : nothing;
-    const automatic = this.autoLevel === null ? 'Deepest level' : `Automatic (${levelTitle(this.autoLevel)})`;
+    const automatic = 'Deepest level';
     const levelSelect =
       this.selectable && cluster && levelsServed.length > 1
         ? html`<span part="level" class="choice"><span class="t" aria-hidden="true">${this.level === null ? automatic : levelTitle(this.level)}</span>

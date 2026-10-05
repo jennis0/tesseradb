@@ -350,10 +350,9 @@ def test_a_wgs84_shapes_masked_counts_are_its_curved_images(wgs84_server):
 
     for terms in PRINCIPALS:
         token = server.authorise(terms)["token"]
-        body = server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
         served = {
             a.key: a.masked_count
-            for a in decode_viewport_artifacts(body)
+            for a in decode_viewport_artifacts(server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP))
             if a.layer == LAYER
         }
         assert served == counts(curved, points, terms), f"principal {terms}"
@@ -384,7 +383,7 @@ def test_every_served_points_membership_is_the_curved_images(wgs84_server):
         body = server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
         ids = {
             a.key: a.tessera_id
-            for a in decode_viewport_artifacts(body)
+            for a in decode_viewport_artifacts(server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP))
             if a.layer == LAYER
         }
         table = decode_viewport_points(body)

@@ -2,10 +2,10 @@
 //! response withheld** (D12, `client-components.md` §5.10; `tessera_engine::membership_column`).
 //!
 //! The property the leak argument rests on is the join: every non-null value in the column is an
-//! identifier in the same response's artifacts frame. It is asserted on every response these
-//! cases take, whatever else they check, so a resolver that reached past the served set — to a
-//! leaf the cut removed, a child a masked principal was not served, a label whose cluster went —
-//! fails here before anything reads the value.
+//! identifier the same request serves on `Engine::viewport_artifacts`. It is asserted on every
+//! response these cases take, whatever else they check, so a resolver that reached past the served
+//! set — to a leaf the cut removed, a child a masked principal was not served, a label whose
+//! cluster went — fails here before anything reads the value.
 //!
 //! The tree is planted, as `artifact_hierarchy` plants it, so the expected ancestor is arithmetic
 //! on source ids rather than anything the engine said. The two serving layouts are compared on
@@ -17,7 +17,9 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportOut, ViewportRequest};
+use tessera_engine::{
+    ArtifactOut, Engine, LayerSelection, PointColumns, ViewportArtifactsRequest, ViewportRequest,
+};
 use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
@@ -199,15 +201,21 @@ fn plant(fx: &Fixture, engine: &Engine) {
         .unwrap();
 }
 
+/// One viewport's points, and the artifacts the same request is served.
+struct Answer {
+    points: PointColumns,
+    artifacts: Vec<ArtifactOut>,
+}
+
 fn viewport(
     engine: &Engine,
     credential: &[u8],
     bbox: [f64; 4],
     layers: LayerSelection,
     budget: Option<u32>,
-) -> ViewportOut {
+) -> Answer {
     let session = engine.authorise(credential).unwrap();
-    engine
+    let points = engine
         .viewport(
             &session,
             ViewportRequest::new("s0", 0, bbox, N_ITEMS as usize)
@@ -215,12 +223,23 @@ fn viewport(
                 .artifact_budget(budget),
         )
         .expect("a viewport")
+        .points;
+    let artifacts = engine
+        .viewport_artifacts(
+            &session,
+            ViewportArtifactsRequest::new("s0", 0, bbox, usize::MAX)
+                .layers(layers)
+                .budget(budget),
+        )
+        .expect("a viewport's artifacts")
+        .artifacts();
+    Answer { points, artifacts }
 }
 
 /// **The join.** Every non-null value of every membership column is the identifier of an artifact
-/// of that layer in this response's artifacts frame — the property the leak argument rests on.
-/// Returns `point id → layer → artifact key` for the assertions that follow.
-fn joined(out: &ViewportOut) -> BTreeMap<u64, BTreeMap<String, String>> {
+/// of that layer the same request serves — the property the leak argument rests on. Returns
+/// `point id → layer → artifact key` for the assertions that follow.
+fn joined(out: &Answer) -> BTreeMap<u64, BTreeMap<String, String>> {
     let by_id: BTreeMap<(String, u64), &ArtifactOut> = out
         .artifacts
         .iter()
@@ -242,8 +261,8 @@ fn joined(out: &ViewportOut) -> BTreeMap<u64, BTreeMap<String, String>> {
             let Some(id) = id else { continue };
             let artifact = by_id.get(&(column.layer.clone(), *id)).unwrap_or_else(|| {
                 panic!(
-                    "point {point} names artifact {id} on {}, which is not in the artifacts \
-                         frame of the same response",
+                    "point {point} names artifact {id} on {}, which the same request is not \
+                         served",
                     column.layer
                 )
             });
@@ -268,7 +287,7 @@ fn expected_tree_key(source: u64, served: &BTreeSet<&str>) -> Option<&'static st
     chain.iter().copied().find(|k| served.contains(k))
 }
 
-fn assert_tree_column(fx: &Fixture, out: &ViewportOut, sources: impl Iterator<Item = u64>) {
+fn assert_tree_column(fx: &Fixture, out: &Answer, sources: impl Iterator<Item = u64>) {
     let served: BTreeSet<&str> = out
         .artifacts
         .iter()
@@ -777,7 +796,15 @@ fn measure_the_column_cost() {
         let k = N_ITEMS as usize;
         for budget in [None, Some(64), Some(16)] {
             let out = run(LayerSelection::All, k, budget);
-            let served = out.artifacts.len();
+            let served = engine
+                .viewport_artifacts(
+                    &session,
+                    ViewportArtifactsRequest::new("s0", 2, WHOLE_MAP, usize::MAX)
+                        .budget(budget),
+                )
+                .unwrap()
+                .artifacts()
+                .len();
             let points = out.points.len();
             assert_eq!(engine.layout_fallbacks(), 0);
             let layers_k = time(LayerSelection::All, k, budget);

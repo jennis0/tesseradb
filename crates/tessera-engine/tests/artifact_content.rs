@@ -175,7 +175,7 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
 
     let narrow = artifacts_of(&engine, &subset_credential());
     let bbox = narrow[0].derived.bbox.expect("declared");
-    let hull = narrow[0].derived.shape.clone().expect("declared");
+    let hull = shape_of(&engine, &subset_credential(), narrow[0].tessera_id).expect("declared");
 
     let visible: Vec<[u32; 2]> = visible_to_subset(sources.iter().copied())
         .into_iter()
@@ -234,7 +234,7 @@ fn the_served_hull_is_tighter_than_its_wrap_and_holds_every_visible_member() {
 
     for credential in [subset_credential(), full_coverage_credential()] {
         let served = artifacts_of(&engine, &credential);
-        let hull = served[0].derived.shape.clone().expect("declared");
+        let hull = shape_of(&engine, &credential, served[0].tessera_id).expect("declared");
         let visible: Vec<[u32; 2]> = if credential == subset_credential() {
             visible_to_subset(sources.iter().copied())
                 .into_iter()
@@ -319,7 +319,10 @@ fn the_drill_down_agrees_with_the_viewport_on_derived_content() {
         .unwrap()
         .expect("the identifier the viewport just issued");
 
-    assert_eq!(drilled.derived, from_viewport[0].derived);
+    // The tiles carry no shape; the drill-down carries the one this layer declares.
+    assert_eq!(drilled.derived.centroid, from_viewport[0].derived.centroid);
+    assert_eq!(drilled.derived.bbox, from_viewport[0].derived.bbox);
+    assert!(from_viewport[0].derived.shape.is_none() && drilled.derived.shape.is_some());
     assert_eq!(drilled.masked_count, from_viewport[0].masked_count);
 }
 
@@ -566,10 +569,11 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
         2,
         "both artifacts came back from the manifest, with no log to replay: {served:?}"
     );
-    let labels: Vec<&str> = served
+    let mut labels: Vec<&str> = served
         .iter()
         .map(|a| a.content.first().expect("content survived").as_str())
         .collect();
+    labels.sort_unstable();
     assert_eq!(
         labels,
         vec!["the first label", "the second label"],

@@ -23,6 +23,8 @@ pub const DEFAULT_MAX_UNDERLAY_CELLS: usize = 8192;
 /// At this many tiles one request's tile vector is at most 4 MB.
 pub const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
 
+pub const DEFAULT_MAX_ARTIFACTS_PER_TILE: usize = 1_000;
+
 pub const DEFAULT_MAX_CATEGORY_VALUES: usize = 1_000;
 
 pub const DEFAULT_MAX_SUGGESTIONS: usize = 20;
