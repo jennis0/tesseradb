@@ -308,19 +308,22 @@ fn build_bundle(dir: &Path, items: &[Item]) -> PathBuf {
 
 /// A bundle of `items`, each view holding the items listed beside it.
 fn build_views(dir: &Path, items: &[Item], views: &[(&str, &[Item])]) -> PathBuf {
-    let open: Vec<(&str, &[Item], Option<Vec<String>>)> = views
+    let open: Vec<GatedView<'_>> = views
         .iter()
         .map(|&(view, held)| (view, held, None))
         .collect();
     build_gated_views(dir, items, &open)
 }
 
+/// A view's name, the items it holds, and the labels a viewer must hold one of to reach it.
+type GatedView<'a> = (&'a str, &'a [Item], Option<Vec<String>>);
+
 /// [`build_views`], each view reached by a viewer holding one of the labels beside it, or by every
 /// viewer where there are none.
 fn build_gated_views(
     dir: &Path,
     items: &[Item],
-    views: &[(&str, &[Item], Option<Vec<String>>)],
+    views: &[GatedView<'_>],
 ) -> PathBuf {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
