@@ -113,7 +113,7 @@ pub(super) enum Key {
 pub(super) struct Held {
     table: u32,
     under: Arc<Generation>,
-    mask: crate::histogram::MaskIdentity,
+    mask: crate::figures::MaskIdentity,
     groups: Groups,
     served: Option<Served>,
     spill: Option<(Position, Vec<Run>, bool)>,

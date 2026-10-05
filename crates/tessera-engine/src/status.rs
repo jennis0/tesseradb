@@ -170,10 +170,10 @@ impl Engine {
         self.write.live().allocator_high_water()
     }
 
-    /// The masked-count cache's gauges. Operator plane only: a count of structures, naming no
-    /// artifact and no principal.
-    pub fn masked_count_cache_stats(&self) -> crate::histogram::MaskedCountStats {
-        self.masked_counts.stats()
+    /// The figures' gauges ([`crate::figures`]). Operator plane only: a count of structures,
+    /// naming no artifact and no principal.
+    pub fn figures_stats(&self) -> crate::figures::FiguresStats {
+        self.figures.stats()
     }
 
     /// The derived-geometry cache's gauges. Operator plane only, naming no artifact and no
@@ -229,17 +229,17 @@ impl Engine {
             .set_memory_bound(fragment_bytes);
     }
 
-    /// Bound the masked-count cache (`serve.masked_count_cache_bytes`). This key exists only for a
-    /// deployment with a row-major layer; unset, an embedder gets an unbounded cache.
+    /// Bound the fragments' counts held in memory (`serve.masked_count_cache_bytes`). This key
+    /// exists only for a deployment with a row-major layer; unset, an embedder gets no bound.
     pub fn set_masked_count_cache_bytes(&self, bytes: u64) {
-        self.masked_counts.set_bound_bytes(bytes);
+        self.figures.set_bound_bytes(bytes);
     }
 
-    /// How long a masked-count build waits, from its first wait, while viewers are drawing points
+    /// How long a walk of a level's figures waits, from its first wait, while viewers are drawing points
     /// (`serve.masked_count_give_way_ms`). Unset, an embedder gets
-    /// [`crate::histogram::DEFAULT_GIVE_WAY_MS`].
+    /// [`crate::figures::DEFAULT_GIVE_WAY_MS`].
     pub fn set_masked_count_give_way_ms(&self, give_way_ms: u64) {
-        self.masked_counts.set_give_way_ms(give_way_ms);
+        self.figures.set_give_way_ms(give_way_ms);
     }
 
     /// Bound the region decomposition cache (`serve.region_cache_bytes`).

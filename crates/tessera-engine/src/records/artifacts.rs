@@ -40,7 +40,7 @@ use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::filter::FilterExpr;
 use crate::layer_read::{check_level, ReadLevel, LayerRefusal};
-use crate::histogram::MaskIdentity;
+use crate::figures::MaskIdentity;
 use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::shapes::DrawnShape;
@@ -797,8 +797,8 @@ fn parent_position(scope: &Scope<'_>, parent: TesseraId) -> Option<(u32, u32)> {
 /// the level's accumulation where it has one, and computed from the visible rows otherwise.
 fn visible_geometry(scope: &Scope<'_>, read: &ReadLevel, ordinal: u32) -> DerivedContent {
     let wanted = [ComputedProperty::Centroid, ComputedProperty::Box];
-    if let Some(geometry) = read.counts.as_ref().and_then(|c| c.geometry()) {
-        return crate::derived::accumulated(&wanted, geometry, ordinal);
+    if let Some(figures) = read.counts.as_ref().filter(|c| c.has_geometry()) {
+        return crate::derived::accumulated(&wanted, figures, ordinal);
     }
     let locator = RowLocator::new(scope.open.served.segments.clone());
     let visible = read.rows.visible_rows(ordinal, &scope.open.mask);

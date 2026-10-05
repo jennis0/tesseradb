@@ -78,7 +78,7 @@ The server holds five caches, each with a limit you can set under `[serve]`:
 |---|---|---|
 | `row_projection_cache_bytes` | 2 GiB | For each session, which rows of the bundle it may see |
 | `fragment_cache_bytes` | 1 GiB | For each distinct set of granted labels, the items it covers. Copies on disc in the cache directory outlive the memory |
-| `masked_count_cache_bytes` | 256 MiB | Visible member counts, centroids and boxes for annotation layers stored by row, one entry per grant and level. Empty in a corpus without one |
+| `masked_count_cache_bytes` | 256 MiB | Visible member counts, centroids and boxes for annotation layers stored by row, one entry per grant and level: 4 B an artifact for counts alone, 40 B with a centroid, 296 B with a box. A copy of each entry is kept in the cache directory, so a restart reads it back. Empty in a corpus without one |
 | `region_cache_bytes` | 256 MiB | Drawn filter regions broken into map tiles, shared between viewers |
 | `occupancy_cache_bytes` | 32 MiB | How many tiles at each zoom hold something a session can see |
 

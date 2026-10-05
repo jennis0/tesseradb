@@ -76,14 +76,14 @@ impl DerivedContent {
     }
 }
 
-/// [`compute`]'s answer for a level served from its column alone, read out of the accumulation one
-/// pass over the mask produced for every artifact at once ([`crate::histogram::MaskedGeometry`]).
-/// Both sum in `u64`, exact and unable to overflow, so this and the row-major route agree bit for
-/// bit. A hull is not here: it is a function of the positions, not an accumulation over them, so a
-/// layer deriving one keeps the artifact-major form ([`crate::artifacts::serves_column_only`]).
+/// [`compute`]'s answer for a level served from its column alone, read off the level's figures
+/// ([`crate::figures::Figures`]). Both sum in `u64`, exact and unable to overflow, so this and the
+/// row-major route agree bit for bit. A hull is not here: it is a function of the positions, not
+/// an accumulation over them, so a layer deriving one keeps the artifact-major form
+/// ([`crate::artifacts::serves_column_only`]).
 pub fn accumulated(
     declared: &[ComputedProperty],
-    geometry: &crate::histogram::MaskedGeometry,
+    geometry: &crate::figures::Figures,
     ordinal: u32,
 ) -> DerivedContent {
     let mut out = DerivedContent::default();

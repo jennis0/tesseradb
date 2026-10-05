@@ -310,8 +310,8 @@ impl Engine {
         generation: &crate::Generation,
         geometry: &crate::cache::SessionGeometry,
         projection_segments_version: u64,
-    ) -> crate::histogram::MaskIdentity {
-        crate::histogram::MaskIdentity {
+    ) -> crate::figures::MaskIdentity {
+        crate::figures::MaskIdentity {
             token_id: session.token_id(),
             terms: session.terms_digest(),
             segments_version: generation.segments_version,
@@ -327,7 +327,7 @@ impl Engine {
     /// for a session, every later request is one hash lookup and nothing else.
     pub(super) fn spawn_ladder_fill(
         &self,
-        identity: &crate::histogram::MaskIdentity,
+        identity: &crate::figures::MaskIdentity,
         view: &str,
         session: &Session,
         generation: &Arc<crate::Generation>,
@@ -365,7 +365,7 @@ impl Engine {
     /// filtered mask reaching it would make θ move as the viewer types.
     pub(crate) fn occupied_tiles(
         &self,
-        identity: &crate::histogram::MaskIdentity,
+        identity: &crate::figures::MaskIdentity,
         view: &str,
         segments: &[(&SegmentData, u32)],
         mask: &crate::compose::EffectiveMask,

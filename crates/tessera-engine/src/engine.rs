@@ -51,8 +51,8 @@ pub(crate) fn build_compute_pool(
         .build()
 }
 
-/// The pool masked counts are built on ([`Engine::count_pool`]). Nothing is spawned on it, so a
-/// panic reaches the `install` caller.
+/// The pool a level's figures are walked on ([`Engine::count_pool`]). Nothing is spawned on it, so
+/// a panic reaches the `install` caller.
 fn build_count_pool(
     threads: usize,
 ) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
@@ -111,9 +111,10 @@ pub struct Engine {
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     /// The spatial levels' held shapes, index and per-segment resolved pieces.
     pub(crate) shapes: Arc<crate::shapes::ShapeStore>,
-    /// The masked counts of levels served by row, per `(term set, layer, level)` and generation,
-    /// shared by every session with the same term set ([`crate::histogram`]).
-    pub(crate) masked_counts: Arc<crate::histogram::MaskedCountCache>,
+    /// The figures of levels served by row: the counts over each fragment's base rows, shared by
+    /// every session with the same grant, and the corrections each request applies to them
+    /// ([`crate::figures`]).
+    pub(crate) figures: Arc<crate::figures::FiguresCache>,
     /// `N_occ(d)` per `(session, view, depth)` and generation, memoised so a pan at one zoom does
     /// not walk the mask again. Per *session*, since `N_occ` is counted inside one principal's own
     /// composed mask.
@@ -138,8 +139,8 @@ pub struct Engine {
     /// the pool a segment write executes on. Its width bounds what requests and writes use at
     /// once; `count_pool` is the one other pool.
     pub(crate) pool: Arc<rayon::ThreadPool>,
-    /// Where a level's masked counts are built ([`Engine::masked_counts`]): a walk of every visible
-    /// row, seconds long on a large view. As wide as `pool`, so a request on `pool` never queues
+    /// Where a level's figures are walked ([`Engine::figures`]): a walk of every row of a
+    /// fragment, seconds long on a large view. As wide as `pool`, so a request on `pool` never queues
     /// behind a build's chunks.
     pub(crate) count_pool: Arc<rayon::ThreadPool>,
     /// The bundle **root** — the directory holding `CURRENT` and every prefix under it, not the
@@ -1009,7 +1010,10 @@ impl Engine {
             max_region_cells: AtomicU64::new(crate::region::DEFAULT_MAX_REGION_CELLS as u64),
             artifact_projections: Arc::clone(&artifact_projections),
             shapes: Arc::clone(&shapes),
-            masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
+            figures: Arc::new(crate::figures::FiguresCache::new(
+                u64::MAX,
+                Some(cache_dir.join(crate::figures::FIGURES_DIR)),
+            )),
             occupancy: Arc::clone(&occupancy),
             derived_geometry: Arc::new(crate::derived::cache::DerivedCache::default()),
             suggest_sets: Arc::new(crate::suggest_set::SuggestSets::default()),

@@ -44,7 +44,7 @@ use crate::compose::{FilterRows, MaskedSet};
 use crate::engine::Engine;
 use crate::error::Result;
 use crate::filter::FilterExpr;
-use crate::histogram::MaskIdentity;
+use crate::figures::MaskIdentity;
 use crate::region::RegionVerdict;
 use crate::viewport::{
     crossing_domain, filter_refusal, segment_holding, unique_holders, OpenView, ResolvedLeaves,

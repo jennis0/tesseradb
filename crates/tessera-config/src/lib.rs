@@ -1168,7 +1168,7 @@ fn parse(text: &str) -> Result<Config> {
             .unwrap_or(DEFAULT_MASKED_COUNT_CACHE_BYTES),
         masked_count_give_way_ms: serve
             .masked_count_give_way_ms
-            .unwrap_or(tessera_engine::histogram::DEFAULT_GIVE_WAY_MS),
+            .unwrap_or(tessera_engine::figures::DEFAULT_GIVE_WAY_MS),
         occupancy_cache_bytes: serve
             .occupancy_cache_bytes
             .unwrap_or(tessera_engine::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES),

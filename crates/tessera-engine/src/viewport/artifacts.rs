@@ -121,7 +121,7 @@ pub(super) struct GatedArtifact {
     pub(super) rank: Option<u32>,
     /// The level's masked counts where it has them, so derived geometry reuses this gate's
     /// walk of the mask instead of repeating it.
-    pub(super) counts: Option<Arc<crate::histogram::MaskedCounts>>,
+    pub(super) counts: Option<Arc<crate::figures::Figures>>,
 }
 
 /// One request's state, as the dependency prerequisite needs it: gathered once per response,
@@ -321,53 +321,6 @@ impl Engine {
         warmed
     }
 
-    /// This level's masked counts, computed from the composed mask and never from the whole
-    /// population, which would reveal a count of items this viewer cannot see. `None` on an
-    /// artifact-major level, which counts one artifact at a time instead.
-    ///
-    /// Built on first use and shared by every session with the same term set
-    /// ([`crate::histogram`]). The walk runs on the count pool, so a request on the compute pool
-    /// does not queue behind it. A request waiting for another's build stops when its client goes
-    /// away, and is refused [`EngineError::CountsBuilding`] past [`crate::histogram`]'s wait bound.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn masked_counts(
-        &self,
-        served: &ServedView<'_>,
-        layer: &str,
-        level: u32,
-        level_version: u64,
-        rows: &crate::artifacts::ArtifactRows,
-        mask: &crate::compose::EffectiveMask,
-        segments: Option<&[(&SegmentData, u32)]>,
-    ) -> Result<Option<Arc<crate::histogram::MaskedCounts>>> {
-        use crate::compose::WholeMask;
-        let Some(column) = rows.column() else {
-            return Ok(None);
-        };
-        // A column-only form holds no per-artifact membership, so its geometry is accumulated in
-        // this walk rather than read per artifact; where the form holds bitmaps it is not.
-        let accumulate = segments.filter(|_| !rows.membership().rows_held());
-        let key = served
-            .mask_identity
-            .key(served.name, layer, level, level_version, accumulate.is_some());
-        self.masked_counts
-            .get_or_build(key, &served.turn, served.cancel.as_ref(), |build| {
-                let places = accumulate.map(crate::derived::Placement::of_segments);
-                self.count_pool.install(|| {
-                    #[cfg(feature = "fault-injection")]
-                    self.switches.hold_masked_count_build_if_wanted();
-                    column
-                        .accumulate(mask.visible_all(), places.as_deref(), &|| build.give_way())
-                        .map(|walked| crate::histogram::MaskedCounts::of(walked, places.is_some()))
-                })
-            })
-            .map(Some)
-            .map_err(|ended| match ended {
-                tessera_cache::WaitEnded::Budget => EngineError::CountsBuilding,
-                tessera_cache::WaitEnded::Cancelled => EngineError::Cancelled,
-            })
-    }
-
     /// One artifact, located and gated for one principal.
     ///
     /// `None` is the only failure shape: an identifier naming nothing, naming a point, naming an
@@ -448,18 +401,14 @@ impl Engine {
                 crate::artifacts::serves_column_only(&layer.declaration),
             )
         });
-        // See `Engine::masked_counts`: a cold row-major drill-down pays the whole histogram.
-        let counts = self.masked_counts(
+        let counts = self.figures(
             served,
             &name,
             level,
             level_version,
             &rows,
             mask,
-            // Only where the layer derives accumulated geometry — a count-only level has no use
-            // for a position per visible row.
-            crate::artifacts::derives_accumulated_geometry(&layer.declaration)
-                .then_some(segments),
+            crate::figures::Geometry::declared(&layer.declaration),
         )?;
         let carried_counts = counts.clone();
         // The same containment the viewport builds, from the same partition.
@@ -625,11 +574,9 @@ impl Engine {
                 fragment_watermark: mask_identity.fragment_watermark,
                 properties: crate::derived::cache::properties_bits(&declared_derived),
             };
-            match counts.as_ref().and_then(|c| c.geometry()) {
-                // The accumulation the level's own counts carry.
-                Some(geometry) => {
-                    crate::derived::accumulated(&declared_derived, geometry, ordinal)
-                }
+            match counts.as_ref().filter(|c| c.has_geometry()) {
+                // The accumulation the level's own figures carry.
+                Some(figures) => crate::derived::accumulated(&declared_derived, figures, ordinal),
                 None => {
                     let content = self.derived_geometry.get_or_derive(key, || {
                         let Ok(segments) = segments_with_row_bases(view, view_data) else {
@@ -940,8 +887,8 @@ impl Engine {
                 crate::artifacts::serves_column_only(&layer.declaration),
             )
         });
-        // The target's own count, under the same key the viewport would read.
-        let counts = self.masked_counts(
+        // The target's own figures, under the same key the viewport would read.
+        let counts = self.figures(
             ctx.served,
             &attachment.layer,
             attachment.level,
@@ -949,7 +896,7 @@ impl Engine {
             &rows,
             ctx.mask,
             // A prerequisite asks whether the target is *served*, never for its geometry.
-            None,
+            crate::figures::Geometry::None,
         );
         let Some(counts) = ctx.held(counts) else {
             return false;
@@ -1155,7 +1102,7 @@ impl Engine {
     /// One level's row form in this request's view and the version it is of, from one call so
     /// that a histogram is never filed under a later version than the column it counts, with the
     /// version of the level's lineage beside them.
-    pub(super) fn level_form(
+    pub(crate) fn level_form(
         &self,
         served: &ServedView<'_>,
         registered: &tessera_types::layer::RegisteredLayer,
@@ -1220,15 +1167,14 @@ impl Engine {
         );
         // Decided by the level's layout, never the request: artifact-major counts per artifact,
         // row-major reads the histogram.
-        let counts = self.masked_counts(
+        let counts = self.figures(
             served,
             &layer.name,
             level,
             level_version,
             &rows,
             pass.sets.mask,
-            crate::artifacts::derives_accumulated_geometry(&layer.registered.declaration)
-                .then_some(&served.segments[..]),
+            crate::figures::Geometry::declared(&layer.registered.declaration),
         )?;
         // Built after candidacy: the filter decides nothing about which artifacts are served.
         let matched = pass
@@ -1464,9 +1410,9 @@ impl Engine {
                     properties: crate::derived::cache::properties_bits(&layer.declared_derived),
                 };
                 // The accumulation where the level has one; nothing here walks the mask again.
-                match level.counts.as_ref().and_then(|c| c.geometry()) {
-                    Some(geometry) => {
-                        crate::derived::accumulated(&layer.declared_derived, geometry, ordinal)
+                match level.counts.as_ref().filter(|c| c.has_geometry()) {
+                    Some(figures) => {
+                        crate::derived::accumulated(&layer.declared_derived, figures, ordinal)
                     }
                     None => (*self.derived_geometry.get_or_derive(key, || {
                         let visible = rows.visible_rows(ordinal, pass.sets.mask);
@@ -1576,7 +1522,7 @@ struct LevelPass<'a> {
     lineage_version: u64,
     /// The level's masked counts and accumulated geometry where it has them — `None` on an
     /// artifact-major level.
-    counts: Option<Arc<crate::histogram::MaskedCounts>>,
+    counts: Option<Arc<crate::figures::Figures>>,
     /// The filter's and the highlight's answers over this level, borrowed from the request's
     /// composed sets.
     matched: Option<crate::artifacts::Matched<'a>>,

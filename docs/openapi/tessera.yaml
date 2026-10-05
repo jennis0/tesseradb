@@ -7002,14 +7002,30 @@ components:
         masked_count_cache:
           type: object
           additionalProperties: false
-          required: [entries, bytes, hits, misses, evictions]
-          description: Per-session masked counts, pruned at revocation and at the expiry sweep.
+          required: [entries, bytes, hits, misses, evictions, fills, loads, exact, reserve_spent]
+          description: The per-artifact counts of levels served from a row column, held per grant over the grant's base rows and corrected per request.
           properties:
             entries: { type: integer, minimum: 0 }
             bytes: { type: integer, minimum: 0 }
             hits: { type: integer, minimum: 0 }
             misses: { type: integer, minimum: 0 }
             evictions: { type: integer, minimum: 0 }
+            fills:
+              type: integer
+              minimum: 0
+              description: Walks of a grant's base rows. A growth or a publication between folds does not walk again.
+            loads:
+              type: integer
+              minimum: 0
+              description: Counts read back from the cache directory rather than walked.
+            exact:
+              type: integer
+              minimum: 0
+              description: Walks of one request's whole visible set, taken while a level's denied-row labels are read in the background.
+            reserve_spent:
+              type: integer
+              minimum: 0
+              description: Boxes worked out from an artifact's rows because the denied rows took every spare edge row on a side.
         region_cache:
           type: object
           additionalProperties: false
