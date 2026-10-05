@@ -14,11 +14,13 @@ layer at scale.
 
 Five decisions this stage makes:
 
-- **`publisher` is the access column**, and every row carries a term: a row the source gives no
+- **The publisher is the access term**, and every row carries one: a row the source gives no
   publisher — every `bioscan`, `eol` and `fathomnet` row, and any GBIF row whose record names none
   — carries `unpublished`, a key of the same closed vocabulary (owner ruling, 2026-09-03). So the
   column is never empty, `point_visibility`'s `default` never fires, and a principal holding no
-  term sees nothing.
+  term sees nothing. The label sits in its own `access` column, the publisher's name as one quoted
+  term, because a name holds spaces and commas that an access expression reads as syntax;
+  `publisher` keeps the bare name for the vocabulary, the attribute and the predicate layer.
 - **The `geo` view holds a subset of the entity space.** Only the rows the GBIF join matched *and*
   that carry a coordinate are in `points-geo.parquet`. An entity absent from a view is what
   views.md allows, and it is the point of the rung.
@@ -122,6 +124,7 @@ POINTS_SCHEMA = pa.schema(
         pa.field("x", pa.float64()),
         pa.field("y", pa.float64()),
         pa.field("publisher", pa.string()),
+        pa.field("access", pa.string()),
         *[pa.field(rank, pa.string()) for rank in sources.RANKS],
         pa.field("source_dataset", pa.string()),
         pa.field("basisOfRecord", pa.string()),
@@ -140,8 +143,16 @@ GEO_SCHEMA = pa.schema(
         pa.field("lon", pa.float64()),
         pa.field("lat", pa.float64()),
         pa.field("publisher", pa.string()),
+        pa.field("access", pa.string()),
     ]
 )
+
+
+def access_label(publisher: pa.Array) -> pa.Array:
+    """Each publisher's name as an access label of one quoted term, taken exactly as written."""
+    escaped = pc.replace_substring(pc.replace_substring(publisher, "\\", "\\\\"), '"', '\\"')
+    return pc.binary_join_element_wise('"', escaped, '"', "")
+
 
 #: The taxonomy layer's member file: one row per specimen, `key` a seven-entry list whose positions
 #: are the declared levels.
@@ -754,10 +765,11 @@ def main() -> None:
                "common_name", "uuid", *sources.RANKS]
 
     points = pq.ParquetWriter(out / "points.parquet", POINTS_SCHEMA, compression="zstd",
-                              use_dictionary=["publisher", "source_dataset", "basisOfRecord",
-                                              "img_type", "scientific_name", *sources.RANKS])
+                              use_dictionary=["publisher", "access", "source_dataset",
+                                              "basisOfRecord", "img_type", "scientific_name",
+                                              *sources.RANKS])
     geo = pq.ParquetWriter(out / "points-geo.parquet", GEO_SCHEMA, compression="zstd",
-                           use_dictionary=["publisher"])
+                           use_dictionary=["publisher", "access"])
     members = pq.ParquetWriter(out / "members-taxonomy.parquet", MEMBER_SCHEMA,
                                compression="zstd")
     at = 0
@@ -766,9 +778,15 @@ def main() -> None:
             m = table.num_rows
             entity = np.arange(at, at + m, dtype=np.uint64)
 
-            publisher = pc.fill_null(
-                table.column("publisher").combine_chunks().cast(pa.string()), UNPUBLISHED
+            # Trimmed as a credential's terms are, and a blank name is no publisher.
+            trimmed = pc.utf8_trim_whitespace(
+                table.column("publisher").combine_chunks().cast(pa.string())
             )
+            publisher = pc.fill_null(
+                pc.if_else(pc.equal(trimmed, ""), pa.scalar(None, pa.string()), trimmed),
+                UNPUBLISHED,
+            )
+            access = access_label(publisher)
             counts = pc.value_counts(publisher)
             publisher_counts.update(dict(zip(counts.field("values").to_pylist(),
                                              counts.field("counts").to_pylist())))
@@ -796,6 +814,7 @@ def main() -> None:
                         "x": pa.array(xy[at : at + m, 0].astype(np.float64), pa.float64()),
                         "y": pa.array(xy[at : at + m, 1].astype(np.float64), pa.float64()),
                         "publisher": publisher,
+                        "access": access,
                         **{r: table.column(r).combine_chunks().cast(pa.string())
                            for r in sources.RANKS},
                         "source_dataset":
@@ -823,6 +842,7 @@ def main() -> None:
                             "lon": pa.array(lon[at + here], pa.float64()),
                             "lat": pa.array(lat[at + here], pa.float64()),
                             "publisher": publisher.take(pa.array(here)),
+                            "access": access.take(pa.array(here)),
                         },
                         schema=GEO_SCHEMA,
                     ),
@@ -844,7 +864,7 @@ def main() -> None:
                 del sci, com
 
             at += m
-            del table, publisher, listed
+            del table, publisher, access, listed
             if (at // 10_000_000) != ((at - m) // 10_000_000):
                 print(f"    {at:,}/{n:,}  ({peak_gb():.1f} GB)", flush=True)
     points.close()
