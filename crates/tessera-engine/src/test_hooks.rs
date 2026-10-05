@@ -510,6 +510,14 @@ impl Engine {
         }))
     }
 
+    /// Wait until the figures' background work queued so far, writes and reads of denied rows'
+    /// labels, has run.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn figures_settled_for_test(&self) {
+        self.figures.settle();
+    }
+
     /// The row form this engine is holding for one `(view, layer, level)`, without building one —
     /// for a differential that asserts it equals a form built from scratch. On a request path
     /// this would serve whatever was last cached rather than the generation being served, which

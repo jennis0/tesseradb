@@ -1736,7 +1736,7 @@ fn a_points_request_does_not_wait_for_a_count_build() {
 /// holds; a request that starts after the suppression waits for it and subtracts the suppressed
 /// row, read at its own start.
 #[test]
-fn a_build_in_flight_at_a_suppression_is_not_served_after_it() {
+fn a_build_in_flight_at_a_suppression_is_corrected_for_it() {
     let fx = fixture();
     let engine = std::sync::Arc::new(published(
         &fx,

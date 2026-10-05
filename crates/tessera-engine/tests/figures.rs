@@ -483,6 +483,18 @@ fn served(engine: &Engine, session: &Session) -> Vec<ArtifactOut> {
 fn check(fx: &Fixture, engine: &Engine, what: &str) {
     let mut served_any = false;
     for principal in fx.corpus.principals() {
+        served_any |= check_one(fx, engine, &principal, what);
+    }
+    assert!(
+        served_any,
+        "{what}: nothing was served, so nothing was compared"
+    );
+}
+
+/// [`check`] for one principal, answering whether anything was served to compare.
+fn check_one(fx: &Fixture, engine: &Engine, principal: &Principal, what: &str) -> bool {
+    let mut served_any = false;
+    {
         let session = principal.session(engine);
         let artifacts = served(engine, &session);
         for layer in [FLAT, LIST] {
@@ -499,7 +511,7 @@ fn check(fx: &Fixture, engine: &Engine, what: &str) {
                     continue;
                 }
                 let at = format!("{what}: {:?} {principal:?} {layer} {key}", fx.corpus);
-                let modelled = fx.modelled(&principal, layer, key);
+                let modelled = fx.modelled(principal, layer, key);
                 let walked = walked.get(key).copied().unwrap_or((0, None, None));
                 assert_eq!(walked.0, modelled, "{at}: the walk and the model disagree");
                 match served.get(key) {
@@ -527,10 +539,7 @@ fn check(fx: &Fixture, engine: &Engine, what: &str) {
             }
         }
     }
-    assert!(
-        served_any,
-        "{what}: nothing was served, so nothing was compared"
-    );
+    served_any
 }
 
 /// The rows of `(layer, key)`'s members sorted by `x`, lowest first, as source ids.
@@ -565,7 +574,11 @@ fn the_figures_are_the_visible_rows_for_every_corpus_and_principal() {
         check(&fx, &engine, "an edge suppressed");
         fx.change(&engine, [edge], ChangeOp::Unsuppress);
         check(&fx, &engine, "the edge's suppression lifted");
-        fx.change(&engine, (0..N).filter(|s| s.is_multiple_of(11)), ChangeOp::Delete);
+        fx.change(
+            &engine,
+            (0..N).filter(|s| s.is_multiple_of(11)),
+            ChangeOp::Delete,
+        );
         fx.change(&engine, (0..N).filter(|s| s % 13 == 1), ChangeOp::Suppress);
         check(&fx, &engine, "a scattering deleted and suppressed");
         fx.change(
@@ -814,17 +827,17 @@ fn a_restart_reads_the_counts_and_the_denied_labels_back() {
     {
         let engine = fx.open_published();
         fold(&engine);
-        fx.change(&engine, (0..N).filter(|s| s.is_multiple_of(6)), ChangeOp::Suppress);
-        check(&fx, &engine, "before the restart");
-        // The writes are off the request path; wait until every principal's counts of both
-        // levels, and both levels' denied-row labels, are on disk.
-        let dir = fx.cache.join(tessera_engine::figures::FIGURES_DIR);
-        let fragments = 2 * fx.corpus.principals().len();
-        wait_until(
-            "the figures are written",
-            std::time::Duration::from_secs(30),
-            || files_under(&dir, "counts") >= fragments && files_under(&dir, "denied") >= 2,
+        fx.change(
+            &engine,
+            (0..N).filter(|s| s.is_multiple_of(6)),
+            ChangeOp::Suppress,
         );
+        check(&fx, &engine, "before the restart");
+        // The writes are off the request path; they are all on disk once the worker has run them.
+        engine.figures_settled_for_test();
+        let dir = fx.cache.join(tessera_engine::figures::FIGURES_DIR);
+        assert!(files_under(&dir, "counts") >= 2 * fx.corpus.principals().len());
+        assert!(files_under(&dir, "denied") >= 2);
     }
     let engine = fx.open();
     check(&fx, &engine, "after the restart");
@@ -882,4 +895,100 @@ fn a_level_published_after_a_deny_is_corrected_from_its_first_request() {
         .collect();
     fx.grow(&engine, LIST, "l6", &denied);
     check(&fx, &engine, "grown over denied rows");
+}
+
+/// **A deny after a level's labels are held brings them forward by the new rows alone**: at the
+/// deny, on the figures' thread, reading from the column only the rows the deny added.
+#[test]
+fn a_deny_brings_held_labels_forward_by_its_new_rows_alone() {
+    let mut fx = Fixture::new(Corpus::SingleKey);
+    let engine = fx.open_published();
+    fold(&engine);
+    let first: Vec<u64> = (0..N).filter(|s| s % 12 == 5).collect();
+    fx.change(&engine, first.iter().copied(), ChangeOp::Suppress);
+    check(&fx, &engine, "a first deny");
+    engine.figures_settled_for_test();
+    let read = engine.figures_stats().labels_rows_read;
+    assert_eq!(
+        read,
+        2 * first.len() as u64,
+        "each level read the first deny's rows once"
+    );
+
+    let second: Vec<u64> = (0..N).filter(|s| s % 12 == 7).collect();
+    fx.change(&engine, second.iter().copied(), ChangeOp::Suppress);
+    let wanted = read + 2 * second.len() as u64;
+    wait_until(
+        "the deny brought the held labels forward",
+        std::time::Duration::from_secs(30),
+        || engine.figures_stats().labels_rows_read >= wanted,
+    );
+    check(&fx, &engine, "a second deny");
+    engine.figures_settled_for_test();
+    assert_eq!(
+        engine.figures_stats().labels_rows_read,
+        wanted,
+        "the second deny read its own rows and none the first had"
+    );
+    assert_eq!(
+        engine.figures_stats().exact,
+        0,
+        "no request walked its whole mask"
+    );
+}
+
+/// **A level whose reserve is larger than the bound keeps its counts**: the reserve is not kept,
+/// the counts are, and a box a deny reaches is worked out from the artifact's rows.
+#[test]
+fn counts_are_kept_where_their_reserve_is_too_large_for_the_bound() {
+    let mut fx = Fixture::new(Corpus::SingleKey);
+    let engine = fx.open_published();
+    fold(&engine);
+    // Above the two levels' counts and sums, below the flat level's reserve.
+    engine.set_masked_count_cache_bytes(2_000);
+    let reader = Principal::ReadAll;
+    assert!(check_one(&fx, &engine, &reader, "under a small bound"));
+    let fills = engine.figures_stats().fills;
+    assert!(
+        engine.figures_stats().not_admitted > 0,
+        "the flat level's reserve was not kept"
+    );
+    assert!(check_one(&fx, &engine, &reader, "again"));
+    assert_eq!(
+        engine.figures_stats().fills,
+        fills,
+        "the counts were kept and read again"
+    );
+    let edge = by_x(&fx, FLAT, "f3");
+    fx.change(&engine, edge.iter().copied().take(3), ChangeOp::Suppress);
+    assert!(check_one(
+        &fx,
+        &engine,
+        &reader,
+        "an edge denied without a reserve"
+    ));
+}
+
+/// **The figures' directory stays under its byte bound**, the files least recently written or
+/// read removed first.
+#[test]
+fn the_figures_directory_is_held_under_its_bound() {
+    let fx = Fixture::new(Corpus::PerDocument);
+    let engine = fx.open_published();
+    fold(&engine);
+    check(&fx, &engine, "every principal's counts written");
+    engine.figures_settled_for_test();
+    let unbounded = engine.figures_stats().disk_bytes;
+    assert!(unbounded > 0);
+    engine.set_figures_disk_bytes(unbounded / 2);
+    engine.figures_settled_for_test();
+    let held = engine.figures_stats().disk_bytes;
+    assert!(
+        held > 0 && held <= unbounded / 2,
+        "{held} bytes held under a bound of {}",
+        unbounded / 2
+    );
+    check(&fx, &engine, "after the bound");
+    engine.figures_settled_for_test();
+    assert!(engine.figures_stats().disk_bytes <= unbounded / 2);
 }

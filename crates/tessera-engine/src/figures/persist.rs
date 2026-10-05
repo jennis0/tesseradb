@@ -6,26 +6,25 @@
 //! its SHA-256, then the payload; a file whose length or digest does not match is not read, so a
 //! torn or altered entry is a miss. Writes go through [`tessera_authz::write_private_atomically`],
 //! as the fragments beside them do.
+//!
+//! The directory is held under a byte bound: after each write the files least recently written or
+//! read are removed until what is left fits.
 
 use std::path::{Path, PathBuf};
 
-use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 
-use crate::row_column::{Reserve, RESERVE};
+use crate::engine::hex_encode as hex;
+use crate::row_column::RESERVE;
 
-use super::counts::Dense;
-use super::denied::{DeniedLabels, Labelled};
+use super::counts::{CountsAt, Dense, Grown, Reserves};
+use super::denied::DeniedLabels;
 use super::Geometry;
 
-const COUNTS_MAGIC: &[u8; 8] = b"TSFCNT01";
-const DENIED_MAGIC: &[u8; 8] = b"TSFDNY01";
+const COUNTS_MAGIC: &[u8; 8] = b"TSFCNT02";
+const DENIED_MAGIC: &[u8; 8] = b"TSFDNY02";
 const HEADER: usize = 8 + 8 + 32;
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 /// The directory a bundle identity's entries live in.
 pub(crate) fn identity_dir(root: &Path, identity: &[u8; 32]) -> PathBuf {
@@ -82,6 +81,52 @@ fn path_of(dir: &Path, stem: &str, at: u64, extension: &str) -> PathBuf {
     dir.join(format!("{stem}-{at}.{extension}"))
 }
 
+/// Remove the files under `root` least recently written or read until they hold at most `bound`
+/// bytes.
+pub(crate) fn hold_under(root: &Path, bound: u64) {
+    fn walk(dir: &Path, out: &mut Vec<(std::time::SystemTime, u64, PathBuf)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), out);
+            } else {
+                let at = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                out.push((at, meta.len(), entry.path()));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, &mut files);
+    let mut held: u64 = files.iter().map(|(_, len, _)| len).sum();
+    files.sort();
+    for (_, len, path) in files {
+        if held <= bound {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            held -= len;
+        }
+    }
+}
+
+/// The bytes the files under `root` hold.
+pub(crate) fn bytes_under(root: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.metadata() {
+            Ok(meta) if meta.is_dir() => bytes_under(&entry.path()),
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
 /// Write `payload` as the entry `stem` at `at`, and remove the entry's other versions.
 fn write(dir: &Path, stem: &str, at: u64, extension: &str, magic: &[u8; 8], payload: &[u8]) {
     let mut bytes = Vec::with_capacity(HEADER + payload.len());
@@ -112,9 +157,14 @@ fn write(dir: &Path, stem: &str, at: u64, extension: &str, magic: &[u8; 8], payl
     }
 }
 
-/// The payload of the entry `stem` at `at`, where a whole and unaltered one is on disk.
+/// The payload of the entry `stem` at `at`, where a whole and unaltered one is on disk. A read marks
+/// the file used, so the byte bound removes it after the files nobody has read.
 fn read(dir: &Path, stem: &str, at: u64, extension: &str, magic: &[u8; 8]) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(path_of(dir, stem, at, extension)).ok()?;
+    let path = path_of(dir, stem, at, extension);
+    let bytes = std::fs::read(&path).ok()?;
+    if let Ok(file) = std::fs::File::options().append(true).open(&path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
     if bytes.len() < HEADER || &bytes[..8] != magic {
         return None;
     }
@@ -126,7 +176,8 @@ fn read(dir: &Path, stem: &str, at: u64, extension: &str, magic: &[u8; 8]) -> Op
     Some(payload.to_vec())
 }
 
-/// Little-endian reads off the front of a payload.
+/// Little-endian reads off the front of a payload. `tessera-store`'s readers are private to the
+/// formats they frame, so this is the figures' own.
 struct Reader<'a>(&'a [u8]);
 
 impl Reader<'_> {
@@ -171,95 +222,142 @@ impl Reader<'_> {
     }
 }
 
-/// Write a fragment's counts at `at`.
-pub(crate) fn write_counts(dir: &Path, stem: &str, at: u64, dense: &Dense) {
-    let n = dense.counts.len();
-    let geometry = !dense.placed.is_empty();
-    let reserves = !dense.reserves.is_empty();
-    let mut payload = Vec::with_capacity(n * (4 + if geometry { 36 } else { 0 }) + 16);
-    payload.extend_from_slice(&(n as u64).to_le_bytes());
-    payload.push(u8::from(geometry) | (u8::from(reserves) << 1));
-    let u32s = |values: &[u32], payload: &mut Vec<u8>| {
-        for v in values {
-            payload.extend_from_slice(&v.to_le_bytes());
-        }
-    };
-    u32s(&dense.counts, &mut payload);
-    if geometry {
-        u32s(&dense.placed, &mut payload);
-        for s in &dense.sums {
-            for v in s {
-                payload.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        for b in &dense.boxes {
-            u32s(b, &mut payload);
-        }
+fn put_u32s(payload: &mut Vec<u8>, values: &[u32]) {
+    for v in values {
+        payload.extend_from_slice(&v.to_le_bytes());
     }
-    if reserves {
-        for reserve in &dense.reserves {
-            for side in reserve {
-                for key in side {
-                    payload.extend_from_slice(&key.to_le_bytes());
-                }
-            }
-        }
-    }
-    write(dir, stem, at, "counts", COUNTS_MAGIC, &payload);
 }
 
-/// A fragment's counts at `at`, where they are on disk with the geometry `geometry` asks for.
-pub(crate) fn read_counts(dir: &Path, stem: &str, at: u64, geometry: Geometry) -> Option<Dense> {
+fn put_u64s(payload: &mut Vec<u8>, values: &[u64]) {
+    for v in values {
+        payload.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Write a fragment's counts at their version: the walk, its reserves, and what the steps since it
+/// added.
+pub(crate) fn write_counts(dir: &Path, stem: &str, counts: &CountsAt, reserves: Option<&Reserves>) {
+    let dense = &counts.dense;
+    let n = dense.counts.len();
+    let geometry = !dense.placed.is_empty();
+    let mut payload = Vec::with_capacity(n * if geometry { 40 } else { 4 } + 64);
+    payload.extend_from_slice(&dense.filled_at.to_le_bytes());
+    payload.extend_from_slice(&(n as u64).to_le_bytes());
+    payload.push(u8::from(geometry) | (u8::from(reserves.is_some()) << 1));
+    put_u32s(&mut payload, &dense.counts);
+    if geometry {
+        put_u32s(&mut payload, &dense.placed);
+        put_u64s(&mut payload, dense.sums.as_flattened());
+        put_u32s(&mut payload, dense.boxes.as_flattened());
+    }
+    if let Some(reserves) = reserves {
+        payload.extend_from_slice(&(reserves.index.len() as u64).to_le_bytes());
+        put_u32s(&mut payload, &reserves.index);
+        payload.extend_from_slice(&(reserves.rows.len() as u64).to_le_bytes());
+        for rows in &reserves.rows {
+            put_u32s(&mut payload, rows.as_flattened());
+        }
+    }
+    let mut grown: Vec<(&u32, &Grown)> = counts.grown.iter().collect();
+    grown.sort_unstable_by_key(|(ordinal, _)| **ordinal);
+    payload.extend_from_slice(&(grown.len() as u64).to_le_bytes());
+    for (ordinal, g) in grown {
+        put_u32s(&mut payload, &[*ordinal, g.count, g.placed]);
+        put_u64s(&mut payload, &g.sums);
+        payload.extend_from_slice(&(g.points.len() as u64).to_le_bytes());
+        for &(row, x, y) in &g.points {
+            put_u32s(&mut payload, &[row, x, y]);
+        }
+    }
+    write(dir, stem, counts.at, "counts", COUNTS_MAGIC, &payload);
+}
+
+/// A fragment's counts at `at`, and their reserves, where they are on disk with the geometry
+/// `geometry` asks for.
+pub(crate) fn read_counts(
+    dir: &Path,
+    stem: &str,
+    at: u64,
+    geometry: Geometry,
+) -> Option<(CountsAt, Option<Reserves>)> {
     let payload = read(dir, stem, at, "counts", COUNTS_MAGIC)?;
     let mut r = Reader(&payload);
+    let filled_at = r.u64()?;
     let n = usize::try_from(r.u64()?).ok()?;
     let flags = r.u8()?;
-    let (placed, reserves) = (flags & 1 != 0, flags & 2 != 0);
-    if placed != (geometry != Geometry::None) || reserves != (geometry == Geometry::Box) {
+    let (placed, reserved) = (flags & 1 != 0, flags & 2 != 0);
+    if placed != (geometry != Geometry::None) || (reserved && geometry != Geometry::Box) {
         return None;
     }
     let mut dense = Dense {
+        filled_at,
         counts: r.u32s(n)?,
         ..Dense::default()
     };
     if placed {
         dense.placed = r.u32s(n)?;
-        dense.sums = r
-            .u64s(2 * n)?
-            .as_chunks::<2>()
-            .0
-            .to_vec();
-        dense.boxes = r
-            .u32s(4 * n)?
-            .as_chunks::<4>()
-            .0
-            .to_vec();
+        dense.sums = r.u64s(2 * n)?.as_chunks::<2>().0.to_vec();
+        dense.boxes = r.u32s(4 * n)?.as_chunks::<4>().0.to_vec();
     }
-    if reserves {
-        let keys = r.u64s(n * 4 * RESERVE)?;
-        let sides = keys.as_chunks::<RESERVE>().0;
-        let reserves: &[Reserve] = sides.as_chunks::<4>().0;
-        dense.reserves = reserves.to_vec();
+    let reserves = match reserved {
+        false => None,
+        true => {
+            let len = usize::try_from(r.u64()?).ok()?;
+            let index = r.u32s(len)?;
+            let held = usize::try_from(r.u64()?).ok()?;
+            let flat = r.u32s(held.checked_mul(4 * RESERVE)?)?;
+            let sides = flat.as_chunks::<RESERVE>().0;
+            Some(Reserves {
+                index,
+                rows: sides.as_chunks::<4>().0.to_vec(),
+            })
+        }
+    };
+    let mut grown = FxHashMap::default();
+    for _ in 0..r.u64()? {
+        let head = r.u32s(3)?;
+        let sums = r.u64s(2)?;
+        let points = usize::try_from(r.u64()?).ok()?;
+        let flat = r.u32s(points.checked_mul(3)?)?;
+        grown.insert(
+            head[0],
+            Grown {
+                count: head[1],
+                placed: head[2],
+                sums: [sums[0], sums[1]],
+                points: flat
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|p| (p[0], p[1], p[2]))
+                    .collect(),
+            },
+        );
     }
-    r.0.is_empty().then_some(dense)
+    if !r.0.is_empty() {
+        return None;
+    }
+    let counts = CountsAt {
+        at,
+        dense: std::sync::Arc::new(dense),
+        grown: std::sync::Arc::new(grown),
+    };
+    Some((counts, reserves))
 }
 
 /// Write a level's denied-row labels.
 pub(crate) fn write_denied(dir: &Path, stem: &str, labels: &DeniedLabels) {
-    let mut payload = Vec::with_capacity(labels.labels.len() * 24 + 8);
-    payload.extend_from_slice(&(labels.labels.len() as u64).to_le_bytes());
-    let mut rows: Vec<(&u32, &Labelled)> = labels.labels.iter().collect();
-    rows.sort_unstable_by_key(|(row, _)| **row);
-    for (row, held) in rows {
-        payload.extend_from_slice(&row.to_le_bytes());
-        let (x, y) = held.position.unwrap_or((0, 0));
-        payload.push(u8::from(held.position.is_some()));
-        payload.extend_from_slice(&x.to_le_bytes());
-        payload.extend_from_slice(&y.to_le_bytes());
-        payload.extend_from_slice(&(held.ordinals.len() as u32).to_le_bytes());
-        for ordinal in &held.ordinals {
-            payload.extend_from_slice(&ordinal.to_le_bytes());
-        }
+    let n = labels.rows.len();
+    let mut payload = Vec::with_capacity(n * 24 + 32);
+    payload.extend_from_slice(&(n as u64).to_le_bytes());
+    put_u32s(&mut payload, &labels.rows);
+    put_u32s(&mut payload, &labels.offsets);
+    payload.extend_from_slice(&(labels.ordinals.len() as u64).to_le_bytes());
+    put_u32s(&mut payload, &labels.ordinals);
+    for position in &labels.positions {
+        let (x, y) = position.unwrap_or((0, 0));
+        payload.push(u8::from(position.is_some()));
+        put_u32s(&mut payload, &[x, y]);
     }
     write(dir, stem, labels.at, "denied", DENIED_MAGIC, &payload);
 }
@@ -275,32 +373,29 @@ pub(crate) fn read_denied(
 ) -> Option<DeniedLabels> {
     let payload = read(dir, stem, at, "denied", DENIED_MAGIC)?;
     let mut r = Reader(&payload);
-    let n = r.u64()?;
-    let mut labels = FxHashMap::default();
-    let mut rows = Vec::new();
+    let n = usize::try_from(r.u64()?).ok()?;
+    let rows = r.u32s(n)?;
+    let offsets = r.u32s(n.checked_add(1)?)?;
+    let total = usize::try_from(r.u64()?).ok()?;
+    let ordinals = r.u32s(total)?;
+    let mut positions = Vec::with_capacity(n);
     for _ in 0..n {
-        let row = r.u32()?;
         let placed = r.u8()? != 0;
         let (x, y) = (r.u32()?, r.u32()?);
-        let count = r.u32()? as usize;
-        let ordinals = r.u32s(count)?;
-        rows.push(row);
-        labels.insert(
-            row,
-            Labelled {
-                ordinals,
-                position: placed.then_some((x, y)),
-            },
-        );
+        positions.push(placed.then_some((x, y)));
     }
-    if !r.0.is_empty() {
-        return None;
-    }
-    Some(DeniedLabels {
+    let framed = r.0.is_empty()
+        && rows.windows(2).all(|w| w[0] < w[1])
+        && offsets.windows(2).all(|w| w[0] <= w[1])
+        && offsets.first() == Some(&0)
+        && offsets.last().map(|&o| o as usize) == Some(total);
+    framed.then_some(DeniedLabels {
         identity,
         column,
         at,
-        rows: Bitmap::of(&rows),
-        labels,
+        rows,
+        offsets,
+        ordinals,
+        positions,
     })
 }

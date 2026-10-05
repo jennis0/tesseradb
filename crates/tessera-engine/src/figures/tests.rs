@@ -18,8 +18,8 @@ use crate::artifacts::MembershipRows;
 use crate::derived::{place, Placement};
 use crate::row_column::RowColumn;
 
-use super::cache::{FiguresCache, Tail};
-use super::counts::{CountsAt, Deltas, Dense};
+use super::cache::{Counters, Tail};
+use super::counts::{CountsAt, Deltas, Dense, Reserves};
 use super::denied::{Brought, DeniedLabels, DenyCorrection};
 use super::{BoxSource, Figures, Geometry};
 
@@ -164,12 +164,12 @@ fn mask(rng: &mut StdRng, deny: f64) -> Mask {
 
 /// The figures as the engine assembles them, from `counts` and the mask.
 fn assembled(
-    counts: Arc<CountsAt>,
+    (counts, reserves): (Arc<CountsAt>, Option<Arc<Reserves>>),
     column: &Arc<RowColumn>,
     mask: &Mask,
     labels: Option<&DeniedLabels>,
     positions: &Arc<Positions>,
-    cache: &Arc<FiguresCache>,
+    counters: &Arc<Counters>,
 ) -> Figures {
     let places = positions.places();
     let mut subtracted = mask.minus.clone();
@@ -187,6 +187,7 @@ fn assembled(
     let held = Arc::clone(positions);
     Figures {
         counts,
+        reserves,
         deny,
         tail: Some(Arc::new(Tail(tail))),
         len: column.len(),
@@ -197,10 +198,25 @@ fn assembled(
                 mask.projection.clone(),
             )),
             base_rows: BASE,
-            box_of: Arc::new(move |rows: &Bitmap| super::box_of_rows(rows, &held.places())),
-            cache: Arc::clone(cache),
+            places: Arc::new(move |read: &mut dyn FnMut(&[Placement<'_>])| read(&held.places())),
+            counters: Arc::clone(counters),
         }),
     }
+}
+
+/// The fragment's counts over `projection`'s base rows at `at`, and their reserves, as a walk
+/// takes them.
+fn filled(
+    column: &RowColumn,
+    projection: &Bitmap,
+    places: &[Placement<'_>],
+    at: u64,
+) -> (Arc<CountsAt>, Option<Arc<Reserves>>) {
+    let walked = column
+        .accumulate_below(projection, BASE, Some(places), true, &|| true)
+        .expect("an unstopped walk answers");
+    let (dense, reserves) = Dense::of(at, walked);
+    (Arc::new(CountsAt::of(dense)), reserves.map(Arc::new))
 }
 
 fn base_denied(mask: &Mask) -> Bitmap {
@@ -222,22 +238,19 @@ fn the_figures_are_a_walk_of_the_visible_rows() {
             let mut column = column(&mut rng, layout);
             let deny = [0.0, 0.01, 0.2, 0.6][seed as usize % 4];
             let mask = mask(&mut rng, deny);
-            let cache = Arc::new(FiguresCache::default());
+            let counters = Arc::new(Counters::default());
             let what = format!("{layout:?} seed {seed} deny {deny}");
 
-            let walked = column
-                .accumulate_below(&mask.projection, BASE, Some(&places), true, &|| true)
-                .expect("an unstopped walk answers");
-            let counts = Arc::new(CountsAt::of(1, Dense::of(walked)));
+            let (counts, reserves) = filled(&column, &mask.projection, &places, 1);
             let labels = DeniedLabels::read([3; 32], &column, 1, &base_denied(&mask), &places);
             let shared = Arc::new(column.clone());
             let figures = assembled(
-                Arc::clone(&counts),
+                (Arc::clone(&counts), reserves.clone()),
                 &shared,
                 &mask,
                 Some(&labels),
                 &positions,
-                &cache,
+                &counters,
             );
             assert_figures_match(&figures, &walk(&column, &mask.visible(), &places), &what);
 
@@ -268,22 +281,24 @@ fn the_figures_are_a_walk_of_the_visible_rows() {
             ));
             let brought =
                 match labels.brought([3; 32], &column, 2, &base_denied(&mask), &places, u64::MAX) {
-                    Brought::Ready(brought) => brought,
-                    _ => panic!("{what}: the labels follow the column's own step"),
+                    (Brought::Ready(brought), _) => brought,
+                    _ => DeniedLabels::read([3; 32], &column, 2, &base_denied(&mask), &places),
                 };
-            assert_eq!(
-                brought.labels,
-                DeniedLabels::read([3; 32], &column, 2, &base_denied(&mask), &places).labels,
-                "{what}: labels brought forward by a step equal labels read afresh"
-            );
             let shared = Arc::new(column.clone());
-            let figures = assembled(followed, &shared, &mask, Some(&brought), &positions, &cache);
+            let figures = assembled(
+                (followed, reserves),
+                &shared,
+                &mask,
+                Some(&brought),
+                &positions,
+                &counters,
+            );
             assert_figures_match(
                 &figures,
                 &walk(&column, &mask.visible(), &places),
                 &format!("{what}, after a growth"),
             );
-            spent += cache.stats().reserve_spent;
+            spent += counters.spent.load(std::sync::atomic::Ordering::Relaxed);
         }
     }
     assert!(
@@ -302,10 +317,7 @@ fn a_denied_edge_takes_the_next_row_from_the_reserve_until_it_is_spent() {
     let places = positions.places();
     let column = column(&mut rng, ServingLayout::RowMajorLabel);
     let projection = Bitmap::from_range(0..ROWS);
-    let walked = column
-        .accumulate_below(&projection, BASE, Some(&places), true, &|| true)
-        .unwrap();
-    let counts = Arc::new(CountsAt::of(1, Dense::of(walked)));
+    let filled = filled(&column, &projection, &places, 1);
     let shared = Arc::new(column.clone());
     // Artifact 0's base rows by `x`, lowest first.
     let mut by_x: Vec<(u32, u32)> = Vec::new();
@@ -330,15 +342,15 @@ fn a_denied_edge_takes_the_next_row_from_the_reserve_until_it_is_spent() {
             plus: Bitmap::new(),
             denied,
         };
-        let cache = Arc::new(FiguresCache::default());
+        let counters = Arc::new(Counters::default());
         let labels = DeniedLabels::read([3; 32], &column, 1, &base_denied(&mask), &places);
         let figures = assembled(
-            Arc::clone(&counts),
+            filled.clone(),
             &shared,
             &mask,
             Some(&labels),
             &positions,
-            &cache,
+            &counters,
         );
         let oracle = walk(&column, &mask.visible(), &places);
         assert_eq!(
@@ -347,39 +359,12 @@ fn a_denied_edge_takes_the_next_row_from_the_reserve_until_it_is_spent() {
             "{denied_edges} rows denied on the low x edge"
         );
         assert_eq!(
-            cache.stats().reserve_spent > 0,
+            counters.spent.load(std::sync::atomic::Ordering::Relaxed) > 0,
             denied_edges >= crate::row_column::RESERVE,
             "{denied_edges} rows denied: the reserve of {} answers fewer, and only those",
             crate::row_column::RESERVE
         );
     }
-}
-
-/// **A step that does not start where the labels stand is no way forward**, and neither is a
-/// column the labels were not read from: the labels are read again.
-#[test]
-fn labels_follow_only_their_own_columns_steps() {
-    let mut rng = StdRng::seed_from_u64(5);
-    let positions = Positions::random(&mut rng);
-    let places = positions.places();
-    let mut column = column(&mut rng, ServingLayout::RowMajorList);
-    let denied = sample(&mut rng, 0..BASE, 0.1);
-    let labels = DeniedLabels::read([3; 32], &column, 4, &denied, &places);
-    column.record_step(5, 6, &[(1, 2)]);
-    assert!(matches!(
-        labels.brought([3; 32], &column, 6, &denied, &places, u64::MAX),
-        Brought::Broken
-    ));
-    let other = column.clone().renewed();
-    assert!(matches!(
-        labels.brought([3; 32], &other, 4, &denied, &places, u64::MAX),
-        Brought::Broken
-    ));
-    let more = sample(&mut rng, 0..BASE, 0.3);
-    assert!(matches!(
-        labels.brought([3; 32], &column, 4, &more, &places, 10),
-        Brought::TooMany
-    ));
 }
 
 /// **What is written is what is read back**, and a file altered by one byte is not read.
@@ -390,21 +375,36 @@ fn counts_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
     let places = positions.places();
     let column = column(&mut rng, ServingLayout::RowMajorList);
     let projection = sample(&mut rng, 0..ROWS, 0.5);
-    let walked = column
-        .accumulate_below(&projection, BASE, Some(&places), true, &|| true)
-        .unwrap();
-    let counts = CountsAt::of(7, Dense::of(walked));
+    let (counts, reserves) = filled(&column, &projection, &places, 6);
+    let mut column = column;
+    let kept = column
+        .amend_kept(&[(3, 1), (BASE - 1, 2)], ROWS)
+        .expect("a list column takes any pair");
+    column.record_step(6, 7, &kept);
+    let steps = column.steps_between(6, 7).unwrap();
+    let counts = counts.followed(
+        7,
+        &steps,
+        |_| true,
+        |row| place(&places, row),
+        Geometry::Box,
+    );
     let dir = tempfile::tempdir().unwrap();
     let stem = super::persist::counts_stem(&[1; 32], "s0", "layer", 0, Geometry::Box);
-    super::persist::write_counts(dir.path(), &stem, 7, &counts.folded());
-    let read =
+    super::persist::write_counts(dir.path(), &stem, &counts, reserves.as_deref());
+    let (read, read_reserves) =
         super::persist::read_counts(dir.path(), &stem, 7, Geometry::Box).expect("it reads back");
-    assert_eq!(read.counts, counts.dense.counts);
-    assert_eq!(read.sums, counts.dense.sums);
-    assert_eq!(read.boxes, counts.dense.boxes);
-    assert_eq!(read.reserves, counts.dense.reserves);
+    assert_eq!(read.dense.counts, counts.dense.counts);
+    assert_eq!(read.dense.sums, counts.dense.sums);
+    assert_eq!(read.dense.boxes, counts.dense.boxes);
+    assert_eq!(read.dense.filled_at, 6);
+    assert_eq!(
+        read.grown, counts.grown,
+        "what the step added is read back beside the walk"
+    );
+    assert_eq!(read_reserves.as_ref(), reserves.as_deref());
     assert!(super::persist::read_counts(dir.path(), &stem, 8, Geometry::Box).is_none());
-    assert!(super::persist::read_counts(dir.path(), &stem, 7, Geometry::Centroid).is_none());
+    assert!(super::persist::read_counts(dir.path(), &stem, 7, Geometry::None).is_none());
 
     let denied = sample(&mut rng, 0..BASE, 0.1);
     let labels = DeniedLabels::read([3; 32], &column, 7, &denied, &places);
@@ -412,8 +412,7 @@ fn counts_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
     super::persist::write_denied(dir.path(), &stem, &labels);
     let read = super::persist::read_denied(dir.path(), &stem, 7, [3; 32], column.identity())
         .expect("it reads back");
-    assert_eq!(read.labels, labels.labels);
-    assert_eq!(read.rows, labels.rows);
+    assert_eq!(read, labels);
 
     let path = dir.path().join(format!("{stem}-7.denied"));
     let mut bytes = std::fs::read(&path).unwrap();

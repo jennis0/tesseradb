@@ -622,7 +622,16 @@ impl ArtifactsPager<'_> {
                 Property::Content => row.content = served.supplied.values.clone(),
                 Property::Centroid | Property::Box => {
                     if row.centroid.is_none() && row.bbox.is_none() {
-                        let derived = visible_geometry(scope, read, ordinal);
+                        let wanted: Vec<ComputedProperty> = self
+                            .properties
+                            .iter()
+                            .filter_map(|p| match p {
+                                Property::Centroid => Some(ComputedProperty::Centroid),
+                                Property::Box => Some(ComputedProperty::Box),
+                                _ => None,
+                            })
+                            .collect();
+                        let derived = visible_geometry(scope, read, ordinal, &wanted);
                         let frame = frame()?;
                         row.centroid = derived.centroid.map(|[x, y]| frame.point(x, y));
                         row.bbox = derived.bbox.map(|[x0, y0, x1, y1]| {
@@ -793,16 +802,20 @@ fn parent_position(scope: &Scope<'_>, parent: TesseraId) -> Option<(u32, u32)> {
     (served.entity == entity).then_some((level, ordinal))
 }
 
-/// The artifact's centroid and box over the members this viewer can see, in grid units: read off
-/// the level's accumulation where it has one, and computed from the visible rows otherwise.
-fn visible_geometry(scope: &Scope<'_>, read: &ReadLevel, ordinal: u32) -> DerivedContent {
-    let wanted = [ComputedProperty::Centroid, ComputedProperty::Box];
+/// The `wanted` centroid and box over the members this viewer can see, in grid units: read off
+/// the level's figures where they carry positions, and computed from the visible rows otherwise.
+fn visible_geometry(
+    scope: &Scope<'_>,
+    read: &ReadLevel,
+    ordinal: u32,
+    wanted: &[ComputedProperty],
+) -> DerivedContent {
     if let Some(figures) = read.counts.as_ref().filter(|c| c.has_geometry()) {
-        return crate::derived::accumulated(&wanted, figures, ordinal);
+        return crate::derived::accumulated(wanted, figures, ordinal);
     }
     let locator = RowLocator::new(scope.open.served.segments.clone());
     let visible = read.rows.visible_rows(ordinal, &scope.open.mask);
-    crate::derived::compute(&wanted, &visible, &locator)
+    crate::derived::compute(wanted, &visible, &locator)
 }
 
 /// The layer's drawn geometry for one artifact, in grid units: a derived hull over the members

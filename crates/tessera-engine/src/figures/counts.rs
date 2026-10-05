@@ -1,27 +1,57 @@
-//! A fragment's counts over its base rows, and the sparse corrections a request applies to them.
+//! A fragment's counts over its base rows, the reserve kept beside them, and the sparse
+//! corrections a request applies to them.
 
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::row_column::{
-    reserve_key, reserve_offer, GrowthStep, LevelAccumulation, Reserve, RESERVE, RESERVE_EMPTY,
-};
+use crate::row_column::{reserve_key, reserve_row, GrowthStep, LevelAccumulation, RESERVE};
+
+/// An artifact keeps a reserve only above this many placed rows. At or below it, a box a deny
+/// touches is worked out from the artifact's members, which are as few.
+pub(crate) const RESERVE_MIN_PLACED: u32 = 2 * RESERVE as u32;
+
+/// A reserve slot holding no row.
+const NO_ROW: u32 = u32::MAX;
 
 /// What one walk folded up per ordinal, held as the walk produced it.
 #[derive(Debug, Default)]
 pub(crate) struct Dense {
+    /// The level version the walk read.
+    pub(crate) filled_at: u64,
     pub(crate) counts: Vec<u32>,
-    /// Empty where the walk was given no positions, as are `sums`, `boxes` and `reserves`.
+    /// Empty where the walk was given no positions, as are `sums` and `boxes`.
     pub(crate) placed: Vec<u32>,
     pub(crate) sums: Vec<[u64; 2]>,
     pub(crate) boxes: Vec<[u32; 4]>,
-    /// Empty unless the layer serves a box.
-    pub(crate) reserves: Vec<Reserve>,
+}
+
+/// Per artifact with more than [`RESERVE_MIN_PLACED`] placed rows, the [`RESERVE`] most extreme
+/// rows the walk counted on each side of its box, most extreme first. Rows alone: a coordinate is
+/// looked up when a deny needs it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Reserves {
+    /// Per ordinal, where its rows are in `rows`, or `u32::MAX` for none.
+    pub(crate) index: Vec<u32>,
+    pub(crate) rows: Vec<[[u32; RESERVE]; 4]>,
+}
+
+impl Reserves {
+    pub(crate) fn weight_bytes(&self) -> u64 {
+        (self.index.len() * 4 + self.rows.len() * std::mem::size_of::<[[u32; RESERVE]; 4]>()) as u64
+    }
+
+    /// One artifact's rows on one side, most extreme first.
+    pub(crate) fn side(&self, ordinal: u32, side: usize) -> Option<impl Iterator<Item = u32> + '_> {
+        let at = *self.index.get(ordinal as usize)?;
+        let rows = self.rows.get(at as usize)?;
+        Some(rows[side].iter().copied().take_while(|&row| row != NO_ROW))
+    }
 }
 
 impl Dense {
-    pub(crate) fn of(accumulation: LevelAccumulation) -> Self {
+    /// The walk's figures and, where it kept them, its reserves.
+    pub(crate) fn of(filled_at: u64, accumulation: LevelAccumulation) -> (Self, Option<Reserves>) {
         let LevelAccumulation {
             counts,
             placed,
@@ -29,26 +59,45 @@ impl Dense {
             boxes,
             reserves,
         } = accumulation;
-        Dense {
+        let kept = (!reserves.is_empty()).then(|| {
+            let mut out = Reserves {
+                index: vec![u32::MAX; reserves.len()],
+                rows: Vec::new(),
+            };
+            for (ordinal, reserve) in reserves.iter().enumerate() {
+                if placed.get(ordinal).copied().unwrap_or(0) <= RESERVE_MIN_PLACED {
+                    continue;
+                }
+                out.index[ordinal] = out.rows.len() as u32;
+                out.rows.push(reserve.map(|side| {
+                    side.map(|key| match key {
+                        crate::row_column::RESERVE_EMPTY => NO_ROW,
+                        key => reserve_row(key),
+                    })
+                }));
+            }
+            out
+        });
+        let dense = Dense {
+            filled_at,
             counts,
             placed,
             sums,
             boxes,
-            reserves,
-        }
+        };
+        (dense, kept)
     }
 
     fn weight_bytes(&self) -> u64 {
         (self.counts.len() * 4
             + self.placed.len() * 4
             + self.sums.len() * 16
-            + self.boxes.len() * 16
-            + self.reserves.len() * std::mem::size_of::<Reserve>()) as u64
+            + self.boxes.len() * 16) as u64
     }
 }
 
 /// What the steps since the walk added to one artifact over the fragment's base rows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Grown {
     pub(crate) count: u32,
     pub(crate) placed: u32,
@@ -69,9 +118,9 @@ pub(crate) struct CountsAt {
 }
 
 impl CountsAt {
-    pub(crate) fn of(at: u64, dense: Dense) -> Self {
+    pub(crate) fn of(dense: Dense) -> Self {
         CountsAt {
-            at,
+            at: dense.filled_at,
             dense: Arc::new(dense),
             grown: Arc::default(),
         }
@@ -79,13 +128,11 @@ impl CountsAt {
 
     #[cfg(test)]
     pub(crate) fn of_counts(at: u64, counts: Vec<u32>) -> Self {
-        Self::of(
-            at,
-            Dense {
-                counts,
-                ..Dense::default()
-            },
-        )
+        Self::of(Dense {
+            filled_at: at,
+            counts,
+            ..Dense::default()
+        })
     }
 
     pub(crate) fn weight_bytes(&self) -> u64 {
@@ -95,16 +142,6 @@ impl CountsAt {
                 .values()
                 .map(|g| 32 + g.points.len() as u64 * 12)
                 .sum::<u64>()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        let grown = self
-            .grown
-            .keys()
-            .map(|&o| o as usize + 1)
-            .max()
-            .unwrap_or(0);
-        self.dense.counts.len().max(grown)
     }
 
     pub(crate) fn count(&self, ordinal: u32) -> u64 {
@@ -118,15 +155,17 @@ impl CountsAt {
         u64::from(dense) + u64::from(grown)
     }
 
-    pub(crate) fn placed(&self, ordinal: u32) -> u64 {
-        let dense = self
-            .dense
+    fn dense_placed(&self, ordinal: u32) -> u32 {
+        self.dense
             .placed
             .get(ordinal as usize)
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn placed(&self, ordinal: u32) -> u64 {
         let grown = self.grown.get(&ordinal).map_or(0, |g| g.placed);
-        u64::from(dense) + u64::from(grown)
+        u64::from(self.dense_placed(ordinal)) + u64::from(grown)
     }
 
     pub(crate) fn sums(&self, ordinal: u32) -> [u64; 2] {
@@ -144,14 +183,7 @@ impl CountsAt {
     pub(crate) fn bbox(&self, ordinal: u32) -> Option<[u32; 4]> {
         let mut out = [u32::MAX, u32::MAX, 0, 0];
         let mut any = false;
-        if self
-            .dense
-            .placed
-            .get(ordinal as usize)
-            .copied()
-            .unwrap_or(0)
-            > 0
-        {
+        if self.dense_placed(ordinal) > 0 {
             if let Some(dense) = self.dense.boxes.get(ordinal as usize) {
                 out = *dense;
                 any = true;
@@ -166,33 +198,24 @@ impl CountsAt {
         any.then_some(out)
     }
 
-    /// Whether this entry keeps reserves, so a deny on an edge can be answered without a walk.
-    pub(crate) fn reserves(&self) -> bool {
-        !self.dense.reserves.is_empty()
-    }
-
-    /// The candidates for one side of one artifact's box, most extreme first, and whether they
-    /// are every placed row counted rather than the walk's reserve of them.
-    pub(crate) fn side(&self, ordinal: u32, side: usize) -> (Vec<u64>, bool) {
-        let dense_placed = self
-            .dense
-            .placed
-            .get(ordinal as usize)
-            .copied()
-            .unwrap_or(0);
-        let mut keys: Vec<u64> = self
-            .dense
-            .reserves
-            .get(ordinal as usize)
-            .map(|reserve| {
-                reserve[side]
-                    .iter()
-                    .copied()
-                    .take_while(|&key| key != RESERVE_EMPTY)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let complete = dense_placed as usize <= RESERVE;
+    /// The candidates for one side of one artifact's box, as reserve keys, most extreme first:
+    /// every row the counts vouch is at least as extreme as any row they leave out. `None` where
+    /// the walk's rows of the artifact are more than its reserve holds and no reserve is held.
+    pub(crate) fn side(
+        &self,
+        ordinal: u32,
+        side: usize,
+        reserves: Option<&Reserves>,
+        position: &dyn Fn(u32) -> Option<(u32, u32)>,
+    ) -> Option<Vec<u64>> {
+        let dense_placed = self.dense_placed(ordinal);
+        let mut keys: Vec<u64> = Vec::new();
+        let complete = dense_placed == 0;
+        if !complete {
+            for row in reserves?.side(ordinal, side)? {
+                keys.push(reserve_key(side, row, position(row)?));
+            }
+        }
         let dense_last = keys.last().copied();
         if let Some(grown) = self.grown.get(&ordinal) {
             keys.extend(
@@ -203,13 +226,13 @@ impl CountsAt {
             );
             keys.sort_unstable();
         }
-        // An incomplete reserve vouches only for rows at least as extreme as its last key.
-        if !complete {
-            if let Some(last) = dense_last {
+        // A reserve vouches only for rows at least as extreme as its last key.
+        if let (false, Some(last)) = (complete, dense_last) {
+            if dense_placed as usize > RESERVE {
                 keys.retain(|&key| key <= last);
             }
         }
-        (keys, complete)
+        Some(keys)
     }
 
     /// These counts carried from `self.at` to `to` by `steps`, counting each pair whose row
@@ -248,49 +271,6 @@ impl CountsAt {
             dense: Arc::clone(&self.dense),
             grown: Arc::new(grown),
         }
-    }
-
-    /// The walk and the steps folded into one, as a walk at this version would have produced it:
-    /// what is written to disk.
-    pub(crate) fn folded(&self) -> Dense {
-        let mut dense = Dense {
-            counts: self.dense.counts.clone(),
-            placed: self.dense.placed.clone(),
-            sums: self.dense.sums.clone(),
-            boxes: self.dense.boxes.clone(),
-            reserves: self.dense.reserves.clone(),
-        };
-        let len = self.len();
-        let geometry = !dense.placed.is_empty();
-        let reserve = !dense.reserves.is_empty();
-        dense.counts.resize(len, 0);
-        if geometry {
-            dense.placed.resize(len, 0);
-            dense.sums.resize(len, [0; 2]);
-            dense.boxes.resize(len, [u32::MAX, u32::MAX, 0, 0]);
-        }
-        if reserve {
-            dense.reserves.resize(len, [[RESERVE_EMPTY; RESERVE]; 4]);
-        }
-        for (&ordinal, grown) in self.grown.iter() {
-            let i = ordinal as usize;
-            dense.counts[i] += grown.count;
-            if !geometry {
-                continue;
-            }
-            dense.placed[i] += grown.placed;
-            dense.sums[i][0] += grown.sums[0];
-            dense.sums[i][1] += grown.sums[1];
-            for &(row, x, y) in &grown.points {
-                widen(&mut dense.boxes[i], x, y);
-                if reserve {
-                    for (side, held) in dense.reserves[i].iter_mut().enumerate() {
-                        reserve_offer(held, reserve_key(side, row, (x, y)));
-                    }
-                }
-            }
-        }
-        dense
     }
 }
 

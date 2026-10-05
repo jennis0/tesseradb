@@ -24,19 +24,23 @@
 //! counted as drawing while it waits on a walk, its own included, so nothing waits on itself. A
 //! walk, or a walk waiting for a place, that every caller has left stops and holds nothing.
 //!
-//! The bound is `serve.masked_count_cache_bytes`, 256 MiB unless configured. An entry over a
-//! fragment's base rows is 4 B an artifact for counts alone, 40 B with a centroid's sums and a box,
-//! and 296 B where the layer serves a box, whose reserve holds eight rows a side.
+//! The bound is `serve.masked_count_cache_bytes`. An entry over a fragment's base rows is 4 B an
+//! artifact for counts alone and 40 B with a centroid's sums and a box. A layer that serves a box
+//! keeps a reserve beside it as an entry of its own, 4 B an artifact and 128 B more for each
+//! artifact with more than sixteen placed rows, so an entry too large for the bound loses its
+//! reserve and keeps its counts.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
-use tessera_cache::{Cancel, CacheWeight, SingleFlightCache, WaitEnded, WaitingBuildError};
+use tessera_cache::{CacheWeight, Cancel, SingleFlightCache, WaitEnded, WaitingBuildError};
 
-use super::counts::{CountsAt, Deltas};
-use super::denied::{DeniedLabels, DenyCorrection};
+use super::counts::{CountsAt, Deltas, Reserves};
+use super::denied::DenyCorrection;
+use super::labels::{HeldLabels, LabelStore};
+use super::worker::Worker;
 use super::Geometry;
 
 /// How many builds may walk at once.
@@ -62,9 +66,8 @@ const CORRECTIONS_BYTES: u64 = 256 << 20;
 pub(crate) enum FiguresKey {
     /// A level's counts over one fragment's base rows ([`FragmentKey`]).
     Fragment(FragmentKey),
-    /// A level's counts over one request's whole composed mask, the walk every request took before
-    /// the fragment's counts existed, and still the answer while a level's denied-row labels are
-    /// being built.
+    /// A level's counts over one request's whole composed mask: the walk of the whole composed
+    /// mask, the answer while a level's denied-row labels are being read.
     Exact(ExactKey),
 }
 
@@ -188,26 +191,48 @@ impl MaskIdentity {
 /// from before a publication reads the counts at that form's version.
 const VERSIONS_KEPT: usize = 4;
 
+/// What one held reserve belongs to: a fragment's entry, and the version its walk read.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ReserveKey {
+    pub fragment: FragmentKey,
+    pub filled_at: u64,
+}
+
+/// Where an entry is written, and when it was last.
+pub(crate) struct Written {
+    pub(super) dir: std::path::PathBuf,
+    pub(super) stem: String,
+    /// The newest version written to disk.
+    pub(super) at: AtomicU64,
+    pub(super) last: Mutex<Option<Instant>>,
+    pub(super) writing: std::sync::atomic::AtomicBool,
+}
+
 /// One held entry: the counts over a fragment's base rows at the last few versions of the level
 /// they were brought to, newest last.
 pub(crate) struct FragmentCounts {
     versions: Mutex<std::collections::VecDeque<Arc<CountsAt>>>,
     /// What was charged against the bound when the entry was admitted.
     weight: u64,
-    /// The newest version written to disk, and whether a write is under way.
-    pub(super) persisted: AtomicU64,
-    pub(super) persisting: std::sync::atomic::AtomicBool,
+    /// `None` for an entry nothing writes: a walk of a whole mask.
+    pub(super) written: Option<Written>,
 }
 
 impl FragmentCounts {
-    pub(crate) fn new(counts: CountsAt) -> Self {
+    /// `written` names where the entry is written, and that its version is on disk already.
+    pub(crate) fn new(counts: CountsAt, written: Option<(std::path::PathBuf, String)>) -> Self {
         let weight = counts.weight_bytes();
         let at = counts.at;
         FragmentCounts {
             versions: Mutex::new(std::iter::once(Arc::new(counts)).collect()),
             weight,
-            persisted: AtomicU64::new(at),
-            persisting: std::sync::atomic::AtomicBool::new(false),
+            written: written.map(|(dir, stem)| Written {
+                dir,
+                stem,
+                at: AtomicU64::new(at),
+                last: Mutex::new(Some(Instant::now())),
+                writing: std::sync::atomic::AtomicBool::new(false),
+            }),
         }
     }
 
@@ -235,7 +260,11 @@ impl FragmentCounts {
     /// The newest version held.
     pub(crate) fn newest(&self) -> Arc<CountsAt> {
         let versions = self.versions.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(versions.back().expect("an entry holds at least one version"))
+        Arc::clone(
+            versions
+                .back()
+                .expect("an entry holds at least one version"),
+        )
     }
 }
 
@@ -246,6 +275,12 @@ impl CacheWeight for FragmentCounts {
 }
 
 impl CacheWeight for DenyCorrection {
+    fn cache_weight_bytes(&self) -> u64 {
+        self.weight_bytes()
+    }
+}
+
+impl CacheWeight for Reserves {
     fn cache_weight_bytes(&self) -> u64 {
         self.weight_bytes()
     }
@@ -283,8 +318,29 @@ pub struct FiguresStats {
     pub loads: u64,
     /// Walks of a whole composed mask, taken where a level's denied-row labels are not yet held.
     pub exact: u64,
-    /// Boxes worked out from an artifact's rows because a deny spent a side's reserve.
+    /// Boxes worked out from an artifact's rows because a deny reached a side its reserve could
+    /// not answer.
     pub reserve_spent: u64,
+    /// Entries, counts or reserves, larger than the whole bound: served to the request that built
+    /// them and not kept.
+    pub not_admitted: u64,
+    /// Bytes of denied-row labels held, and their bound.
+    pub labels_bytes: u64,
+    pub labels_bound_bytes: u64,
+    /// Denied rows whose labels were read from a level's column.
+    pub labels_rows_read: u64,
+    /// Bytes of figures in the cache directory, and their bound.
+    pub disk_bytes: u64,
+    pub disk_bound_bytes: u64,
+}
+
+/// The counters the figures keep, shared with what outlives a request.
+#[derive(Debug, Default)]
+pub(crate) struct Counters {
+    pub(crate) fills: AtomicU64,
+    pub(crate) loads: AtomicU64,
+    pub(crate) exact: AtomicU64,
+    pub(crate) spent: AtomicU64,
 }
 
 /// One request's part in [`FiguresCache::drawing`].
@@ -335,9 +391,11 @@ impl Interest {
     /// Every caller that wanted this build has gone.
     fn abandoned(&self) -> bool {
         let callers = self.callers.lock().unwrap_or_else(PoisonError::into_inner);
-        callers
-            .iter()
-            .all(|(_, cancel)| cancel.as_ref().is_some_and(crate::CancelToken::is_cancelled))
+        callers.iter().all(|(_, cancel)| {
+            cancel
+                .as_ref()
+                .is_some_and(crate::CancelToken::is_cancelled)
+        })
     }
 }
 
@@ -361,7 +419,11 @@ impl Build<'_> {
     /// drawing request's sweep is waiting for.
     pub(crate) fn give_way(&self) -> bool {
         let budget = Duration::from_millis(self.cache.give_way_ms.load(Ordering::Relaxed));
-        let mut drawing = self.cache.drawing.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut drawing = self
+            .cache
+            .drawing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         loop {
             if self.interest.abandoned() {
                 return false;
@@ -390,18 +452,21 @@ struct Abandoned;
 /// The cache itself, under a byte bound.
 pub struct FiguresCache {
     slots: SingleFlightCache<FiguresKey, FragmentCounts>,
+    /// The reserves, beside the counts they were walked with.
+    pub(super) reserves: SingleFlightCache<ReserveKey, Reserves>,
     /// The deny corrections, per fragment and deny version.
     pub(super) denies: SingleFlightCache<DenyKey, DenyCorrection>,
     /// The tails, per session and generation.
     pub(super) tails: SingleFlightCache<TailKey, Tail>,
-    /// Per `(view, layer, level)`, the labels of the view's denied base rows at the last few
-    /// versions they were brought to ([`DeniedLabels`]).
-    pub(super) denied: Mutex<FxHashMap<LevelAddress, std::collections::VecDeque<Arc<DeniedLabels>>>>,
-    /// The `(view, layer, level)`s whose denied-row labels are being built in the background.
-    pub(super) labelling: Mutex<rustc_hash::FxHashSet<LevelAddress>>,
+    /// Per `(view, layer, level)`, the labels of the view's denied base rows.
+    pub(super) labels: LabelStore,
     /// Where entries are persisted: one directory per bundle identity beneath it. `None` holds
     /// nothing on disk.
     pub(super) dir: Option<std::path::PathBuf>,
+    /// The bytes `dir` may hold.
+    pub(super) disk_bound: Arc<AtomicU64>,
+    /// The one thread that writes entries and reads denied rows' labels in the background.
+    pub(super) worker: Worker,
     /// Builds walking now, at most [`CONCURRENT_BUILDS`].
     building: Mutex<usize>,
     built: Condvar,
@@ -412,12 +477,12 @@ pub struct FiguresCache {
     /// Who wants each key's build.
     interest: Mutex<FxHashMap<FiguresKey, Arc<Interest>>>,
     next_caller: AtomicU64,
-    pub(super) fills: AtomicU64,
-    pub(super) loads: AtomicU64,
-    pub(super) exact: AtomicU64,
-    /// Boxes worked out from an artifact's rows because a deny spent a side's reserve.
-    pub(super) spent: AtomicU64,
+    pub(super) counters: Arc<Counters>,
 }
+
+/// The bytes of figures the cache directory holds unless `serve.figures_disk_bytes` says
+/// otherwise.
+pub const DEFAULT_DISK_BYTES: u64 = 8 << 30;
 
 impl Default for FiguresCache {
     fn default() -> Self {
@@ -440,17 +505,25 @@ impl FiguresCache {
     pub fn new(bound_bytes: u64, dir: Option<std::path::PathBuf>) -> Self {
         let slots = SingleFlightCache::new(bound_bytes);
         slots.set_wait_budget_ms(BUILD_WAIT_MS);
+        let disk_bound = Arc::new(AtomicU64::new(DEFAULT_DISK_BYTES));
+        let reserves = SingleFlightCache::new(bound_bytes);
         let denies = SingleFlightCache::new(CORRECTIONS_BYTES);
         denies.set_wait_budget_ms(BUILD_WAIT_MS);
         let tails = SingleFlightCache::new(CORRECTIONS_BYTES);
         tails.set_wait_budget_ms(BUILD_WAIT_MS);
         FiguresCache {
             slots,
+            reserves,
             denies,
             tails,
-            denied: Mutex::new(FxHashMap::default()),
-            labelling: Mutex::new(Default::default()),
+            labels: LabelStore {
+                held: Arc::new(HeldLabels::new(super::labels::DEFAULT_LABELS_BYTES)),
+                dir: dir.clone(),
+                disk_bound: Arc::clone(&disk_bound),
+            },
             dir,
+            disk_bound,
+            worker: Worker::default(),
             building: Mutex::new(0),
             built: Condvar::new(),
             drawing: Mutex::new(Drawing::default()),
@@ -458,10 +531,7 @@ impl FiguresCache {
             give_way_ms: AtomicU64::new(DEFAULT_GIVE_WAY_MS),
             interest: Mutex::new(FxHashMap::default()),
             next_caller: AtomicU64::new(0),
-            fills: AtomicU64::new(0),
-            loads: AtomicU64::new(0),
-            exact: AtomicU64::new(0),
-            spent: AtomicU64::new(0),
+            counters: Arc::default(),
         }
     }
 
@@ -470,6 +540,17 @@ impl FiguresCache {
     pub fn set_bound_bytes(&self, bound_bytes: u64) {
         self.slots.set_bound_bytes(bound_bytes);
         self.slots.retain_keys(|_| false);
+        self.reserves.set_bound_bytes(bound_bytes);
+        self.reserves.retain_keys(|_| false);
+    }
+
+    /// The bytes of figures the cache directory may hold.
+    pub fn set_disk_bound_bytes(&self, bytes: u64) {
+        self.disk_bound.store(bytes, Ordering::Relaxed);
+        if let Some(root) = self.dir.clone() {
+            self.worker
+                .submit(move || super::persist::hold_under(&root, bytes));
+        }
     }
 
     /// How long a build gives way to drawing requests, from its first wait.
@@ -480,23 +561,84 @@ impl FiguresCache {
 
     pub fn stats(&self) -> FiguresStats {
         let stats = self.slots.stats();
+        let labels = self.labels.held.stats();
         FiguresStats {
             hits: stats.hits,
             misses: stats.misses,
             evictions: stats.evictions,
-            resident_bytes: stats.bytes,
+            resident_bytes: stats.bytes + self.reserves.stats().bytes,
             entries: stats.entries,
             waiters: stats.waiters_now,
-            fills: self.fills.load(Ordering::Relaxed),
-            loads: self.loads.load(Ordering::Relaxed),
-            exact: self.exact.load(Ordering::Relaxed),
-            reserve_spent: self.spent.load(Ordering::Relaxed),
+            fills: self.counters.fills.load(Ordering::Relaxed),
+            loads: self.counters.loads.load(Ordering::Relaxed),
+            exact: self.counters.exact.load(Ordering::Relaxed),
+            reserve_spent: self.counters.spent.load(Ordering::Relaxed),
+            not_admitted: stats.oversized_admissions + self.reserves.stats().oversized_admissions,
+            labels_bytes: labels.bytes,
+            labels_bound_bytes: labels.bound,
+            labels_rows_read: labels.rows_read,
+            disk_bytes: self.dir.as_deref().map_or(0, super::persist::bytes_under),
+            disk_bound_bytes: self.disk_bound.load(Ordering::Relaxed),
         }
+    }
+
+    /// Remove from the cache directory every bundle identity's entries but `identity`'s: at open,
+    /// and whenever a compaction rotates the identity.
+    pub(crate) fn sweep(&self, identity: [u8; 32]) {
+        if let Some(root) = self.dir.clone() {
+            self.worker
+                .submit(move || super::persist::sweep_other_identities(&root, &identity));
+        }
+    }
+
+    /// The reserve walked with `key`'s counts at `filled_at`, where it is held.
+    pub(crate) fn reserve(&self, key: &FragmentKey, filled_at: u64) -> Option<Arc<Reserves>> {
+        let key = ReserveKey {
+            fragment: key.clone(),
+            filled_at,
+        };
+        match self.reserves.peek(&key) {
+            tessera_cache::Peek::Ready(held) => Some(held),
+            _ => None,
+        }
+    }
+
+    /// Hold `reserves` for `key`'s counts at `filled_at`, unless it is larger than the bound.
+    pub(crate) fn hold_reserve(&self, key: &FragmentKey, filled_at: u64, reserves: Reserves) {
+        let key = ReserveKey {
+            fragment: key.clone(),
+            filled_at,
+        };
+        let _ = self.reserves.get_or_derive(key, None, |_| reserves);
+    }
+
+    /// Every entry's newest counts not yet on disk: what a clean shutdown writes.
+    fn unwritten(&self) -> Vec<(FiguresKey, Arc<FragmentCounts>, Arc<CountsAt>)> {
+        self.slots
+            .ready_entries()
+            .into_iter()
+            .filter_map(|(key, held)| {
+                let written = held.written.as_ref()?;
+                let newest = held.newest();
+                (written.at.load(Ordering::Acquire) < newest.at).then_some((
+                    key,
+                    Arc::clone(&held),
+                    newest,
+                ))
+            })
+            .collect()
+    }
+
+    /// Wait until the background work queued so far has run.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn settle(&self) {
+        self.worker.drain();
     }
 
     /// Drop the tails held for these sessions.
     pub(crate) fn prune_tokens(&self, token_ids: &rustc_hash::FxHashSet<u64>) {
-        self.tails.retain_keys(|key| !token_ids.contains(&key.token_id));
+        self.tails
+            .retain_keys(|key| !token_ids.contains(&key.token_id));
     }
 
     /// This key's counts, building them if nothing is held. A request arriving while another
@@ -606,7 +748,11 @@ impl FiguresCache {
         }
         impl Drop for Caller<'_> {
             fn drop(&mut self) {
-                let mut map = self.cache.interest.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut map = self
+                    .cache
+                    .interest
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 let mut callers = self
                     .interest
                     .callers
@@ -644,7 +790,11 @@ impl FiguresCache {
         struct Permit<'a>(&'a FiguresCache);
         impl Drop for Permit<'_> {
             fn drop(&mut self) {
-                *self.0.building.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+                *self
+                    .0
+                    .building
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) -= 1;
                 self.0.built.notify_one();
             }
         }
@@ -661,6 +811,25 @@ impl FiguresCache {
         }
         *building += 1;
         Some(Permit(self))
+    }
+}
+
+impl Drop for FiguresCache {
+    /// The writes queued, then the newest counts of every entry whose last write is older: a write
+    /// is held back while an entry was written recently, and a clean shutdown keeps what that held
+    /// back.
+    fn drop(&mut self) {
+        self.worker.finish();
+        for (key, held, newest) in self.unwritten() {
+            let Some(written) = &held.written else {
+                continue;
+            };
+            let reserve = match &key {
+                FiguresKey::Fragment(key) => self.reserve(key, newest.dense.filled_at),
+                FiguresKey::Exact(_) => None,
+            };
+            super::persist::write_counts(&written.dir, &written.stem, &newest, reserve.as_deref());
+        }
     }
 }
 
@@ -685,7 +854,7 @@ mod tests {
     }
 
     fn counts(values: &[u32]) -> FragmentCounts {
-        FragmentCounts::new(CountsAt::of_counts(1, values.to_vec()))
+        FragmentCounts::new(CountsAt::of_counts(1, values.to_vec()), None)
     }
 
     fn get(
@@ -710,7 +879,11 @@ mod tests {
             });
             assert_eq!(held.newest().count(0), 5);
             assert_eq!(held.newest().count(1), 6);
-            assert_eq!(held.newest().count(9), 0, "past the level is zero, not a panic");
+            assert_eq!(
+                held.newest().count(9),
+                0,
+                "past the level is zero, not a panic"
+            );
         }
         assert_eq!(built.into_inner(), 1);
         assert_eq!(cache.stats().hits, 2);
@@ -727,20 +900,25 @@ mod tests {
         let held = Arc::new(std::sync::Mutex::new(held));
         let askers: Vec<_> = (0..4)
             .map(|_| {
-                let (cache, builds, held) = (Arc::clone(&cache), Arc::clone(&builds), Arc::clone(&held));
+                let (cache, builds, held) =
+                    (Arc::clone(&cache), Arc::clone(&builds), Arc::clone(&held));
                 std::thread::spawn(move || {
                     get(&cache, key(1, "a", 0), || {
                         builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         held.lock().unwrap().recv().unwrap();
                         counts(&[3, 4])
                     })
-                    .newest().count(1)
+                    .newest()
+                    .count(1)
                 })
             })
             .collect();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while cache.stats().waiters < 3 {
-            assert!(std::time::Instant::now() < deadline, "the other requests never waited");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the other requests never waited"
+            );
             std::thread::yield_now();
         }
         release.send(()).unwrap();
@@ -765,7 +943,8 @@ mod tests {
                     held.recv().unwrap();
                     counts(&[7])
                 })
-                .newest().count(0)
+                .newest()
+                .count(0)
             })
         };
         while cache.stats().misses == 0 {
@@ -773,9 +952,10 @@ mod tests {
         }
         let gone = crate::CancelToken::new();
         gone.cancel();
-        let waited = cache.get_or_build(key(1, "a", 0), &DrawingTurn::default(), Some(&gone), |_| {
-            Some(counts(&[0]))
-        });
+        let waited =
+            cache.get_or_build(key(1, "a", 0), &DrawingTurn::default(), Some(&gone), |_| {
+                Some(counts(&[0]))
+            });
         assert_eq!(waited.err(), Some(WaitEnded::Cancelled));
         release.send(()).unwrap();
         assert_eq!(builder.join().unwrap(), 7);
@@ -792,24 +972,35 @@ mod tests {
         let open = Arc::new(AtomicBool::new(false));
         let builders: Vec<_> = (0..6u8)
             .map(|terms| {
-                let (cache, walking, most, open) =
-                    (Arc::clone(&cache), Arc::clone(&walking), Arc::clone(&most), Arc::clone(&open));
+                let (cache, walking, most, open) = (
+                    Arc::clone(&cache),
+                    Arc::clone(&walking),
+                    Arc::clone(&most),
+                    Arc::clone(&open),
+                );
                 std::thread::spawn(move || {
                     get(&cache, key(terms, "a", 0), || {
-                        most.fetch_max(walking.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        most.fetch_max(
+                            walking.fetch_add(1, Ordering::SeqCst) + 1,
+                            Ordering::SeqCst,
+                        );
                         while !open.load(Ordering::SeqCst) {
                             std::thread::yield_now();
                         }
                         walking.fetch_sub(1, Ordering::SeqCst);
                         counts(&[u32::from(terms)])
                     })
-                    .newest().count(0)
+                    .newest()
+                    .count(0)
                 })
             })
             .collect();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while cache.stats().misses < 6 || walking.load(Ordering::SeqCst) < CONCURRENT_BUILDS {
-            assert!(std::time::Instant::now() < deadline, "the builds never started");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the builds never started"
+            );
             std::thread::yield_now();
         }
         open.store(true, Ordering::SeqCst);
@@ -827,9 +1018,15 @@ mod tests {
         let before = get(&cache, key(1, "a", 4), || counts(&[10]));
         assert_eq!(before.newest().count(0), 10);
         let after = get(&cache, key(1, "a", 5), || counts(&[9]));
-        assert_eq!(after.newest().count(0), 9, "the corrected count, not the held one");
         assert_eq!(
-            get(&cache, key(1, "a", 4), || counts(&[0])).newest().count(0),
+            after.newest().count(0),
+            9,
+            "the corrected count, not the held one"
+        );
+        assert_eq!(
+            get(&cache, key(1, "a", 4), || counts(&[0]))
+                .newest()
+                .count(0),
             10
         );
     }
@@ -838,9 +1035,24 @@ mod tests {
     #[test]
     fn the_counts_are_the_term_sets_own() {
         let cache = FiguresCache::default();
-        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[3])).newest().count(0), 3);
-        assert_eq!(get(&cache, key(2, "a", 0), || counts(&[8])).newest().count(0), 8);
-        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[0])).newest().count(0), 3);
+        assert_eq!(
+            get(&cache, key(1, "a", 0), || counts(&[3]))
+                .newest()
+                .count(0),
+            3
+        );
+        assert_eq!(
+            get(&cache, key(2, "a", 0), || counts(&[8]))
+                .newest()
+                .count(0),
+            8
+        );
+        assert_eq!(
+            get(&cache, key(1, "a", 0), || counts(&[0]))
+                .newest()
+                .count(0),
+            3
+        );
     }
 
     /// The bound evicts the least recently used, lowering it reclaims at once, and an entry
@@ -857,7 +1069,12 @@ mod tests {
         get(&cache, key(3, "a", 0), || counts(&[3, 3]));
         assert_eq!(cache.stats().entries, 2);
         assert_eq!(cache.stats().evictions, 1);
-        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[0, 0])).newest().count(0), 1);
+        assert_eq!(
+            get(&cache, key(1, "a", 0), || counts(&[0, 0]))
+                .newest()
+                .count(0),
+            1
+        );
 
         cache.set_bound_bytes(0);
         assert_eq!(cache.stats().entries, 0);
@@ -887,7 +1104,8 @@ mod tests {
                         Some(counts(&[1]))
                     })
                     .unwrap()
-                    .newest().count(0)
+                    .newest()
+                    .count(0)
             })
         };
         walking.recv().unwrap();
@@ -925,7 +1143,8 @@ mod tests {
                         Some(counts(&[5]))
                     })
                     .unwrap()
-                    .newest().count(0)
+                    .newest()
+                    .count(0)
             })
         };
         walking.recv().unwrap();
@@ -955,7 +1174,8 @@ mod tests {
                     held.recv().unwrap();
                     counts(&[1])
                 })
-                .newest().count(0)
+                .newest()
+                .count(0)
             })
         };
         building.recv().unwrap();
@@ -967,7 +1187,8 @@ mod tests {
                 cache
                     .get_or_build(key(1, "a", 0), &turn, None, |_| Some(counts(&[0])))
                     .unwrap()
-                    .newest().count(0)
+                    .newest()
+                    .count(0)
             })
         };
         while cache.stats().waiters == 0 {
@@ -984,13 +1205,18 @@ mod tests {
                         Some(counts(&[2]))
                     })
                     .unwrap()
-                    .newest().count(0);
+                    .newest()
+                    .count(0);
                 done.send(got).unwrap();
             })
         };
         let walked = finished.recv_timeout(std::time::Duration::from_secs(60));
         held_tx.send(()).unwrap();
-        assert_eq!(walked, Ok(2), "the walk gave way while a drawing request waited on a build");
+        assert_eq!(
+            walked,
+            Ok(2),
+            "the walk gave way while a drawing request waited on a build"
+        );
         walker.join().unwrap();
         assert_eq!(slow.join().unwrap(), 1);
         assert_eq!(waiting.join().unwrap(), 1);
@@ -1006,14 +1232,16 @@ mod tests {
         let (started, building) = std::sync::mpsc::channel::<()>();
         let walkers: Vec<_> = (0..CONCURRENT_BUILDS as u8)
             .map(|terms| {
-                let (cache, held, started) = (Arc::clone(&cache), Arc::clone(&held), started.clone());
+                let (cache, held, started) =
+                    (Arc::clone(&cache), Arc::clone(&held), started.clone());
                 std::thread::spawn(move || {
                     get(&cache, key(terms, "a", 0), || {
                         started.send(()).unwrap();
                         held.lock().unwrap().recv().unwrap();
                         counts(&[u32::from(terms)])
                     })
-                    .newest().count(0)
+                    .newest()
+                    .count(0)
                 })
             })
             .collect();
@@ -1041,6 +1269,10 @@ mod tests {
         for walker in walkers {
             walker.join().unwrap();
         }
-        assert_eq!(cache.stats().entries, CONCURRENT_BUILDS, "the stopped build holds nothing");
+        assert_eq!(
+            cache.stats().entries,
+            CONCURRENT_BUILDS,
+            "the stopped build holds nothing"
+        );
     }
 }

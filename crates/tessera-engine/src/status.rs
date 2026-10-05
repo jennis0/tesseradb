@@ -235,6 +235,12 @@ impl Engine {
         self.figures.set_bound_bytes(bytes);
     }
 
+    /// Bound the figures kept in the cache directory (`serve.figures_disk_bytes`). Unset, an
+    /// embedder gets [`crate::figures::DEFAULT_DISK_BYTES`].
+    pub fn set_figures_disk_bytes(&self, bytes: u64) {
+        self.figures.set_disk_bound_bytes(bytes);
+    }
+
     /// How long a walk of a level's figures waits, from its first wait, while viewers are drawing points
     /// (`serve.masked_count_give_way_ms`). Unset, an embedder gets
     /// [`crate::figures::DEFAULT_GIVE_WAY_MS`].

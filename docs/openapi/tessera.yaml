@@ -7002,7 +7002,7 @@ components:
         masked_count_cache:
           type: object
           additionalProperties: false
-          required: [entries, bytes, hits, misses, evictions, fills, loads, exact, reserve_spent]
+          required: [entries, bytes, hits, misses, evictions, fills, loads, exact, reserve_spent, not_admitted, labels_bytes, labels_bound_bytes, labels_rows_read, disk_bytes, disk_bound_bytes]
           description: The per-artifact counts of levels served from a row column, held per grant over the grant's base rows and corrected per request.
           properties:
             entries: { type: integer, minimum: 0 }
@@ -7025,7 +7025,30 @@ components:
             reserve_spent:
               type: integer
               minimum: 0
-              description: Boxes worked out from an artifact's rows because the denied rows took every spare edge row on a side.
+              description: Boxes worked out from an artifact's rows because a deny reached a side of the box its spare edge rows could not answer.
+            not_admitted:
+              type: integer
+              minimum: 0
+              description: Counts or spare edge rows larger than the whole bound, served to the request that built them and not kept. Above zero, the bound is below one grant's level.
+            labels_bytes:
+              type: integer
+              minimum: 0
+              description: Bytes of denied rows' labels held to correct the counts.
+            labels_bound_bytes:
+              type: integer
+              minimum: 0
+            labels_rows_read:
+              type: integer
+              minimum: 0
+              description: Denied rows whose labels were read from a level's column, at a first read or a deny.
+            disk_bytes:
+              type: integer
+              minimum: 0
+              description: Bytes of counts and labels in the engine's cache directory.
+            disk_bound_bytes:
+              type: integer
+              minimum: 0
+              description: The bound on disk_bytes, `serve.figures_disk_bytes`.
         region_cache:
           type: object
           additionalProperties: false

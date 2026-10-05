@@ -676,6 +676,20 @@ impl ArtifactProjections {
             .map(|held| Arc::clone(&held.rows))
     }
 
+    /// The form held for one `(view, layer, level)` and the level version it is at, where one is.
+    pub(crate) fn held_form_at(
+        &self,
+        view: &str,
+        layer: &str,
+        level: u32,
+    ) -> Option<(Arc<ArtifactRows>, u64)> {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(view.to_string(), layer.to_string(), level))
+            .map(|held| (Arc::clone(&held.rows), held.key.level_version))
+    }
+
     /// File `held` under `address` unless what is there is later on either term — the segments
     /// version its rows were brought to, or the level version its records describe (see
     /// [`Held::at`]). A form later on one term and earlier on the other is kept out and what it

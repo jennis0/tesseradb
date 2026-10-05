@@ -1036,6 +1036,11 @@ impl Engine {
             stage,
         };
 
+        // Only the bundle being served can ever read its figures back.
+        engine
+            .figures
+            .sweep(engine.generation.load().bundle_identity());
+
         // Every level's row form, built before this engine serves a request: left lazy, the cost
         // lands on whichever request of a fresh process arrives first.
         let warmed = engine.warm_artifact_projections();
@@ -1128,6 +1133,7 @@ impl Engine {
             coalesce_policy: coalesce_policy(&self.config),
             merge_policy: merge_policy(&self.config),
             artifact_projections: Arc::clone(&self.artifact_projections),
+            figures: Arc::clone(&self.figures),
             region_cache: Arc::clone(&self.region_cache),
             shapes: Arc::clone(&self.shapes),
             lineages: Arc::clone(&self.lineages),

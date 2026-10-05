@@ -3162,6 +3162,12 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "loads": masked_counts.loads,
             "exact": masked_counts.exact,
             "reserve_spent": masked_counts.reserve_spent,
+            "not_admitted": masked_counts.not_admitted,
+            "labels_bytes": masked_counts.labels_bytes,
+            "labels_bound_bytes": masked_counts.labels_bound_bytes,
+            "labels_rows_read": masked_counts.labels_rows_read,
+            "disk_bytes": masked_counts.disk_bytes,
+            "disk_bound_bytes": masked_counts.disk_bound_bytes,
         },
         "region_cache": {
             "entries": region_cache.entries,
