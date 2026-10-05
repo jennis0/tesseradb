@@ -142,6 +142,67 @@ fn for_each_row_in(rows: &Bitmap, lo: u32, end: u64, mut visit: impl FnMut(u32))
 /// bunched into a few stretches.
 const CHUNK_ROWS: u32 = 1 << 20;
 
+/// How many artifacts of a level to each row scanned, past which a scan lists its hits rather
+/// than marking a byte per artifact.
+const SPARSE_MARKS: u64 = 64;
+
+/// How many artifacts' bytes a scan marks in the time it reads one row.
+const MARKS_PER_ROW: u64 = 32;
+
+/// The ordinals a scan has seen: a byte per ordinal, or a list where the rows are few.
+enum Marks {
+    Dense(Vec<bool>),
+    Sparse { len: u32, hits: Vec<u32> },
+}
+
+impl Marks {
+    fn new(len: usize, sparse: bool) -> Self {
+        match sparse {
+            true => Marks::Sparse {
+                len: len as u32,
+                hits: Vec::new(),
+            },
+            false => Marks::Dense(vec![false; len]),
+        }
+    }
+
+    /// Mark `ordinal`; one past the level's end is passed over.
+    fn mark(&mut self, ordinal: u32) {
+        match self {
+            Marks::Dense(seen) => {
+                if let Some(hit) = seen.get_mut(ordinal as usize) {
+                    *hit = true;
+                }
+            }
+            Marks::Sparse { len, hits } => {
+                if ordinal < *len {
+                    hits.push(ordinal);
+                }
+            }
+        }
+    }
+
+    /// Added in one call rather than one `add` per hit: each `add` crosses the bitmap library's
+    /// boundary, and a level's ordinal count is in the millions.
+    fn into_bitmap(self) -> Bitmap {
+        let mut hits: Vec<u32> = match self {
+            Marks::Dense(seen) => seen
+                .iter()
+                .enumerate()
+                .filter(|(_, hit)| **hit)
+                .map(|(ordinal, _)| ordinal as u32)
+                .collect(),
+            Marks::Sparse { hits, .. } => hits,
+        };
+        hits.sort_unstable();
+        hits.dedup();
+        let mut out = Bitmap::new();
+        out.add_many(&hits);
+        out.run_optimize();
+        out
+    }
+}
+
 /// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
 /// where a publication built it.
 ///
@@ -1097,14 +1158,15 @@ impl RowColumn {
     /// A `Vec<bool>` over the level's ordinals rather than adding into the bitmap as the scan goes:
     /// a scattered layer's rows hit the same handful of ordinals over and over, and a set insert per
     /// row is the cost the marking array exists to remove. It is one byte per artifact for the
-    /// length of the call.
+    /// length of the call, so a scan of rows fewer than the level's artifacts by
+    /// [`SPARSE_MARKS`] lists its hits instead ([`Self::candidates_cost`]).
     ///
     /// Where the viewport covers the whole mask this is not called: the level's masked-count
     /// histogram already holds the answer, and [`crate::artifacts::ArtifactRows::candidacy`]
     /// carries the argument. What reaches here is a viewport narrower than the mask, and a filtered
     /// request's narrower set again ([`crate::artifacts::ArtifactRows::matched`]).
     pub fn candidates(&self, here: &Bitmap) -> Bitmap {
-        let mut seen = vec![false; self.len()];
+        let mut seen = Marks::new(self.len(), self.marks_sparsely(here.cardinality()));
         let base_rows = self.base_rows();
         match &*self.pack {
             Pack::Label(pack) => {
@@ -1119,7 +1181,7 @@ impl RowColumn {
                         self.tail.as_ref().map_or(ROW_COLUMN_HOLE, |t| t.label(row))
                     };
                     if label != ROW_COLUMN_HOLE {
-                        seen[label as usize] = true;
+                        seen.mark(label);
                     }
                 });
             }
@@ -1129,7 +1191,7 @@ impl RowColumn {
                         return;
                     }
                     for ordinal in pack.list(row as usize) {
-                        seen[ordinal as usize] = true;
+                        seen.mark(ordinal);
                     }
                 });
             }
@@ -1140,25 +1202,25 @@ impl RowColumn {
         if let Some(added) = &self.added {
             for row in added.rows.and(here).iter() {
                 for (_, ordinal) in added.at(row) {
-                    if let Some(hit) = seen.get_mut(*ordinal as usize) {
-                        *hit = true;
-                    }
+                    seen.mark(*ordinal);
                 }
             }
         }
-        // Added in one call rather than one `add` per hit, for the same reason the scan above
-        // reads the mask a block at a time: each `add` crosses the bitmap library's boundary, and
-        // a level's ordinal count is in the millions.
-        let hits: Vec<u32> = seen
-            .iter()
-            .enumerate()
-            .filter(|(_, hit)| **hit)
-            .map(|(ordinal, _)| ordinal as u32)
-            .collect();
-        let mut out = Bitmap::new();
-        out.add_many(&hits);
-        out.run_optimize();
-        out
+        seen.into_bitmap()
+    }
+
+    /// Whether a scan of `rows` rows lists its hits rather than marking a byte per artifact.
+    fn marks_sparsely(&self, rows: u64) -> bool {
+        rows.saturating_mul(SPARSE_MARKS) < self.len() as u64
+    }
+
+    /// What [`Self::candidates`] over `rows` rows costs, in rows read: the rows, and where it marks
+    /// a byte per artifact, that marking too.
+    pub fn candidates_cost(&self, rows: u64) -> u64 {
+        match self.marks_sparsely(rows) {
+            true => rows,
+            false => rows + self.len() as u64 / MARKS_PER_ROW,
+        }
     }
 
     /// Every artifact of this level that labels `row`: one for the label form, any number for the

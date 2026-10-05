@@ -90,13 +90,13 @@ impl Supplied {
 /// A drawn geometry as the wire carries it: parts, then rings, then vertices in grid units.
 pub(crate) type Rings = Vec<Vec<Vec<[u32; 2]>>>;
 
-/// One view's authored shape as rings for the wire, and whether the vertex budget fired; `None`
-/// where the artifact authored none for `view` or its bytes do not decode.
+/// One view's authored shape as rings for the wire; `None` where the artifact authored none for
+/// `view` or its bytes do not decode.
 pub(crate) fn authored_rings(
     shapes: &tessera_lifecycle::membership::ArtifactShapes,
     view: &str,
     zoom: Option<u8>,
-) -> Option<(Rings, bool)> {
+) -> Option<Rings> {
     let shape = tessera_spatial::shape::Shape::decode(shapes.for_view(view)?).ok()?;
     Some(crate::shapes::served_rings(&shape, zoom))
 }
@@ -593,7 +593,7 @@ impl Engine {
         };
         // The one shape a client draws; this route always answers for it.
         let mut derived = derived;
-        let shape_guard_fired = self.drawn_shape(
+        self.drawn_shape(
             &layer.declaration,
             view,
             &name,
@@ -620,12 +620,11 @@ impl Engine {
             // No filter or highlight on this route to answer about, and no viewport to scope it to.
             matched: None,
             highlighted: None,
-            shape_guard_fired,
         }))
     }
 
     /// The predicate or authored kind of an artifact's one drawn geometry, filled into
-    /// `derived.shape` beside the count. Returns whether the vertex budget fired.
+    /// `derived.shape` beside the count.
     ///
     /// A predicate shape is the level's held canonical shape, served only for an artifact its
     /// own verdict already admitted.
@@ -644,9 +643,9 @@ impl Engine {
         authored: Option<&tessera_lifecycle::membership::ArtifactShapes>,
         derived: &mut crate::derived::DerivedContent,
         zoom: Option<u8>,
-    ) -> bool {
+    ) {
         match declaration.drawn_shape() {
-            None | Some(crate::shapes::DrawnShape::Derived) => false,
+            None | Some(crate::shapes::DrawnShape::Derived) => {}
             Some(crate::shapes::DrawnShape::Predicate) => {
                 let held = match self.shapes.get(view, layer, level) {
                     Some(held) => held,
@@ -661,21 +660,12 @@ impl Engine {
                         )
                     }),
                 };
-                let Some(shape) = held.shapes.get(ordinal as usize).and_then(|s| s.as_ref()) else {
-                    return false;
-                };
-                let (parts, guarded) = crate::shapes::served_rings(&shape.shape, zoom);
-                derived.shape = Some(parts);
-                guarded
+                if let Some(shape) = held.shapes.get(ordinal as usize).and_then(|s| s.as_ref()) {
+                    derived.shape = Some(crate::shapes::served_rings(&shape.shape, zoom));
+                }
             }
             Some(crate::shapes::DrawnShape::Authored) => {
-                let Some((parts, guarded)) =
-                    authored.and_then(|shapes| authored_rings(shapes, view, zoom))
-                else {
-                    return false;
-                };
-                derived.shape = Some(parts);
-                guarded
+                derived.shape = authored.and_then(|shapes| authored_rings(shapes, view, zoom));
             }
         }
     }
@@ -1329,7 +1319,24 @@ impl Engine {
             (a.is_none(), a, at.0).cmp(&(b.is_none(), b, bt.0))
         });
         for (key, at) in keyed {
-            self.assemble_one(level, contents.as_deref(), key, at, bits(at.0), walked)?;
+            let content = match self.supplied_content(
+                level.layer.pass.served.generation,
+                &level.layer.registered.declaration,
+                level.level,
+                at.0,
+                at.1,
+                at.3,
+                level.layer.pass.ask.rows == ArtifactRows::Full,
+                contents.as_deref(),
+            ) {
+                Some(supplied) => supplied.values,
+                // Content restored from a packed extent carries no values yet, and is withheld
+                // rather than served with its description missing. Asked under the identity
+                // projection too: an identity response must not carry a row the full response
+                // would withhold.
+                None => continue,
+            };
+            self.assemble_one(level, content, key, at, bits(at.0), walked)?;
         }
         Ok(())
     }
@@ -1383,45 +1390,26 @@ impl Engine {
         })
     }
 
-    /// One artifact the gate admitted, as it is served: its content, its identifier, its derived
+    /// One artifact the gate admitted, as it is served: `content`, its identifier, its derived
     /// geometry and its two filter bits, with where it sits and what it points at recorded in
-    /// `walked` for the reconciliation. Absent where its content cannot be read back or its
-    /// identifier cannot be formed.
+    /// `walked` for the reconciliation. Absent where its identifier cannot be formed.
     pub(super) fn assemble_one(
         &self,
         level: &LevelPass<'_>,
-        contents: Option<&crate::artifact_content::LevelContent>,
+        content: Vec<String>,
         key: Option<String>,
-        (ordinal, entity, masked_count, rank): Passing,
+        (ordinal, entity, masked_count, _): Passing,
         (matched, highlighted): FilterBits,
         walked: &mut Walked,
     ) -> Result<()> {
         let (layer, pass) = (level.layer, level.layer.pass);
         let (served, ask) = (pass.served, pass.ask);
-        let generation = served.generation;
-        let declaration = &layer.registered.declaration;
         let (name, number) = (&layer.name, level.level);
         let rows: &crate::artifacts::ArtifactRows = &level.rows;
         let full = ask.rows == ArtifactRows::Full;
         // Checked once per artifact served: without this a client that has gone is discovered
         // only once the whole frame is ready, after minutes deriving geometry nobody reads.
         check_cancelled(&ask.cancel)?;
-        // Content restored from a packed extent carries no values yet, and is withheld rather than
-        // served with its description missing. Asked under the identity projection too, with
-        // `materialise = false`: an identity response must not carry a row the full response
-        // would withhold.
-        let Some(supplied) = self.supplied_content(
-            generation,
-            declaration,
-            number,
-            ordinal,
-            entity,
-            rank,
-            full,
-            contents,
-        ) else {
-            return Ok(());
-        };
         // The blinding is total over the allocator's space; a failure means the manifest and
         // allocator disagree, and dropping the artifact is the fail-closed reading of that.
         let Ok(tessera_id) = self.identity_key.forward(pass.shard, entity) else {
@@ -1478,7 +1466,7 @@ impl Engine {
                 .map(|a| (a.layer.clone(), a.level, a.ordinal)),
         });
         walked.out.push(ArtifactOut {
-            content: supplied.values,
+            content,
             layer: name.clone(),
             tessera_id,
             key,
@@ -1491,8 +1479,6 @@ impl Engine {
             target: None,
             matched,
             highlighted,
-            // A shape is served by identifier alone.
-            shape_guard_fired: false,
         });
         Ok(())
     }
@@ -1598,6 +1584,13 @@ pub(super) fn viewport_sets<'a>(
         viewport,
         matched_here,
         highlighted_here,
+    }
+}
+
+impl Walked {
+    /// Whether this walk holds the artifact at `(layer, level, ordinal)`.
+    pub(super) fn serves(&self, at: &(String, u32, u32)) -> bool {
+        self.served_at.contains_key(at)
     }
 }
 

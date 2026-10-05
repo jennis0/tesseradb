@@ -909,7 +909,7 @@ fn drawn_shape(
         }
         DrawnShape::Authored => {
             let shapes = served.supplied.authored.as_ref()?;
-            Some(authored_rings(shapes, scope.open.served.name, None)?.0)
+            authored_rings(shapes, scope.open.served.name, None)
         }
         DrawnShape::Predicate => {
             let mut derived = DerivedContent::default();
