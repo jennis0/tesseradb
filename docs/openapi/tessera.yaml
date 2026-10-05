@@ -1297,7 +1297,8 @@ paths:
         is the multiple of the width at or below the smallest value, and the last the first
         multiple at or above the largest, or above it on an integer field. Where every visible
         value is the same, the width is the largest power of ten at or below its magnitude, or 1
-        for 0. On a timestamp field the width is the finest of 1, 2 or 5 times a power of ten
+        for 0. One bin over values either side of 0 has no such width, and runs from the smallest
+        value to the largest, or to one above it on an integer field. On a timestamp field the width is the finest of 1, 2 or 5 times a power of ten
         microseconds up to 500,000; 1, 2, 5, 10, 15 or 30 seconds or minutes; 1, 2, 3, 6 or 12
         hours; 1 or 2 days; a week; 1, 2, 3 or 6 months; and 1, 2 or 5 times a power of ten years,
         that needs at most `bins` bins. A fixed width's bins start at multiples of it from

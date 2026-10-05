@@ -688,7 +688,8 @@ fn readable_numbers(
             }
         }
     }
-    // A span no readable width covers within the float range.
+    // One bin over values either side of 0, which no multiple of a width starts below, or a span
+    // no readable width covers within the float range.
     let upper = if integer { max + 1.0 } else { max };
     equal_numbers(min, upper, n as u32)
 }
