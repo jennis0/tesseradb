@@ -1692,3 +1692,81 @@ fn an_item_joining_another_view_is_sampled_with_its_indexed_values() {
     tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
         .expect("the bundle verifies");
 }
+
+/// **A sample read partly from the band and partly by scanning is the oracle's.** A flush adds a
+/// second segment of 6,000 items, of which the subset viewer sees 15%, against a third of the
+/// built segment's. At a sample of 12 of the subset viewer's 1,900 items the cut is held by band
+/// 7, about one row in 128: the built segment's dense set is read from the band, and the flushed
+/// segment's sparse one, fewer than 25 of its rows a band entry, by scanning its own rows, where
+/// an indexed-only field's value is found in the band's copy by row.
+#[test]
+fn a_sample_read_partly_from_the_band_and_partly_by_scanning_is_the_oracles() {
+    let mut fx = fixture();
+    let session = fx.session(false);
+    let mut added = Vec::new();
+    let rows: Vec<UnallocatedRow> = (0..6_000u64)
+        .map(|i| {
+            let mut item = built(INGESTED + i);
+            item.subset = i % 20 < 3;
+            item.flushed = false;
+            let descriptors = match item.subset {
+                true => vec![b"0".to_vec(), b"1".to_vec()],
+                false => vec![b"0".to_vec()],
+            };
+            let row = UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                terms: fx.engine.resolve_terms(&descriptors),
+                descriptors,
+                x: item.position.0,
+                y: item.position.1,
+                scalars: vec![
+                    WalScalar::Utf8(item.kind.to_string()),
+                    item.score.map_or(WalScalar::Null, WalScalar::F64),
+                    item.weight.map_or(WalScalar::Null, WalScalar::F32),
+                    item.rank.map_or(WalScalar::Null, WalScalar::I32),
+                    item.seen.map_or(WalScalar::Null, WalScalar::TimestampUs),
+                    item.when.map_or(WalScalar::Null, WalScalar::TimestampUs),
+                    WalScalar::Bool(item.source.is_multiple_of(2)),
+                    WalScalar::U64(key_id(&format!("binned-{i}"))),
+                ],
+                scoped: Vec::new(),
+            };
+            added.push(item);
+            row
+        })
+        .collect();
+    fx.engine
+        .ingest_rows(rows, "sparse".to_string(), [9u8; 32])
+        .expect("the ingest is accepted");
+    wait_until("the flush", Duration::from_secs(60), || {
+        fx.engine.request_flush();
+        fx.engine.generation().buffer.is_empty()
+    });
+    fx.items.extend(added);
+    for item in fx.items.iter_mut() {
+        item.flushed = true;
+    }
+    let ids = identities(&fx);
+    let items: Vec<&Item> = fx.visible(false, &|_| true).collect();
+    let s = 12;
+    let cut = cut_of(s, items.len() as u64).unwrap();
+    assert_eq!(tessera_store::bands::band_below(cut), Some(7));
+    let sample = sample_of(&items, s, &ids);
+    let scanned = sample.iter().filter(|i| i.source >= INGESTED).count();
+    assert!(scanned > 0, "the flushed segment's set has items below the cut");
+    for column in COLUMNS {
+        let groupings = [sampled(column, 10, None, s)];
+        let (head, rows, entries) = read_table(&fx.engine, &session, request(&groupings));
+        assert!(entries > 0, "{column}: the built segment is read from the band");
+        assert_eq!(head.sample.unwrap().items, sample.len() as u64, "{column}");
+        let edges = edges_of(&rows);
+        let want = scaled(
+            expected(&edges, &sample, None, column),
+            items.len() as u64,
+            sample.len() as u64,
+            None,
+        );
+        assert_eq!(rows, want, "{column}");
+    }
+}
