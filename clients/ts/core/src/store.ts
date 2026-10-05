@@ -137,7 +137,8 @@ export type StoreOptions = {
   /**
    * How the drawn layers' artifacts are asked for. `perTile` is the most artifacts one level shows
    * in one tile, largest first, at most `meta.selection.maxArtifactsPerTile`; the store has no
-   * number of its own, so without it a drawn layer shows nothing and the `artifacts` projection is
+   * number of its own, so without it a drawn layer shows nothing, colouring by a layer
+   * (`setColourBy('cluster:<layer>')`) has no colours either, and the `artifacts` projection is
    * `refused`, saying what to set. `budget` is the most artifacts a `nested` or `dag` layer is cut
    * to, met by drawing ancestors in place of their descendants, and the most it tags the points
    * with; omitted, the cut is unbounded. `heldTiles` is how many tiles of artifacts the store keeps

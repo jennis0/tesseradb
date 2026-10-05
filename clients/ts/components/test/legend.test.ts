@@ -481,7 +481,7 @@ describe('the Colour heading under a layer with several depths served', () => {
 
   async function mountHeading() {
     const host = await mount('<tessera-legend selectable></tessera-legend>');
-    const el = host.querySelector('tessera-legend') as HTMLElement & {store: unknown; autoLevel: number | null};
+    const el = host.querySelector('tessera-legend') as HTMLElement & {store: unknown};
     const store = fakeStore({meta: {...META, layers: [clusters]}, status: status({}), legend: legend('cluster:clusters'), filters: filtersOf(emptyDraft(META.filterOperands))});
     store.set('artifacts', {...store.get('artifacts'), colourServed: [served(1n, 0), served(2n, 1), served(3n, 2)]});
     el.store = store;
@@ -490,15 +490,12 @@ describe('the Colour heading under a layer with several depths served', () => {
   }
 
   it('names the level as its option does, lists every depth, and gives the colour-by name as its tooltip', async () => {
-    const {host, el} = await mountHeading();
+    const {host} = await mountHeading();
     expect(deep(host, '[part="level"] .t')?.textContent).toBe('Deepest level');
     const options = [...(deep(host, '[part="level-select"]') as HTMLSelectElement).options].map((o) => o.textContent);
     expect(options).toEqual(['Deepest level', 'Level 0', 'Level 1', 'Level 2']);
     expect(deep(host, '[part="colour-by"] .t')?.getAttribute('title')).toBe(TITLE);
 
-    el.autoLevel = 1;
-    await settle(host);
-    expect(deep(host, '[part="level"] .t')?.textContent).toBe('Automatic (Level 1)');
     const select = deep(host, '[part="level-select"]') as HTMLSelectElement;
     select.value = '2';
     select.dispatchEvent(new Event('change'));

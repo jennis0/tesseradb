@@ -102,7 +102,8 @@ class Map(anywidget.AnyWidget):
       `None`, the default, titles a point by its id.
     - `artifacts_per_tile`: the most annotations each level of a layer shows in one tile of the
       map, largest first, at most the server's `max_artifacts_per_tile`. `None`, the default,
-      draws no annotation, and the map says what to set.
+      draws no annotation and leaves colouring by a layer without colours, and the map says what
+      to set.
 
     Read the widget's attributes in a later cell:
 

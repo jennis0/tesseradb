@@ -7,7 +7,7 @@ import {
   type ArtifactChannelState
 } from '../src/artifactChannel.js';
 import {SessionArtifactTable} from '../src/artifactTable.js';
-import {TesseraClient} from '../src/client.js';
+import {TesseraClient, type TileSink} from '../src/client.js';
 import {GRID32, mortonOfTile} from '../src/coords.js';
 import type {Artifact, Layer, Quantisation, ViewportArtifactsRequest} from '../src/types.js';
 import {artifact, layer, manualClock, settle, tileAnswers} from './support.js';
@@ -345,6 +345,38 @@ describe('the idle prefetch', () => {
     expect(viewportArtifacts).toHaveBeenCalledTimes(3);
   });
 
+  it('files none of a streaming prefetch’s remaining frames once the keys move under it', async () => {
+    let keys = {identityKey: 'ik', contentKey: 'ck'};
+    let channelRef: ArtifactChannel | null = null;
+    let calls = 0;
+    // A transport that finishes a body whatever the signal says, as one already in the socket does.
+    const viewportArtifacts = vi.fn(async (_token: string, req: ViewportArtifactsRequest, opts: {onTile?: TileSink} = {}) => {
+      const call = calls++;
+      const k = keys;
+      for (const [i, tile] of (req.tiles ?? []).entries()) {
+        // The prefetch's second frame: a suppression has moved the content key meanwhile.
+        if (call === 1 && i === 1) {
+          keys = {identityKey: 'ik', contentKey: 'ck2'};
+          channelRef!.observeContentKey('ck2');
+        }
+        await opts.onTile?.({treed: false, tile, artifacts: [cluster(tile + 100n)]}, k);
+      }
+      return {frames: [], timings: {serverUs: 0, admissionUs: 0, stageNs: null}, ...k, pin: k.contentKey, stale: false, region: null, bytes: 0};
+    });
+    const client = {viewportArtifacts, artifacts: vi.fn()} as unknown as TesseraClient;
+    const {ch, clock, table} = channel(client, {prefetch: true});
+    channelRef = ch;
+    ch.setLayer('clusters/x');
+    ch.refresh(view, 400, 300);
+    await settle();
+    clock.fire();
+    await settle();
+    // The view's four tiles under the new key, asked for again, and nothing of the ring.
+    expect(ch.heldTiles).toBe(4);
+    expect(table.live).toBe(4);
+    for (const t of VIEW_TILES) expect(table.ordinalOf('clusters/x', t + 100n)).not.toBe(0);
+  });
+
   it('never fetches during interaction: a gesture disarms the idle timer', async () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch, clock} = channel(client, {prefetch: true, settleMs: 200, idleMs: 1500});
@@ -386,6 +418,24 @@ describe('a tag no held tile carries', () => {
     expect(table.entry(ordinal!)).toMatchObject({rung: 2, centroid: [GRID32 / 4, (GRID32 * 3) / 4]});
     // The read takes nothing it does not give back.
     expect(table.live).toBe(1);
+  });
+
+  it('is read again after a failed read, once the wait is out', async () => {
+    const {client, artifacts} = fakeClient(() => []);
+    artifacts.mockRejectedValueOnce(Object.assign(new Error('shed'), {status: 429}));
+    artifacts.mockImplementation(async () => ({async *[Symbol.asyncIterator]() {}}));
+    const {ch, table, clock} = channel(client);
+    ch.setLayer('clusters/x');
+    ch.refresh(view, 400, 300);
+    await settle();
+    const [ordinal] = table.take([{tesseraId: 77n, layer: 'clusters/x', parentIds: []}]);
+    await ch.lookUp([ordinal!]);
+    // Within the wait nothing is asked, so a shed read is not repeated at once.
+    await ch.lookUp([ordinal!]);
+    expect(artifacts).toHaveBeenCalledTimes(1);
+    clock.fire();
+    await ch.lookUp([ordinal!]);
+    expect(artifacts).toHaveBeenCalledTimes(2);
   });
 
   it('is not read where a held tile carries it', async () => {

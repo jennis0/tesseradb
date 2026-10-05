@@ -60,6 +60,10 @@ function defaultClock(): ArtifactChannelClock {
   };
 }
 
+/** How long reads by identifier wait after one fails, at first and at most. */
+const LOOK_RETRY_MS = 1000;
+const LOOK_RETRY_MAX_MS = 30_000;
+
 /** How long the view must be still before the artifact request goes out. */
 const SETTLE_MS = 200;
 
@@ -146,6 +150,8 @@ type HeldTile = {rows: Artifact[]; answered: Set<string>; usedAt: number};
 /** What a view needs: its tiles, centre first, and the pairs and layers it is asked over. */
 type Want = {
   depth: number;
+  /** The filter the request sends, and the same as text, which keys the tiles it brings. */
+  expression: FilterExpr | null;
   filter: string;
   tiles: bigint[];
   /** The (layer, level) pairs of the flat and levelled layers asked for. */
@@ -235,6 +241,9 @@ export class ArtifactChannel {
   private heldUnder: {identityKey: string; contentKey: string} | null = null;
   /** The tags read by identifier under {@link heldUnder}'s keys, asked once each. */
   private looked = new Set<string>();
+  /** Set while reads by identifier wait out a failure, and how long the next wait is. */
+  private lookPaused: unknown = null;
+  private lookWait = LOOK_RETRY_MS;
   private state: ArtifactChannelState = {layer: null, layers: [], artifacts: [], status: 'idle', refusal: null, version: 0, held: 0};
 
   constructor(
@@ -361,6 +370,9 @@ export class ArtifactChannel {
     this.walkedRows = [];
     this.heldUnder = null;
     this.looked.clear();
+    if (this.lookPaused !== null) this.clock.cancel(this.lookPaused);
+    this.lookPaused = null;
+    this.lookWait = LOOK_RETRY_MS;
   }
 
   /**
@@ -442,6 +454,7 @@ export class ArtifactChannel {
     const rect = tileRectOfBbox(view.bbox, depth);
     return {
       depth,
+      expression: filters,
       filter: filters === null ? '' : JSON.stringify(filters),
       tiles: this.centreFirst(rect, depth, view.target),
       pairs,
@@ -543,6 +556,7 @@ export class ArtifactChannel {
     const token = await this.opts.token();
     if (signal.aborted) return false;
     let admitted = true;
+    let stale = false;
     let first = true;
     let landed = 0;
     const walkedLayers = new Set(want.walked);
@@ -556,7 +570,7 @@ export class ArtifactChannel {
         layers: walked ? [...want.held, ...want.walked] : want.held,
         ...(want.levels === undefined ? {} : {levels: want.levels}),
         perTile: this.opts.perTile!,
-        ...(want.filter === '' ? {} : {filters: this.opts.filters!()}),
+        ...(want.expression === null ? {} : {filters: want.expression}),
         ...(walked && this.opts.budget !== undefined ? {budget: this.opts.budget} : {})
       },
       {
@@ -569,6 +583,13 @@ export class ArtifactChannel {
             if (admitted) this.keysOf(keys.identityKey, keys.contentKey);
           }
           if (!admitted) return;
+          // What is held may have moved to other keys since the first frame, as a suppression
+          // moves the content key; a frame of the old keys is not filed under the new.
+          const held = this.heldUnder;
+          if (!held || held.identityKey !== keys.identityKey || held.contentKey !== keys.contentKey) {
+            stale = true;
+            return;
+          }
           const own = frame.artifacts.filter((a) => walkedLayers.has(a.layer));
           if (walked && own.length > 0) {
             this.name(own);
@@ -582,7 +603,7 @@ export class ArtifactChannel {
         }
       }
     );
-    if (!admitted || signal.aborted) {
+    if (!admitted || stale || signal.aborted) {
       this.unname(fresh);
       return false;
     }
@@ -594,6 +615,8 @@ export class ArtifactChannel {
   }
 
   private async request(): Promise<void> {
+    // A prefetch is idle work under what was held; this request may hold something else.
+    this.cancelPrefetch();
     const view = this.view;
     if (!view) return;
     this.inFlight?.abort();
@@ -715,7 +738,7 @@ export class ArtifactChannel {
    */
   async lookUp(ordinals: Iterable<number>): Promise<void> {
     const table = this.table;
-    if (!table || !this.heldUnder) return;
+    if (!table || !this.heldUnder || this.lookPaused !== null) return;
     const byLayer = new Map<string, bigint[]>();
     for (const ordinal of ordinals) {
       const entry = table.entry(ordinal);
@@ -755,10 +778,18 @@ export class ArtifactChannel {
             });
           }
         }
+        this.lookWait = LOOK_RETRY_MS;
         if (table.generation !== generation || this.heldUnder !== keys || refs.length === 0) return;
         table.release(table.take(refs));
       } catch {
-        // A tag left unread keeps the neutral colour; nothing drawn is wrong.
+        // A tag left unread keeps the neutral colour. It is asked again by the next check once
+        // the wait is out, each wait twice the last, so a shed read is not repeated at once.
+        if (this.heldUnder !== keys) return;
+        for (const id of ids) this.looked.delete(keyOf({layer, tesseraId: id}));
+        if (this.lookPaused === null) {
+          this.lookPaused = this.clock.after(this.lookWait, () => (this.lookPaused = null));
+          this.lookWait = Math.min(this.lookWait * 2, LOOK_RETRY_MAX_MS);
+        }
       }
     }
   }

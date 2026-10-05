@@ -56,7 +56,8 @@ export abstract class TesseraElement extends LitElement {
   /**
    * The most artifacts one level of a drawn layer shows in one tile, for the store the element
    * builds; at most `/v1/meta`'s `selection.max_artifacts_per_tile`. Only the map, the explorer
-   * and `<tessera-store>` read it. Unset, a drawn layer shows nothing and the store says why.
+   * and `<tessera-store>` read it. Unset, a drawn layer shows nothing, colouring by a layer has no
+   * colours, and the store says why.
    * Changing it builds a new store.
    */
   @property({type: Number, attribute: 'artifacts-per-tile'}) accessor artifactsPerTile: number | null = null;

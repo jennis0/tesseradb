@@ -724,7 +724,7 @@ class Selection:
         - `size_by`: a number column to size points by; `None` draws them at one size.
         - `artifacts_per_tile`: the most annotations each level of a layer shows in one tile of
           the map, largest first, at most the server's `max_artifacts_per_tile`. Without it the
-          map draws no annotation and says so.
+          map draws no annotation, colouring by a layer has no colours, and the map says so.
 
         Items outside the box are still drawn when they are in frame.
 
@@ -839,7 +839,8 @@ class Viewer:
         - `size_by`: a number column to size points by; `None` draws them at one size.
 
         Other keywords go to `Map` unchanged, such as `bbox` to frame the camera on a box, and
-        `artifacts_per_tile`, without which the map draws no annotation. The
+        `artifacts_per_tile`, without which the map draws no annotation and colouring by a layer
+        has no colours. The
         page in the browser fetches its own data from the database with this reader's token. The
         token is sent to the page as a message and is never saved with the notebook.
         """
