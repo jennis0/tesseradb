@@ -269,7 +269,7 @@ impl RowMembersPack {
         }
         if payload_at != align_up(tables_end(ordinals))
             || ranges_at < payload_at
-            || ranges_at % ALIGN != 0
+            || !ranges_at.is_multiple_of(ALIGN)
             || ranges.checked_mul(8).and_then(|b| b.checked_add(ranges_at)) != Some(file_len)
         {
             return Err(malformed(
@@ -299,7 +299,7 @@ impl RowMembersPack {
                 }
                 continue;
             }
-            if offset % ALIGN as usize != 0 || offset < end || offset + len > payload_len {
+            if !offset.is_multiple_of(ALIGN as usize) || offset < end || offset + len > payload_len {
                 return Err(malformed(
                     path,
                     format!("ordinal {ordinal}'s bitmap is misaligned, overlaps another or leaves the payload"),
@@ -435,7 +435,10 @@ impl RowMembersPack {
 mod tests {
     use super::*;
 
-    fn write(dir: &Path, levels: &[(u32, &[u32], &[(u32, u32)])], ordinals: u32) -> PathBuf {
+    /// One artifact as the writer takes it: ordinal, members, covering.
+    type Artifact<'a> = (u32, &'a [u32], &'a [(u32, u32)]);
+
+    fn write(dir: &Path, levels: &[Artifact<'_>], ordinals: u32) -> PathBuf {
         let path = dir.join("m.tsrm");
         let mut file = RowMembersFile::create(&path, ordinals, 1000, 4).unwrap();
         for (ordinal, members, covering) in levels {
