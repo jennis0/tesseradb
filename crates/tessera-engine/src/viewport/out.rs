@@ -374,9 +374,6 @@ pub struct ArtifactOut {
     /// forest the response's own `parent_ids` links form, after the budget cut and every other
     /// narrowing, so a re-rooted subtree's root reads 0. On a flat layer, 0.
     pub rung: u32,
-    /// Whether the served shape's vertex budget cut vertices the request's depth alone would
-    /// have kept. The same for every principal served the artifact, so it discloses nothing.
-    pub shape_guard_fired: bool,
     /// Whether any member of this artifact the principal may see, inside the request's tiles,
     /// matches the request's filter. `None` means no question was asked, not no matches. A
     /// boolean, never a count: existence and `masked_count` stay anchored on the unfiltered

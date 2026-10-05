@@ -676,8 +676,11 @@ class Server:
         filters: dict | None = None,
         **extra,
     ) -> requests.Response:
-        """[`artifacts_viewport`] without the raise, for a test whose subject is the refusal."""
-        body = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "layers": "all"}
+        """[`artifacts_viewport`] without the raise, for a test whose subject is the refusal.
+        `bbox` `None` sends the request's `tiles` in its place."""
+        body = {"view": view_id, "zoom": zoom, "layers": "all"}
+        if bbox is not None:
+            body["bbox"] = list(bbox)
         if filters is not None:
             body["filters"] = filters
         body.update({key: value for key, value in extra.items() if value is not None})

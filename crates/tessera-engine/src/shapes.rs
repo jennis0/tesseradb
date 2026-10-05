@@ -91,15 +91,14 @@ pub fn served_tolerance(zoom: Option<u8>) -> u32 {
 }
 
 /// A held shape as the wire carries it — parts, rings, vertices in grid units — at a request's
-/// depth, under the vertex budget, and whether the budget cut what the depth alone would have
-/// kept (§7.2). One function for the predicate and the authored kind, so the two cannot be
+/// depth, under the vertex budget. One function for the predicate and the authored kind, so the two cannot be
 /// simplified differently; the derived kind is the hull and is digested at derivation.
 pub fn served_rings(
     shape: &tessera_spatial::shape::Shape,
     zoom: Option<u8>,
-) -> (Vec<Vec<Vec<[u32; 2]>>>, bool) {
-    let (parts, guarded) = shape.rings_guarded(served_tolerance(zoom), SERVED_VERTEX_BUDGET);
-    let parts = parts
+) -> Vec<Vec<Vec<[u32; 2]>>> {
+    let (parts, _) = shape.rings_guarded(served_tolerance(zoom), SERVED_VERTEX_BUDGET);
+    parts
         .into_iter()
         .map(|rings| {
             rings
@@ -107,8 +106,7 @@ pub fn served_rings(
                 .map(|ring| ring.into_iter().map(|(x, y)| [x, y]).collect())
                 .collect()
         })
-        .collect();
-    (parts, guarded)
+        .collect()
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

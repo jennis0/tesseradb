@@ -553,7 +553,7 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
         let text = text.as_str();
 
         let fields: Vec<&str> = text.split(',').collect();
-        // 22 engine-side fields, the sink's own `shape_guard_fired` counter, the occupancy walk's
+        // 22 engine-side fields, one position no figure fills, the occupancy walk's
         // duration and the tiles answered from the bands. Fields are appended, so the bench
         // harnesses' positions before each are unchanged.
         assert_eq!(

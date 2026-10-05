@@ -34,15 +34,19 @@ is JSON. A reader dispatches on `kind` without parsing any Arrow metadata.
 kind 1  tiles      exactly one, first        (tile: u64, visible: u64, matched: u64, served: u64)
 kind 2  sub-cells  exactly one iff requested (cell: u64, count: u64)
 kind 3  points     zero or more, whole tiles per frame; the frames concatenate
-kind 5  artifacts  at most one, after points; absent — never empty — when nothing is served
 kind 4  trailer    exactly one, last; JSON with exactly {stream_us, arrow_serialise_ns, points, flushes}
 ```
 
 Three rules a decoder must keep: **the trailer is the completeness signal** — a body without a
 trailing kind-4 frame is incomplete whatever the transport said, though every prefix is sound to
 draw, since the counts are exact from the first frame; **an unknown kind is an error, never
-skipped**; and **absence of the artifacts frame carries no reason** — no layer reached, none
-intersecting, none clearing its criterion are one outcome by design.
+skipped**; and **an artifacts frame of no rows carries no reason** — no layer reached, none in the
+tile, none clearing its criterion are one outcome by design.
+
+A `POST /v1/artifacts/viewport` body has the same framing: kind-5 artifacts frames, one for the
+nested and `dag` layers first where it holds a row and then exactly one per tile in the request's
+order, each with seventeen columns ending in `tile`, and a trailer of exactly `{stream_us,
+arrow_serialise_ns, rows, frames}`.
 
 The points batch is `(tessera_id: u64, code: u64, …render columns)`, the render columns in
 `/v1/meta`'s `declared_scalars` order, each named by its column. A render column is nullable: a
@@ -90,8 +94,8 @@ first tiles rows: [ { tile: '0', visible: '640', matched: '640', served: '0' }, 
 first artifacts rows: [ { layer: 'clusters/kmeans-v2', tessera_id: '11158655851902647723', key: 'c-0000', masked_count: '2480', ... } ]
 ```
 
-That fixture is a `k = 0` request naming a layer — the *just the artifacts* idiom: a tiles frame
-with `served = 0` everywhere, the artifacts frame, and no points frame. The `u64` columns come off
+That fixture is a `k = 0` body: a tiles frame with `served = 0` everywhere, an artifacts frame,
+and no points frame. The `u64` columns come off
 Arrow JS as `BigInt` and are printed as decimal strings; a decoder that narrows a `tessera_id` to
 a JS `number` has already lost bits on this fixture's first id. Its test is
 `clients/ts/wire-example/test/decode.test.ts`, run by `bash scripts/check-clients.sh` with the rest of the client gate.

@@ -17,6 +17,7 @@ use tessera_engine::{
     ViewportArtifactsOut, ViewportArtifactsRequest, ViewportArtifactsSink, ViewportRequest,
 };
 use tessera_lifecycle::wal::ChangeOp;
+use tessera_lifecycle::membership::IncomingAttachment;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
@@ -430,4 +431,84 @@ fn a_cancelled_request_stops_between_tiles() {
         "{outcome:?}"
     );
     assert_eq!(sink.frames, 1, "no tile after the cancellation was walked");
+}
+
+/// **A dependent takes a place in a tile's quota only where its target is in the frame.** Two
+/// clusters, the larger served alone under a quota of one, and a label on each: the label on the
+/// cluster left out is the larger label, and yet the tile serves the other, since the frame would
+/// drop a label whose cluster it does not hold. The request names the labels first; the clusters
+/// are still chosen first.
+#[test]
+fn a_dependent_whose_target_the_frame_lacks_takes_no_place_in_the_quota() {
+    let fx = fixture();
+    let (clusters, labels) = ("deps/clusters", "deps/labels");
+    let mut target = declaration(clusters, ServingLayout::ArtifactMajor);
+    target.content.computed = Vec::new();
+    fx.engine.register_layer(target).unwrap();
+    let mut dependent = declaration(labels, ServingLayout::ArtifactMajor);
+    dependent.content.computed = Vec::new();
+    dependent.depends_on = vec![clusters.into()];
+    fx.engine.register_layer(dependent).unwrap();
+    let entities: BTreeMap<u64, u64> =
+        fx.source_of.iter().map(|(&entity, &source)| (source, entity)).collect();
+    let members = |range: std::ops::Range<u64>| range.map(|s| EntityId::new(entities[&s]));
+    fx.engine
+        .publish_artifacts(
+            clusters.into(),
+            0,
+            vec![
+                IncomingArtifact::from_entities(Some("big".into()), members(0..600)),
+                IncomingArtifact::from_entities(Some("small".into()), members(600..900)),
+            ],
+        )
+        .unwrap();
+    let label = |key: &str, target: &str, sources: std::ops::Range<u64>| {
+        IncomingArtifact::attached(
+            Some(key.into()),
+            members(sources),
+            Vec::new(),
+            IncomingAttachment {
+                layer: clusters.into(),
+                level: 0,
+                key: target.into(),
+            },
+        )
+    };
+    fx.engine
+        .publish_artifacts(
+            labels.into(),
+            0,
+            vec![
+                label("on-big", "big", 0..100),
+                label("on-small", "small", 600..900),
+            ],
+        )
+        .unwrap();
+    tick(&fx.engine);
+
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let names = [labels, clusters];
+    let out = fx
+        .engine
+        .viewport_artifacts(
+            &session,
+            ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, 1)
+                .layers(LayerSelection::Named(&names)),
+        )
+        .unwrap();
+    let keys: Vec<(String, String)> = out.frames[0]
+        .artifacts
+        .iter()
+        .map(|a| (a.layer.clone(), a.key.clone().unwrap()))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            (clusters.to_string(), "big".to_string()),
+            (labels.to_string(), "on-big".to_string())
+        ],
+        "the cluster level first, then the one label whose cluster the tile holds"
+    );
+    let served = &out.frames[0].artifacts;
+    assert_eq!(served[1].target, Some(served[0].tessera_id));
 }
