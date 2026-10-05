@@ -287,10 +287,11 @@ async fn meta(
             "max_page_rows": state.limits.max_page_rows,
             "max_page_bytes": state.limits.max_page_bytes,
             // `POST /v1/aggregate`'s ceilings: groupings per request, and a grouping's `top`,
-            // named list and cells.
+            // named list, bins and cells.
             "max_aggregate_groupings": state.limits.max_aggregate_groupings,
             "max_aggregate_top": state.limits.max_aggregate_top,
             "max_aggregate_named": state.limits.max_aggregate_named,
+            "max_aggregate_bins": state.limits.max_aggregate_bins,
             // The most cells one grouping's cell level may list: its depth's cells in its area.
             "max_aggregate_cells": state.limits.max_aggregate_cells,
         },

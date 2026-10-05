@@ -1,6 +1,7 @@
 //! `POST /v1/aggregate`: how a set of the items a viewer may see in one view is distributed, across
-//! the values of a category field, across the artifacts of one level of a layer, across the cells
-//! of the map, or across a group and cells together. Every figure is an exact count over the
+//! the values of a category field, across bins of a number or timestamp field, across the
+//! artifacts of one level of a layer, across the cells of the map, or across a group and cells
+//! together. Every figure is an exact count over the
 //! viewer's visible set, and a second set can be given to compare each figure with.
 //!
 //! [`Engine::aggregate_stream`] serves one response: a head, then each grouping's table in order,
@@ -8,10 +9,11 @@
 //! from the latest generation, so a deletion or suppression accepted during a read applies from
 //! the next page. Which groups a table lists is fixed at its first page and carried in the cursor.
 //!
-//! Rows carry vocabulary keys, artifacts' `tessera_id`s and cell prefixes. A code, an ordinal or an
+//! Rows carry vocabulary keys, bin edges, artifacts' `tessera_id`s and cell prefixes. A code, an ordinal or an
 //! entity id reaches the caller only inside a sealed cursor.
 
 mod artifacts;
+mod bins;
 mod cursor;
 pub(crate) mod set;
 mod table;
@@ -25,7 +27,7 @@ use tessera_types::TesseraId;
 use crate::cancel::CancelToken;
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
-use crate::filter::FilterExpr;
+use crate::filter::{FilterExpr, Scalar};
 use crate::records::{
     page_rows_of, refuse_shape, Binding, Clock, PageEnd, PageEndedBy, RecordsLimits,
     ResponseEndedBy, Route,
@@ -91,6 +93,14 @@ pub enum By {
     /// The values of a category field, as a resolved column name: a group-scoped field arrives
     /// pinned to one view's column.
     Field { column: String, pick: Pick<String> },
+    /// The values of a number or timestamp field, as a resolved column name, counted in at most
+    /// `bins` bins of `range`, or with no range in readable bins around the values of the items
+    /// the viewer may see in the view.
+    Bins {
+        column: String,
+        bins: u32,
+        range: Option<(Scalar, Scalar)>,
+    },
     /// The artifacts of one level of a layer. `level` is required on a layer with several levels
     /// and refused on one with a single level.
     Layer {
@@ -115,6 +125,8 @@ pub struct AggregateCaps {
     pub groupings: u32,
     pub top: u32,
     pub named: u32,
+    /// The most bins a histogram may ask for.
+    pub bins: u32,
     /// The most cells a grouping's cell level may list, whatever its groups.
     pub cells: u64,
 }
@@ -204,6 +216,16 @@ pub enum AggregateRefused {
     /// Not a category field this deployment can count: undeclared, not a category, or a category
     /// with no per-value record and not drawn.
     NotCountable(String),
+    /// Not a number or timestamp field this deployment can bin: a `bool`, or a number declared
+    /// with neither `index` nor `render`.
+    NotBinnable(String),
+    ZeroBins,
+    /// A range whose lower bound is not below its upper bound.
+    EmptyRange,
+    /// A fractional bound on a timestamp field's range.
+    FractionalTime(String),
+    /// A histogram with a cell level.
+    BinsWithCells,
     DepthPast32(u8),
     /// No `level` on a layer with several.
     LevelRequired(String),
@@ -243,6 +265,25 @@ impl std::fmt::Display for AggregateRefused {
                 f,
                 "field '{field}' cannot be counted; name a category field declared with index or \
                  render"
+            ),
+            AggregateRefused::NotBinnable(field) => write!(
+                f,
+                "field '{field}' cannot be binned; name a number or timestamp field declared \
+                 with index or render"
+            ),
+            AggregateRefused::ZeroBins => write!(f, "bins is 0; ask for at least one bin"),
+            AggregateRefused::EmptyRange => write!(
+                f,
+                "the range is empty or reversed; give [lower, upper] with lower below upper"
+            ),
+            AggregateRefused::FractionalTime(field) => write!(
+                f,
+                "field '{field}' holds timestamps, so its range is whole microseconds; give \
+                 integers"
+            ),
+            AggregateRefused::BinsWithCells => write!(
+                f,
+                "a grouping by bins has no cell level; ask for cells in a grouping of its own"
             ),
             AggregateRefused::DepthPast32(depth) => write!(
                 f,
@@ -531,6 +572,10 @@ fn refuse_groupings(groupings: &[Grouping], caps: &AggregateCaps) -> Result<()> 
         }
         let (top, named) = match &grouping.by {
             None => continue,
+            Some(By::Bins { bins, range, .. }) => {
+                refuse_bins(*bins, range.as_ref(), grouping.cells.is_some(), caps)?;
+                continue;
+            }
             Some(By::Field { pick, .. }) => match pick {
                 Pick::Top(n) => (Some(*n), None),
                 Pick::Named(keys) => (None, Some(keys.len())),
@@ -561,6 +606,34 @@ fn refuse_groupings(groupings: &[Grouping], caps: &AggregateCaps) -> Result<()> 
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// The refusals a grouping by bins earns from its shape alone.
+fn refuse_bins(
+    bins: u32,
+    range: Option<&(Scalar, Scalar)>,
+    cells: bool,
+    caps: &AggregateCaps,
+) -> Result<()> {
+    let refused = |why| Err(EngineError::AggregateRefused(why));
+    if bins == 0 {
+        return refused(AggregateRefused::ZeroBins);
+    }
+    if bins > caps.bins {
+        return refused(AggregateRefused::OverCap {
+            what: "bins",
+            cap: "max_aggregate_bins",
+            given: bins as usize,
+            limit: caps.bins,
+        });
+    }
+    if range.is_some_and(|&(lower, upper)| !bins::below(lower, upper)) {
+        return refused(AggregateRefused::EmptyRange);
+    }
+    if cells {
+        return refused(AggregateRefused::BinsWithCells);
     }
     Ok(())
 }

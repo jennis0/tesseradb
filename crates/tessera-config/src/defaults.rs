@@ -42,6 +42,9 @@ pub const DEFAULT_MAX_AGGREGATE_TOP: u32 = 1_000;
 /// The most values or artifacts one aggregate grouping may name.
 pub const DEFAULT_MAX_AGGREGATE_NAMED: u32 = 1_000;
 
+/// The most bins one aggregate grouping by bins may ask for.
+pub const DEFAULT_MAX_AGGREGATE_BINS: u32 = 1_000;
+
 /// The most cells one aggregate grouping's cell level may list: every cell at depth 10.
 pub const DEFAULT_MAX_AGGREGATE_CELLS: u64 = 1 << 20;
 

@@ -394,6 +394,11 @@ struct RawServe {
     ///
     /// Default: `1000`.
     max_aggregate_named: Option<u32>,
+    /// The most bins one aggregate grouping by bins may ask for. A request asking for more is
+    /// refused with 422.
+    ///
+    /// Default: `1000`.
+    max_aggregate_bins: Option<u32>,
     /// The most cells one aggregate grouping's cell level may list: the cells at its depth in its
     /// area, however many groups share them. A request asking for more is refused with 422.
     ///
@@ -635,6 +640,8 @@ pub struct Config {
     pub max_aggregate_top: u32,
     /// The longest named list of an aggregate grouping.
     pub max_aggregate_named: u32,
+    /// The most bins of an aggregate grouping by bins.
+    pub max_aggregate_bins: u32,
     /// The most cells an aggregate grouping's cell level may list.
     pub max_aggregate_cells: u64,
     /// Bytes one aggregate response may carry; at least `aggregate_page_bytes`.
@@ -1072,6 +1079,9 @@ fn parse(text: &str) -> Result<Config> {
         max_aggregate_named: serve
             .max_aggregate_named
             .unwrap_or(DEFAULT_MAX_AGGREGATE_NAMED),
+        max_aggregate_bins: serve
+            .max_aggregate_bins
+            .unwrap_or(DEFAULT_MAX_AGGREGATE_BINS),
         max_aggregate_cells: serve
             .max_aggregate_cells
             .unwrap_or(DEFAULT_MAX_AGGREGATE_CELLS),

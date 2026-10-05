@@ -12,8 +12,8 @@ use crate::error::{EngineError, Result};
 pub(super) struct Position {
     /// The table in progress, or the number of tables once every one is sent.
     pub(super) table: u32,
-    /// The groups the table in progress lists, fixed at its first page: codes, or artifacts'
-    /// entities. `None` before the table's first page.
+    /// The groups the table in progress lists, fixed at its first page: codes, bin edges, or
+    /// artifacts' entities. `None` before the table's first page.
     pub(super) chosen: Option<Vec<u64>>,
     /// The next group to send, as a position in `chosen` followed by the rest and none.
     pub(super) group: u32,
@@ -115,6 +115,11 @@ pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8;
         let by = match &grouping.by {
             None => "-".to_string(),
             Some(By::Field { column, pick }) => format!("field {column:?} {}", pick_text(pick)),
+            Some(By::Bins {
+                column,
+                bins,
+                range,
+            }) => format!("bins {column:?} {bins} {range:?}"),
             Some(By::Layer { layer, level, pick }) => {
                 format!("layer {layer:?} {level:?} {}", pick_text(pick))
             }

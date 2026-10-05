@@ -5,7 +5,8 @@
 //! It is sent beside viewport requests, so it runs under the viewport's admission. Its response is
 //! held to its own byte budget, `serve.aggregate_response_bytes`, in pages of
 //! `serve.aggregate_page_bytes`, and to the bulk reads' time budget, and ends with a cursor where
-//! they cut it; a cell level lists at most `selection.max_aggregate_cells` cells.
+//! they cut it; a cell level lists at most `selection.max_aggregate_cells` cells, and a histogram
+//! at most `selection.max_aggregate_bins` bins.
 
 use std::sync::Arc;
 
@@ -58,8 +59,8 @@ struct GroupingReq {
     cells: Option<CellsReq>,
 }
 
-/// A grouping's outer level: `field` with `top` or `values`, or `layer` with `top` or
-/// `artifacts` and, on a levelled layer, `level`.
+/// A grouping's outer level: `field` with `top` or `values`, or with `bins` and optionally
+/// `range`, or `layer` with `top` or `artifacts` and, on a levelled layer, `level`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ByReq {
@@ -73,6 +74,11 @@ struct ByReq {
     top: Option<u32>,
     #[serde(default)]
     values: Option<Vec<String>>,
+    #[serde(default)]
+    bins: Option<u32>,
+    /// `[lower, upper]`, each a number, or on an integer or timestamp field its decimal string.
+    #[serde(default)]
+    range: Option<[Value; 2]>,
     /// `tessera_id`s, each a number or its decimal string.
     #[serde(default)]
     artifacts: Option<Vec<Value>>,
@@ -189,6 +195,7 @@ fn run_aggregate(
             groupings: state.limits.max_aggregate_groupings,
             top: state.limits.max_aggregate_top,
             named: state.limits.max_aggregate_named,
+            bins: state.limits.max_aggregate_bins,
             cells: state.limits.max_aggregate_cells,
         },
         cancel: Some(cancel),
@@ -259,7 +266,19 @@ fn by_of(
     match (&by.field, &by.layer) {
         (Some(field), None) => {
             if by.artifacts.is_some() || by.level.is_some() {
-                return bad("`artifacts` and `level` go with `layer`; a field takes `top` or `values`");
+                return bad(
+                    "`artifacts` and `level` go with `layer`; a field takes `top`, `values` or \
+                     `bins`",
+                );
+            }
+            if by.range.is_some() && by.bins.is_none() {
+                return bad("`range` goes with `bins`; send `bins` beside it, or leave it out");
+            }
+            if let Some(bins) = by.bins {
+                if by.top.is_some() || by.values.is_some() {
+                    return bad("`by` carries `bins` beside `top` or `values`; send one");
+                }
+                return bins_of(meta, view, session, field, bins, by.range.as_ref());
             }
             let pick = match (by.top, &by.values) {
                 (Some(top), None) => Pick::Top(top),
@@ -282,8 +301,11 @@ fn by_of(
             }
         }
         (None, Some(layer)) => {
-            if by.values.is_some() {
-                return bad("`values` goes with `field`; a layer takes `top` or `artifacts`");
+            if by.values.is_some() || by.bins.is_some() || by.range.is_some() {
+                return bad(
+                    "`values`, `bins` and `range` go with `field`; a layer takes `top` or \
+                     `artifacts`",
+                );
             }
             let pick = match (by.top, &by.artifacts) {
                 (Some(top), None) => Pick::Top(top),
@@ -308,19 +330,88 @@ fn by_of(
     }
 }
 
+/// A grouping by bins of `field`, a number or timestamp field resolved under `view`, with its
+/// range read as a filter's `range` reads its bounds.
+fn bins_of(
+    meta: &tessera_engine::EngineMeta,
+    view: &str,
+    session: &tessera_engine::Session,
+    field: &str,
+    bins: u32,
+    range: Option<&[Value; 2]>,
+) -> Result<By, ApiError> {
+    let (column, integer) = match meta.resolve_category_column(field, view, session.visible_views()) {
+        tessera_engine::LeafColumn::Resolved {
+            column,
+            family: tessera_engine::filter::Family::Numeric,
+            integer,
+            ..
+        } => (column, integer),
+        tessera_engine::LeafColumn::Resolved {
+            family: tessera_engine::filter::Family::Category,
+            ..
+        } => {
+            return Err(ApiError::Contract(format!(
+                "field '{field}' is a category; bins go with a number or timestamp field, and a \
+                 category takes top or values"
+            )))
+        }
+        tessera_engine::LeafColumn::Resolved { .. } => {
+            return Err(ApiError::Contract(format!(
+                "field '{field}' is not a number or timestamp; name a number or timestamp field \
+                 for bins"
+            )))
+        }
+        _ => {
+            return match category_column(meta, field, view, session.visible_views())? {
+                CategoryColumn::Unpinned { group } => Err(ApiError::Contract(format!(
+                    "field '{field}' is scoped to view group '{group}' and view '{view}' is not \
+                     one of its views; pin the view it means as '{field}@<key>'"
+                ))),
+                _ => Err(ApiError::Contract(format!(
+                    "field '{field}' is unknown; name a field /v1/meta publishes"
+                ))),
+            }
+        }
+    };
+    let range = match range {
+        None => None,
+        Some([lower, upper]) => Some((
+            crate::filter_dto::numeric_value(field, lower, integer)?,
+            crate::filter_dto::numeric_value(field, upper, integer)?,
+        )),
+    };
+    Ok(By::Bins {
+        column,
+        bins,
+        range,
+    })
+}
+
 /// A refusal naming a field the engine was given resolved, named as the caller spelled it.
 fn in_callers_words(e: EngineError, asked: &[GroupingReq], sent: &[Grouping]) -> EngineError {
-    let EngineError::AggregateRefused(AggregateRefused::NotCountable(column)) = &e else {
-        return e;
+    let (column, rename): (&String, fn(String) -> AggregateRefused) = match &e {
+        EngineError::AggregateRefused(AggregateRefused::NotCountable(column)) => {
+            (column, AggregateRefused::NotCountable)
+        }
+        EngineError::AggregateRefused(AggregateRefused::NotBinnable(column)) => {
+            (column, AggregateRefused::NotBinnable)
+        }
+        EngineError::AggregateRefused(AggregateRefused::FractionalTime(column)) => {
+            (column, AggregateRefused::FractionalTime)
+        }
+        _ => return e,
     };
     let spelling = asked.iter().zip(sent).find_map(|(asked, sent)| match &sent.by {
-        Some(By::Field { column: resolved, .. }) if resolved == column => {
+        Some(By::Field { column: resolved, .. }) | Some(By::Bins { column: resolved, .. })
+            if resolved == column =>
+        {
             asked.by.as_ref().and_then(|by| by.field.clone())
         }
         _ => None,
     });
     match spelling {
-        Some(field) => EngineError::AggregateRefused(AggregateRefused::NotCountable(field)),
+        Some(field) => EngineError::AggregateRefused(rename(field)),
         None => e,
     }
 }

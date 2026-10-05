@@ -329,16 +329,7 @@ fn tally_rows(
     segments: &[(&tessera_store::read::SegmentData, u32)],
     column: &str,
 ) -> Counts {
-    let pieces: Vec<(usize, std::ops::Range<u32>)> = segments
-        .iter()
-        .enumerate()
-        .flat_map(|(s, &(segment, row_base))| {
-            (0..segment.row_count.div_ceil(PIECE_ROWS)).map(move |p| {
-                let lo = row_base + p * PIECE_ROWS;
-                (s, lo..(lo + PIECE_ROWS).min(row_base + segment.row_count))
-            })
-        })
-        .collect();
+    let pieces = pieces(segments);
     // Indexed by code up to the widest code any segment stores, a map where one stores 32 bits.
     let width = segments
         .iter()
@@ -378,6 +369,23 @@ fn tally_rows(
         })
         .reduce(empty, Tally::merge);
     tally.into_counts()
+}
+
+/// The view's rows cut into pieces of at most [`PIECE_ROWS`], each within one segment: the segment's
+/// position in `segments`, and the piece's rows in view row space.
+pub(super) fn pieces(
+    segments: &[(&tessera_store::read::SegmentData, u32)],
+) -> Vec<(usize, std::ops::Range<u32>)> {
+    segments
+        .iter()
+        .enumerate()
+        .flat_map(|(s, &(segment, row_base))| {
+            (0..segment.row_count.div_ceil(PIECE_ROWS)).map(move |p| {
+                let lo = row_base + p * PIECE_ROWS;
+                (s, lo..(lo + PIECE_ROWS).min(row_base + segment.row_count))
+            })
+        })
+        .collect()
 }
 
 /// A running count per code: indexed by code for a `u8` or `u16` column, a map for a `u32` one.

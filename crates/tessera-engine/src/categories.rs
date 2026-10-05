@@ -763,23 +763,37 @@ impl Engine {
     }
 }
 
-/// Visit `(entity, code)` for each buffered row holding a value in `column`: an entity-scoped
-/// column's on the entity's own row, a group-scoped family's (`name@view`) on every row whose
-/// values that view's column holds. The rows a flush writes into the column's next extent.
+/// Visit `(entity, code)` for each buffered row holding a value in `column`, as
+/// [`buffered_values`] finds them.
 pub(crate) fn buffered_codes(
     manifest: &tessera_store::manifest::Manifest,
     buffer: &tessera_lifecycle::IngestBuffer,
     column: &str,
     visit: &mut dyn FnMut(u32, u32),
 ) {
-    use crate::flush::{buffered_value, category_code, BufferedPlace};
-    let mut emit = |entity: &tessera_types::EntityId, item, place| {
-        let code = category_code(buffered_value(item, place));
+    buffered_values(manifest, buffer, column, &mut |entity, value| {
+        let code = crate::flush::category_code(value);
         debug_assert!(code.is_some(), "a buffered category value is a code");
-        let entity = u32::try_from(entity.raw()).expect("entity ids are bounded by the allocator");
         if let Some(code) = code {
             visit(entity, code);
         }
+    });
+}
+
+/// Visit `(entity, value)` for each buffered row of `column`: an entity-scoped column's on the
+/// entity's own row, a group-scoped family's (`name@view`) on every row whose values that view's
+/// column holds. The rows a flush writes into the column's next extent. A row with no value in
+/// the column visits `Null`.
+pub(crate) fn buffered_values(
+    manifest: &tessera_store::manifest::Manifest,
+    buffer: &tessera_lifecycle::IngestBuffer,
+    column: &str,
+    visit: &mut dyn FnMut(u32, &tessera_lifecycle::WalScalar),
+) {
+    use crate::flush::{buffered_value, BufferedPlace};
+    let mut emit = |entity: &tessera_types::EntityId, item, place| {
+        let entity = u32::try_from(entity.raw()).expect("entity ids are bounded by the allocator");
+        visit(entity, buffered_value(item, place));
     };
     if let Some(index) = manifest
         .declared_scalars

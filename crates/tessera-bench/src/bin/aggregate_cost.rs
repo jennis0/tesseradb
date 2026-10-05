@@ -171,6 +171,7 @@ fn read(
                     groupings: 8,
                     top: 1000,
                     named: 1000,
+                    bins: 1000,
                     cells: u64::MAX,
                 },
                 cancel: None,

@@ -73,6 +73,16 @@ impl Set {
         }
     }
 
+    /// Every item this viewer may see in `open`'s view.
+    pub(super) fn whole(open: &OpenView<'_>) -> Set {
+        Set::of(Held::Whole, open.mask.visible_total(), None)
+    }
+
+    /// Whether this is every item this viewer may see in the view.
+    pub(super) fn is_whole(&self) -> bool {
+        matches!(self.held, Held::Whole)
+    }
+
     /// How many items the set holds.
     pub(super) fn size(&self) -> u64 {
         self.size
@@ -187,7 +197,7 @@ pub(super) fn compose(
     let served = &open.served;
     let candidate = engine.filter_candidate(served.session, generation)?;
     let resolved = ResolvedLeaves::default();
-    let whole = || Set::of(Held::Whole, open.mask.visible_total(), None);
+    let whole = || Set::whole(open);
     let (set, reference) = engine.route_filters_under(
         served,
         &open.mask,
