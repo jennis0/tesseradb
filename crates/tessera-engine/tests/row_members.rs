@@ -25,8 +25,7 @@ use tessera_engine::{Engine, LayerSelection, ViewportRequest};
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_store::manifest::{DerivedForm, SegmentsManifest};
 use tessera_types::layer::{
-    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
-    ServingLayout,
+    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
 use tessera_types::EntityId;
 
@@ -130,9 +129,11 @@ fn write_layer(dir: &Path, layer: &str, artifacts: u64, rows: &[(String, u64)]) 
     let stem = layer.replace('/', "_");
     let keys: Vec<String> = (0..artifacts).map(|i| key(layer, i)).collect();
     let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
-    let batch =
-        RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(keys)) as ArrayRef])
-            .unwrap();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(keys)) as ArrayRef],
+    )
+    .unwrap();
     write(&dir.join(format!("{stem}.parquet")), schema, batch);
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
@@ -146,7 +147,9 @@ fn write_layer(dir: &Path, layer: &str, artifacts: u64, rows: &[(String, u64)]) 
                 rows.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
             )) as ArrayRef,
             Arc::new(UInt32Array::from(vec![None::<u32>; rows.len()])),
-            Arc::new(UInt64Array::from(rows.iter().map(|(_, e)| *e).collect::<Vec<_>>())),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|(_, e)| *e).collect::<Vec<_>>(),
+            )),
         ],
     )
     .unwrap();
@@ -276,7 +279,11 @@ fn labels_transposed(column: &RowColumn) -> Vec<Vec<u32>> {
 
 /// A covering that holds `members` in at most 32 ascending, disjoint ranges.
 fn assert_covers(covering: &[(u32, u32)], members: &[u32], what: &str) {
-    assert!(covering.len() <= COVERING_RANGES, "{what}: {} ranges", covering.len());
+    assert!(
+        covering.len() <= COVERING_RANGES,
+        "{what}: {} ranges",
+        covering.len()
+    );
     assert!(
         covering.windows(2).all(|w| w[0].1 < w[1].0) && covering.iter().all(|r| r.0 <= r.1),
         "{what}: the ranges are not ascending and disjoint"
@@ -304,7 +311,11 @@ fn held_forms(column: &RowColumn, fresh: bool, what: &str) -> Forms {
         assert_eq!(&held, rows, "{what}: ordinal {ordinal}'s members");
         let covering = members.covering(ordinal as u32);
         if fresh {
-            assert_eq!(covering, widest_gap_covering(rows), "{what}: ordinal {ordinal}'s covering");
+            assert_eq!(
+                covering,
+                widest_gap_covering(rows),
+                "{what}: ordinal {ordinal}'s covering"
+            );
         } else {
             assert_covers(&covering, rows, &format!("{what}: ordinal {ordinal}"));
         }
@@ -335,21 +346,37 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
             .filter(|e| {
                 e.form == DerivedForm::RowMembers
                     && (&e.layer, e.level, &e.view, e.level_version)
-                        == (&column.layer, column.level, &column.view, column.level_version)
+                        == (
+                            &column.layer,
+                            column.level,
+                            &column.view,
+                            column.level_version,
+                        )
             })
             .collect();
-        assert_eq!(beside.len(), 1, "{}: one member file beside its column", column.layer);
+        assert_eq!(
+            beside.len(),
+            1,
+            "{}: one member file beside its column",
+            column.layer
+        );
         let labels = RowColumn::open_labels(&prefix.join(&column.path), layout).unwrap();
-        let pack =
-            tessera_store::row_members::RowMembersPack::open(&prefix.join(&beside[0].path))
-                .expect("the member file opens");
+        let pack = tessera_store::row_members::RowMembersPack::open(&prefix.join(&beside[0].path))
+            .expect("the member file opens");
         assert_eq!(pack.rows(), labels.base_rows());
         assert_eq!(pack.ordinals() as usize, labels.len());
         let mut forms = Vec::new();
         for (ordinal, rows) in labels_transposed(&labels).iter().enumerate() {
             let ordinal = ordinal as u32;
-            let held: Vec<u32> = pack.members(ordinal).map(|v| v.iter().collect()).unwrap_or_default();
-            assert_eq!(&held, rows, "{} ordinal {ordinal}'s stored members", column.layer);
+            let held: Vec<u32> = pack
+                .members(ordinal)
+                .map(|v| v.iter().collect())
+                .unwrap_or_default();
+            assert_eq!(
+                &held, rows,
+                "{} ordinal {ordinal}'s stored members",
+                column.layer
+            );
             let covering: Vec<(u32, u32)> = pack.covering(ordinal).collect();
             assert_eq!(
                 covering,
@@ -360,7 +387,8 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
             forms.push((held, covering));
         }
         assert!(
-            out.insert((column.layer.clone(), column.level), forms).is_none(),
+            out.insert((column.layer.clone(), column.level), forms)
+                .is_none(),
             "one column per level in one view"
         );
     }
@@ -391,7 +419,11 @@ fn a_build_writes_the_members_and_coverings_beside_every_row_major_column() {
     let fx = fixture();
     let stored = stored_forms(&fx.root);
     let layers: Vec<&str> = stored.keys().map(|(layer, _)| layer.as_str()).collect();
-    assert_eq!(layers, vec![HULL, LABEL, LIST], "a member file beside each row-major column");
+    assert_eq!(
+        layers,
+        vec![HULL, LABEL, LIST],
+        "a member file beside each row-major column"
+    );
     let label = &stored[&(LABEL.to_string(), 0)];
     assert_eq!(
         label.iter().map(|(rows, _)| rows.len() as u64).sum::<u64>(),
@@ -417,7 +449,11 @@ fn build_and_fold_write_the_same_forms_for_the_same_data() {
     fold(&engine);
     drop(engine);
     let folded = stored_forms(&fx.root);
-    assert_ne!(manifest_at(&fx.root).0, fx.root.join("v00000"), "the fold published a prefix");
+    assert_ne!(
+        manifest_at(&fx.root).0,
+        fx.root.join("v00000"),
+        "the fold published a prefix"
+    );
     assert_eq!(built, folded);
 }
 
@@ -453,7 +489,11 @@ fn a_fold_after_ingest_and_growth_writes_the_forms_over_its_new_rows_and_a_resta
     let engine = fx.open();
     touch(&engine, &[LABEL, LIST, HULL]);
     assert!(engine.columns_adopted() > 0);
-    assert_eq!(engine.columns_composed(), 0, "the restart composed a column it was handed");
+    assert_eq!(
+        engine.columns_composed(),
+        0,
+        "the restart composed a column it was handed"
+    );
     for layer in [LABEL, LIST, HULL] {
         let column = held_column(&engine, layer).expect("a row-major level holds its column");
         let held = held_forms(&column, true, &format!("{layer} after the restart"));
@@ -495,7 +535,9 @@ fn a_level_published_at_runtime_holds_the_members_of_the_column_it_composes() {
         ("late/label", ServingLayout::RowMajorLabel, 25u64),
         ("late/list", ServingLayout::RowMajorList, 9),
     ] {
-        engine.register_layer(runtime_declaration(name, layout)).unwrap();
+        engine
+            .register_layer(runtime_declaration(name, layout))
+            .unwrap();
         let published: Vec<IncomingArtifact> = (0..artifacts)
             .map(|i| {
                 let mut sources: Vec<u64> = (0..N).filter(|e| e % artifacts == i).collect();
@@ -512,7 +554,10 @@ fn a_level_published_at_runtime_holds_the_members_of_the_column_it_composes() {
     for name in ["late/label", "late/list"] {
         let column = held_column(&engine, name).expect("the level is served from a column");
         let held = held_forms(&column, true, name);
-        assert!(held.iter().any(|(rows, _)| !rows.is_empty()), "{name} holds members");
+        assert!(
+            held.iter().any(|(rows, _)| !rows.is_empty()),
+            "{name} holds members"
+        );
     }
 }
 
@@ -547,8 +592,15 @@ fn a_growth_after_the_build_holds_what_a_rebuild_with_it_stores() {
     let rebuilt = &rebuilt[&(LABEL.to_string(), 0)];
     assert_eq!(held.len(), rebuilt.len());
     for (ordinal, ((rows, covering), (expected, _))) in held.iter().zip(rebuilt).enumerate() {
-        assert_eq!(rows, expected, "ordinal {ordinal}'s members against the rebuild");
-        assert_covers(covering, expected, &format!("ordinal {ordinal} against the rebuild"));
+        assert_eq!(
+            rows, expected,
+            "ordinal {ordinal}'s members against the rebuild"
+        );
+        assert_covers(
+            covering,
+            expected,
+            &format!("ordinal {ordinal} against the rebuild"),
+        );
     }
 }
 
@@ -563,7 +615,10 @@ fn a_column_recomposed_as_a_list_holds_its_new_members_and_a_dropped_one_takes_t
             .grow_memberships(
                 layer.into(),
                 0,
-                vec![IncomingGrowth::from_entities(key(layer, 1), fx.entities([0]))],
+                vec![IncomingGrowth::from_entities(
+                    key(layer, 1),
+                    fx.entities([0]),
+                )],
             )
             .expect("a growth into an artifact that exists");
     }
@@ -574,10 +629,16 @@ fn a_column_recomposed_as_a_list_holds_its_new_members_and_a_dropped_one_takes_t
     assert_eq!(listed.layout(), ServingLayout::RowMajorList);
     let held = held_forms(&listed, true, "recomposed as a list");
     let row = held[0].0[0];
-    assert!(held[1].0.contains(&row), "the shared row is a member of both artifacts");
+    assert!(
+        held[1].0.contains(&row),
+        "the shared row is a member of both artifacts"
+    );
 
     let dropped = engine.held_artifact_form_for_test("s0", HULL, 0).unwrap();
-    assert!(dropped.column().is_none(), "the hull level lost its column and its members with it");
+    assert!(
+        dropped.column().is_none(),
+        "the hull level lost its column and its members with it"
+    );
     assert_eq!(dropped.layout(), ServingLayout::ArtifactMajor);
 }
 
@@ -592,7 +653,9 @@ fn the_covering_index_returns_every_artifact_with_a_member_in_a_row_range() {
         let rows = column.base_rows();
         let mut state = 11u64;
         let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) as u32
         };
         for _ in 0..500 {

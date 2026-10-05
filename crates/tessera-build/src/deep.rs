@@ -832,7 +832,8 @@ fn check_row_members(
             ));
         }
     }
-    let scratch = std::env::temp_dir().join(format!("tessera-verify-members-{}", std::process::id()));
+    let scratch =
+        std::env::temp_dir().join(format!("tessera-verify-members-{}", std::process::id()));
     let checked = (|| {
         for column in extents.iter() {
             let DerivedForm::RowColumn { layout } = column.form else {
@@ -881,7 +882,9 @@ fn check_row_members(
                 if !stored.covering(ordinal).eq(fresh.covering(ordinal)) {
                     return Err(disagrees(
                         members_path,
-                        format!("holds another covering for ordinal {ordinal} than its column gives"),
+                        format!(
+                            "holds another covering for ordinal {ordinal} than its column gives"
+                        ),
                     ));
                 }
             }

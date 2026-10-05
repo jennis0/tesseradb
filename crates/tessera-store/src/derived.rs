@@ -593,6 +593,17 @@ impl ColumnLabels<'_> {
         }
     }
 
+    /// Every ordinal of the column, once for each row carrying it.
+    fn for_each_ordinal(&self, mut visit: impl FnMut(u32)) {
+        let rows = self.rows() as usize;
+        match self {
+            ColumnLabels::Label(pack) => {
+                pack.for_each_row_label(0, rows, |_, ordinal| visit(ordinal))
+            }
+            ColumnLabels::List(pack) => pack.for_each_value(0, rows, visit),
+        }
+    }
+
     /// Every `(row, ordinal)` of the column, in row order.
     fn for_each(&self, visit: impl FnMut(u32, u32)) {
         let rows = self.rows() as usize;
@@ -619,7 +630,10 @@ impl ColumnLabels<'_> {
 /// entries, or one artifact alone where that artifact has more. What stands is the bucket's rows,
 /// 4 B an entry, or for an artifact alone in its bucket only its bitmap as it grows. The coverings,
 /// 8 B a range, are held until the file is finished.
-pub fn project_row_members(labels: ColumnLabels<'_>, scratch: &Path) -> crate::Result<std::path::PathBuf> {
+pub fn project_row_members(
+    labels: ColumnLabels<'_>,
+    scratch: &Path,
+) -> crate::Result<std::path::PathBuf> {
     std::fs::create_dir_all(scratch).map_err(|source| crate::StoreError::Io {
         path: scratch.to_path_buf(),
         source,
@@ -641,7 +655,7 @@ fn write_row_members(
 ) -> crate::Result<()> {
     let ordinals = labels.ordinals();
     let mut counts = vec![0u64; ordinals as usize];
-    labels.for_each(|_, ordinal| {
+    labels.for_each_ordinal(|ordinal| {
         if let Some(count) = counts.get_mut(ordinal as usize) {
             *count += 1;
         }
@@ -2615,16 +2629,24 @@ mod derived_tests {
         let mut scattered_sorted = scattered.clone();
         scattered_sorted.sort_unstable();
         scattered_sorted.dedup();
-        let dense: Vec<u32> = (0..rows).filter(|r| r % 3 == 1 && !scattered_sorted.contains(r)).collect();
+        let dense: Vec<u32> = (0..rows)
+            .filter(|r| r % 3 == 1 && !scattered_sorted.contains(r))
+            .collect();
         let cases: Vec<Vec<Vec<u32>>> = vec![
             vec![(10..70_000).step_by(5).collect()],
-            vec![scattered_sorted.clone(), Vec::new(), dense.clone(), vec![rows - 1]],
+            vec![
+                scattered_sorted.clone(),
+                Vec::new(),
+                dense.clone(),
+                vec![rows - 1],
+            ],
         ];
         for sets in &cases {
             for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-                let column = project_row_column(sets.len() as u32, rows, layout, dir.path(), &walk_of(sets))
-                    .expect("a column")
-                    .expect("the sets partition");
+                let column =
+                    project_row_column(sets.len() as u32, rows, layout, dir.path(), &walk_of(sets))
+                        .expect("a column")
+                        .expect("the sets partition");
                 let members = stage_row_members(&column, layout, dir.path()).expect("the members");
                 let pack = crate::row_members::RowMembersPack::open(&members).expect("they open");
                 assert_members_match(&pack, sets);
@@ -2634,7 +2656,10 @@ mod derived_tests {
             }
         }
         let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().collect();
-        assert!(left.is_empty(), "the writer leaves nothing behind: {left:?}");
+        assert!(
+            left.is_empty(),
+            "the writer leaves nothing behind: {left:?}"
+        );
     }
 
     /// A list column's row may carry several artifacts, and each of them has the row.
@@ -2642,9 +2667,15 @@ mod derived_tests {
     fn an_overlapping_level_gives_each_artifact_its_shared_rows() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let sets = vec![vec![0, 1, 2, 90], vec![1, 2, 3], vec![]];
-        let column = project_row_column(3, 100, ServingLayout::RowMajorList, dir.path(), &walk_of(&sets))
-            .unwrap()
-            .unwrap();
+        let column = project_row_column(
+            3,
+            100,
+            ServingLayout::RowMajorList,
+            dir.path(),
+            &walk_of(&sets),
+        )
+        .unwrap()
+        .unwrap();
         let members = stage_row_members(&column, ServingLayout::RowMajorList, dir.path()).unwrap();
         let pack = crate::row_members::RowMembersPack::open(&members).unwrap();
         assert_members_match(&pack, &sets);
