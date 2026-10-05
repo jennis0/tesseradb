@@ -1332,11 +1332,9 @@ paths:
         one for the whole set: no tile, cell or group has a floor or a cap. `N` is `total`, the
         set's exact size. The reference set is sampled the same way at its own cut, and `lift`
         is taken from the scaled counts. Where `N` is at most `sample`, every item is counted
-        and the counts are exact. Every item is also counted, exactly, wherever the sample would
-        read no less: where the cut is above 2^58, `sample` being more than about one item in 64
-        of the set, and where the set's items are so few of the view's rows that testing the
-        view's rows below the cut against the set costs as much as reading the set's own values.
-        The server decides the second from counts it holds before reading anything. Without
+        and the counts are exact. Every item is also counted, exactly, where the cut is above
+        2^58, `sample` being more than about one item in 64 of the set, since no identity band
+        holds so wide a cut. Whether a set is sampled depends on `N` and `sample` alone. Without
         `range`, the edges are drawn as above from the values of the visible set, every item this
         principal may see in `view` whatever `filters`, `reference` and any region say, counted
         by the same rule: its items below its own cut where it is sampled, and every item where
@@ -5486,7 +5484,7 @@ components:
           properties:
             sampled:
               type: boolean
-              description: Whether any count is scaled from a sample; `false` where every item of the set, and of the reference set if any, was counted, because each held no more items than `sample` or the sample would have read no less (see **Sampled bins**).
+              description: Whether any count is scaled from a sample; `false` where every item of the set, and of the reference set if any, was counted, because each held no more items than `sample` or its cut was above 2^58 (see **Sampled bins**).
             items:
               type: integer
               minimum: 0

@@ -1666,9 +1666,9 @@ export type Grouping = {
  * With `bins` and a `sample`, a set of more than `sample` items is counted over its items whose
  * `tessera_id` is below one cut, `sample / total` of the identity range, about `sample` of them, and
  * each count is scaled to the set's `total`. Default edges are then drawn from the visible set's
- * sample. A set of at most `sample` items is counted exactly, and so is a set the server would read
- * no less of by sampling: one where `sample` is more than one item in 64, or whose items are too
- * few of the view's rows. The table's {@link AggregateTable.sample} says how it was counted.
+ * sample. A set of at most `sample` items is counted exactly, and so is one where `sample` is more
+ * than about one item in 64 of the set. The table's {@link AggregateTable.sample} says how it was
+ * counted.
  *
  * @category Requests and responses
  */

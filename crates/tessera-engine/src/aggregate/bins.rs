@@ -35,14 +35,15 @@
 //! The items below a cut are band `band_below(cut)` of each segment's identity bands
 //! ([`tessera_store::bands`]) intersected with the set. Each piece of rows is read either from the
 //! band, a set lookup per entry, or by scanning the set's rows' identities, whichever its counts,
-//! known before reading, say costs less. A banded entry's value is read from the band's copy of
-//! the column. A scanned row below the cut is read from the drawn column, or where the field is
-//! only indexed, from the band's copy, since every row below the cut is in the band.
+//! known before reading, say costs less. Both read the same items, so the choice changes only the
+//! time a piece takes. A banded entry's value is read from the band's copy of the column. A
+//! scanned row below the cut is read from the drawn column, or where the field is only indexed,
+//! from the band's copy, since every row below the cut is in the band.
 //!
-//! A set is counted exactly, every item read and nothing scaled, wherever the sample would read
-//! no less: where the cut is wider than the widest band, or where the pieces' costs, each the
-//! lesser of its band entries times [`BAND_ENTRY_ROWS`] and its rows in the set, add up to `N` or
-//! more. The head then says the set was not sampled, and counts `N` items.
+//! A set is counted exactly, every item read and nothing scaled, where its cut is above 2^58 and
+//! so wider than the widest band: where `s` is more than about one item in 64 of the set. Whether
+//! a set is sampled depends on `N` and `s` alone, so it says nothing of rows the viewer cannot see.
+//! The head then says the set was not sampled, and counts `N` items.
 
 use rayon::prelude::*;
 use tessera_filter::RecordValue;
@@ -374,8 +375,8 @@ impl Bins {
     }
 
     /// A tally of `set`'s values, how many of its counted items have no value, and how the set was
-    /// counted: the sample below the set's cut where it holds more items than the sample size and
-    /// the sample saves reads, and otherwise every item.
+    /// counted: the sample below the set's cut where it holds more items than the sample size and a
+    /// band holds the cut, and otherwise every item.
     fn tally<K: Num, T: Tally<K>>(
         &self,
         cx: &Cx<'_>,
@@ -386,7 +387,7 @@ impl Bins {
         let members = set.cells(cx);
         if let Some(plan) = self
             .cut(set.size())
-            .and_then(|cut| SamplePlan::of(cx, &members, set.size(), cut))
+            .and_then(|cut| SamplePlan::of(cx, &members, cut))
         {
             let (tally, none, items) = self.pass_sample(cx, &members, &plan, empty)?;
             timings.band_entries += plan.entries_read();
@@ -682,15 +683,15 @@ struct SamplePiece {
 }
 
 impl SamplePlan {
-    /// The plan for `members`, a set of `n` items, sampled below `cut`, or `None` where every item
-    /// is read for no more than the sample costs and the set is counted exactly. A piece costs the
-    /// lesser of its band entries times [`BAND_ENTRY_ROWS`] and its members, which is what decides
-    /// how it is read; where the pieces' costs add up to `n` or more, or no band holds every
-    /// identity below the cut, the sample reads at least as much as counting every item.
-    fn of(cx: &Cx<'_>, members: &CellSet<'_>, n: u64, cut: u64) -> Option<SamplePlan> {
+    /// The plan for `members` sampled below `cut`, or `None` where no band holds every identity
+    /// below the cut and the set is counted exactly. Whether a set is sampled depends on its size
+    /// and the sample size alone, both inside the visible set. Each piece is then read from the
+    /// band or by scanning, whichever its band entries times [`BAND_ENTRY_ROWS`] and its members
+    /// say costs less; the two read the same items.
+    fn of(cx: &Cx<'_>, members: &CellSet<'_>, cut: u64) -> Option<SamplePlan> {
         let band = tessera_store::bands::band_below(cut)?;
         let segments = cx.segments();
-        let pieces: Vec<(SamplePiece, u64)> = pieces(segments)
+        let pieces = pieces(segments)
             .into_par_iter()
             .map(|(s, rows)| {
                 let (segment, row_base) = segments[s];
@@ -698,23 +699,16 @@ impl SamplePlan {
                 let entries = (held.partition_point(|&r| r < rows.end - row_base)
                     - held.partition_point(|&r| r < rows.start - row_base))
                     as u64;
-                let count = members.count(rows.clone());
-                let from_band = entries.saturating_mul(BAND_ENTRY_ROWS);
-                let piece = SamplePiece {
+                let banded = entries.saturating_mul(BAND_ENTRY_ROWS) < members.count(rows.clone());
+                SamplePiece {
                     segment: s,
                     rows,
                     entries,
-                    banded: from_band < count,
-                };
-                (piece, from_band.min(count))
+                    banded,
+                }
             })
             .collect();
-        let cost = pieces.iter().map(|(_, cost)| cost).sum::<u64>();
-        (cost < n).then(|| SamplePlan {
-            cut,
-            band,
-            pieces: pieces.into_iter().map(|(piece, _)| piece).collect(),
-        })
+        Some(SamplePlan { cut, band, pieces })
     }
 
     /// The band entries the banded pieces read.

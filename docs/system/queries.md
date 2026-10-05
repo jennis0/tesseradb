@@ -525,11 +525,11 @@ rows' identities, whichever the band's entry count and the set's row count, both
 anything is read, say costs less: a narrow viewer's set is scanned, a broad one's read from the
 band. A band entry costs about as much as 25 scanned rows, since each is a lookup in the set.
 
-A set is counted exactly, every item read and nothing scaled, wherever the sample would read no
-less. A sample larger than about one item in 64 of the set has a cut wider than any band. Where
-every piece of a set would be scanned rather than read from the band, the scan reads every member's
-identity, which costs about what reading every member's value does. The head then says the set was
-not sampled.
+A set is counted exactly, every item read and nothing scaled, where its cut is wider than any
+band: where the sample size is more than about one item in 64 of the set. Whether a set is sampled
+depends only on its size and the sample size, both counted inside the visible set, and the choice
+between the band and a scan reads the same items, so the answer never depends on rows the viewer
+cannot see. The head then says the set was not sampled.
 
 Measured on the 3.5-billion-item GBIF bundle with its files in the page cache, a 100,000-item
 sample of the whole map takes 4 ms from the bands, and a viewer seeing 2.1% of the map is sampled

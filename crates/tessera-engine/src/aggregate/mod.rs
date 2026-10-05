@@ -167,7 +167,7 @@ pub struct TableHead {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableSample {
     /// Whether the counts are scaled from a sample; `false` where every item was counted, because
-    /// the set held no more items than the sample size or the sample would read no less.
+    /// the set held no more items than the sample size or its cut was wider than any band.
     pub sampled: bool,
     /// The items counted in the set: `total` where not sampled.
     pub items: u64,

@@ -1035,9 +1035,8 @@ class Viewer:
           more than `s` items is counted over its items whose `tessera_id` is below one cut,
           `s / total` of the identity range, about `s` of them, each count scaled to the set's
           `total`; default edges then come from the visible set's own sample. A set of at most
-          `s` items is counted exactly, and so is a set the server would read no less of by
-          sampling: one where `s` is more than one item in 64, or whose items are too few of the
-          view's rows. A histogram's table is always one page. `"cells"` divides the set, or each
+          `s` items is counted exactly, and so is one where `s` is more than about one item in 64
+          of the set. A histogram's table is always one page. `"cells"` divides the set, or each
           group, into the view's cells at a depth from 0 to 32, `{"depth": d}`, optionally only
           those meeting a box, `{"depth": d, "area": [x0, y0, x1, y1]}`; a grouping by bins takes
           no cells.

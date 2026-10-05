@@ -536,21 +536,15 @@ def sample_of(items: list[int], s: int, ids: dict[int, int]) -> list[int]:
 
 
 def exact_by_size(items: list[int], s: int) -> bool:
-    """Whether the contract counts every item whatever the set's rows: a set of at most `s`
-    items, or one whose cut is above 2^58, wider than any identity band."""
+    """Whether the contract counts every item: a set of at most `s` items, or one whose cut is
+    above 2^58, wider than any identity band. It depends on the set's size alone."""
     return len(items) <= s or (s << 64) // len(items) > 1 << 58
 
 
-def counted(items: list[int], s: int, ids: dict[int, int], head_items: int, what: str) -> list[int]:
-    """The items a table counted: every item where the head counts them all, and otherwise the
-    contract's sample. Which of the two the server chose is the head's to say, beyond
-    `exact_by_size`."""
-    if head_items == len(items):
-        return items
-    taken = sample_of(items, s, ids)
-    assert not exact_by_size(items, s), f"{what}: a set the size alone counts whole was sampled"
-    assert head_items == len(taken), f"{what}: {head_items} items, neither every item nor the sample"
-    return taken
+def counted(items: list[int], s: int, ids: dict[int, int]) -> list[int]:
+    """The items the contract counts: every item where the size says so, and otherwise the
+    sample."""
+    return items if exact_by_size(items, s) else sample_of(items, s, ids)
 
 
 def scale(count: int, n: int, taken: int) -> int:
@@ -562,10 +556,9 @@ def scale(count: int, n: int, taken: int) -> int:
 @pytest.mark.parametrize("column", [c.name for c in COLUMNS])
 def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities, principal, column):
     """With `sample`, each count is the oracle's count among the set's items below the cut,
-    scaled to the set, or every item's count where the head says the set was counted whole; the
-    reference is counted the same way at its own cut; the default edges are the readable edges of
-    the visible set's sample, or of every visible item, as the head says, and hold still under
-    every filter. The oracle draws every sample from the principal's visible items alone, so an
+    scaled to the set, or every item's count where the set's size and `sample` say it is counted
+    whole; the reference is counted the same way at its own cut; the default edges are the readable
+    edges of the visible set as it is counted, and hold still under every filter. The oracle draws every sample from the principal's visible items alone, so an
     item it cannot see that entered a sample, moved `total` or moved an edge would show here."""
     token = deployment.server.authorise(list(fx.PRINCIPALS[principal]))["token"]
     seen = visible(principal)
@@ -580,8 +573,8 @@ def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities,
             head, rows = read_table(deployment.server, token, body)
             what = f"{principal} / {column} / sample {s} / filter {name}"
             sample = head["sample"]
-            taken = counted(items, s, identities, sample["items"], what)
-            reference = counted(seen, s, identities, sample["reference_items"], what)
+            taken = counted(items, s, identities)
+            reference = counted(seen, s, identities)
             if principal == "everyone" and name == "none" and s < 300:
                 assert len(taken) < len(items), f"{what}: the whole view is sampled"
             edges = default_edges(column, reference, 10)
@@ -593,10 +586,10 @@ def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities,
             assert rows == want_rows, f"{what}: served {rows}, expected {want_rows}"
             assert (head["total"], head["reference_total"]) == (len(items), len(seen)), what
             assert sample == {
-                "sampled": len(taken) < len(items) or len(reference) < len(seen),
+                "sampled": not exact_by_size(items, s) or not exact_by_size(seen, s),
                 "items": len(taken),
                 "reference_items": len(reference),
-                "edges_sampled": len(reference) < len(seen),
+                "edges_sampled": not exact_by_size(seen, s),
             }, f"{what}: {head}"
             served = [(r[1], r[2]) for r in rows if r[0] == "listed"]
             assert held is None or served == held, f"{what}: the edges moved"

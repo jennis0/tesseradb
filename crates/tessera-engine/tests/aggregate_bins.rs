@@ -1154,21 +1154,19 @@ fn exact_by_size(s: u64, n: u64) -> bool {
     cut_of(s, n).is_none_or(|cut| cut > 1 << 58)
 }
 
-/// The items a table counted of `items`: every one where the head counts them all, and otherwise
-/// the oracle's sample of them.
-fn counted<'a>(items: &[&'a Item], sample: &[&'a Item], head_items: u64, what: &str) -> Vec<&'a Item> {
-    if head_items == items.len() as u64 {
-        items.to_vec()
-    } else {
-        assert_eq!(head_items, sample.len() as u64, "{what}: neither every item nor the sample");
-        sample.to_vec()
+/// The items the contract counts of `items` with sample size `s`: every one where the size says
+/// so, and otherwise those below the cut.
+fn counted<'a>(items: &[&'a Item], s: u64, ids: &HashMap<u64, u64>) -> Vec<&'a Item> {
+    match exact_by_size(s, items.len() as u64) {
+        true => items.to_vec(),
+        false => sample_of(items, s, ids),
     }
 }
 
 /// **A sampled histogram counts exactly the set's items below one cut and scales them, or counts
 /// every item**, on every route a field's values are read by: a drawn column, an indexed one
-/// copied in the bands, and one both drawn and indexed. A set the sample would save no reads on
-/// is counted whole, and one the size alone says is counted whole always is. With a range the
+/// copied in the bands, and one both drawn and indexed. Which of the two is decided by the set's
+/// size and the sample size alone, and the head says which. With a range the
 /// edges are fixed, so every count is checked against the oracle's; without one the edges are
 /// drawn from the visible set, or its sample where the head says so, cover every value in it, and
 /// hold still under a filter.
@@ -1209,27 +1207,23 @@ fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
                     let (head, rows, entries) = read_table(&fx.engine, &session, req);
                     entries_read += entries;
                     let counts = head.sample.expect("a sample was asked for");
-                    let taken = counted(&items, &sample_of(&items, s, &ids), counts.items, &what);
-                    let reference = counted(
-                        &all,
-                        &sample_of(&all, s, &ids),
-                        counts.reference_items.expect("a reference"),
-                        &what,
+                    let taken = counted(&items, s, &ids);
+                    let reference = counted(&all, s, &ids);
+                    assert_eq!(
+                        counts,
+                        tessera_engine::TableSample {
+                            sampled: !exact_by_size(s, n) || !exact_by_size(s, v),
+                            items: taken.len() as u64,
+                            reference_items: Some(reference.len() as u64),
+                            // Drawn from the visible set as the reference counted it.
+                            edges_sampled: !exact_by_size(s, v),
+                        },
+                        "{what}"
                     );
-                    let scaled_any = taken.len() < items.len() || reference.len() < all.len();
-                    assert_eq!(counts.sampled, scaled_any, "{what}");
-                    if exact_by_size(s, n) {
-                        assert_eq!(taken.len(), items.len(), "{what}: counted whole");
+                    match exact_by_size(s, n) {
+                        false => sampled_tables += 1,
+                        true => exact_tables += 1,
                     }
-                    if exact_by_size(s, v) {
-                        assert_eq!(reference.len(), all.len(), "{what}: counted whole");
-                    }
-                    match taken.len() < items.len() {
-                        true => sampled_tables += 1,
-                        false => exact_tables += 1,
-                    }
-                    // The edges are drawn from the visible set as the reference counted it.
-                    assert_eq!(counts.edges_sampled, reference.len() < all.len(), "{what}");
                     let edges = edges_of(&rows);
                     for item in &reference {
                         if let Some(v) = item.value(column).filter(|v| match v {
@@ -1270,7 +1264,8 @@ fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
                     let (head, rows) = table(&fx.engine, &session, req);
                     let counts = head.sample.expect("a sample was asked for");
                     assert!(!counts.edges_sampled, "{what}: a range draws no edges");
-                    let taken = counted(&items, &sample_of(&items, s, &ids), counts.items, &what);
+                    let taken = counted(&items, s, &ids);
+                    assert_eq!(counts.items, taken.len() as u64, "{what}");
                     let edges = edges_of(&rows);
                     let want = scaled(
                         expected(&edges, &taken, None, column),
@@ -1312,13 +1307,13 @@ fn a_set_within_the_sample_size_is_counted_exactly() {
     );
 }
 
-/// **A set the sample would save no reads on is counted exactly**, and says so. The subset
-/// viewer's set at a sample of 30 has a cut wider than any band. A category filter's set at a
-/// sample of 8 has a cut the bands hold, but the band holds every row of the view below it, and
-/// the set is too few of them for the band to be cheaper than reading the set's own values: the
-/// band holds at least `n / 25` entries.
+/// **Whether a set is sampled depends on its size and the sample size alone.** The subset
+/// viewer's set at a sample of 30 has a cut above 2^58, wider than any band, and is counted
+/// exactly, and says so. A category filter's set at a sample of 8 has a cut the bands hold, and is
+/// sampled, though the band holds every row of the view below the cut and the set is few of them,
+/// so it is read by scanning: how a set is read never changes what it counts.
 #[test]
-fn a_sample_that_saves_no_reads_is_counted_exactly() {
+fn whether_a_set_is_sampled_depends_on_its_size_alone() {
     let fx = fixture();
     let ids = identities(&fx);
     let cases: [(bool, u64, Option<FilterExpr>, Keep); 2] = [
@@ -1327,39 +1322,34 @@ fn a_sample_that_saves_no_reads_is_counted_exactly() {
     ];
     for (broad, s, filter, keep) in cases {
         let session = fx.session(broad);
-        let n = fx.visible(broad, keep).count() as u64;
-        let cut = cut_of(s, n).expect("the set is larger than the sample");
-        if let Some(band) = tessera_store::bands::band_below(cut) {
-            let held = fx
-                .items
-                .iter()
-                .filter(|i| ids[&i.source].leading_zeros() >= band)
-                .count() as u64;
-            assert!(held * 25 >= n, "the band holds {held} rows for a set of {n}");
-        }
+        let items: Vec<&Item> = fx.visible(broad, keep).collect();
+        let n = items.len() as u64;
+        let taken = counted(&items, s, &ids);
         for column in COLUMNS {
             let what = format!("{column}, sample {s}");
             let range = Some((Scalar::Int(-50), Scalar::Int(150)));
-            let groupings = [bins(column, 10, range)];
-            let mut req = request(&groupings);
-            req.filter = filter.clone();
-            let (exact_head, exact) = table(&fx.engine, &session, req);
             let groupings = [sampled(column, 10, range, s)];
             let mut req = request(&groupings);
             req.filter = filter.clone();
-            let (head, rows, entries) = read_table(&fx.engine, &session, req);
-            assert_eq!(rows, exact, "{what}");
-            assert_eq!(entries, 0, "{what}: no band was read");
+            let (head, rows) = table(&fx.engine, &session, req);
             assert_eq!(
                 head.sample,
                 Some(tessera_engine::TableSample {
-                    sampled: false,
-                    items: exact_head.total,
+                    sampled: !exact_by_size(s, n),
+                    items: taken.len() as u64,
                     reference_items: None,
                     edges_sampled: false,
                 }),
                 "{what}"
             );
+            let edges = edges_of(&rows);
+            let want = scaled(
+                expected(&edges, &taken, None, column),
+                n,
+                taken.len() as u64,
+                None,
+            );
+            assert_eq!(rows, want, "{what}");
         }
     }
 }
