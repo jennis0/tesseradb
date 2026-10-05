@@ -630,8 +630,8 @@ class Server:
         (contracts §3.2: an unknown filter column is a `422`, `none_of` is a `422`), where
         `raise_for_status` would convert the assertion target into a harness exception."""
         body = {"view": view_id, "zoom": zoom, "bbox": list(bbox)}
-        # `layers` omitted means no layers since contracts r38 (D9); the oracle wants every layer
-        # the principal reaches, which is what the I3 containment tests compare against.
+        # `layers` omitted means no layers; the oracle tags points with every layer the principal
+        # reaches.
         body["layers"] = "all"
         if k is not None:
             body["k"] = k
@@ -640,7 +640,7 @@ class Server:
         if filters is not None:
             body["filters"] = filters
         # **Every other request field, passed through by name.** `highlight`, `point_rows`,
-        # `artifact_rows`, `computed`, `levels`: each is one JSON key with no harness-side
+        # `levels`, `artifact_budget`: each is one JSON key with no harness-side
         # translation, and naming them one by one here would make this file a second copy of the
         # request schema that has to be edited whenever the first one is.
         body.update({key: value for key, value in extra.items() if value is not None})
@@ -648,6 +648,54 @@ class Server:
             f"{self.viewer_base}/v1/viewport",
             headers={"Authorization": f"Bearer {token}"},
             json=body,
+            timeout=30,
+        )
+
+    def artifacts_viewport(
+        self,
+        token: str,
+        view_id: str,
+        zoom: int,
+        bbox,
+        filters: dict | None = None,
+        **extra,
+    ) -> bytes:
+        """`POST /v1/artifacts/viewport`'s raw framed body: every layer the principal reaches
+        unless `layers` names some, and every artifact of each tile unless `per_tile` names a
+        quota, the deployment's ceiling being every one."""
+        resp = self.artifacts_viewport_request(token, view_id, zoom, bbox, filters, **extra)
+        resp.raise_for_status()
+        return resp.content
+
+    def artifacts_viewport_request(
+        self,
+        token: str,
+        view_id: str,
+        zoom: int,
+        bbox,
+        filters: dict | None = None,
+        **extra,
+    ) -> requests.Response:
+        """[`artifacts_viewport`] without the raise, for a test whose subject is the refusal."""
+        body = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "layers": "all"}
+        if filters is not None:
+            body["filters"] = filters
+        body.update({key: value for key, value in extra.items() if value is not None})
+        if "per_tile" not in body:
+            body["per_tile"] = self.meta(token)["selection"]["max_artifacts_per_tile"]
+        return requests.post(
+            f"{self.viewer_base}/v1/artifacts/viewport",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=30,
+        )
+
+    def artifact_card(self, token: str, tessera_id: int, view_id: str, **body) -> requests.Response:
+        """`POST /v1/artifacts/{tessera_id}`: one artifact's card, its drawn shape included."""
+        return requests.post(
+            f"{self.viewer_base}/v1/artifacts/{tessera_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"view": view_id, **body},
             timeout=30,
         )
 

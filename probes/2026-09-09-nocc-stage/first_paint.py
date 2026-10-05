@@ -82,7 +82,7 @@ def viewport(token, zoom, bbox, k=500):
                       json={"view": args.view, "zoom": zoom, "bbox": list(bbox), "k": k},
                       timeout=1800)
     r.raise_for_status()
-    tiles, _p, _s, _a, trailer = decode_frames(r.content)
+    tiles, _p, _s, trailer = decode_frames(r.content)
     stats = dict(zip(NAMES, (int(x) for x in trailer["stage_ns"].split(","))))
     return tiles, stats
 

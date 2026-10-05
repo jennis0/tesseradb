@@ -8,10 +8,10 @@ A battery is a list of queries and a recorded response per query (§12.2):
 The membership is §3's table, and it is small because the query surface is deliberately small —
 the same property that makes the leak register enumerable. Every served surface is here: the
 schema (`/v1/meta`), a category's values (`/v1/categories/{column}`) and its typeahead
-(`/suggest`), the viewport's streamed surfaces (tiles, points, underlay and artifacts, with a
-filter or a highlight where asked — the underlay must be *requested*, since at
-`underlay_offset = 0` it emits nothing and silently drops out of every comparison, and the
-artifacts only where `layers` names some), the counts by group over a drawn region
+(`/suggest`), the viewport's streamed surfaces (tiles, points and underlay, with a filter or a
+highlight where asked — the underlay must be *requested*, since at `underlay_offset = 0` it emits
+nothing and silently drops out of every comparison) and, where `layers` names some, the
+artifacts the same request is served from `/v1/artifacts/viewport`, the counts by group over a drawn region
 (`/v1/aggregate`), the drill-down
 (`/v1/items/{id}`), which earns its place twice over: it is the only surface that reads all three
 homes, so a blob-resident field dropped by a producer is visible nowhere else, and a layer's
@@ -86,7 +86,8 @@ class Viewport:
     underlay_offset: int = 0
     #: Canonical JSON for the `highlight` expression, or None.
     highlight: str | None = None
-    #: Canonical JSON for `layers` (`"all"` or a list of names), or None for no artifact pass.
+    #: Canonical JSON for `layers` (`"all"` or a list of names), or None for none: the layers that
+    #: tag the points, and whose artifacts the same request is read for.
     layers: str | None = None
 
     def __post_init__(self):
@@ -309,7 +310,8 @@ def record_one(server, token: str, query: Query) -> Canonical:
         )
         return _status_and_body(resp, (200, 404))
     if isinstance(query, Viewport):
-        return canonicalise_viewport(_viewport_body(server, token, query))
+        artifacts = None if query.layers is None else _artifacts_body(server, token, query)
+        return canonicalise_viewport(_viewport_body(server, token, query), artifacts)
     if isinstance(query, Item):
         # 404 is a *real* answer on this surface — contracts §3.2 returns it identically for "no
         # such ID" and "not visible to this principal", and a deny stage legitimately moves a
@@ -385,6 +387,29 @@ def _viewport_body(server, token: str, query: Viewport) -> bytes:
         body["layers"] = json.loads(query.layers)
     resp = requests.post(
         f"{server.viewer_base}/v1/viewport",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
+def _artifacts_body(server, token: str, query: Viewport) -> bytes:
+    """The `/v1/artifacts/viewport` body of the same request: its tiles, filter, highlight and
+    layers, every artifact of each tile."""
+    body: dict = {"view": query.view_id, "zoom": query.zoom, "layers": json.loads(query.layers)}
+    if query.bbox is not None:
+        body["bbox"] = list(query.bbox)
+    if query.tiles is not None:
+        body["tiles"] = list(query.tiles)
+    if query.filters is not None:
+        body["filters"] = json.loads(query.filters)
+    if query.highlight is not None:
+        body["highlight"] = json.loads(query.highlight)
+    body["per_tile"] = server.meta(token)["selection"]["max_artifacts_per_tile"]
+    resp = requests.post(
+        f"{server.viewer_base}/v1/artifacts/viewport",
         headers={"Authorization": f"Bearer {token}"},
         json=body,
         timeout=30,

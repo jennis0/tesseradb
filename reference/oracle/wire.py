@@ -8,13 +8,16 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order;
                         a scalar with no value is null
     kind 4  trailer    JSON                                   exactly one, last
-    kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and every
-                        key, masked_count, the derived           points frame; absent when none served
-                        geometry, content, parent_ids,
-                        rung, matched, highlighted — then
-                        shape_x/shape_y,
-                        in the schema only when a served
-                        row carries a drawn geometry; §3.2 r45)
+
+and the `/v1/artifacts/viewport` body, the same framing with one kind and a trailer of its own:
+
+    kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  first, one with a null `tile` for the
+                        key, masked_count, the centroid      treed layers, absent where it holds
+                        and box, content, parent_ids,        none; then exactly one per tile in
+                        rung, matched, highlighted,          request order, empty where the tile
+                        target, tile)                        holds none
+    kind 4  trailer    JSON (stream_us, arrow_serialise_ns,   exactly one, last
+                        rows, frames)
 
 Mirrors `crates/tessera-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
 independently implemented in Python (this is the client-side decode any real SDK would need, not
@@ -39,7 +42,7 @@ import pyarrow.ipc as ipc
 
 
 class Artifact(NamedTuple):
-    """One served artifact, as the kind-5 frame carries it.
+    """One served artifact, as a kind-5 frame carries it.
 
     Every field here is a fact about *this principal's* view of the artifact, and none is a fact
     about the artifact: `masked_count` is what they can see, and the geometry describes the members
@@ -53,13 +56,6 @@ class Artifact(NamedTuple):
     masked_count: int
     centroid: tuple[float, float] | None
     box: tuple[int, int, int, int] | None
-    #: The artifact's one drawn geometry, of the kind its layer declared (contracts §3.2 r45,
-    #: `polygon-membership.md` §7.1): parts, then rings, then `(x, y)` vertices. A part's first
-    #: ring is its outer and the rest are holes; two parts are two shapes, never a shape with a
-    #: gap. A derived hull is one part per α-group with no holes, so a membership that is several
-    #: separated clouds is several parts. The wire's `shape_x`/`shape_y` are
-    #: `list<list<list<uint32>>>`, one column per axis, and the two agree at every level.
-    shape: list[list[list[tuple[int, int]]]] | None
     #: One content, entire, positional to the layer's declared kinds. Empty means the layer
     #: declares no supplied content — never that content was withheld.
     content: list[str]
@@ -73,18 +69,21 @@ class Artifact(NamedTuple):
     #: layer. Empty for a root, for a flat artifact, and for a parent the response withheld alike
     #: — the wire does not distinguish them (C29, per entry), and neither may a reader.
     parent_ids: list[int]
-    #: Whether a member this principal may see, inside the request's tiles, matches the request's
+    #: Whether a member this principal may see, inside the frame's tile, matches the request's
     #: `filters` ([decision 0104](../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
     #: `None` — a null on the wire — where the request carried none: *there was no question*,
-    #: never *no matches*. A boolean and never a count, and clipped to the request's tiles where
+    #: never *no matches*. A boolean and never a count, and clipped to the tile where
     #: `masked_count` is not.
     matched: bool | None
     #: The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2), and `None`
     #: where the request carried no `highlight`.
     highlighted: bool | None
-    #: The identifier of the artifact this row is attached to, a row of the same response, or
-    #: `None` for a row attached to nothing.
+    #: The identifier of the artifact this row is attached to, a row of the same frame or of the
+    #: treed frame, or `None` for a row attached to nothing.
     target: int | None = None
+    #: The tile, as its Morton prefix at the request's depth, whose visible members put the row in
+    #: its frame; `None` in the treed frame.
+    tile: int | None = None
 
 
 FRAME_TILES = 1
@@ -105,6 +104,28 @@ _KNOWN_KINDS = {
 #: double-gated behind the server's timing feature and configuration.
 TRAILER_REQUIRED_KEYS = frozenset({"stream_us", "arrow_serialise_ns", "points", "flushes"})
 TRAILER_OPTIONAL_KEYS = frozenset({"stage_ns"})
+#: The `/v1/artifacts/viewport` trailer's closed key set.
+ARTIFACTS_TRAILER_KEYS = frozenset({"stream_us", "arrow_serialise_ns", "rows", "frames"})
+#: An artifacts frame's columns, in their fixed order.
+ARTIFACT_COLUMNS = (
+    "layer",
+    "tessera_id",
+    "key",
+    "masked_count",
+    "centroid_x",
+    "centroid_y",
+    "box_min_x",
+    "box_min_y",
+    "box_max_x",
+    "box_max_y",
+    "content",
+    "parent_ids",
+    "rung",
+    "matched",
+    "highlighted",
+    "target",
+    "tile",
+)
 
 
 def split_frames(data: bytes) -> list[tuple[int, bytes]]:
@@ -129,27 +150,6 @@ def split_frames(data: bytes) -> list[tuple[int, bytes]]:
         frames.append((kind, data[start:end]))
         at = end
     return frames
-
-
-def _zip_shape(sx, sy):
-    """Parts → rings → `(x, y)`, refusing the two axes disagreeing at any level.
-
-    Contracts §3.2 r45: the axes carry the same structure by construction and a decoder checks
-    it rather than assumes it — `zip` would silently truncate to the shorter side.
-    """
-    if len(sx) != len(sy):
-        raise ValueError("shape axes disagree on the number of parts")
-    parts = []
-    for px, py in zip(sx, sy):
-        if px is None or py is None or len(px) != len(py):
-            raise ValueError("shape axes disagree on the number of rings in a part")
-        rings = []
-        for rx, ry in zip(px, py):
-            if rx is None or ry is None or len(rx) != len(ry):
-                raise ValueError("shape axes disagree on the number of vertices in a ring")
-            rings.append(list(zip(rx, ry)))
-        parts.append(rings)
-    return parts
 
 
 def _batches(payload: bytes):
@@ -177,7 +177,6 @@ def decode_frames(data: bytes):
     tiles: list[tuple[int, int, int, int]] = []
     points: list[tuple[int, int]] = []
     sub_cells: list[tuple[int, int]] | None = None
-    artifacts: list[Artifact] | None = None
     trailer: dict | None = None
 
     for index, (kind, payload) in enumerate(frames):
@@ -215,99 +214,11 @@ def decode_frames(data: bytes):
                     )
                 )
         elif kind == FRAME_ARTIFACTS:
-            # At most one, after every points frame. A second would silently concatenate into the
-            # artifact surface, which is the same laxity the tiles rule above refuses.
-            if artifacts is not None:
-                raise ValueError("more than one artifacts frame")
-            artifacts = []
-            for batch in _batches(payload):
-                # `masked_count` is what the *asking principal* can see, never the artifact's
-                # membership size. The oracle must not treat it as a cardinality of anything it
-                # can enumerate independently: no unmasked quantity reaches this wire at all, by
-                # design, so there is nothing here to reconcile against a corpus-wide figure.
-                #
-                # The geometry columns carry the same warning in a shape that hides it better: a
-                # centroid or a derived hull is computed over `membership ∩ M_auth`, so two
-                # principals legitimately disagree about the same `tessera_id` here too, and
-                # neither shape is the artifact's (a predicate or authored shape agrees across
-                # principals, but this reader does not know the kind and must not assume it). A
-                # `None` is *this layer declares no such property* — never *withheld*, since an
-                # artifact whose content could not be served is absent whole. `layer` is
-                # dictionary-encoded (contracts §3.2 r44); `to_pylist` resolves the keys to their
-                # utf8 values, so the encoding is invisible from here on. The two shape columns
-                # TRAIL the fixed columns and are absent from the schema entirely when no served
-                # row carries a drawn geometry (§3.2 r45) — an absent column is distinguishable
-                # from a null one, so 0076's null rule gains no third reading.
-                names = set(batch.schema.names)
-                if ("shape_x" in names) != ("shape_y" in names):
-                    raise ValueError("a shape with one axis column and not the other")
-                columns = {
-                    name: batch.column(name).to_pylist()
-                    for name in (
-                        "layer",
-                        "tessera_id",
-                        "key",
-                        "masked_count",
-                        "centroid_x",
-                        "centroid_y",
-                        "box_min_x",
-                        "box_min_y",
-                        "box_max_x",
-                        "box_max_y",
-                        "content",
-                        "parent_ids",
-                        "rung",
-                        "matched",
-                        "highlighted",
-                        "target",
-                    )
-                }
-                shapes = "shape_x" in names
-                shape_x = batch.column("shape_x").to_pylist() if shapes else None
-                shape_y = batch.column("shape_y").to_pylist() if shapes else None
-                for row in range(batch.num_rows):
-                    cx = columns["centroid_x"][row]
-                    bx = columns["box_min_x"][row]
-                    sx = shape_x[row] if shapes else None
-                    sy = shape_y[row] if shapes else None
-                    if (sx is None) != (sy is None):
-                        raise ValueError("a shape with one axis and not the other")
-                    artifacts.append(
-                        Artifact(
-                            layer=columns["layer"][row],
-                            tessera_id=columns["tessera_id"][row],
-                            key=columns["key"][row],
-                            masked_count=columns["masked_count"][row],
-                            centroid=(
-                                None if cx is None else (cx, columns["centroid_y"][row])
-                            ),
-                            box=(
-                                None
-                                if bx is None
-                                else (
-                                    bx,
-                                    columns["box_min_y"][row],
-                                    columns["box_max_x"][row],
-                                    columns["box_max_y"][row],
-                                )
-                            ),
-                            shape=None if sx is None else _zip_shape(sx, sy),
-                            content=list(columns["content"][row] or []),
-                            rung=columns["rung"][row],
-                            parent_ids=list(columns["parent_ids"][row] or []),
-                            matched=columns["matched"][row],
-                            highlighted=columns["highlighted"][row],
-                            target=columns["target"][row],
-                        )
-                    )
-            if not artifacts:
-                raise ValueError(
-                    "an empty artifacts frame: the server omits the frame when nothing is served, "
-                    "so a present-but-empty one means the emitter and this reader disagree"
-                )
+            raise ValueError(
+                "an artifacts frame in a viewport body: artifacts are served by "
+                "/v1/artifacts/viewport, and a viewport body carries none"
+            )
         elif kind == FRAME_POINTS:
-            if artifacts is not None:
-                raise ValueError("a points frame follows the artifacts frame")
             for batch in _batches(payload):
                 # `tessera_id` (u64), not `handle` (u32): contracts r6 retires the per-session
                 # handle from the viewer plane and puts the stable wire identity at the row. The
@@ -349,12 +260,12 @@ def decode_frames(data: bytes):
         raise ValueError(
             f"sum of served ({served_total}) != number of points ({len(points)})"
         )
-    return tiles, points, sub_cells, artifacts, trailer
+    return tiles, points, sub_cells, trailer
 
 
 def decode_viewport(data: bytes):
     """`(tiles, points)`; tile rows are 5-tuples `(tile, visible, matched, served, highlighted)`."""
-    tiles, points, _sub_cells, _artifacts, _trailer = decode_frames(data)
+    tiles, points, _sub_cells, _trailer = decode_frames(data)
     return tiles, points
 
 
@@ -395,25 +306,123 @@ def decode_viewport_with_subcells(data: bytes):
     contract with its existing callers; `decode_frames` is the layer that distinguishes
     unrequested (`None`) from present-but-empty (`[]`).
     """
-    tiles, points, sub_cells, _artifacts, _trailer = decode_frames(data)
+    tiles, points, sub_cells, _trailer = decode_frames(data)
     return tiles, points, sub_cells if sub_cells is not None else []
 
 
-def decode_viewport_artifacts(data: bytes):
-    """The artifacts a response served, as [`Artifact`] rows.
+def _artifact_rows(payload: bytes) -> list[Artifact]:
+    """One artifacts frame's rows, its seventeen columns read by name and checked by position.
 
-    `[]` when the response carried no artifacts frame — and that is not a loss of information: the
-    server omits the frame precisely when nothing is served, and *why* nothing is served (no layer
-    reachable, none intersecting the viewport, none clearing its existence criterion) is
-    deliberately not on the wire. A caller wanting to distinguish those has asked a question the
-    response is designed not to answer.
-
-    **`masked_count` is the asking principal's own count**, so two principals legitimately disagree
-    about the same `tessera_id`, and neither figure is the artifact's membership size. A comparator
-    that asserted agreement across principals would be asserting the bug.
+    `masked_count` is what the *asking principal* can see, never the artifact's membership size,
+    and the centroid and box are over the members they can see: two principals legitimately
+    disagree about one `tessera_id`. A `None` geometry is *this layer declares no such property,
+    or the request asked for none* — never *withheld*, since an artifact that cannot be served is
+    absent whole. `layer` is dictionary-encoded; `to_pylist` resolves it.
     """
-    _tiles, _points, _sub_cells, artifacts, _trailer = decode_frames(data)
-    return artifacts if artifacts is not None else []
+    rows: list[Artifact] = []
+    with ipc.open_stream(io.BytesIO(payload)) as reader:
+        if tuple(reader.schema.names) != ARTIFACT_COLUMNS:
+            raise ValueError(f"an artifacts frame's columns are {reader.schema.names}")
+        for batch in reader:
+            columns = {name: batch.column(name).to_pylist() for name in ARTIFACT_COLUMNS}
+            for row in range(batch.num_rows):
+                cx = columns["centroid_x"][row]
+                bx = columns["box_min_x"][row]
+                rows.append(
+                    Artifact(
+                        layer=columns["layer"][row],
+                        tessera_id=columns["tessera_id"][row],
+                        key=columns["key"][row],
+                        masked_count=columns["masked_count"][row],
+                        centroid=None if cx is None else (cx, columns["centroid_y"][row]),
+                        box=(
+                            None
+                            if bx is None
+                            else (
+                                bx,
+                                columns["box_min_y"][row],
+                                columns["box_max_x"][row],
+                                columns["box_max_y"][row],
+                            )
+                        ),
+                        content=list(columns["content"][row] or []),
+                        rung=columns["rung"][row],
+                        parent_ids=list(columns["parent_ids"][row] or []),
+                        matched=columns["matched"][row],
+                        highlighted=columns["highlighted"][row],
+                        target=columns["target"][row],
+                        tile=columns["tile"][row],
+                    )
+                )
+    return rows
+
+
+def decode_artifact_frames(data: bytes):
+    """`(frames, trailer)` of a `/v1/artifacts/viewport` body: each frame as `(tile, rows)`. `tile`
+    is `None` for the treed frame, and for a tile's frame of no rows, which names no tile.
+
+    Strict as [`decode_frames`] is: a frame of another kind, rows of one frame naming two tiles, a
+    treed frame anywhere but first or holding no row, a missing trailer, a trailer key outside the
+    closed set, or a trailer whose counts disagree with the body all raise.
+    """
+    frames: list[tuple[int | None, list[Artifact]]] = []
+    trailer: dict | None = None
+    at = 0
+    raw: list[tuple[int, bytes]] = []
+    while at < len(data):
+        if len(data) - at < 5:
+            raise ValueError(f"truncated frame header at byte {at}")
+        kind = data[at]
+        (length,) = struct.unpack_from("<I", data, at + 1)
+        end = at + 5 + length
+        if end > len(data):
+            raise ValueError(f"frame at byte {at} claims a payload past the end of the body")
+        raw.append((kind, data[at + 5 : end]))
+        at = end
+    if not raw or raw[-1][0] != FRAME_TRAILER:
+        raise ValueError("missing trailer: the response is incomplete")
+    for index, (kind, payload) in enumerate(raw[:-1]):
+        if kind != FRAME_ARTIFACTS:
+            raise ValueError(f"a frame of kind {kind} in an artifacts viewport body")
+        rows = _artifact_rows(payload)
+        tiles = {row.tile for row in rows}
+        if len(tiles) > 1:
+            raise ValueError(f"one frame names the tiles {sorted(tiles, key=str)}")
+        if rows and rows[0].tile is None and index != 0:
+            raise ValueError("the treed frame comes first")
+        frames.append((rows[0].tile if rows else -1, rows))
+    trailer = json.loads(raw[-1][1])
+    if set(trailer) != ARTIFACTS_TRAILER_KEYS:
+        raise ValueError(f"the trailer's keys are {sorted(trailer)}")
+    if trailer["frames"] != len(frames):
+        raise ValueError(f"the trailer counts {trailer['frames']} frames, the body {len(frames)}")
+    if trailer["rows"] != sum(len(rows) for _, rows in frames):
+        raise ValueError("the trailer's rows disagree with the body")
+    return [(None if tile == -1 else tile, rows) for tile, rows in frames], trailer
+
+
+def decode_viewport_artifacts(data: bytes) -> list[Artifact]:
+    """Every artifact a `/v1/artifacts/viewport` body served, once, in the order first served,
+    with `matched` and `highlighted` taken over every tile it was served in and `tile` `None`: what
+    one answer over the whole of the request's tiles says.
+
+    `[]` where nothing was served — and *why* nothing is served (no layer reachable, none in the
+    tiles, none clearing its existence criterion) is deliberately not on the wire.
+    """
+    frames, _trailer = decode_artifact_frames(data)
+    merged: dict[int, Artifact] = {}
+    for _tile, rows in frames:
+        for row in rows:
+            held = merged.get(row.tessera_id)
+            if held is None:
+                merged[row.tessera_id] = row._replace(tile=None)
+                continue
+            either = lambda a, b: None if a is None or b is None else (a or b)  # noqa: E731
+            merged[row.tessera_id] = held._replace(
+                matched=either(held.matched, row.matched),
+                highlighted=either(held.highlighted, row.highlighted),
+            )
+    return list(merged.values())
 
 
 # `POST /v1/items` is framed the viewport's way with kinds of its own:

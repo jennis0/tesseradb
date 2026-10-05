@@ -1268,6 +1268,51 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     assert not leaked, f"entity id(s) as decimal text in an artifacts body: {sorted(leaked)[:20]}"
     assert identity_key_hex not in artifact_text.decode("utf-8", errors="replace")
 
+    # --- POST /v1/artifacts/viewport: the same layer, tile by tile, every frame swept ----------
+    tile_ids: set[int] = set()
+    tile_id_values: set[int] = set()
+    tile_number_values: set[int] = set()
+    tile_text = b""
+    for zoom in (0, 2):
+        raw = server.artifacts_viewport(
+            token,
+            VIEW,
+            zoom,
+            [0.0, 0.0, GRID_MAX, GRID_MAX],
+            layers=[ARTIFACTS_LAYER],
+            filters={"region": {"bbox": [0.0, 0.0, GRID_MAX / 2, GRID_MAX]}},
+        )
+        assert identity_key_raw not in raw, "identity key's raw 16 bytes in an artifacts viewport"
+        frames, trailer = wire.decode_artifact_frames(raw)
+        # Its two elapsed times are microseconds and nanoseconds, any of which can equal an entity
+        # id by chance; the counts are swept.
+        tile_text += json.dumps({k: trailer[k] for k in ("rows", "frames")}).encode() + b"\n"
+        for _tile, rows in frames:
+            for row in rows:
+                tile_ids.add(row.tessera_id)
+                tile_id_values.update([row.tessera_id, *row.parent_ids])
+                if row.target is not None:
+                    tile_id_values.add(row.target)
+                tile_number_values.update(
+                    v for v in (row.masked_count, row.rung, row.tile) if v is not None
+                )
+                for value in (*(row.centroid or ()), *(row.box or ())):
+                    tile_number_values.add(
+                        int.from_bytes(struct.pack("<d", float(value)), "little")
+                    )
+                    tile_number_values.add(int(value))
+                tile_text += "\n".join([row.key or "", *row.content]).encode() + b"\n"
+    assert tile_ids, "the artifacts viewport must serve rows to mean anything"
+    tile_entities = {identity_mod.invert(identity_key, t)[1] for t in tile_ids}
+    leaked = tile_id_values & (target_ids | tile_entities)
+    assert not leaked, f"entity id(s) in an artifacts viewport identifier: {sorted(leaked)[:20]}"
+    leaked = tile_number_values & (target_ids_high | tile_entities)
+    assert not leaked, f"entity id(s) in an artifacts viewport number: {sorted(leaked)[:20]}"
+    leaked = _decimal_windows(tile_text, SAFE_ID_FLOOR) & (target_ids_high | tile_entities)
+    assert not leaked, f"entity id(s) as decimal text in an artifacts viewport: {sorted(leaked)[:20]}"
+    for half in (identity_key.k0, identity_key.k1):
+        assert half not in tile_id_values | tile_number_values
+
     # --- server log: text, so scan for decimal substrings, not just raw LE bytes -----------------
     log_bytes = log_path.read_bytes()
     log_text_for_substrings = log_bytes.decode("utf-8", errors="replace")

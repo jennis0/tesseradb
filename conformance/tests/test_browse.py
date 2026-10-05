@@ -110,11 +110,11 @@ def page(server, token: str, **body) -> dict:
 
 
 def served_artifacts(server, token: str, layer: str) -> dict:
-    """What the viewport's own artifacts frame serves this principal for `layer` — the second
+    """What `/v1/artifacts/viewport` serves this principal for `layer` — the second
     reader for every identifier and every count browse reports."""
     return {
         str(a.tessera_id): a
-        for a in decode_viewport_artifacts(server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000))
+        for a in decode_viewport_artifacts(server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP))
         if a.layer == layer
     }
 

@@ -596,14 +596,17 @@ def normalise_viewport(
         return local[tessera][1] if tessera in local else f"unserved artifact {tessera}"
 
     # Kept apart from the rows, which are compared by key, so an order difference is reported as
-    # one and cannot hide a difference in what is served.
-    out["artifact order"] = [[row["layer"], row["key"]] for row in rows]
+    # one and cannot hide a difference in what is served. A tile's rows go by count and then by
+    # `tessera_id`, which each deployment draws for itself, so the order compared is the counts'.
+    out["artifact order"] = [[row["tile"], row["layer"], row["masked_count"]] for row in rows]
     for row in rows:
         row.pop("tessera_id")
         row["parent_ids"] = sorted(key(p) for p in row.get("parent_ids") or [])
         if "target" in row:
             row["target"] = key(row["target"])
-    out["artifacts"] = sorted(rows, key=lambda r: (r["layer"], r["key"] or "", r["rung"]))
+    out["artifacts"] = sorted(
+        rows, key=lambda r: (r["layer"], r["key"] or "", r["rung"], r["tile"] is None, r["tile"] or 0)
+    )
 
     points = streams_table(canon.points)
     served = []

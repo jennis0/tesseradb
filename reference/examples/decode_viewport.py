@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A worked decode of a `POST /v1/viewport` body, in Python with `pyarrow` and nothing of
+"""A worked decode of a `POST /v1/viewport` or `POST /v1/artifacts/viewport` body, in Python with
+`pyarrow` and nothing of
 Tessera's — not the oracle's `wire.py`, deliberately, so that a stranger holding only this file
 and contracts §5 can read a response. `docs/openapi/README.md` walks it.
 
@@ -9,19 +10,24 @@ prints every frame — kind, payload length, and for an Arrow payload its row co
 then the first rows of each batch. A `tessera_id` is a `u64` and is printed as a decimal integer.
 
 The framing (contracts §5): `u8 kind`, `u32` little-endian payload length, payload, repeated.
-Every Arrow payload is a complete IPC stream, decodable alone; the trailer is JSON. Kinds:
+Every Arrow payload is a complete IPC stream, decodable alone; the trailer is JSON. A viewport
+body's kinds:
 
-    1  tiles       exactly one, first          (tile, visible, matched, served)
+    1  tiles       exactly one, first          (tile, visible, matched, served, highlighted)
     2  sub-cells   exactly one iff requested   (cell, count)
     3  points      zero or more                (tessera_id, code, ...render columns)
-    5  artifacts   at most one, after points   (layer, tessera_id, key, masked_count, ...,
-                                                rung, matched)
     4  trailer     exactly one, last           JSON — its presence marks the response complete
 
-The artifacts frame's `layer` is dictionary-encoded (u16 keys over utf8 values), which `pyarrow`
-resolves on read, and its two shape columns (`shape_x`/`shape_y`, parts → rings → vertices) trail
-the fixed set — in the schema only when a served layer has a drawn geometry (contracts §3.2 r45). Under `artifact_rows: "identity"` the same rows arrive
-as just (layer, tessera_id, rung, matched); this decoder is generic over either shape.
+An artifacts viewport body's:
+
+    5  artifacts   one per tile, in request    (layer, tessera_id, key, masked_count, ...,
+                   order, after one for the     rung, matched, highlighted, target, tile)
+                   treed layers where it holds
+                   a row
+    4  trailer     exactly one, last           JSON
+
+An artifacts frame's `layer` is dictionary-encoded (u16 keys over utf8 values), which `pyarrow`
+resolves on read.
 
 Strict on purpose: a truncated body, a missing trailer or an unknown kind raises. Every prefix of
 a stream is sound to draw — the counts are exact from the first frame — but it must not be
@@ -62,17 +68,19 @@ def split_frames(body: bytes) -> list[tuple[int, bytes]]:
         offset = end
     if not frames or frames[-1][0] != TRAILER:
         raise ValueError("no trailing kind-4 frame: the response is incomplete")
-    if frames[0][0] != TILES:
-        raise ValueError("the first frame must be the tiles frame")
+    kinds = {kind for kind, _ in frames[:-1]}
+    if frames[0][0] != TILES and not kinds <= {ARTIFACTS}:
+        raise ValueError("a body begins with its tiles frame, or holds artifacts frames alone")
     return frames
 
 
 @dataclass
 class Viewport:
     frames: list[int]
-    tiles: pa.Table
+    tiles: pa.Table | None
     sub_cells: pa.Table | None
-    artifacts: pa.Table | None
+    #: One table per artifacts frame, in order.
+    artifacts: list[pa.Table] = field(default_factory=list)
     points: list[pa.Table] = field(default_factory=list)
     trailer: dict = field(default_factory=dict)
 
@@ -82,9 +90,11 @@ class Viewport:
 
 
 def decode_viewport(body: bytes) -> Viewport:
-    """Every batch of one body. Points frames concatenate; their boundaries are not contract."""
+    """Every batch of one body. Points frames concatenate; their boundaries are not contract. An
+    artifacts frame is one tile's, so each is kept apart."""
     frames = split_frames(body)
-    tiles = sub_cells = artifacts = None
+    tiles = sub_cells = None
+    artifacts: list[pa.Table] = []
     points: list[pa.Table] = []
     trailer: dict = {}
     for kind, payload in frames:
@@ -97,10 +107,9 @@ def decode_viewport(body: bytes) -> Viewport:
         elif kind == SUB_CELLS:
             sub_cells = table
         elif kind == ARTIFACTS:
-            artifacts = table
+            artifacts.append(table)
         else:
             points.append(table)
-    assert tiles is not None
     return Viewport([k for k, _ in frames], tiles, sub_cells, artifacts, points, trailer)
 
 
@@ -127,12 +136,13 @@ def main(path: str) -> None:
         print(f"  kind {kind} {KIND_NAMES[kind]}: {len(payload)} B, {table.num_rows} rows, "
               f"columns {table.column_names}")
     v = decode_viewport(body)
-    print("first tiles rows:", first_rows([v.tiles], 3))
-    if v.sub_cells is not None:
-        print("first sub-cells rows:", first_rows([v.sub_cells], 3))
-    if v.artifacts is not None:
-        print("first artifacts rows:", first_rows([v.artifacts], 3))
-    print("first points rows:", first_rows(v.points, 3))
+    if v.tiles is not None:
+        print("first tiles rows:", first_rows([v.tiles], 3))
+        if v.sub_cells is not None:
+            print("first sub-cells rows:", first_rows([v.sub_cells], 3))
+        print("first points rows:", first_rows(v.points, 3))
+    else:
+        print("first artifacts rows:", first_rows(v.artifacts, 3))
 
 
 if __name__ == "__main__":
