@@ -363,6 +363,7 @@ fn caps() -> AggregateCaps {
         groupings: 8,
         top: 100,
         named: 100,
+        bins: 100,
         cells: u64::MAX,
     }
 }

@@ -3,7 +3,7 @@
 //! the whole table, a suppression applies from the next response, every refusal has its status,
 //! a request takes its slot from the viewport's gate or, with cells, the bulk-read lane, and
 //! frees it when the client goes away, a trailer says when a table was counted over a changed
-//! corpus, and `/v1/meta` publishes its limits.
+//! corpus, `/v1/meta` publishes its limits, and a number or timestamp field is counted in bins.
 
 mod common;
 
@@ -24,7 +24,8 @@ const LAYER: &str = "groups/flat";
 const ARCHIVES: [&str; 3] = ["astro", "cond", "hep"];
 
 /// `archive` is drawn and indexed; `tag` is a category held only in the record store, so it
-/// cannot be counted.
+/// cannot be counted. `score` is a drawn number, `stamp` an indexed timestamp and `pages` a number
+/// held only in the record store.
 const SCHEMA_TOML: &str = r#"
 [[vocabulary]]
 name       = "archive"
@@ -53,7 +54,32 @@ vocabulary = "archive"
 name       = "tag"
 type       = "category"
 vocabulary = "tag"
+
+[[attribute]]
+name   = "score"
+type   = "f64"
+render = true
+
+[[attribute]]
+name  = "stamp"
+type  = "timestamp_us"
+index = true
+
+[[attribute]]
+name = "pages"
+type = "u32"
 "#;
+
+/// Item `e`'s score: none on every seventh, otherwise from 0 to 99.9.
+fn score_of(e: u64) -> Option<f64> {
+    (!e.is_multiple_of(7)).then(|| ((e * 7919) % 1000) as f64 / 10.0)
+}
+
+/// Item `e`'s stamp: a day of 2020 or 2021, none on every eleventh.
+fn stamp_of(e: u64) -> Option<i64> {
+    const JAN_2020: i64 = 1_577_836_800_000_000;
+    (!e.is_multiple_of(11)).then(|| JAN_2020 + ((e * 389) % 700) as i64 * 86_400_000_000)
+}
 
 /// Item `e`'s archive: none on every tenth, otherwise spread so that both viewers see all three.
 fn archive_of(e: u64) -> Option<&'static str> {
@@ -83,11 +109,21 @@ fn build_bundle(dir: &Path) {
     let ids: Vec<u64> = (0..N).collect();
     let archives = StringArray::from_iter(ids.iter().map(|&e| archive_of(e)));
     let tags = StringArray::from_iter_values(ids.iter().map(|&e| format!("t{}", e % 4)));
+    let scores = arrow::array::Float64Array::from_iter(ids.iter().map(|&e| score_of(e)));
+    let stamps =
+        arrow::array::TimestampMicrosecondArray::from_iter(ids.iter().map(|&e| stamp_of(e)));
+    let pages = arrow::array::UInt32Array::from_iter_values(ids.iter().map(|&e| e as u32));
     write_points(
         &points,
         &ids,
         scatter,
-        vec![column("archive", true, archives), column("tag", false, tags)],
+        vec![
+            column("archive", true, archives),
+            column("tag", false, tags),
+            column("score", true, scores),
+            column("stamp", true, stamps),
+            column("pages", false, pages),
+        ],
     );
     write_pairs_n(&pairs, N);
     build_declared(
@@ -747,6 +783,7 @@ async fn every_refusal_has_its_status() {
         limits.max_aggregate_groupings = 2;
         limits.max_aggregate_top = 5;
         limits.max_aggregate_named = 3;
+        limits.max_aggregate_bins = 8;
     })
     .await;
     let token = token_for(&f.server, &["0"]).await;
@@ -791,6 +828,22 @@ async fn every_refusal_has_its_status() {
         (by(json!({ "field": "nope", "top": 1 })), None),
         (by(json!({ "field": "id", "top": 1 })), None),
         (by(json!({ "field": "tag", "top": 1 })), None),
+        (by(json!({ "field": "score", "bins": 4, "top": 2 })), None),
+        (by(json!({ "field": "score", "range": [0, 1] })), None),
+        (by(json!({ "field": "score", "top": 2, "range": [0, 1] })), None),
+        (by(json!({ "field": "score", "bins": 0 })), None),
+        (by(json!({ "field": "score", "bins": 9 })), Some("max_aggregate_bins")),
+        (by(json!({ "field": "score", "bins": 4, "range": [5, 5] })), None),
+        (by(json!({ "field": "score", "bins": 4, "range": [5, 1] })), None),
+        (by(json!({ "field": "score", "bins": 4, "range": [1] })), None),
+        (by(json!({ "field": "score", "bins": 4, "range": ["a", 1] })), None),
+        (by(json!({ "field": "score", "bins": 4, "range": [10, "50"] })), None),
+        (by(json!({ "field": "stamp", "bins": 4, "range": [0.5, 10] })), None),
+        (by(json!({ "layer": LAYER, "bins": 4 })), None),
+        (json!({ "view": "s0", "groupings": [{ "by": { "field": "score", "bins": 4 }, "cells": { "depth": 2 } }] }), None),
+        (by(json!({ "field": "archive", "bins": 4 })), None),
+        (by(json!({ "field": "pages", "bins": 4 })), None),
+        (by(json!({ "field": "nope", "bins": 4 })), None),
         (json!({ "view": "s0", "groupings": [{}], "filters": { "nope": { "eq": 1 } } }), None),
         (json!({ "view": "s0", "groupings": [{}], "reference": { "nope": { "eq": 1 } } }), None),
         (json!({ "view": "s0", "groupings": [{}], "page_rows": 0 }), None),
@@ -1106,6 +1159,7 @@ async fn meta_publishes_the_limits() {
         limits.max_aggregate_groupings = 7;
         limits.max_aggregate_top = 70;
         limits.max_aggregate_named = 700;
+        limits.max_aggregate_bins = 70_000;
     })
     .await;
     let token = token_for(&f.server, &["0"]).await;
@@ -1124,5 +1178,122 @@ async fn meta_publishes_the_limits() {
     assert_eq!(selection["max_aggregate_groupings"], 7);
     assert_eq!(selection["max_aggregate_top"], 70);
     assert_eq!(selection["max_aggregate_named"], 700);
+    assert_eq!(selection["max_aggregate_bins"], 70_000);
     assert_eq!(selection["max_aggregate_cells"], 1 << 20, "the default: every cell at depth 10");
+}
+
+/// A bins table's rows: each bin's `(lower, upper, count, reference_count)` with its edges as
+/// numbers, and the `rest` and `none` rows as `(group, count)`.
+type BinRows = (Vec<(f64, f64, u64, Option<u64>)>, Vec<(String, u64)>);
+
+fn bin_rows(responses: &[DecodedAggregate], timestamps: bool) -> BinRows {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::{Float64Type, TimeUnit, TimestampMicrosecondType};
+    let mut bins = Vec::new();
+    let mut others = Vec::new();
+    let batches = responses
+        .iter()
+        .flat_map(|r| r.tables.iter())
+        .flat_map(|(_, pages)| pages.iter().map(|(batch, _)| batch));
+    for batch in batches {
+        let edge = |name: &str, i: usize| -> Option<f64> {
+            let column = batch.column_by_name(name).expect("a bins table has its edges");
+            if timestamps {
+                assert_eq!(
+                    column.data_type(),
+                    &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+                );
+            } else {
+                assert_eq!(column.data_type(), &DataType::Float64);
+            }
+            (!column.is_null(i)).then(|| match timestamps {
+                true => column.as_primitive::<TimestampMicrosecondType>().value(i) as f64,
+                false => column.as_primitive::<Float64Type>().value(i),
+            })
+        };
+        assert!(batch.column_by_name("key").is_none());
+        for (i, row) in aggregate_rows(batch).into_iter().enumerate() {
+            match (edge("lower", i), edge("upper", i)) {
+                (Some(lower), Some(upper)) => {
+                    bins.push((lower, upper, row.count, row.reference_count))
+                }
+                _ => others.push((row.group.unwrap(), row.count)),
+            }
+        }
+    }
+    (bins, others)
+}
+
+/// **A number or timestamp field is counted in bins**: the default edges cover what the viewer
+/// sees and stay put under a filter, a range gives equal bins, each bin counts the items whose
+/// value it holds, and the edges are `float64` or `timestamp[us, UTC]` as the field is.
+#[tokio::test]
+async fn a_number_or_timestamp_field_is_counted_in_bins() {
+    let f = fixture().await;
+    let terms = ["1"];
+    let token = token_for(&f.server, &terms).await;
+    let place = |bins: &[(f64, f64, u64, Option<u64>)], v: f64| {
+        let last = bins.len() - 1;
+        bins.iter().enumerate().position(|(b, &(lo, hi, _, _))| {
+            v >= lo && (v < hi || (b == last && v == hi))
+        })
+    };
+    fn stamp(e: u64) -> Option<f64> {
+        stamp_of(e).map(|t| t as f64)
+    }
+    type ValueOf = fn(u64) -> Option<f64>;
+    for (field, timestamps, value) in [("score", false, score_of as ValueOf), ("stamp", true, stamp)] {
+        let mut held = None;
+        for filters in [json!(null), json!({ "archive": { "eq": "hep" } }), left_half()] {
+            let mut body = json!({ "view": "s0", "reference": {},
+                                   "groupings": [{ "by": { "field": field, "bins": 10 } }] });
+            if !filters.is_null() {
+                body["filters"] = filters.clone();
+            }
+            let (bins, others) = bin_rows(&read_all(&f.server, &token, &body).await, timestamps);
+            let edges: Vec<(f64, f64)> = bins.iter().map(|b| (b.0, b.1)).collect();
+            assert!(!edges.is_empty() && edges.len() <= 10, "{field}: {edges:?}");
+            match &held {
+                None => held = Some(edges.clone()),
+                Some(held) => assert_eq!(held, &edges, "{field} under {filters}: the edges moved"),
+            }
+            let matched = |e: u64| match &filters {
+                Value::Null => true,
+                f if f.get("archive").is_some() => archive_of(e) == Some("hep"),
+                _ => in_left_half(e),
+            };
+            let mut want = vec![(0u64, 0u64); bins.len()];
+            let mut none = (0u64, 0u64);
+            for e in items(&terms, |_| true) {
+                match value(e) {
+                    None => none = (none.0 + u64::from(matched(e)), none.1 + 1),
+                    Some(v) => {
+                        let at = place(&bins, v).expect("every visible value has a bin");
+                        want[at].0 += u64::from(matched(e));
+                        want[at].1 += 1;
+                    }
+                }
+            }
+            let got: Vec<(u64, u64)> = bins.iter().map(|b| (b.2, b.3.unwrap())).collect();
+            assert_eq!(got, want, "{field} under {filters}");
+            assert_eq!(others, vec![("none".to_string(), none.0)], "{field} under {filters}");
+        }
+    }
+    // A range: equal bins, and the values outside it in `rest`.
+    let body = json!({ "view": "s0", "groupings": [{ "by": { "field": "score", "bins": 4,
+                                                              "range": [10, 50] } }] });
+    let (bins, others) = bin_rows(&read_all(&f.server, &token, &body).await, false);
+    let edges: Vec<(f64, f64)> = bins.iter().map(|b| (b.0, b.1)).collect();
+    assert_eq!(edges, [(10.0, 20.0), (20.0, 30.0), (30.0, 40.0), (40.0, 50.0)]);
+    let outside = items(&terms, |_| true)
+        .into_iter()
+        .filter(|&e| score_of(e).is_some_and(|v| !(10.0..=50.0).contains(&v)))
+        .count() as u64;
+    assert_eq!(others.iter().find(|o| o.0 == "rest").map(|o| o.1), Some(outside));
+    // A timestamp's bounds as a decimal string or a number.
+    let body = json!({ "view": "s0", "groupings": [{ "by": { "field": "stamp", "bins": 2,
+        "range": ["1577836800000000", 1_640_995_200_000_000u64] } }] });
+    let (bins, _) = bin_rows(&read_all(&f.server, &token, &body).await, true);
+    assert_eq!(bins.len(), 2);
+    assert_eq!((bins[0].0, bins[1].1), (1_577_836_800_000_000.0, 1_640_995_200_000_000.0));
 }

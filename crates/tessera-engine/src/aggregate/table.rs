@@ -9,8 +9,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanBufferBuilder, DictionaryArray, Float64Array, Int32Array, Int8Array,
-    StringArray, UInt64Array,
+    Array, ArrayRef, BooleanBufferBuilder, DictionaryArray, Float64Array, Int32Array, Int64Array,
+    Int8Array, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::buffer::{NullBuffer, ScalarBuffer};
 use arrow::datatypes::{Field as ArrowField, Int32Type, Int8Type, Schema};
@@ -19,6 +19,7 @@ use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 
 use super::artifacts::{Layer, Served};
+use super::bins::{Bins, Kind};
 use super::cursor::Position;
 use super::set::Cx;
 use super::values::Field;
@@ -55,6 +56,7 @@ struct Area {
 enum Outer {
     None,
     Field(Field),
+    Bins(Bins),
     Layer(Layer),
 }
 
@@ -91,7 +93,7 @@ pub(super) struct Groups {
     pub(super) sizes: Vec<(u64, u64)>,
     /// For each listed group, whether its row appears with no item.
     pub(super) always: Vec<bool>,
-    /// For each listed group, its key.
+    /// For each listed group, its key, or on a grouping by bins its edges.
     pub(super) keys: Vec<Key>,
     /// For each listed group, its title, on a field.
     pub(super) titles: Option<Vec<Option<String>>>,
@@ -104,6 +106,15 @@ pub(super) struct Groups {
 pub(super) enum Key {
     Text(String),
     Id(u64),
+    /// A bin's lower and upper edge.
+    Bin(Edge, Edge),
+}
+
+/// A bin's edge: a float, or an integer or a timestamp in microseconds since the Unix epoch.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Edge {
+    Float(f64),
+    Int(i128),
 }
 
 /// What one page of a table counted that the next page of the same response can take while the
@@ -264,6 +275,11 @@ impl Plan {
         let outer = match &grouping.by {
             None => Outer::None,
             Some(By::Field { column, pick }) => Outer::Field(Field::of(generation, column, pick)?),
+            Some(By::Bins {
+                column,
+                bins,
+                range,
+            }) => Outer::Bins(Bins::of(generation, column, *bins, *range)?),
             Some(By::Layer { layer, level, pick }) => Outer::Layer(Layer::of(
                 engine, session, generation, view, layer, *level, pick,
             )?),
@@ -320,6 +336,7 @@ impl Plan {
             || match &self.outer {
                 Outer::None => false,
                 Outer::Field(field) => field.wants_rows(),
+                Outer::Bins(bins) => bins.wants_rows(),
                 Outer::Layer(_) => true,
             }
     }
@@ -359,6 +376,7 @@ impl Plan {
                     Outer::Field(field) => {
                         (field.groups(cx, position.chosen.as_deref(), timings)?, None)
                     }
+                    Outer::Bins(bins) => (bins.groups(cx, timings)?, None),
                     Outer::Layer(layer) => {
                         let (groups, served) =
                             layer.groups(cx, position.chosen.as_deref(), timings)?;
@@ -402,6 +420,7 @@ impl Plan {
                         codes = field.entity_codes(cx.generation)?;
                         Source::Grouped(field.row_groups(cx, &table, &codes)?)
                     }
+                    Outer::Bins(_) => unreachable!("a grouping by bins with cells is refused"),
                     Outer::Layer(_) => {
                         let served = served.as_ref().expect("a layer's groups were read");
                         labels = served.label_table();
@@ -453,7 +472,12 @@ impl Plan {
         };
         let total: usize = runs.iter().map(Run::len).sum();
         let fits = max_page_bytes.saturating_sub(dictionary).saturating_mul(8) / row_bits;
-        let most = total.min(limit).min(fits.max(1));
+        // A histogram is one page, whatever the page's limits: its edges are drawn once, and no
+        // more bins than `max_aggregate_bins` can be asked for.
+        let most = match self.outer {
+            Outer::Bins(_) => total,
+            _ => total.min(limit).min(fits.max(1)),
+        };
         // A long run goes out as its own page, sent as the columns it was counted into.
         let (page, rest) = split_runs(
             runs,
@@ -517,16 +541,24 @@ impl Plan {
     }
 
     /// The Arrow bits a row adds to a page, besides the dictionaries: its values, and a validity
-    /// bit in each column that can hold a null (`key`, `title` and `lift`).
+    /// bit in each column that can hold a null (`key`, `lower`, `upper`, `title` and `lift`).
     fn row_bits(&self, groups: &Groups, reference: bool) -> usize {
         let mut bytes = 8;
         let mut nullable = 0;
-        if !matches!(self.outer, Outer::None) {
-            nullable += 1;
-            bytes += 1 + match self.outer {
-                Outer::Layer(_) => 8,
-                _ => 4,
-            };
+        match self.outer {
+            Outer::None => {}
+            Outer::Bins(_) => {
+                nullable += 2;
+                bytes += 1 + 16;
+            }
+            Outer::Layer(_) => {
+                nullable += 1;
+                bytes += 1 + 8;
+            }
+            Outer::Field(_) => {
+                nullable += 1;
+                bytes += 1 + 4;
+            }
         }
         if groups.titles.is_some() {
             nullable += 1;
@@ -553,7 +585,7 @@ impl Plan {
             .iter()
             .map(|key| match key {
                 Key::Text(key) => text(key),
-                Key::Id(_) => 0,
+                Key::Id(_) | Key::Bin(..) => 0,
             })
             .sum();
         let titles: usize = groups
@@ -600,6 +632,45 @@ impl Plan {
                     let ids = UInt64Array::new(repeated(runs, id).into(), on_listed);
                     push("key", Arc::new(ids), true);
                 }
+                Outer::Bins(bins) => {
+                    let edge = |g: u32, upper: bool| match groups.keys.get(g as usize) {
+                        Some(Key::Bin(lower, high)) => Some(if upper { *high } else { *lower }),
+                        _ => None,
+                    };
+                    for (name, upper) in [("lower", false), ("upper", true)] {
+                        let float = |g| match edge(g, upper) {
+                            Some(Edge::Float(x)) => x,
+                            _ => 0.0,
+                        };
+                        // An integer edge is within its served column's span.
+                        let int = |g| match edge(g, upper) {
+                            Some(Edge::Int(x)) => x,
+                            _ => 0,
+                        };
+                        let valid = on_listed.clone();
+                        let edges: ArrayRef = match bins.kind() {
+                            Kind::Float => {
+                                Arc::new(Float64Array::new(repeated(runs, float).into(), valid))
+                            }
+                            Kind::Signed => Arc::new(Int64Array::new(
+                                repeated(runs, |g| int(g) as i64).into(),
+                                valid,
+                            )),
+                            Kind::Unsigned => Arc::new(UInt64Array::new(
+                                repeated(runs, |g| int(g) as u64).into(),
+                                valid,
+                            )),
+                            Kind::Timestamp => Arc::new(
+                                TimestampMicrosecondArray::new(
+                                    repeated(runs, |g| int(g) as i64).into(),
+                                    valid,
+                                )
+                                .with_timezone("UTC"),
+                            ),
+                        };
+                        push(name, edges, true);
+                    }
+                }
                 _ => {
                     // Each listed value's key and title are written once, and each row carries the
                     // listed position.
@@ -608,7 +679,7 @@ impl Plan {
                         .iter()
                         .map(|key| match key {
                             Key::Text(text) => text.as_str(),
-                            Key::Id(_) => "",
+                            Key::Id(_) | Key::Bin(..) => "",
                         })
                         .collect();
                     let positions: ScalarBuffer<i32> =

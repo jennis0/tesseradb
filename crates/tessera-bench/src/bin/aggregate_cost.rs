@@ -1,10 +1,12 @@
 //! **What does `POST /v1/aggregate` cost?**
 //!
 //! Times `Engine::aggregate_stream`, every page of every table read to the end, for a table with
-//! no level, value groupings, density surfaces, value by cell and an artifact grouping, each with
-//! no filter and under a polygon, beside the viewport request over the same set at zoom 4 and the
-//! whole extent. The principal holds every term in the bundle's dictionary. The engine's pool is
-//! `--threads` wide.
+//! no level, value groupings, histograms, density surfaces, value by cell and an artifact
+//! grouping, each with no filter and under a polygon, beside the viewport request over the same
+//! set at zoom 4 and the whole extent. A histogram is timed with its default edges, which read
+//! the whole visible set's values first, and with the range those edges span, which does not.
+//! The principal holds every term in the bundle's dictionary. The engine's pool is `--threads`
+//! wide.
 //!
 //! Every figure is the median of `--repeat` runs, with the fastest and slowest beside it, after one
 //! run that is not counted. Each case also reports its last run's time by stage: composing the
@@ -18,6 +20,7 @@
 //!     --bundle data/ladder/geonames/bundle-final --view world --threads 12 \
 //!     --polygon '0.4722,0.3927;0.5833,0.3927;0.6111,0.2904;0.4722,0.2904' \
 //!     --field feature_class --field country --field admin1 \
+//!     --bins population --bins modified \
 //!     --layer admin/hierarchy:0
 //! ```
 
@@ -25,11 +28,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::{
+    DataType, Float64Type, Int64Type, TimestampMicrosecondType, UInt64Type,
+};
 use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use serde_json::{json, Value};
 
-use tessera_engine::filter::{FilterExpr, RegionLeaf};
+use tessera_engine::filter::{FilterExpr, RegionLeaf, Scalar};
 use tessera_engine::shapes::{Bounds, ShapeF64, Space};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{
@@ -52,6 +59,9 @@ struct Args {
     /// A category field to group by; repeatable.
     #[arg(long)]
     field: Vec<String>,
+    /// A number or timestamp field to count in 20 bins; repeatable.
+    #[arg(long)]
+    bins: Vec<String>,
     /// `layer:level` to group by; repeatable.
     #[arg(long)]
     layer: Vec<String>,
@@ -67,11 +77,15 @@ struct Args {
     case: Vec<String>,
 }
 
-/// Counts what a response carries and keeps none of it.
+/// Counts what a response carries and keeps none of it, but a histogram's outer edges.
 #[derive(Default)]
 struct Tally {
     rows: u64,
     pages: u64,
+    /// Items in the set, from the last table head.
+    total: u64,
+    /// The first and last edge of the last histogram page read.
+    edges: Option<(Scalar, Scalar)>,
     /// Summed over every response of the read.
     compose_ns: u64,
     count_ns: u64,
@@ -86,13 +100,38 @@ impl AggregateSink for Tally {
         Ok(())
     }
 
-    fn table(&mut self, _: &TableHead) -> SinkResult {
+    fn table(&mut self, head: &TableHead) -> SinkResult {
+        self.total = head.total;
         Ok(())
     }
 
     fn page(&mut self, _: u32, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
         self.rows += batch.num_rows() as u64;
         self.pages += 1;
+        // A histogram's first lower edge and last upper edge; `rest` and `none` have neither.
+        let edge = |name: &str, last: bool| -> Option<Scalar> {
+            let column = batch.column_by_name(name)?;
+            let mut rows = 0..batch.num_rows();
+            let i = match last {
+                true => rows.rfind(|&i| !column.is_null(i)),
+                false => rows.find(|&i| !column.is_null(i)),
+            }?;
+            Some(match column.data_type() {
+                DataType::Float64 => Scalar::Float(column.as_primitive::<Float64Type>().value(i)),
+                DataType::Int64 => {
+                    Scalar::Int(i128::from(column.as_primitive::<Int64Type>().value(i)))
+                }
+                DataType::UInt64 => {
+                    Scalar::Int(i128::from(column.as_primitive::<UInt64Type>().value(i)))
+                }
+                _ => Scalar::Int(i128::from(
+                    column.as_primitive::<TimestampMicrosecondType>().value(i),
+                )),
+            })
+        };
+        if let (Some(lower), Some(upper)) = (edge("lower", false), edge("upper", true)) {
+            self.edges = Some((lower, upper));
+        }
         Ok(())
     }
 }
@@ -171,6 +210,7 @@ fn read(
                     groupings: 8,
                     top: 1000,
                     named: 1000,
+                    bins: 1000,
                     cells: u64::MAX,
                 },
                 cancel: None,
@@ -278,6 +318,22 @@ fn main() -> Result<(), BoxError> {
     for column in &args.field {
         cases.push((format!("{column} top 10"), field(column, None), true));
     }
+    for column in &args.bins {
+        let histogram = |range| Grouping {
+            by: Some(By::Bins {
+                column: column.to_string(),
+                bins: 20,
+                range,
+            }),
+            cells: None,
+            area: None,
+        };
+        let edges = read(&engine, &session, &args.view, None, &[histogram(None)])?.edges;
+        cases.push((format!("{column} bins 20"), histogram(None), true));
+        if let Some(range) = edges {
+            cases.push((format!("{column} bins 20 in a range"), histogram(Some(range)), true));
+        }
+    }
     for depth in [6u8, 16, 32] {
         cases.push((format!("density d{depth}"), density(depth), depth == 16));
     }
@@ -343,6 +399,7 @@ fn main() -> Result<(), BoxError> {
                     "case": name,
                     "region": filter.is_some(),
                     "rows": tally.rows,
+                    "items": tally.total,
                     "pages": tally.pages,
                     "ms": {"median": ms(median), "fastest": ms(lo), "slowest": ms(hi)},
                     "last_run_ms": {

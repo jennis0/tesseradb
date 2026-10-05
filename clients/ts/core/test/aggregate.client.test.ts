@@ -1,4 +1,4 @@
-import {Dictionary, Int8, Int32, Table, tableToIPC, Uint64, Utf8, vectorFromArray} from 'apache-arrow';
+import {Dictionary, Int8, Int32, Table, tableToIPC, TimestampMicrosecond, Uint64, Utf8, vectorFromArray} from 'apache-arrow';
 import {describe, expect, it} from 'vitest';
 import {PartialAggregate} from '../src/aggregate.js';
 import {TesseraClient, TesseraError} from '../src/client.js';
@@ -183,6 +183,24 @@ describe('TesseraClient.aggregate', () => {
     ]);
     expect(result.region).toBeNull();
     expect(result.recomposed).toBe(false);
+  });
+
+  it('sends a grouping by bins with its range exact, and reads each bin with its edges', async () => {
+    const day = 86_400_000;
+    const table = new Table({
+      group: vectorFromArray(['listed', 'listed', 'none'], new Dictionary(new Utf8(), new Int8())),
+      lower: vectorFromArray([0, day, null], new TimestampMicrosecond('UTC')),
+      upper: vectorFromArray([day, 2 * day, null], new TimestampMicrosecond('UTC')),
+      count: u64([3n, 0n, 2n])
+    });
+    const {client, sent} = clientFor({'': () => chunked(responseOf([{head: {grouping: 0, total: 5, groups: 1, resumed: false}, pages: [{table, next: null}]}], null))});
+    const result = await client.aggregate('tok', {view: 's0', groupings: [{by: {field: 'seen', bins: 2, range: [0, 2n ** 60n + 1n]}}]});
+    expect(sent[0]!.body.groupings).toEqual([{by: {field: 'seen', bins: 2, range: [0, '1152921504606846977']}}]);
+    expect(rowsOf(result.tables[0]!.rows)).toEqual([
+      {group: 'listed', lower: 0, upper: day, count: 3n},
+      {group: 'listed', lower: day, upper: 2 * day, count: 0n},
+      {group: 'none', lower: null, upper: null, count: 2n}
+    ]);
   });
 
   it('continues past a response cancelled before its first page, which is a trailer alone', async () => {

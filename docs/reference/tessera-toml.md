@@ -84,6 +84,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `max_aggregate_groupings` | integer | `16` | The most groupings one `POST /v1/aggregate` may ask for, each a table of the response. A request with more is refused with 422. |
 | `max_aggregate_top` | integer | `1000` | The largest `top` one aggregate grouping may ask for. A larger one is refused with 422. |
 | `max_aggregate_named` | integer | `1000` | The most values or artifacts one aggregate grouping may name. A longer list is refused with 422. |
+| `max_aggregate_bins` | integer | `1000` | The most bins one aggregate grouping by bins may ask for. A request asking for more is refused with 422. |
 | `max_aggregate_cells` | integer | `1048576` | The most cells one aggregate grouping's cell level may list: the cells at its depth in its area, however many groups share them. A request asking for more is refused with 422. |
 | `aggregate_response_bytes` | integer | `16777216` (16 MiB) | The most bytes one `POST /v1/aggregate` response carries before it ends with a cursor to resume from. It runs under the viewport's admission, so this bounds what each one holds. A value below `aggregate_page_bytes` or above 2147483648 is refused. |
 | `aggregate_page_bytes` | integer | `4194304` (4 MiB) | The most bytes one page of an aggregate response holds, as Arrow column bytes before compression. `0` is refused, and so is a value above 2147483648. |

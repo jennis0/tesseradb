@@ -115,6 +115,11 @@ pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8;
         let by = match &grouping.by {
             None => "-".to_string(),
             Some(By::Field { column, pick }) => format!("field {column:?} {}", pick_text(pick)),
+            Some(By::Bins {
+                column,
+                bins,
+                range,
+            }) => format!("bins {column:?} {bins} {range:?}"),
             Some(By::Layer { layer, level, pick }) => {
                 format!("layer {layer:?} {level:?} {}", pick_text(pick))
             }

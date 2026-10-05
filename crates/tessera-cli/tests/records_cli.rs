@@ -820,3 +820,77 @@ fn the_format_is_named_or_refused_before_any_request() {
     assert!(rows(&read_parquet(&dir.join("items.dat"))) > 0);
     assert!(rows(&read_parquet(&dir.join("named.PARQUET"))) > 0);
 }
+
+/// `tessera aggregate` writes the one table its grouping asks for, as the same read over HTTP
+/// gives it: a histogram, which is one page however small the pages asked for, and a breakdown,
+/// carried across responses from its cursor; and arguments that are not JSON send nothing.
+#[test]
+fn an_aggregate_read_is_the_table_over_http() {
+    let served = serve();
+    let reads = [
+        (
+            r#"{"by": {"field": "seen_at", "bins": 12}}"#,
+            json!({ "by": { "field": "seen_at", "bins": 12 } }),
+            "histogram.arrows",
+            false,
+        ),
+        (
+            r#"{"by": {"field": "bay", "top": 3}}"#,
+            json!({ "by": { "field": "bay", "top": 3 } }),
+            "breakdown.parquet",
+            true,
+        ),
+    ];
+    for (grouping, parsed, name, pages) in reads {
+        let body = json!({
+            "view": "s0",
+            "groupings": [parsed],
+            "filters": { "bay": { "in": ["amber", "basalt", "cedar", "dune"] } },
+            "reference": {},
+            "page_rows": 2,
+            "pages": 1,
+        });
+        let (whole, responses) = served.http_read("aggregate", &body);
+        assert_eq!(responses > 1, pages, "{name}: {responses} responses, {} rows", rows(&whole));
+        let out = served.dir.path().join(name);
+        let done = served.run(&[
+            "aggregate",
+            "--view",
+            "s0",
+            "--grouping",
+            grouping,
+            "--filters",
+            r#"{"bay": {"in": ["amber", "basalt", "cedar", "dune"]}}"#,
+            "--reference",
+            "{}",
+            "--page-rows",
+            "2",
+            "--pages",
+            "1",
+            "--out",
+            out.to_str().unwrap(),
+        ]);
+        assert!(done.status.success(), "{}", done.stderr);
+        assert!(done.stderr.contains("\"total\""), "the head is printed: {}", done.stderr);
+        assert_eq!(plain(&read_output(&out)), plain(&whole), "{name}");
+        let bodies = served.proxy.bodies();
+        assert_eq!(bodies.len(), responses);
+        assert_eq!(bodies[0], body, "the arguments, and nothing else");
+        for later in &bodies[1..] {
+            assert_eq!(later, &following(&body, &later["cursor"]));
+        }
+    }
+
+    let out = served.dir.path().join("refused.arrows");
+    for (flag, text) in [("--grouping", "{by"), ("--filters", "nope")] {
+        let mut args = vec!["aggregate", "--view", "s0", "--grouping", "{}"];
+        if flag == "--grouping" {
+            args.truncate(3);
+        }
+        args.extend([flag, text, "--out", out.to_str().unwrap()]);
+        let refused = served.run(&args);
+        assert_eq!(refused.status.code(), Some(1), "{flag}: {}", refused.stderr);
+    }
+    assert!(served.proxy.bodies().is_empty());
+    assert!(!out.exists());
+}

@@ -251,6 +251,17 @@ describe('an aggregate that leaves out one clause', () => {
     expect(pending[2]!.req.filters).toEqual(store.requestFilters());
     expect(JSON.stringify(pending[2]!.req.filters)).toContain('hep');
   });
+
+  it('sends a grouping by bins as given, less the clause on its own field', async () => {
+    const {store, pending} = await storeWith();
+    store.setFilters(BOTH);
+    store.setAggregate('years', {groupings: [{by: {field: 'year', bins: 20, range: [1990, 2030]}}], without: 'year', reference: 'visible'});
+    await flush();
+    expect(pending[0]!.req.groupings).toEqual([{by: {field: 'year', bins: 20, range: [1990, 2030]}}]);
+    expect(pending[0]!.req.reference).toEqual({});
+    expect(JSON.stringify(pending[0]!.req.filters)).not.toContain('year');
+    expect(JSON.stringify(pending[0]!.req.filters)).toContain('archive');
+  });
 });
 
 describe('an aggregate that leaves out one layer’s clauses', () => {

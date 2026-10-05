@@ -542,7 +542,7 @@ fn parse_range(column: &str, value: &Value, integer: bool) -> Result<FilterOpera
 /// number becomes `f64`. A JSON boolean is accepted for a `bool` column, which stores as 0/1. On
 /// an integer or timestamp column a decimal string (`"-42"`) is an exact integer too, for a
 /// client whose numbers are doubles and cannot carry one past 2^53.
-fn numeric_value(column: &str, value: &Value, integer: bool) -> Result<Scalar, ApiError> {
+pub(crate) fn numeric_value(column: &str, value: &Value, integer: bool) -> Result<Scalar, ApiError> {
     match value {
         Value::String(text) if integer => decimal_integer(text).map(Scalar::Int).ok_or_else(|| {
             bad(format!(

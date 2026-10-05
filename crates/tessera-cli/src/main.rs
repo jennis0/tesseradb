@@ -290,6 +290,20 @@ enum Command {
     /// For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --layer
     /// clusters --fields key,masked_count --format ipc > clusters.arrows`.
     Artifacts(records::ArtifactsArgs),
+    /// Count how the items a session token may see in one view are distributed, by one grouping,
+    /// from a running server, and write the table as Arrow IPC or Parquet.
+    ///
+    /// The grouping is `POST /v1/aggregate`'s, as JSON: `{}` is the size of the set; `{"by":
+    /// {"field": "venue", "top": 10}}` the ten commonest values of a category field; `{"by":
+    /// {"field": "year", "bins": 20}}` a histogram of a number or timestamp field; `{"by":
+    /// {"layer": "clusters", "top": 10}}` the largest artifacts of a layer; `{"cells": {"depth":
+    /// 8}}` a density surface. The read is carried across responses, and written, as `tessera
+    /// items` carries and writes one. The table's head, with the set's total, is printed on
+    /// stderr at the end.
+    ///
+    /// For example, `tessera aggregate --server http://127.0.0.1:8080 --view papers --grouping
+    /// '{"by": {"field": "submitted_at", "bins": 12}}' --format ipc > submitted.arrows`.
+    Aggregate(records::AggregateArgs),
     /// Serve the bundle that `tessera.toml` names.
     ///
     /// Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and
@@ -1681,6 +1695,7 @@ fn main() -> ExitCode {
         Command::Provider { command } => identity::provider(command),
         Command::Items(args) => records::items(args),
         Command::Artifacts(args) => records::artifacts(args),
+        Command::Aggregate(args) => records::aggregate(args),
         Command::Health {
             deployment,
             timeout,

@@ -48,6 +48,7 @@ export function meta(over: Partial<Meta> = {}): Meta {
       maxAggregateGroupings: 16,
       maxAggregateTop: 1000,
       maxAggregateNamed: 1000,
+      maxAggregateBins: 1000,
       maxAggregateCells: 1_048_576
     },
     maxTilesPerRequest: 4096,

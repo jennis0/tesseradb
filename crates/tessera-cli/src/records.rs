@@ -1,5 +1,6 @@
-//! `tessera items` and `tessera artifacts`: a whole read of `POST /v1/items` or
-//! `POST /v1/artifacts` from a running server, written as Arrow IPC or Parquet.
+//! `tessera items`, `tessera artifacts` and `tessera aggregate`: a whole read of `POST /v1/items`,
+//! `POST /v1/artifacts` or one table of `POST /v1/aggregate` from a running server, written as
+//! Arrow IPC or Parquet.
 //!
 //! Each response's pages are written as they arrive, and the next response is requested with the
 //! cursor the last one ended on, until the cursor is null. A page is written once the page end
@@ -18,7 +19,9 @@ use arrow::record_batch::RecordBatch;
 use clap::ValueEnum;
 use parquet::arrow::ArrowWriter;
 use serde_json::{Map, Value};
-use tessera_wire::{read_frame, FRAME_PAGE_END, FRAME_RECORDS, FRAME_RECORDS_HEAD, FRAME_TRAILER};
+use tessera_wire::{
+    read_frame, FRAME_PAGE_END, FRAME_RECORDS, FRAME_RECORDS_HEAD, FRAME_TABLE_HEAD, FRAME_TRAILER,
+};
 
 #[derive(clap::Args)]
 pub(crate) struct ItemsArgs {
@@ -93,6 +96,28 @@ pub(crate) struct ArtifactsArgs {
     /// end. Refused with `--cursor`.
     #[arg(long)]
     count: bool,
+    #[command(flatten)]
+    paging: Paging,
+    #[command(flatten)]
+    target: Target,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct AggregateArgs {
+    /// The view the counts are taken in. An item with no position in it is not counted.
+    #[arg(long)]
+    view: String,
+    /// One grouping as JSON, such as `{"by": {"field": "year", "bins": 20}}`. `{}` is the size of
+    /// the set.
+    #[arg(long, value_name = "JSON")]
+    grouping: String,
+    /// A filter expression as JSON. Only the items that match are counted.
+    #[arg(long, value_name = "JSON")]
+    filters: Option<String>,
+    /// A second set to compare each count with, as a filter expression in JSON; `{}` is every
+    /// item the token may see in the view. The table then has `reference_count` and `lift`.
+    #[arg(long, value_name = "JSON")]
+    reference: Option<String>,
     #[command(flatten)]
     paging: Paging,
     #[command(flatten)]
@@ -207,23 +232,53 @@ pub(crate) fn artifacts(args: ArtifactsArgs) -> ExitCode {
     run("artifacts", request, &args.target)
 }
 
-/// The fields both routes share, each sent only when given.
+pub(crate) fn aggregate(args: AggregateArgs) -> ExitCode {
+    let request = paged(&args.paging).and_then(|mut request| {
+        request.insert("view".into(), args.view.into());
+        let grouping = json_argument("--grouping", &args.grouping, "one grouping, such as '{}'")?;
+        request.insert("groupings".into(), Value::Array(vec![grouping]));
+        if let Some(filters) = &args.filters {
+            request.insert("filters".into(), filter_argument("--filters", filters)?);
+        }
+        if let Some(reference) = &args.reference {
+            request.insert("reference".into(), filter_argument("--reference", reference)?);
+        }
+        Ok(request)
+    });
+    run("aggregate", request, &args.target)
+}
+
+/// The fields `items` and `artifacts` share, each sent only when given.
 fn request(
     fields: &str,
     filters: Option<&str>,
     paging: &Paging,
 ) -> Result<Map<String, Value>, String> {
-    let mut request = Map::new();
+    let mut request = paged(paging)?;
     request.insert("fields".into(), names(fields));
     if let Some(filters) = filters {
-        let parsed: Value = serde_json::from_str(filters).map_err(|e| {
-            format!(
-                "--filters is not JSON ({e}); write one filter expression, such as \
-                 '{{\"year\": {{\"eq\": 2020}}}}'"
-            )
-        })?;
-        request.insert("filters".into(), parsed);
+        request.insert("filters".into(), filter_argument("--filters", filters)?);
     }
+    Ok(request)
+}
+
+/// A filter expression given as `flag`.
+fn filter_argument(flag: &str, text: &str) -> Result<Value, String> {
+    json_argument(
+        flag,
+        text,
+        "one filter expression, such as '{\"year\": {\"eq\": 2020}}'",
+    )
+}
+
+/// The JSON given as `flag`, or a refusal saying what to write instead.
+fn json_argument(flag: &str, text: &str, what: &str) -> Result<Value, String> {
+    serde_json::from_str(text).map_err(|e| format!("{flag} is not JSON ({e}); write {what}"))
+}
+
+/// The paging fields every route shares, each sent only when given.
+fn paged(paging: &Paging) -> Result<Map<String, Value>, String> {
+    let mut request = Map::new();
     if let Some(rows) = paging.page_rows {
         request.insert("page_rows".into(), rows.into());
     }
@@ -304,6 +359,12 @@ fn read(
         .build()
         .map_err(|e| format!("starting the HTTP client: {e}"))?;
     let url = format!("{}/v1/{route}", target.server.trim_end_matches('/'));
+    // An aggregate table opens each response with its table head, and a response cancelled
+    // before its first page is a trailer alone.
+    let head = match route {
+        "aggregate" => FRAME_TABLE_HEAD,
+        _ => FRAME_RECORDS_HEAD,
+    };
     let mut summary = Summary {
         resume: request.get("cursor").and_then(Value::as_str).map(str::to_owned),
         ..Summary::default()
@@ -314,7 +375,7 @@ fn read(
             Err(e) => break Err(e),
         };
         summary.responses += 1;
-        if let Err(e) = read_response(response, &mut output, &mut summary) {
+        if let Err(e) = read_response(response, head, &mut output, &mut summary) {
             break Err(e);
         }
         let (Some(next), false) = (summary.resume.clone(), summary.done) else {
@@ -370,9 +431,10 @@ fn post(
 }
 
 /// Write one response's pages, each once its page end has arrived, taking the cursor of each
-/// page end and of the trailer.
+/// page end and of the trailer. The response opens with one frame of kind `head`.
 fn read_response(
     mut body: impl Read,
+    head: u8,
     output: &mut Output,
     summary: &mut Summary,
 ) -> Result<(), String> {
@@ -389,12 +451,13 @@ fn read_response(
                 return Err(format!("the response was cut short ({})", crate::innermost(&e)))
             }
         };
-        if first != (kind == FRAME_RECORDS_HEAD) {
+        let headless = head == FRAME_TABLE_HEAD && kind == FRAME_TRAILER;
+        if first != (kind == head) && !(first && headless) {
             return Err("the response does not have exactly one head, first".into());
         }
         first = false;
         match kind {
-            FRAME_RECORDS_HEAD => {
+            kind if kind == head => {
                 if summary.head.is_none() {
                     summary.head = Some(json(&payload)?);
                 }
