@@ -626,10 +626,11 @@ impl ColumnLabels<'_> {
 /// # What it holds while it runs
 ///
 /// The pairs go to a disk partition by ordinal and each bucket is read back in turn, as the
-/// column's own composition does by row. A bucket holds about [`crate::partition::PARTITION_BUCKET_RECORDS`]
-/// entries, or one artifact alone where that artifact has more. What stands is the bucket's rows,
-/// 4 B an entry, or for an artifact alone in its bucket only its bitmap as it grows. The coverings,
-/// 8 B a range, are held until the file is finished.
+/// column's own composition does by row. A bucket holds at most
+/// [`crate::partition::PARTITION_BUCKET_RECORDS`] entries, or one artifact alone where that
+/// artifact has more. What stands is the bucket's rows, 4 B an entry, or for an artifact alone in
+/// its bucket only its bitmap as it grows. The coverings, 8 B a range, are held until the file is
+/// finished.
 pub fn project_row_members(
     labels: ColumnLabels<'_>,
     scratch: &Path,

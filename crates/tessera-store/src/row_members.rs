@@ -302,7 +302,10 @@ impl RowMembersPack {
             if !offset.is_multiple_of(ALIGN as usize) || offset < end || offset + len > payload_len {
                 return Err(malformed(
                     path,
-                    format!("ordinal {ordinal}'s bitmap is misaligned, overlaps another or leaves the payload"),
+                    format!(
+                        "ordinal {ordinal}'s bitmap is misaligned, overlaps another or leaves the \
+                         payload"
+                    ),
                 ));
             }
             end = offset + len;
@@ -339,7 +342,10 @@ impl RowMembersPack {
                 if lo > hi || hi >= rows || last.is_some_and(|last| lo <= last) {
                     return Err(malformed(
                         path,
-                        format!("ordinal {ordinal}'s covering is not ascending, disjoint ranges inside the rows"),
+                        format!(
+                            "ordinal {ordinal}'s covering is not ascending, disjoint ranges \
+                             inside the rows"
+                        ),
                     ));
                 }
                 last = Some(hi);

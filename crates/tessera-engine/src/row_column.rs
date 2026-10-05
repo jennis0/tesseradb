@@ -689,7 +689,10 @@ impl RowColumn {
 
     /// A fold-written column read for its labels alone, with no members beside it: for a reader
     /// that turns the labels into something else, never for a column that is served.
-    pub fn open_labels(path: &std::path::Path, expected: ServingLayout) -> tessera_store::Result<Self> {
+    pub fn open_labels(
+        path: &std::path::Path,
+        expected: ServingLayout,
+    ) -> tessera_store::Result<Self> {
         let pack = match expected {
             ServingLayout::RowMajorLabel => Pack::Label(LabelColumnPack::open(path)?),
             ServingLayout::RowMajorList => Pack::List(ListColumnPack::open(path)?),

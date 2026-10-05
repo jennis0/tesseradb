@@ -2,8 +2,8 @@ use super::*;
 
 /// Every level's version, and the derived files of `held` still adoptable at it. A file whose
 /// level has moved is dropped, so a manifest never names one nothing could adopt, except the row
-/// column of a layer in `enumerated` and the member file beside it: an enumerated membership only grows between folds, and an
-/// open completes a column the level has moved past
+/// column of a layer in `enumerated` and the member file beside it: an enumerated membership only
+/// grows between folds, and an open completes a column the level has moved past
 /// ([`crate::artifacts::ArtifactProjections::adopt_columns`]). Nothing completes a level's label
 /// column or its band-order copy, so those are dropped with every other file, and a level holds
 /// a copy only while the copy is current. A spatial layer's column is read only at its level's

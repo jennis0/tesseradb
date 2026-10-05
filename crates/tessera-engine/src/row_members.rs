@@ -1,6 +1,7 @@
 //! **A row-major level's members by artifact, and the coverings that say where each could be** —
-//! the reading half of [`tessera_store::row_members`], held inside the [`crate::row_column::RowColumn`]
-//! it was written from, so nothing can replace or drop the column without them.
+//! the reading half of [`tessera_store::row_members`], held inside the
+//! [`crate::row_column::RowColumn`] it was written from, so nothing can replace or drop the column
+//! without them.
 //!
 //! Both are over the column's base rows and are viewer-independent: a member bitmap is every base
 //! row the artifact holds, whoever is looking, and a covering is at most
