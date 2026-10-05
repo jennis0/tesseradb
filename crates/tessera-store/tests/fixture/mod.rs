@@ -76,7 +76,7 @@ pub fn build_bundle(root: &Path, n: u64) {
     let seg_dir = view_dir.join("segments").join("seg0");
     fs::create_dir_all(&seg_dir).expect("mkdir");
 
-    write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
+    write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
     write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n).expect("permutation");
 
     let mut files = BTreeMap::new();
@@ -209,6 +209,7 @@ pub fn flush_segment(
             identity_key: &key,
             shard_id: 0,
             scalar_schema: &[],
+            indexed: &[],
             row_base,
             entity_floor: 0,
         },

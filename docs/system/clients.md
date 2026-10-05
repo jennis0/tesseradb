@@ -226,8 +226,10 @@ the items the selection counts.
 | Python | `viewer.aggregate(view, groupings, filters, reference)`, `db.aggregate` and `selection.aggregate` | one `pyarrow` table per grouping, the head's figures in its schema metadata |
 | CLI | `tessera aggregate --view <view> --grouping <json>` | one grouping's table, read through the cursor and written as Arrow IPC or Parquet, its head on stderr |
 
-Every surface sends a grouping as the caller wrote it, a histogram's `bins` and `range` included,
-and none adds a default. The store sends a reference only where the component registered one, as a
+Every surface sends a grouping as the caller wrote it, a histogram's `bins`, `range` and `sample`
+included, and none adds a default. Each reads a sampled histogram's head as it reads the rest: the
+TypeScript client as the table's `sample`, Python in the `tessera.head` metadata, and the CLI on
+stderr. The store sends a reference only where the component registered one, as a
 filter expression or as the whole visible set. It chooses no grouping. A registration can name one
 column in `without`, as the filter draft keys its controls, and the store then sends its filters
 less that column's control. A category control uses this to list its own values: with its clause

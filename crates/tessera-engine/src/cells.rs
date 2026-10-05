@@ -48,6 +48,14 @@ impl CellSet<'_> {
         }
     }
 
+    /// Whether the set holds view row `row`.
+    pub(crate) fn contains(&self, row: u32) -> bool {
+        match self {
+            CellSet::Mask(mask) => mask.contains_row(row),
+            CellSet::Rows(set) => set.contains(row),
+        }
+    }
+
     pub(crate) fn for_each_run(&self, rows: Range<u32>, f: &mut impl FnMut(Range<u32>)) {
         match self {
             CellSet::Mask(mask) => mask.for_each_visible_run(rows, f),

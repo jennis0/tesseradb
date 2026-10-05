@@ -100,13 +100,25 @@ fn write_pairs(path: &Path, n: u64) {
 
 /// Build `n` items into `root/bundle`, oracle pairs on, with `score` rendered where `render`.
 fn built_bundle(root: &Path, n: u64, render: bool) {
+    built_bundle_with(root, n, render.then_some(Score::Rendered));
+}
+
+/// How `score` is declared.
+#[derive(Clone, Copy, PartialEq)]
+enum Score {
+    Rendered,
+    Indexed,
+}
+
+/// Build `n` items into `root/bundle`, oracle pairs on, with `score` declared as `score` says.
+fn built_bundle_with(root: &Path, n: u64, score: Option<Score>) {
     let points = root.join("points.parquet");
     let pairs = root.join("pairs.parquet");
     let out = root.join("bundle");
     write_points(&points, n);
     write_pairs(&pairs, n);
     let (mut schema, mut attribute_sources) = common::id_attributes(&points);
-    if render {
+    if let Some(score) = score {
         schema.attributes.push(tessera_build::config::Attribute {
             field: None,
             name: "score".to_string(),
@@ -115,8 +127,8 @@ fn built_bundle(root: &Path, n: u64, render: bool) {
             analyser: None,
             vocabulary: None,
             value_set: None,
-            index: false,
-            render: true,
+            index: score == Score::Indexed,
+            render: score == Score::Rendered,
             unique: false,
         });
         attribute_sources = tessera_build::config::AttributeSource::over(&points, &schema);
@@ -204,6 +216,7 @@ fn flushed_bundle(root: &Path) {
             identity_key: &key,
             shard_id: 0,
             scalar_schema: &[],
+            indexed: &[],
             row_base: n as u32,
             entity_floor: 0,
         },
@@ -994,6 +1007,28 @@ fn a_render_copy_that_is_not_its_rows_value_is_refused() {
     let at = bands.copy_range("score").expect("score is copied").start;
     drop(bands);
     let path = root.join("v00000").join(rel);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[at] ^= 1;
+    fs::write(&path, &bytes).unwrap();
+    refresh_digest(&root, rel);
+
+    expect_refused_on(&root, rel);
+}
+
+/// An indexed copy that does not hold its item's value is refused, and an intact one verifies.
+#[test]
+fn an_indexed_copy_that_is_not_its_items_value_is_refused() {
+    const ROWS: u64 = 1_000;
+    let temp = tempfile::TempDir::new().unwrap();
+    built_bundle_with(temp.path(), ROWS, Some(Score::Indexed));
+    let root = bundle_root(&temp);
+    verify_deep(&root, &VerifyOpts::default()).expect("the built bundle verifies");
+    let rel = "partitions/default/views/s0/segments/seg-0/bands.bin";
+    let path = root.join("v00000").join(rel);
+    let bands = tessera_store::bands::Bands::open(path.parent().unwrap(), ROWS as u32).unwrap();
+    assert_eq!(bands.indexed_names().collect::<Vec<_>>(), vec!["score"]);
+    let at = bands.copy_range("score").expect("score is copied").start;
+    drop(bands);
     let mut bytes = fs::read(&path).unwrap();
     bytes[at] ^= 1;
     fs::write(&path, &bytes).unwrap();

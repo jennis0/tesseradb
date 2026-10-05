@@ -601,6 +601,60 @@ async fn an_artifact_grouping_counts_the_members_the_viewer_sees() {
     assert_eq!(as_value_rows(&table(&responses, 1)), expected(&["a2", "a0"]));
 }
 
+/// **A sampled histogram's head says how it was counted**: a sample smaller than the set is
+/// scaled to the set's size, one as large as the set, or too large for a band to hold, counts
+/// every item exactly, as an unsampled histogram does, and default edges drawn from the visible
+/// set's sample say so.
+#[tokio::test]
+async fn a_sampled_histograms_head_says_how_it_was_counted() {
+    let f = fixture().await;
+    let token = token_for(&f.server, &["1"]).await;
+    let body = |sample: Option<u64>| {
+        let mut by = json!({ "field": "stamp", "bins": 6, "range": [1_577_836_800_000_000i64, 1_640_995_200_000_000i64] });
+        if let Some(sample) = sample {
+            by["sample"] = json!(sample);
+        }
+        json!({ "view": "s0", "reference": {}, "groupings": [{ "by": by }] })
+    };
+    let drawn = |sample: u64| {
+        let by = json!({ "field": "stamp", "bins": 6, "sample": sample });
+        json!({ "view": "s0", "reference": {}, "groupings": [{ "by": by }] })
+    };
+    let n = items(&["1"], |_| true).len() as u64;
+    let (_, exact) = aggregate_ok(&f.server, &token, &body(None)).await;
+    assert!(exact.tables[0].0.get("sample").is_none());
+    let exact = table(&[exact], 0);
+
+    let (_, whole) = aggregate_ok(&f.server, &token, &body(Some(n))).await;
+    assert_eq!(
+        whole.tables[0].0["sample"],
+        json!({ "sampled": false, "items": n, "reference_items": n, "edges_sampled": false })
+    );
+    assert_eq!(table(&[whole], 0), exact);
+
+    // A cut above 2^58 is wider than any band.
+    let (_, wide) = aggregate_ok(&f.server, &token, &body(Some(n / 60))).await;
+    assert_eq!(wide.tables[0].0["sample"]["sampled"], false);
+    assert_eq!(table(&[wide], 0), exact);
+
+    // The viewer sees a third of the view's rows, so a cut the band holds as few as one row in
+    // 128 of them is sampled.
+    let (_, drawn) = aggregate_ok(&f.server, &token, &drawn(6)).await;
+    assert_eq!(drawn.tables[0].0["sample"]["edges_sampled"], true);
+
+    let (_, part) = aggregate_ok(&f.server, &token, &body(Some(6))).await;
+    let head = &part.tables[0].0;
+    assert_eq!(head["total"], n);
+    assert_eq!(head["sample"]["sampled"], true);
+    assert_eq!(head["sample"]["edges_sampled"], false);
+    let taken = head["sample"]["items"].as_u64().unwrap();
+    assert!(taken > 0 && taken < 20, "{head}");
+    // Scaled counts sum to the set's size, give or take a rounding a row.
+    let rows = table(&[part], 0);
+    let sum: u64 = rows.iter().map(|row| row.count).sum();
+    assert!(sum.abs_diff(n) <= rows.len() as u64, "{sum} for {n}");
+}
+
 /// **A reference adds its counts and the lift**: `{}` is the whole visible set, a filter a subset
 /// of it, and each row's lift is its share of the set over its share of the reference.
 #[tokio::test]
@@ -844,6 +898,10 @@ async fn every_refusal_has_its_status() {
         (by(json!({ "field": "archive", "bins": 4 })), None),
         (by(json!({ "field": "pages", "bins": 4 })), None),
         (by(json!({ "field": "nope", "bins": 4 })), None),
+        (by(json!({ "field": "score", "bins": 4, "sample": 0 })), None),
+        (by(json!({ "field": "score", "top": 2, "sample": 10 })), None),
+        (by(json!({ "field": "score", "sample": 10 })), None),
+        (by(json!({ "layer": LAYER, "top": 2, "sample": 10 })), None),
         (json!({ "view": "s0", "groupings": [{}], "filters": { "nope": { "eq": 1 } } }), None),
         (json!({ "view": "s0", "groupings": [{}], "reference": { "nope": { "eq": 1 } } }), None),
         (json!({ "view": "s0", "groupings": [{}], "page_rows": 0 }), None),

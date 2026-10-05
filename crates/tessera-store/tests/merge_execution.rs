@@ -25,6 +25,19 @@ fn quantisation() -> Quantisation {
     }
 }
 
+/// The indexed column every segment here carries, which the bands copy and `columns.arrow` does not.
+fn score() -> Vec<(String, ScalarType)> {
+    vec![("score".to_string(), ScalarType::U32)]
+}
+
+/// Entity `e`'s score: none on every fifth entity.
+fn score_of(e: u64) -> tessera_spatial::tiler::ScalarValue {
+    match e % 5 {
+        0 => tessera_spatial::tiler::ScalarValue::Null,
+        _ => tessera_spatial::tiler::ScalarValue::U32(e as u32 * 3),
+    }
+}
+
 /// Write one segment of `count` entities from `entity_lo`, whose coordinates are a function of the
 /// entity id — `stride` chosen so two segments' points **interleave** in Morton order rather than
 /// falling into disjoint regions, which is what makes the merge's sort do real work.
@@ -35,7 +48,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
             number: EntityId::new(e),
             x: (((e * stride) % 97) as f64) / 97.0,
             y: (((e * 53) % 89) as f64) / 89.0,
-            scalars: vec![],
+            scalars: vec![score_of(e)],
         })
         .collect();
     write_flush_segment(
@@ -50,6 +63,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &[],
+            indexed: &score(),
             row_base: 0,
             entity_floor: 0,
         },
@@ -76,6 +90,7 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::merge::MergeOutpu
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            indexed: &score(),
             absent_ok: &[],
             row_base: 0,
         },
@@ -153,6 +168,18 @@ fn a_merged_segment_carries_its_own_bands() {
         .map(|&s| codes[s as usize])
         .collect();
     assert_eq!(segment.cell_codes.codes(), expected.as_slice());
+
+    // Each entry's indexed value is its own item's, carried from the input it came from.
+    let copy = segment.bands.copy("score").expect("the indexed column is copied");
+    for (e, &id) in segment.bands.ids().iter().enumerate() {
+        let entity = key().invert(tessera_types::TesseraId::new(id)).1.raw();
+        let held = copy.holds(e).then(|| copy.value_at(e));
+        let expected = match score_of(entity) {
+            tessera_spatial::tiler::ScalarValue::Null => None,
+            value => Some(value),
+        };
+        assert_eq!(held, expected, "entry {e}, entity {entity}");
+    }
 }
 
 /// **Byte-exact through the code, never through coordinates.** A segment stores the code and its
@@ -263,6 +290,7 @@ fn out_of_order_inputs_are_refused() {
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            indexed: &[],
             absent_ok: &[],
             row_base: 0,
         },
@@ -300,6 +328,7 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            indexed: &[],
             absent_ok: &[],
             row_base: 0,
         },
@@ -342,6 +371,7 @@ fn a_column_declared_since_the_inputs_is_absent_in_every_row_rather_than_shiftin
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            indexed: &[],
             absent_ok: &lawful,
             row_base: 0,
         },
@@ -425,7 +455,7 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
     let expected_dir = dir.path().join("expected");
     std::fs::create_dir_all(&expected_dir).unwrap();
     let codes = tessera_spatial::sort_batch(&mut items, &mut entity_ids);
-    write_segment(&expected_dir, &items, &codes, &[]).expect("the reference segment writes");
+    write_segment(&expected_dir, &items, &codes, &[], &[]).expect("the reference segment writes");
 
     merge(dir.path(), &inputs);
     let merged = seg_dir(dir.path(), "merged-1");

@@ -11,7 +11,10 @@
 //! row order, which is also Morton order: a tile is a contiguous run of a band, found by binary
 //! search on its codes. Beside the entries, every render column of the segment is copied in entry
 //! order, so a band entry's drawn value is read beside it instead of from the column at a scattered
-//! row. Each layer level's per-row label is copied the same way, but by the level's own writer
+//! row. So is every indexed number and timestamp column that is not drawn ([`copied_beside`]),
+//! whose values live in entity space rather than in `columns.arrow`: its producer hands each banded
+//! row's values to [`BandWriter::push`], and its copy carries which entries hold a value. Each layer
+//! level's per-row label is copied the same way, but by the level's own writer
 //! ([`write_band_labels`]), since a level's column is written after its segment and moves with the
 //! level rather than with the rows.
 //!
@@ -23,7 +26,7 @@
 //! header   64 B   magic "TSBD", version u16, first band u16, band count u32 (B), row count u32,
 //!                 entries u64 (T), copy count u32 (C), zero to the end
 //! starts   (B + 1) x u64   entry index at which each band begins; starts[B] == T
-//! copies   C x 8 B         per copy: name length u16, type tag u8, width u8, zero u32
+//! copies   C x 8 B         per copy: name length u16, type tag u8, width u8, held u8, zero
 //! names    the copies' names, UTF-8, concatenated in table order
 //! -- each section below begins on a 4096-byte boundary --
 //! ids        T x u64
@@ -31,10 +34,15 @@
 //! codes      T x u32
 //! residuals  T x u32
 //! copy k     T x width_k
+//! held k     ceil(T / 8) B, for a copy whose held byte is 1
 //! ```
 //!
 //! Entry `e` is `(rows[e], ids[e], codes[e], residuals[e])`, and band `j`'s entries are
-//! `starts[j - first] .. starts[j - first + 1]`. A copy holds entry `e`'s value at index `e`.
+//! `starts[j - first] .. starts[j - first + 1]`. A copy holds entry `e`'s value at index `e`. The
+//! render columns come first, in `columns.arrow`'s order, then the indexed columns in the order
+//! their producer named them. A render copy has no held bits: whether its row holds a value is the
+//! segment's presence bitmap's to say. An indexed copy's held bits say it, bit `e % 8` of byte
+//! `e / 8`, and an entry without a value holds zero.
 //!
 //! **One file with an index, sections apart.** Each section is one typed array at its natural
 //! alignment, so a reader takes `&[u64]` and `&[u32]` straight off the mapping with no per-entry
@@ -56,8 +64,10 @@
 //! Every producer of a segment feeds [`BandWriter`] its rows in row order and calls
 //! [`BandWriter::finish`] once `columns.arrow` is complete: [`crate::write::SegmentWriter`] does
 //! so for a flush, a merge, the compaction fold and the in-memory build, and the bounded build
-//! assembly does so directly. The copies are read back from the finished `columns.arrow`, so they
-//! are the stored column's values by construction whichever producer wrote it.
+//! assembly does so directly. The render copies are read back from the finished `columns.arrow`,
+//! so they are the stored column's values by construction whichever producer wrote it. The indexed
+//! copies are what each producer hands over: a flush its buffered rows' values, the builds their
+//! values by entity, and a merge or a fold its inputs' own copies.
 //!
 //! # What the bands do not hold
 //!
@@ -70,6 +80,8 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use memmap2::{Mmap, MmapMut};
+
+use tessera_types::scalar::{ScalarType, ScalarValue};
 
 use crate::error::{Result, StoreError};
 use crate::read::{ColumnsRef, ScalarSlice};
@@ -85,7 +97,7 @@ pub const CELL_CODES_FILE: &str = "cell-codes.u32";
 pub const FIRST_BAND: u32 = 6;
 
 const MAGIC: &[u8; 4] = b"TSBD";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const HEADER_BYTES: usize = 64;
 const COPY_RECORD_BYTES: usize = 8;
 const SECTION_ALIGN: usize = 4096;
@@ -102,6 +114,23 @@ pub fn page_size() -> usize {
 /// The band a row falls in at most: its identity's leading zero bits.
 pub fn band_of(tessera_id: u64) -> u32 {
     tessera_id.leading_zeros()
+}
+
+/// The narrowest band holding every identity below `cut`, or `None` where that band is wider than
+/// [`FIRST_BAND`] and so is not written. The largest identity below `cut` is `cut - 1`, and every
+/// smaller one has at least its leading zeros.
+pub fn band_below(cut: u64) -> Option<u32> {
+    Some(cut.saturating_sub(1).leading_zeros()).filter(|&band| band >= FIRST_BAND)
+}
+
+/// Whether the bands copy a column that is not drawn: an indexed number or timestamp column. Every
+/// producer of a segment, at a build and at a running service, asks this of each declared column.
+pub fn copied_beside(ty: ScalarType, category: bool, index: bool, render: bool) -> bool {
+    index
+        && !render
+        && !category
+        && ty != ScalarType::Bool
+        && CopyType::of_type(ty).is_some()
 }
 
 /// A stored type a copy can hold, at the width it is stored at. `Bool` is one byte, 0 or 1.
@@ -146,6 +175,25 @@ impl CopyType {
 
     fn of_tag(tag: u8) -> Option<Self> {
         CopyType::ALL.get(usize::from(tag)).copied()
+    }
+
+    /// The copy type of a declared column's storage type, or `None` for a variable-width one.
+    pub fn of_type(ty: ScalarType) -> Option<Self> {
+        Some(match ty {
+            ScalarType::Bool => CopyType::Bool,
+            ScalarType::U8 => CopyType::U8,
+            ScalarType::U16 => CopyType::U16,
+            ScalarType::U32 => CopyType::U32,
+            ScalarType::U64 => CopyType::U64,
+            ScalarType::I8 => CopyType::I8,
+            ScalarType::I16 => CopyType::I16,
+            ScalarType::I32 => CopyType::I32,
+            ScalarType::I64 => CopyType::I64,
+            ScalarType::F32 => CopyType::F32,
+            ScalarType::F64 => CopyType::F64,
+            ScalarType::TimestampUs => CopyType::TimestampUs,
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => return None,
+        })
     }
 
     pub fn width(self) -> usize {
@@ -197,6 +245,38 @@ fn put_value(slice: &ScalarSlice<'_>, row: usize, out: &mut [u8]) {
     }
 }
 
+/// Write `value` into `out` at `ty`'s width, little-endian, and answer whether it is a value:
+/// [`ScalarValue::Null`] writes zero. A value of another type is refused.
+fn put_scalar(value: &ScalarValue, ty: CopyType, out: &mut [u8]) -> io::Result<bool> {
+    match (value, ty) {
+        (ScalarValue::Null, _) => {
+            out.fill(0);
+            return Ok(false);
+        }
+        (ScalarValue::Bool(v), CopyType::Bool) => out[0] = u8::from(*v),
+        (ScalarValue::U8(v), CopyType::U8) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::U16(v), CopyType::U16) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::U32(v), CopyType::U32) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::U64(v), CopyType::U64) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::I8(v), CopyType::I8) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::I16(v), CopyType::I16) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::I32(v), CopyType::I32) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::I64(v), CopyType::I64) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::F32(v), CopyType::F32) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::F64(v), CopyType::F64) => out.copy_from_slice(&v.to_le_bytes()),
+        (ScalarValue::TimestampUs(v), CopyType::TimestampUs) => {
+            out.copy_from_slice(&v.to_le_bytes())
+        }
+        (value, ty) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("bands: a {ty:?} column was handed {value:?}"),
+            ))
+        }
+    }
+    Ok(true)
+}
+
 fn align_up(at: usize) -> usize {
     at.div_ceil(SECTION_ALIGN) * SECTION_ALIGN
 }
@@ -206,8 +286,8 @@ fn align_up(at: usize) -> usize {
 struct Layout {
     band_count: usize,
     entries: usize,
-    /// Per copy, where its values begin.
-    copies: Vec<usize>,
+    /// Per copy, where its values begin, and where its held bits begin if it has them.
+    copies: Vec<(usize, Option<usize>)>,
     ids: usize,
     rows: usize,
     codes: usize,
@@ -216,22 +296,29 @@ struct Layout {
 }
 
 impl Layout {
-    fn of(band_count: usize, entries: usize, names_len: usize, widths: &[usize]) -> Self {
-        let table = HEADER_BYTES + (band_count + 1) * 8 + widths.len() * COPY_RECORD_BYTES;
+    /// `copies` is each copy's width and whether it has held bits.
+    fn of(band_count: usize, entries: usize, names_len: usize, copies: &[(usize, bool)]) -> Self {
+        let table = HEADER_BYTES + (band_count + 1) * 8 + copies.len() * COPY_RECORD_BYTES;
         let ids = align_up(table + names_len);
         let rows = align_up(ids + entries * 8);
         let codes = align_up(rows + entries * 4);
         let residuals = align_up(codes + entries * 4);
         let mut at = align_up(residuals + entries * 4);
-        let mut copies = Vec::with_capacity(widths.len());
-        for width in widths {
-            copies.push(at);
+        let mut placed = Vec::with_capacity(copies.len());
+        for &(width, held) in copies {
+            let values = at;
             at = align_up(at + entries * width);
+            let bits = held.then(|| {
+                let bits = at;
+                at = align_up(at + entries.div_ceil(8));
+                bits
+            });
+            placed.push((values, bits));
         }
         Layout {
             band_count,
             entries,
-            copies,
+            copies: placed,
             ids,
             rows,
             codes,
@@ -241,20 +328,40 @@ impl Layout {
     }
 }
 
-/// Streams a segment's rows into its band file. Holds a 20-byte spool record per row in band
-/// [`FIRST_BAND`] and the per-band counts; nothing else is held.
+/// Streams a segment's rows into its band file. Holds a spool record per row in band
+/// [`FIRST_BAND`], of 20 bytes and each indexed column's value and a held byte, and the per-band
+/// counts; nothing else is held.
 pub struct BandWriter {
     spool: BufWriter<File>,
     /// Removes the spool however the writer ends, finished, failed or dropped.
     spool_path: RemoveOnDrop,
+    /// The indexed columns copied beside the render ones, in the order [`BandWriter::push`] is
+    /// handed their values.
+    indexed: Vec<(String, CopyType)>,
+    record: Vec<u8>,
     /// Entries by their exact leading-zero count, `FIRST_BAND..=64`.
     by_zeros: [u64; 65],
     row: u32,
 }
 
 impl BandWriter {
-    /// Start a band file for the segment in `dir`, which must exist.
-    pub fn create(dir: &Path) -> io::Result<Self> {
+    /// Start a band file for the segment in `dir`, which must exist, copying the render columns
+    /// of its `columns.arrow` and the `indexed` columns, whose values each banded row's push
+    /// hands over.
+    pub fn create(dir: &Path, indexed: &[(String, ScalarType)]) -> io::Result<Self> {
+        let indexed = indexed
+            .iter()
+            .map(|(name, ty)| {
+                CopyType::of_type(*ty)
+                    .map(|copy| (name.clone(), copy))
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("bands: column '{name}' is {ty:?}, which has no fixed width"),
+                        )
+                    })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
         let spool_path = dir.join(format!("{BANDS_FILE}.spool"));
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -262,24 +369,42 @@ impl BandWriter {
             .create(true)
             .truncate(true)
             .open(&spool_path)?;
+        let record_bytes =
+            SPOOL_RECORD_BYTES + indexed.iter().map(|(_, ty)| 1 + ty.width()).sum::<usize>();
         Ok(BandWriter {
             spool: BufWriter::with_capacity(1 << 20, file),
             spool_path: RemoveOnDrop(spool_path),
+            indexed,
+            record: vec![0; record_bytes],
             by_zeros: [0; 65],
             row: 0,
         })
     }
 
-    /// Take the next row, in the row order the segment is written in.
-    pub fn push(&mut self, tessera_id: u64, morton: u32, residual: u32) -> io::Result<()> {
+    /// Take the next row, in the row order the segment is written in. `indexed(k)` is the row's
+    /// value of the `k`th indexed column, or [`ScalarValue::Null`] where it has none; it is asked
+    /// only of a row that falls in a band.
+    pub fn push(
+        &mut self,
+        tessera_id: u64,
+        morton: u32,
+        residual: u32,
+        mut indexed: impl FnMut(usize) -> io::Result<ScalarValue>,
+    ) -> io::Result<()> {
         let zeros = band_of(tessera_id);
         if zeros >= FIRST_BAND {
-            let mut record = [0u8; SPOOL_RECORD_BYTES];
+            let record = &mut self.record;
             record[0..8].copy_from_slice(&tessera_id.to_le_bytes());
             record[8..12].copy_from_slice(&self.row.to_le_bytes());
             record[12..16].copy_from_slice(&morton.to_le_bytes());
             record[16..20].copy_from_slice(&residual.to_le_bytes());
-            self.spool.write_all(&record)?;
+            let mut at = SPOOL_RECORD_BYTES;
+            for (k, (_, ty)) in self.indexed.iter().enumerate() {
+                let held = put_scalar(&indexed(k)?, *ty, &mut record[at + 1..at + 1 + ty.width()])?;
+                record[at] = u8::from(held);
+                at += 1 + ty.width();
+            }
+            self.spool.write_all(record)?;
             self.by_zeros[zeros as usize] += 1;
         }
         self.row += 1;
@@ -287,15 +412,19 @@ impl BandWriter {
     }
 
     /// Write `bands.bin` into `dir`, copying every render column of the segment's finished
-    /// `columns.arrow`. The spool is removed whether this succeeds or not.
+    /// `columns.arrow` and the indexed columns' values the pushes handed over. The spool is
+    /// removed whether this succeeds or not.
     pub fn finish(self, dir: &Path) -> io::Result<()> {
         let BandWriter {
             spool,
             spool_path,
+            indexed,
+            record,
             by_zeros,
             row,
         } = self;
         let _guard = spool_path;
+        let record_bytes = record.len();
         let spool = spool.into_inner().map_err(io::IntoInnerError::into_error)?;
         let columns = ColumnsRef::load(&dir.join("columns.arrow")).map_err(io::Error::other)?;
         if columns.row_count() != row {
@@ -322,16 +451,35 @@ impl BandWriter {
 
         // A variable-width column has no copy. No declaration can render one, and the writer
         // accepts one only because the column format admits it.
-        let copies: Vec<(&str, CopyType, ScalarSlice<'_>)> = columns
+        let rendered: Vec<(&str, CopyType, ScalarSlice<'_>)> = columns
             .scalar_names()
             .filter_map(|name| {
                 let slice = columns.scalar(name).expect("a listed column is held");
                 CopyType::of_slice(&slice).map(|ty| (name, ty, slice))
             })
             .collect();
+        if let Some((name, _)) = indexed
+            .iter()
+            .find(|(name, _)| rendered.iter().any(|(drawn, _, _)| drawn == name))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("bands: column '{name}' is both drawn and handed over as indexed"),
+            ));
+        }
+        // Every copy as the table lists it: its name, its type and whether it has held bits.
+        let copies: Vec<(&str, CopyType, bool)> = rendered
+            .iter()
+            .map(|(name, ty, _)| (*name, *ty, false))
+            .chain(indexed.iter().map(|(name, ty)| (name.as_str(), *ty, true)))
+            .collect();
         let names_len: usize = copies.iter().map(|(name, _, _)| name.len()).sum();
-        let widths: Vec<usize> = copies.iter().map(|(_, ty, _)| ty.width()).collect();
-        let layout = Layout::of(band_count, entries, names_len, &widths);
+        let shapes: Vec<(usize, bool)> = copies
+            .iter()
+            .map(|(_, ty, held)| (ty.width(), *held))
+            .collect();
+        let layout = Layout::of(band_count, entries, names_len, &shapes);
+        let indexed_at = &layout.copies[rendered.len()..];
 
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -355,7 +503,7 @@ impl BandWriter {
             map[at..at + 8].copy_from_slice(&start.to_le_bytes());
             at += 8;
         }
-        for (name, ty, _) in &copies {
+        for (name, ty, held) in &copies {
             let len = u16::try_from(name.len()).map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -365,6 +513,7 @@ impl BandWriter {
             map[at..at + 2].copy_from_slice(&len.to_le_bytes());
             map[at + 2] = ty.tag();
             map[at + 3] = ty.width() as u8;
+            map[at + 4] = u8::from(*held);
             at += COPY_RECORD_BYTES;
         }
         for (name, _, _) in &copies {
@@ -382,18 +531,35 @@ impl BandWriter {
             map[layout.residuals + e * 4..layout.residuals + e * 4 + 4]
                 .copy_from_slice(&residual.to_le_bytes());
         };
+        // An indexed copy's value and held bit, moved from entry `from` to entry `e`.
+        let carry = |map: &mut MmapMut, from: usize, e: usize| {
+            for ((_, ty), &(values, bits)) in indexed.iter().zip(indexed_at) {
+                let width = ty.width();
+                map.copy_within(values + from * width..values + (from + 1) * width, values + e * width);
+                let bits = bits.expect("an indexed copy has held bits");
+                if map[bits + from / 8] & (1 << (from % 8)) != 0 {
+                    map[bits + e / 8] |= 1 << (e % 8);
+                }
+            }
+        };
         if band_count > 0 {
             // SAFETY: the spool is this writer's own file and is not written while mapped.
             let spooled = unsafe { Mmap::map(&spool) }?;
-            for (e, record) in spooled
-                .as_chunks::<SPOOL_RECORD_BYTES>()
-                .0
-                .iter()
-                .enumerate()
-            {
+            for (e, record) in spooled.chunks_exact(record_bytes).enumerate() {
                 let read = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
                 let id = u64::from_le_bytes(record[0..8].try_into().unwrap());
                 put(&mut map, e, id, read(8), read(12), read(16));
+                let mut at = SPOOL_RECORD_BYTES;
+                for ((_, ty), &(values, bits)) in indexed.iter().zip(indexed_at) {
+                    let width = ty.width();
+                    map[values + e * width..values + (e + 1) * width]
+                        .copy_from_slice(&record[at + 1..at + 1 + width]);
+                    if record[at] != 0 {
+                        let bits = bits.expect("an indexed copy has held bits");
+                        map[bits + e / 8] |= 1 << (e % 8);
+                    }
+                    at += 1 + width;
+                }
             }
             let read_u32 = |map: &MmapMut, base: usize, e: usize| {
                 u32::from_le_bytes(map[base + e * 4..base + e * 4 + 4].try_into().unwrap())
@@ -416,13 +582,14 @@ impl BandWriter {
                         read_u32(&map, layout.residuals, from),
                     );
                     put(&mut map, e, id, row, code, residual);
+                    carry(&mut map, from, e);
                     e += 1;
                 }
                 debug_assert_eq!(e as u64, starts[band + 1]);
             }
         }
 
-        for ((_, ty, slice), &base) in copies.iter().zip(&layout.copies) {
+        for ((_, ty, slice), &(base, _)) in rendered.iter().zip(&layout.copies) {
             let width = ty.width();
             for e in 0..entries {
                 let row = u32::from_le_bytes(
@@ -476,9 +643,17 @@ pub struct BandCopy<'a> {
     pub ty: CopyType,
     /// Entry `e`'s value is `bytes[e * width..(e + 1) * width]`, little-endian.
     pub bytes: &'a [u8],
+    /// An indexed column's held bits: entry `e` holds a value where bit `e % 8` of byte `e / 8`
+    /// is set. `None` on a render column, whose segment's presence bitmap says it.
+    pub held: Option<&'a [u8]>,
 }
 
 impl BandCopy<'_> {
+    /// Whether entry `e` holds a value, as far as the copy knows: always, on a render column.
+    pub fn holds(&self, e: usize) -> bool {
+        self.held.is_none_or(|bits| bits[e / 8] & (1 << (e % 8)) != 0)
+    }
+
     /// Entry `e`'s value as a scalar of the copied column's type.
     pub fn value_at(&self, e: usize) -> tessera_types::scalar::ScalarValue {
         use tessera_types::scalar::ScalarValue as V;
@@ -530,7 +705,8 @@ pub struct Bands {
     first_band: u32,
     row_count: u32,
     starts: Vec<u64>,
-    copies: Vec<(String, CopyType)>,
+    /// Each copy's name, type, and whether it has held bits.
+    copies: Vec<(String, CopyType, bool)>,
     layout: Layout,
     /// Set once a request has asked for its reads to be advised as random.
     advised: std::sync::Once,
@@ -631,11 +807,16 @@ impl Bands {
             if usize::from(map[at + 3]) != ty.width() {
                 return Err(malformed(&path, "a copy's width is not its type's"));
             }
+            let held = match map[at + 4] {
+                0 => false,
+                1 => true,
+                other => return Err(malformed(&path, format!("a copy's held byte is {other}"))),
+            };
             lens.push(len);
-            copies.push((String::new(), ty));
+            copies.push((String::new(), ty, held));
             at += COPY_RECORD_BYTES;
         }
-        for ((name, _), len) in copies.iter_mut().zip(&lens) {
+        for ((name, _, _), len) in copies.iter_mut().zip(&lens) {
             let bytes = map
                 .get(at..at + len)
                 .ok_or_else(|| malformed(&path, "a copy's name runs past the file"))?;
@@ -644,8 +825,11 @@ impl Bands {
                 .to_string();
             at += len;
         }
-        let widths: Vec<usize> = copies.iter().map(|(_, ty)| ty.width()).collect();
-        let layout = Layout::of(band_count, entries, lens.iter().sum(), &widths);
+        let shapes: Vec<(usize, bool)> = copies
+            .iter()
+            .map(|(_, ty, held)| (ty.width(), *held))
+            .collect();
+        let layout = Layout::of(band_count, entries, lens.iter().sum(), &shapes);
         if map.len() != layout.len {
             return Err(malformed(
                 &path,
@@ -747,22 +931,35 @@ impl Bands {
         self.typed(self.layout.residuals)
     }
 
-    /// The names of the copied columns, in the order `columns.arrow` holds them.
+    /// The names of the copied columns: the render columns in the order `columns.arrow` holds
+    /// them, then the indexed ones.
     pub fn copy_names(&self) -> impl Iterator<Item = &str> {
-        self.copies.iter().map(|(name, _)| name.as_str())
+        self.copies.iter().map(|(name, _, _)| name.as_str())
+    }
+
+    /// The names of the copied indexed columns, those with held bits.
+    pub fn indexed_names(&self) -> impl Iterator<Item = &str> {
+        self.copies
+            .iter()
+            .filter(|(_, _, held)| *held)
+            .map(|(name, _, _)| name.as_str())
+    }
+
+    fn position(&self, name: &str) -> Option<usize> {
+        self.copies.iter().position(|(held, _, _)| held == name)
     }
 
     /// Where one copied column's values lie in `bands.bin`, as a byte range of the file.
     pub fn copy_range(&self, name: &str) -> Option<std::ops::Range<usize>> {
-        let k = self.copies.iter().position(|(held, _)| held == name)?;
-        let at = self.layout.copies[k];
+        let k = self.position(name)?;
+        let at = self.layout.copies[k].0;
         Some(at..at + self.entries() * self.copies[k].1.width())
     }
 
     /// One copied column's values in entry order, read in place as `T`, or `None` where the
     /// segment has no copy of that name stored as `ty`, or `T` is not `ty`'s width.
     pub fn copy_values<T: CopyValue>(&self, name: &str, ty: CopyType) -> Option<&[T]> {
-        let k = self.copies.iter().position(|(held, _)| held == name)?;
+        let k = self.position(name)?;
         if self.copies[k].1 != ty || ty.width() != std::mem::size_of::<T>() {
             return None;
         }
@@ -771,7 +968,7 @@ impl Bands {
         // aligned for `T`, and every bit pattern is a valid `T`.
         Some(unsafe {
             std::slice::from_raw_parts(
-                self.map.as_ptr().add(self.layout.copies[k]) as *const T,
+                self.map.as_ptr().add(self.layout.copies[k].0) as *const T,
                 self.entries(),
             )
         })
@@ -779,14 +976,32 @@ impl Bands {
 
     /// One copied column, or `None` where the segment has no column of that name.
     pub fn copy(&self, name: &str) -> Option<BandCopy<'_>> {
-        let k = self.copies.iter().position(|(held, _)| held == name)?;
+        let k = self.position(name)?;
         let ty = self.copies[k].1;
-        let at = self.layout.copies[k];
+        let (at, bits) = self.layout.copies[k];
         Some(BandCopy {
             name: &self.copies[k].0,
             ty,
             bytes: &self.map[at..at + self.entries() * ty.width()],
+            held: bits.map(|bits| &self.map[bits..bits + self.entries().div_ceil(8)]),
         })
+    }
+
+    /// Band `band`'s entries from the first whose row is at least `from`, looked up by row in
+    /// ascending row order.
+    pub fn entries_from(&self, band: u32, from: u32) -> BandEntries<'_> {
+        let span = self.band(band);
+        let rows = &self.rows()[span.clone()];
+        BandEntries {
+            rows,
+            start: span.start,
+            at: rows.partition_point(|&r| r < from),
+        }
+    }
+
+    /// The entry of segment row `row` in band `band`, where the band holds it.
+    pub fn entry_of_row(&self, band: u32, row: u32) -> Option<usize> {
+        self.entries_from(band, row).entry(row)
     }
 
     /// Check every entry against the segment it was written for: each band holds exactly the rows
@@ -811,10 +1026,15 @@ impl Bands {
             .scalar_names()
             .filter(|name| !matches!(columns.scalar(name), Some(ScalarSlice::Utf8(_))))
             .collect();
-        let held: Vec<&str> = self.copy_names().collect();
-        if names != held {
+        let drawn: Vec<&str> = self
+            .copies
+            .iter()
+            .filter(|(_, _, held)| !held)
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        if names != drawn {
             return Err(format!(
-                "the bands copy {held:?} and the segment's render columns are {names:?}"
+                "the bands copy {drawn:?} and the segment's render columns are {names:?}"
             ));
         }
         let deepest = ids
@@ -884,6 +1104,62 @@ impl Bands {
             }
         }
         Ok(())
+    }
+
+    /// Check the indexed copy `name`, declared as `declared`, against the value of each entry's
+    /// entity: `value_of(row)` is that value, [`ScalarValue::Null`] where the entity has none, or
+    /// `None` where the row is not checked. What `tessera verify --deep` asks of each indexed
+    /// copy, after [`Bands::check_against`] has checked the entries' rows.
+    pub fn check_indexed_against(
+        &self,
+        name: &str,
+        declared: ScalarType,
+        mut value_of: impl FnMut(u32) -> Option<ScalarValue>,
+    ) -> std::result::Result<(), String> {
+        let copy = self
+            .copy(name)
+            .ok_or_else(|| format!("the bands hold no copy of '{name}'"))?;
+        if copy.held.is_none() || CopyType::of_type(declared) != Some(copy.ty) {
+            return Err(format!(
+                "copy '{name}' is a {:?} copy where the bundle declares an indexed {declared:?}",
+                copy.ty
+            ));
+        }
+        for (e, &row) in self.rows().iter().enumerate() {
+            let Some(expected) = value_of(row) else {
+                continue;
+            };
+            let copied = match copy.holds(e) {
+                true => copy.value_at(e),
+                false => ScalarValue::Null,
+            };
+            if !scalar_bits_equal(&expected, &copied) {
+                return Err(format!(
+                    "copy '{name}', entry {e}: holds {copied:?} and row {row}'s item holds \
+                     {expected:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One band's entries, looked up by row with a cursor that only moves forward.
+#[derive(Debug, Clone)]
+pub struct BandEntries<'a> {
+    rows: &'a [u32],
+    start: usize,
+    at: usize,
+}
+
+impl BandEntries<'_> {
+    /// The entry of segment row `row`, where the band holds it. Each row asked must be at least
+    /// the one asked before it; the cursor steps over the entries between them.
+    pub fn entry(&mut self, row: u32) -> Option<usize> {
+        while self.rows.get(self.at).is_some_and(|&r| r < row) {
+            self.at += 1;
+        }
+        (self.rows.get(self.at) == Some(&row)).then_some(self.start + self.at)
     }
 }
 
@@ -1079,8 +1355,17 @@ mod tests {
     use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
     use tessera_types::TesseraId;
 
+    /// Item `i`'s value of the indexed column `year`: none on every seventh item.
+    fn year_of(i: usize) -> ScalarValue {
+        match i % 7 {
+            0 => ScalarValue::Null,
+            _ => ScalarValue::I16(1900 + i as i16),
+        }
+    }
+
     /// A segment of `n` rows whose identities spread over many bands: row `i`'s identity has `i % 20`
-    /// leading zeros. Rows ascend by Morton code, three rows a cell.
+    /// leading zeros. Rows ascend by Morton code, three rows a cell. Three columns are drawn and
+    /// `year` is indexed only.
     fn segment(dir: &Path, n: usize) -> Vec<TilerItem> {
         let items: Vec<TilerItem> = (0..n)
             .map(|i| {
@@ -1094,6 +1379,7 @@ mod tests {
                         ScalarValue::U16(i as u16),
                         ScalarValue::Bool(i % 2 == 0),
                         ScalarValue::F64(i as f64 / 4.0),
+                        year_of(i),
                     ],
                 }
             })
@@ -1118,6 +1404,7 @@ mod tests {
                 ("flag".to_string(), ScalarType::Bool),
                 ("weight".to_string(), ScalarType::F64),
             ],
+            &[("year".to_string(), ScalarType::I16)],
         )
         .unwrap();
         sorted
@@ -1164,6 +1451,94 @@ mod tests {
             );
         }
         assert!(bands.copy("absent").is_none());
+
+        // The indexed column is not in `columns.arrow`; its copy holds each entry's item's value,
+        // and says which entries hold none.
+        assert!(columns.scalar("year").is_none());
+        assert_eq!(bands.indexed_names().collect::<Vec<_>>(), vec!["year"]);
+        let year = bands.copy("year").unwrap();
+        for (e, &row) in bands.rows().iter().enumerate() {
+            let i = (u64::MAX >> (rows[row as usize].tessera_id.raw().leading_zeros()))
+                - rows[row as usize].tessera_id.raw();
+            let held = year.holds(e).then(|| year.value_at(e));
+            let expected = match year_of(i as usize) {
+                ScalarValue::Null => None,
+                value => Some(value),
+            };
+            assert_eq!(held, expected, "entry {e}, item {i}");
+        }
+    }
+
+    /// An entry is found by its row, alone or by a cursor moving forward, and a row the band does
+    /// not hold has none.
+    #[test]
+    fn an_entry_is_found_by_its_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        segment(dir.path(), 400);
+        let bands = Bands::open(dir.path(), 400).unwrap();
+        for j in bands.bands() {
+            let span = bands.band(j);
+            let held: std::collections::HashMap<u32, usize> = bands.rows()[span.clone()]
+                .iter()
+                .enumerate()
+                .map(|(at, &row)| (row, span.start + at))
+                .collect();
+            let mut cursor = bands.entries_from(j, 100);
+            for row in 0..400 {
+                assert_eq!(bands.entry_of_row(j, row), held.get(&row).copied(), "band {j}");
+                if row >= 100 && row % 3 != 1 {
+                    assert_eq!(cursor.entry(row), held.get(&row).copied(), "band {j}");
+                }
+            }
+        }
+    }
+
+    /// The indexed copy holds each entry's item's value, and a value that is not its item's is
+    /// found; a row the caller does not check is skipped.
+    #[test]
+    fn an_indexed_copy_is_checked_against_its_items_values() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rows = segment(dir.path(), 400);
+        let bands = Bands::open(dir.path(), 400).unwrap();
+        let item_of = |row: u32| {
+            let id = rows[row as usize].tessera_id.raw();
+            ((u64::MAX >> id.leading_zeros()) - id) as usize
+        };
+        bands
+            .check_indexed_against("year", ScalarType::I16, |row| Some(year_of(item_of(row))))
+            .unwrap();
+        let wrong = bands.rows()[0];
+        let changed = |row: u32| match row == wrong {
+            true => Some(ScalarValue::I16(-1)),
+            false => Some(year_of(item_of(row))),
+        };
+        assert!(bands
+            .check_indexed_against("year", ScalarType::I16, changed)
+            .is_err());
+        let skipped = |row: u32| (row != wrong).then(|| year_of(item_of(row)));
+        bands
+            .check_indexed_against("year", ScalarType::I16, skipped)
+            .unwrap();
+        assert!(bands
+            .check_indexed_against("year", ScalarType::I32, |row| Some(year_of(item_of(row))))
+            .is_err());
+        assert!(bands
+            .check_indexed_against("count", ScalarType::U16, |_| None)
+            .is_err());
+    }
+
+    /// The band below a cut holds every identity below it, and the next band does not.
+    #[test]
+    fn the_band_below_a_cut_is_the_narrowest_holding_it() {
+        for cut in [2u64, 3, 1 << 50, (1 << 50) + 1, (1 << 57) - 1, 1 << 57, 1 << 58, u64::MAX] {
+            let band = cut.saturating_sub(1).leading_zeros();
+            assert_eq!(band_below(cut), (band >= FIRST_BAND).then_some(band), "{cut}");
+            // Every identity below the cut has at least `band` leading zeros, and one has exactly.
+            assert_eq!(band_of(cut - 1), band, "{cut}");
+            assert!((0..cut).step_by((cut / 7).max(1) as usize).all(|id| band_of(id) >= band));
+        }
+        assert_eq!(band_below(1 << 58), Some(6));
+        assert_eq!(band_below((1 << 58) + 1), None);
     }
 
     #[test]
@@ -1205,7 +1580,7 @@ mod tests {
             scalars: vec![],
         }];
         let code = tessera_spatial::split32(1, 1).0.raw();
-        write_segment(dir.path(), &items, &[code], &[]).unwrap();
+        write_segment(dir.path(), &items, &[code], &[], &[]).unwrap();
         let bands = Bands::open(dir.path(), 1).unwrap();
         assert_eq!(bands.entries(), 0);
         assert!(bands.bands().is_empty());

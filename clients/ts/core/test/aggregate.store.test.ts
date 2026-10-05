@@ -24,7 +24,7 @@ const DRAFT: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs']}
 /** An answer to `req`: one table per grouping, `total` its number. */
 function answer(req: AggregateRequest, total: number, identityKey = 'ik'): AggregateResult {
   return {
-    tables: req.groupings.map((_, grouping) => ({grouping, total, referenceTotal: null, groups: null, rows: new Table()})),
+    tables: req.groupings.map((_, grouping) => ({grouping, total, referenceTotal: null, groups: null, sample: null, rows: new Table()})),
     region: null,
     recomposed: false,
     identityKey,

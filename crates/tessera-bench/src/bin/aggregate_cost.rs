@@ -324,6 +324,7 @@ fn main() -> Result<(), BoxError> {
                 column: column.to_string(),
                 bins: 20,
                 range,
+                sample: None,
             }),
             cells: None,
             area: None,

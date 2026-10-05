@@ -2,9 +2,9 @@ import {Table, tableFromIPC} from 'apache-arrow';
 import {FRAME_PAGE_END, FRAME_RECORDS, FRAME_TABLE_HEAD, FRAME_TRAILER} from './frame.js';
 import {Frames, pageEndOf, registerZstd, trailerFrom, type RecordsRequest} from './records.js';
 import {parseRegionVerdict} from './region.js';
-import type {AggregateResult, AggregateTable, RegionVerdict} from './types.js';
+import type {AggregateResult, AggregateSample, AggregateTable, RegionVerdict} from './types.js';
 
-type RawTableHead = {grouping?: unknown; total?: unknown; reference_total?: unknown; groups?: unknown; resumed?: unknown};
+type RawTableHead = {grouping?: unknown; total?: unknown; reference_total?: unknown; groups?: unknown; resumed?: unknown; sample?: unknown};
 
 /** One table as it is read: the figures of its first head, and its pages so far. */
 type Reading = Omit<AggregateTable, 'rows'> & {pages: Table[]};
@@ -124,6 +124,21 @@ function tableHeadOf(payload: Uint8Array): Omit<AggregateTable, 'rows'> {
     grouping: raw.grouping as number,
     total: raw.total as number,
     referenceTotal: Number.isInteger(raw.reference_total) ? (raw.reference_total as number) : null,
-    groups: Number.isInteger(raw.groups) ? (raw.groups as number) : null
+    groups: Number.isInteger(raw.groups) ? (raw.groups as number) : null,
+    sample: sampleOf(raw.sample)
+  };
+}
+
+function sampleOf(raw: unknown): AggregateSample | null {
+  if (raw === undefined || raw === null) return null;
+  const sample = raw as {sampled?: unknown; items?: unknown; reference_items?: unknown; edges_sampled?: unknown};
+  if (typeof sample.sampled !== 'boolean' || !Number.isInteger(sample.items) || typeof sample.edges_sampled !== 'boolean') {
+    throw new Error('a table head\'s `sample` has no `sampled`, `items` or `edges_sampled`, which the contract requires; the server and this client are from different versions');
+  }
+  return {
+    sampled: sample.sampled,
+    items: sample.items as number,
+    referenceItems: Number.isInteger(sample.reference_items) ? (sample.reference_items as number) : null,
+    edgesSampled: sample.edges_sampled
   };
 }

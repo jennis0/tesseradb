@@ -20,6 +20,30 @@
 //! integer field. On a timestamp field they fall on whole seconds, minutes, hours, days, weeks
 //! starting on Monday, months or years, in UTC, at the finest of those that needs no more bins
 //! than were asked for.
+//!
+//! # A sampled histogram
+//!
+//! With a sample size `s` and a set of `N > s` items, the counts are taken over the set's items
+//! whose `tessera_id` is below the cut `⌊s · 2⁶⁴ / N⌋`, about `s` of them, and each count is scaled
+//! by `N` over the items counted, rounded to the nearest whole number with a half rounded up. The
+//! cut is one for the whole set, so no tile, segment or group has a floor or a cap. `N` is the
+//! set's composed size and the sample is drawn from the set's own rows, which are inside the
+//! visible set, so an item the viewer may not see neither enters the sample nor moves `N`. Where
+//! `N <= s` every item is counted and nothing is scaled. The reference is sampled the same way,
+//! at its own cut. Default edges are drawn from the visible set's sample, at its own cut.
+//!
+//! The items below a cut are band `band_below(cut)` of each segment's identity bands
+//! ([`tessera_store::bands`]) intersected with the set. Each piece of rows is read either from the
+//! band, a set lookup per entry, or by scanning the set's rows' identities, whichever its counts,
+//! known before reading, say costs less. Both read the same items, so the choice changes only the
+//! time a piece takes. A banded entry's value is read from the band's copy of the column. A
+//! scanned row below the cut is read from the drawn column, or where the field is only indexed,
+//! from the band's copy, since every row below the cut is in the band.
+//!
+//! A set is counted exactly, every item read and nothing scaled, where its cut is above 2^58 and
+//! so wider than the widest band: where `s` is more than about one item in 64 of the set. Whether
+//! a set is sampled depends on `N` and `s` alone, so it says nothing of rows the viewer cannot see.
+//! The head then says the set was not sampled, and counts `N` items.
 
 use rayon::prelude::*;
 use tessera_filter::RecordValue;
@@ -49,7 +73,17 @@ pub(super) struct Bins {
     drawn: bool,
     bins: u32,
     range: Option<(Scalar, Scalar)>,
+    /// The sample size, where one was asked for.
+    sample: Option<u64>,
 }
+
+/// A banded entry costs about this many scanned rows: a set lookup per entry read from a band
+/// (about 15 ns) against a scanned row's identity (about 0.6 ns). Measured over the GBIF bundle's
+/// 3.5 billion rows with the files in the page cache, where a 100,000-item sample of the whole
+/// extent took 4 ms from the band and a viewer seeing 2.1% of it 44 ms by scanning against 109 ms
+/// from the band. At 0.6 ns a row, every row would scan in about 2 s; measured cold under a 24 GB
+/// memory cap, that scan read all 28 GB of the identity column from disk and took 18 to 20 s.
+const BAND_ENTRY_ROWS: u64 = 25;
 
 /// How a field's values are compared with an edge, and the type its edges are served as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +152,7 @@ impl Bins {
         column: &str,
         bins: u32,
         range: Option<(Scalar, Scalar)>,
+        sample: Option<u64>,
     ) -> Result<Bins> {
         let manifest = &generation.bundle.manifest;
         let not_binnable =
@@ -177,7 +212,14 @@ impl Bins {
             drawn,
             bins,
             range,
+            sample,
         })
+    }
+
+    /// The cut a set of `n` items is sampled below, or `None` where every item is counted.
+    fn cut(&self, n: u64) -> Option<u64> {
+        let s = self.sample.filter(|&s| n > s)?;
+        Some(((u128::from(s) << 64) / u128::from(n)) as u64)
     }
 
     pub(super) fn kind(&self) -> Kind {
@@ -194,12 +236,21 @@ impl Bins {
     /// and never carried to another.
     pub(super) fn groups(&self, cx: &Cx<'_>, timings: &mut AggregateTimings) -> Result<Groups> {
         let counting = std::time::Instant::now();
-        let edges = self.edges(cx)?;
-        let set = self.counts(cx, &cx.sets.set, &edges)?;
-        let reference = match &cx.sets.reference {
-            Some(reference) => Some(self.counts(cx, reference, &edges)?),
-            None => None,
+        let (edges, edges_sampled) = self.edges(cx, timings)?;
+        let (set, counted) = self.counts(cx, &cx.sets.set, &edges, timings)?;
+        let (reference, reference_counted) = match &cx.sets.reference {
+            Some(reference) => {
+                let (counts, counted) = self.counts(cx, reference, &edges, timings)?;
+                (Some(counts), Some(counted))
+            }
+            None => (None, None),
         };
+        let sample = self.sample.map(|_| super::TableSample {
+            sampled: counted.sampled || reference_counted.is_some_and(|r| r.sampled),
+            items: counted.items,
+            reference_items: reference_counted.map(|r| r.items),
+            edges_sampled,
+        });
         timings.count_ns += counting.elapsed().as_nanos() as u64;
         timings.entities_crossed +=
             cx.sets.set.crossed() + cx.sets.reference.as_ref().map_or(0, Set::crossed);
@@ -222,22 +273,24 @@ impl Bins {
                 .collect(),
             titles: None,
             distinct: set.bins.iter().filter(|&&n| n > 0).count() as u64,
+            sample,
         })
     }
 
     /// The request's range cut into equal bins, or readable edges around the values of every item
-    /// this viewer may see in the view.
-    fn edges(&self, cx: &Cx<'_>) -> Result<Edges> {
+    /// this viewer may see in the view, and whether those values were a sample.
+    fn edges(&self, cx: &Cx<'_>, timings: &mut AggregateTimings) -> Result<(Edges, bool)> {
         let n = self.bins;
         if let Some((lower, upper)) = self.range {
-            return Ok(match self.kind {
+            let edges = match self.kind {
                 Kind::Float => Edges::Floats(equal_floats(
                     tessera_filter::as_f64(lower),
                     tessera_filter::as_f64(upper),
                     n,
                 )),
                 kind => Edges::Ints(kind.clamp(equal_ints(int_of(lower), int_of(upper), n))),
-            });
+            };
+            return Ok((edges, false));
         }
         // The visible set, which no filter or region narrows.
         let built;
@@ -249,43 +302,224 @@ impl Bins {
             built = Set::whole(cx.open);
             &built
         };
+        // With a sample size, the visible set's sample, at the visible set's own cut.
         if self.kind == Kind::Float {
-            let span = self.pass(cx, visible, Extremes::<f64>::default)?.0.span;
-            return Ok(Edges::Floats(
-                span.map_or_else(Vec::new, |(min, max)| readable_floats(min, max, n)),
-            ));
+            let (extremes, _, counted) = self.tally(cx, visible, Extremes::<f64>::default, timings)?;
+            let edges = Edges::Floats(
+                extremes
+                    .span
+                    .map_or_else(Vec::new, |(min, max)| readable_floats(min, max, n)),
+            );
+            return Ok((edges, counted.sampled));
         }
-        let span = self.pass(cx, visible, Extremes::<i128>::default)?.0.span;
-        Ok(Edges::Ints(match span {
+        let (extremes, _, counted) = self.tally(cx, visible, Extremes::<i128>::default, timings)?;
+        let edges = Edges::Ints(match extremes.span {
             None => Vec::new(),
             Some((min, max)) if self.kind == Kind::Timestamp => {
                 readable_times(min as i64, max as i64, n)
             }
             Some((min, max)) => self.kind.clamp(readable_ints(min, max, n)),
-        }))
+        });
+        Ok((edges, counted.sampled))
     }
 
-    /// How many items of `set` fall in each bin of `edges`, in none, and have no value.
-    fn counts(&self, cx: &Cx<'_>, set: &Set, edges: &Edges) -> Result<Counts> {
+    /// How many items of `set` fall in each bin of `edges`, in none, and have no value, scaled to
+    /// the set where a sample was counted, and how the set was counted.
+    fn counts(
+        &self,
+        cx: &Cx<'_>,
+        set: &Set,
+        edges: &Edges,
+        timings: &mut AggregateTimings,
+    ) -> Result<(Counts, Counted)> {
         let bins = edges.bins();
-        fn counts<K>((hist, none): (Histogram<'_, K>, u64)) -> Counts {
-            Counts {
-                bins: hist.bins,
-                rest: hist.rest,
-                none,
-            }
+        let n = set.size();
+        fn counts<K>(
+            (hist, none, counted): (Histogram<'_, K>, u64, Counted),
+            n: u64,
+        ) -> (Counts, Counted) {
+            let items = counted.items;
+            // Each count times `n / items`, to the nearest whole number with a half rounded up.
+            let scale = |c: u64| match items {
+                0 => 0,
+                _ if items == n => c,
+                _ => ((u128::from(c) * u128::from(n) * 2 + u128::from(items))
+                    / (2 * u128::from(items))) as u64,
+            };
+            let counts = Counts {
+                bins: hist.bins.into_iter().map(scale).collect(),
+                rest: scale(hist.rest),
+                none: scale(none),
+            };
+            (counts, counted)
         }
         // With no bin, every value is in `rest`.
         Ok(match edges {
-            Edges::Floats(edges) if bins > 0 => {
-                counts(self.pass(cx, set, || Histogram::new(&edges[..bins], edges[bins]))?)
-            }
-            Edges::Ints(edges) if bins > 0 => {
-                counts(self.pass(cx, set, || Histogram::new(&edges[..bins], edges[bins]))?)
-            }
-            Edges::Floats(_) => counts(self.pass(cx, set, || Histogram::<f64>::new(&[], 0.0))?),
-            Edges::Ints(_) => counts(self.pass(cx, set, || Histogram::<i128>::new(&[], 0))?),
+            Edges::Floats(edges) if bins > 0 => counts(
+                self.tally(cx, set, || Histogram::new(&edges[..bins], edges[bins]), timings)?,
+                n,
+            ),
+            Edges::Ints(edges) if bins > 0 => counts(
+                self.tally(cx, set, || Histogram::new(&edges[..bins], edges[bins]), timings)?,
+                n,
+            ),
+            Edges::Floats(_) => counts(
+                self.tally(cx, set, || Histogram::<f64>::new(&[], 0.0), timings)?,
+                n,
+            ),
+            Edges::Ints(_) => counts(
+                self.tally(cx, set, || Histogram::<i128>::new(&[], 0), timings)?,
+                n,
+            ),
         })
+    }
+
+    /// A tally of `set`'s values, how many of its counted items have no value, and how the set was
+    /// counted: the sample below the set's cut where it holds more items than the sample size and a
+    /// band holds the cut, and otherwise every item.
+    fn tally<K: Num, T: Tally<K>>(
+        &self,
+        cx: &Cx<'_>,
+        set: &Set,
+        empty: impl Fn() -> T + Sync + Send,
+        timings: &mut AggregateTimings,
+    ) -> Result<(T, u64, Counted)> {
+        let members = set.cells(cx);
+        if let Some(plan) = self
+            .cut(set.size())
+            .and_then(|cut| SamplePlan::of(cx, &members, cut))
+        {
+            let (tally, none, items) = self.pass_sample(cx, &members, &plan, empty)?;
+            timings.band_entries += plan.entries_read();
+            return Ok((
+                tally,
+                none,
+                Counted {
+                    items,
+                    sampled: true,
+                },
+            ));
+        }
+        let (tally, none) = self.pass(cx, set, empty)?;
+        Ok((
+            tally,
+            none,
+            Counted {
+                items: set.size(),
+                sampled: false,
+            },
+        ))
+    }
+
+    /// The values of `members`' items whose `tessera_id` is below the plan's cut, in parallel
+    /// pieces of the view's rows, each read from the band or by scanning as the plan says.
+    fn pass_sample<K: Num, T: Tally<K>>(
+        &self,
+        cx: &Cx<'_>,
+        members: &CellSet<'_>,
+        plan: &SamplePlan,
+        empty: impl Fn() -> T + Sync + Send,
+    ) -> Result<(T, u64, u64)> {
+        cx.check_cancelled()?;
+        let SamplePlan { band, cut, .. } = *plan;
+        let column = self.column.as_str();
+        let segments = cx.segments();
+        // What one piece found: its tally, its items with no value, its items, and the view rows
+        // whose value is read through their entity.
+        let found = cx.engine.pool.install(|| {
+            plan.pieces
+                .par_iter()
+                .try_fold(
+                    || (empty(), 0u64, 0u64, Vec::<u32>::new()),
+                    |(mut tally, mut none, mut items, mut through), piece| {
+                        let (segment, row_base) = segments[piece.segment];
+                        let copy = segment.bands.copy(column);
+                        let drawn = segment.columns.scalar(column);
+                        let present = segment.columns.presence(column);
+                        // A banded entry's value from the copy, where the segment has one.
+                        let copied = |local: u32, e: usize| {
+                            copy.map(|copy| {
+                                (copy.holds(e)
+                                    && (copy.held.is_some() || present.contains(local)))
+                                .then(|| copy.value_at(e))
+                            })
+                        };
+                        // A row's value from the drawn column, where the segment has it.
+                        let read = |local: u32| {
+                            drawn.as_ref().map(|slice| {
+                                present
+                                    .contains(local)
+                                    .then(|| slice.value_at(local as usize))
+                                    .flatten()
+                            })
+                        };
+                        let mut take = |value: Option<Option<WalScalar>>, view_row: u32| {
+                            items += 1;
+                            match value {
+                                Some(value) => match value.as_ref().and_then(K::of_wal) {
+                                    Some(x) => tally.add(x),
+                                    None => none += 1,
+                                },
+                                None if self.held => through.push(view_row),
+                                None => none += 1,
+                            }
+                        };
+                        let local = piece.rows.start - row_base..piece.rows.end - row_base;
+                        if piece.banded {
+                            crate::bands::admitted_entries(
+                                segment,
+                                row_base,
+                                band,
+                                local,
+                                |view_row| members.contains(view_row),
+                                |e, view_row, id| {
+                                    if id < cut {
+                                        let local = view_row - row_base;
+                                        take(copied(local, e).or_else(|| read(local)), view_row);
+                                    }
+                                },
+                            )?;
+                        } else {
+                            // A drawn field is read from its column. An indexed field is read from
+                            // the band's copy, whose entries are found in row order, since every
+                            // row below the cut is in the band.
+                            let ids = segment.columns.tessera_id();
+                            let mut entries = segment.bands.entries_from(band, local.start);
+                            members.for_each_run(piece.rows.clone(), &mut |run| {
+                                for view_row in run {
+                                    let local = view_row - row_base;
+                                    if ids[local as usize] < cut {
+                                        let value = read(local).or_else(|| {
+                                            entries.entry(local).and_then(|e| copied(local, e))
+                                        });
+                                        take(value, view_row);
+                                    }
+                                }
+                            });
+                        }
+                        Ok::<_, EngineError>((tally, none, items, through))
+                    },
+                )
+                .try_reduce(
+                    || (empty(), 0, 0, Vec::new()),
+                    |(a, m, i, mut x), (b, n, j, y)| {
+                        x.extend(y);
+                        Ok((a.merge(b), m + n, i + j, x))
+                    },
+                )
+        })?;
+        let (mut tally, mut none, items, through) = found;
+        if !through.is_empty() {
+            let rows = croaring::Bitmap::of(&through);
+            let entities = super::set::crossing(cx.engine, cx.open, &rows)?;
+            let (more, without) = cx
+                .engine
+                .pool
+                .install(|| self.pass_entities(cx, &entities, &empty));
+            tally = tally.merge(more);
+            none += without;
+        }
+        Ok((tally, none, items))
     }
 
     /// One pass over the values of `set`'s items into a tally, and how many items have no value:
@@ -421,6 +655,69 @@ impl Bins {
                 },
             )
             .reduce(|| (empty(), 0), |(a, m), (b, n)| (a.merge(b), m + n))
+    }
+}
+
+/// How one set was counted.
+#[derive(Debug, Clone, Copy)]
+struct Counted {
+    items: u64,
+    sampled: bool,
+}
+
+/// How a set's sample below `cut` is read: each piece of the view's rows from band `band`, or by
+/// scanning the set's rows' identities.
+struct SamplePlan {
+    cut: u64,
+    band: u32,
+    pieces: Vec<SamplePiece>,
+}
+
+struct SamplePiece {
+    segment: usize,
+    /// View rows.
+    rows: std::ops::Range<u32>,
+    /// The band's entries among the rows.
+    entries: u64,
+    banded: bool,
+}
+
+impl SamplePlan {
+    /// The plan for `members` sampled below `cut`, or `None` where no band holds every identity
+    /// below the cut and the set is counted exactly. Whether a set is sampled depends on its size
+    /// and the sample size alone, both inside the visible set. Each piece is then read from the
+    /// band or by scanning, whichever its band entries times [`BAND_ENTRY_ROWS`] and its members
+    /// say costs less; the two read the same items.
+    fn of(cx: &Cx<'_>, members: &CellSet<'_>, cut: u64) -> Option<SamplePlan> {
+        let band = tessera_store::bands::band_below(cut)?;
+        let segments = cx.segments();
+        let pieces = pieces(segments)
+            .into_par_iter()
+            .map(|(s, rows)| {
+                let (segment, row_base) = segments[s];
+                let held = &segment.bands.rows()[segment.bands.band(band)];
+                let entries = (held.partition_point(|&r| r < rows.end - row_base)
+                    - held.partition_point(|&r| r < rows.start - row_base))
+                    as u64;
+                let banded = entries.saturating_mul(BAND_ENTRY_ROWS) < members.count(rows.clone());
+                SamplePiece {
+                    segment: s,
+                    rows,
+                    entries,
+                    banded,
+                }
+            })
+            .collect();
+        Some(SamplePlan { cut, band, pieces })
+    }
+
+    /// The band entries the banded pieces read.
+    fn entries_read(&self) -> u64 {
+        self.pieces
+            .iter()
+            .filter(|p| p.banded)
+            .map(|p| p.entries)
+            .sum()
     }
 }
 

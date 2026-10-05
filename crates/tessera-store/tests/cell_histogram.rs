@@ -91,7 +91,7 @@ fn build_bundle(root: &Path) {
     let seg_dir = view_dir.join("segments").join("seg0");
     fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
 
-    write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
+    write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
     write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n)
         .expect("write_permutation");
 

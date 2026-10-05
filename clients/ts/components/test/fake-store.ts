@@ -250,7 +250,7 @@ export function aggregateEntry(tables: {rows: AggregateRow[]; groups?: number | 
     view,
     refusal: null,
     result: {
-      tables: tables.map((t, grouping) => ({grouping, total: t.total ?? t.rows.reduce((n, r) => n + r.count, 0), referenceTotal: null, groups: t.groups ?? null, rows: table(t.rows)})),
+      tables: tables.map((t, grouping) => ({grouping, total: t.total ?? t.rows.reduce((n, r) => n + r.count, 0), referenceTotal: null, groups: t.groups ?? null, sample: null, rows: table(t.rows)})),
       region: null,
       recomposed: false,
       identityKey: 'ik',

@@ -12,6 +12,17 @@ pub(crate) fn scalar_schema_of(
         .collect()
 }
 
+/// The columns every segment's bands copy beside the render tail: the indexed numbers and
+/// timestamps that are not drawn.
+pub(crate) fn band_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+) -> Vec<(String, ScalarType)> {
+    manifest
+        .band_scalars()
+        .map(|d| (d.name.clone(), d.arrow_type))
+        .collect()
+}
+
 /// Every view's group-scoped attribute families, keyed by view id.
 ///
 /// A family belongs to the group that owns the keys; a `members` group's own list is always

@@ -80,6 +80,9 @@ struct ByReq {
     /// `[lower, upper]`, each a number, or on an integer or timestamp field its decimal string.
     #[serde(default)]
     range: Option<[Value; 2]>,
+    /// With `bins`: count about this many of the set's items and scale the counts to the set.
+    #[serde(default)]
+    sample: Option<u64>,
     /// `tessera_id`s, each a number or its decimal string.
     #[serde(default)]
     artifacts: Option<Vec<Value>>,
@@ -117,6 +120,16 @@ impl AggregateSink for FrameSink {
         }
         if let Some(groups) = head.groups {
             json["groups"] = groups.into();
+        }
+        if let Some(sample) = head.sample {
+            json["sample"] = serde_json::json!({
+                "sampled": sample.sampled,
+                "items": sample.items,
+                "edges_sampled": sample.edges_sampled,
+            });
+            if let Some(items) = sample.reference_items {
+                json["sample"]["reference_items"] = items.into();
+            }
         }
         self.producer
             .send(table_head_frame(json.to_string().as_bytes()))
@@ -275,6 +288,9 @@ fn by_of(
             if by.range.is_some() && by.bins.is_none() {
                 return bad("`range` goes with `bins`; send `bins` beside it, or leave it out");
             }
+            if by.sample.is_some() && by.bins.is_none() {
+                return bad("`sample` goes with `bins`; send `bins` beside it, or leave it out");
+            }
             let pick = match (by.bins, by.top, &by.values) {
                 (Some(_), None, None) => None,
                 (Some(_), _, _) => {
@@ -325,6 +341,7 @@ fn by_of(
                         column,
                         bins,
                         range,
+                        sample: by.sample,
                     })
                 }
                 (None, _, Family::Category) => Err(ApiError::Contract(format!(
@@ -338,10 +355,11 @@ fn by_of(
             }
         }
         (None, Some(layer)) => {
-            if by.values.is_some() || by.bins.is_some() || by.range.is_some() {
+            if by.values.is_some() || by.bins.is_some() || by.range.is_some() || by.sample.is_some()
+            {
                 return bad(
-                    "`values`, `bins` and `range` go with `field`; a layer takes `top` or \
-                     `artifacts`",
+                    "`values`, `bins`, `range` and `sample` go with `field`; a layer takes `top` \
+                     or `artifacts`",
                 );
             }
             let pick = match (by.top, &by.artifacts) {

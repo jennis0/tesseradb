@@ -146,6 +146,7 @@ impl Field {
             keys,
             titles: Some(titles),
             distinct: set.by_code.len() as u64,
+            sample: None,
         })
     }
 

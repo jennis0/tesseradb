@@ -66,8 +66,9 @@ const PERMUTATION_MAX_BOUND: u64 = 1 << 32;
 ///
 /// `items` and `codes` must already be in row order (i.e. the output of
 /// [`tessera_spatial::tiler::sort_batch`]) and the same length; row *i*'s Morton code is
-/// `codes[i]`. `scalar_schema` declares the name and Arrow type of each item's trailing
-/// `scalars`, in the order they appear in `TilerItem::scalars`.
+/// `codes[i]`. `scalar_schema` declares the name and Arrow type of each item's leading
+/// `scalars`, in the order they appear in `TilerItem::scalars`, and `indexed` those of the values
+/// after them, which the bands copy and `columns.arrow` does not hold.
 ///
 /// **One of [`SegmentWriter`]'s producers, not a second writer** — see the module doc. The caller
 /// already holds every row, so nothing here is streamed *in*; what the delegation buys is that
@@ -77,6 +78,7 @@ pub fn write_segment(
     items: &[TilerItem],
     codes: &[u32],
     scalar_schema: &[(String, ScalarType)],
+    indexed: &[(String, ScalarType)],
 ) -> io::Result<()> {
     if items.len() != codes.len() {
         return Err(io::Error::new(
@@ -89,8 +91,21 @@ pub fn write_segment(
         ));
     }
 
-    let mut writer = SegmentWriter::create(dir, scalar_schema)?;
+    let mut writer = SegmentWriter::create(dir, scalar_schema, indexed)?;
+    let drawn = scalar_schema.len();
     for (item, code) in items.iter().zip(codes) {
+        let (scalars, after) = item.scalars.split_at(drawn.min(item.scalars.len()));
+        let value = |k: usize| {
+            after.get(k).cloned().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "write_segment: tessera_id {} has no value for indexed column {k}",
+                        item.tessera_id.raw()
+                    ),
+                )
+            })
+        };
         writer.append(SegmentRow {
             tessera_id: item.tessera_id,
             morton: *code,
@@ -98,7 +113,8 @@ pub fn write_segment(
             // returned as this row's code, so the stored pair is one splitting of one position
             // rather than two derivations that could disagree.
             residual: split32(item.qx, item.qy).1,
-            scalars: &item.scalars,
+            scalars,
+            indexed: &value,
         })?;
     }
     writer.finish()?;
@@ -171,6 +187,17 @@ pub struct SegmentRow<'a> {
     pub residual: u32,
     /// The declared scalars, positionally against the `scalar_schema` the writer was created with.
     pub scalars: &'a [ScalarValue],
+    /// The row's value of the `k`th of the `indexed` columns the writer was created with, or
+    /// [`ScalarValue::Null`]. Asked only of a row the bands hold ([`crate::bands::BandWriter`]).
+    pub indexed: &'a dyn Fn(usize) -> io::Result<ScalarValue>,
+}
+
+/// A [`SegmentRow::indexed`] for a writer created with no indexed columns, which is never asked.
+pub fn no_indexed(k: usize) -> io::Result<ScalarValue> {
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("no indexed column {k} was declared to this writer"),
+    ))
 }
 
 /// Writes one segment's `morton.u32` and `columns.arrow` from rows arriving in
@@ -207,8 +234,14 @@ pub struct SegmentWriter {
 }
 
 impl SegmentWriter {
-    /// Create the segment's files under `dir`, which must exist.
-    pub fn create(dir: &Path, scalar_schema: &[(String, ScalarType)]) -> io::Result<Self> {
+    /// Create the segment's files under `dir`, which must exist. `scalar_schema` is
+    /// `columns.arrow`'s tail; `indexed` is the columns the bands copy beside it, whose values each
+    /// row's [`SegmentRow::indexed`] answers.
+    pub fn create(
+        dir: &Path,
+        scalar_schema: &[(String, ScalarType)],
+        indexed: &[(String, ScalarType)],
+    ) -> io::Result<Self> {
         let mut fields = fixed_fields();
         for (name, ty) in scalar_schema {
             fields.push(Field::new(name, arrow_type_of(*ty), false));
@@ -231,7 +264,7 @@ impl SegmentWriter {
         Ok(SegmentWriter {
             morton: BufWriter::new(File::create(dir.join("morton.u32"))?),
             cuts: CutWriter::create(dir)?,
-            bands: crate::bands::BandWriter::create(dir)?,
+            bands: crate::bands::BandWriter::create(dir, indexed)?,
             dir: dir.to_path_buf(),
             columns_path: dir.join("columns.arrow"),
             schema,
@@ -261,7 +294,7 @@ impl SegmentWriter {
         self.morton.write_all(&row.morton.to_le_bytes())?;
         self.cuts.push(row.morton)?;
         self.bands
-            .push(row.tessera_id.raw(), row.morton, row.residual)?;
+            .push(row.tessera_id.raw(), row.morton, row.residual, row.indexed)?;
         self.columns[0].append_u64(row.tessera_id.raw())?;
         self.columns[1].append_u32(row.residual)?;
         for (idx, spool) in self.columns.iter_mut().enumerate().skip(FIXED_COLUMN_COUNT) {

@@ -19,7 +19,7 @@
 //! parts, and every part is read at the same band, so the count and the `m` smallest are taken over
 //! the union, as [`crate::select::SelectionParts`] requires.
 
-use tessera_store::bands::FIRST_BAND;
+use tessera_store::bands::{band_below, FIRST_BAND};
 
 use crate::compose::EffectiveMask;
 use crate::error::{EngineError, Result};
@@ -66,10 +66,9 @@ pub fn select(
         return Ok(BandAnswer::Declined);
     }
     // The narrowest band holding every identity below the cut.
-    let holding = cut.leading_zeros();
-    if holding < FIRST_BAND {
+    let Some(holding) = band_below(cut) else {
         return Ok(BandAnswer::Declined);
-    }
+    };
     // Identities are uniform, so band `j` holds about `matched / 2^j` of the tile's visible rows.
     // Start at the narrowest band expected to hold `m` of them; a wider one is always as exact.
     let expected_below = ((u128::from(matched) * u128::from(cut)) >> 64) as u64;
@@ -89,34 +88,18 @@ pub fn select(
         candidates.clear();
         let mut below = 0u64;
         for part in parts {
-            let bands = &part.segment.bands;
-            bands.advise_random();
-            let span = bands.band(band);
-            let (rows, ids) = (bands.rows(), bands.ids());
-            let lo = span.start + rows[span.clone()].partition_point(|&r| r < part.range.start);
-            let hi = span.start + rows[span.clone()].partition_point(|&r| r < part.range.end);
-            bands.will_need(rows, lo..hi);
-            bands.will_need(ids, lo..hi);
             let whole = part.visible == u64::from(part.range.end - part.range.start);
-            for e in lo..hi {
-                let row = rows[e];
-                // The entries are trusted only as far as `tessera verify --deep` checked them, so a
-                // row is checked against the part, and the segment, before it names anything.
-                if !part.range.contains(&row) {
-                    return Err(EngineError::Malformed(format!(
-                        "segment '{}' has a band entry naming row {row}, outside the rows {:?} it \
-                         was found among; run `tessera verify --deep` on the bundle and rebuild it",
-                        part.segment.seg_id, part.range
-                    )));
-                }
-                let view_row = part.row_base + row;
-                if whole || mask.contains_row(view_row) {
-                    let id = ids[e];
+            entries_read += admitted_entries(
+                part.segment,
+                part.row_base,
+                band,
+                part.range.clone(),
+                |view_row| whole || mask.contains_row(view_row),
+                |e, view_row, id| {
                     below += u64::from(id < cut);
                     candidates.push((id, view_row, e as u32));
-                }
-            }
-            entries_read += (hi - lo) as u64;
+                },
+            )?;
         }
         let m = served_count(below, params, matched);
         if candidates.len() >= m {
@@ -134,4 +117,43 @@ pub fn select(
         }
     }
     Ok(BandAnswer::Sparse { read: true })
+}
+
+/// Each entry of `segment`'s band `band` whose row lies in `range`, segment-local, and whose view
+/// row (`row_base` plus the row) `admits`, in entry order: `each(entry, view_row, tessera_id)`.
+/// Answers how many entries were read. The mask, or a set composed under it, is what `admits`
+/// asks, so the band decides only which rows are read, never which are visible.
+pub(crate) fn admitted_entries(
+    segment: &tessera_store::read::SegmentData,
+    row_base: u32,
+    band: u32,
+    range: std::ops::Range<u32>,
+    admits: impl Fn(u32) -> bool,
+    mut each: impl FnMut(usize, u32, u64),
+) -> Result<u64> {
+    let bands = &segment.bands;
+    bands.advise_random();
+    let span = bands.band(band);
+    let (rows, ids) = (bands.rows(), bands.ids());
+    let lo = span.start + rows[span.clone()].partition_point(|&r| r < range.start);
+    let hi = span.start + rows[span.clone()].partition_point(|&r| r < range.end);
+    bands.will_need(rows, lo..hi);
+    bands.will_need(ids, lo..hi);
+    for e in lo..hi {
+        let row = rows[e];
+        // The entries are trusted only as far as `tessera verify --deep` checked them, so a row is
+        // checked against the range, and the segment, before it names anything.
+        if !range.contains(&row) {
+            return Err(EngineError::Malformed(format!(
+                "segment '{}' has a band entry naming row {row}, outside the rows {range:?} it was \
+                 found among; run `tessera verify --deep` on the bundle and rebuild it",
+                segment.seg_id
+            )));
+        }
+        let view_row = row_base + row;
+        if admits(view_row) {
+            each(e, view_row, ids[e]);
+        }
+    }
+    Ok((hi - lo) as u64)
 }

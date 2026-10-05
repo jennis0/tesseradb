@@ -1167,10 +1167,15 @@ class Viewer:
           values of every item this reader may see in the view, whatever the filters, in at most
           `n` bins. Sending a first answer's first `lower` and last `upper` back as the range,
           with the number of bins it returned, gives the same edges without the pass that finds
-          them, except for a timestamp binned by months or years. A histogram's table is always
-          one page. `"cells"` divides the set, or each group, into the view's cells at a depth
-          from 0 to 32, `{"depth": d}`, optionally only those meeting a box, `{"depth": d,
-          "area": [x0, y0, x1, y1]}`; a grouping by bins takes no cells.
+          them, except for a timestamp binned by months or years. With `"sample": s`, a set of
+          more than `s` items is counted over its items whose `tessera_id` is below one cut,
+          `s / total` of the identity range, about `s` of them, each count scaled to the set's
+          `total`; default edges then come from the visible set's own sample. A set of at most
+          `s` items is counted exactly, and so is one where `s` is more than about one item in 64
+          of the set. A histogram's table is always one page. `"cells"` divides the set, or each
+          group, into the view's cells at a depth from 0 to 32, `{"depth": d}`, optionally only
+          those meeting a box, `{"depth": d, "area": [x0, y0, x1, y1]}`; a grouping by bins takes
+          no cells.
         - `filters`: the set counted, as `Selection.filter` takes an expression. Without it, every
           item this reader may see in the view.
         - `reference`: a second set to compare with, drawn from what this reader may see. `{}` is
@@ -1184,10 +1189,14 @@ class Viewer:
         `lower` up to but not including `upper`, and the last bin also holds its `upper`), `cell`
         (the cell's Morton prefix), `count`, `reference_count` and `lift`. Its schema metadata
         `tessera.head` is the table's figures as JSON: `grouping`, `total` (the items in the set),
-        `reference_total` with a reference, and `groups` (the groups in the set before the cut to
-        `top` or the names given) with `"by"`. `tessera.recomposed` is `"true"` where a page counted
-        a different state of the database from the page before it, and `tessera.region` is the
-        server's region verdict where a filter had a `region` leaf.
+        `reference_total` with a reference, `groups` (the groups in the set before the cut to
+        `top` or the names given) with `"by"`, and with a `"sample"` the object `sample`:
+        `sampled` (whether any count is scaled), `items` (the set's items counted), with a
+        reference `reference_items`, and `edges_sampled` (whether the default edges came from the
+        visible set's sample, which they can where the set is counted exactly).
+        `tessera.recomposed` is `"true"` where a page counted a different state of the database
+        from the page before it, and `tessera.region` is the server's region verdict where a
+        filter had a `region` leaf.
 
         The server answers a page at a time, and each response ends with a cursor for the next.
         This requests responses until none is left and joins each table's pages. A refusal of the
@@ -1199,6 +1208,7 @@ class Viewer:
             venues.to_pandas()
             v.aggregate("papers", [{"cells": {"depth": 6}}], filters={"year": {"eq": 2023}}, reference={})
             [years] = v.aggregate("papers", [{"by": {"field": "submitted", "bins": 20}}])
+            [sampled] = v.aggregate("papers", [{"by": {"field": "year", "bins": 20, "sample": 100_000}}])
         """
         import pyarrow as pa
         from pyarrow import ipc

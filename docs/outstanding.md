@@ -111,6 +111,7 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - `withdraw_on_member_deletion = true` is refused as not built.
 - A page `tessera serve` could serve on the viewer address that signs a visitor in with `public` only, so a first map needs no Node and no example server. Joe 2026-09-24: needs more thought.
 - A `uuid` field type: 16 bytes stored, canonical text in and out. A UUID held as keyword text costs 36 bytes in the record store. Useful for unique fields and beyond.
+- A band-ordered main table. Store rows ordered by band, the leading zero bits of `tessera_id`, then by Morton code within a band. The bands would then be the table: their copies in `bands.bin` would go, and any sample rate would be a prefix of the rows. The cost is that a tile becomes one row range per band, about 30 on the GBIF bundle, rather than one contiguous range, which undoes the premise that a tile is a contiguous run of row ids. Probe what the extra ranges cost a tile first.
 - Filters and exports over lists of about a million values. Looking the values up is cheap; sending a list of 8 to 40 MB with every map request is not. Needs a general design for passing filters once and keeping them on the server.
 
 ## Documentation

@@ -32,11 +32,16 @@ use tessera_engine::{
     AggregateTrailer, By, Engine, EngineError, Grouping, PageEnd, RecordsLimits, Reference,
     Session, SinkResult, TableHead, ViewportRequest,
 };
+use tessera_engine::IngestRequest;
+use tessera_lifecycle::command::IngestRow;
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_spatial::shape::{ShapeF64, Space};
 
 const N: u64 = 3_000;
+
+/// The first source id of an item a test ingests.
+const INGESTED: u64 = 1_000_000;
 
 /// `score` is drawn and indexed, `weight` and `seen` indexed alone, `rank` and `when` drawn alone.
 /// `flag` is an indexed bool, which has no bins.
@@ -298,26 +303,40 @@ fn write_pairs(path: &Path, items: &[Item]) {
 }
 
 fn build_bundle(dir: &Path, items: &[Item]) -> PathBuf {
+    build_views(dir, items, &[("s0", items)])
+}
+
+/// A bundle of `items`, each view holding the items listed beside it.
+fn build_views(dir: &Path, items: &[Item], views: &[(&str, &[Item])]) -> PathBuf {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points(&points, items);
+    // A label is the item's, so every view reads one relation.
     write_pairs(&pairs, items);
     std::fs::write(dir.join("config.toml"), SCHEMA).unwrap();
     let schema = Config::parse(&dir.join("config.toml"), &HashMap::new())
         .expect("the schema parses")
         .schema;
+    let views = views
+        .iter()
+        .map(|(view, held)| {
+            let points = dir.join(format!("{view}-points.parquet"));
+            write_points(&points, held);
+            tessera_build::ViewArgs {
+                visibility: None,
+                view_id: view.to_string(),
+                projection: tessera_spatial::Projection::None,
+                extent: extent(),
+                points,
+                point_fields: Default::default(),
+                select: None,
+                access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            }
+        })
+        .collect();
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
+        views,
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
@@ -494,6 +513,7 @@ fn bins(column: &str, n: u32, range: Option<(Scalar, Scalar)>) -> Grouping {
             column: column.to_string(),
             bins: n,
             range,
+            sample: None,
         }),
         cells: None,
         area: None,
@@ -580,9 +600,20 @@ fn rows_of(batch: &RecordBatch) -> Vec<Row> {
 
 /// One table read whole, following the cursor.
 fn table(engine: &Engine, session: &Session, req: AggregateRequest<'_>) -> (TableHead, Vec<Row>) {
+    let (head, rows, _) = read_table(engine, session, req);
+    (head, rows)
+}
+
+/// One table read whole, following the cursor, and how many identity band entries it read.
+fn read_table(
+    engine: &Engine,
+    session: &Session,
+    req: AggregateRequest<'_>,
+) -> (TableHead, Vec<Row>, u64) {
     let mut head = None;
     let mut rows = Vec::new();
     let mut cursor: Option<String> = None;
+    let mut band_entries = 0;
     loop {
         let this = AggregateRequest {
             cursor: cursor.as_deref(),
@@ -595,8 +626,9 @@ fn table(engine: &Engine, session: &Session, req: AggregateRequest<'_>) -> (Tabl
         for (_, batch, _) in &collect.pages {
             rows.extend(rows_of(batch));
         }
+        band_entries += trailer.timings.band_entries;
         match trailer.next {
-            None => return (head.expect("a table"), rows),
+            None => return (head.expect("a table"), rows, band_entries),
             Some(next) => cursor = Some(next),
         }
     }
@@ -1050,6 +1082,384 @@ fn a_grouping_by_bins_that_cannot_be_served_is_refused() {
         refused(bins("seen", 4, Some((Scalar::Float(0.5), Scalar::Int(10))))),
         AggregateRefused::FractionalTime("seen".to_string())
     );
+    assert_eq!(
+        refused(sampled("score", 4, None, 0)),
+        AggregateRefused::ZeroSample
+    );
+}
+
+// ---- sampled histograms ---------------------------------------------------------------------
+
+fn sampled(column: &str, n: u32, range: Option<(Scalar, Scalar)>, sample: u64) -> Grouping {
+    let mut grouping = bins(column, n, range);
+    if let Some(By::Bins { sample: s, .. }) = &mut grouping.by {
+        *s = Some(sample);
+    }
+    grouping
+}
+
+/// The cut a set of `n` items is sampled below with sample size `s`, as the contract states it.
+fn cut_of(s: u64, n: u64) -> Option<u64> {
+    (n > s).then(|| ((u128::from(s) << 64) / u128::from(n)) as u64)
+}
+
+/// Each item's `tessera_id`, from the entity its unique `id` names.
+fn identities(fx: &Fx) -> HashMap<u64, u64> {
+    fx.items
+        .iter()
+        .map(|item| {
+            // An ingested item holds the `id` of its key.
+            let entity = match item.source.checked_sub(INGESTED) {
+                Some(i) => item_of_key(&fx.engine, &format!("binned-{i}")),
+                None => item_of_id(&fx.engine, item.source).unwrap(),
+            }
+            .expect("every item holds its id");
+            (item.source, test_key().forward(0, entity).unwrap().raw())
+        })
+        .collect()
+}
+
+/// The items of `items` the oracle samples at sample size `s`, and the factor nothing: the cut is
+/// taken over the set's size.
+fn sample_of<'a>(items: &[&'a Item], s: u64, ids: &HashMap<u64, u64>) -> Vec<&'a Item> {
+    match cut_of(s, items.len() as u64) {
+        None => items.to_vec(),
+        Some(cut) => items
+            .iter()
+            .copied()
+            .filter(|item| ids[&item.source] < cut)
+            .collect(),
+    }
+}
+
+/// `rows`' counts scaled from a sample of `taken` items to a set of `n`, to the nearest whole
+/// number with a half rounded up, as the contract states it.
+fn scaled(mut rows: Vec<Row>, n: u64, taken: u64, reference: Option<(u64, u64)>) -> Vec<Row> {
+    let scale = |c: u64, n: u64, taken: u64| match taken {
+        0 => 0,
+        t => ((u128::from(c) * u128::from(n) * 2 + u128::from(t)) / (2 * u128::from(t))) as u64,
+    };
+    for row in &mut rows {
+        row.count = scale(row.count, n, taken);
+        if let (Some(r), Some((rn, rt))) = (row.reference.as_mut(), reference) {
+            *r = scale(*r, rn, rt);
+        }
+    }
+    rows
+}
+
+/// Whether the contract counts a set of `n` items exactly with sample size `s`, whatever its rows:
+/// where it holds at most `s` items, or its cut is above 2^58 and so wider than any band.
+fn exact_by_size(s: u64, n: u64) -> bool {
+    cut_of(s, n).is_none_or(|cut| cut > 1 << 58)
+}
+
+/// The items the contract counts of `items` with sample size `s`: every one where the size says
+/// so, and otherwise those below the cut.
+fn counted<'a>(items: &[&'a Item], s: u64, ids: &HashMap<u64, u64>) -> Vec<&'a Item> {
+    match exact_by_size(s, items.len() as u64) {
+        true => items.to_vec(),
+        false => sample_of(items, s, ids),
+    }
+}
+
+/// **A sampled histogram counts exactly the set's items below one cut and scales them, or counts
+/// every item**, on every route a field's values are read by: a drawn column, an indexed one
+/// copied in the bands, and one both drawn and indexed. Which of the two is decided by the set's
+/// size and the sample size alone, and the head says which. With a range the
+/// edges are fixed, so every count is checked against the oracle's; without one the edges are
+/// drawn from the visible set, or its sample where the head says so, cover every value in it, and
+/// hold still under a filter.
+#[test]
+fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
+    let fx = fixture();
+    let ids = identities(&fx);
+    let area = [100.0, 200.0, 600.0, 750.0];
+    let (mut sampled_tables, mut exact_tables, mut entries_read) = (0, 0, 0);
+    for broad in [true, false] {
+        let session = fx.session(broad);
+        let all: Vec<&Item> = fx.visible(broad, &|_| true).collect();
+        // 400 is wider than any band and is counted exactly; 8 and 30 are sampled where the set's
+        // rows are dense enough among the band's.
+        for s in [8, 30, 400] {
+            for column in COLUMNS {
+                let mut held: Option<Vec<Val>> = None;
+                let filters: [(&str, Option<FilterExpr>, Keep); 3] = [
+                    ("none", None, &|_| true),
+                    ("kind", Some(fx.kind_is("b")), &|i| i.kind == "b"),
+                    (
+                        "region",
+                        Some(bbox(area[0], area[1], area[2], area[3])),
+                        &|i| in_box(i, area),
+                    ),
+                ];
+                for (name, filter, keep) in filters {
+                    let what = format!("{column}, broad {broad}, sample {s}, filter {name}");
+                    let items: Vec<&Item> = fx.visible(broad, keep).collect();
+                    let n = items.len() as u64;
+                    let v = all.len() as u64;
+
+                    // Default edges, from the visible set or its sample.
+                    let groupings = [sampled(column, 12, None, s)];
+                    let mut req = request(&groupings);
+                    req.filter = filter.clone();
+                    req.reference = Some(Reference::Visible);
+                    let (head, rows, entries) = read_table(&fx.engine, &session, req);
+                    entries_read += entries;
+                    let counts = head.sample.expect("a sample was asked for");
+                    let taken = counted(&items, s, &ids);
+                    let reference = counted(&all, s, &ids);
+                    assert_eq!(
+                        counts,
+                        tessera_engine::TableSample {
+                            sampled: !exact_by_size(s, n) || !exact_by_size(s, v),
+                            items: taken.len() as u64,
+                            reference_items: Some(reference.len() as u64),
+                            // Drawn from the visible set as the reference counted it.
+                            edges_sampled: !exact_by_size(s, v),
+                        },
+                        "{what}"
+                    );
+                    match exact_by_size(s, n) {
+                        false => sampled_tables += 1,
+                        true => exact_tables += 1,
+                    }
+                    let edges = edges_of(&rows);
+                    for item in &reference {
+                        if let Some(v) = item.value(column).filter(|v| match v {
+                            Val::F(f) => f.is_finite(),
+                            _ => true,
+                        }) {
+                            assert!(
+                                !less(v, edges[0]) && !less(edges[edges.len() - 1], v),
+                                "{what}: {v:?} outside {edges:?}"
+                            );
+                        }
+                    }
+                    match &held {
+                        None => held = Some(edges.clone()),
+                        Some(held) => assert_eq!(held, &edges, "{what}: the edges moved"),
+                    }
+                    let want = scaled(
+                        expected(&edges, &taken, Some(&reference), column),
+                        n,
+                        taken.len() as u64,
+                        Some((v, reference.len() as u64)),
+                    );
+                    assert_eq!(rows, want, "{what}");
+                    assert_eq!(head.total, n, "{what}");
+
+                    // A range.
+                    let range = Some((Scalar::Int(-50), Scalar::Int(150)));
+                    let range = match column {
+                        "seen" | "when" => Some((
+                            Scalar::Int(i128::from(date(2016, 1, 1))),
+                            Scalar::Int(i128::from(date(2026, 1, 1))),
+                        )),
+                        _ => range,
+                    };
+                    let groupings = [sampled(column, 10, range, s)];
+                    let mut req = request(&groupings);
+                    req.filter = filter;
+                    let (head, rows) = table(&fx.engine, &session, req);
+                    let counts = head.sample.expect("a sample was asked for");
+                    assert!(!counts.edges_sampled, "{what}: a range draws no edges");
+                    let taken = counted(&items, s, &ids);
+                    assert_eq!(counts.items, taken.len() as u64, "{what}");
+                    let edges = edges_of(&rows);
+                    let want = scaled(
+                        expected(&edges, &taken, None, column),
+                        n,
+                        taken.len() as u64,
+                        None,
+                    );
+                    assert_eq!(rows, want, "{what}, in a range");
+                }
+            }
+        }
+    }
+    assert!(sampled_tables > 0 && exact_tables > 0, "both ways of counting are reached");
+    assert!(entries_read > 0, "a sample is read from the bands");
+}
+
+/// **A set no larger than the sample size is counted exactly**, and says so; without a sample size
+/// the head says nothing of one.
+#[test]
+fn a_set_within_the_sample_size_is_counted_exactly() {
+    let fx = fixture();
+    let session = fx.session(true);
+    let exact = table(&fx.engine, &session, request(&[bins("rank", 12, None)]));
+    let within = table(
+        &fx.engine,
+        &session,
+        request(&[sampled("rank", 12, None, N)]),
+    );
+    assert_eq!(exact.1, within.1);
+    assert_eq!(exact.0.sample, None);
+    assert_eq!(
+        within.0.sample,
+        Some(tessera_engine::TableSample {
+            sampled: false,
+            items: exact.0.total,
+            reference_items: None,
+            edges_sampled: false,
+        })
+    );
+}
+
+/// **Whether a set is sampled depends on its size and the sample size alone.** The subset
+/// viewer's set at a sample of 30 has a cut above 2^58, wider than any band, and is counted
+/// exactly, and says so. A category filter's set at a sample of 8 has a cut the bands hold, and is
+/// sampled, though the band holds every row of the view below the cut and the set is few of them,
+/// so it is read by scanning: how a set is read never changes what it counts.
+#[test]
+fn whether_a_set_is_sampled_depends_on_its_size_alone() {
+    let fx = fixture();
+    let ids = identities(&fx);
+    let cases: [(bool, u64, Option<FilterExpr>, Keep); 2] = [
+        (false, 30, None, &|_| true),
+        (true, 8, Some(fx.kind_is("c")), &|i| i.kind == "c"),
+    ];
+    for (broad, s, filter, keep) in cases {
+        let session = fx.session(broad);
+        let items: Vec<&Item> = fx.visible(broad, keep).collect();
+        let n = items.len() as u64;
+        let taken = counted(&items, s, &ids);
+        for column in COLUMNS {
+            let what = format!("{column}, sample {s}");
+            let range = Some((Scalar::Int(-50), Scalar::Int(150)));
+            let groupings = [sampled(column, 10, range, s)];
+            let mut req = request(&groupings);
+            req.filter = filter.clone();
+            let (head, rows) = table(&fx.engine, &session, req);
+            assert_eq!(
+                head.sample,
+                Some(tessera_engine::TableSample {
+                    sampled: !exact_by_size(s, n),
+                    items: taken.len() as u64,
+                    reference_items: None,
+                    edges_sampled: false,
+                }),
+                "{what}"
+            );
+            let edges = edges_of(&rows);
+            let want = scaled(
+                expected(&edges, &taken, None, column),
+                n,
+                taken.len() as u64,
+                None,
+            );
+            assert_eq!(rows, want, "{what}");
+        }
+    }
+}
+
+/// **Default edges come from the visible set's sample even where the set itself is counted
+/// whole**, and say so; they are the edges the unfiltered table draws, whatever the filter or
+/// region, so they hold still. With a range nothing is drawn.
+#[test]
+fn default_edges_are_drawn_from_the_visible_sample_however_the_set_is_counted() {
+    let fx = fixture();
+    let ids = identities(&fx);
+    let session = fx.session(true);
+    let s = 8;
+    let all: Vec<&Item> = fx.visible(true, &|_| true).collect();
+    let visible_sample = sample_of(&all, s, &ids);
+    let area = [100.0, 100.0, 140.0, 140.0];
+    let in_area = |i: &Item| in_box(i, area);
+    let few: Vec<&Item> = fx.visible(true, &in_area).collect();
+    assert!(!few.is_empty() && few.len() as u64 <= s, "the region holds {} items", few.len());
+    for column in COLUMNS {
+        let groupings = [sampled(column, 12, None, s)];
+        let (whole_head, whole_rows) = table(&fx.engine, &session, request(&groupings));
+        assert!(whole_head.sample.unwrap().edges_sampled, "{column}");
+        let edges = edges_of(&whole_rows);
+        for (name, filter) in [
+            ("region", bbox(area[0], area[1], area[2], area[3])),
+            ("kind", fx.kind_is("b")),
+        ] {
+            let mut req = request(&groupings);
+            req.filter = Some(filter);
+            let (head, rows) = table(&fx.engine, &session, req);
+            assert!(head.sample.unwrap().edges_sampled, "{column}, {name}");
+            assert_eq!(edges_of(&rows), edges, "{column}, {name}: the edges moved");
+            if name == "region" {
+                assert_eq!(
+                    head.sample.unwrap(),
+                    tessera_engine::TableSample {
+                        sampled: false,
+                        items: few.len() as u64,
+                        reference_items: None,
+                        edges_sampled: true,
+                    }
+                );
+                assert_eq!(rows, expected(&edges, &few, None, column), "{column}");
+            }
+        }
+        // The edges are readable edges around the sample's values, which the whole set's need
+        // not be.
+        for item in &visible_sample {
+            if let Some(v) = item.value(column).filter(|v| match v {
+                Val::F(f) => f.is_finite(),
+                _ => true,
+            }) {
+                assert!(!less(v, edges[0]) && !less(edges[edges.len() - 1], v), "{column}");
+            }
+        }
+        let exact_edges = edges_of(&table(&fx.engine, &session, request(&[bins(column, 12, None)])).1);
+        assert_ne!(edges, exact_edges, "{column}: the extremes lie outside the sample");
+    }
+}
+
+/// **Items the viewer may not see never enter the sample, never change the set's size and never
+/// move a default edge.** The subset viewer's sampled tables are the broad viewer's once every
+/// item the subset viewer may not see is suppressed: the same items, under the same identities.
+/// Some of those items lie below the cut. The unfiltered tables at a sample of 6 are read from the
+/// bands, whose entries include the hidden items, and the filtered ones by scanning or whole.
+#[test]
+fn invisible_items_never_enter_a_sample() {
+    let fx = fixture();
+    let ids = identities(&fx);
+    let s = 6;
+    let hidden: Vec<&Item> = fx.items.iter().filter(|i| !i.subset).collect();
+    let visible = fx.visible(false, &|_| true).count() as u64;
+    let cut = cut_of(s, visible).unwrap();
+    assert!(
+        hidden.iter().filter(|i| ids[&i.source] < cut).count() > 3,
+        "the fixture hides items below the cut"
+    );
+    let read = |session: &Session| {
+        let mut band_entries = 0;
+        let tables = [(s, false), (s, true), (30, true), (400, true)]
+            .into_iter()
+            .flat_map(|(s, filtered)| COLUMNS.iter().map(move |column| (s, filtered, column)))
+            .map(|(s, filtered, column)| {
+                let groupings = [sampled(column, 12, None, s)];
+                let mut req = request(&groupings);
+                req.filter = filtered.then(|| fx.kind_is("a"));
+                req.reference = Some(Reference::Visible);
+                let (head, rows, entries) = read_table(&fx.engine, session, req);
+                band_entries += entries;
+                (head, rows)
+            })
+            .collect::<Vec<_>>();
+        (tables, band_entries)
+    };
+    let (subset, entries) = read(&fx.session(false));
+    assert!(entries > 0, "the subset viewer's sample is read from the bands");
+    assert_ne!(
+        subset,
+        read(&fx.session(true)).0,
+        "the hidden items change the broad viewer's tables"
+    );
+    for item in &hidden {
+        let entity = item_of_id(&fx.engine, item.source).unwrap().unwrap();
+        fx.engine
+            .accept_change(entity, ChangeOp::Suppress)
+            .expect("the suppression is accepted");
+    }
+    assert_eq!(subset, read(&fx.session(true)).0);
+    assert_eq!(read(&fx.session(false)).0, subset);
 }
 
 /// **Items ingested and flushed are binned**, and a value past the old largest widens the
@@ -1063,7 +1473,7 @@ fn a_flushed_ingest_is_binned() {
     let rows: Vec<UnallocatedRow> = (0..30u64)
         .map(|i| {
             let item = Item {
-                source: 1_000_000 + i,
+                source: INGESTED + i,
                 kind: "a",
                 score: (i % 4 != 0).then_some(1_000.0 + i as f64),
                 weight: Some(i as f32),
@@ -1140,4 +1550,213 @@ fn a_flushed_ingest_is_binned() {
     let groupings = [bins("score", 12, None)];
     let edges = edges_of(&table(&fx.engine, &session, request(&groupings)).1);
     assert!(matches!(edges[edges.len() - 1], Val::F(hi) if hi >= 1_029.0));
+
+    // The flushed segment's bands copy its indexed columns, so a sample drawn through them is the
+    // oracle's, the flushed items among it.
+    let ids = identities(&fx);
+    let items: Vec<&Item> = fx.visible(true, &|_| true).collect();
+    for column in COLUMNS {
+        let groupings = [sampled(column, 10, None, 40)];
+        let (head, rows, entries) = read_table(&fx.engine, &session, request(&groupings));
+        let sample = sample_of(&items, 40, &ids);
+        let edges = edges_of(&rows);
+        let want = scaled(
+            expected(&edges, &sample, None, column),
+            items.len() as u64,
+            sample.len() as u64,
+            None,
+        );
+        assert_eq!(rows, want, "{column}");
+        assert_eq!(head.sample.unwrap().items, sample.len() as u64);
+        assert!(entries > 0, "{column}: the sample is read from the bands");
+    }
+}
+
+/// **An item joining another view at a running service carries its indexed values there, as a
+/// built row does.** View `s1` is built holding the even items. The odd ones join it by a row
+/// naming their `id` and position alone, and are flushed; then items both views hold are edited,
+/// which writes their row in each view, and flushed. A sample of `s1` read from the bands, whose
+/// copies of the indexed-only `weight` and `seen` the new rows wrote, is then the oracle's, as it
+/// is on `s0`.
+#[test]
+fn an_item_joining_another_view_is_sampled_with_its_indexed_values() {
+    let items: Vec<Item> = (0..N).map(built).collect();
+    let even: Vec<Item> = items
+        .iter()
+        .filter(|i| i.source.is_multiple_of(2))
+        .cloned()
+        .collect();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_views(tmp.path(), &items, &[("s0", &items), ("s1", &even)]);
+    let engine = engine_at(tmp.path(), &root, 3600);
+    let root = root.clone();
+    let mut fx = Fx {
+        _tmp: tmp,
+        engine,
+        items,
+    };
+    let ids = identities(&fx);
+    let session = fx.session(true);
+    let ingest = |fx: &Fx, batch: &str, view: Option<&str>, rows: Vec<IngestRow>| {
+        let receipt = fx
+            .engine
+            .ingest(IngestRequest {
+                batch_id: batch.to_string(),
+                body_hash: {
+                    let mut hash = [0u8; 32];
+                    hash[..batch.len()].copy_from_slice(batch.as_bytes());
+                    hash
+                },
+                view: view.map(str::to_string),
+                rows,
+                artifacts: Default::default(),
+                strict: true,
+                tessera_id_column: false,
+            })
+            .expect("the batch is accepted");
+        assert!(receipt.refused.is_empty(), "{batch}: {:?}", receipt.refused);
+        assert_eq!(receipt.created, 0, "{batch}");
+        wait_until("the flush", Duration::from_secs(60), || {
+            fx.engine.request_flush();
+            fx.engine.generation().buffer.is_empty()
+        });
+    };
+    // Every declared column, `id` alone given.
+    let naming = |item: &Item, position: Option<(f64, f64)>, rank: Option<i32>| IngestRow {
+        tessera_id: None,
+        labels: None,
+        position,
+        scalars: (0..8)
+            .map(|p| match p {
+                3 => rank.map_or(WalScalar::Null, WalScalar::I32),
+                7 => WalScalar::U64(item.source),
+                _ => WalScalar::Null,
+            })
+            .collect(),
+        scoped: Vec::new(),
+        omitted: (0..7).filter(|&p| p != 3 || rank.is_none()).collect(),
+    };
+    let joining: Vec<IngestRow> = fx
+        .items
+        .iter()
+        .filter(|i| !i.source.is_multiple_of(2))
+        .map(|i| naming(i, Some(i.position), None))
+        .collect();
+    ingest(&fx, "join", Some("s1"), joining);
+    let edits: Vec<IngestRow> = fx
+        .items
+        .iter_mut()
+        .filter(|i| i.source % 3 == 1)
+        .map(|i| {
+            let rank = i.rank.map_or(7, |r| r + 1_000);
+            i.rank = Some(rank);
+            naming(i, None, Some(rank))
+        })
+        .collect();
+    ingest(&fx, "edit", None, edits);
+
+    let all: Vec<&Item> = fx.items.iter().collect();
+    let s = 30;
+    let sample = sample_of(&all, s, &ids);
+    for view in ["s1", "s0"] {
+        for column in COLUMNS {
+            let what = format!("{view}, {column}");
+            let groupings = [sampled(column, 10, None, s)];
+            let mut req = request(&groupings);
+            req.view = view;
+            let (head, rows, entries) = read_table(&fx.engine, &session, req);
+            assert!(entries > 0, "{what}: the sample is read from the bands");
+            assert_eq!(head.total, N, "{what}");
+            assert_eq!(head.sample.unwrap().items, sample.len() as u64, "{what}");
+            let edges = edges_of(&rows);
+            let want = scaled(
+                expected(&edges, &sample, None, column),
+                N,
+                sample.len() as u64,
+                None,
+            );
+            assert_eq!(rows, want, "{what}");
+        }
+    }
+    // Every banded row's copy holds its item's value, as a deep verification reads it.
+    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+        .expect("the bundle verifies");
+}
+
+/// **A sample read partly from the band and partly by scanning is the oracle's.** A flush adds a
+/// second segment of 6,000 items, of which the subset viewer sees 15%, against a third of the
+/// built segment's. At a sample of 12 of the subset viewer's 1,900 items the cut is held by band
+/// 7, about one row in 128: the built segment's dense set is read from the band, and the flushed
+/// segment's sparse one, fewer than 25 of its rows a band entry, by scanning its own rows, where
+/// an indexed-only field's value is found in the band's copy by row.
+#[test]
+fn a_sample_read_partly_from_the_band_and_partly_by_scanning_is_the_oracles() {
+    let mut fx = fixture();
+    let session = fx.session(false);
+    let mut added = Vec::new();
+    let rows: Vec<UnallocatedRow> = (0..6_000u64)
+        .map(|i| {
+            let mut item = built(INGESTED + i);
+            item.subset = i % 20 < 3;
+            item.flushed = false;
+            let descriptors = match item.subset {
+                true => vec![b"0".to_vec(), b"1".to_vec()],
+                false => vec![b"0".to_vec()],
+            };
+            let row = UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                terms: fx.engine.resolve_terms(&descriptors),
+                descriptors,
+                x: item.position.0,
+                y: item.position.1,
+                scalars: vec![
+                    WalScalar::Utf8(item.kind.to_string()),
+                    item.score.map_or(WalScalar::Null, WalScalar::F64),
+                    item.weight.map_or(WalScalar::Null, WalScalar::F32),
+                    item.rank.map_or(WalScalar::Null, WalScalar::I32),
+                    item.seen.map_or(WalScalar::Null, WalScalar::TimestampUs),
+                    item.when.map_or(WalScalar::Null, WalScalar::TimestampUs),
+                    WalScalar::Bool(item.source.is_multiple_of(2)),
+                    WalScalar::U64(key_id(&format!("binned-{i}"))),
+                ],
+                scoped: Vec::new(),
+            };
+            added.push(item);
+            row
+        })
+        .collect();
+    fx.engine
+        .ingest_rows(rows, "sparse".to_string(), [9u8; 32])
+        .expect("the ingest is accepted");
+    wait_until("the flush", Duration::from_secs(60), || {
+        fx.engine.request_flush();
+        fx.engine.generation().buffer.is_empty()
+    });
+    fx.items.extend(added);
+    for item in fx.items.iter_mut() {
+        item.flushed = true;
+    }
+    let ids = identities(&fx);
+    let items: Vec<&Item> = fx.visible(false, &|_| true).collect();
+    let s = 12;
+    let cut = cut_of(s, items.len() as u64).unwrap();
+    assert_eq!(tessera_store::bands::band_below(cut), Some(7));
+    let sample = sample_of(&items, s, &ids);
+    let scanned = sample.iter().filter(|i| i.source >= INGESTED).count();
+    assert!(scanned > 0, "the flushed segment's set has items below the cut");
+    for column in COLUMNS {
+        let groupings = [sampled(column, 10, None, s)];
+        let (head, rows, entries) = read_table(&fx.engine, &session, request(&groupings));
+        assert!(entries > 0, "{column}: the built segment is read from the band");
+        assert_eq!(head.sample.unwrap().items, sample.len() as u64, "{column}");
+        let edges = edges_of(&rows);
+        let want = scaled(
+            expected(&edges, &sample, None, column),
+            items.len() as u64,
+            sample.len() as u64,
+            None,
+        );
+        assert_eq!(rows, want, "{column}");
+    }
 }

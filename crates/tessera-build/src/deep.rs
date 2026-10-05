@@ -175,7 +175,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         )?;
         check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
         check_cut_index(phash, partition, &mut report)?;
-        check_bands(&prefix_dir, phash, partition, &mut report)?;
+        check_bands(&prefix_dir, phash, &bundle.manifest, partition, &mut report)?;
         check_band_labels(&prefix_dir, partition, &mut report)?;
         check_row_members(root, &prefix_dir, partition, &mut report)?;
         check_unique_indexes(
@@ -399,43 +399,7 @@ fn check_unique_indexes(
             Ok(())
         };
         if homes_value {
-            let dir = prefix_dir.join("partitions").join(phash).join("attrs").join(attribute);
-            let access = tessera_filter::Access::MappedSequential;
-            let mut layers: Vec<(tessera_filter::ValueColumn, Option<tessera_filter::SortedDict>)> =
-                Vec::new();
-            let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", tessera_filter::VALUES_FILE);
-            if manifest.files.contains_key(&base_rel) {
-                let values = tessera_filter::ValueColumn::open_dir(&dir, access)
-                    .map_err(|e| BuildError::io(&dir, e))?;
-                let dict = (declared.arrow_type == tessera_spatial::ScalarType::Keyword)
-                    .then(|| tessera_filter::SortedDict::open_dir(&dir, access))
-                    .transpose()
-                    .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))?;
-                layers.push((values, dict));
-            }
-            for extent in partition_manifest
-                .attr_extents
-                .iter()
-                .filter(|e| &e.column == attribute && e.view.is_none())
-            {
-                let values = tessera_filter::open_extent(
-                    &join_rel(prefix_dir, &extent.values)?,
-                    &join_rel(prefix_dir, &extent.presence)?,
-                    access,
-                )
-                .map_err(|e| BuildError::Invalid(format!("{}: {e}", extent.values)))?;
-                let dict = extent
-                    .dict
-                    .as_ref()
-                    .map(|rel| {
-                        join_rel(prefix_dir, rel).and_then(|path| {
-                            tessera_filter::SortedDict::open(&path, access)
-                                .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))
-                        })
-                    })
-                    .transpose()?;
-                layers.push((values, dict));
-            }
+            let layers = value_layers(prefix_dir, phash, manifest, partition_manifest, declared)?;
             let mut scratch_bytes = Vec::new();
             let mut keyed = |dict: &tessera_filter::SortedDict, ordinal: u32| {
                 dict.key_of(ordinal, &mut scratch_bytes)
@@ -559,7 +523,56 @@ fn check_unique_indexes(
     Ok(())
 }
 
-/// A stored value at the shape the unique key derivation takes.
+/// The value layers of the indexed column `declared` in partition `phash`: the build's, where it
+/// wrote one, then each extent a running service wrote, each with its dictionary on a keyword.
+fn value_layers(
+    prefix_dir: &Path,
+    phash: &str,
+    manifest: &Manifest,
+    partition_manifest: &SegmentsManifest,
+    declared: &tessera_store::manifest::DeclaredScalar,
+) -> Result<Vec<(tessera_filter::ValueColumn, Option<tessera_filter::SortedDict>)>> {
+    let attribute = &declared.name;
+    let dir = prefix_dir.join("partitions").join(phash).join("attrs").join(attribute);
+    let access = tessera_filter::Access::MappedSequential;
+    let mut layers = Vec::new();
+    let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", tessera_filter::VALUES_FILE);
+    if manifest.files.contains_key(&base_rel) {
+        let values = tessera_filter::ValueColumn::open_dir(&dir, access)
+            .map_err(|e| BuildError::io(&dir, e))?;
+        let dict = (declared.arrow_type == tessera_spatial::ScalarType::Keyword)
+            .then(|| tessera_filter::SortedDict::open_dir(&dir, access))
+            .transpose()
+            .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))?;
+        layers.push((values, dict));
+    }
+    for extent in partition_manifest
+        .attr_extents
+        .iter()
+        .filter(|e| &e.column == attribute && e.view.is_none())
+    {
+        let values = tessera_filter::open_extent(
+            &join_rel(prefix_dir, &extent.values)?,
+            &join_rel(prefix_dir, &extent.presence)?,
+            access,
+        )
+        .map_err(|e| BuildError::Invalid(format!("{}: {e}", extent.values)))?;
+        let dict = extent
+            .dict
+            .as_ref()
+            .map(|rel| {
+                join_rel(prefix_dir, rel).and_then(|path| {
+                    tessera_filter::SortedDict::open(&path, access)
+                        .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))
+                })
+            })
+            .transpose()?;
+        layers.push((values, dict));
+    }
+    Ok(layers)
+}
+
+/// A stored value at the shape the unique key derivation and the band copies take.
 fn record_as_scalar(value: tessera_filter::RecordValue) -> tessera_spatial::ScalarValue {
     use tessera_filter::RecordValue as RV;
     use tessera_spatial::ScalarValue as SV;
@@ -573,6 +586,9 @@ fn record_as_scalar(value: tessera_filter::RecordValue) -> tessera_spatial::Scal
         RV::I32(x) => SV::I32(x),
         RV::I64(x) => SV::I64(x),
         RV::TimestampUs(x) => SV::TimestampUs(x),
+        RV::F32(x) => SV::F32(x),
+        RV::F64(x) => SV::F64(x),
+        RV::Bool(x) => SV::Bool(x),
         RV::Utf8(s) => SV::Utf8(s),
         _ => SV::Null,
     }
@@ -672,14 +688,35 @@ fn disagrees(path: PathBuf, reason: String) -> BuildError {
 
 /// **Every segment's bands are its rows, and its cell codes its cells.** Each band holds exactly
 /// the rows whose identity has that many leading zero bits, in row order, with the row's own
-/// identity, code and residual and a copy of each render column's value; each cell code is the
-/// Morton code of the cell's first row ([`tessera_store::bands`]). A refusal names the file.
+/// identity, code and residual, a copy of each render column's value, and a copy of each indexed
+/// column's value of the row's entity; each cell code is the Morton code of the cell's first row
+/// ([`tessera_store::bands`]). A refusal names the file.
 fn check_bands(
     prefix_dir: &Path,
     phash: &str,
+    manifest: &Manifest,
     partition: &tessera_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
+    // The schema as served, and each copied column's value layers, opened once.
+    let served = manifest.with_attributes(&partition.manifest.attributes, &[]);
+    let copied = served
+        .band_scalars()
+        .map(|declared| {
+            value_layers(prefix_dir, phash, manifest, &partition.manifest, declared)
+                .map(|layers| (declared, layers))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let key = IdentityKey::from_hex(&manifest.identity.key)
+        .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
+    let deleted = partition
+        .manifest
+        .tombstones
+        .entities()
+        .cloned()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
+        })?;
     let mut views: Vec<_> = partition.views.iter().collect();
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
@@ -700,10 +737,84 @@ fn check_bands(
                     "a cell code is not its cell's Morton code".to_string(),
                 ));
             }
+            let bands_file = dir.join(tessera_store::bands::BANDS_FILE);
             segment
                 .bands
                 .check_against(codes, &segment.columns)
-                .map_err(|reason| disagrees(dir.join(tessera_store::bands::BANDS_FILE), reason))?;
+                .map_err(|reason| disagrees(bands_file.clone(), reason))?;
+            if let Some(name) = segment
+                .bands
+                .indexed_names()
+                .find(|name| !copied.iter().any(|(declared, _)| declared.name == *name))
+            {
+                return Err(disagrees(
+                    bands_file,
+                    format!("the bands copy '{name}', which is not an indexed number or timestamp"),
+                ));
+            }
+            // Each banded row's entity, where it is live: a deleted entity's rows wait for the
+            // compaction, and its values may already be gone.
+            let ids = segment.columns.tessera_id();
+            let mut entity_of: std::collections::HashMap<u32, u32> = Default::default();
+            let mut wanted = croaring::Bitmap::new();
+            let span = segment.bands.band(tessera_store::bands::FIRST_BAND);
+            for &row in &segment.bands.rows()[span] {
+                let entity = segment
+                    .entities
+                    .entity_of(
+                        row,
+                        ids[row as usize],
+                        &key,
+                        manifest.identity.shard_id,
+                        &segment.seg_id,
+                    )
+                    .map_err(|e| BuildError::Invalid(e.to_string()))?;
+                let entity = u32::try_from(entity.raw()).map_err(|_| {
+                    BuildError::Invalid(format!(
+                        "segment '{}': row {row} holds entity {}, past a u32",
+                        segment.seg_id,
+                        entity.raw()
+                    ))
+                })?;
+                if !deleted.contains(entity) {
+                    entity_of.insert(row, entity);
+                    wanted.add(entity);
+                }
+            }
+            for (declared, layers) in &copied {
+                if segment.bands.copy(&declared.name).is_none() {
+                    // Written before the column was declared: the column is read by entity.
+                    continue;
+                }
+                let mut values: std::collections::HashMap<u32, tessera_spatial::ScalarValue> =
+                    Default::default();
+                for (layer, _) in layers {
+                    layer.for_each_record_value_in(&wanted, |entity, value| {
+                        // A value column stores a timestamp as its `i64`.
+                        let value = match (declared.arrow_type, record_as_scalar(value)) {
+                            (
+                                tessera_spatial::ScalarType::TimestampUs,
+                                tessera_spatial::ScalarValue::I64(t),
+                            ) => tessera_spatial::ScalarValue::TimestampUs(t),
+                            (_, value) => value,
+                        };
+                        values.insert(entity, value);
+                        Ok::<(), ()>(())
+                    })
+                    .expect("the closure does not fail");
+                }
+                segment
+                    .bands
+                    .check_indexed_against(&declared.name, declared.arrow_type, |row| {
+                        entity_of.get(&row).map(|entity| {
+                            values
+                                .get(entity)
+                                .cloned()
+                                .unwrap_or(tessera_spatial::ScalarValue::Null)
+                        })
+                    })
+                    .map_err(|reason| disagrees(bands_file.clone(), reason))?;
+            }
             report.band_entries += segment.bands.entries() as u64;
         }
     }

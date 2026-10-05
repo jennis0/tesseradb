@@ -220,9 +220,11 @@ pub struct GenerationStamp {
 // which a reader at 32 would evaluate as one, so a 31 bundle is refused.
 // 33: every row-major column has a member file beside it, holding each artifact's members over the
 // base rows and a covering of at most 32 row ranges. A 32 bundle lacks the files and is refused.
+// 34: a segment's bands copy every indexed number and timestamp column that is not drawn, with the
+// entries that hold a value. A 33 band file lacks the copies and is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 33;
+pub const BUNDLE_FORMAT: u32 = 34;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

@@ -119,7 +119,8 @@ pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8;
                 column,
                 bins,
                 range,
-            }) => format!("bins {column:?} {bins} {range:?}"),
+                sample,
+            }) => format!("bins {column:?} {bins} {range:?} sample {sample:?}"),
             Some(By::Layer { layer, level, pick }) => {
                 format!("layer {layer:?} {level:?} {}", pick_text(pick))
             }

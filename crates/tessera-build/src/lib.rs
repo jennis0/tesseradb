@@ -1826,23 +1826,28 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     // ---- 7. tiler and segment ---------------------------------------------------------
     // Narrow each item's scalars to the render columns, in declaration order, so they align with
-    // `scalar_schema_of`'s filtered list. Done after the filter emit above, which needs every
-    // declared column including the `index`-only ones.
+    // `scalar_schema_of`'s filtered list, then the columns the bands copy, as `band_schema_of`
+    // lists them. Done after the filter emit above, which needs every declared column including
+    // the `index`-only ones.
     //
     // **Unconditional, where it used to be skipped when every column rendered.**
     {
-        let render: Vec<bool> = args.schema.attributes.iter().map(|a| a.render).collect();
+        let attributes = &args.schema.attributes;
         for item in &mut tiler_items {
-            let mut kept = Vec::with_capacity(render.iter().filter(|k| **k).count());
-            for (i, v) in item.scalars.iter().enumerate() {
-                if render[i] {
-                    kept.push(v.clone());
+            let mut kept = Vec::with_capacity(item.scalars.len());
+            let drawn: fn(&crate::config::Attribute) -> bool = |a| a.render;
+            for keep in [drawn, band_copied] {
+                for (attribute, v) in attributes.iter().zip(&item.scalars) {
+                    if keep(attribute) {
+                        kept.push(v.clone());
+                    }
                 }
             }
             item.scalars = kept;
         }
     }
     let scalar_schema = scalar_schema_of(&args.schema);
+    let band_schema = band_schema_of(&args.schema);
     let codes = sort_batch(&mut tiler_items, &mut entity_ids);
     // **The resolution this frame actually gave the corpus**, counted here because `codes` is the
     // row order — `(morton, tessera_id)` ascending — and is the same vector `write_segment` puts
@@ -1880,7 +1885,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         }
     }
 
-    write_segment(&segment_dir, &tiler_items, &codes, &scalar_schema)
+    write_segment(&segment_dir, &tiler_items, &codes, &scalar_schema, &band_schema)
         .map_err(|e| BuildError::io(&segment_dir, e))?;
     for name in tessera_store::SEGMENT_FILES {
         fsync_file(&segment_dir.join(name))?;
@@ -2117,6 +2122,35 @@ fn scalar_schema_of(
         .iter()
         .filter(|a| a.render)
         .map(|a| (a.name.clone(), a.ty))
+        .collect()
+}
+
+/// Whether the identity bands copy `attribute` beside the render columns.
+pub(crate) fn band_copied(attribute: &crate::config::Attribute) -> bool {
+    tessera_store::bands::copied_beside(
+        attribute.ty,
+        attribute.vocabulary.is_some(),
+        attribute.index,
+        attribute.render,
+    )
+}
+
+/// The columns the identity bands copy beside the render columns, in declared order, each with its
+/// position in the declaration.
+pub(crate) fn band_copied_columns(
+    schema: &crate::config::Schema,
+) -> impl Iterator<Item = (usize, &crate::config::Attribute)> {
+    schema
+        .attributes
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| band_copied(a))
+}
+
+/// The columns the identity bands copy beside the render columns, in declared order.
+fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+    band_copied_columns(schema)
+        .map(|(_, a)| (a.name.clone(), a.ty))
         .collect()
 }
 

@@ -46,7 +46,7 @@ import pytest
 
 import declared_fixture as fx
 from declared_fixture import Column, Corpus, Deployment
-from oracle.wire import split_aggregate_frames
+from oracle.wire import split_aggregate_frames, split_items_frames
 
 BUILT = list(range(fx.N_BUILT))
 INGESTED = list(range(fx.N_BUILT, fx.N_ITEMS))
@@ -501,3 +501,123 @@ def test_a_grouping_by_bins_that_cannot_be_served_is_refused(deployment):
         token, view=fx.WORLD, groupings=[{"by": {"field": "score", "bins": 2}, "cells": {"depth": 3}}]
     )
     assert resp.status_code == 422, resp.text
+
+
+# ---------------------------------------------------------------------------------------------
+# Sampled bins
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def identities(deployment) -> dict[int, int]:
+    """Each item's `tessera_id`, by its source id, read through `/v1/items` as `everyone`."""
+    token = deployment.server.authorise(list(fx.PRINCIPALS["everyone"]))["token"]
+    body: dict = {"view": fx.WORLD, "fields": ["fx"], "order": "map"}
+    out = {}
+    while True:
+        resp = deployment.server.items(token, **body)
+        assert resp.status_code == 200, resp.text
+        decoded = split_items_frames(resp.content)
+        for records, _end in decoded.pages:
+            for row in ipc.open_stream(io.BytesIO(records)).read_all().to_pylist():
+                out[row["fx"]] = int(row["tessera_id"])
+        if decoded.trailer["next"] is None:
+            return out
+        body["cursor"] = decoded.trailer["next"]
+
+
+def sample_of(items: list[int], s: int, ids: dict[int, int]) -> list[int]:
+    """The items the contract counts with sample size `s` where it samples: every item of a set
+    of at most `s`, and otherwise those whose `tessera_id` is below `floor(s * 2^64 / N)`."""
+    if len(items) <= s:
+        return items
+    cut = (s << 64) // len(items)
+    return [i for i in items if ids[i] < cut]
+
+
+def exact_by_size(items: list[int], s: int) -> bool:
+    """Whether the contract counts every item: a set of at most `s` items, or one whose cut is
+    above 2^58, wider than any identity band. It depends on the set's size alone."""
+    return len(items) <= s or (s << 64) // len(items) > 1 << 58
+
+
+def counted(items: list[int], s: int, ids: dict[int, int]) -> list[int]:
+    """The items the contract counts: every item where the size says so, and otherwise the
+    sample."""
+    return items if exact_by_size(items, s) else sample_of(items, s, ids)
+
+
+def scale(count: int, n: int, taken: int) -> int:
+    """`count * n / taken`, to the nearest whole number with a half rounded up."""
+    return (2 * count * n + taken) // (2 * taken) if taken else 0
+
+
+@pytest.mark.parametrize("principal", list(fx.PRINCIPALS))
+@pytest.mark.parametrize("column", [c.name for c in COLUMNS])
+def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities, principal, column):
+    """With `sample`, each count is the oracle's count among the set's items below the cut,
+    scaled to the set, or every item's count where the set's size and `sample` say it is counted
+    whole; the reference is counted the same way at its own cut; the default edges are the readable
+    edges of the visible set as it is counted, and hold still under every filter. The oracle draws every sample from the principal's visible items alone, so an
+    item it cannot see that entered a sample, moved `total` or moved an edge would show here."""
+    token = deployment.server.authorise(list(fx.PRINCIPALS[principal]))["token"]
+    seen = visible(principal)
+    for s in (5, 25, 300):
+        held = None
+        for name, (filters, keep) in FILTERS.items():
+            items = [i for i in seen if keep(i)]
+            body = {"view": fx.WORLD, "reference": {},
+                    "groupings": [{"by": {"field": column, "bins": 10, "sample": s}}]}
+            if filters is not None:
+                body["filters"] = filters
+            head, rows = read_table(deployment.server, token, body)
+            what = f"{principal} / {column} / sample {s} / filter {name}"
+            sample = head["sample"]
+            taken = counted(items, s, identities)
+            reference = counted(seen, s, identities)
+            if principal == "everyone" and name == "none" and s < 300:
+                assert len(taken) < len(items), f"{what}: the whole view is sampled"
+            edges = default_edges(column, reference, 10)
+            _, raw = expected(column, edges, taken, reference)
+            want_rows = [
+                (g, lo, hi, scale(c, len(items), len(taken)), scale(r, len(seen), len(reference)))
+                for g, lo, hi, c, r in raw
+            ]
+            assert rows == want_rows, f"{what}: served {rows}, expected {want_rows}"
+            assert (head["total"], head["reference_total"]) == (len(items), len(seen)), what
+            assert sample == {
+                "sampled": not exact_by_size(items, s) or not exact_by_size(seen, s),
+                "items": len(taken),
+                "reference_items": len(reference),
+                "edges_sampled": not exact_by_size(seen, s),
+            }, f"{what}: {head}"
+            served = [(r[1], r[2]) for r in rows if r[0] == "listed"]
+            assert held is None or served == held, f"{what}: the edges moved"
+            held = served
+
+
+def test_a_sample_as_large_as_the_set_is_exact(deployment):
+    token = deployment.server.authorise(list(fx.PRINCIPALS["two"]))["token"]
+    n = len(visible("two"))
+    grouping = {"field": "rank", "bins": 12}
+    exact = read_table(deployment.server, token,
+                       {"view": fx.WORLD, "reference": {}, "groupings": [{"by": grouping}]})
+    for s in (n, n // 60):
+        whole = read_table(deployment.server, token,
+                           {"view": fx.WORLD, "reference": {}, "groupings": [{"by": {**grouping, "sample": s}}]})
+        assert "sample" not in exact[0]
+        assert whole[0].pop("sample") == {
+            "sampled": False, "items": n, "reference_items": n, "edges_sampled": False,
+        }, s
+        assert whole == exact, s
+
+
+def test_a_sample_that_cannot_be_served_is_refused(deployment):
+    token = deployment.server.authorise(list(fx.PRINCIPALS["everyone"]))["token"]
+    for by in (
+        {"field": "score", "bins": 4, "sample": 0},
+        {"field": "score", "sample": 10},
+        {"field": "fx", "top": 2, "sample": 10},
+    ):
+        resp = deployment.server.aggregate(token, view=fx.WORLD, groupings=[{"by": by}])
+        assert resp.status_code == 422 and resp.json()["error"] == "contract", (by, resp.text)
