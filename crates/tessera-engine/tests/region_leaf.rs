@@ -304,13 +304,6 @@ fn by_artifact(id: TesseraId) -> FilterExpr {
     FilterExpr::Region(RegionLeaf::Artifact(id))
 }
 
-/// The response with the artifacts frame taken out, so two requests naming no layer can be
-/// compared whole: tiles, points, sub-cells, stamp, staleness and the verdict.
-fn without_artifacts(mut out: ViewportOut) -> ViewportOut {
-    out.artifacts.clear();
-    out
-}
-
 #[test]
 fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_artifact_is_not_served(
 ) {
@@ -342,12 +335,12 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let served = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize).layers(LayerSelection::All),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
         )
         .unwrap()
-        .artifacts;
+        .artifacts();
     assert_eq!(served.len(), 1, "the broad principal is served the cluster");
     let id = served[0].tessera_id;
     assert_eq!(served[0].masked_count, 300);
@@ -373,8 +366,8 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
     let withheld = viewport(&engine, &subset_credential(), Some(by_artifact(id)));
     assert_eq!(matched(&unknown), 0);
     assert_eq!(
-        without_artifacts(withheld),
-        without_artifacts(unknown.clone()),
+        withheld,
+        unknown.clone(),
         "withheld and unknown are one response"
     );
     // And so is the outside of it: `none_of` over an empty operand is every visible row.
@@ -396,8 +389,8 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
     );
     assert_eq!(matched(&suppressed), 0);
     assert_eq!(
-        without_artifacts(suppressed),
-        without_artifacts(unknown_full),
+        suppressed,
+        unknown_full,
         "suppressed and unknown are one response"
     );
     engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();

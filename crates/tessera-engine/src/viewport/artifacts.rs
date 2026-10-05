@@ -940,47 +940,40 @@ impl Engine {
         move |attachment| self.dependency_served(ctx, attachment, DEPENDENCY_CHAIN_MAX)
     }
 
-    /// The artifacts of this viewport: every one requested, that this principal reaches, that
-    /// has a visible member inside the requested tiles, and that passes the predicate.
+    /// The artifacts of `names` over every tile of `tiling`, walked whole: every one this
+    /// principal reaches, that has a visible member inside the tiles, that passes the predicate
+    /// and that the cut keeps, settled against itself and against `outside`.
     ///
     /// Four narrowings in this order, and the order is the disclosure control: reachability
     /// first, so a name the principal cannot reach never has its membership touched; candidacy
-    /// second, keeping the count off artifacts outside the viewport; the predicate last.
+    /// second, keeping the count off artifacts outside the tiles; the predicate last.
     ///
     /// The count is over the whole membership, not the tiles: a per-viewport count would move as
     /// the viewer pans and let them difference two boxes for the members in between.
     ///
     /// The view arrives whole and is not resolved a second time, so an artifact and a point of
     /// one response are answered over the same row space.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn serve_artifacts(
         &self,
         served: &ServedView<'_>,
         mask: &crate::compose::EffectiveMask,
         tiling: &Tiling,
-        req: &ViewportRequest<'_>,
-    ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
-        let reachable = self.reachable_layers(served.session);
-        let names = requested_layers(req.layers, &reachable);
+        ask: &ArtifactAsk<'_>,
+        names: Vec<String>,
+        in_request: &std::collections::BTreeSet<String>,
+        dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+    ) -> Result<Settled> {
         if names.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(Settled::default());
         }
-        // Built from the same resolution: a label's target may live in any layer its own
-        // `depends_on` names, reachable or not.
-        let ctx = DependencyContext::new(served, mask, &reachable);
-        let dependency_served = self.dependency_gate(&ctx);
-
         // The rows this request's tiles span, which every set below is taken over.
         let Some(tile_rows) = tile_rows(served, &tiling.ranges) else {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(Settled::default());
         };
         let sets = viewport_sets(&tile_rows, mask);
-
-        // The layers this response walks — see [`orphaned_dependents`].
-        let in_request: std::collections::BTreeSet<String> = names.iter().cloned().collect();
-
-        let walked = self.walk_layers(served, req, names, &sets, &dependency_served)?;
-        ctx.finish()?;
-        Ok(settle_response(walked, &in_request))
+        let walked = self.walk_layers(served, ask, mask, names, &sets, dependency_served)?;
+        Ok(settle_response(walked, in_request, &Outside::default()))
     }
 
     /// One pass over the requested layers and the levels this request selects of each: the gate,
@@ -989,7 +982,8 @@ impl Engine {
     fn walk_layers(
         &self,
         served: &ServedView<'_>,
-        req: &ViewportRequest<'_>,
+        ask: &ArtifactAsk<'_>,
+        mask: &crate::compose::EffectiveMask,
         names: Vec<String>,
         sets: &ViewportSets<'_>,
         dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
@@ -1000,8 +994,8 @@ impl Engine {
         let source = served.generation.partition_source();
         let pass = ArtifactPass {
             served,
-            req,
-            sets,
+            ask,
+            mask,
             dependency_served,
             locator: &locator,
             source: &source,
@@ -1010,24 +1004,27 @@ impl Engine {
 
         let mut walked = Walked::default();
         for name in names {
-            let Some(layer) = self.layer_pass(&pass, name, &mut walked) else {
+            let Some(layer) = self.layer_pass(&pass, name) else {
                 continue;
             };
+            if lineage_kind(layer.registered.declaration.hierarchy.kind).is_some() {
+                walked.treed.insert(layer.name.clone());
+            }
             let mut served_levels: Vec<ServedLevel> = Vec::new();
             for (number, runs) in layer.registered.runs.iter().enumerate() {
                 let number = number as u32;
                 // Skipped before the projection is built: costs nothing here, which matters for
                 // a whole-layer response over a multi-level hierarchy.
                 if !level_is_selected(
-                    req.levels,
+                    ask.levels,
                     &layer.registered.declaration.levels,
                     number,
-                    req.zoom,
+                    ask.zoom,
                 ) {
                     continue;
                 }
                 let level = self.level_pass(&layer, number, runs)?;
-                let passing = self.gate_candidates(&level);
+                let passing = self.gate_candidates(&level, sets);
                 let (lineage, cut) = self.cut_level(&level, &passing);
                 served_levels.push(ServedLevel {
                     level: number,
@@ -1036,7 +1033,20 @@ impl Engine {
                     // Filled once the response's membership is settled, below.
                     served: std::collections::HashMap::new(),
                 });
-                self.assemble_level(&level, passing, &cut, &mut walked)?;
+                // Built after candidacy: the filter decides nothing about which artifacts are
+                // served.
+                let matched = sets.matched_here.as_ref().map(|here| level.rows.matched(here));
+                let highlighted = sets
+                    .highlighted_here
+                    .as_ref()
+                    .map(|here| level.rows.matched(here));
+                let bits = |ordinal: u32| -> FilterBits {
+                    (
+                        matched.as_ref().map(|m| level.rows.matches(m, ordinal)),
+                        highlighted.as_ref().map(|m| level.rows.matches(m, ordinal)),
+                    )
+                };
+                self.assemble_level(&level, passing, &cut, &bits, &mut walked)?;
             }
             walked.served_layers.push(ServedLayer {
                 name: layer.name,
@@ -1048,11 +1058,10 @@ impl Engine {
 
     /// One requested layer, resolved for this request: the registration this walk reads it
     /// through, what is parsed once for it, and the three dispositions that drop it whole.
-    fn layer_pass<'a>(
+    pub(super) fn layer_pass<'a>(
         &self,
         pass: &'a ArtifactPass<'a>,
         name: String,
-        walked: &mut Walked,
     ) -> Option<LayerPass<'a>> {
         let generation = pass.served.generation;
         let Some(registered) = self.write.live().registered_layer(&name) else {
@@ -1074,9 +1083,6 @@ impl Engine {
         {
             return None;
         }
-        if lineage_kind(registered.declaration.hierarchy.kind).is_some() {
-            walked.treed.insert(name.clone());
-        }
 
         // Parsed once per layer, an unparseable name dropped rather than erroring the response,
         // and narrowed by the request so a property not asked for is never computed.
@@ -1086,7 +1092,7 @@ impl Engine {
             .computed
             .iter()
             .filter_map(|name| crate::derived::ComputedProperty::parse(name))
-            .filter(|property| pass.req.computed.selects(*property))
+            .filter(|property| pass.ask.computed.selects(*property))
             .collect();
 
         let vocabulary = predicate_vocabulary(generation, &registered.declaration);
@@ -1149,9 +1155,9 @@ impl Engine {
     }
 
     /// **Stage one: this level, resolved for this request** — the row form and the version it is
-    /// of, the level's masked counts, and the two filter sets. Everything the gate, the cut and the
-    /// assembly read of the level is settled here and read from there.
-    fn level_pass<'a>(
+    /// of, and the level's figures. Everything the gate, the cut and the assembly read of the
+    /// level is settled here and read from there.
+    pub(super) fn level_pass<'a>(
         &self,
         layer: &'a LayerPass<'a>,
         level: u32,
@@ -1173,20 +1179,9 @@ impl Engine {
             level,
             level_version,
             &rows,
-            pass.sets.mask,
+            pass.mask,
             crate::figures::Geometry::declared(&layer.registered.declaration),
         )?;
-        // Built after candidacy: the filter decides nothing about which artifacts are served.
-        let matched = pass
-            .sets
-            .matched_here
-            .as_ref()
-            .map(|here| rows.matched(here));
-        let highlighted = pass
-            .sets
-            .highlighted_here
-            .as_ref()
-            .map(|here| rows.matched(here));
         Ok(LevelPass {
             layer,
             level,
@@ -1195,33 +1190,41 @@ impl Engine {
             level_version,
             lineage_version,
             counts,
-            matched,
-            highlighted,
         })
     }
 
-    /// **Stage two: the verdict, for every candidate the viewport touches** — the ordinals that
-    /// pass, with the two outputs their verdict carried.
-    fn gate_candidates(&self, level: &LevelPass<'_>) -> Vec<Passing> {
+    /// The verdict over one level for this request's viewer, settled once and asked per
+    /// candidate.
+    pub(super) fn level_view<'a>(
+        &self,
+        level: &'a LevelPass<'a>,
+    ) -> crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask> {
         let (layer, pass) = (level.layer, level.layer.pass);
         let served = pass.served;
         let rows: &crate::artifacts::ArtifactRows = &level.rows;
-        let containment = rows
-            .partition()
-            .map(|p| p.answers(served.session.satisfied()));
-        let view = crate::artifacts::ArtifactView {
+        crate::artifacts::ArtifactView {
             declaration: &layer.registered.declaration,
             overlay: &served.generation.overlay,
             labels: self.label_gate(served.session, &layer.registered.declaration),
             layer_reachable: true,
             rows,
-            mask: pass.sets.mask,
+            mask: pass.mask,
             dependency_served: pass.dependency_served,
-            containment,
+            containment: rows
+                .partition()
+                .map(|p| p.answers(served.session.satisfied())),
             denied: served.denied,
             // Kept on the level beside this, so derived geometry reads the same accumulation.
             counts: level.counts.clone(),
-        };
+        }
+    }
+
+    /// **Stage two: the verdict, for every candidate the viewport touches** — the ordinals that
+    /// pass, with the two outputs their verdict carried.
+    fn gate_candidates(&self, level: &LevelPass<'_>, sets: &ViewportSets<'_>) -> Vec<Passing> {
+        let pass = level.layer.pass;
+        let rows: &crate::artifacts::ArtifactRows = &level.rows;
+        let view = self.level_view(level);
         // Every candidate is tested before any is cut: a loop that decided and pruned in one
         // step could let a node's neighbours reach its verdict.
         let mut passing = Vec::new();
@@ -1229,14 +1232,14 @@ impl Engine {
         // no visible member, so skipping it withholds nothing. Holes and artifacts with no
         // projected membership stay live on the identifier route, which walks no index. Or, on
         // a row-major level, a scan over the viewport intersected with the mask.
-        let candidates = rows.candidacy(&pass.sets.viewport, level.counts.as_deref());
+        let candidates = rows.candidacy(&sets.viewport, level.counts.as_deref());
         for ordinal in candidates.iter() {
             // An artifact its own label withholds has no membership probed.
             if !view.admits_label(ordinal) {
                 continue;
             }
             // Every candidate pays a masked probe, on whichever route is cheapest for it.
-            if !rows.candidate_in(ordinal, &candidates, &pass.sets.viewport, pass.sets.mask) {
+            if !rows.candidate_in(ordinal, &candidates, &sets.viewport, pass.mask) {
                 continue;
             }
             let Some(entity) = level.runs.entity_of(ordinal as u64).map(EntityId::new) else {
@@ -1292,7 +1295,7 @@ impl Engine {
         let served = crate::cut::cut(
             &lineage,
             &ordinals,
-            layer.pass.req.artifact_budget,
+            layer.pass.ask.budget,
             layer.registered.declaration.hierarchy.prune_children,
         );
         (lineage, served)
@@ -1301,207 +1304,247 @@ impl Engine {
     /// **Stage four: the row every survivor is served as** — its content, its derived shape, its
     /// two edges recorded for the reconciliation after the walk, and the placement they resolve
     /// against.
+    ///
+    /// A level is served in key order, then its keyless artifacts in ordinal order, so a level a
+    /// build published and one published at a running service are served alike.
     fn assemble_level(
         &self,
         level: &LevelPass<'_>,
         passing: Vec<Passing>,
         cut: &[u32],
+        bits: &dyn Fn(u32) -> FilterBits,
         walked: &mut Walked,
     ) -> Result<()> {
-        let (layer, pass) = (level.layer, level.layer.pass);
-        let (served, req) = (pass.served, pass.req);
-        let generation = served.generation;
-        let declaration = &layer.registered.declaration;
-        let (name, number) = (&layer.name, level.level);
-        let rows: &crate::artifacts::ArtifactRows = &level.rows;
-        // Read once for the level rather than once per artifact: 408ms of a response whose
-        // points half is 1.3ms, decompressing one zstd block per artifact — 6.7ms read together.
-        let contents = if declaration.content.supplied.is_empty() || cut.is_empty() {
-            None
-        } else {
-            Some(self.level_contents.get_or_build(
-                name,
-                number,
-                level.level_version,
-                generation.segments_version,
-                || {
-                    crate::artifact_content::LevelContent::build(
-                        generation.filter_columns.records(),
-                        level.runs,
-                    )
-                },
-            ))
-        };
-
-        // A level is served in key order, then its keyless artifacts in ordinal order, so a level
-        // a build published and one published at a running service are served alike. The keys
-        // are read from the level's slots, looked up once, and copied only where the row carries
-        // one.
         let survivors: Vec<Passing> = passing
             .into_iter()
             .filter(|&(ordinal, ..)| cut.binary_search(&ordinal).is_ok())
             .collect();
-        let full = req.artifact_rows == ArtifactRows::Full;
-        let keyed: Vec<(Option<String>, Passing)> = self.write.live().with_artifacts(|store| {
-            let slots = store.slots(name, number);
-            let key_of = |ordinal: u32| {
-                slots
-                    .get(ordinal as usize)
-                    .and_then(Option::as_ref)
-                    .and_then(|record| record.key.as_deref())
-            };
-            let mut order: Vec<(Option<&str>, Passing)> =
-                survivors.into_iter().map(|at| (key_of(at.0), at)).collect();
-            order.sort_unstable_by(|(a, at), (b, bt)| {
-                (a.is_none(), a, at.0).cmp(&(b.is_none(), b, bt.0))
-            });
-            order
-                .into_iter()
-                .map(|(key, at)| (key.filter(|_| full).map(str::to_string), at))
-                .collect()
+        let contents = self.level_contents_of(level, !survivors.is_empty());
+        let mut keyed: Vec<(Option<String>, Passing)> = self
+            .keys_of(level, survivors.iter().map(|at| at.0))
+            .into_iter()
+            .zip(survivors)
+            .collect();
+        keyed.sort_unstable_by(|(a, at), (b, bt)| {
+            (a.is_none(), a, at.0).cmp(&(b.is_none(), b, bt.0))
         });
-        for (key, (ordinal, entity, masked_count, rank)) in keyed {
-            // Checked once per artifact served: without this a client that has gone is
-            // discovered only once the whole frame is ready, after minutes deriving geometry
-            // nobody reads.
-            check_cancelled(&req.cancel)?;
-            // Content restored from a packed extent carries no values yet, and is withheld
-            // rather than served with its description missing. Asked under the identity
-            // projection too, with `materialise = false`: an identity response must not carry a
-            // row the full response would withhold.
-            let Some(supplied) = self.supplied_content(
-                generation,
+        for (key, at) in keyed {
+            self.assemble_one(level, contents.as_deref(), key, at, bits(at.0), walked)?;
+        }
+        Ok(())
+    }
+
+    /// The level's supplied contents, read once for the level rather than once per artifact:
+    /// 408ms of a response whose points half is 1.3ms, decompressing one zstd block per artifact,
+    /// against 6.7ms read together. `None` where the layer supplies none or nothing is `wanted`.
+    pub(super) fn level_contents_of(
+        &self,
+        level: &LevelPass<'_>,
+        wanted: bool,
+    ) -> Option<Arc<crate::artifact_content::LevelContent>> {
+        let layer = level.layer;
+        let generation = layer.pass.served.generation;
+        if layer.registered.declaration.content.supplied.is_empty() || !wanted {
+            return None;
+        }
+        Some(self.level_contents.get_or_build(
+            &layer.name,
+            level.level,
+            level.level_version,
+            generation.segments_version,
+            || {
+                crate::artifact_content::LevelContent::build(
+                    generation.filter_columns.records(),
+                    level.runs,
+                )
+            },
+        ))
+    }
+
+    /// The publisher's key of each of `ordinals` at this level, read from the level's slots under
+    /// one look at the store, and `None` where the ask carries no payload.
+    pub(super) fn keys_of(
+        &self,
+        level: &LevelPass<'_>,
+        ordinals: impl Iterator<Item = u32>,
+    ) -> Vec<Option<String>> {
+        let full = level.layer.pass.ask.rows == ArtifactRows::Full;
+        self.write.live().with_artifacts(|store| {
+            let slots = store.slots(&level.layer.name, level.level);
+            ordinals
+                .map(|ordinal| {
+                    slots
+                        .get(ordinal as usize)
+                        .and_then(Option::as_ref)
+                        .and_then(|record| record.key.clone())
+                        .filter(|_| full)
+                })
+                .collect()
+        })
+    }
+
+    /// One artifact the gate admitted, as it is served: its content, its identifier, its derived
+    /// geometry and its two filter bits, with where it sits and what it points at recorded in
+    /// `walked` for the reconciliation. Absent where its content cannot be read back or its
+    /// identifier cannot be formed.
+    pub(super) fn assemble_one(
+        &self,
+        level: &LevelPass<'_>,
+        contents: Option<&crate::artifact_content::LevelContent>,
+        key: Option<String>,
+        (ordinal, entity, masked_count, rank): Passing,
+        (matched, highlighted): FilterBits,
+        walked: &mut Walked,
+    ) -> Result<()> {
+        let (layer, pass) = (level.layer, level.layer.pass);
+        let (served, ask) = (pass.served, pass.ask);
+        let generation = served.generation;
+        let declaration = &layer.registered.declaration;
+        let (name, number) = (&layer.name, level.level);
+        let rows: &crate::artifacts::ArtifactRows = &level.rows;
+        let full = ask.rows == ArtifactRows::Full;
+        // Checked once per artifact served: without this a client that has gone is discovered
+        // only once the whole frame is ready, after minutes deriving geometry nobody reads.
+        check_cancelled(&ask.cancel)?;
+        // Content restored from a packed extent carries no values yet, and is withheld rather than
+        // served with its description missing. Asked under the identity projection too, with
+        // `materialise = false`: an identity response must not carry a row the full response
+        // would withhold.
+        let Some(supplied) = self.supplied_content(
+            generation,
+            declaration,
+            number,
+            ordinal,
+            entity,
+            rank,
+            full,
+            contents,
+        ) else {
+            return Ok(());
+        };
+        // The blinding is total over the allocator's space; a failure means the manifest and
+        // allocator disagree, and dropping the artifact is the fail-closed reading of that.
+        let Ok(tessera_id) = self.identity_key.forward(pass.shard, entity) else {
+            return Ok(());
+        };
+        // From the composed mask, and only from it: every property below is a function of the
+        // artifact's membership intersected with what this principal may see. Skipped under the
+        // identity projection, whose point is that the derived sweep decides nothing about which
+        // rows are served. Held per principal between requests: the cache key names the
+        // principal so a hit never answers for a different one.
+        let mut derived = if !full || layer.declared_derived.is_empty() {
+            crate::derived::DerivedContent::default()
+        } else {
+            let key = crate::derived::cache::DerivedKey {
+                token_id: served.mask_identity.token_id,
+                view: served.name.to_string(),
+                layer: name.clone(),
+                level: number,
+                ordinal,
+                level_version: level.level_version,
+                segments_version: served.mask_identity.segments_version,
+                overlay_version: served.mask_identity.overlay_version,
+                fragment_identity: served.mask_identity.fragment_identity,
+                fragment_watermark: served.mask_identity.fragment_watermark,
+                properties: crate::derived::cache::properties_bits(&layer.declared_derived),
+            };
+            // The accumulation where the level has one; nothing here walks the mask again.
+            match level.counts.as_ref().filter(|c| c.has_geometry()) {
+                Some(figures) => {
+                    crate::derived::accumulated(&layer.declared_derived, figures, ordinal)
+                }
+                None => (*self.derived_geometry.get_or_derive(key, || {
+                    let visible = rows.visible_rows(ordinal, pass.mask);
+                    crate::derived::compute(&layer.declared_derived, &visible, pass.locator)
+                }))
+                .clone(),
+            }
+        };
+        let shape_guard_fired = full
+            && ask.computed.selects(crate::derived::ComputedProperty::Hull)
+            && self.drawn_shape(
                 declaration,
+                served.name,
+                name,
                 number,
                 ordinal,
-                entity,
-                rank,
-                req.artifact_rows == ArtifactRows::Full,
-                contents.as_deref(),
-            ) else {
-                continue;
-            };
-            // The blinding is total over the allocator's space; a failure means the manifest and
-            // allocator disagree, and dropping the artifact is the fail-closed reading of that.
-            let Ok(tessera_id) = self.identity_key.forward(pass.shard, entity) else {
-                continue;
-            };
-            // From the composed mask, and only from it: every property below is a function of
-            // the artifact's membership intersected with what this principal may see. Skipped
-            // under the identity projection, whose point is that the derived sweep decides
-            // nothing about which rows are served. Held per principal between requests: the
-            // cache key names the principal so a hit never answers for a different one.
-            let derived = if req.artifact_rows == ArtifactRows::Identity
-                || layer.declared_derived.is_empty()
-            {
-                crate::derived::DerivedContent::default()
-            } else {
-                let key = crate::derived::cache::DerivedKey {
-                    token_id: served.mask_identity.token_id,
-                    view: served.name.to_string(),
-                    layer: name.clone(),
-                    level: number,
-                    ordinal,
-                    level_version: level.level_version,
-                    segments_version: served.mask_identity.segments_version,
-                    overlay_version: served.mask_identity.overlay_version,
-                    fragment_identity: served.mask_identity.fragment_identity,
-                    fragment_watermark: served.mask_identity.fragment_watermark,
-                    properties: crate::derived::cache::properties_bits(&layer.declared_derived),
-                };
-                // The accumulation where the level has one; nothing here walks the mask again.
-                match level.counts.as_ref().filter(|c| c.has_geometry()) {
-                    Some(figures) => {
-                        crate::derived::accumulated(&layer.declared_derived, figures, ordinal)
-                    }
-                    None => (*self.derived_geometry.get_or_derive(key, || {
-                        let visible = rows.visible_rows(ordinal, pass.sets.mask);
-                        crate::derived::compute(&layer.declared_derived, &visible, pass.locator)
-                    }))
-                    .clone(),
-                }
-            };
-            // Only where the request asked for it and the row is materialised.
-            let content = supplied.values;
-            let mut derived = derived;
-            let shape_guard_fired = if req.artifact_rows == ArtifactRows::Full
-                && req.computed.selects(crate::derived::ComputedProperty::Hull)
-            {
-                self.drawn_shape(
-                    declaration,
-                    served.name,
-                    name,
-                    number,
-                    ordinal,
-                    supplied.authored.as_ref(),
-                    &mut derived,
-                    Some(req.zoom),
-                )
-            } else {
-                false
-            };
-            let parents: Vec<(String, u32, u32)> = rows
-                .parents(ordinal)
-                .iter()
-                .map(|p| (name.clone(), p.level, p.ordinal))
-                .collect();
-            // Recorded, not resolved: a parent or attachment target may sit in a level this
-            // loop has not reached yet.
-            walked
-                .served_at
-                .insert((name.clone(), number, ordinal), tessera_id);
-            walked.placed.push(Placement {
-                at: (name.clone(), number, ordinal),
-                parents,
-                attached_to: rows
-                    .attachment(ordinal)
-                    .map(|a| (a.layer.clone(), a.level, a.ordinal)),
-            });
-            walked.out.push(ArtifactOut {
-                content,
-                layer: name.clone(),
-                tessera_id,
-                key,
-                masked_count,
-                derived,
-                // On a treed layer this is recomputed below as the response-local chain depth.
-                rung: number,
-                // Both filled in below, once the response's own membership is settled.
-                parent_ids: Vec::new(),
-                target: None,
-                matched: level.matched.as_ref().map(|m| rows.matches(m, ordinal)),
-                // The same probe, with the highlight's crossed set in place of the filter's.
-                highlighted: level.highlighted.as_ref().map(|m| rows.matches(m, ordinal)),
-                shape_guard_fired,
-            });
-        }
+                supplied.authored.as_ref(),
+                &mut derived,
+                Some(ask.zoom),
+            );
+        let parents: Vec<(String, u32, u32)> = rows
+            .parents(ordinal)
+            .iter()
+            .map(|p| (name.clone(), p.level, p.ordinal))
+            .collect();
+        // Recorded, not resolved: a parent or attachment target may sit in a level this loop has
+        // not reached yet.
+        walked
+            .served_at
+            .insert((name.clone(), number, ordinal), tessera_id);
+        walked.placed.push(Placement {
+            at: (name.clone(), number, ordinal),
+            parents,
+            attached_to: rows
+                .attachment(ordinal)
+                .map(|a| (a.layer.clone(), a.level, a.ordinal)),
+        });
+        walked.out.push(ArtifactOut {
+            content: supplied.values,
+            layer: name.clone(),
+            tessera_id,
+            key,
+            masked_count,
+            derived,
+            // On a treed layer this is recomputed below as the response-local chain depth.
+            rung: number,
+            // Both filled in below, once the response's own membership is settled.
+            parent_ids: Vec::new(),
+            target: None,
+            matched,
+            highlighted,
+            shape_guard_fired,
+        });
         Ok(())
     }
 }
 
 /// One artifact the gate admitted: its ordinal, its entity, the masked count its verdict carried
 /// and the rank of the content that verdict chose.
-type Passing = (u32, EntityId, u64, Option<u32>);
+pub(super) type Passing = (u32, EntityId, u64, Option<u32>);
+
+/// What a walk of a layer's artifacts is asked for, apart from where: the depth drawn at, the
+/// levels, the computed properties, the budget a treed layer is cut to, the columns and the
+/// request's cancellation.
+pub(crate) struct ArtifactAsk<'a> {
+    pub(crate) zoom: u8,
+    pub(crate) levels: LevelSelection<'a>,
+    pub(crate) computed: ComputedSelection<'a>,
+    pub(crate) budget: Option<u32>,
+    pub(crate) rows: ArtifactRows,
+    pub(crate) cancel: Option<CancelToken>,
+}
 
 /// **The artifacts pass of one request**: what every layer and every level of it is answered
 /// against, resolved once before the walk.
-struct ArtifactPass<'a> {
-    served: &'a ServedView<'a>,
-    req: &'a ViewportRequest<'a>,
-    sets: &'a ViewportSets<'a>,
+pub(super) struct ArtifactPass<'a> {
+    pub(super) served: &'a ServedView<'a>,
+    pub(super) ask: &'a ArtifactAsk<'a>,
+    /// The viewer's composed mask, which every verdict and every derived property reads.
+    pub(super) mask: &'a crate::compose::EffectiveMask,
     /// The dependency prerequisite, closed over this request's state.
-    dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
-    locator: &'a crate::derived::RowLocator<'a>,
-    source: &'a crate::containment::PartitionSource<'a>,
-    shard: u32,
+    pub(super) dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+    pub(super) locator: &'a crate::derived::RowLocator<'a>,
+    pub(super) source: &'a crate::containment::PartitionSource<'a>,
+    pub(super) shard: u32,
 }
 
 /// One layer of that pass: the registration this walk reads it through, and what is parsed once
 /// for it.
-struct LayerPass<'a> {
-    pass: &'a ArtifactPass<'a>,
-    name: String,
-    registered: tessera_types::layer::RegisteredLayer,
+pub(super) struct LayerPass<'a> {
+    pub(super) pass: &'a ArtifactPass<'a>,
+    pub(super) name: String,
+    pub(super) registered: tessera_types::layer::RegisteredLayer,
     /// The derived properties this layer declares **and** this request asked for.
     declared_derived: Vec<crate::derived::ComputedProperty>,
     /// The predicate's inputs, resolved per level: per-level for a spatial layer, nothing for a
@@ -1511,40 +1554,35 @@ struct LayerPass<'a> {
 
 /// One level of one layer, as [`Engine::level_pass`] settles it: the values the gate, the cut and
 /// the assembly all read, so that none of them resolves one of its own.
-struct LevelPass<'a> {
-    layer: &'a LayerPass<'a>,
-    level: u32,
+pub(super) struct LevelPass<'a> {
+    pub(super) layer: &'a LayerPass<'a>,
+    pub(super) level: u32,
     /// The level's reserved entity runs — ordinal to entity.
-    runs: &'a tessera_types::layer::ReservedRuns,
+    pub(super) runs: &'a tessera_types::layer::ReservedRuns,
     /// This view's row form of the level's membership, and the version it is of.
-    rows: Arc<crate::artifacts::ArtifactRows>,
+    pub(super) rows: Arc<crate::artifacts::ArtifactRows>,
     level_version: u64,
     lineage_version: u64,
     /// The level's masked counts and accumulated geometry where it has them — `None` on an
     /// artifact-major level.
-    counts: Option<Arc<crate::figures::Figures>>,
-    /// The filter's and the highlight's answers over this level, borrowed from the request's
-    /// composed sets.
-    matched: Option<crate::artifacts::Matched<'a>>,
-    highlighted: Option<crate::artifacts::Matched<'a>>,
+    pub(super) counts: Option<Arc<crate::figures::Figures>>,
 }
 
-/// The row-space sets one response is answered over, composed once for every layer in it.
-struct ViewportSets<'a> {
-    /// The viewer's composed mask, carried beside the sets taken from it.
-    mask: &'a crate::compose::EffectiveMask,
-    /// The request's tiles as one masked set — the candidate generator every level walks.
-    viewport: crate::tile_index::Viewport<'a>,
-    matched_here: Option<croaring::Bitmap>,
-    highlighted_here: Option<croaring::Bitmap>,
+/// The row-space sets one response, or one tile of it, is answered over, composed once for every
+/// layer in it.
+pub(super) struct ViewportSets<'a> {
+    /// The tiles as one masked set — the candidate generator every level walks.
+    pub(super) viewport: crate::tile_index::Viewport<'a>,
+    pub(super) matched_here: Option<croaring::Bitmap>,
+    pub(super) highlighted_here: Option<croaring::Bitmap>,
 }
 
-/// The viewport as one row-space set, built once for every layer: the merged global spans of
-/// every tile this request resolved, reusing `crossing_domain` so this and the filter's crossing
-/// cannot disagree about which rows a request covers.
+/// The tiles as one row-space set: the merged global spans of every tile resolved, reusing
+/// `crossing_domain` so this and the filter's crossing cannot disagree about which rows a request
+/// covers.
 ///
 /// `None` where those tiles span no row: no layer can have a candidate there.
-fn tile_rows(
+pub(super) fn tile_rows(
     served: &ServedView<'_>,
     ranges: &[Vec<(usize, Range<u32>)>],
 ) -> Option<croaring::Bitmap> {
@@ -1556,9 +1594,8 @@ fn tile_rows(
     (!tile_rows.is_empty()).then_some(tile_rows)
 }
 
-/// The three sets every layer of the response is answered against, composed once from the rows its
-/// tiles span.
-fn viewport_sets<'a>(
+/// The three sets every layer is answered against, composed once from the rows the tiles span.
+pub(super) fn viewport_sets<'a>(
     tile_rows: &'a croaring::Bitmap,
     mask: &'a crate::compose::EffectiveMask,
 ) -> ViewportSets<'a> {
@@ -1569,7 +1606,6 @@ fn viewport_sets<'a>(
     // `None` is a request carrying no highlight.
     let highlighted_here = mask.highlighted_rows(viewport.here());
     ViewportSets {
-        mask,
         viewport,
         matched_here,
         highlighted_here,
@@ -1580,7 +1616,7 @@ fn viewport_sets<'a>(
 /// which of it is served. Held outside the level it is written from, so the assembly can write
 /// here while the level's row form, counts and contents are still borrowed.
 #[derive(Default)]
-struct Walked {
+pub(super) struct Walked {
     out: Vec<ArtifactOut>,
     /// The treed layers, whose rung is the response-local chain depth, applied after the row
     /// set is final.
@@ -1591,13 +1627,28 @@ struct Walked {
     served_layers: Vec<ServedLayer>,
 }
 
+/// Artifacts served in another frame of the same response, by `(layer, level, ordinal)`: their
+/// identifiers and their two filter bits, which a dependent in this frame may name and take.
+pub(super) type Outside = std::collections::BTreeMap<(String, u32, u32), (TesseraId, FilterBits)>;
+
+/// One walk, reconciled: the rows served, each walked layer's served set for the membership
+/// column, and every row served by its address.
+#[derive(Default)]
+pub(super) struct Settled {
+    pub(super) out: Vec<ArtifactOut>,
+    pub(super) served_layers: Vec<ServedLayer>,
+    pub(super) served_at: Outside,
+}
+
 /// Reconcile the walk against itself: drop the dependents whose target this response does not
 /// hold, resolve the two edges that may only name rows the response carries, and rank the treed
-/// layers over the forest that is left.
-fn settle_response(
+/// layers over the forest that is left. A target in `outside` is held by the response, in another
+/// of its frames.
+pub(super) fn settle_response(
     walked: Walked,
     in_request: &std::collections::BTreeSet<String>,
-) -> (Vec<ArtifactOut>, Vec<ServedLayer>) {
+    outside: &Outside,
+) -> Settled {
     let Walked {
         out,
         treed,
@@ -1608,7 +1659,7 @@ fn settle_response(
     // The cut ran after the verdicts, so a dependent may have passed on a target this response
     // then removed. Dropped here, before parents are resolved, so its own name leaves
     // `served_at` too — one response must never describe a cluster it does not contain.
-    let dropped = orphaned_dependents(&placed, in_request, &mut served_at);
+    let dropped = orphaned_dependents(&placed, in_request, &mut served_at, outside);
 
     // A dependent's masked count is its own; its two filter bits are copied from the target
     // instead, since a label's own membership is often empty and would read `false` for every
@@ -1625,7 +1676,12 @@ fn settle_response(
                 .attached_to
                 .as_ref()
                 .filter(|target| in_request.contains(&target.0))
-                .and_then(|target| bits_at.get(target).copied())
+                .and_then(|target| {
+                    bits_at
+                        .get(target)
+                        .copied()
+                        .or_else(|| outside.get(target).map(|&(_, bits)| bits))
+                })
         })
         .collect();
 
@@ -1634,6 +1690,7 @@ fn settle_response(
     // the budget — carries no entry, indistinguishable from a root or an unattached row; naming
     // it would tell the viewer a coarser artifact exists that they are not cleared to see.
     let mut served = Vec::with_capacity(out.len());
+    let mut kept = Vec::with_capacity(out.len());
     for (((mut artifact, place), dropped), target_bit) in out
         .into_iter()
         .zip(&placed)
@@ -1643,11 +1700,12 @@ fn settle_response(
         if dropped {
             continue;
         }
-        artifact.target = place
-            .attached_to
-            .as_ref()
-            .and_then(|target| served_at.get(target))
-            .copied();
+        artifact.target = place.attached_to.as_ref().and_then(|target| {
+            served_at
+                .get(target)
+                .copied()
+                .or_else(|| outside.get(target).map(|&(id, _)| id))
+        });
         if let Some((matched, highlighted)) = target_bit {
             artifact.matched = matched;
             artifact.highlighted = highlighted;
@@ -1660,6 +1718,7 @@ fn settle_response(
             .collect();
         artifact.parent_ids.sort_unstable_by_key(|id| id.raw());
         artifact.parent_ids.dedup();
+        kept.push(place.at.clone());
         served.push(artifact);
     }
     // A treed layer's rung is the response-local depth — the longest parent chain in the forest
@@ -1694,7 +1753,16 @@ fn settle_response(
             slot.served.insert(*ordinal, (*tessera_id, rung));
         }
     }
-    (served, served_layers)
+    let served_at = kept
+        .into_iter()
+        .zip(&served)
+        .map(|(at, artifact)| (at, (artifact.tessera_id, (artifact.matched, artifact.highlighted))))
+        .collect();
+    Settled {
+        out: served,
+        served_layers,
+        served_at,
+    }
 }
 
 /// Whether a layer's kind holds a lineage the cut climbs and the rung is counted over —
@@ -1789,6 +1857,7 @@ fn orphaned_dependents(
     placed: &[Placement],
     in_request: &std::collections::BTreeSet<String>,
     served_at: &mut std::collections::BTreeMap<(String, u32, u32), TesseraId>,
+    outside: &Outside,
 ) -> Vec<bool> {
     let mut dependents_of: std::collections::BTreeMap<(&str, u32, u32), Vec<usize>> =
         std::collections::BTreeMap::new();
@@ -1801,7 +1870,10 @@ fn orphaned_dependents(
             .entry((target.0.as_str(), target.1, target.2))
             .or_default()
             .push(i);
-        if in_request.contains(&target.0) && !served_at.contains_key(target) {
+        if in_request.contains(&target.0)
+            && !served_at.contains_key(target)
+            && !outside.contains_key(target)
+        {
             queue.push(i);
         }
     }
@@ -1820,3 +1892,4 @@ fn orphaned_dependents(
     }
     dropped
 }
+

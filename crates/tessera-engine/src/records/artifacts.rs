@@ -68,6 +68,9 @@ pub struct ArtifactsRequest<'a> {
     pub parent: Option<TesseraId>,
     /// Only artifacts whose key, or first served text content, contains this, case-insensitively.
     pub q: Option<&'a str>,
+    /// Only the artifacts these identifiers name. One this viewer is not served, or that names
+    /// nothing in the layer, has no row, and the two are one answer.
+    pub ids: Option<&'a [TesseraId]>,
     /// Only artifacts with a visible member matching this, and a `matched_count` column.
     pub filter: Option<FilterExpr>,
     /// Every served artifact under `filter`, those with no matching member included.
@@ -182,6 +185,9 @@ struct ArtifactsPager<'r> {
     scan: Option<(u32, u32)>,
     /// The position the response started from: a stop is honoured only past it.
     origin: Option<(u32, u32)>,
+    /// Under `ids`: the position of each artifact named in the layer, ascending, with the entity
+    /// the identifier named there.
+    named: Option<Vec<(u32, u32, EntityId)>>,
     filter: Option<HeldFilter>,
     region: Option<RegionVerdict>,
 }
@@ -401,6 +407,7 @@ impl Engine {
             .readable_layer(session, &generation, req.layer, req.view)
             .map_err(layer_refused)?;
         check_level(&layer, req.level).map_err(layer_refused)?;
+        let named = req.ids.map(|ids| self.named_positions(&generation, &layer, req.level, ids));
         let binding = Binding {
             route: Route::Artifacts,
             view: req.view,
@@ -411,7 +418,7 @@ impl Engine {
                 entity: layer.entity.raw(),
                 level: req.level,
             }),
-            request: None,
+            request: req.ids.map(ids_digest),
         };
         let resumed = match req.cursor {
             None => None,
@@ -455,11 +462,54 @@ impl Engine {
             binding,
             scan,
             origin: scan,
+            named,
             filter: None,
             region: None,
         };
         Ok((response, pager))
     }
+
+    /// Where each of `ids` sits in `layer`, at `level` where one is named, ascending: the
+    /// identifiers naming an artifact of the layer, whether or not this viewer is served it. Every
+    /// other identifier names nothing here.
+    fn named_positions(
+        &self,
+        generation: &Generation,
+        layer: &RegisteredLayer,
+        level: Option<u32>,
+        ids: &[TesseraId],
+    ) -> Vec<(u32, u32, EntityId)> {
+        let shard = generation.bundle.manifest.identity.shard_id;
+        let mut named: Vec<(u32, u32, EntityId)> = ids
+            .iter()
+            .filter_map(|&id| {
+                let (in_shard, entity) = self.identity_key.invert(id);
+                if in_shard != shard {
+                    return None;
+                }
+                let (name, at, ordinal) = self.write.live().locate_artifact(entity)?;
+                (name == layer.declaration.name && level.is_none_or(|level| level == at))
+                    .then_some((at, ordinal, entity))
+            })
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        named
+    }
+}
+
+/// The digest an artifacts cursor under `ids` is bound to: the identifiers, sorted.
+fn ids_digest(ids: &[TesseraId]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<u64> = ids.iter().map(|id| id.raw()).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(b"tessera-artifacts-ids-v1");
+    for id in sorted {
+        hasher.update(id.to_le_bytes());
+    }
+    hasher.finalize().into()
 }
 
 impl ArtifactsPager<'_> {
@@ -584,6 +634,30 @@ impl ArtifactsPager<'_> {
         match self.req.level {
             Some(level) => level..level + 1,
             None => 0..layer.runs.len() as u32,
+        }
+    }
+
+    /// The positions the read walks after `after`, in `(level, ordinal)` order: every artifact
+    /// of its levels, or under `ids` the ones named, each with the entity it must still hold.
+    fn positions<'s>(
+        &'s self,
+        scope: &'s Scope<'_>,
+        after: Option<(u32, u32)>,
+    ) -> Box<dyn Iterator<Item = (u32, u32, Option<EntityId>)> + 's> {
+        let past = move |at: (u32, u32)| after.is_none_or(|after| at > after);
+        match &self.named {
+            Some(named) => Box::new(
+                named
+                    .iter()
+                    .filter(move |&&(level, ordinal, _)| past((level, ordinal)))
+                    .map(|&(level, ordinal, entity)| (level, ordinal, Some(entity))),
+            ),
+            None => Box::new(self.levels(scope.layer).flat_map(move |level| {
+                let len = scope.levels[level as usize].rows.len() as u32;
+                (0..len)
+                    .filter(move |&ordinal| past((level, ordinal)))
+                    .map(move |ordinal| (level, ordinal, None))
+            })),
         }
     }
 
@@ -866,24 +940,24 @@ impl Pager for ArtifactsPager<'_> {
     ) -> Result<Counted> {
         let counted = self.with_scope(engine, open, generation, |pager, scope| {
             let (mut served_count, mut matched) = (0u64, 0u64);
-            for level in pager.levels(scope.layer) {
-                for ordinal in 0..scope.levels[level as usize].rows.len() as u32 {
-                    // The count runs before the first page, so only cancellation ends it.
-                    if ordinal % CHUNK == 0
-                        && pager.req.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
-                    {
-                        return Err(EngineError::Cancelled);
-                    }
-                    let Some(served) = scope.served(level, ordinal) else {
-                        continue;
-                    };
-                    if !scope.selected(level, ordinal, &served, pager.req.q) {
-                        continue;
-                    }
-                    served_count += 1;
-                    if scope.matched(level, ordinal).is_none_or(|n| n > 0) {
-                        matched += 1;
-                    }
+            for (walked, (level, ordinal, named)) in pager.positions(scope, None).enumerate() {
+                // The count runs before the first page, so only cancellation ends it.
+                if walked % CHUNK as usize == 0
+                    && pager.req.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
+                {
+                    return Err(EngineError::Cancelled);
+                }
+                let Some(served) = scope.served(level, ordinal) else {
+                    continue;
+                };
+                if named.is_some_and(|entity| entity != served.entity)
+                    || !scope.selected(level, ordinal, &served, pager.req.q)
+                {
+                    continue;
+                }
+                served_count += 1;
+                if scope.matched(level, ordinal).is_none_or(|n| n > 0) {
+                    matched += 1;
                 }
             }
             Ok((served_count, matched))
@@ -908,45 +982,40 @@ impl Pager for ArtifactsPager<'_> {
             let mut bytes = 0usize;
             let mut scan = pager.scan;
             let mut since_clock = 0u32;
-            for level in pager.levels(scope.layer) {
-                let start = match scan {
-                    Some((at, _)) if at > level => continue,
-                    Some((at, ordinal)) if at == level => ordinal.saturating_add(1),
-                    _ => 0,
+            for (level, ordinal, named) in pager.positions(scope, pager.scan) {
+                if since_clock == 0 {
+                    if let Some(reason) = clock.stop() {
+                        if !rows.is_empty() || scan > pager.origin {
+                            return Ok((rows, bytes, scan, Ended::Stopped(reason)));
+                        }
+                    }
+                }
+                since_clock = (since_clock + 1) % CHUNK;
+                let row = match scope.served(level, ordinal) {
+                    Some(served)
+                        if named.is_none_or(|entity| entity == served.entity)
+                            && scope.selected(level, ordinal, &served, pager.req.q) =>
+                    {
+                        let unmatched = scope.matched(level, ordinal) == Some(0);
+                        if unmatched && !pager.req.keep_unmatched {
+                            None
+                        } else {
+                            Some(pager.row(scope, level, ordinal, served)?)
+                        }
+                    }
+                    _ => None,
                 };
-                let len = scope.levels[level as usize].rows.len() as u32;
-                for ordinal in start..len {
-                    if since_clock == 0 {
-                        if let Some(reason) = clock.stop() {
-                            if !rows.is_empty() || scan > pager.origin {
-                                return Ok((rows, bytes, scan, Ended::Stopped(reason)));
-                            }
-                        }
+                if let Some(row) = row {
+                    let row_bytes = pager.row_bytes(&row);
+                    if !rows.is_empty() && bytes + row_bytes > max_bytes {
+                        return Ok((rows, bytes, scan, Ended::Bytes));
                     }
-                    since_clock = (since_clock + 1) % CHUNK;
-                    let row = match scope.served(level, ordinal) {
-                        Some(served) if scope.selected(level, ordinal, &served, pager.req.q) => {
-                            let unmatched = scope.matched(level, ordinal) == Some(0);
-                            if unmatched && !pager.req.keep_unmatched {
-                                None
-                            } else {
-                                Some(pager.row(scope, level, ordinal, served)?)
-                            }
-                        }
-                        _ => None,
-                    };
-                    if let Some(row) = row {
-                        let row_bytes = pager.row_bytes(&row);
-                        if !rows.is_empty() && bytes + row_bytes > max_bytes {
-                            return Ok((rows, bytes, scan, Ended::Bytes));
-                        }
-                        bytes += row_bytes;
-                        rows.push(row);
-                    }
-                    scan = Some((level, ordinal));
-                    if rows.len() == pager.page_rows as usize {
-                        return Ok((rows, bytes, scan, Ended::Filled));
-                    }
+                    bytes += row_bytes;
+                    rows.push(row);
+                }
+                scan = Some((level, ordinal));
+                if rows.len() == pager.page_rows as usize {
+                    return Ok((rows, bytes, scan, Ended::Filled));
                 }
             }
             Ok((rows, bytes, scan, Ended::End))

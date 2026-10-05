@@ -30,7 +30,6 @@ use common::*;
 use tessera_corpus::materialise::PARTITION_LAYER;
 use tessera_corpus::{Corpus, Grant, BAY_VALUES};
 use tessera_engine::filter::{FilterExpr, FilterOperand};
-use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
 use tessera_types::TesseraId;
 use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
@@ -131,14 +130,14 @@ fn lit(
 ) -> BTreeMap<String, (u64, Option<bool>, Option<bool>)> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
-    let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
+    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     request.filter = filter;
     request.highlight = highlight;
-    engine
-        .viewport(&session, request)
-        .expect("a viewport over the fixture")
-        .artifacts
+    let out = engine
+        .viewport_artifacts(&session, request)
+        .expect("a viewport over the fixture");
+    over_every_tile(&out)
         .into_iter()
         .map(|artifact| {
             (
@@ -470,14 +469,14 @@ fn a_label_carries_its_targets_bits() {
      -> BTreeMap<(String, String), Row> {
         let session = fx.engine.authorise(&grant_credential(grant)).unwrap();
         let names = [CLUSTERS, LABELS];
-        let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
+        let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
         request.layers = tessera_engine::LayerSelection::Named(&names);
         request.filter = filter;
         request.highlight = highlight;
-        fx.engine
-            .viewport(&session, request)
-            .expect("a viewport over the fixture")
-            .artifacts
+        let out = fx.engine
+            .viewport_artifacts(&session, request)
+            .expect("a viewport over the fixture");
+        over_every_tile(&out)
             .into_iter()
             .map(|a| {
                 (
@@ -600,13 +599,13 @@ fn described_served(
 ) -> BTreeMap<String, (u64, Vec<String>)> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [DESCRIBED];
-    let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
+    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     request.filter = filter;
-    engine
-        .viewport(&session, request)
-        .expect("a viewport over the fixture")
-        .artifacts
+    let out = engine
+        .viewport_artifacts(&session, request)
+        .expect("a viewport over the fixture");
+    over_every_tile(&out)
         .into_iter()
         .map(|a| {
             (

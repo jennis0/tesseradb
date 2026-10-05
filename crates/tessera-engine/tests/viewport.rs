@@ -2158,7 +2158,6 @@ struct RecordingSink {
         Vec<tessera_engine::TileCount>,
         Option<Vec<tessera_engine::SubCellCount>>,
     )>,
-    artifacts: Option<Vec<tessera_engine::ArtifactOut>>,
     chunks: Vec<tessera_engine::PointColumns>,
     /// When `Some(n)`, the nth callback overall refuses with `SinkClosed`.
     refuse_at: Option<usize>,
@@ -2192,24 +2191,6 @@ impl tessera_engine::ViewportSink for RecordingSink {
         assert!(self.counts.is_none(), "counts is delivered exactly once");
         assert!(self.chunks.is_empty(), "every count precedes every point");
         self.counts = Some((tiles.to_vec(), sub_cells.map(<[_]>::to_vec)));
-        self.step()
-    }
-
-    fn artifacts(
-        &mut self,
-        artifacts: &[tessera_engine::ArtifactOut],
-    ) -> tessera_engine::SinkResult {
-        assert!(self.counts.is_some(), "counts precede artifacts");
-        assert!(
-            self.chunks.is_empty(),
-            "the artifacts frame precedes every point"
-        );
-        assert!(
-            self.artifacts.is_none(),
-            "artifacts is delivered at most once"
-        );
-        assert!(!artifacts.is_empty(), "never called with an empty slice");
-        self.artifacts = Some(artifacts.to_vec());
         self.step()
     }
 

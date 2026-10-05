@@ -695,6 +695,12 @@ pub fn generous_bulk_gate() -> ComputeGate {
     ComputeGate::for_bulk_reads(16)
 }
 
+/// The artifact viewport's lane every mount takes: sixteen at once and as many waiting, each for
+/// at most 250 ms.
+pub fn generous_artifact_gate() -> ComputeGate {
+    ComputeGate::for_artifacts(16, 250)
+}
+
 /// A server whose two admission gates and `[serve]` limits the caller chooses: the bulk-read tests
 /// set the lane, the page ceilings, the response budgets and the stream budgets through `tune`.
 pub async fn spawn_server_with_bulk_reads(
@@ -1038,6 +1044,7 @@ async fn mount_server_with_flush(
         compute_gate,
         password_gate: generous_password_gate(),
         bulk_gate,
+        artifact_gate: generous_artifact_gate(),
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         catalogue,
         oidc: test_verifier(),

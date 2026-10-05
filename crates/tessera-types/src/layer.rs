@@ -457,23 +457,15 @@ impl ComputedProperty {
     /// Every name a declaration may carry.
     pub const VOCABULARY: [&'static str; 3] = ["centroid", "box", "hull"];
 
-    /// **The ask vocabulary** — what a `/v1/viewport` request's `computed` may name
-    /// (`polygon-membership.md` §7.1): the same three words with `shape` in place of `hull`. A
-    /// layer has one drawn geometry of a declared kind — derived (the hull), predicate (the
-    /// membership shape) or authored (a supplied drawing) — and a request asks for *the shape*
-    /// without knowing which; the declaration keeps the word `hull` because that is what an
-    /// enumerated layer computes. The narrowing rule is unchanged: a layer with no drawn geometry
-    /// serves none however it is asked.
-    pub const ASK_VOCABULARY: [&'static str; 3] = ["centroid", "box", "shape"];
+    /// **The ask vocabulary**: what a `POST /v1/artifacts/viewport` request's `computed` may
+    /// name. A shape is read by an artifact's `tessera_id`, never with a tile's artifacts.
+    pub const ASK_VOCABULARY: [&'static str; 2] = ["centroid", "box"];
 
-    /// Parse a request's `computed` word: `shape` selects the layer's drawn geometry, which for
-    /// a derived layer is the [`ComputedProperty::Hull`] it declared. `hull` is **not** an ask
-    /// word — the request names the drawing, not its derivation.
+    /// Parse a request's `computed` word.
     pub fn parse_ask(name: &str) -> Option<Self> {
         match name {
             "centroid" => Some(ComputedProperty::Centroid),
             "box" => Some(ComputedProperty::Box),
-            "shape" => Some(ComputedProperty::Hull),
             _ => None,
         }
     }
@@ -1764,28 +1756,14 @@ mod tests {
         ));
     }
 
-    /// The ask vocabulary names the drawing, not its derivation: `shape` selects the hull a
-    /// derived layer declared, and `hull` is not an ask word.
+    /// A request asks for a centroid and a box by name, and for no drawn geometry.
     #[test]
-    fn the_ask_vocabulary_says_shape_where_the_declaration_says_hull() {
-        assert_eq!(
-            ComputedProperty::parse_ask("shape"),
-            Some(ComputedProperty::Hull)
-        );
+    fn the_ask_vocabulary_is_the_centroid_and_the_box() {
+        for word in ComputedProperty::ASK_VOCABULARY {
+            assert_eq!(ComputedProperty::parse_ask(word), ComputedProperty::parse(word));
+        }
+        assert_eq!(ComputedProperty::parse_ask("shape"), None);
         assert_eq!(ComputedProperty::parse_ask("hull"), None);
-        assert_eq!(
-            ComputedProperty::parse_ask("centroid"),
-            Some(ComputedProperty::Centroid)
-        );
-        assert_eq!(
-            ComputedProperty::parse_ask("box"),
-            Some(ComputedProperty::Box)
-        );
-        assert_eq!(ComputedProperty::parse("shape"), None);
-        assert_eq!(
-            ComputedProperty::ASK_VOCABULARY,
-            ["centroid", "box", "shape"]
-        );
     }
 
     #[test]

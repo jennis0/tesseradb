@@ -1,13 +1,13 @@
 //! The frames `tessera-wire` writes, read back the way a client reads them.
 
 use arrow::array::{
-    Array, BooleanArray, DictionaryArray, ListArray, StringArray, UInt32Array, UInt64Array,
+    Array, BooleanArray, DictionaryArray, StringArray, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, TimeUnit, UInt16Type};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use tessera_wire::{
-    artifacts_frame, artifacts_identity_frame, page_end_frame, points_frame,
+    artifacts_frame, page_end_frame, points_frame,
     points_highlight_frame, read_frame, records_frame, records_head_frame, split_frames,
     sub_cells_frame, table_head_frame, tiles_frame, trailer_frame, ArtifactRow, FrameError,
     RecordsCompression, ScalarColumn, FRAME_ARTIFACTS, FRAME_HEADER_BYTES, FRAME_PAGE_END,
@@ -420,9 +420,8 @@ fn layers(batch: &RecordBatch) -> Vec<String> {
 }
 
 #[test]
-fn the_artifacts_frame_has_sixteen_fixed_columns_then_the_shape() {
+fn the_artifacts_frame_has_seventeen_fixed_columns_ending_in_the_tile() {
     let content = ["label".to_string(), "summary".to_string()];
-    let shape = vec![vec![vec![[1u32, 2], [3, 4], [5, 6]]]];
     let full = ArtifactRow {
         layer: "clusters/a",
         tessera_id: 7,
@@ -430,15 +429,22 @@ fn the_artifacts_frame_has_sixteen_fixed_columns_then_the_shape() {
         masked_count: 12,
         centroid: Some([1.5, 2.5]),
         bbox: Some([1, 2, 3, 4]),
-        shape: None,
         content: &content,
         parent_ids: vec![3, 4],
         rung: 3,
         matched: Some(true),
         highlighted: Some(false),
         target: None,
+        tile: Some(u32::MAX),
     };
-    let rows = [full.clone(), row("regions/b", 8), row("clusters/a", 9)];
+    let rows = [
+        full.clone(),
+        ArtifactRow {
+            tile: Some(5),
+            ..row("regions/b", 8)
+        },
+        row("clusters/a", 9),
+    ];
     let batch = batch_of(&artifacts_frame(&rows), FRAME_ARTIFACTS);
     let fixed = [
         "layer",
@@ -457,8 +463,9 @@ fn the_artifacts_frame_has_sixteen_fixed_columns_then_the_shape() {
         "matched",
         "highlighted",
         "target",
+        "tile",
     ];
-    assert_eq!(names(&batch), fixed, "no row has a shape");
+    assert_eq!(names(&batch), fixed);
     assert_eq!(layers(&batch), ["clusters/a", "regions/b", "clusters/a"]);
     assert_eq!(u64s(&batch, "masked_count"), [Some(12), Some(0), Some(0)]);
     let key = column::<StringArray>(&batch, "key");
@@ -468,6 +475,13 @@ fn the_artifacts_frame_has_sixteen_fixed_columns_then_the_shape() {
     let box_max_x = column::<UInt32Array>(&batch, "box_max_x");
     assert_eq!(box_max_x.iter().collect::<Vec<_>>(), [Some(3), None, None]);
     assert_eq!(column::<UInt32Array>(&batch, "rung").values(), &[3, 0, 0]);
+    assert!(nullable(&batch, "tile"));
+    let tile = column::<UInt32Array>(&batch, "tile");
+    assert_eq!(
+        tile.iter().collect::<Vec<_>>(),
+        [Some(u32::MAX), Some(5), None],
+        "a depth-16 prefix fills the column, and a treed row has none"
+    );
 
     let lists = |name: &str| -> Vec<String> {
         let column = batch.column_by_name(name).unwrap();
@@ -479,19 +493,9 @@ fn the_artifacts_frame_has_sixteen_fixed_columns_then_the_shape() {
     assert_eq!(lists("content"), ["[label, summary]", "[]", "[]"]);
     assert_eq!(lists("parent_ids"), ["[3, 4]", "[]", "[]"]);
 
-    let shaped = [
-        ArtifactRow {
-            shape: Some(&shape),
-            ..full
-        },
-        row("regions/b", 8),
-    ];
-    let mut with_shape: Vec<&str> = fixed.to_vec();
-    with_shape.extend(["shape_x", "shape_y"]);
-    assert_eq!(
-        names(&batch_of(&artifacts_frame(&shaped), FRAME_ARTIFACTS)),
-        with_shape
-    );
+    let empty = batch_of(&artifacts_frame(&[]), FRAME_ARTIFACTS);
+    assert_eq!(names(&empty), fixed, "a tile holding nothing is a frame of no rows");
+    assert_eq!(empty.num_rows(), 0);
 }
 
 /// A null answers a request that asked no such question, which `false` would not.
@@ -512,114 +516,17 @@ fn matched_highlighted_and_target_are_null_when_nothing_was_asked() {
             ..row("labels/a", 9)
         },
     ];
-    for frame in [artifacts_frame(&rows), artifacts_identity_frame(&rows)] {
-        let batch = batch_of(&frame, FRAME_ARTIFACTS);
-        assert!(nullable(&batch, "matched") && nullable(&batch, "highlighted"));
-        assert_eq!(bools(&batch, "matched"), [Some(true), Some(false), None]);
-        assert_eq!(bools(&batch, "highlighted"), [Some(false), None, None]);
-    }
     let batch = batch_of(&artifacts_frame(&rows), FRAME_ARTIFACTS);
+    assert!(nullable(&batch, "matched") && nullable(&batch, "highlighted"));
+    assert_eq!(bools(&batch, "matched"), [Some(true), Some(false), None]);
+    assert_eq!(bools(&batch, "highlighted"), [Some(false), None, None]);
     assert!(nullable(&batch, "target"));
     assert_eq!(u64s(&batch, "target"), [None, None, Some(8)]);
 }
 
+/// A loose ceiling on bytes per row, so the frame does not grow unnoticed.
 #[test]
-fn the_identity_projection_is_five_columns_whatever_the_rows_hold() {
-    let shape = vec![vec![vec![[1u32, 2], [3, 4], [5, 6]]]];
-    let rows = [
-        ArtifactRow {
-            rung: 2,
-            shape: Some(&shape),
-            target: Some(8),
-            ..row("clusters/a", 7)
-        },
-        row("regions/b", 8),
-    ];
-    let batch = batch_of(&artifacts_identity_frame(&rows), FRAME_ARTIFACTS);
-    assert_eq!(
-        names(&batch),
-        ["layer", "tessera_id", "rung", "matched", "highlighted"]
-    );
-    assert_eq!(layers(&batch), ["clusters/a", "regions/b"]);
-    assert_eq!(u64s(&batch, "tessera_id"), [Some(7), Some(8)]);
-    assert_eq!(column::<UInt32Array>(&batch, "rung").values(), &[2, 0]);
-}
-
-/// A shape is parts of rings of vertices, three lists deep, so a second part cannot be read as a
-/// hole of the first.
-#[test]
-fn a_shape_travels_as_parts_of_rings() {
-    let two_parts = vec![
-        vec![
-            vec![[1u32, 2], [3, 4], [5, 6]],
-            vec![[70, 80], [90, 100], [110, 120], [130, 140]],
-        ],
-        vec![vec![[7, 1], [8, 1], [9, 2]]],
-    ];
-    let rows = [
-        ArtifactRow {
-            shape: Some(&two_parts),
-            ..row("clusters/a", 7)
-        },
-        row("clusters/a", 8),
-    ];
-    let batch = batch_of(&artifacts_frame(&rows), FRAME_ARTIFACTS);
-
-    fn list(array: &dyn Array) -> &ListArray {
-        array.as_any().downcast_ref::<ListArray>().expect("a list")
-    }
-    let axis = |name: &str| -> Vec<Option<Vec<Vec<Vec<u32>>>>> {
-        let shapes = column::<ListArray>(&batch, name);
-        (0..shapes.len())
-            .map(|row| {
-                shapes.is_valid(row).then(|| {
-                    let parts = shapes.value(row);
-                    list(&parts)
-                        .iter()
-                        .map(|rings| {
-                            list(&rings.expect("a part is never null"))
-                                .iter()
-                                .map(|vertices| {
-                                    vertices
-                                        .expect("a ring is never null")
-                                        .as_any()
-                                        .downcast_ref::<UInt32Array>()
-                                        .expect("vertices are u32")
-                                        .values()
-                                        .to_vec()
-                                })
-                                .collect()
-                        })
-                        .collect()
-                })
-            })
-            .collect()
-    };
-    assert_eq!(
-        axis("shape_x"),
-        [
-            Some(vec![
-                vec![vec![1, 3, 5], vec![70, 90, 110, 130]],
-                vec![vec![7, 8, 9]]
-            ]),
-            None
-        ]
-    );
-    assert_eq!(
-        axis("shape_y"),
-        [
-            Some(vec![
-                vec![vec![2, 4, 6], vec![80, 100, 120, 140]],
-                vec![vec![1, 1, 2]]
-            ]),
-            None
-        ]
-    );
-}
-
-/// Loose ceilings on bytes per row, so neither projection grows unnoticed.
-#[test]
-fn artifact_rows_stay_within_their_size_bounds() {
+fn artifact_rows_stay_within_their_size_bound() {
     const ROWS: usize = 100_000;
     let keys: Vec<String> = (0..ROWS).map(|i| format!("key-{i:07}")).collect();
     let content: Vec<Vec<String>> = (0..ROWS).map(|i| vec![format!("label {i}")]).collect();
@@ -631,7 +538,6 @@ fn artifact_rows_stay_within_their_size_bounds() {
             masked_count: (i % 1000) as u64,
             centroid: Some([i as f64, (i * 2) as f64]),
             bbox: Some([i as u32, i as u32, i as u32 + 5, i as u32 + 5]),
-            shape: None,
             content: &content[i],
             parent_ids: if i % 7 != 0 {
                 vec![(i / 7) as u64]
@@ -642,13 +548,12 @@ fn artifact_rows_stay_within_their_size_bounds() {
             matched: Some(i % 2 == 0),
             highlighted: Some(i % 3 == 0),
             target: None,
+            tile: Some((i / 50) as u32),
         })
         .collect();
 
-    let identity = artifacts_identity_frame(&rows).len() as f64 / ROWS as f64;
-    assert!(identity < 20.0, "identity rows are {identity:.1} B/row");
     let full = artifacts_frame(&rows).len() as f64 / ROWS as f64;
-    assert!(full < 140.0, "full rows are {full:.1} B/row");
+    assert!(full < 145.0, "rows are {full:.1} B/row");
 }
 
 /// A page of records: an identifier, a nullable number, a category's keys under a dictionary and

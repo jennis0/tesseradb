@@ -96,13 +96,6 @@ fn visible(out: &ViewportOut) -> u64 {
     out.tiles.iter().map(|t| t.visible).sum()
 }
 
-/// The response with the artifacts frame taken out, so two requests can be compared whole: tiles,
-/// points, sub-cells, stamp, staleness and the region verdict.
-fn without_artifacts(mut out: ViewportOut) -> ViewportOut {
-    out.artifacts.clear();
-    out
-}
-
 /// A bundle with one flat layer of one artifact over [`MEMBERS`], served under `layout`.
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -135,12 +128,12 @@ fn fixture(layout: Option<ServingLayout>, bar: u64) -> Fixture {
         .unwrap();
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let served = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize).layers(LayerSelection::All),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
         )
         .unwrap()
-        .artifacts;
+        .artifacts();
     assert_eq!(served.len(), 1, "the broad principal is served the cluster");
     assert_eq!(served[0].masked_count, visible_members(MEMBERS, |_| true));
     Fixture {
@@ -168,13 +161,13 @@ impl Fixture {
         let session = self.engine.authorise(&full_coverage_credential()).unwrap();
         let served = self
             .engine
-            .viewport(
+            .viewport_artifacts(
                 &session,
-                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                     .layers(LayerSelection::All),
             )
             .unwrap()
-            .artifacts;
+            .artifacts();
         served
             .iter()
             .find(|a| a.key.as_deref() == Some(key))
@@ -333,8 +326,8 @@ fn an_artifact_that_is_not_served_is_an_empty_operand_and_refuses_nothing() {
     let never = viewport(&fx.engine, &subset_credential(), Some(member_of(unknown)));
     assert_eq!(matched(&never), 0, "an identifier that names nothing");
     assert_eq!(
-        without_artifacts(withheld),
-        without_artifacts(never.clone()),
+        withheld,
+        never.clone(),
         "withheld and unknown are one response"
     );
     // And so is its outside: `none_of` over an empty operand is every visible row.
@@ -370,8 +363,8 @@ fn an_artifact_that_is_not_served_is_an_empty_operand_and_refuses_nothing() {
     let never_broad = viewport(&fx.engine, &full_coverage_credential(), Some(member_of(unknown)));
     assert_eq!(matched(&suppressed), 0);
     assert_eq!(
-        without_artifacts(suppressed),
-        without_artifacts(never_broad),
+        suppressed,
+        never_broad,
         "suppressed and unknown are one response"
     );
     fx.engine

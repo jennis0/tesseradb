@@ -1,5 +1,5 @@
-//! Frames of the streamed `POST /v1/viewport`, `POST /v1/items`, `POST /v1/artifacts` and
-//! `POST /v1/aggregate` responses.
+//! Frames of the streamed `POST /v1/viewport`, `POST /v1/artifacts/viewport`, `POST /v1/items`,
+//! `POST /v1/artifacts` and `POST /v1/aggregate` responses.
 //!
 //! A body is a sequence of frames: a `u8` kind, a `u32` little-endian payload length, then the
 //! payload. Every payload decodes on its own, so no reader walks Arrow messages to find a
@@ -13,9 +13,16 @@
 //!                    with zero rows when it is empty
 //! kind 3  points     Arrow stream; zero or more, whole tiles per frame, concatenating to the
 //!                    full points set
-//! kind 5  artifacts  Arrow stream, full or identity projection; at most one, after tiles and
-//!                    every points frame, absent when no artifact is served
 //! kind 4  trailer    JSON; exactly one, last. Its presence says the body is complete
+//! ```
+//!
+//! An artifacts viewport body:
+//!
+//! ```text
+//! kind 5  artifacts  Arrow stream; first, one whose `tile` is null holding the treed layers'
+//!                    artifacts, absent where it would hold none; then exactly one per tile, in
+//!                    the request's order, with zero rows where the tile holds none
+//! kind 4  trailer    JSON; exactly one, last
 //! ```
 //!
 //! An items body:
@@ -41,8 +48,8 @@
 //! kind 4  trailer    JSON; exactly one, last
 //! ```
 //!
-//! Clients index the tiles batch and the artifacts batch's fixed columns by position, so a new
-//! column is appended and never inserted.
+//! Clients index the tiles batch and the artifacts batch's columns by position, so a new column is
+//! appended and never inserted.
 //!
 //! Nothing here takes an entity id: identities arrive as `tessera_id: u64` columns.
 
@@ -52,7 +59,7 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int16Array,
     Int32Array, Int64Array, Int8Array, ListBuilder, StringArray, StringBuilder,
-    TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt32Builder, UInt64Array,
+    TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array,
     UInt64Builder, UInt8Array,
 };
 use arrow::buffer::{BooleanBuffer, NullBuffer};
@@ -271,9 +278,6 @@ pub struct ArtifactRow<'a> {
     pub centroid: Option<[f64; 2]>,
     /// `[x_min, y_min, x_max, y_max]`, in the same units and on the same terms.
     pub bbox: Option<[u32; 4]>,
-    /// The drawn geometry, in the same units: parts, then rings, then vertices. A part's first
-    /// ring is its outline and the rest are holes.
-    pub shape: Option<&'a [Vec<Vec<[u32; 2]>>]>,
     /// One value per content kind the layer declares, in declaration order.
     pub content: &'a [String],
     /// The parents that are rows of this same frame, ascending. Empty for a root and equally for
@@ -283,15 +287,19 @@ pub struct ArtifactRow<'a> {
     /// The resolution to draw at: the declared level on a levelled layer, the depth within this
     /// response's parent links on a treed layer, 0 on a flat one.
     pub rung: u32,
-    /// Whether a visible member inside the request's tiles passes the request's filter. `None`
-    /// when the request had no filter.
+    /// Whether a visible member inside the frame's tile, or the request's tiles in the frame of
+    /// treed layers, passes the request's filter. `None` when the request had no filter.
     pub matched: Option<bool>,
     /// The same for the filter and the highlight together. `None` when the request had no
     /// highlight.
     pub highlighted: Option<bool>,
-    /// The `tessera_id` of the row in this frame that this artifact is attached to, such as a
-    /// label's cluster. `None` for an artifact attached to nothing.
+    /// The `tessera_id` of the row this artifact is attached to, such as a label's cluster, in
+    /// this frame or in the response's frame of treed layers. `None` for an artifact attached to
+    /// nothing.
     pub target: Option<u64>,
+    /// The tile, as its Morton prefix at the request's depth, whose visible members put this
+    /// artifact in the frame. `None` in the frame of treed layers, which has no tile.
+    pub tile: Option<u32>,
 }
 
 /// The `layer` column, dictionary-encoded with `u16` keys in order of first appearance.
@@ -316,41 +324,9 @@ fn layer_column(rows: &[ArtifactRow<'_>]) -> (Field, ArrayRef) {
     (required("layer", &column), column)
 }
 
-/// The columns both artifact projections carry after `layer`.
-struct ArtifactIdentity {
-    tessera_id: (Field, ArrayRef),
-    rung: (Field, ArrayRef),
-    matched: (Field, ArrayRef),
-    highlighted: (Field, ArrayRef),
-}
-
-impl ArtifactIdentity {
-    fn of(rows: &[ArtifactRow<'_>]) -> Self {
-        let tessera_id: ArrayRef = Arc::new(UInt64Array::from_iter_values(
-            rows.iter().map(|r| r.tessera_id),
-        ));
-        let rung: ArrayRef = Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung)));
-        let matched: ArrayRef = Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched)));
-        let highlighted: ArrayRef =
-            Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.highlighted)));
-        ArtifactIdentity {
-            tessera_id: (required("tessera_id", &tessera_id), tessera_id),
-            rung: (required("rung", &rung), rung),
-            matched: (nullable("matched", &matched), matched),
-            highlighted: (nullable("highlighted", &highlighted), highlighted),
-        }
-    }
-}
-
-/// The artifacts frame in the full projection.
-///
-/// Sixteen columns, `layer` to `target`, sit at fixed positions. `shape_x` and `shape_y` follow
-/// them when some row has a shape and are absent from the schema otherwise. A null in a nullable
-/// column says the layer declares no such property, or the request asked no such question; an
-/// artifact that cannot be served is absent whole.
-///
-/// A shape is two `List<List<List<UInt32>>>` columns, one per axis, with the same nesting in
-/// both.
+/// The artifacts frame: seventeen columns at fixed positions, `layer` to `target` and then
+/// `tile`. A null in a nullable column says the layer declares no such property, or the request
+/// asked no such question; an artifact that cannot be served is absent whole.
 pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     fn optional<A, T>(name: &str, values: impl Iterator<Item = Option<T>>) -> (Field, ArrayRef)
     where
@@ -375,84 +351,36 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     }
     let (content, parent_ids): (ArrayRef, ArrayRef) =
         (Arc::new(content.finish()), Arc::new(parent_ids.finish()));
+    let required_u = |name, column: ArrayRef| (required(name, &column), column);
+    let tessera_id: ArrayRef =
+        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.tessera_id)));
     let masked_count: ArrayRef = Arc::new(UInt64Array::from_iter_values(
         rows.iter().map(|r| r.masked_count),
     ));
-    let identity = ArtifactIdentity::of(rows);
+    let rung: ArrayRef = Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung)));
     let bbox = |name, at: usize| {
         optional::<UInt32Array, _>(name, rows.iter().map(move |r| r.bbox.map(|b| b[at])))
     };
-
-    let mut columns = vec![
+    let columns = vec![
         layer_column(rows),
-        identity.tessera_id,
+        required_u("tessera_id", tessera_id),
         optional::<StringArray, _>("key", rows.iter().map(|r| r.key)),
-        (required("masked_count", &masked_count), masked_count),
+        required_u("masked_count", masked_count),
         optional::<Float64Array, _>("centroid_x", rows.iter().map(|r| r.centroid.map(|c| c[0]))),
         optional::<Float64Array, _>("centroid_y", rows.iter().map(|r| r.centroid.map(|c| c[1]))),
         bbox("box_min_x", 0),
         bbox("box_min_y", 1),
         bbox("box_max_x", 2),
         bbox("box_max_y", 3),
-        (required("content", &content), content),
-        (required("parent_ids", &parent_ids), parent_ids),
-        identity.rung,
-        identity.matched,
-        identity.highlighted,
+        required_u("content", content),
+        required_u("parent_ids", parent_ids),
+        required_u("rung", rung),
+        optional::<BooleanArray, _>("matched", rows.iter().map(|r| r.matched)),
+        optional::<BooleanArray, _>("highlighted", rows.iter().map(|r| r.highlighted)),
         optional::<UInt64Array, _>("target", rows.iter().map(|r| r.target)),
+        optional::<UInt32Array, _>("tile", rows.iter().map(|r| r.tile)),
     ];
-    if rows.iter().any(|r| r.shape.is_some()) {
-        columns.push(shape_column("shape_x", rows, 0));
-        columns.push(shape_column("shape_y", rows, 1));
-    }
     arrow_frame(FRAME_ARTIFACTS, columns)
-}
-
-fn shape_column(name: &str, rows: &[ArtifactRow<'_>], axis: usize) -> (Field, ArrayRef) {
-    let item = |data_type| Arc::new(Field::new("item", data_type, false));
-    let vertex = item(DataType::UInt32);
-    let ring = item(DataType::List(vertex.clone()));
-    let part = item(DataType::List(ring.clone()));
-    let mut shapes = ListBuilder::new(
-        ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex))
-            .with_field(ring),
-    )
-    .with_field(part);
-    for row in rows {
-        let Some(parts) = row.shape else {
-            shapes.append_null();
-            continue;
-        };
-        for rings in parts {
-            for vertices in rings {
-                for vertex in vertices {
-                    shapes.values().values().values().append_value(vertex[axis]);
-                }
-                shapes.values().values().append(true);
-            }
-            shapes.values().append(true);
-        }
-        shapes.append(true);
-    }
-    let column: ArrayRef = Arc::new(shapes.finish());
-    (nullable(name, &column), column)
-}
-
-/// The artifacts frame in the identity projection: the rows [`artifacts_frame`] would carry, as
-/// `layer`, `tessera_id`, `rung`, `matched` and `highlighted` only. The other columns are absent
-/// from the schema.
-pub fn artifacts_identity_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
-    let identity = ArtifactIdentity::of(rows);
-    arrow_frame(
-        FRAME_ARTIFACTS,
-        vec![
-            layer_column(rows),
-            identity.tessera_id,
-            identity.rung,
-            identity.matched,
-            identity.highlighted,
-        ],
-    )
 }
 
 /// The points frame in the highlight projection: the points [`points_frame`] would carry, as

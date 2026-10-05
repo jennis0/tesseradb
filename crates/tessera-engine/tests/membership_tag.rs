@@ -11,8 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
 use tessera_engine::{
-    ArtifactOut, Engine, LayerSelection, PointColumns, SinkResult, SubCellCount,
-    TileCount, ViewportHead, ViewportOut, ViewportRequest, ViewportSink,
+    ArtifactOut, Engine, LayerSelection, ViewportArtifactsRequest, ViewportOut, ViewportRequest,
 };
 use tessera_lifecycle::membership::IncomingAttachment;
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
@@ -86,10 +85,23 @@ fn column(out: &ViewportOut, layer: &str) -> Vec<Option<u64>> {
         .unwrap_or_else(|| vec![None; out.points.len()])
 }
 
-/// Every non-null tag names an artifact of its layer in the same response's frame.
-fn assert_joined(out: &ViewportOut) {
-    let frame: BTreeSet<(&str, u64)> = out
-        .artifacts
+/// The artifacts the same viewer is served over the request's tiles.
+fn served(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+    request: &ViewportRequest<'_>,
+) -> Vec<ArtifactOut> {
+    let tiled = ViewportArtifactsRequest::new(request.view, request.zoom, request.bbox, usize::MAX)
+        .tiles(request.tiles)
+        .layers(request.layers)
+        .levels(request.levels)
+        .budget(request.artifact_budget);
+    engine.viewport_artifacts(session, tiled).unwrap().artifacts()
+}
+
+/// Every non-null tag names an artifact of its layer that the same request is served.
+fn assert_joined(out: &ViewportOut, served: &[ArtifactOut]) {
+    let frame: BTreeSet<(&str, u64)> = served
         .iter()
         .map(|a| (a.layer.as_str(), a.tessera_id.raw()))
         .collect();
@@ -97,7 +109,7 @@ fn assert_joined(out: &ViewportOut) {
         for id in c.ids.iter().flatten() {
             assert!(
                 frame.contains(&(c.layer.as_str(), *id)),
-                "{} names {id}, which the frame does not carry",
+                "{} names {id}, which the request is not served",
                 c.layer
             );
         }
@@ -112,7 +124,7 @@ struct Compared {
 }
 
 /// Ask one request twice, from the labels and from the walk, and require the same answer. Returns
-/// the answer from the labels.
+/// the answer from the labels, and the artifacts the request is served.
 fn compare_one(
     engine: &Engine,
     session: &tessera_engine::Session,
@@ -120,7 +132,8 @@ fn compare_one(
     layers: &[&str],
     at: &str,
     compared: &mut Compared,
-) -> ViewportOut {
+) -> (ViewportOut, Vec<ArtifactOut>) {
+    let served = served(engine, session, &request);
     engine.set_tags_from_labels_for_test(false);
     let walked = engine.viewport(session, request.clone()).unwrap();
     engine.set_tags_from_labels_for_test(true);
@@ -129,21 +142,14 @@ fn compare_one(
         labelled.points.tessera_ids, walked.points.tessera_ids,
         "{at}: the points"
     );
-    let frame = |out: &ViewportOut| -> BTreeSet<(String, u64)> {
-        out.artifacts
-            .iter()
-            .map(|a| (a.layer.clone(), a.tessera_id.raw()))
-            .collect()
-    };
-    assert_eq!(frame(&labelled), frame(&walked), "{at}: the frame");
     for layer in layers {
         let tags = column(&labelled, layer);
         assert_eq!(tags, column(&walked, layer), "{at}: {layer}");
         *compared.tagged.entry(layer.to_string()).or_default() += tags.iter().flatten().count();
     }
-    assert_joined(&labelled);
+    assert_joined(&labelled, &served);
     compared.banded += labelled.timings.tiles_from_bands;
-    labelled
+    (labelled, served)
 }
 
 /// Ask every case twice, from the labels and from the walk, and require the same answer.
@@ -369,14 +375,15 @@ fn labels_tag_points_as_the_walk_does_through_growth_ingest_fold_and_suppression
     let request = ViewportRequest::new("s0", 0, WHOLE_MAP, 200)
         .layers(LayerSelection::Named(&[TIERED, FLAT]));
     let before = engine.viewport(&session, request.clone()).unwrap();
-    let named = |out: &ViewportOut, layer: &str, key: &str| -> Option<u64> {
-        out.artifacts
+    let served_before = served(&engine, &session, &request);
+    let named = |layer: &str, key: &str| -> Option<u64> {
+        served_before
             .iter()
             .find(|a| a.layer == layer && a.key.as_deref() == Some(key))
             .map(|a| a.tessera_id.raw())
     };
-    let r1 = named(&before, TIERED, "r1").expect("r1 is served");
-    let f2 = named(&before, FLAT, "f2").expect("f2 is served");
+    let r1 = named(TIERED, "r1").expect("r1 is served");
+    let f2 = named(FLAT, "f2").expect("f2 is served");
     assert!(column(&before, TIERED).contains(&Some(r1)));
     assert!(column(&before, FLAT).contains(&Some(f2)));
     for id in [r1, f2] {
@@ -512,9 +519,9 @@ fn own_labels_content_fractions_filters_and_highlights_tag_as_the_walk_does() {
                         _ => {}
                     }
                     let at = format!("{stage}: principal {who}, shape {shape}, zoom {zoom}");
-                    let out = compare_one(engine, &session, request, &layers, &at, &mut compared);
-                    let key_of: BTreeMap<u64, String> = out
-                        .artifacts
+                    let (out, served) =
+                        compare_one(engine, &session, request, &layers, &at, &mut compared);
+                    let key_of: BTreeMap<u64, String> = served
                         .iter()
                         .map(|a| (a.tessera_id.raw(), a.key.clone().unwrap_or_default()))
                         .collect();
@@ -714,86 +721,4 @@ artifacts = [
             .any(|(id, tag)| fresh.contains(id) && tag.is_some()),
         "an ingested point inside a box is tagged with it"
     );
-}
-
-// ---------------------------------------------------------------------------------------------
-// The order on the stream
-// ---------------------------------------------------------------------------------------------
-
-/// What the producer delivered, in its order.
-#[derive(Default)]
-struct Recorded(Vec<&'static str>);
-
-impl ViewportSink for Recorded {
-    fn head(&mut self, _: ViewportHead) -> SinkResult {
-        self.0.push("head");
-        Ok(())
-    }
-    fn counts(&mut self, _: &[TileCount], _: Option<&[SubCellCount]>) -> SinkResult {
-        self.0.push("counts");
-        Ok(())
-    }
-    fn artifacts(&mut self, _: &[ArtifactOut]) -> SinkResult {
-        self.0.push("artifacts");
-        Ok(())
-    }
-    fn points(&mut self, _: PointColumns) -> SinkResult {
-        self.0.push("points");
-        Ok(())
-    }
-}
-
-#[test]
-fn the_points_reach_the_sink_before_the_artifacts() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture_n(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        ROWS,
-    );
-    let map = source_to_new_map(&root, "v00000");
-    let engine = open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal"));
-    engine
-        .register_layer(declaration(FLAT, HierarchyKind::Flat, None))
-        .unwrap();
-    engine
-        .register_layer(declaration(TREE, HierarchyKind::Nested, None))
-        .unwrap();
-    for layer in [FLAT, TREE] {
-        engine
-            .publish_artifacts(
-                layer.into(),
-                0,
-                vec![IncomingArtifact::from_entities(
-                    Some("a".into()),
-                    (0..ROWS).map(|s| EntityId::new(map[&s])),
-                )],
-            )
-            .unwrap();
-    }
-    tick(&engine);
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    for layers in [&[FLAT][..], &[TREE][..], &[FLAT, TREE][..]] {
-        let mut sink = Recorded::default();
-        // A small chunk threshold, so the points arrive in several chunks.
-        engine
-            .viewport_stream(
-                &session,
-                ViewportRequest::new("s0", 2, WHOLE_MAP, 50).layers(LayerSelection::Named(layers)),
-                1 << 10,
-                &mut sink,
-            )
-            .unwrap();
-        let points = sink.0.iter().filter(|&&s| s == "points").count();
-        assert!(points > 1, "{layers:?}: {:?}", sink.0);
-        assert_eq!(&sink.0[..2], ["head", "counts"]);
-        assert_eq!(
-            sink.0.last(),
-            Some(&"artifacts"),
-            "{layers:?}: the artifacts come after every point: {:?}",
-            sink.0
-        );
-    }
 }

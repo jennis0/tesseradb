@@ -14,7 +14,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, LevelSelection, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine, LayerSelection, LevelSelection};
 use tessera_lifecycle::membership::IncomingAttachment;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
@@ -95,12 +95,12 @@ fn node(
 fn artifacts_of(engine: &Engine, credential: &[u8], budget: Option<u32>) -> Vec<ArtifactOut> {
     let session = engine.authorise(credential).unwrap();
     engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize).artifact_budget(budget),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).budget(budget),
         )
         .expect("a viewport over the whole map")
-        .artifacts
+        .artifacts()
 }
 
 fn keys(artifacts: &[ArtifactOut]) -> Vec<String> {
@@ -587,14 +587,14 @@ fn levelled_artifacts_of(
 ) -> Vec<ArtifactOut> {
     let session = engine.authorise(credential).unwrap();
     engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
-                .artifact_budget(budget)
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                .budget(budget)
                 .layers(LayerSelection::Named(&[layer])),
         )
         .expect("a viewport over the whole map")
-        .artifacts
+        .artifacts()
 }
 
 /// **A budget is inert on a tiered layer, and that is the ruling rather than an
@@ -1175,14 +1175,14 @@ fn at_zoom(
 ) -> Vec<ArtifactOut> {
     let session = engine.authorise(credential).unwrap();
     engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", zoom, WHOLE_MAP, N_ITEMS as usize)
+            tessera_engine::ViewportArtifactsRequest::new("s0", zoom, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(&[layer]))
                 .levels(levels),
         )
         .expect("a viewport over the whole map")
-        .artifacts
+        .artifacts()
 }
 
 fn levels_of(served: &[ArtifactOut]) -> Vec<u32> {
@@ -1530,9 +1530,9 @@ fn naming_a_level_does_not_blank_a_treed_layer_beside_it() {
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let served = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(&[
                     "admin/boundaries",
                     "clusters/hdbscan",
@@ -1540,7 +1540,7 @@ fn naming_a_level_does_not_blank_a_treed_layer_beside_it() {
                 .levels(LevelSelection::Named(&[1])),
         )
         .expect("a viewport over the whole map")
-        .artifacts;
+        .artifacts();
 
     assert_eq!(
         keys_in(&served, "admin/boundaries"),
@@ -1616,14 +1616,14 @@ fn a_dependent_goes_when_its_targets_level_is_not_asked_for() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let both = |zoom: u8, levels: LevelSelection<'_>| -> Vec<ArtifactOut> {
         engine
-            .viewport(
+            .viewport_artifacts(
                 &session,
-                ViewportRequest::new("s0", zoom, WHOLE_MAP, N_ITEMS as usize)
+                tessera_engine::ViewportArtifactsRequest::new("s0", zoom, WHOLE_MAP, usize::MAX)
                     .layers(LayerSelection::Named(&["admin/boundaries", "admin/names"]))
                     .levels(levels),
             )
             .expect("a viewport over the whole map")
-            .artifacts
+            .artifacts()
     };
 
     // Both levels asked for: the country is served and so is the name at level 1 above it.
@@ -1865,12 +1865,12 @@ fn count_of(engine: &Engine, key: &str) -> u64 {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let served = loop {
         match engine.authorise(&full_coverage_credential()).and_then(|session| {
-            engine.viewport(
+            engine.viewport_artifacts(
                 &session,
-                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
             )
         }) {
-            Ok(out) => break out.artifacts,
+            Ok(out) => break out.artifacts(),
             Err(e) => {
                 assert!(
                     std::time::Instant::now() < deadline,

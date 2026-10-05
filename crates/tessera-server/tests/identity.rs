@@ -749,6 +749,7 @@ async fn the_catalogue_survives_a_restart() {
             compute_gate: generous_test_gate(),
             password_gate: generous_password_gate(),
             bulk_gate: generous_bulk_gate(),
+            artifact_gate: generous_artifact_gate(),
             ingest_admission: tessera_server::state::IngestAdmission::new(4),
             catalogue,
             oidc: Default::default(),

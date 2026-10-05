@@ -1,19 +1,8 @@
-//! **The identity projection answers with the same rows, and the rung is the number a client
-//! draws by** (`artifact-fetch-protocol.md` §5.2, §5.3).
-//!
-//! Two contracts, each of which fails plausibly:
-//!
-//! - **The row set, the `matched` bits and the `rung` values are identical under either value of
-//!   `artifact_rows`; only the columns change.** The projection skips payload production — derived
-//!   geometry, the key lookup, content materialisation — and any of those skips can quietly become
-//!   a selection change: the content probe in particular *withholds* an artifact whose content
-//!   cannot be read back, so a projection that skipped the probe outright would serve a row the
-//!   full response withholds. Checked across a levelled layer, a treed layer under a budget cut,
-//!   and with and without a filter, for two principals.
-//! - **`rung` is the declared level on a levelled layer and the response-local parent-chain depth
-//!   on a treed one** — the depth in the forest the response's own `parent_ids` links form, after
-//!   the cut, so a re-rooted subtree starts at 0. A rung read from the stored tree instead would
-//!   draw a pruned leaf at depth 2 of a response whose links say it is a root.
+//! **The rung is the number a client draws by**: the declared level on a levelled layer and the
+//! response-local parent-chain depth on a treed one — the depth in the forest the response's own
+//! `parent_ids` links form, after the cut, so a re-rooted subtree starts at 0. A rung read from the
+//! stored tree instead would draw a pruned leaf at depth 2 of a response whose links say it is a
+//! root.
 //!
 //! Engine-level rather than over HTTP, for `artifact_filter_bit.rs`'s reason: the subject is what
 //! is computed inside the trust boundary; the wire's column shapes are `tessera-server`'s tests.
@@ -23,15 +12,14 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
-use tessera_corpus::{Corpus, BAY_VALUES};
-use tessera_engine::filter::{FilterExpr, FilterOperand};
-use tessera_engine::{ArtifactOut, ArtifactRows, Engine, LayerSelection, ViewportRequest};
+use tessera_corpus::Corpus;
+use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportArtifactsRequest};
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, LevelDeclaration,
     MembershipSource,
 };
-use tessera_types::{AttrLocalId, EntityId};
+use tessera_types::EntityId;
 
 const N: u64 = 3_000;
 const SEED: u64 = 0x5EED;
@@ -39,32 +27,6 @@ const SEED: u64 = 0x5EED;
 const TREED: &str = "clusters/tree";
 const PRUNED: &str = "clusters/pruned";
 const TIERED: &str = "admin/tiers";
-
-/// The value the filtered cases ask about — key *i* of [`BAY_VALUES`] is code *i + 1*, code 0
-/// being the reserved *absent* sentinel (the generator's declaration).
-const BAY: &str = "cedar";
-
-fn bay_is(key: &str) -> FilterExpr {
-    let code = BAY_VALUES
-        .iter()
-        .position(|v| *v == key)
-        .expect("the fixture filters on a value the generator plants") as u32
-        + 1;
-    FilterExpr::Leaf {
-        column: "bay".into(),
-        operand: FilterOperand::Equals(AttrLocalId::new(code)),
-    }
-}
-
-/// A well-formed predicate over a real column that nothing carries — *no matches*, not *no
-/// filter*, so `matched` is `Some(false)` rather than `None` and the equality below is not
-/// comparing nulls with nulls.
-fn tag_is_absent() -> FilterExpr {
-    FilterExpr::Leaf {
-        column: "tag".into(),
-        operand: FilterOperand::TextEquals("kw-nothing".into()),
-    }
-}
 
 fn declaration(name: &str, kind: HierarchyKind, prune_children: bool) -> LayerDeclaration {
     LayerDeclaration {
@@ -200,118 +162,20 @@ fn artifacts(
     grant: &str,
     layers: &[&str],
     budget: Option<u32>,
-    filter: Option<FilterExpr>,
-    rows: ArtifactRows,
 ) -> Vec<ArtifactOut> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
-    let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize)
+    let request = ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
         .layers(LayerSelection::Named(layers))
-        .artifact_budget(budget)
-        .artifact_rows(rows);
-    if let Some(filter) = filter {
-        request = request.filter(filter);
-    }
+        .budget(budget);
     engine
-        .viewport(&session, request)
+        .viewport_artifacts(&session, request)
         .expect("a viewport over the fixture")
-        .artifacts
-}
-
-/// `(layer, tessera_id) → (rung, matched, masked_count, parent_ids)` — everything §5.2's sentence
-/// quantifies over, plus the two row facts the engine also owes unchanged.
-type IdentityView = BTreeMap<(String, u64), (u32, Option<bool>, u64, Vec<u64>)>;
-
-fn identity_view(served: &[ArtifactOut]) -> IdentityView {
-    served
-        .iter()
-        .map(|a| {
-            (
-                (a.layer.clone(), a.tessera_id.raw()),
-                (
-                    a.rung,
-                    a.matched,
-                    a.masked_count,
-                    a.parent_ids.iter().map(|p| p.raw()).collect::<Vec<_>>(),
-                ),
-            )
-        })
-        .collect()
-}
-
-/// **§5.2's contract sentence, quantified**: across a levelled layer, a treed layer with and
-/// without a budget cut, a pruned treed layer (whose response is a re-rooted forest), two
-/// principals, and three filter states — the row set, the `matched` bits and the `rung` values
-/// are identical under either value of `artifact_rows`.
-#[test]
-fn identity_and_full_agree_on_rows_bits_and_rungs() {
-    let fx = fixture();
-    let layers = [TREED, PRUNED, TIERED];
-    for grant in ["0", "0,1"] {
-        for budget in [None, Some(3)] {
-            for filter in [None, Some(bay_is(BAY)), Some(tag_is_absent())] {
-                let full = artifacts(
-                    &fx.engine,
-                    grant,
-                    &layers,
-                    budget,
-                    filter.clone(),
-                    ArtifactRows::Full,
-                );
-                let identity = artifacts(
-                    &fx.engine,
-                    grant,
-                    &layers,
-                    budget,
-                    filter.clone(),
-                    ArtifactRows::Identity,
-                );
-                let where_ = format!("grant {grant}, budget {budget:?}, filter {filter:?}");
-                assert!(
-                    full.len() > 3,
-                    "{where_}: {} artifacts served, too few for this to mean anything",
-                    full.len()
-                );
-                assert_eq!(
-                    identity_view(&full),
-                    identity_view(&identity),
-                    "{where_}: the projection moved the row set, a bit, a rung, a count or a \
-                     parent link"
-                );
-                if filter.is_some() {
-                    assert!(
-                        full.iter().all(|a| a.matched.is_some()),
-                        "{where_}: a filtered request answers every served artifact"
-                    );
-                }
-
-                // The projection is a column subset, and the skipped payload is really skipped:
-                // no derived geometry, no key, no content on any identity row — while the full
-                // rows carry the centroid their layers declare, so the emptiness opposite is not
-                // an emptiness the fixture would have produced anyway.
-                for row in &identity {
-                    assert!(
-                        row.derived.is_empty() && row.key.is_none() && row.content.is_empty(),
-                        "{where_}: identity row {:?} carries payload",
-                        row.tessera_id
-                    );
-                }
-                assert!(
-                    full.iter().all(|a| a.derived.centroid.is_some()),
-                    "{where_}: every fixture layer declares a centroid, so every full row \
-                     carries one"
-                );
-                assert!(
-                    full.iter().all(|a| a.key.is_some()),
-                    "{where_}: every fixture artifact was published with a key"
-                );
-            }
-        }
-    }
+        .artifacts()
 }
 
 /// The per-key rungs of one layer, from a full unfiltered whole-map request.
 fn rungs_of(engine: &Engine, layer: &str, budget: Option<u32>) -> BTreeMap<String, u32> {
-    artifacts(engine, "0,1", &[layer], budget, None, ArtifactRows::Full)
+    artifacts(engine, "0,1", &[layer], budget)
         .into_iter()
         .map(|a| (a.key.expect("published with a key"), a.rung))
         .collect()
@@ -364,7 +228,7 @@ fn a_cut_that_reroots_a_subtree_restarts_its_rungs_at_zero() {
         BTreeMap::from([("root".into(), 0), ("a".into(), 1), ("b".into(), 1)]),
         "the budget climbs, and what survives keeps its depth in what survives"
     );
-    let pruned = artifacts(&fx.engine, "0,1", &[PRUNED], None, None, ArtifactRows::Full);
+    let pruned = artifacts(&fx.engine, "0,1", &[PRUNED], None);
     assert_eq!(
         pruned
             .iter()

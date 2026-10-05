@@ -334,7 +334,7 @@ pub struct ViewCoordinates {
 /// dependent inherits both or neither.
 pub(super) type FilterBits = (Option<bool>, Option<bool>);
 
-/// One artifact, as a viewport serves it. No ordinal, no declared size and no membership: a
+/// One artifact, as it is served. No ordinal, no declared size and no membership: a
 /// declared size would be a corpus-wide count over items this principal may not see. There is no
 /// reason-for-absence anywhere in the response, because an artifact that failed its criterion
 /// must be indistinguishable from one that was never published.
@@ -404,10 +404,6 @@ pub struct ViewportOut {
     /// See [`ViewportHead::region`].
     pub region: Option<crate::region::RegionVerdict>,
     pub tiles: Vec<TileCount>,
-    /// The annotation artifacts intersecting the request's tiles, with the count this
-    /// principal's visible set generates — see [`ArtifactOut`]. Empty whether the principal
-    /// reaches no layer, nothing intersects, or everything failed its existence criterion.
-    pub artifacts: Vec<ArtifactOut>,
     /// The served points, column-major — see [`PointColumns`].
     pub points: PointColumns,
     /// The density underlay, when requested — empty otherwise. Only non-empty cells appear.
@@ -466,8 +462,7 @@ pub struct SinkClosed;
 pub type SinkResult = std::result::Result<(), SinkClosed>;
 
 /// Where [`Engine::viewport_stream`] delivers a response, in strict order: `head`, then
-/// `counts`, then zero or more `points` chunks, then at most one `artifacts`. The producer
-/// returning `Ok` is the completeness
+/// `counts`, then zero or more `points` chunks. The producer returning `Ok` is the completeness
 /// signal; there is no `done` callback. Every callback may refuse with [`SinkClosed`], which
 /// aborts the request as a cancellation: the remaining work is abandoned and the caller gets
 /// [`EngineError::Cancelled`].
@@ -478,11 +473,6 @@ pub trait ViewportSink {
     /// points. `sub_cells` is `None` when the request did not ask for the underlay and `Some`
     /// (possibly empty) when it did.
     fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult;
-    /// The artifacts intersecting the request's tiles. At most once, after the last points
-    /// chunk, never with an empty slice: an absent frame and an empty one carry the same
-    /// information. Required rather than defaulted, so a consumer cannot compile against a
-    /// response it never renders.
-    fn artifacts(&mut self, artifacts: &[ArtifactOut]) -> SinkResult;
     /// One flush chunk: whole tiles' worth of points, in response order, ascending by
     /// `tessera_id` within each tile. Never called with an empty chunk.
     fn points(&mut self, chunk: PointColumns) -> SinkResult;
@@ -586,7 +576,6 @@ pub(super) struct CollectSink {
     pub(super) head: Option<ViewportHead>,
     pub(super) tiles: Vec<TileCount>,
     pub(super) sub_cells: Vec<SubCellCount>,
-    pub(super) artifacts: Vec<ArtifactOut>,
     pub(super) points: Option<PointColumns>,
 }
 
@@ -599,11 +588,6 @@ impl ViewportSink for CollectSink {
     fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult {
         self.tiles = tiles.to_vec();
         self.sub_cells = sub_cells.unwrap_or_default().to_vec();
-        Ok(())
-    }
-
-    fn artifacts(&mut self, artifacts: &[ArtifactOut]) -> SinkResult {
-        self.artifacts = artifacts.to_vec();
         Ok(())
     }
 

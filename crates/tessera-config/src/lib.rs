@@ -234,6 +234,12 @@ struct RawServe {
     ///
     /// Default: `250`.
     admission_timeout_ms: Option<u64>,
+    /// `POST /v1/artifacts/viewport` requests computed at once, apart from `compute_admission`. As
+    /// many more may wait, each for at most `admission_timeout_ms`; one past that is refused with
+    /// 429, and `0` refuses every such request. A value above 1152921504606846975 is refused.
+    ///
+    /// Default: `compute_threads`.
+    artifact_admission: Option<usize>,
     /// Milliseconds a request waits for another request's build of a shared cached structure
     /// before it is refused with 429.
     ///
@@ -263,6 +269,11 @@ struct RawServe {
     ///
     /// Default: `262144`.
     max_tiles_per_request: Option<usize>,
+    /// The largest `per_tile` one `POST /v1/artifacts/viewport` may name: how many artifacts one
+    /// level serves in one tile. A larger one is refused with 422.
+    ///
+    /// Default: `1000`.
+    max_artifacts_per_tile: Option<usize>,
     /// The largest `underlay_offset` a viewport request may name: how many zoom levels below the
     /// tiles its exact masked counts are served at. A larger one is refused with 422, and `0`
     /// refuses every underlay. At most 255.
@@ -622,6 +633,7 @@ pub struct Config {
     pub max_underlay_offset: u8,
     pub max_underlay_cells: usize,
     pub max_tiles_per_request: usize,
+    pub max_artifacts_per_tile: usize,
     pub max_category_values: usize,
     pub max_suggestions: usize,
     pub max_suggestion_walk: u64,
@@ -680,6 +692,8 @@ pub struct Config {
     pub password_admission: usize,
     pub compute_queue: usize,
     pub admission_timeout_ms: u64,
+    /// `POST /v1/artifacts/viewport` requests admitted at once; as many more may wait.
+    pub artifact_admission: usize,
     pub single_flight_wait_ms: u64,
     pub stream_flush_bytes: usize,
     pub stream_write_stall_ms: u64,
@@ -733,6 +747,7 @@ pub struct OidcProvider {
 pub fn serving_blocking_threads(config: &Config) -> usize {
     config
         .compute_admission
+        .saturating_add(config.artifact_admission)
         .saturating_add(config.bulk_admission)
         .saturating_add(config.ingest_admission)
         .saturating_add(config.password_admission)
@@ -919,6 +934,15 @@ fn parse(text: &str) -> Result<Config> {
             key: "serve.compute_admission + serve.compute_queue",
         });
     }
+    let artifact_admission = serve.artifact_admission.unwrap_or(compute_threads);
+    if artifact_admission
+        .checked_mul(2)
+        .is_none_or(|slots| slots > Semaphore::MAX_PERMITS)
+    {
+        return Err(ConfigError::AdmissionTooLarge {
+            key: "serve.artifact_admission",
+        });
+    }
     let bulk_admission = serve.bulk_admission.unwrap_or(DEFAULT_BULK_ADMISSION);
     if bulk_admission > Semaphore::MAX_PERMITS {
         return Err(ConfigError::AdmissionTooLarge {
@@ -1056,6 +1080,9 @@ fn parse(text: &str) -> Result<Config> {
         max_tiles_per_request: serve
             .max_tiles_per_request
             .unwrap_or(DEFAULT_MAX_TILES_PER_REQUEST),
+        max_artifacts_per_tile: serve
+            .max_artifacts_per_tile
+            .unwrap_or(DEFAULT_MAX_ARTIFACTS_PER_TILE),
         max_category_values: serve
             .max_category_values
             .unwrap_or(DEFAULT_MAX_CATEGORY_VALUES),
@@ -1129,6 +1156,7 @@ fn parse(text: &str) -> Result<Config> {
         admission_timeout_ms: serve
             .admission_timeout_ms
             .unwrap_or(DEFAULT_ADMISSION_TIMEOUT_MS),
+        artifact_admission,
         single_flight_wait_ms: serve
             .single_flight_wait_ms
             .unwrap_or(tessera_engine::DEFAULT_SINGLE_FLIGHT_WAIT_MS),
@@ -1698,6 +1726,7 @@ mod tests {
         assert_eq!(
             serving_blocking_threads(&config),
             config.compute_admission
+                + config.artifact_admission
                 + 3
                 + config.ingest_admission
                 + config.password_admission
@@ -1758,6 +1787,25 @@ mod tests {
             parse(&valid_toml(&format!("bulk_admission = {}", usize::MAX / 2))),
             Err(ConfigError::AdmissionTooLarge {
                 key: "serve.bulk_admission"
+            })
+        ));
+    }
+
+    #[test]
+    fn the_artifact_viewport_keys_have_their_defaults_and_parse_when_set() {
+        let config = parse(&valid_toml("compute_threads = 7")).expect("defaults must load");
+        assert_eq!(config.artifact_admission, 7);
+        assert_eq!(config.max_artifacts_per_tile, DEFAULT_MAX_ARTIFACTS_PER_TILE);
+
+        let config = parse(&valid_toml("artifact_admission = 3
+max_artifacts_per_tile = 20"))
+            .expect("explicit keys must load");
+        assert_eq!(config.artifact_admission, 3);
+        assert_eq!(config.max_artifacts_per_tile, 20);
+        assert!(matches!(
+            parse(&valid_toml(&format!("artifact_admission = {}", usize::MAX / 4))),
+            Err(ConfigError::AdmissionTooLarge {
+                key: "serve.artifact_admission"
             })
         ));
     }

@@ -797,12 +797,12 @@ fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> TesseraId {
     tick(&fx.engine);
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
     fx.engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 10).layers(LayerSelection::All),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
         )
         .unwrap()
-        .artifacts[0]
+        .artifacts()[0]
         .tessera_id
 }
 

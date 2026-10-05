@@ -75,6 +75,9 @@ pub(crate) struct ArtifactsReq {
     parent: Option<serde_json::Value>,
     #[serde(default)]
     q: Option<String>,
+    /// `tessera_id`s, each a number or its decimal string: only the artifacts they name.
+    #[serde(default)]
+    ids: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     filters: Option<serde_json::Value>,
     #[serde(default)]
@@ -438,12 +441,23 @@ fn run_artifacts(
         Ok(parent) => parent,
         Err(e) => return Read::Refused(e),
     };
+    let ids = match req
+        .ids
+        .iter()
+        .flatten()
+        .map(|value| crate::filter_dto::tessera_id(Some(value), "ids"))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(ids) => req.ids.is_some().then_some(ids),
+        Err(e) => return Read::Refused(e),
+    };
     let request = ArtifactsRequest {
         view: &view.id,
         layer: &req.layer,
         level: req.level,
         parent,
         q: req.q.as_deref(),
+        ids: ids.as_deref(),
         filter,
         keep_unmatched: req.keep_unmatched,
         count: req.count,

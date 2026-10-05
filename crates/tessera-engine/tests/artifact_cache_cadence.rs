@@ -22,7 +22,7 @@ mod common;
 use common::*;
 use rustc_hash::FxHashSet;
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::Engine;
+use tessera_engine::{Engine, ViewportArtifactsRequest};
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
@@ -460,18 +460,43 @@ fn hulled(name: &str) -> LayerDeclaration {
 
 /// A pan: overlapping viewports that walk across the map, as a viewer dragging it produces.
 ///
-/// Each step is a real `/v1/viewport` through the serving path, so what is being counted is the
-/// derivations a *sequence of requests* makes rather than a rate computed from a key's shape.
+/// Each step is a real request for the artifacts in view through the serving path, so what is
+/// being counted is the derivations a *sequence of requests* makes rather than a rate computed
+/// from a key's shape.
 fn pan(engine: &Engine, session: &tessera_engine::Session, steps: usize) {
     for step in 0..steps {
         let x = 40.0 * step as f64;
         engine
-            .viewport(
+            .viewport_artifacts(
                 session,
-                ViewportRequest::new("s0", 0, [x, 0.0, x + 700.0, 1000.0], N_ITEMS as usize),
+                ViewportArtifactsRequest::new("s0", 0, [x, 0.0, x + 700.0, 1000.0], usize::MAX),
             )
             .expect("a viewport");
     }
+}
+
+/// An artifact's drawn shape for this session, read by its identifier: the one route a shape is
+/// served on.
+fn shape_of(engine: &Engine, session: &tessera_engine::Session, layer: &str) -> Vec<Vec<Vec<[u32; 2]>>> {
+    let id = engine
+        .viewport_artifacts(
+            session,
+            ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                .computed(tessera_engine::ComputedSelection::Named(&[])),
+        )
+        .expect("a viewport")
+        .artifacts()
+        .into_iter()
+        .find(|a| a.layer == layer)
+        .expect("the artifact is served")
+        .tessera_id;
+    engine
+        .artifact(session, id, "s0", None)
+        .expect("a read by identifier")
+        .expect("the artifact is served")
+        .derived
+        .shape
+        .expect("a declared hull")
 }
 
 /// **The headline for derived geometry: a pan re-serves the same artifacts and derives them once.**
@@ -528,21 +553,7 @@ fn a_write_re_derives_the_shape_it_moved() {
     publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..200)]);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let hull_of = |engine: &Engine| -> Vec<Vec<Vec<[u32; 2]>>> {
-        engine
-            .viewport(
-                &session,
-                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-            )
-            .expect("a viewport")
-            .artifacts
-            .into_iter()
-            .find(|a| a.layer == "clusters/a")
-            .expect("the artifact is served")
-            .derived
-            .shape
-            .expect("a declared hull")
-    };
+    let hull_of = |engine: &Engine| shape_of(engine, &session, "clusters/a");
     let before = hull_of(&engine);
     assert_eq!(before, hull_of(&engine), "the second request re-derived");
 
@@ -576,21 +587,9 @@ fn two_principals_over_one_artifact_get_two_shapes() {
     engine.register_layer(hulled("clusters/a")).unwrap();
     publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..600)]);
 
-    let hull_for = |credential: &[u8]| -> Vec<Vec<Vec<[u32; 2]>>> {
+    let hull_for = |credential: &[u8]| {
         let session = engine.authorise(credential).unwrap();
-        engine
-            .viewport(
-                &session,
-                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-            )
-            .expect("a viewport")
-            .artifacts
-            .into_iter()
-            .find(|a| a.layer == "clusters/a")
-            .expect("the artifact is served")
-            .derived
-            .shape
-            .expect("a declared hull")
+        shape_of(&engine, &session, "clusters/a")
     };
     let broad = hull_for(&full_coverage_credential());
     let narrow = hull_for(&subset_credential());
@@ -642,18 +641,25 @@ fn pruning_fixture(fx: &Fixture) -> Engine {
     engine
 }
 
-/// One request that warms all three: artifacts give the masked counts and the hulls, the request
-/// itself takes the occupancy ladder.
+/// Two requests that warm all three: the points take the occupancy ladder, and the artifacts give
+/// the masked counts and the derived geometry.
 fn warm(engine: &Engine, session: &tessera_engine::Session) {
-    let out = engine
+    engine
         .viewport(
             session,
             ViewportRequest::new("s0", 4, WHOLE_MAP, N_ITEMS as usize),
         )
         .expect("a viewport");
+    let out = engine
+        .viewport_artifacts(
+            session,
+            ViewportArtifactsRequest::new("s0", 4, WHOLE_MAP, usize::MAX),
+        )
+        .expect("a viewport's artifacts")
+        .artifacts();
     for layer in ["clusters/counts", "clusters/shapes"] {
         assert!(
-            out.artifacts.iter().any(|a| a.layer == layer),
+            out.iter().any(|a| a.layer == layer),
             "the request must serve {layer}'s artifacts, or it warms nothing"
         );
     }
