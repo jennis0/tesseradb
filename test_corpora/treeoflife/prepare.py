@@ -153,6 +153,7 @@ def access_label(publisher: pa.Array) -> pa.Array:
     escaped = pc.replace_substring(pc.replace_substring(publisher, "\\", "\\\\"), '"', '\\"')
     return pc.binary_join_element_wise('"', escaped, '"', "")
 
+
 #: The taxonomy layer's member file: one row per specimen, `key` a seven-entry list whose positions
 #: are the declared levels.
 MEMBER_SCHEMA = pa.schema(
@@ -777,8 +778,13 @@ def main() -> None:
             m = table.num_rows
             entity = np.arange(at, at + m, dtype=np.uint64)
 
+            # Trimmed as a credential's terms are, and a blank name is no publisher.
+            trimmed = pc.utf8_trim_whitespace(
+                table.column("publisher").combine_chunks().cast(pa.string())
+            )
             publisher = pc.fill_null(
-                table.column("publisher").combine_chunks().cast(pa.string()), UNPUBLISHED
+                pc.if_else(pc.equal(trimmed, ""), pa.scalar(None, pa.string()), trimmed),
+                UNPUBLISHED,
             )
             access = access_label(publisher)
             counts = pc.value_counts(publisher)

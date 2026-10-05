@@ -57,12 +57,14 @@ from ..common.paths import ladder, staged
 from ..common.timing import Steps
 
 RUNG = "overture"
-
-#: Each place's country as an access label of one quoted term, null where the country is. A few
-#: publisher-written countries hold spaces, quotes or `&` ("Navi Mumbai", "9 &10"), which an
-#: access expression reads as syntax; quoted, each is one term taken exactly as written.
-ACCESS_LABEL = r"""'"' || replace(replace(country, '\', '\\'), '"', '\"') || '"'"""
 VINTAGE = "2026-08-19.0"
+
+#: Each place's country as an access label of one quoted term, trimmed as a credential's terms are,
+#: and null where the country is empty or blank. A few publisher-written countries hold spaces,
+#: quotes or `&` ("Navi Mumbai", "9 &10"), which an access expression reads as syntax; quoted, each
+#: is one term taken exactly as written.
+ACCESS_LABEL = r"""'"' || replace(replace(
+    NULLIF(regexp_replace(country, '^\s+|\s+$', '', 'g'), ''), '\', '\\'), '"', '\"') || '"'"""
 
 #: The subtypes whose division id is lifted out of the lineage into an indexed column, so that the
 #: same boundary can be asked for as an attribute membership as well as through the nested layer —
