@@ -28,6 +28,12 @@ The oracle derives, from the contract's rules alone and in exact arithmetic:
 Each table is compared row for row, with every principal, under no filter and two filters, against
 a reference of the whole visible set. The edges must be the same under every filter.
 
+**A summary** of each field, `{"field": f, "summary": true}`, is one row of figures over the
+principal's whole visible set, whatever the filters say: `items`, `count` (the finite values),
+`none`, `min`, `max` and `mean`, each worked out here from the values. A deployment of its own
+takes a suppression, its lift, a deletion, an ingest, a fold and a restart, and after each the
+summaries and the default edges, counted whole and sampled, are the oracle's for every principal.
+
 What it does not cover, so the gap is stated: a suppression between pages, which the engine's
 tests cover, and timing.
 """
@@ -557,9 +563,10 @@ def scale(count: int, n: int, taken: int) -> int:
 def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities, principal, column):
     """With `sample`, each count is the oracle's count among the set's items below the cut,
     scaled to the set, or every item's count where the set's size and `sample` say it is counted
-    whole; the reference is counted the same way at its own cut; the default edges are the readable
-    edges of the visible set as it is counted, and hold still under every filter. The oracle draws every sample from the principal's visible items alone, so an
-    item it cannot see that entered a sample, moved `total` or moved an edge would show here."""
+    whole; the reference is counted the same way at its own cut; the default edges are the
+    readable edges of the whole visible set, as without a sample, and hold still under every
+    filter. The oracle draws every sample from the principal's visible items alone, so an item it
+    cannot see that entered a sample, moved `total` or moved an edge would show here."""
     token = deployment.server.authorise(list(fx.PRINCIPALS[principal]))["token"]
     seen = visible(principal)
     for s in (5, 25, 300):
@@ -577,7 +584,7 @@ def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities,
             reference = counted(seen, s, identities)
             if principal == "everyone" and name == "none" and s < 300:
                 assert len(taken) < len(items), f"{what}: the whole view is sampled"
-            edges = default_edges(column, reference, 10)
+            edges = default_edges(column, seen, 10)
             _, raw = expected(column, edges, taken, reference)
             want_rows = [
                 (g, lo, hi, scale(c, len(items), len(taken)), scale(r, len(seen), len(reference)))
@@ -589,7 +596,6 @@ def test_sampled_bins_are_the_items_below_one_cut_scaled(deployment, identities,
                 "sampled": not exact_by_size(items, s) or not exact_by_size(seen, s),
                 "items": len(taken),
                 "reference_items": len(reference),
-                "edges_sampled": not exact_by_size(seen, s),
             }, f"{what}: {head}"
             served = [(r[1], r[2]) for r in rows if r[0] == "listed"]
             assert held is None or served == held, f"{what}: the edges moved"
@@ -607,7 +613,7 @@ def test_a_sample_as_large_as_the_set_is_exact(deployment):
                            {"view": fx.WORLD, "reference": {}, "groupings": [{"by": {**grouping, "sample": s}}]})
         assert "sample" not in exact[0]
         assert whole[0].pop("sample") == {
-            "sampled": False, "items": n, "reference_items": n, "edges_sampled": False,
+            "sampled": False, "items": n, "reference_items": n,
         }, s
         assert whole == exact, s
 
@@ -621,3 +627,152 @@ def test_a_sample_that_cannot_be_served_is_refused(deployment):
     ):
         resp = deployment.server.aggregate(token, view=fx.WORLD, groupings=[{"by": by}])
         assert resp.status_code == 422 and resp.json()["error"] == "contract", (by, resp.text)
+
+
+# ---------------------------------------------------------------------------------------------
+# A field's summary
+# ---------------------------------------------------------------------------------------------
+
+
+def summary_oracle(column: str, items: list[int]) -> dict:
+    """The summary the contract gives of `column` over `items`."""
+    values = [v for i in items if (v := BY_NAME[column].value(i)) is not None]
+    finite = [v for v in values if not (isinstance(v, float) and not math.isfinite(v))]
+    return {
+        "items": len(items),
+        "count": len(finite),
+        "none": len(items) - len(values),
+        "min": min(finite) if finite else None,
+        "max": max(finite) if finite else None,
+        "mean": float(sum(Fraction(v) for v in finite) / len(finite)) if finite else None,
+    }
+
+
+def read_summary(server, token: str, column: str, filters: dict | None = None) -> tuple[dict, dict]:
+    """A summary's head and its one row, its smallest and largest value as the oracle holds them."""
+    body: dict = {"view": fx.WORLD, "groupings": [{"by": {"field": column, "summary": True}}]}
+    if filters is not None:
+        body["filters"] = filters
+    resp = server.aggregate(token, **body)
+    assert resp.status_code == 200, resp.text
+    decoded = split_aggregate_frames(resp.content)
+    [(head, pages)] = decoded.tables
+    assert len(pages) == 1, f"a summary is one page, not {len(pages)}"
+    batch = ipc.open_stream(io.BytesIO(pages[0][0])).read_next_batch()
+    assert batch.schema.names == ["items", "count", "none", "min", "max", "mean"]
+    assert batch.column("min").type == EDGE_TYPES[column], batch.column("min").type
+    row = {}
+    for name in batch.schema.names:
+        column_values = batch.column(name)
+        if pa.types.is_timestamp(column_values.type):
+            column_values = column_values.cast(pa.int64())
+        row[name] = column_values.to_pylist()[0]
+    return head, row
+
+
+def same_summary(served: dict, want: dict) -> bool:
+    """Equal, the mean to within the last digits of a `float64` sum taken in another order."""
+    exact = {k: v for k, v in served.items() if k != "mean"}
+    if exact != {k: v for k, v in want.items() if k != "mean"}:
+        return False
+    if served["mean"] is None or want["mean"] is None:
+        return served["mean"] == want["mean"]
+    return math.isclose(served["mean"], want["mean"], rel_tol=1e-12, abs_tol=1e-9)
+
+
+@pytest.mark.parametrize("principal", list(fx.PRINCIPALS))
+@pytest.mark.parametrize("column", [c.name for c in COLUMNS])
+def test_a_summary_is_the_oracles_over_the_whole_visible_set(deployment, principal, column):
+    """A summary is the figures of every item the principal may see, whatever the filter; its head
+    keeps the filtered set's `total`. Items it cannot see hold every field's extremes."""
+    token = deployment.server.authorise(list(fx.PRINCIPALS[principal]))["token"]
+    seen = visible(principal)
+    want = summary_oracle(column, seen)
+    for name, (filters, keep) in FILTERS.items():
+        head, row = read_summary(deployment.server, token, column, filters)
+        what = f"{principal} / {column} / filter {name}"
+        assert same_summary(row, want), f"{what}: served {row}, expected {want}"
+        assert head["total"] == sum(1 for i in seen if keep(i)), what
+        assert "groups" not in head and "sample" not in head, what
+
+
+def test_a_summary_that_cannot_be_served_is_refused(deployment):
+    token = deployment.server.authorise(list(fx.PRINCIPALS["everyone"]))["token"]
+    for grouping in (
+        {"by": {"field": "fx", "summary": True, "top": 2}},
+        {"by": {"field": "score", "summary": True, "bins": 4}},
+        {"by": {"field": "score", "summary": True}, "cells": {"depth": 3}},
+        {"by": {"field": "nope", "summary": True}},
+    ):
+        resp = deployment.server.aggregate(token, view=fx.WORLD, groupings=[grouping])
+        assert resp.status_code == 422 and resp.json()["error"] == "contract", (grouping, resp.text)
+
+
+#: Items ingested by the lifecycle test after its build and first ingest.
+LATE = list(range(fx.N_ITEMS, fx.N_ITEMS + 40))
+
+
+@pytest.fixture
+def changing(tmp_path):
+    blocks = [fx.plain_view_toml(), fx.fx_column().toml(), *(c.toml() for c in COLUMNS)]
+    points = {fx.WORLD: (BUILT, [fx.fx_column(), *COLUMNS], 0, fx.WORLD_EXTENT)}
+    d = Deployment(tmp_path / "field-figures", Corpus(blocks, points))
+    try:
+        d.rows("/control/ingest", fx.point_rows(INGESTED, [fx.fx_column(), *COLUMNS]), "bins")
+        d.publish()
+        yield d
+    finally:
+        d.stop()
+
+
+def test_the_figures_are_the_oracles_through_every_change(changing):
+    """After each change a running service makes, every principal's summary and default edges
+    of every field are the oracle's over the items it may see then: a suppression of the items
+    holding the extremes, from the next request; the lift of one; a deletion; an ingest; a fold;
+    and a restart."""
+    alive = set(range(fx.N_ITEMS))
+    suppressed: set[int] = set()
+
+    def check(when: str) -> None:
+        for principal, grants in fx.PRINCIPALS.items():
+            token = changing.server.authorise(list(grants))["token"]
+            seen = sorted(i for i in alive - suppressed if fx.access_of(i) in grants)
+            for column in COLUMNS:
+                what = f"{when} / {principal} / {column.name}"
+                _, row = read_summary(changing.server, token, column.name)
+                want = summary_oracle(column.name, seen)
+                assert same_summary(row, want), f"{what}: served {row}, expected {want}"
+                edges = default_edges(column.name, seen, 10)
+                for sample in (None, 25):
+                    by: dict = {"field": column.name, "bins": 10}
+                    if sample is not None:
+                        by["sample"] = sample
+                    _, rows = read_table(changing.server, token, {
+                        "view": fx.WORLD, "reference": {}, "groupings": [{"by": by}],
+                    })
+                    served = [(r[1], r[2]) for r in rows if r[0] == "listed"]
+                    assert served == list(zip(edges, edges[1:])), f"{what} / sample {sample}"
+
+    def change(op: str, items) -> None:
+        changing.control("POST", "/control/changes", expect=(200,),
+                         json=[{"op": op, "match": {"fx": i}} for i in items])
+
+    check("built and ingested")
+    change("suppress", PA[:10])
+    suppressed |= set(PA[:10])
+    check("suppressed")
+    change("unsuppress", PA[:2])
+    suppressed -= set(PA[:2])
+    check("lifted")
+    gone = [i for i in INGESTED if i % 5 == 0] + PA[2:4]
+    change("delete", gone)
+    alive -= set(gone)
+    check("deleted")
+    changing.rows("/control/ingest", fx.point_rows(LATE, [fx.fx_column(), *COLUMNS]), "late")
+    changing.publish()
+    alive |= set(LATE)
+    check("ingested")
+    changing.fold()
+    check("folded")
+    changing.restart()
+    check("restarted")

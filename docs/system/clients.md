@@ -227,9 +227,11 @@ the items the selection counts.
 | CLI | `tessera aggregate --view <view> --grouping <json>` | one grouping's table, read through the cursor and written as Arrow IPC or Parquet, its head on stderr |
 
 Every surface sends a grouping as the caller wrote it, a histogram's `bins`, `range` and `sample`
-included, and none adds a default. Each reads a sampled histogram's head as it reads the rest: the
-TypeScript client as the table's `sample`, Python in the `tessera.head` metadata, and the CLI on
-stderr. The store sends a reference only where the component registered one, as a
+and a field's `summary` included, and none adds a default. Each reads a sampled histogram's head as
+it reads the rest: the TypeScript client as the table's `sample`, Python in the `tessera.head`
+metadata, and the CLI on stderr. A summary is a table of one row on every surface, with the columns
+`items`, `count`, `none`, `min`, `max` and `mean`, over the whole visible set in the view; the
+request's filters change its head's `total` and none of its figures. The store sends a reference only where the component registered one, as a
 filter expression or as the whole visible set. It chooses no grouping. A registration can name one
 column in `without`, as the filter draft keys its controls, and the store then sends its filters
 less that column's control. A category control uses this to list its own values: with its clause

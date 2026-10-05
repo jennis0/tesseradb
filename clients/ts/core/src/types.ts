@@ -1641,11 +1641,12 @@ export type Grouping = {
 
 /**
  * A grouping's outer level: the values of a category field or the artifacts of one level of a
- * layer, as the `top` groups by count or as the groups named; or the values of a number or
- * timestamp field in `bins`, a histogram.
+ * layer, as the `top` groups by count or as the groups named; the values of a number or timestamp
+ * field in `bins`, a histogram; or a number or timestamp field's `summary`.
  *
  * With `top` or `values`, a `field` is a category declared with `index` or `render`, or one with a
- * `derived` vocabulary; with `bins`, a number or timestamp field declared with `index` or `render`.
+ * `derived` vocabulary; with `bins` or `summary`, a number or timestamp field declared with `index`
+ * or `render`.
  * A group-scoped field resolves under the request's view as a filter leaf on it does, or is pinned
  * as `<field>@<key>`. A `layer` is one `/v1/meta` publishes to this principal, and `level` is
  * required on a layer with several levels and refused on one with a single level. A named value or
@@ -1655,20 +1656,26 @@ export type Grouping = {
  * with whole bounds the edges are whole numbers; where either bound is fractional the bins are cut
  * in float and the edges are numbers. On a timestamp field the bounds are whole microseconds since
  * the Unix epoch. A `bigint` bound is sent exactly. A histogram's table is always one page.
- * Without a `range`, the edges are readable values around the values of every item this principal
- * may see in the view, whatever the filters say, in at most `bins` bins, so they stay put as the
- * filters and the viewport change. Sending the first answer's first `lower` and last `upper` back
- * as the `range`, with `bins` set to the number of bins it returned, gives the same bins and skips
- * the pass over the visible set, except on a timestamp field binned by months or years and where
- * an edge was served as its column's smallest or largest value. At most
+ * Without a `range`, the edges are readable values around the smallest and largest value of every
+ * item this principal may see in the view, whatever the filters say, in at most `bins` bins, so
+ * they stay put as the filters and the viewport change, and no visible value lies outside them.
+ * Sending the first answer's first `lower` and last `upper` back as the `range`, with `bins` set to
+ * the number of bins it returned, gives the same bins, except on a timestamp field binned by months
+ * or years and where an edge was served as its column's smallest or largest value. At most
  * `meta.selection.maxAggregateBins`; a grouping by bins takes no `cells`.
  *
  * With `bins` and a `sample`, a set of more than `sample` items is counted over its items whose
  * `tessera_id` is below one cut, `sample / total` of the identity range, about `sample` of them, and
- * each count is scaled to the set's `total`. Default edges are then drawn from the visible set's
- * sample. A set of at most `sample` items is counted exactly, and so is one where `sample` is more
- * than about one item in 64 of the set. The table's {@link AggregateTable.sample} says how it was
- * counted.
+ * each count is scaled to the set's `total`. Default edges are the exact ones, as without a
+ * `sample`. A set of at most `sample` items is counted exactly, and so is one where `sample` is
+ * more than about one item in 64 of the set. The table's {@link AggregateTable.sample} says how it
+ * was counted.
+ *
+ * With `summary: true`, the table is one row of the field's figures over every item this principal
+ * may see in the view, whatever the filters and the reference say: `items`, `count` (those holding
+ * a finite value) and `none` (those holding none), each a `bigint`; `min` and `max`, typed as a
+ * histogram's edges, null where `count` is 0; and `mean`, a number, null where `count` is 0. Every
+ * figure is exact, the mean of a float field to its last digits. A summary takes no `cells`.
  *
  * @category Requests and responses
  */
@@ -1676,6 +1683,7 @@ export type AggregateBy =
   | {field: string; top: number}
   | {field: string; values: string[]}
   | {field: string; bins: number; range?: [number | bigint, number | bigint]; sample?: number}
+  | {field: string; summary: true}
   | {layer: string; level?: number; top: number}
   | {layer: string; level?: number; artifacts: bigint[]};
 
@@ -1723,7 +1731,7 @@ export type AggregateTable = {
   referenceTotal: number | null;
   /**
    * The groups with an item in the set before the cut to `top` or the named list; `null` where the
-   * grouping has no `by`.
+   * grouping has no `by`, or is a `summary`.
    */
   groups: number | null;
   /** How a histogram asked for with a `sample` was counted; `null` on any other grouping. */
@@ -1744,11 +1752,6 @@ export type AggregateSample = {
   items: number;
   /** The items of the reference set counted; `null` where the request carried no `reference`. */
   referenceItems: number | null;
-  /**
-   * Whether the default edges were drawn from the visible set's sample, which they can be where
-   * the set itself is counted exactly; `false` where the grouping gave a `range`.
-   */
-  edgesSampled: boolean;
 };
 
 /**
