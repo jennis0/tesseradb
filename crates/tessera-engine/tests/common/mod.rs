@@ -678,6 +678,22 @@ pub fn over_every_tile(out: &tessera_engine::ViewportArtifactsOut) -> Vec<Artifa
     merged
 }
 
+/// The drawn shape a principal is served for an artifact, read by its identifier: the one route a
+/// shape is served on.
+pub fn shape_of(
+    engine: &Engine,
+    credential: &[u8],
+    id: TesseraId,
+) -> Option<Vec<Vec<Vec<[u32; 2]>>>> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .artifact(&session, id, "s0", None)
+        .unwrap()
+        .expect("the artifact is served")
+        .derived
+        .shape
+}
+
 /// The entity an artifact's served identifier names.
 pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
     engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
