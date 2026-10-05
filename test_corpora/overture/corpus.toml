@@ -35,13 +35,14 @@ source = "points"
 # no rights or audience field either, so each place's access term is the country of its first
 # address — the same synthetic compartment the GeoNames rung uses, which is what makes the two
 # rungs' access figures comparable at 5.5× the scale. Places with no country carry no term and take
-# the declared `public` default, which the build reports.
+# the declared `public` default, which the build reports. `access` is the `country` column with
+# each value quoted as one term (`prepare.py`), since a few publisher-written countries hold spaces.
 [[view]]
 name             = "world"
 title            = "Overture places"
 projection       = "web_mercator"
 extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
-point_visibility = { field = "country", default = "public" }
+point_visibility = { field = "access", default = "public" }
 
 # ---------------------------------------------------------------------------------------------
 # Vocabularies. The split is the same structural one the GeoNames rung draws, and it lands

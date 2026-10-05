@@ -66,9 +66,10 @@ allocation_view = "bioclip"
 # transform, the normalisation and the south-running y all happen inside the build, which is why
 # `points-geo.parquet` carries `lon` and `lat` exactly as GBIF publishes them.
 #
-# **`point_visibility` reads `publisher` on both views, and it is the real organisational
+# **`point_visibility` reads `access` on both views, and it is the real organisational
 # compartment**: the institution that published the occurrence record. 473 of them, and it is a
-# property of the row rather than a synthetic stand-in.
+# property of the row rather than a synthetic stand-in. `access` is the `publisher` column with
+# each name quoted as one term (`prepare.py`), since a name holds spaces and commas.
 #
 # **The `default` never fires**, and that is an owner ruling (2026-09-03) rather than a property of
 # the data. A row with no publisher — every `bioscan`, `eol` and `fathomnet` row, and any GBIF row
@@ -88,7 +89,7 @@ projection       = "none"
 extent           = "auto"
 source           = "points"
 visibility       = "public"
-point_visibility = { field = "publisher", default = "unpublished" }
+point_visibility = { field = "access", default = "unpublished" }
 
 [[view]]
 name             = "geo"
@@ -97,7 +98,7 @@ projection       = "web_mercator"
 extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
 source           = "points_geo"
 visibility       = "public"
-point_visibility = { field = "publisher", default = "unpublished" }
+point_visibility = { field = "access", default = "unpublished" }
 
 # ---------------------------------------------------------------------------------------------
 # Vocabularies, all eleven minted from `staging/metadata.parquet` and all **closed**: a value
