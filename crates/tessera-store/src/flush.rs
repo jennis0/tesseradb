@@ -61,7 +61,8 @@ pub struct FlushRow {
     pub number: EntityId,
     pub x: f64,
     pub y: f64,
-    /// One value per **render** column, in declared order. [`ScalarValue::Null`] is a legal member
+    /// One value per **render** column, in declared order, then one per column of
+    /// [`FlushInput::indexed`]. [`ScalarValue::Null`] is a legal member
     /// and is the caller's only way to say "this item has no value here": the writer records it in
     /// the column's presence bitmap and stores the type's zero in the row (decision 0064).
     /// Substituting the zero *before* this point loses the distinction irrecoverably.
@@ -81,6 +82,8 @@ pub struct FlushInput<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
+    /// The indexed columns the bands copy ([`crate::bands::copied_beside`]).
+    pub indexed: &'a [(String, ScalarType)],
     /// Where this segment's rows begin in the view's row space — the view's current total.
     pub row_base: u32,
     /// The view's [`crate::permutation::RowSpace::entity_floor`]: the rows of entities below it
@@ -209,7 +212,7 @@ pub fn write_flush_segment(
         }
     }
 
-    write_segment(&seg_dir, &items, &codes, input.scalar_schema).map_err(|source| {
+    write_segment(&seg_dir, &items, &codes, input.scalar_schema, input.indexed).map_err(|source| {
         StoreError::Io {
             path: seg_dir.join("columns.arrow"),
             source,
@@ -433,6 +436,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema,
+                indexed: &[],
                 row_base: 0,
                 entity_floor: 0,
             },

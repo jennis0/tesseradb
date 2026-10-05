@@ -141,6 +141,8 @@ pub(crate) struct MergeContext {
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) scalar_schema: Vec<(String, tessera_spatial::tiler::ScalarType)>,
+    /// The columns the bands copy beside the render tail.
+    pub(crate) band_schema: Vec<(String, tessera_spatial::tiler::ScalarType)>,
     /// The columns an input segment may lawfully lack: the view's group-scoped render lanes and
     /// the entity-scoped columns declared at a running service and not yet folded. Any other
     /// missing column is a torn segment and fails the merge.
@@ -171,6 +173,7 @@ pub(crate) fn execute(
             identity_key: &ctx.identity_key,
             shard_id: ctx.shard_id,
             scalar_schema: &ctx.scalar_schema,
+            indexed: &ctx.band_schema,
             absent_ok: &ctx.absent_ok,
             row_base: plan.row_base,
         },

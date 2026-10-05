@@ -59,7 +59,7 @@ fn tiler_and_segment_writers_round_trip() {
     assert_eq!(codes.len(), items.len());
 
     let dir = tempfile::tempdir().expect("tempdir");
-    write_segment(dir.path(), &items, &codes, &[]).expect("write_segment");
+    write_segment(dir.path(), &items, &codes, &[], &[]).expect("write_segment");
 
     let row_order_entities: Vec<EntityId> = entity_ids.clone();
     let bound = n; // entity ids are 0..n, contiguous
@@ -206,7 +206,7 @@ fn morton_file_is_u32_four_bytes_per_row_and_the_u64_file_is_gone() {
     let codes = sort_batch(&mut items, &mut entity_ids);
 
     let dir = tempfile::tempdir().expect("tempdir");
-    write_segment(dir.path(), &items, &codes, &[]).expect("write_segment");
+    write_segment(dir.path(), &items, &codes, &[], &[]).expect("write_segment");
 
     assert!(
         !dir.path().join("morton.u64").exists(),
@@ -334,7 +334,7 @@ fn write_segment_scalars_round_trip() {
         ("count".to_string(), ScalarType::U64),
         ("label".to_string(), ScalarType::Utf8),
     ];
-    write_segment(dir.path(), &items, &codes, &scalar_schema).expect("write_segment");
+    write_segment(dir.path(), &items, &codes, &scalar_schema, &[]).expect("write_segment");
 
     let file = fs::File::open(dir.path().join("columns.arrow")).expect("open columns.arrow");
     let mut reader = FileReader::try_new(file, None).expect("FileReader::try_new");
@@ -670,7 +670,7 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
     let codes = sort_batch(&mut items, &mut entity_ids);
 
     let dir = tempfile::tempdir().expect("tempdir");
-    write_segment(dir.path(), &items, &codes, &schema).expect("write_segment");
+    write_segment(dir.path(), &items, &codes, &schema, &[]).expect("write_segment");
 
     let cols = ColumnsRef::load(&dir.path().join("columns.arrow")).expect("columns.arrow loads");
     assert_eq!(cols.row_count() as u64, n);
@@ -817,7 +817,7 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
 
             let whole = dir.path().join(format!("whole-{}-{rows}", scalars.len()));
             fs::create_dir(&whole).expect("segment dir");
-            let mut writer = SegmentWriter::create(&whole, &declared).expect("create");
+            let mut writer = SegmentWriter::create(&whole, &declared, &[]).expect("create");
             for row in 0..rows {
                 let values: Vec<ScalarValue> =
                     columns.iter().map(|column| column[row].clone()).collect();
@@ -827,6 +827,7 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
                         morton: 0,
                         residual: residual[row],
                         scalars: &values,
+                        indexed: &tessera_store::write::no_indexed,
                     })
                     .expect("append");
             }

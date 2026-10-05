@@ -43,7 +43,7 @@ fn write_input(dir: &Path, seg_id: &str, entities: &[u64], stride: u64) -> FoldS
 
     let seg_dir = dir.join(seg_id);
     fs::create_dir_all(&seg_dir).expect("mkdir");
-    write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
+    write_segment(&seg_dir, &items, &codes, &[], &[]).expect("write_segment");
 
     FoldSegmentInput {
         seg_id: seg_id.to_string(),
@@ -72,6 +72,7 @@ fn a_column_an_input_lacks_fails_the_fold_unless_declared_since_the_inputs() {
         identity_key: &identity_key,
         shard_id: 0,
         scalar_schema: &schema,
+        indexed: &[],
         absent_ok,
         tombstones: &no_tombstones,
         permutation_bound: 8,
@@ -123,6 +124,7 @@ fn fold(
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &[],
+            indexed: &[],
             absent_ok: &[],
             tombstones,
             permutation_bound: bound,

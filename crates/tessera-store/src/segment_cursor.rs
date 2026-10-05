@@ -31,6 +31,8 @@ pub(crate) struct SegmentCursor {
     pub(crate) rows: usize,
     /// Where each row's entity is read ([`crate::edited`]).
     entities: crate::edited::RowEntities,
+    /// Where a banded row's indexed values are read.
+    bands: crate::bands::Bands,
 }
 
 impl SegmentCursor {
@@ -63,6 +65,7 @@ impl SegmentCursor {
                 ),
             });
         }
+        let bands = crate::bands::Bands::open(dir, rows as u32)?;
         Ok(SegmentCursor {
             seg_id,
             morton,
@@ -70,6 +73,46 @@ impl SegmentCursor {
             row: 0,
             rows,
             entities,
+            bands,
+        })
+    }
+
+    /// Row `row`'s value of the indexed column `name`, read from this segment's copy of it, for a
+    /// row the bands hold. A segment written before the column was declared has no copy and no
+    /// value; a copy of another type fails the operation, as [`gather_scalars`] does.
+    pub(crate) fn indexed_value(
+        &self,
+        row: usize,
+        name: &str,
+        declared: ScalarType,
+        op: &str,
+    ) -> std::io::Result<ScalarValue> {
+        let malformed = |detail: String| std::io::Error::new(std::io::ErrorKind::InvalidData, detail);
+        let Some(copy) = self.bands.copy(name) else {
+            return Ok(ScalarValue::Null);
+        };
+        if crate::bands::CopyType::of_type(declared) != Some(copy.ty) || copy.held.is_none() {
+            return Err(malformed(format!(
+                "{op}: segment '{}' copies '{name}' as {:?} where the bundle declares an indexed \
+                 {declared:?}",
+                self.seg_id, copy.ty
+            )));
+        }
+        let span = self.bands.band(crate::bands::FIRST_BAND);
+        let rows = &self.bands.rows()[span.clone()];
+        let at = rows.partition_point(|&r| (r as usize) < row);
+        if rows.get(at).is_none_or(|&r| r as usize != row) {
+            return Err(malformed(format!(
+                "{op}: segment '{}' has no band entry for row {}, whose identity puts it in a \
+                 band; run `tessera verify --deep` on the bundle and rebuild it",
+                self.seg_id, row
+            )));
+        }
+        let e = span.start + at;
+        Ok(if copy.holds(e) {
+            copy.value_at(e)
+        } else {
+            ScalarValue::Null
         })
     }
 

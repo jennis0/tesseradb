@@ -163,6 +163,9 @@ pub struct MergeSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
+    /// The indexed columns the bands copy ([`crate::bands::copied_beside`]), each banded row's
+    /// value read from its input's copy.
+    pub indexed: &'a [(String, ScalarType)],
     /// The columns of `scalar_schema` an input may lawfully lack (`segment_cursor::gather_scalars`):
     /// the view's group-scoped render lanes and the columns declared at a running service since
     /// the inputs were written. Any other column an input lacks fails the operation.
@@ -245,7 +248,7 @@ pub fn execute_merge(
         path: out_dir.join("columns.arrow"),
         source,
     };
-    let mut writer = SegmentWriter::create(&out_dir, spec.scalar_schema).map_err(io)?;
+    let mut writer = SegmentWriter::create(&out_dir, spec.scalar_schema, spec.indexed).map_err(io)?;
     // Each merged row's entity, in emission order: the merged row *is* the emission ordinal, so
     // the extent needs no companion permutation of the entity axis.
     let mut entities: Vec<u64> = Vec::new();
@@ -285,12 +288,18 @@ pub fn execute_merge(
             &cursor.seg_id,
             OP,
         )?;
+        let reading = &*cursor;
+        let indexed = |k: usize| {
+            let (name, ty) = &spec.indexed[k];
+            reading.indexed_value(row, name, *ty, OP)
+        };
         writer
             .append(SegmentRow {
                 tessera_id,
                 morton,
                 residual: cursor.columns.residual()[row],
                 scalars: &scalars,
+                indexed: &indexed,
             })
             .map_err(io)?;
         entities.push(entity.raw());
@@ -455,6 +464,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                indexed: &[],
                 row_base: 0,
                 entity_floor: 0,
             },
@@ -515,6 +525,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                indexed: &[],
                 absent_ok: &[],
                 row_base: 0,
             },
@@ -569,6 +580,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                indexed: &[],
                 absent_ok: &[],
                 row_base: 0,
             },

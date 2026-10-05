@@ -204,6 +204,7 @@ fn flushed_bundle(root: &Path) {
             identity_key: &key,
             shard_id: 0,
             scalar_schema: &[],
+            indexed: &[],
             row_base: n as u32,
             entity_floor: 0,
         },

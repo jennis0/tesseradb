@@ -291,6 +291,7 @@ impl Executor {
             identity_key: self.deps.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
+            band_schema: band_schema_of(manifest),
             absent_ok,
         };
 
@@ -1248,6 +1249,8 @@ impl Executor {
                     schema
                 },
                 render_indices: render_indices.clone(),
+                band_schema: band_schema_of(manifest),
+                band_indices: manifest.band_indices().collect(),
                 scoped_schema,
                 scoped_render: scoped_render_indices,
                 filter_schema: filter_schema.clone(),

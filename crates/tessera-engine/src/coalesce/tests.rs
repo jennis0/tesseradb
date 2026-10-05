@@ -147,6 +147,7 @@ impl Fixture {
             identity_key: &key,
             shard_id: 0,
             scalar_schema: &[],
+            indexed: &[],
             row_base,
             entity_floor: 0,
         };

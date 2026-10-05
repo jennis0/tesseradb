@@ -746,6 +746,7 @@ impl Executor {
             identity_key: self.deps.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
+            band_schema: band_schema_of(manifest),
             absent_ok,
             runtime_attributes,
             runtime_scoped_attributes,

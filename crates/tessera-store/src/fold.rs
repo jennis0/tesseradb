@@ -113,6 +113,9 @@ pub struct FoldRowSpaceSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
+    /// The indexed columns the bands copy ([`crate::bands::copied_beside`]), each banded row's
+    /// value read from its input's copy.
+    pub indexed: &'a [(String, ScalarType)],
     /// The columns of `scalar_schema` an input may lawfully lack (`segment_cursor::gather_scalars`):
     /// the view's group-scoped render lanes and the columns declared at a running service since
     /// the inputs were written. Any other column an input lacks fails the operation.
@@ -201,7 +204,8 @@ pub fn fold_row_space(
     // filtered viewport can walk a tile without a Feistel per row.
     let mut row_entity: Vec<u32> = Vec::new();
 
-    let mut writer = SegmentWriter::create(output_dir, spec.scalar_schema).map_err(columns_io)?;
+    let mut writer = SegmentWriter::create(output_dir, spec.scalar_schema, spec.indexed)
+        .map_err(columns_io)?;
     let mut permutation =
         PermutationWriter::create(permutation_path, spec.permutation_bound).map_err(perm_io)?;
 
@@ -283,12 +287,19 @@ pub fn fold_row_space(
             &cursor.seg_id,
             OP,
         )?;
+        // The cursor has moved on; its copy is read at the row being written.
+        let reading = &cursors[index];
+        let indexed = |k: usize| {
+            let (name, ty) = &spec.indexed[k];
+            reading.indexed_value(row, name, *ty, OP)
+        };
         writer
             .append(SegmentRow {
                 tessera_id,
                 morton,
-                residual: cursor.columns.residual()[row],
+                residual: reading.columns.residual()[row],
                 scalars: &scalars,
+                indexed: &indexed,
             })
             .map_err(columns_io)?;
         permutation.set(entity, row_count).map_err(perm_io)?;
@@ -395,6 +406,7 @@ mod tests {
                 identity_key: &key(),
                 shard_id: 0,
                 scalar_schema: &schema(),
+                indexed: &[],
                 row_base: 0,
                 entity_floor: 0,
             },
@@ -419,6 +431,7 @@ mod tests {
                 identity_key: &key(),
                 shard_id: 0,
                 scalar_schema: &schema(),
+                indexed: &[],
                 absent_ok: &[],
                 tombstones,
                 permutation_bound: 8,

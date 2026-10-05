@@ -398,6 +398,8 @@ pub(crate) struct Assembly<'a> {
     pub(crate) identity_key: &'a IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) render: Vec<RenderColumn<'a>>,
+    /// The columns the identity bands copy beside the render ones, by entity.
+    pub(crate) indexed: Vec<RenderColumn<'a>>,
 }
 
 /// What it produced.
@@ -594,7 +596,12 @@ pub(crate) fn write_segment(
     let mut cuts_out =
         CutWriter::create(job.segment_dir).map_err(|e| BuildError::io(&cuts_path, e))?;
     // The identity bands, from the writer every other producer of a segment uses.
-    let mut bands_out = tessera_store::bands::BandWriter::create(job.segment_dir)
+    let indexed: Vec<(String, ScalarType)> = job
+        .indexed
+        .iter()
+        .map(|column| (column.name.clone(), column.ty))
+        .collect();
+    let mut bands_out = tessera_store::bands::BandWriter::create(job.segment_dir, &indexed)
         .map_err(|e| BuildError::io(job.segment_dir, e))?;
     let mut row_entity_out = std::io::BufWriter::new(
         std::fs::File::create(&row_entity_path)
@@ -658,7 +665,9 @@ pub(crate) fn write_segment(
                     .push(record.morton)
                     .map_err(|e| BuildError::io(&cuts_path, e))?;
                 bands_out
-                    .push(record.identity, record.morton, record.residual)
+                    .push(record.identity, record.morton, record.residual, |k| {
+                        Ok(job.indexed[k].values.value_at(record.entity as usize))
+                    })
                     .map_err(|e| BuildError::io(job.segment_dir, e))?;
                 codes.extend_from_slice(&record.morton.to_le_bytes());
                 entities.extend_from_slice(&record.entity.to_le_bytes());

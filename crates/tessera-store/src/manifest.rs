@@ -1248,6 +1248,25 @@ impl Manifest {
         self.declared_scalars.iter().filter(|d| d.render)
     }
 
+    /// The declared scalars the identity bands copy beside the render columns: the indexed
+    /// numbers and timestamps that are not drawn ([`crate::bands::copied_beside`]), in declared
+    /// order.
+    pub fn band_scalars(&self) -> impl Iterator<Item = &DeclaredScalar> {
+        self.band_indices().map(|index| &self.declared_scalars[index])
+    }
+
+    /// Where each of [`Self::band_scalars`] sits in the full declaration, which a buffered row's
+    /// values are positional against.
+    pub fn band_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.declared_scalars
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                crate::bands::copied_beside(d.arrow_type, d.vocabulary.is_some(), d.index, d.render)
+            })
+            .map(|(index, _)| index)
+    }
+
     /// Where each render column sits in the **full** declaration.
     ///
     /// A buffered row carries one scalar per declared column, positionally, while a segment's tail

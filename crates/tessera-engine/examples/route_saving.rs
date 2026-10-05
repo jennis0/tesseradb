@@ -216,7 +216,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
 
     let mut entity_ids: Vec<EntityId> = (0..items.len() as u64).map(EntityId::new).collect();
     let codes = sort_batch(&mut items, &mut entity_ids);
-    write_segment(temp.path(), &items, &codes, &[]).unwrap();
+    write_segment(temp.path(), &items, &codes, &[], &[]).unwrap();
     let seg = SegmentData::load(
         temp.path(),
         "seg0",

@@ -30,6 +30,8 @@ pub(crate) struct FoldContext {
     pub(crate) shard_id: u32,
     /// Per view: the bundle-wide render tail plus that view's group-scoped render lanes.
     pub(crate) scalar_schema: BTreeMap<String, Vec<(String, ScalarType)>>,
+    /// The columns the bands copy beside the render tail, in every view.
+    pub(crate) band_schema: Vec<(String, ScalarType)>,
     /// Per view, the columns a segment may lack; any other missing column is a torn segment.
     pub(crate) absent_ok: BTreeMap<String, Vec<String>>,
     /// Entity-scoped columns declared at a running service and not yet folded.
@@ -233,6 +235,7 @@ fn fold_row_spaces(
                 identity_key: &ctx.identity_key,
                 shard_id: ctx.shard_id,
                 scalar_schema: view_schema,
+                indexed: &ctx.band_schema,
                 absent_ok: ctx.absent_ok.get(&view.view).map_or(&[][..], Vec::as_slice),
                 tombstones: &plan.tombstones,
                 permutation_bound: view.permutation_bound,

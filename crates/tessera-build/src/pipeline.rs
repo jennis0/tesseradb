@@ -1805,7 +1805,10 @@ fn build_bundle(
         .iter_mut()
         .zip(args.schema.attributes.iter())
     {
-        if !attribute.render && !blob_resident(&args.schema, attribute) {
+        if !attribute.render
+            && !blob_resident(&args.schema, attribute)
+            && !crate::band_copied(attribute)
+        {
             column.release();
         }
     }
@@ -1853,11 +1856,14 @@ fn build_bundle(
     // extents are unlinked above. What is left is the blob-resident columns, the postings pass
     // having already released the rest; `release` is idempotent, so the loop states the whole rule
     // rather than the half of it this line reaches.
+    //
+    // The columns the bands copy are kept too: each segment's band file reads its banded rows'
+    // values from them.
     for (column, attribute) in attributes_by_entity
         .iter_mut()
         .zip(args.schema.attributes.iter())
     {
-        if !attribute.render {
+        if !attribute.render && !crate::band_copied(attribute) {
             column.release();
         }
     }
@@ -1959,6 +1965,18 @@ fn build_bundle(
                     values: &scoped_render[column].values,
                 });
             }
+            let indexed: Vec<crate::assembly::RenderColumn<'_>> = args
+                .schema
+                .attributes
+                .iter()
+                .zip(attributes_by_entity.iter())
+                .filter(|(attribute, _)| crate::band_copied(attribute))
+                .map(|(attribute, values)| crate::assembly::RenderColumn {
+                    name: attribute.name.clone(),
+                    ty: attribute.ty,
+                    values,
+                })
+                .collect();
             let job = crate::assembly::Assembly {
                 view_dir: &view_dir,
                 view: &view.view_id,
@@ -1968,6 +1986,7 @@ fn build_bundle(
                 identity_key: &args.identity_key,
                 shard_id: args.shard_id,
                 render,
+                indexed,
             };
             crate::assembly::write_segment(&job, partitioned, &boundaries, page_plan)?
         };

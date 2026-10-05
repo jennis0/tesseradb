@@ -260,7 +260,7 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
         }
 
         let temp = TempDir::new().expect("a temp dir for the segment");
-        write_segment(temp.path(), &items, &written, &[]).expect("write_segment");
+        write_segment(temp.path(), &items, &written, &[], &[]).expect("write_segment");
         let data = SegmentData::load(
             temp.path(),
             &format!("bench-{g}"),

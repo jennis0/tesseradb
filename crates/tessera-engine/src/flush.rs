@@ -427,6 +427,9 @@ pub(crate) struct FlushContext {
     pub(crate) scalar_schema: Vec<(String, ScalarType)>,
     /// Where each of `scalar_schema`'s columns sits in a buffered row's scalar list.
     pub(crate) render_indices: Vec<usize>,
+    /// The columns the bands copy beside the render tail, and where each sits in a buffered row.
+    pub(crate) band_schema: Vec<(String, ScalarType)>,
+    pub(crate) band_indices: Vec<usize>,
     /// The filterable columns and where each one's value sits in a buffered row, entity-space, separate from the render tail.
     pub(crate) filter_schema: Vec<FilterColumnSpec>,
     /// The blob-resident columns — neither indexed nor rendered, never a category — and their positions in a buffered row.
@@ -587,6 +590,10 @@ fn execute_flush_stages(
                 .unwrap_or(&WalScalar::Null);
             scalars.push(value.clone());
         }
+        // Then the columns the bands copy, which `columns.arrow` does not hold.
+        for &index in &ctx.band_indices {
+            scalars.push(buffered_value(item, BufferedPlace::Entity(index)).clone());
+        }
         rows.push(FlushRow {
             entity_id: *entity,
             number: *number,
@@ -612,6 +619,7 @@ fn execute_flush_stages(
                     identity_key: &ctx.identity_key,
                     shard_id: ctx.shard_id,
                     scalar_schema: &ctx.scalar_schema,
+                    indexed: &ctx.band_schema,
                     row_base: ctx.row_base,
                     entity_floor: ctx.entity_floor,
                 },

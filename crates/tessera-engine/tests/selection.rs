@@ -77,7 +77,7 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
     // is a placeholder and its post-sort contents are deliberately ignored.
     let mut entity_ids: Vec<EntityId> = (0..items.len() as u64).map(EntityId::new).collect();
     let codes = sort_batch(&mut items, &mut entity_ids);
-    write_segment(temp.path(), &items, &codes, &[]).unwrap();
+    write_segment(temp.path(), &items, &codes, &[], &[]).unwrap();
 
     let data = SegmentData::load(
         temp.path(),
