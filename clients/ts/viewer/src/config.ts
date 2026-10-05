@@ -39,6 +39,8 @@ export type ViewerConfig = {
    * lands on decoded ground. Each costs up to about four times the viewport's bytes over new ground.
    */
   prefetchLayers: number;
+  /** The most artifacts one level shows in one tile (`?per-tile=`, default 50). */
+  artifactsPerTile: number;
 };
 
 /**
@@ -52,6 +54,7 @@ export function readConfig(): ViewerConfig {
   return {
     ringBytes: (Number(query?.get('ring') ?? '') || 8) * 1_000_000,
     prefetchLayers: query?.has('layers') ? Math.max(0, Number(query.get('layers')) || 0) : 1,
+    artifactsPerTile: query?.has('per-tile') ? Math.max(0, Number(query.get('per-tile')) || 0) : 50,
     datasets: []
   };
 }

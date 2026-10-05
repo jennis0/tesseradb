@@ -1,4 +1,4 @@
-import {CELL_GRID} from './coords.js';
+import {CELL_GRID, GRID32} from './coords.js';
 import type {MapProjection, Quantisation, TileScheme, ViewInfo} from './types.js';
 
 /**
@@ -59,4 +59,25 @@ function lonLatOfUnitSquare(x: number, y: number, projection: MapProjection): [n
     return [lon, ((2 * Math.atan(Math.exp(mercY)) - Math.PI / 2) * 180) / Math.PI];
   }
   return [lon, (0.5 - y) * 180];
+}
+
+/**
+ * A position in a view's data coordinates, as a bulk read serves it, to 32-bit grid units: longitude
+ * and latitude projected onto the frame for a projected view, the view's own coordinates otherwise.
+ * The inverse of how the server writes a position out.
+ *
+ * @internal
+ */
+export function gridOfData(x: number, y: number, projection: MapProjection, q: Quantisation): [number, number] {
+  let [ux, uy] = [x, y];
+  if (projection !== 'none') {
+    ux = (x + 180) / 360;
+    if (projection === 'web_mercator') {
+      const lat = Math.max(-85.0511287798066, Math.min(85.0511287798066, y));
+      uy = 0.5 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / (2 * Math.PI);
+    } else {
+      uy = 0.5 - Math.max(-90, Math.min(90, y)) / 180;
+    }
+  }
+  return [((ux - q.xMin) / (q.xMax - q.xMin)) * GRID32, ((uy - q.yMin) / (q.yMax - q.yMin)) * GRID32];
 }

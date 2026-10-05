@@ -2,9 +2,9 @@
  * Arrow decoding off the render thread. Decoding a large response takes far longer than the server
  * takes to answer it, and on the render thread it holds up every gesture.
  *
- * Three request shapes: a whole body, from a batch caller; and an artifacts frame followed by one
- * points frame at a time, from the streaming client, which decodes the counts itself. Each frame
- * is an independent Arrow stream, so they decode separately.
+ * Three request shapes: a whole viewport body, from a batch caller; one points frame at a time,
+ * from the streaming client, which decodes the counts itself; and one artifacts frame at a time,
+ * from `viewportArtifacts`. Each frame is an independent Arrow stream, so they decode separately.
  *
  * A plain worker without `SharedArrayBuffer`: shared memory needs a cross-origin isolated page,
  * which breaks resources without a CORP header and cannot be set on some static hosts. Typed arrays
@@ -13,14 +13,14 @@
  * No authorisation happens here. The worker parses a response the server has already restricted,
  * and `tessera_id` is opaque on either side.
  */
-import {decodeArtifacts, decodePoints, decodeViewport} from './decode.js';
+import {decodeArtifactsFrame, decodePoints, decodeViewport} from './decode.js';
 import type {MembershipColumn, ScalarColumn} from './types.js';
 
 export type DecodeRequest =
   /** A whole framed body, trailer included. */
   | {id: number; kind?: 'body'; bytes: ArrayBuffer}
-  /** The artifacts frame, or null where the response has none. */
-  | {id: number; kind: 'artifacts'; bytes: ArrayBuffer | null}
+  /** One kind-5 frame of a `/v1/artifacts/viewport` body. */
+  | {id: number; kind: 'artifacts'; bytes: ArrayBuffer}
   /** One kind-3 frame. */
   | {id: number; kind: 'points'; bytes: ArrayBuffer};
 
@@ -48,7 +48,7 @@ self.onmessage = (event: MessageEvent<DecodeRequest>) => {
   try {
     const started = performance.now();
     if (request.kind === 'artifacts') {
-      const result = decodeArtifacts(request.bytes ? new Uint8Array(request.bytes) : null);
+      const result = decodeArtifactsFrame(new Uint8Array(request.bytes));
       // The artifacts are plain objects, so they cross by structured clone.
       self.postMessage({id, result, ms: performance.now() - started});
       return;

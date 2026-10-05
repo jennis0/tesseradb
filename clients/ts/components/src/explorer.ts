@@ -6,7 +6,7 @@ import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, cellDepth, nearestStop} from '@tesseradb/deck';
 import {WORLD_SIZE, activeCount, artifactName, emptyDraft} from '@tesseradb/client';
-import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
+import {hasOneLayout, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import {listedAt} from './artifact-list.js';
 import {HeldAggregate} from './aggregate.js';
@@ -866,9 +866,6 @@ export class TesseraExplorer extends TesseraElement {
   private placements = new Map<string, {side: Side; offset: number; world: [number, number]}>();
   /** Set while the camera moves, and cleared {@link CALLOUT_REST_MS} after it stops. */
   private moving: ReturnType<typeof setTimeout> | null = null;
-  /** The zoom the level drawn was last worked out at, and the level that gave when none is chosen. */
-  private zoomSeen: number | null = null;
-  private autoSeen: number | null = null;
   /** The count of values behind the folded Colour heading. */
   private readonly hintCount = new HeldAggregate('colour-hint');
   /** The folded In view heading, kept while nothing it counts has changed. */
@@ -995,12 +992,8 @@ export class TesseraExplorer extends TesseraElement {
     const narrow = this.narrow;
     // Short of room, the docked layout takes the overlay's form.
     const floating = this.layout === 'overlay' || compact;
-    // The level drawn: the one chosen through the legend, else, for a levelled layer served
-    // whole, the level the view's budget would cut at, else the deepest served.
-    const autoLevel = this.autoLevel();
-    this.zoomSeen = this.map?.zoom ?? null;
-    this.autoSeen = autoLevel;
-    const level = this.level ?? autoLevel;
+    // The level drawn: the one chosen through the legend, else the deepest served.
+    const level = this.level;
     // A click that found nothing shows no card; a broken pick shows its fault.
     const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick?.kind === 'broken');
     // The detail shows whichever changed last.
@@ -1019,7 +1012,7 @@ export class TesseraExplorer extends TesseraElement {
       ? html`<div class="names"><span part="dataset-title" class="title">${this.datasetTitle}</span><div class="sub">${pickers}${viewText('')}</div></div>`
       : html`<div class="names">${pickers}${viewText('title')}</div>`;
     const named = pickersShown || viewName !== '' || this.datasetTitle !== '';
-    const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout ?hide-palettes=${this.hidePalettes} .limit=${compact ? 4 : 0} .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
+    const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout ?hide-palettes=${this.hidePalettes} .limit=${compact ? 4 : 0} .level=${this.level} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
     const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>`;
     const list = html`<slot name="artifacts"><tessera-artifact-list exportparts=${FORWARD['artifact-list']} .level=${level} .rows=${8}></tessera-artifact-list></slot>`;
@@ -1399,11 +1392,6 @@ export class TesseraExplorer extends TesseraElement {
       if (stops !== this.stopsSeen) {
         this.stopsSeen = stops;
         this.requestUpdate();
-      }
-      const zoom = this.map?.zoom ?? null;
-      if (zoom !== this.zoomSeen && this.level === null) {
-        this.zoomSeen = zoom;
-        if (this.autoLevel() !== this.autoSeen) this.requestUpdate();
       }
     });
   }
@@ -1833,27 +1821,6 @@ export class TesseraExplorer extends TesseraElement {
     menu.style.left = `${Math.round(left)}px`;
     menu.style.top = `${Math.round(Math.max(8, Math.min(b.top - 32, vh - height - 8)))}px`;
     if (opened) (menu.querySelector<HTMLElement>('[aria-checked="true"]') ?? menu.querySelector<HTMLElement>('button'))?.focus();
-  }
-
-  /** The level a levelled layer draws at when none was chosen; see `render`. */
-  private autoLevel(): number | null {
-    const s = this.resolvedStore;
-    const meta = s?.get('meta');
-    const a = s?.get('artifacts');
-    if (!s || !meta || !a) return null;
-    const coloured = clusterLayerOf(s.get('legend').colourBy);
-    const layer = coloured ?? a.layers[0] ?? null;
-    const declared = layer ? meta.layers.find((l) => l.name === layer) : null;
-    if (!declared || declared.levels.length === 0) return null;
-    // On a levelled layer, the only kind reaching here, the served `rung` is the declared level.
-    const counts: number[] = [];
-    for (const x of coloured ? a.colourServed : a.served) {
-      if (x.layer !== layer) continue;
-      counts[x.rung] = (counts[x.rung] ?? 0) + 1;
-    }
-    for (let i = 0; i < counts.length; i++) counts[i] ??= 0;
-    if (counts.length <= 1) return null;
-    return levelForBudget(counts, artifactBudgetFor(this.map?.zoom ?? 0));
   }
 
   /** A follow in flight: dropped when it lands, when another starts, and at dispose. */

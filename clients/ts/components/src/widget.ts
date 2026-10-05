@@ -27,8 +27,8 @@ import './explorer.js';
  * supplier (renewal before expiry, or after a refusal that ends the session) send `reauthorise`.
  * A page reload makes a new model, which sends `ready` again.
  *
- * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height` and
- * `title_field` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
+ * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height`,
+ * `title_field` and `artifacts_per_tile` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
  * `size_max`, `size_scale` and `filters` go both ways;
  * `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
  * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
@@ -215,13 +215,19 @@ function sameBbox(a: number[] | null, b: number[] | null): boolean {
 }
 
 /** How a store is built: `createStore`, unless a test injects one. */
-export type StoreFactory = (options: {viewerUrl: string; authorise: TokenSupplier; view?: string}) => Store;
+export type StoreFactory = (options: {viewerUrl: string; authorise: TokenSupplier; view?: string; artifacts?: {perTile: number}}) => Store;
 
 function buildStore(model: WidgetModel, state: ModelState): Store | null {
   const url = model.get('url');
   if (typeof url !== 'string' || !url) return null;
   const view = model.get('view');
-  return state.storeFactory({viewerUrl: url, authorise: state.supplier, ...(typeof view === 'string' && view ? {view} : {})});
+  const perTile = model.get('artifacts_per_tile');
+  return state.storeFactory({
+    viewerUrl: url,
+    authorise: state.supplier,
+    ...(typeof view === 'string' && view ? {view} : {}),
+    ...(typeof perTile === 'number' ? {artifacts: {perTile}} : {})
+  });
 }
 
 function heightOf(model: WidgetModel): string {
@@ -420,6 +426,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     for (const v of state.views.values()) equip(v);
   };
   model.on('change:url', rebuildAll);
+  model.on('change:artifacts_per_tile', rebuildAll);
   // A view change calls `setCurrentView` on each store; a store holds several views, so stepping
   // through a roster rebuilds nothing. A `url` change rebuilds, since a `tessera_id` from one
   // bundle means nothing in another. A switch made in one view reaches only that view's store,

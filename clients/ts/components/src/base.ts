@@ -13,14 +13,15 @@ import {storeContext} from './context.js';
 export type StoreSource = 'property' | 'context' | 'own' | 'detached';
 
 /** What an own store was built from; a change in any of these rebuilds it. */
-type OwnConfig = {viewerUrl: string; token: string; authorise: TokenSupplier | null};
+type OwnConfig = {viewerUrl: string; token: string; authorise: TokenSupplier | null; artifactsPerTile: number | null};
 
 /**
  * What every element shares: how it finds its store, and how it follows it.
  *
  * Store precedence: a `.store` property; else a context answer (a provider that connects after an
  * element built its own store is not adopted); else, for the map, the explorer and
- * `<tessera-store>`, its own store from `viewer-url` and `token` or an `authorise` property; else
+ * `<tessera-store>`, its own store from `viewer-url`, `token` or an `authorise` property, and
+ * `artifacts-per-tile`; else
  * detached, which renders nothing. An own store is built once those attributes suffice, and
  * replaced when `viewer-url`, `token` or the `authorise` function changes. A store handed in by
  * property or context is not disposed here.
@@ -52,6 +53,13 @@ export abstract class TesseraElement extends LitElement {
    * `Store` in `@tesseradb/client`), so a framework keeps the function stable across renders.
    */
   @property({attribute: false}) accessor authorise: TokenSupplier | null = null;
+  /**
+   * The most artifacts one level of a drawn layer shows in one tile, for the store the element
+   * builds; at most `/v1/meta`'s `selection.max_artifacts_per_tile`. Only the map, the explorer
+   * and `<tessera-store>` read it. Unset, a drawn layer shows nothing and the store says why.
+   * Changing it builds a new store.
+   */
+  @property({type: Number, attribute: 'artifacts-per-tile'}) accessor artifactsPerTile: number | null = null;
 
   /** Whether this element builds its own store from attributes when nothing else supplies one. */
   protected canBuildOwn = false;
@@ -97,7 +105,7 @@ export abstract class TesseraElement extends LitElement {
 
   protected override willUpdate(changed: PropertyValues<this>): void {
     if (!this.isConnected) return;
-    if (changed.has('store') || changed.has('viewerUrl') || changed.has('token') || changed.has('authorise')) this.resolve();
+    if (changed.has('store') || changed.has('viewerUrl') || changed.has('token') || changed.has('authorise') || changed.has('artifactsPerTile')) this.resolve();
   }
 
   /**
@@ -107,9 +115,17 @@ export abstract class TesseraElement extends LitElement {
    */
   private resolve(): void {
     const wanted: OwnConfig | null =
-      this.canBuildOwn && this.viewerUrl && (this.token || this.authorise) ? {viewerUrl: this.viewerUrl, token: this.token, authorise: this.authorise} : null;
+      this.canBuildOwn && this.viewerUrl && (this.token || this.authorise)
+        ? {viewerUrl: this.viewerUrl, token: this.token, authorise: this.authorise, artifactsPerTile: this.artifactsPerTile}
+        : null;
     const held = this.ownConfig;
-    const same = wanted !== null && held !== null && wanted.viewerUrl === held.viewerUrl && wanted.token === held.token && wanted.authorise === held.authorise;
+    const same =
+      wanted !== null &&
+      held !== null &&
+      wanted.viewerUrl === held.viewerUrl &&
+      wanted.token === held.token &&
+      wanted.authorise === held.authorise &&
+      wanted.artifactsPerTile === held.artifactsPerTile;
     const old = this.ownStore;
     let next: Store | null = null;
     let source: StoreSource = 'detached';
@@ -120,7 +136,11 @@ export abstract class TesseraElement extends LitElement {
       next =
         old && same
           ? old
-          : createStore({viewerUrl: wanted.viewerUrl, ...(wanted.authorise ? {authorise: wanted.authorise} : {token: wanted.token})});
+          : createStore({
+              viewerUrl: wanted.viewerUrl,
+              ...(wanted.authorise ? {authorise: wanted.authorise} : {token: wanted.token}),
+              ...(wanted.artifactsPerTile === null ? {} : {artifacts: {perTile: wanted.artifactsPerTile}})
+            });
       source = 'own';
     } else if (this.contextStore) {
       next = this.contextStore;

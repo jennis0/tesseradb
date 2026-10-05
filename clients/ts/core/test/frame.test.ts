@@ -6,9 +6,10 @@ import {
   FRAME_POINTS,
   FRAME_TILES,
   FRAME_TRAILER,
+  FrameReader,
   splitFramedStreams
 } from '../src/frame.js';
-import {refused} from './support.js';
+import {framed, refused} from './support.js';
 
 const fixture = (name: string) =>
   new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
@@ -29,73 +30,31 @@ describe('splitFramedStreams', () => {
     expect(parts.subCells!.byteLength).toBeGreaterThan(0);
   });
 
-  it('has no artifacts frame when the response served none', () => {
-    // Absent, not empty: the server omits the frame, so a deployment with no annotation layers pays
-    // nothing. Captured with `layers: []` against a server that has layers.
-    expect(splitFramedStreams(fixture('viewport-plain.bin')).artifacts).toBeNull();
-    expect(splitFramedStreams(fixture('viewport-underlay.bin')).artifacts).toBeNull();
-  });
-
-  it('takes the frame where the response served some, between the tiles and the points', () => {
-    // Captured from a server with a published layer (`scripts/capture-golden.mjs`).
-    const parts = splitFramedStreams(fixture('viewport-artifacts.bin'));
-    expect(parts.artifacts).not.toBeNull();
-    expect(parts.artifacts!.byteLength).toBeGreaterThan(0);
-  });
-
-  it('takes an artifacts frame, and refuses a second or a misplaced one', () => {
-    const frame = (kind: number, payload: Uint8Array) => {
-      const out = new Uint8Array(5 + payload.byteLength);
-      out[0] = kind;
-      new DataView(out.buffer).setUint32(1, payload.byteLength, true);
-      out.set(payload, 5);
-      return out;
-    };
-    const cat = (...parts: Uint8Array[]) => {
-      const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
-      let at = 0;
-      for (const p of parts) {
-        out.set(p, at);
-        at += p.byteLength;
-      }
-      return out;
-    };
+  it('refuses an artifacts frame in a viewport body, and takes artifacts frames and a trailer in an artifacts body', () => {
+    const frame = (kind: number, payload: Uint8Array) => ({kind, payload});
     const body = new Uint8Array([1, 2, 3]);
+    // Artifacts come from their own route; a viewport body carrying one is not this client's server.
+    refused(() => splitFramedStreams(framed([frame(FRAME_TILES, body), frame(FRAME_ARTIFACTS, body), frame(FRAME_TRAILER, body)])));
 
-    const ok = splitFramedStreams(
-      cat(
-        frame(FRAME_TILES, body),
-        frame(FRAME_POINTS, body),
-        frame(FRAME_ARTIFACTS, body),
-        frame(FRAME_TRAILER, body)
-      )
-    );
-    expect(ok.artifacts).not.toBeNull();
+    const reader = new FrameReader('artifacts');
+    const kinds = reader.push(framed([frame(FRAME_ARTIFACTS, body), frame(FRAME_ARTIFACTS, new Uint8Array(0)), frame(FRAME_TRAILER, body)])).map((f) => f.kind);
+    reader.end();
+    expect(kinds).toEqual([FRAME_ARTIFACTS, FRAME_ARTIFACTS, FRAME_TRAILER]);
 
-    // A second artifacts frame is refused, as a second tile frame is; it would show a cluster twice.
-    refused(() =>
-      splitFramedStreams(
-        cat(
-          frame(FRAME_TILES, body),
-          frame(FRAME_ARTIFACTS, body),
-          frame(FRAME_ARTIFACTS, body),
-          frame(FRAME_TRAILER, body)
-        )
-      )
-    );
+    // A points frame, a frame after the trailer, and a body with no trailer are refused.
+    refused(() => new FrameReader('artifacts').push(framed([frame(FRAME_POINTS, body)])));
+    refused(() => new FrameReader('artifacts').push(framed([frame(FRAME_TRAILER, body), frame(FRAME_ARTIFACTS, body)])));
+    const cut = new FrameReader('artifacts');
+    cut.push(framed([frame(FRAME_ARTIFACTS, body)]));
+    refused(() => cut.end());
+  });
 
-    // The points come first, so no point waits on the artifacts; a points frame after them is
-    // out of order.
-    refused(() =>
-      splitFramedStreams(
-        cat(
-          frame(FRAME_TILES, body),
-          frame(FRAME_ARTIFACTS, body),
-          frame(FRAME_POINTS, body),
-          frame(FRAME_TRAILER, body)
-        )
-      )
-    );
+  it('reads the captured artifacts body as artifacts frames and a trailer', () => {
+    const reader = new FrameReader('artifacts');
+    const kinds = reader.push(fixture('viewport-artifacts.bin')).map((f) => f.kind);
+    reader.end();
+    expect(kinds.at(-1)).toBe(FRAME_TRAILER);
+    expect(kinds.slice(0, -1).every((k) => k === FRAME_ARTIFACTS)).toBe(true);
   });
 
   it('consumes the whole payload exactly: every frame is length-prefixed', () => {

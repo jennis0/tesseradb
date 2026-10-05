@@ -42,7 +42,6 @@ const artifact = (id: bigint, count: bigint, parent: bigint | null = null, conte
   maskedCount: count,
   centroid: [2 ** 31, 2 ** 31],
   box: null,
-  shape: null,
   content,
   parentIds: parent === null ? [] : [parent],
   rung: 0,

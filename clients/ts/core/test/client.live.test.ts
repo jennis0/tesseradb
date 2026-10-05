@@ -172,13 +172,53 @@ describe('TesseraClient against a live server', () => {
 
   it('opens an artifact by identifier with the count and geometry the viewport served', async (ctx) => {
     live(ctx);
-    const response = await client.viewport(session.token, whole({k: 0, layers: ['taxonomy/arxiv']}));
-    const first = response.result.artifacts[0]!;
+    const {zoom, bbox, view} = whole();
+    const response = await client.viewportArtifacts(session.token, {view, zoom, bbox, layers: ['taxonomy/arxiv'], perTile: 5});
+    const first = response.frames.flatMap((f) => f.artifacts)[0]!;
     expect(first.layer).toBe('taxonomy/arxiv');
     const opened = await client.artifact(session.token, first.tesseraId, {view: 's0'});
     expect(opened).toMatchObject({layer: first.layer, key: first.key, maskedCount: first.maskedCount, centroid: first.centroid, box: first.box});
     expect(opened.maskedCount).toBeGreaterThan(0n);
     await expect(client.artifact(session.token, 1n, {view: 's0'})).rejects.toMatchObject({status: 404});
+  });
+
+  it('streams one artifacts frame per tile, each at most the quota per level, an artifact the same in every tile', async (ctx) => {
+    live(ctx);
+    const tiles = [0n, 1n, 2n, 3n];
+    const frames: unknown[] = [];
+    const response = await client.viewportArtifacts(session.token, {view: 's0', zoom: 1, tiles, layers: ['taxonomy/arxiv'], levels: [0], perTile: 3}, {onTile: (f) => void frames.push(f)});
+    expect(response.frames).toEqual(frames);
+    expect(response.frames.map((f) => f.tile)).toEqual(tiles);
+    const figures = new Map<bigint, string>();
+    for (const frame of response.frames) {
+      expect(frame.artifacts.length).toBeLessThanOrEqual(3);
+      for (const a of frame.artifacts) {
+        const these = `${a.maskedCount}|${a.centroid}|${a.box}`;
+        expect(figures.get(a.tesseraId) ?? these).toBe(these);
+        figures.set(a.tesseraId, these);
+      }
+    }
+    expect(figures.size).toBeGreaterThan(0);
+    await expect(client.viewportArtifacts(session.token, {view: 's0', zoom: 1, tiles, perTile: meta.selection.maxArtifactsPerTile + 1})).rejects.toMatchObject({status: 422});
+  });
+
+  it('reads a point’s tag by identifier, with the level and count its artifact is served with', async (ctx) => {
+    live(ctx);
+    const points = await client.viewport(session.token, whole({k: 20, layers: ['taxonomy/arxiv'], levels: [1]}));
+    const tags = points.result.membership['taxonomy/arxiv']!;
+    expect(tags.ids.length).toBeGreaterThan(0);
+    const ids = [...tags.ids];
+    const read = await client.artifacts(session.token, {view: 's0', layer: 'taxonomy/arxiv', ids, fields: ['level', 'masked_count']});
+    const rows: {id: bigint; level: number; count: bigint}[] = [];
+    for await (const page of read) {
+      for (let i = 0; i < page.numRows; i++) {
+        rows.push({id: BigInt(page.getChild('tessera_id')!.get(i)), level: Number(page.getChild('level')!.get(i)), count: BigInt(page.getChild('masked_count')!.get(i))});
+      }
+    }
+    expect(rows.map((r) => r.id).sort()).toEqual([...ids].sort());
+    for (const r of rows) expect(r.level).toBe(1);
+    const opened = await client.artifact(session.token, rows[0]!.id, {view: 's0'});
+    expect(opened.maskedCount).toBe(rows[0]!.count);
   });
 
   it('browses a tiered layer from its roots to one root’s children', async (ctx) => {

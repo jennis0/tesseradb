@@ -6,7 +6,7 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
-import {decodeViewport, firstRows, rowOf, splitFrames} from '../src/decode-viewport.mjs';
+import {decodeViewport, firstRows, splitFrames} from '../src/decode-viewport.mjs';
 
 const fixtures = join(import.meta.dirname, '..', '..', 'core', 'test', 'fixtures');
 const fixture = (name: string) => new Uint8Array(readFileSync(join(fixtures, name)));
@@ -29,16 +29,19 @@ describe('the worked decode', () => {
     it(`decodes ${name} to the agreed frames, counts and first ids`, () => {
       const r = decodeViewport(fixture(name));
       expect(r.frames).toEqual(want.frames);
-      expect(r.tiles!.numRows).toBe(want.tiles);
+      expect(r.tiles?.numRows ?? null).toBe(want.tiles);
       expect(r.subCells?.numRows ?? null).toBe(want.sub_cells);
-      expect(r.artifacts?.numRows ?? null).toBe(want.artifacts);
+      const artifactRows = r.artifacts.reduce((n, t) => n + t.numRows, 0);
+      expect(r.artifacts.length === 0 ? null : artifactRows).toBe(want.artifacts);
       expect(r.points.reduce((n, t) => n + t.numRows, 0)).toBe(want.points);
       expect(r.trailer).not.toBeNull();
-      expect(r.trailer!.points).toBe(want.points);
+      // A viewport trailer counts the points, an artifacts trailer the artifact rows.
+      if (r.tiles) expect(r.trailer!.points).toBe(want.points);
+      else expect(r.trailer!.rows).toBe(artifactRows);
 
       const firstPoint = firstRows(r.points, 1)[0];
       expect(firstPoint?.tessera_id ?? null).toBe(want.first_point_tessera_id);
-      const firstArtifact = r.artifacts ? rowOf(r.artifacts, 0) : null;
+      const firstArtifact = firstRows(r.artifacts, 1)[0];
       expect(firstArtifact?.tessera_id ?? null).toBe(want.first_artifact_tessera_id);
     });
   }

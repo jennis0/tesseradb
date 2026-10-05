@@ -7,9 +7,6 @@
  *   `highlighted`, all `uint64`. Exactly one, first.
  * - Kind 2, sub-cells: an Arrow IPC stream of `cell` and `count`, both `uint64`. Present only where
  *   the request asked for an underlay, and schema-only where it asked and no cell had a count.
- * - Kind 5, artifacts: an Arrow IPC stream with one row per served artifact, in the full
- *   projection or the five-column identity projection. At most one, after the tiles frame and
- *   every points frame. Absent where the response serves no artifact.
  * - Kind 3, points: an Arrow IPC stream of `tessera_id` and `code`, both `uint64`, then the
  *   rendered columns, a `highlighted` column where the request carried a highlight, and a
  *   `membership:<layer>` column per layer the response names; a request for the highlight
@@ -27,11 +24,6 @@ export type FramedStreams = {
   points: Uint8Array[];
   /** The kind-2 sub-cells payload, or `null` where the request asked for no underlay. */
   subCells: Uint8Array | null;
-  /**
-   * The kind-5 artifacts payload, or `null` where the response serves no artifact. The server
-   * omits the frame instead of sending it empty, so `null` is the empty set.
-   */
-  artifacts: Uint8Array | null;
   /** The kind-4 trailer's JSON bytes. */
   trailer: Uint8Array;
 };
@@ -63,8 +55,15 @@ export const FRAME_TABLE_HEAD = 9;
  * - Kind 7 and kind 8, as in a records body, each records frame after a table head.
  * - Kind 4, trailer: JSON, exactly one, last. A response cancelled before its first page is a
  *   trailer alone.
+ *
+ * `'artifacts'` is a `/v1/artifacts/viewport` body:
+ *
+ * - Kind 5, artifacts: an Arrow IPC stream of seventeen columns, `layer` to `tile`. First, one for
+ *   the treed layers where it holds a row, then exactly one per tile, of no rows where the tile
+ *   holds none.
+ * - Kind 4, trailer: JSON, exactly one, last.
  */
-export type FrameGrammar = 'viewport' | 'records' | 'aggregate';
+export type FrameGrammar = 'viewport' | 'records' | 'aggregate' | 'artifacts';
 
 const FRAME_HEADER_BYTES = 5;
 
@@ -91,7 +90,6 @@ export class FrameReader {
   private frames = 0;
   private sawTiles = false;
   private sawSubCells = false;
-  private sawArtifacts = false;
   private sawPoints = false;
   private sawTrailer = false;
   /** A records frame has arrived and its page end has not. */
@@ -146,6 +144,10 @@ export class FrameReader {
       if (!this.sawTrailer) throw new Error('aggregate payload has no trailer: the response is incomplete; resume the read from its cursor');
       return;
     }
+    if (this.grammar === 'artifacts') {
+      if (!this.sawTrailer) throw new Error('artifacts payload has no trailer: the response is incomplete; ask for the tiles it did not deliver');
+      return;
+    }
     if (this.grammar === 'records') {
       if (this.frames === 0) throw new Error('records payload has no head frame');
       if (!this.sawTrailer) throw new Error('records payload has no trailer: the response is incomplete; resume the read from its cursor');
@@ -171,6 +173,10 @@ export class FrameReader {
       this.checkAggregate(kind);
       return;
     }
+    if (this.grammar === 'artifacts') {
+      this.checkArtifacts(kind);
+      return;
+    }
     switch (kind) {
       case FRAME_TILES:
         if (this.sawTiles) throw new Error('more than one tiles frame');
@@ -184,15 +190,10 @@ export class FrameReader {
         }
         this.sawSubCells = true;
         break;
-      case FRAME_ARTIFACTS:
-        if (this.sawArtifacts) throw new Error('more than one artifacts frame');
-        this.sawArtifacts = true;
-        break;
       case FRAME_POINTS:
         // Checked here and not only at the end, since a streaming reader decodes this frame now
         // and needs the tiles frame to attribute its points.
         if (!this.sawTiles) throw new Error('a points frame before the tiles frame');
-        if (this.sawArtifacts) throw new Error('a points frame after the artifacts frame');
         this.sawPoints = true;
         break;
       case FRAME_TRAILER:
@@ -232,6 +233,14 @@ export class FrameReader {
       default:
         throw new Error(`unknown frame kind ${kind} at byte ${at}`);
     }
+  }
+
+  /** An artifacts viewport's grammar: artifacts frames, then the trailer. */
+  private checkArtifacts(kind: number): void {
+    const at = this.consumed;
+    if (this.sawTrailer) throw new Error(`a frame after the trailer at byte ${at}`);
+    if (kind === FRAME_TRAILER) this.sawTrailer = true;
+    else if (kind !== FRAME_ARTIFACTS) throw new Error(`unknown frame kind ${kind} at byte ${at}`);
   }
 
   /** An aggregate's grammar: the records grammar, with a table head in place of the response's head. */
@@ -314,7 +323,6 @@ export function splitFramedStreams(buf: Uint8Array): FramedStreams {
   let tiles: Uint8Array | null = null;
   const points: Uint8Array[] = [];
   let subCells: Uint8Array | null = null;
-  let artifacts: Uint8Array | null = null;
   let trailer: Uint8Array | null = null;
   for (const frame of reader.push(buf)) {
     switch (frame.kind) {
@@ -323,9 +331,6 @@ export function splitFramedStreams(buf: Uint8Array): FramedStreams {
         break;
       case FRAME_SUB_CELLS:
         subCells = frame.payload;
-        break;
-      case FRAME_ARTIFACTS:
-        artifacts = frame.payload;
         break;
       case FRAME_POINTS:
         points.push(frame.payload);
@@ -336,5 +341,5 @@ export function splitFramedStreams(buf: Uint8Array): FramedStreams {
     }
   }
   reader.end();
-  return {tiles: tiles!, points, subCells, artifacts, trailer: trailer!};
+  return {tiles: tiles!, points, subCells, trailer: trailer!};
 }

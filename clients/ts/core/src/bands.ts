@@ -231,22 +231,14 @@ type ResponseNaming = {
 };
 
 function nameResponse(result: ViewportResult, table: SessionArtifactTable): {naming: ResponseNaming[]; generation: number; release: () => void} {
-  // Parent links and centroids come from this response's artifacts frame, so a band can be coloured
-  // from the response that carried it.
-  const frameOf = new Map<string, {parentIds: readonly bigint[]; centroid: readonly [number, number] | null; rung: number}>();
-  for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentIds: a.parentIds, centroid: a.centroid, rung: a.rung});
   const naming: ResponseNaming[] = [];
   const held: Uint32Array[] = [];
   const generation = table.generation;
   for (const [layer, column] of Object.entries(result.membership)) {
     const refs: ArtifactRef[] = [];
-    for (let d = 0; d < column.ids.length; d++) {
-      const id = column.ids[d]!;
-      const known = frameOf.get(`${layer} ${id}`);
-      // `rung` is the wire's where the artifacts frame carries the artifact, and absent otherwise; it
-      // is not counted from parent links.
-      refs.push({tesseraId: id, layer, parentIds: known?.parentIds ?? [], centroid: known?.centroid ?? null, rung: known?.rung});
-    }
+    // A tag names an artifact alone. Its level, parents and centroid arrive with the artifact
+    // channel's frames, or from a read by identifier where no frame carries it.
+    for (let d = 0; d < column.ids.length; d++) refs.push({tesseraId: column.ids[d]!, layer, parentIds: []});
     const ordinals = table.take(refs);
     held.push(ordinals);
     const map = new Uint32Array(column.ids.length + 1);

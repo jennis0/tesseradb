@@ -80,32 +80,39 @@ async function viewport(token, body) {
 
 /** Every artifact this principal is served for these layers, as `layer::key → row`. */
 async function artifacts(token, layers) {
-  // `k = 0` asks for no points, so nothing depends on which documents were sampled.
-  const frame = (await viewport(token, {k: 0, layers})).find((f) => f.kind === 5);
+  const meta = await metaOf(token);
+  // The whole map as one tile, at the deployment's largest quota, so each served artifact is listed.
+  const r = await fetch(`${viewer}/v1/artifacts/viewport`, {
+    method: 'POST',
+    headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+    body: JSON.stringify({view: meta.views[0].id, zoom: 0, tiles: [0], layers, per_tile: meta.selection.max_artifacts_per_tile})
+  });
+  if (!r.ok) throw new Error(`artifacts viewport: ${r.status} ${await r.text()}`);
   const out = new Map();
-  if (!frame) return out;
-  const table = tableFromIPC(frame.payload);
-  const layerCol = table.getChild('layer');
-  const keys = table.getChild('key');
-  const ids = table.getChild('tessera_id').toArray();
-  const masked = table.getChild('masked_count').toArray();
-  const content = table.getChild('content');
-  for (let i = 0; i < ids.length; i++) {
-    const values = content ? [...(content.get(i) ?? [])].map(String) : [];
-    out.set(`${layerCol.get(i)}::${keys.get(i)}`, {
-      layer: String(layerCol.get(i)),
-      key: String(keys.get(i)),
-      id: ids[i],
-      masked: Number(masked[i]),
-      text: values[0] ?? null
-    });
+  for (const frame of frames(new Uint8Array(Buffer.from(await r.arrayBuffer()))).filter((f) => f.kind === 5)) {
+    const table = tableFromIPC(frame.payload);
+    const layerCol = table.getChild('layer');
+    const keys = table.getChild('key');
+    const ids = table.getChild('tessera_id').toArray();
+    const masked = table.getChild('masked_count').toArray();
+    const content = table.getChild('content');
+    for (let i = 0; i < ids.length; i++) {
+      const values = [...(content.get(i) ?? [])].map(String);
+      out.set(`${layerCol.get(i)}::${keys.get(i)}`, {
+        layer: String(layerCol.get(i)),
+        key: String(keys.get(i)),
+        id: ids[i],
+        masked: Number(masked[i]),
+        text: values[0] ?? null
+      });
+    }
   }
   return out;
 }
 
 /** `k` served point identifiers, which the operator API accepts. */
 async function points(token, k) {
-  // Kind 3 is the points frame and kind 5 the artifacts frame, each a complete Arrow stream.
+  // Kind 3 is the points frame, a complete Arrow stream.
   const frame = (await viewport(token, {k})).find((f) => f.kind === 3);
   if (!frame) throw new Error('the viewport served no points frame');
   return [...tableFromIPC(frame.payload).getChild('tessera_id').toArray()];

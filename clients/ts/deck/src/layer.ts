@@ -688,8 +688,7 @@ export type Outline = {parts: Part[]; source: OutlineSource};
 
 /**
  * A served artifact's outline in world space, with the served vertices unsmoothed: the parts of
- * `fetched` (the shape fetched by identifier) where given, else of the artifact's own shape, else
- * its box, else null. `source` says which, since a square shape and a box both have four corners
+ * `fetched` (the shape fetched by identifier) where given, else its box, else null. `source` says which, since a square shape and a box both have four corners
  * and are drawn differently.
  *
  * A part is an outer ring and its holes. A ring of fewer than three vertices has no area and is
@@ -699,7 +698,7 @@ export type Outline = {parts: Part[]; source: OutlineSource};
 export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
   const w = gridToWorld;
   const parts: Part[] = [];
-  for (const rings of fetched ?? a.shape ?? []) {
+  for (const rings of fetched ?? []) {
     const outer = rings[0];
     if (!outer || outer.length < 3) continue;
     parts.push(rings.filter((ring) => ring.length >= 3).map((ring) => ring.map(gridToWorldXY)));

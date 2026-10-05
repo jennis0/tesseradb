@@ -108,18 +108,18 @@ describe('a streamed viewport response', () => {
     }
   });
 
-  it('hands over the artifacts frame that follows the points with the response', async () => {
-    // A captured body naming a layer: its points carry a membership column and its artifacts
-    // frame follows them.
+  it('hands over a captured body naming a layer whole, its membership column on the points', async () => {
     const body = new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin')));
     const whole = decodeViewport(body);
-    expect(whole.artifacts.length).toBeGreaterThan(0);
+    expect(Object.keys(whole.membership)).toEqual(['clusters/kmeans']);
     vi.stubGlobal('fetch', async () => chunked(body, 97, {headers: HEADERS}));
     const parts: ViewportPart[] = [];
-    const response = await ask(client(), (p) => parts.push(p));
+    await ask(client(), (p) => parts.push(p));
     expect(parts.length).toBeGreaterThan(0);
     expect(parts.flatMap((p) => [...p.result.ids])).toEqual([...whole.ids]);
-    expect(response.result.artifacts).toEqual(whole.artifacts);
+    expect(parts.flatMap((p) => [...p.result.membership['clusters/kmeans']!.index].map((i, n) => (i === 0 ? null : p.result.membership['clusters/kmeans']!.ids[i - 1]!)))).toEqual(
+      [...whole.membership['clusters/kmeans']!.index].map((i) => (i === 0 ? null : whole.membership['clusters/kmeans']!.ids[i - 1]!))
+    );
   });
 
   it('hands over the counts and the first tiles before the last points frame has arrived', async () => {

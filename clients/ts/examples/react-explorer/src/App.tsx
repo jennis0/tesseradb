@@ -51,7 +51,8 @@ function Session({user}: {user: string}) {
     if (!r.ok) throw new Error(`token: ${r.status}`);
     return (await r.json()) as {token: string; expiresAt: number};
   }, [user]);
-  const store = useTesseraStore({viewerUrl: location.origin, authorise});
+  // The most clusters each level shows in one tile of the map, largest first.
+  const store = useTesseraStore({viewerUrl: location.origin, authorise, artifacts: {perTile: 50}});
   const status = useProjection(store, 'status');
   if (!store) return null;
   return (

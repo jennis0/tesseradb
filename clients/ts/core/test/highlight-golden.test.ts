@@ -1,7 +1,8 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
-import {decodeViewport} from '../src/decode.js';
+import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
+import {FRAME_ARTIFACTS, FrameReader} from '../src/frame.js';
 import type {BrowsePage} from '../src/types.js';
 
 /**
@@ -9,10 +10,12 @@ import type {BrowsePage} from '../src/types.js';
  *
  * Recorded by `scripts/capture-golden.mjs` from `tessera serve` over the notebook corpus. The three
  * viewport bodies are one request in three shapes: zoom 3 over the whole of view `s0`, `k = 20`,
- * the taxonomy layer with `computed: ["centroid"]`, and `filters` on `archive in [cs, math]`, under
+ * the taxonomy layer tagging the points, and `filters` on `archive in [cs, math]`, under
  * a principal seeing about half the corpus. Two carry `highlight` on `archive in [cs]`, one of them
  * under `point_rows = "highlight"`, and the third carries none. The capture checks that the three
  * counts are distinct and above zero, so a decoder reading the wrong column fails.
+ * `artifacts-highlight.bin` is the taxonomy's artifacts under the same filter and highlight, at
+ * zoom 1, from `POST /v1/artifacts/viewport`.
  */
 
 const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
@@ -45,18 +48,22 @@ describe('the three highlighted columns, off a served body', () => {
   });
 
   it('carries a bit per served artifact, beside the filter’s and different from it', () => {
-    const r = decodeViewport(fixture('viewport-highlight.bin'));
-    const matched = r.artifacts.filter((a) => a.matched === true).length;
-    const lit = r.artifacts.filter((a) => a.highlighted === true).length;
+    const reader = new FrameReader('artifacts');
+    const artifacts = reader
+      .push(fixture('artifacts-highlight.bin'))
+      .filter((f) => f.kind === FRAME_ARTIFACTS)
+      .flatMap((f) => decodeArtifactsFrame(f.payload).artifacts);
+    const matched = artifacts.filter((a) => a.matched === true).length;
+    const lit = artifacts.filter((a) => a.highlighted === true).length;
     // The filter admits some and not all; the highlight lights some of those and not all of them.
     expect(matched).toBeGreaterThan(0);
-    expect(matched).toBeLessThan(r.artifacts.length);
+    expect(matched).toBeLessThan(artifacts.length);
     expect(lit).toBeGreaterThan(0);
     expect(lit).toBeLessThan(matched);
     // The bit is the conjunction with the filter, so nothing the filter refused is lit.
-    expect(r.artifacts.every((a) => !a.highlighted || a.matched)).toBe(true);
+    expect(artifacts.every((a) => !a.highlighted || a.matched)).toBe(true);
     // Not null where the request carried a highlight: every row was asked.
-    expect(r.artifacts.every((a) => a.highlighted !== null)).toBe(true);
+    expect(artifacts.every((a) => a.highlighted !== null)).toBe(true);
   });
 
   it('answers a request with no highlight by the identity, and sends no bits at all', () => {
@@ -64,11 +71,8 @@ describe('the three highlighted columns, off a served body', () => {
     // `highlighted` is present and equal to `matched` where no highlight was asked.
     expect(sum(r.tiles, 'highlighted')).toBe(sum(r.tiles, 'matched'));
     for (const t of r.tiles) expect(t.highlighted).toBe(t.matched);
-    // The points column is absent rather than all false, and the artifacts' bit is null: no question
-    // was asked.
+    // The points column is absent rather than all false: no question was asked.
     expect(r.highlighted).toBeNull();
-    expect(r.artifacts.every((a) => a.highlighted === null)).toBe(true);
-    expect(r.artifacts.some((a) => a.matched !== null)).toBe(true);
   });
 });
 
