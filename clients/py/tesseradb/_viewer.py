@@ -26,17 +26,19 @@ if TYPE_CHECKING:
 #: How near expiry a held token may come before the next read gets another, in seconds.
 TOKEN_MARGIN = 60.0
 
-#: The `/v1/viewport` fields the server reads as integers.
-_VIEWPORT_INTEGERS = {"k", "artifact_budget", "underlay_offset"}
+#: The `/v1/viewport` and `/v1/artifacts/viewport` fields the server reads as integers.
+_VIEWPORT_INTEGERS = {"k", "artifact_budget", "underlay_offset", "per_tile", "budget"}
 
-#: The frame kinds of a `/v1/viewport` body. An unknown kind is refused rather than skipped, since
-#: skipping one could drop data and present what is left as the whole answer.
+#: The frame kinds of a `/v1/viewport` body, and the artifacts frame of a
+#: `/v1/artifacts/viewport` body, which ends with the same trailer. An unknown kind is refused
+#: rather than skipped, since skipping one could drop data and present what is left as the whole
+#: answer.
 FRAME_TILES = 1
 FRAME_SUB_CELLS = 2
 FRAME_POINTS = 3
 FRAME_TRAILER = 4
 FRAME_ARTIFACTS = 5
-_KINDS = {FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER, FRAME_ARTIFACTS}
+_KINDS = {FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER}
 
 #: The frame kinds of a `POST /v1/items` or `POST /v1/artifacts` body: a head, records frames
 #: each followed by a page end, and the trailer, whose kind is the viewport's.
@@ -291,6 +293,35 @@ def _no_points():
     return pa.table({"tessera_id": pa.array([], pa.uint64()), "code": pa.array([], pa.uint64())})
 
 
+def _no_artifacts():
+    """The table of an artifacts answer that served no frame: its seventeen columns, no rows."""
+    import pyarrow as pa
+
+    flags = pa.list_(pa.field("item", pa.uint64(), nullable=False))
+    texts = pa.list_(pa.field("item", pa.string()))
+    return pa.schema(
+        [
+            pa.field("layer", pa.dictionary(pa.uint16(), pa.string()), nullable=False),
+            pa.field("tessera_id", pa.uint64(), nullable=False),
+            ("key", pa.string()),
+            pa.field("masked_count", pa.uint64(), nullable=False),
+            ("centroid_x", pa.float64()),
+            ("centroid_y", pa.float64()),
+            ("box_min_x", pa.uint32()),
+            ("box_min_y", pa.uint32()),
+            ("box_max_x", pa.uint32()),
+            ("box_max_y", pa.uint32()),
+            pa.field("content", texts, nullable=False),
+            pa.field("parent_ids", flags, nullable=False),
+            pa.field("rung", pa.uint32(), nullable=False),
+            ("matched", pa.bool_()),
+            ("highlighted", pa.bool_()),
+            ("target", pa.uint64()),
+            ("tile", pa.uint32()),
+        ]
+    ).empty_table()
+
+
 def _tile_counts(counted) -> dict:
     """The tiles frame's counts, as a pyarrow table, summed over its tiles."""
     return {
@@ -353,15 +384,17 @@ def _all_of(expressions: Sequence[dict]) -> Optional[dict]:
 
 
 class Sample:
-    """The points a map draws at one zoom, with the annotations drawn beside them.
+    """The points a map draws at one zoom.
 
     It reads as its points table: `num_rows`, `column()`, `schema` and `to_pandas()` all reach
     it, and `points` names it. The table holds `tessera_id`, `code` (the point's position, on a
-    grid of 2^32 steps per axis across the view) and every column declared with `render=True`.
+    grid of 2^32 steps per axis across the view), every column declared with `render=True`, and a
+    `membership:<layer>` column for each layer the sample named: the `tessera_id` of the
+    annotation of that layer holding the point, or null. `Viewer.artifacts` with `ids=` reads
+    those annotations, and `Viewer.viewport_artifacts` the annotations of each map tile.
 
-    `artifacts` is the annotations served with the points, as a pyarrow table, and `sub_cells`
-    the finer counts that `underlay_offset` asks for. Each is `None` when the answer carried
-    none.
+    `sub_cells` is the finer counts that `underlay_offset` asks for, or `None` when the answer
+    carried none.
 
     A category column holds the value's key, as a dictionary column, where the server sends a
     code. A value this reader may not see is null.
@@ -374,14 +407,13 @@ class Sample:
     request that was sent, and `tessera.trailer` the server's closing summary.
     """
 
-    def __init__(self, points, artifacts=None, sub_cells=None):
+    def __init__(self, points, sub_cells=None):
         self.points = points
-        self.artifacts = artifacts
         self.sub_cells = sub_cells
 
     def __getattr__(self, name: str):
         # Guards against recursion while `__init__` has not yet set these.
-        if name in ("points", "artifacts", "sub_cells"):
+        if name in ("points", "sub_cells"):
             raise AttributeError(name)
         return getattr(self.points, name)
 
@@ -393,8 +425,6 @@ class Sample:
 
     def __repr__(self) -> str:
         served = [f"{self.points.num_rows} points"]
-        if self.artifacts is not None:
-            served.append(f"{self.artifacts.num_rows} artifacts")
         if self.sub_cells is not None:
             served.append(f"{self.sub_cells.num_rows} sub-cells")
         return f"Sample({', '.join(served)})"
@@ -532,9 +562,7 @@ class Selection:
         highlight: Optional[dict] = None,
         layers: Any = None,
         levels: Any = None,
-        computed: Optional[Sequence[str]] = None,
         artifact_budget: Optional[int] = None,
-        artifact_rows: Optional[str] = None,
         point_rows: Union[str, Sequence[str], None] = None,
         underlay_offset: Optional[int] = None,
         pin: Any = None,
@@ -553,11 +581,12 @@ class Selection:
           Without it the sample covers the box, or the whole view if there is no box.
         - `highlight`: a second filter. The points drawn are the same, and each carries a
           `highlighted` column saying whether it matches.
-        - `layers`: which annotation layers to include, as a list of names, or `"all"`. A layer
-          is a set of annotations over the items, such as clusters or regions. Without it the
-          sample has none. `levels` chooses which levels of a layered hierarchy, `computed`
-          which of `centroid`, `box` and `shape` to compute, `artifact_budget` the most
-          annotations to return, and `artifact_rows="identity"` a short set of their columns.
+        - `layers`: the annotation layers whose annotations tag the points, as a list of names,
+          or `"all"`: each adds a `membership:<layer>` column. A layer is a set of annotations
+          over the items, such as clusters or regions. `levels` chooses which levels of a
+          layered hierarchy tag them, and `artifact_budget` the most annotations a nested layer
+          tags them with, using coarser ones in place of finer. The annotations themselves come
+          from `Viewer.viewport_artifacts`.
         - `underlay_offset`: also count the items in tiles this many levels finer than `zoom`,
           returned as `sub_cells`.
         - `point_rows`: which columns each point carries. A list of rendered columns returns
@@ -569,7 +598,7 @@ class Selection:
           the data has changed since.
         - `on_counts`: a function called once with the per-tile counts as a pyarrow table, and
           the `sub_cells` table or `None`, as soon as they arrive. The server sends them before
-          the annotations and the points, so a caller can show them while the rest is read.
+          the points, so a caller can show them while the rest is read.
 
         Every option is sent only when given, so the server's own setting applies otherwise.
 
@@ -589,9 +618,7 @@ class Selection:
             ("highlight", highlight),
             ("layers", layers),
             ("levels", levels),
-            ("computed", None if computed is None else list(computed)),
             ("artifact_budget", artifact_budget),
-            ("artifact_rows", artifact_rows),
             (
                 "point_rows",
                 point_rows
@@ -617,7 +644,6 @@ class Selection:
                 if on_counts is not None and counted and tiles is not None:
                     on_counts(tiles, sub_cells)
         frames = _checked(frames)
-        artifacts = _tables([p for kind, p in frames if kind == FRAME_ARTIFACTS])
         # A points frame with no rows is still the server's schema, so test for None, not falsity.
         points = _tables([p for kind, p in frames if kind == FRAME_POINTS])
         if points is None:
@@ -642,7 +668,6 @@ class Selection:
                     "tessera.request": json.dumps(request),
                 }
             ),
-            artifacts,
             sub_cells,
         )
 
@@ -684,6 +709,7 @@ class Selection:
         layers: Optional[Sequence[str]] = None,
         height: int = 480,
         size_by: Optional[str] = None,
+        artifacts_per_tile: Optional[int] = None,
     ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
@@ -696,6 +722,9 @@ class Selection:
           none.
         - `height`: the widget's height in pixels.
         - `size_by`: a number column to size points by; `None` draws them at one size.
+        - `artifacts_per_tile`: the most annotations each level of a layer shows in one tile of
+          the map, largest first, at most the server's `max_artifacts_per_tile`. Without it the
+          map draws no annotation and says so.
 
         Items outside the box are still drawn when they are in frame.
 
@@ -709,6 +738,7 @@ class Selection:
             height=height,
             bbox=self.box,
             size_by=size_by,
+            artifacts_per_tile=artifacts_per_tile,
         )
 
     def _expression(self) -> Optional[dict]:
@@ -808,7 +838,8 @@ class Viewer:
         - `height`: the widget's height in pixels.
         - `size_by`: a number column to size points by; `None` draws them at one size.
 
-        Other keywords go to `Map` unchanged, such as `bbox` to frame the camera on a box. The
+        Other keywords go to `Map` unchanged, such as `bbox` to frame the camera on a box, and
+        `artifacts_per_tile`, without which the map draws no annotation. The
         page in the browser fetches its own data from the database with this reader's token. The
         token is sent to the page as a message and is never saved with the notebook.
         """
@@ -950,6 +981,7 @@ class Viewer:
         level: Optional[int] = None,
         parent: Any = None,
         q: Optional[str] = None,
+        ids: Optional[Sequence[Any]] = None,
         filters: Optional[dict] = None,
         keep_unmatched: Optional[bool] = None,
         count: Optional[bool] = None,
@@ -975,6 +1007,9 @@ class Viewer:
         - `parent`: only the children of this artifact, by its `tessera_id`.
         - `q`: only the artifacts whose key or first text contains this, ignoring case. It cannot
           be combined with `parent`.
+        - `ids`: only the artifacts these `tessera_id`s name, such as the values of a sample's
+          `membership:<layer>` column. One this reader is not served has no row, as one naming
+          nothing does.
         - `filters`: only the artifacts with an item this reader may see that matches. Each row
           then has `matched_count`, how many do.
         - `keep_unmatched`: with `filters`, every artifact, those with no matching item included.
@@ -991,6 +1026,8 @@ class Viewer:
             "level": level,
             "parent": None if parent is None else str(parent),
             "q": q,
+            # Decimal strings: an id past 2^53 is not exact as a JSON number.
+            "ids": None if ids is None else [str(int(one)) for one in ids],
             "filters": filters,
             "keep_unmatched": keep_unmatched,
             "count": count,
@@ -1000,6 +1037,104 @@ class Viewer:
             "compression": compression,
         }
         return self._bulk_read("artifacts", request, given, batches)
+
+    def viewport_artifacts(
+        self,
+        view: str,
+        zoom: int,
+        per_tile: int,
+        *,
+        tiles: Optional[Sequence[int]] = None,
+        bbox: Optional[Sequence[float]] = None,
+        layers: Any = None,
+        levels: Any = None,
+        computed: Optional[Sequence[str]] = None,
+        filters: Optional[dict] = None,
+        highlight: Optional[dict] = None,
+        budget: Optional[int] = None,
+        pin: Any = None,
+        on_tile: Optional[Callable[[Any], None]] = None,
+    ):
+        """The annotations in each map tile at `zoom` that this reader is served, as one pyarrow
+        table with a `tile` column.
+
+        A tile holds an annotation where the annotation has an item this reader may see inside
+        it. Each layer's levels give at most `per_tile` annotations a tile, the largest first, and
+        an annotation in several tiles has a row in each, with the same counts and geometry: they
+        are over all its items this reader may see, never over the tile.
+
+        - `view`: the view, as `meta()` names it.
+        - `zoom`: the map's zoom, from 0 (the whole view as one tile) to 16.
+        - `per_tile`: the most annotations each level of a layer gives one tile, at most the
+          server's `max_artifacts_per_tile`.
+        - `tiles`: these tiles only, each by its number at `zoom` in Z order, in this order.
+          Without it, and without `bbox`, every tile of the view.
+        - `bbox`: the tiles touching this box, `(min_x, min_y, max_x, max_y)` in the view's
+          coordinates, in place of `tiles`.
+        - `layers`: the layers to read, as a list of names, or `"all"`.
+        - `levels`: which levels of a layered hierarchy, as `Selection.sample` takes them.
+        - `computed`: which of `"centroid"` and `"box"` to compute; `[]` is neither.
+        - `filters`, `highlight`: answered as each row's `matched` and `highlighted`, inside its
+          tile. They change nothing else.
+        - `budget`: the most annotations a nested layer gives, using coarser ones in place of
+          finer. Its rows have a null `tile`: a nested layer is answered over every tile asked.
+        - `pin`: the `x-tessera-pin` value from an earlier answer.
+        - `on_tile`: a function called with each tile's rows as a pyarrow table, as they arrive.
+
+        Every option is sent only when given, so the server's own setting applies otherwise. The
+        columns are `layer`, `tessera_id`, `key`, `masked_count`, `centroid_x`, `centroid_y`,
+        `box_min_x`, `box_min_y`, `box_max_x`, `box_max_y` (positions on the grid of 2^32 steps
+        per axis that a sample's `code` uses), `content`, `parent_ids`, `rung` (the level),
+        `matched`, `highlighted`, `target` and `tile`. The schema metadata `tessera.trailer` is
+        the server's closing summary and `tessera.request` the request sent.
+
+            v.viewport_artifacts("papers", 2, per_tile=20, layers=["topics"]).to_pandas()
+        """
+        import pyarrow as pa
+
+        request: dict = {"view": view, "zoom": int(zoom), "per_tile": int(per_tile)}
+        if tiles is not None:
+            request["tiles"] = [int(tile) for tile in tiles]
+        else:
+            request["bbox"] = [float(v) for v in (bbox or _extent(self.meta(), view))]
+        for name, value in (
+            ("layers", layers),
+            ("levels", levels),
+            ("computed", None if computed is None else list(computed)),
+            ("filters", filters),
+            ("highlight", highlight),
+            ("budget", budget),
+            ("pin", pin),
+        ):
+            if value is not None:
+                request[name] = int(value) if name in _VIEWPORT_INTEGERS else value
+        tables = []
+        trailer = None
+        with self._open("POST", "/v1/artifacts/viewport", request) as response:
+            for kind, payload in _frames(response):
+                if trailer is not None:
+                    raise Refusal("artifacts viewport: a frame after the trailer")
+                if kind == FRAME_ARTIFACTS:
+                    table = _tables([payload])
+                    tables.append(table)
+                    if on_tile is not None:
+                        on_tile(table)
+                elif kind == FRAME_TRAILER:
+                    trailer = json.loads(bytes(payload).decode())
+                else:
+                    raise Refusal(f"artifacts viewport: unknown frame kind {kind}")
+        if trailer is None:
+            raise Refusal("artifacts viewport: no trailer, so the response is incomplete")
+        rows = sum(table.num_rows for table in tables)
+        if trailer.get("rows") != rows or trailer.get("frames") != len(tables):
+            raise Refusal(
+                f"artifacts viewport: the trailer says {trailer.get('rows')} rows in "
+                f"{trailer.get('frames')} frames and the body carries {rows} in {len(tables)}"
+            )
+        joined = pa.concat_tables(tables) if tables else _no_artifacts()
+        return joined.replace_schema_metadata(
+            {"tessera.trailer": json.dumps(trailer), "tessera.request": json.dumps(request)}
+        )
 
     def _bulk_read(self, route: str, request: dict, given: dict, batches: bool):
         """A read of `POST /v1/<route>` asking `request` and every `given` field that is not

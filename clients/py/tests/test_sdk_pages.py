@@ -194,7 +194,7 @@ def test_new_papers_with_a_cluster_and_a_label_are_served(served, corpus):
 
 
 def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, corpus):
-    """§10.3's last step: the label's own text, as the viewport's artifacts frame carries it."""
+    """§10.3's last step: the label's own text, as the artifacts viewport carries it."""
     db = notebook(served, corpus)
     insert_the_new_papers(db)
     insert_the_new_cluster(db)
@@ -1024,8 +1024,9 @@ def label_members(key: str = "l0", n: int = 5, ranked: bool = True) -> pa.Table:
     )
 
 
-def artifact_rows_of(db, view: str = "map", frame=None, terms=None) -> list[tuple]:
-    """The kind-5 artifacts frame of a whole-extent viewport: layer, key, content, masked count."""
+def artifact_tables_of(db, view: str = "map", frame=None, terms=None) -> list[dict]:
+    """The artifacts of every layer over the whole of a view at zoom 0, one tile at the largest
+    quota the server takes, as each frame's columns."""
     import io
 
     import pyarrow.ipc as ipc
@@ -1033,28 +1034,29 @@ def artifact_rows_of(db, view: str = "map", frame=None, terms=None) -> list[tupl
     from conftest import post
 
     box = [-5.0, -5.0, 40.0, 40.0] if frame is None else list(frame)
+    per_tile = db.meta()["selection"]["max_artifacts_per_tile"]
     content = post(
-        db.viewer_url + "/v1/viewport",
+        db.viewer_url + "/v1/artifacts/viewport",
         db.token(terms).token,
-        {"view": view, "zoom": 0, "bbox": box, "k": 16, "layers": "all"},
+        {"view": view, "zoom": 0, "bbox": box, "layers": "all", "per_tile": per_tile},
     )
     at = 0
-    rows: list[tuple] = []
+    tables: list[dict] = []
     while at + 5 <= len(content):
         kind = content[at]
         length = int.from_bytes(content[at + 1 : at + 5], "little")
         payload = content[at + 5 : at + 5 + length]
         at += 5 + length
         if kind == 5:
-            table = ipc.open_stream(io.BytesIO(payload)).read_all().to_pydict()
-            rows = list(
-                zip(
-                    table["layer"],
-                    table["key"],
-                    table["content"],
-                    table["masked_count"],
-                )
-            )
+            tables.append(ipc.open_stream(io.BytesIO(payload)).read_all().to_pydict())
+    return tables
+
+
+def artifact_rows_of(db, view: str = "map", frame=None, terms=None) -> list[tuple]:
+    """Each artifact of `artifact_tables_of`: layer, key, content, masked count."""
+    rows: list[tuple] = []
+    for table in artifact_tables_of(db, view, frame, terms):
+        rows += zip(table["layer"], table["key"], table["content"], table["masked_count"])
     return rows
 
 
@@ -1066,31 +1068,12 @@ def artifact_targets_of(db, view: str = "map", frame=None) -> dict[tuple[str, st
     joins a label to its cluster; the masked count beside it is the label's own and says nothing
     about which cluster it describes.
     """
-    import io
-
-    import pyarrow.ipc as ipc
-
-    from conftest import post
-
-    box = [-5.0, -5.0, 40.0, 40.0] if frame is None else list(frame)
-    content = post(
-        db.viewer_url + "/v1/viewport",
-        db.token().token,
-        {"view": view, "zoom": 0, "bbox": box, "k": 16, "layers": "all"},
-    )
-    at = 0
     out: dict[tuple[str, str], tuple[int, int | None]] = {}
-    while at + 5 <= len(content):
-        kind = content[at]
-        length = int.from_bytes(content[at + 1 : at + 5], "little")
-        payload = content[at + 5 : at + 5 + length]
-        at += 5 + length
-        if kind == 5:
-            table = ipc.open_stream(io.BytesIO(payload)).read_all().to_pydict()
-            for layer, key, tessera_id, target in zip(
-                table["layer"], table["key"], table["tessera_id"], table["target"]
-            ):
-                out[(layer, key)] = (tessera_id, target)
+    for table in artifact_tables_of(db, view, frame):
+        for layer, key, tessera_id, target in zip(
+            table["layer"], table["key"], table["tessera_id"], table["target"]
+        ):
+            out[(layer, key)] = (tessera_id, target)
     return out
 
 

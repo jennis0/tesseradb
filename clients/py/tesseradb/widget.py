@@ -100,6 +100,9 @@ class Map(anywidget.AnyWidget):
       `"overlay"` draws the map across the whole widget with the controls floating over it.
     - `title_field`: the field whose value titles a point in the hover and the item card.
       `None`, the default, titles a point by its id.
+    - `artifacts_per_tile`: the most annotations each level of a layer shows in one tile of the
+      map, largest first, at most the server's `max_artifacts_per_tile`. `None`, the default,
+      draws no annotation, and the map says what to set.
 
     Read the widget's attributes in a later cell:
 
@@ -114,7 +117,7 @@ class Map(anywidget.AnyWidget):
     - `filters`, `layers`, `colour_by`, `size_by`, `size_min`, `size_max`, `size_scale`: as the
       map shows them. Setting one redraws the map.
     - `last_error`: why the page last refused something set here, or `None`.
-    - `url`, `height`, `explorer_layout`, `title_field`: as given.
+    - `url`, `height`, `explorer_layout`, `title_field`, `artifacts_per_tile`: as given.
     - `tokens_sent`: how many tokens the kernel has sent the page.
 
     `view`, `bbox`, `filters`, `layers`, `colour_by` and the size settings change when the map
@@ -146,6 +149,8 @@ class Map(anywidget.AnyWidget):
     height = traitlets.Int(480).tag(sync=True)
     # The record field that titles a point in the hover and the item card; `None` titles it by id.
     title_field = traitlets.Unicode(None, allow_none=True).tag(sync=True)
+    # The store's quota of annotations per level per tile; `None` draws none.
+    artifacts_per_tile = traitlets.Int(None, allow_none=True).tag(sync=True)
     # Both ways, synced up at the settle.
     bbox = traitlets.List(traitlets.Float(), minlen=4, maxlen=4, allow_none=True, default_value=None).tag(sync=True)
     # `None` leaves the explorer's own default; `[]` is none; a list is exactly those (with their
@@ -182,6 +187,7 @@ class Map(anywidget.AnyWidget):
         height: int = 480,
         explorer_layout: str = "docked",
         title_field: Optional[str] = None,
+        artifacts_per_tile: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         if token is None:
@@ -214,6 +220,7 @@ class Map(anywidget.AnyWidget):
             height=height,
             explorer_layout=explorer_layout,
             title_field=title_field,
+            artifacts_per_tile=artifacts_per_tile,
             _esm=bundle.read_text(encoding="utf-8"),
             **kwargs,
         )

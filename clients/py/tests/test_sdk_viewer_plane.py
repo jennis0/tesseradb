@@ -1,6 +1,6 @@
 """The viewer plane's verbs from Python, against a served database.
 
-What is asked for through the HTTP API is asked for here: the artifacts a sample serves, the
+What is asked for through the HTTP API is asked for here: the artifacts each tile serves, the
 drill-down on one of them, the highlight that lights a served set without moving it, and the
 control-plane verbs that undo a declaration or end a deletion. The bulk reads are in
 `test_sdk_records.py`.
@@ -30,22 +30,39 @@ def counts(table) -> dict:
     return json.loads(table.schema.metadata[b"tessera.counts"])
 
 
-# ---------------------------------------------------------------------------- the artifacts frame
+# ------------------------------------------------------------------------ the artifacts by tile
 
 
-def test_a_sample_serves_the_artifacts_of_the_layers_it_was_asked_for(db):
-    """A layer published from Python is read back from Python: the frame beside the points."""
-    served = db.view("map").sample(layers="all")
-    assert served.artifacts is not None
-    assert served.artifacts.num_rows == 1
-    rows = served.artifacts.to_pylist()
-    assert rows[0]["layer"] == "clusters"
-    assert rows[0]["masked_count"] == 20
+def test_the_tiles_serve_the_artifacts_of_the_layers_asked_for(db):
+    """A layer published from Python is read back from Python, a row in each tile it has an item
+    in, with the same count in each."""
+    tiles = []
+    served = db.viewport_artifacts("map", 1, per_tile=5, layers="all", on_tile=tiles.append)
+    assert served.num_rows > 0
+    assert len(tiles) == 4
+    assert {row["layer"] for row in served.to_pylist()} == {"clusters"}
+    assert {row["masked_count"] for row in served.to_pylist()} == {20}
+    assert len({row["tessera_id"] for row in served.to_pylist()}) == 1
+    assert {row["tile"] for row in served.to_pylist()} <= {0, 1, 2, 3}
+    assert sum(table.num_rows for table in tiles) == served.num_rows
 
 
-def test_a_sample_asked_for_no_layer_carries_no_artifacts_frame(db):
-    """Absent, never empty: a response that served no artifact sends no frame of that kind."""
-    assert db.view("map").sample(layers=[]).artifacts is None
+def test_the_tiles_asked_for_no_layer_serve_no_artifact(db):
+    """A tile is answered whether it holds an artifact or not, with the same columns."""
+    served = db.viewport_artifacts("map", 0, per_tile=5, layers=[])
+    assert served.num_rows == 0
+    assert served.column_names[-1] == "tile"
+
+
+def test_a_sample_tags_its_points_and_the_tags_are_read_by_identifier(db):
+    """The points of a layer named carry its column, and a read by those identifiers is the
+    artifacts the tags name."""
+    sample = db.view("map").sample(layers=["clusters"])
+    tags = {tag for tag in sample.column("membership:clusters").to_pylist() if tag is not None}
+    assert len(tags) == 1
+    read = db.viewer().artifacts("map", "clusters", ["masked_count"], ids=[*tags, 1])
+    assert read.column("tessera_id").to_pylist() == list(tags)
+    assert read.column("masked_count").to_pylist() == [20]
 
 
 def test_a_sample_reads_as_its_points_table(db):
@@ -178,7 +195,7 @@ def test_compact_is_accepted(db):
 def test_a_layer_is_dropped_and_its_name_is_not_freed(db):
     """Declare has an inverse, and the name it tombstones is refused to a later declaration."""
     db.drop_layer("clusters")
-    assert db.view("map").sample(layers="all").artifacts is None
+    assert db.viewport_artifacts("map", 0, per_tile=5, layers="all").num_rows == 0
     assert "clusters" not in [layer["name"] for layer in db.meta()["layers"]]
 
 
