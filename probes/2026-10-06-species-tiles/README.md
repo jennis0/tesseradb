@@ -84,3 +84,45 @@ cd $W && DEPLOYMENT=/home/joe/code/tessera/data/ladder/gbif-64p/bench-species-co
   python3 probes/2026-10-06-species-tiles/tile_phases.py $W/target/release/tessera $RUN column.json
 git apply -R probes/2026-10-06-species-tiles/tprof.patch
 ```
+
+## The other routes that read the species level
+
+`other_routes.py`, with one binary (a12c2824, no counters) on both bundles. The server starts on a
+fresh cache with the bundle's pages evicted. "First" is each viewer's first ask of the route, and
+"warm" is the median of five more. `artifact by id x20` is twenty requests in a row. Measured at
+00:40 BST with the load average at 6 to 8.
+
+| viewer | route | rows: first / warm ms | column: first / warm ms |
+|---|---|---:|---:|
+| 1% | browse search, page 1 | 105 / 53 | 12 / 13 |
+| 1% | browse search, filtered | 99 / 72 | 42 / 33 |
+| 1% | browse children, filtered | 58 / 53 | 23 / 25 |
+| 1% | aggregate by species | 35 / 36 | 9 / 9 |
+| 1% | artifact by id x20 | 14 / 13 | 396 / 14 |
+| 25% | browse search, page 1 | 102 / 99 | 68 / 66 |
+| 25% | browse search, filtered | 214 / 216 | 130 / 122 |
+| 25% | aggregate by species | 99 / 90 | 68 / 68 |
+| 25% | artifact by id x20 | 42 / 15 | 369 / 14 |
+| 25% | bulk read 100 ids | 243 / 60 | 87 / 1 |
+| 100% | browse search, page 1 | 265 / 296 | 251 / 246 |
+| 100% | browse search, filtered | 806 / 752 | 567 / 513 |
+| 100% | browse children, filtered | 538 / 505 | 233 / 218 |
+| 100% | aggregate by species | 178 / 190 | 256 / 268 |
+| 100% | aggregate by species, filtered | 124 / 115 | 68 / 69 |
+| 100% | viewport z11 tagged | 10 / 5 | 9 / 5 |
+| 100% | artifact by id x20 | 151 / 13 | 409 / 15 |
+| 100% | bulk read 100 ids | 523 / 371 | 139 / 1 |
+
+The full set is in `runs/other-routes-rows.json` and `runs/other-routes-column.json`.
+
+Two are slower with the column:
+
+- **The first `/v1/artifacts/{id}` of each viewer** takes 324 to 431 ms against 1 to 21. That
+  request fills the species figures, and the `fills` counter on `/control/status` goes up by one.
+  The fill happens once per grant and is kept on disk. Later requests take 0.6 to 1.1 ms, against
+  5 to 10 for the 100% viewer as rows. The tile route pays the same fill if it gets there first.
+- **Aggregate by species, unfiltered, for the 100% viewer** takes 254 to 268 ms against 170 to
+  190, which is 1.4 to 1.5 times as long. A level with a column counts groups by scanning the
+  set's rows and reading their labels (`filtered_counts`), one thread over 25.8 million rows. A
+  level stored as rows intersects each artifact's members on the pool instead. The 1% and 25%
+  viewers, and every filtered aggregate, are faster with the column.
