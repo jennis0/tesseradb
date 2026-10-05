@@ -303,7 +303,10 @@ pub(crate) async fn viewport_artifacts(
     )
     .header(
         "etag",
-        format!("\"{}\"", crate::stream::hex16(&head.coordinates.content_key)),
+        format!(
+            "\"{}\"",
+            crate::stream::hex16(&head.coordinates.content_key)
+        ),
     )
     .header("x-tessera-pin", pin)
     .header("x-tessera-stale", if head.stale { "1" } else { "0" })

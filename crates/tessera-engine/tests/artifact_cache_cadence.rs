@@ -477,7 +477,11 @@ fn pan(engine: &Engine, session: &tessera_engine::Session, steps: usize) {
 
 /// An artifact's drawn shape for this session, read by its identifier: the one route a shape is
 /// served on.
-fn shape_of(engine: &Engine, session: &tessera_engine::Session, layer: &str) -> Vec<Vec<Vec<[u32; 2]>>> {
+fn shape_of(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+    layer: &str,
+) -> Vec<Vec<Vec<[u32; 2]>>> {
     let id = engine
         .viewport_artifacts(
             session,

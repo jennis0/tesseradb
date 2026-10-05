@@ -19,8 +19,7 @@ use tessera_engine::{
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
-    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
-    ServingLayout,
+    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
 use tessera_types::{EntityId, TesseraId};
 
@@ -83,7 +82,9 @@ fn fixture() -> Fixture {
         config_uncapped(),
     )
     .expect("the engine opens");
-    engine.start_write_executor(8).expect("the executor starts once");
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
 
     let sizes = [100u64, 150, 200, 250, 300];
     let mut rows = Memberships::new();
@@ -98,10 +99,16 @@ fn fixture() -> Fixture {
     }
     let mut overlap = Memberships::new();
     for r in 0..7u64 {
-        overlap.insert(format!("m7-{r}"), (0..N_ITEMS).filter(|e| e % 7 == r).collect());
+        overlap.insert(
+            format!("m7-{r}"),
+            (0..N_ITEMS).filter(|e| e % 7 == r).collect(),
+        );
     }
     for q in 0..5u64 {
-        overlap.insert(format!("m11-{q}"), (0..N_ITEMS).filter(|e| e % 11 == q).collect());
+        overlap.insert(
+            format!("m11-{q}"),
+            (0..N_ITEMS).filter(|e| e % 11 == q).collect(),
+        );
     }
     let layers = BTreeMap::from([(ROWS, rows), (OVERLAP, overlap)]);
     for (name, layout) in [
@@ -121,11 +128,17 @@ fn fixture() -> Fixture {
         engine.publish_artifacts(name.into(), 0, artifacts).unwrap();
     }
     tick(&engine);
-    assert_eq!(engine.recorded_layout(ROWS, 0), Some(ServingLayout::RowMajorLabel));
+    assert_eq!(
+        engine.recorded_layout(ROWS, 0),
+        Some(ServingLayout::RowMajorLabel)
+    );
     Fixture {
         _tmp: tmp,
         engine,
-        source_of: map.into_iter().map(|(source, entity)| (entity, source)).collect(),
+        source_of: map
+            .into_iter()
+            .map(|(source, entity)| (entity, source))
+            .collect(),
         layers,
     }
 }
@@ -141,18 +154,34 @@ fn visible_by_tile(fx: &Fixture, credential: &[u8], zoom: u8) -> BTreeMap<u64, B
                 .layers(LayerSelection::Named(&[])),
         )
         .unwrap();
-    let ids: Vec<TesseraId> = out.points.tessera_ids.iter().map(|&id| TesseraId::new(id)).collect();
+    let ids: Vec<TesseraId> = out
+        .points
+        .tessera_ids
+        .iter()
+        .map(|&id| TesseraId::new(id))
+        .collect();
     let entities = fx.engine.resolve_tessera_ids(&ids).unwrap();
-    let mut points = entities.into_iter().map(|e| fx.source_of[&e.unwrap().raw()]);
+    let mut points = entities
+        .into_iter()
+        .map(|e| fx.source_of[&e.unwrap().raw()]);
     let mut by_tile = BTreeMap::new();
     for tile in &out.tiles {
         assert_eq!(tile.served, tile.visible, "the viewport is uncapped");
-        by_tile.insert(tile.tile, points.by_ref().take(tile.served as usize).collect());
+        by_tile.insert(
+            tile.tile,
+            points.by_ref().take(tile.served as usize).collect(),
+        );
     }
     by_tile
 }
 
-fn ask(fx: &Fixture, credential: &[u8], layer: &str, zoom: u8, per_tile: usize) -> ViewportArtifactsOut {
+fn ask(
+    fx: &Fixture,
+    credential: &[u8],
+    layer: &str,
+    zoom: u8,
+    per_tile: usize,
+) -> ViewportArtifactsOut {
     let session = fx.engine.authorise(credential).unwrap();
     let names = [layer];
     fx.engine
@@ -177,14 +206,27 @@ fn frames(out: &ViewportArtifactsOut) -> BTreeMap<u64, Vec<(String, u64)>> {
                 let key = a.key.clone().unwrap();
                 let held = figures.entry(key.clone()).or_insert(a);
                 assert_eq!(
-                    (held.masked_count, held.derived.centroid, held.derived.bbox, held.tessera_id),
-                    (a.masked_count, a.derived.centroid, a.derived.bbox, a.tessera_id),
+                    (
+                        held.masked_count,
+                        held.derived.centroid,
+                        held.derived.bbox,
+                        held.tessera_id
+                    ),
+                    (
+                        a.masked_count,
+                        a.derived.centroid,
+                        a.derived.bbox,
+                        a.tessera_id
+                    ),
                     "{key} is served with other figures in tile {tile}"
                 );
                 (key, a.masked_count)
             })
             .collect();
-        assert!(by_tile.insert(tile, rows).is_none(), "tile {tile} is answered once");
+        assert!(
+            by_tile.insert(tile, rows).is_none(),
+            "tile {tile} is answered once"
+        );
     }
     by_tile
 }
@@ -208,15 +250,21 @@ fn oracle(
                 .iter()
                 .filter(|(_, sources)| !sources.is_disjoint(here))
                 .map(|(key, _)| {
-                    let id = *ids
-                        .get(key)
-                        .unwrap_or_else(|| panic!("{key} has a visible member and is never served"));
+                    let id = *ids.get(key).unwrap_or_else(|| {
+                        panic!("{key} has a visible member and is never served")
+                    });
                     (whole[key], id, key.clone())
                 })
                 .collect();
             present.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
             present.truncate(per_tile);
-            (tile, present.into_iter().map(|(count, _, key)| (key, count)).collect())
+            (
+                tile,
+                present
+                    .into_iter()
+                    .map(|(count, _, key)| (key, count))
+                    .collect(),
+            )
         })
         .collect()
 }
@@ -227,7 +275,11 @@ fn oracle(
 #[test]
 fn each_tile_serves_what_the_oracle_names_in_its_order() {
     let fx = fixture();
-    for credential in [full_coverage_credential(), subset_credential(), zero_credential()] {
+    for credential in [
+        full_coverage_credential(),
+        subset_credential(),
+        zero_credential(),
+    ] {
         for zoom in [0u8, 1, 2, 3] {
             let visible = visible_by_tile(&fx, &credential, zoom);
             for layer in [ROWS, OVERLAP] {
@@ -254,7 +306,10 @@ fn each_tile_serves_what_the_oracle_names_in_its_order() {
                     }
                 }
                 if credential == zero_credential() {
-                    assert!(ids.is_empty(), "{layer}: a viewer seeing nothing is served nothing");
+                    assert!(
+                        ids.is_empty(),
+                        "{layer}: a viewer seeing nothing is served nothing"
+                    );
                 } else {
                     let spanning = whole.frames.iter().flat_map(|f| &f.artifacts).count();
                     assert!(
@@ -282,12 +337,28 @@ fn a_denied_member_removes_its_artifact_from_its_tile_on_the_next_request() {
         let (key, tile) = rows
             .iter()
             .flat_map(|(tile, rows)| rows.iter().map(move |(key, _)| (key.clone(), *tile)))
-            .find(|(key, _)| rows.values().filter(|r| r.iter().any(|(k, _)| k == key)).count() > 1)
+            .find(|(key, _)| {
+                rows.values()
+                    .filter(|r| r.iter().any(|(k, _)| k == key))
+                    .count()
+                    > 1
+            })
             .expect("an artifact spans tiles");
-        let denied: Vec<u64> = fx.layers[layer][&key].intersection(&visible[&tile]).copied().collect();
-        let count = before.artifacts().iter().find(|a| a.key.as_ref() == Some(&key)).unwrap().masked_count;
-        let entities: BTreeMap<u64, u64> =
-            fx.source_of.iter().map(|(&entity, &source)| (source, entity)).collect();
+        let denied: Vec<u64> = fx.layers[layer][&key]
+            .intersection(&visible[&tile])
+            .copied()
+            .collect();
+        let count = before
+            .artifacts()
+            .iter()
+            .find(|a| a.key.as_ref() == Some(&key))
+            .unwrap()
+            .masked_count;
+        let entities: BTreeMap<u64, u64> = fx
+            .source_of
+            .iter()
+            .map(|(&entity, &source)| (source, entity))
+            .collect();
         for source in &denied {
             fx.engine
                 .accept_change(EntityId::new(entities[source]), ChangeOp::Suppress)
@@ -304,7 +375,10 @@ fn a_denied_member_removes_its_artifact_from_its_tile_on_the_next_request() {
             .filter(|(k, _)| k == &key)
             .map(|(_, count)| *count)
             .collect();
-        assert!(!elsewhere.is_empty(), "{layer}: {key} is still served where it has members");
+        assert!(
+            !elsewhere.is_empty(),
+            "{layer}: {key} is still served where it has members"
+        );
         assert!(elsewhere.iter().all(|&n| n == count - denied.len() as u64));
         for source in &denied {
             fx.engine
@@ -351,6 +425,9 @@ fn a_cancelled_request_stops_between_tiles() {
             .cancel(Some(cancel)),
         &mut sink,
     );
-    assert!(matches!(outcome, Err(EngineError::Cancelled)), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(EngineError::Cancelled)),
+        "{outcome:?}"
+    );
     assert_eq!(sink.frames, 1, "no tile after the cancellation was walked");
 }

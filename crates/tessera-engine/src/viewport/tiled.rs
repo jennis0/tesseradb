@@ -38,8 +38,13 @@ use crate::row_column::RowColumn;
 use crate::row_members::LevelMembers;
 
 /// What one probe of a member bitmap against a tile's visible rows is taken to cost, in rows of
-/// the scan it competes with, for each 2¹⁶-row chunk the tile spans below the base.
-const PROBE_ROWS_PER_CHUNK: u64 = 256;
+/// the scan it competes with, for each 2¹⁶-row chunk the tile spans below the base. A probe that
+/// finds nothing measures 10 to 180 (`tests::probe_against_scan`), dearer in smaller tiles; one
+/// that finds a member stops sooner.
+const PROBE_ROWS_PER_CHUNK: u64 = 64;
+
+/// The scan's fixed cost, in rows, for each artifact of the level: it marks a byte per artifact.
+const SCAN_ARTIFACTS_PER_ROW: u64 = 32;
 
 /// One `POST /v1/artifacts/viewport` request, as the engine sees it. Construct with
 /// [`ViewportArtifactsRequest::new`] and add the optional parts.
@@ -254,7 +259,6 @@ impl Presence<'_> {
         self.spent += self.probe;
         self.above.contains(ordinal) || self.members.members(ordinal).intersects(self.here)
     }
-
 }
 
 /// The artifacts of `column` labelling a row of `set` at or above `base`, the rows a level's
@@ -393,8 +397,12 @@ impl Engine {
         for layer in &layers {
             for (number, runs) in layer.registered.runs.iter().enumerate() {
                 let number = number as u32;
-                if level_is_selected(req.levels, &layer.registered.declaration.levels, number, req.zoom)
-                {
+                if level_is_selected(
+                    req.levels,
+                    &layer.registered.declaration.levels,
+                    number,
+                    req.zoom,
+                ) {
                     levels.push(self.level_pass(layer, number, runs)?);
                 }
             }
@@ -419,7 +427,15 @@ impl Engine {
                 let spans = crossing_domain(parts, &row_bases);
                 let sets = viewport_sets(&rows, &mask);
                 for ((level, view), state) in levels.iter().zip(&views).zip(&mut states) {
-                    self.serve_tile_level(level, view, state, &sets, &spans, req.per_tile, &mut walked)?;
+                    self.serve_tile_level(
+                        level,
+                        view,
+                        state,
+                        &sets,
+                        &spans,
+                        req.per_tile,
+                        &mut walked,
+                    )?;
                 }
             }
             ctx.finish()?;
@@ -468,23 +484,27 @@ impl Engine {
                     scanned: None,
                     probe: chunks * PROBE_ROWS_PER_CHUNK,
                     spent: 0,
-                    scan: here.cardinality(),
+                    scan: here.cardinality() + column.len() as u64 / SCAN_ARTIFACTS_PER_ROW,
                 };
                 let mut candidates = presence.above.clone();
                 for span in spans.iter().filter(|span| span.start < base) {
-                    candidates.or_inplace(&members.overlapping(span.start..=span.end.min(base) - 1));
+                    candidates
+                        .or_inplace(&members.overlapping(span.start..=span.end.min(base) - 1));
                 }
-                let chosen = self.by_count(level, view, state, counts, &candidates, per_tile, |o| {
-                    presence.holds(o)
-                });
+                let chosen =
+                    self.by_count(level, view, state, counts, &candidates, per_tile, |o| {
+                        presence.holds(o)
+                    });
                 // The filter's and the highlight's rows in the tile, each with the artifacts its rows
                 // above the base carry.
                 let narrowed = |set: &Option<Bitmap>| {
                     set.as_ref()
                         .map(|set| (set.clone(), labelled_above(column, set, base)))
                 };
-                let (matched, highlighted) =
-                    (narrowed(&sets.matched_here), narrowed(&sets.highlighted_here));
+                let (matched, highlighted) = (
+                    narrowed(&sets.matched_here),
+                    narrowed(&sets.highlighted_here),
+                );
                 let holds = |ordinal: u32, set: &Option<(Bitmap, Bitmap)>| {
                     set.as_ref().map(|(rows, above)| {
                         above.contains(ordinal) || members.members(ordinal).intersects(rows)
@@ -501,7 +521,10 @@ impl Engine {
             None => {
                 let chosen = self.by_index(level, view, state, sets, per_tile);
                 let matched = sets.matched_here.as_ref().map(|here| rows.matched(here));
-                let highlighted = sets.highlighted_here.as_ref().map(|here| rows.matched(here));
+                let highlighted = sets
+                    .highlighted_here
+                    .as_ref()
+                    .map(|here| rows.matched(here));
                 chosen
                     .into_iter()
                     .map(|passing| {
@@ -613,8 +636,12 @@ impl Engine {
         let contents = state.contents.as_deref();
         *state.admitted.entry(ordinal).or_insert_with(|| {
             let pass = level.layer.pass;
-            let entity = level.runs.entity_of(u64::from(ordinal)).map(EntityId::new)?;
-            let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) else {
+            let entity = level
+                .runs
+                .entity_of(u64::from(ordinal))
+                .map(EntityId::new)?;
+            let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal)
+            else {
                 return None;
             };
             self.supplied_content(
@@ -630,5 +657,62 @@ impl Engine {
             let id = self.identity_key.forward(pass.shard, entity).ok()?.raw();
             Some((id, (ordinal, entity, masked_count, rank)))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifacts::MembershipRows;
+    use tessera_types::layer::ServingLayout;
+
+    /// What [`PROBE_ROWS_PER_CHUNK`] is set from: the time a probe that finds nothing takes for
+    /// each 2¹⁶-row chunk of a tile, over the time the scan takes for each visible row. Run with
+    /// `cargo test --release -p tessera-engine probe_against_scan -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement"]
+    fn probe_against_scan() {
+        const ROWS: u32 = 1 << 22;
+        const ARTIFACTS: u32 = 8192;
+        let mix = |row: u32| (u64::from(row).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32;
+        let mut sets = vec![Bitmap::new(); ARTIFACTS as usize];
+        for row in 0..ROWS {
+            sets[(mix(row) % ARTIFACTS) as usize].add(row);
+        }
+        let membership = MembershipRows::of_rows(sets.into_iter().map(Some).collect());
+        let scratch = tempfile::tempdir().unwrap();
+        let column = RowColumn::compose(
+            &membership,
+            ROWS,
+            ServingLayout::RowMajorLabel,
+            scratch.path(),
+        )
+        .expect("a partition");
+        let members = column
+            .members()
+            .expect("a composed column holds its members");
+        let visible: Bitmap = (0..ROWS).filter(|&row| mix(row ^ 0x55) % 3 == 0).collect();
+        for shift in [14u32, 16, 18, 20, 22] {
+            let here = visible.and(&Bitmap::from_range(0..1 << shift));
+            let started = std::time::Instant::now();
+            let found = column.candidates(&here);
+            let scan_ns = started.elapsed().as_nanos() as f64 / here.cardinality() as f64;
+            assert!(!found.is_empty());
+            let mut probe_ns = 0f64;
+            let probes = 500;
+            for ordinal in (0..ARTIFACTS).step_by((ARTIFACTS / probes) as usize) {
+                let elsewhere = here.andnot(&members.members(ordinal).to_bitmap());
+                let started = std::time::Instant::now();
+                assert!(!members.members(ordinal).intersects(&elsewhere));
+                probe_ns += started.elapsed().as_nanos() as f64;
+            }
+            let chunks = f64::from((1u32 << shift).div_ceil(1 << 16));
+            let per_chunk = probe_ns / f64::from(probes) / chunks;
+            println!(
+                "tile of 2^{shift} rows: scan {scan_ns:.1} ns a visible row, a probe finding \
+                 nothing {per_chunk:.0} ns a chunk = {:.0} rows of scan",
+                per_chunk / scan_ns
+            );
+        }
     }
 }
