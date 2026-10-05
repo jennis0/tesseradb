@@ -1,24 +1,24 @@
 {
   "artifacts": [
     {
-      "tessera_id": "17161535073487662305",
+      "tessera_id": "9982997188546393394",
       "key": "hdb-050002",
       "masked_count": 26903,
       "matched_count": 58,
       "rung": 1,
       "parent_ids": [
-        "3067963684206046677"
+        "14153659286254502272"
       ],
       "child_count": 2
     },
     {
-      "tessera_id": "4673238422531180036",
+      "tessera_id": "11691405558224806900",
       "key": "hdb-050001",
       "masked_count": 438,
       "matched_count": 0,
       "rung": 1,
       "parent_ids": [
-        "3067963684206046677"
+        "14153659286254502272"
       ],
       "child_count": 2
     }
