@@ -172,5 +172,4 @@ async fn a_named_column_reaches_the_wire_alone_with_the_same_points_counts_and_m
     assert_eq!(named.tiles, full.tiles);
     assert_eq!(named.served, full.served);
     assert_eq!(named.points, full.points);
-    assert_eq!(named.artifacts, full.artifacts);
 }

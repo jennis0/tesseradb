@@ -238,7 +238,7 @@ struct RawServe {
     /// many more may wait, each for at most `admission_timeout_ms`; one past that is refused with
     /// 429, and `0` refuses every such request. A value above 1152921504606846975 is refused.
     ///
-    /// Default: `compute_threads`.
+    /// Default: one per compute thread.
     artifact_admission: Option<usize>,
     /// Milliseconds a request waits for another request's build of a shared cached structure
     /// before it is refused with 429.

@@ -3375,6 +3375,12 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
 /// Every key path `/control/status` serves and each JSON type it takes there across the reads
 /// [`control_status_serves_its_pinned_shape`] makes. `*` stands for every element of an array.
 const STATUS_SHAPE: &[(&str, &str)] = &[
+    ("/artifacts", "object"),
+    ("/artifacts/admission", "integer"),
+    ("/artifacts/in_flight", "integer"),
+    ("/artifacts/queue", "integer"),
+    ("/artifacts/shed_total", "integer"),
+    ("/artifacts/waiting", "integer"),
     ("/bulk", "object"),
     ("/bulk/admission", "integer"),
     ("/bulk/in_flight", "integer"),
@@ -3757,22 +3763,27 @@ async fn control_status_serves_its_pinned_shape() {
     assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
     tick(&server).await;
     let token = token_for(&server, &["0"]).await;
-    // Each body is read to its end, which is where the artifact sweep derives the hull.
+    // The hull is derived where it is read, by identifier; the second read finds it held.
+    let resp = settled(async || {
+        server
+            .client
+            .post(server.viewer_url("/v1/artifacts/viewport"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "view": "s0", "zoom": 0, "per_tile": 100, "bbox": [0.0, 0.0, 1000.0, 1000.0],
+                "layers": [LAYER]
+            }))
+            .send()
+            .await
+            .unwrap()
+    })
+    .await;
+    let id = decode_artifact_frames(&resp.bytes().await.unwrap())
+        .artifacts
+        .expect("the artifact is served")[0]
+        .tessera_id;
     for _ in 0..2 {
-        let resp = settled(async || {
-            server
-                .client
-                .post(server.viewer_url("/v1/viewport"))
-                .bearer_auth(&token)
-                .json(&serde_json::json!({
-                    "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "layers": [LAYER]
-                }))
-                .send()
-                .await
-                .unwrap()
-        })
-        .await;
-        resp.bytes().await.unwrap();
+        assert!(shape_by_id(&server, &token, "s0", id, 0).await.is_some());
     }
     wait_for(
         "a pinned log",

@@ -487,7 +487,16 @@ async fn client_view(server: &TestServer, terms: &[&str]) -> ClientView {
     assert_eq!(resp.status().as_u16(), 200);
     let bytes = resp.bytes().await.unwrap();
     let decoded = decode_viewport_frames(&bytes);
-    let artifacts = artifacts_by_key(&bytes);
+    let body = json!({
+        "view": "s0",
+        "zoom": 0,
+        "per_tile": 1000,
+        "bbox": [0.0, 0.0, 1000.0, 1000.0],
+        "layers": "all",
+    });
+    let resp = post_viewport_artifacts(server, token, &body).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let artifacts = artifacts_by_key(&resp.bytes().await.unwrap());
     ClientView {
         tiles: decoded.tiles,
         points: decoded.points.len(),
@@ -495,22 +504,19 @@ async fn client_view(server: &TestServer, terms: &[&str]) -> ClientView {
     }
 }
 
-/// Decode the artifacts frame in full — the shared decoder drops `parent_ids`, and the edges are
-/// half of what a lineage column is for.
+/// Decode every artifacts frame of a tile route's body in full, the parent edges resolved to keys.
 fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
     use arrow::array::Float64Array as F64;
     let frames = tessera_wire::split_frames(body).expect("well-formed frames");
-    let Some((_, payload)) = frames
+    let batches = frames
         .iter()
-        .find(|(kind, _)| *kind == tessera_wire::FRAME_ARTIFACTS)
-    else {
-        return Vec::new();
-    };
-    let reader =
-        arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(payload.to_vec()), None)
-            .unwrap();
+        .filter(|(kind, _)| *kind == tessera_wire::FRAME_ARTIFACTS)
+        .flat_map(|(_, payload)| {
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(payload.to_vec()), None)
+                .unwrap()
+        });
     let mut rows: Vec<(u64, ClientArtifact)> = Vec::new();
-    for batch in reader {
+    for batch in batches {
         let batch = batch.unwrap();
         let column = |i: usize| batch.column(i).clone();
         // `layer` is dictionary-encoded (contracts §3.2 r43): u16 keys over utf8 values.
