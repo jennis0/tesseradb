@@ -5,130 +5,52 @@
 //! The visible set is split as a level's is ([`super`]'s module doc), `S = (F − D) ∪ T`, so the
 //! count, the sum and the rows with no value are `F − D + T` exactly. The sum is kept exactly
 //! ([`ExactSum`]), so subtracting D's gives back the sum of the values D leaves, however large the
-//! values it subtracts, and the mean is rounded once. F's tally is held per grant, bundle
-//! identity, view and field, shared by every session with the same grant, walked once off the
-//! request path and written to the cache directory. A base row's value does not change between
-//! folds: an edit gives its item a new entity, whose row is above the base, and a fold rotates the
-//! bundle identity. D's tally is held per deny version and read at the request's start, so a
-//! request that starts after a suppression subtracts it. T's is held per session and generation.
+//! values it subtracts, and the mean is rounded once.
 //!
-//! The smallest and largest values stay exact under a deny. F's tally keeps its eight smallest and
-//! eight largest finite values, each with its row. The smallest value of `F − D` is the first of
-//! the eight smallest whose row D does not hold: any value not kept is at least the last one kept.
-//! Where D holds every row kept on a side, `F − D` is walked, once per deny version, as F is, and
-//! its own eight on each side are kept. A later deny that subtracts every row this one did reads
-//! the same way from those before it walks again.
+//! F is composed rather than walked. A build and a fold store, per view, a tally of each field for
+//! each distinct key list the base rows' items carry ([`tessera_store::field_tallies`]). The items
+//! of a key list are in a grant's base rows together or not at all, by the rule the authorised set
+//! is built by ([`crate::compose::admits`]), so F's tally is the merge of the tallies of the lists
+//! the grant satisfies. A base row's value and its item's keys do not change between folds: an
+//! edit gives its item a new entity, whose row is above the base, and a fold writes the file again.
+//! The composition is held per grant, bundle identity, view and field. A field the file holds no
+//! tally of, as one declared at a running service, has its base rows walked instead.
+//!
+//! D's tally is held per deny version and read at the request's start, so a request that starts
+//! after a suppression subtracts it. T's is held per session and generation.
+//!
+//! The smallest and largest values stay exact under a deny. F's tally keeps the eight smallest and
+//! eight largest finite values across the lists it merges, each with its row. The smallest value of
+//! `F − D` is the first of the eight smallest whose row D does not hold: any value not kept is at
+//! least the last one kept. Where D holds every row kept on a side, `F − D` is walked, once per
+//! deny version, and its own eight on each side are kept. A later deny that subtracts every row
+//! this one did reads the same way from those before it walks again.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
 use croaring::Bitmap;
 use tessera_cache::CacheWeight;
+pub(crate) use tessera_store::field_tallies::{keep_extreme, ExactSum, FieldTally, RESERVE};
+pub(crate) use tessera_types::scalar::Number;
+use tessera_types::TermId;
 
 use crate::compose::EffectiveMask;
 use crate::error::{EngineError, Result};
-use crate::row_column::RESERVE;
 use crate::viewport::ServedView;
 use crate::Engine;
 
 use super::cache::{Build, FieldDenyKey, FieldKey, FieldTailKey, FiguresKey};
-pub(crate) use super::exact::ExactSum;
-use super::persist;
 
 /// The base rows one piece of a walk reads before it gives way to drawing requests.
 const FILL_ROWS: u32 = 1 << 26;
 
-/// A field's value as its figures hold it: an integer or a timestamp's microseconds exactly, a
-/// float as itself.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Number {
-    Int(i128),
-    Float(f64),
-}
+/// A tally as the figures' caches hold it.
+pub(crate) struct Held(pub(crate) FieldTally);
 
-impl Number {
-    pub(crate) fn as_f64(self) -> f64 {
-        match self {
-            Number::Int(i) => i as f64,
-            Number::Float(f) => f,
-        }
-    }
-}
-
-impl PartialOrd for Number {
-    fn partial_cmp(&self, other: &Number) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (Number::Int(a), Number::Int(b)) => a.partial_cmp(b),
-            (a, b) => a.as_f64().partial_cmp(&b.as_f64()),
-        }
-    }
-}
-
-/// Put `value` among `side`'s `keep` most extreme values, where it is one of them: the smallest
-/// first, or with `high` the largest first, ties by where each was read. The one order every
-/// tally keeps its extremes in.
-#[inline]
-pub(crate) fn keep_extreme<K: PartialOrd + Copy>(
-    side: &mut Vec<(K, u32)>,
-    keep: usize,
-    value: (K, u32),
-    high: bool,
-) {
-    let before = |a: &(K, u32), b: &(K, u32)| match high {
-        false => a.0 < b.0 || (a.0 == b.0 && a.1 < b.1),
-        true => a.0 > b.0 || (a.0 == b.0 && a.1 < b.1),
-    };
-    if side.len() == keep && side.last().is_none_or(|last| !before(&value, last)) {
-        return;
-    }
-    let at = side.partition_point(|held| before(held, &value));
-    side.insert(at, value);
-    side.truncate(keep);
-}
-
-/// One set of rows' values of a field: how many rows hold no value, and the count and exact sum of
-/// the finite values, with the most extreme of them, each with its row.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct FieldTally {
-    pub(crate) none: u64,
-    pub(crate) count: u64,
-    pub(crate) sum: ExactSum,
-    /// The smallest values, ascending.
-    pub(crate) low: Vec<(Number, u32)>,
-    /// The largest values, descending.
-    pub(crate) high: Vec<(Number, u32)>,
-}
-
-impl FieldTally {
-    /// The tally of no rows.
-    pub(crate) fn empty() -> FieldTally {
-        FieldTally {
-            none: 0,
-            count: 0,
-            sum: ExactSum::default(),
-            low: Vec::new(),
-            high: Vec::new(),
-        }
-    }
-
-    /// Both tallies, keeping `keep` values on each side.
-    fn merged(mut self, other: &FieldTally, keep: usize) -> FieldTally {
-        self.none += other.none;
-        self.count += other.count;
-        self.sum = self.sum.plus(&other.sum);
-        for &value in &other.low {
-            keep_extreme(&mut self.low, keep, value, false);
-        }
-        for &value in &other.high {
-            keep_extreme(&mut self.high, keep, value, true);
-        }
-        self
-    }
-}
-
-impl CacheWeight for FieldTally {
+impl CacheWeight for Held {
     fn cache_weight_bytes(&self) -> u64 {
-        (64 + 8 * ExactSum::WORDS + 32 * (self.low.len() + self.high.len())) as u64
+        (64 + 8 * ExactSum::WORDS + 32 * (self.0.low.len() + self.0.high.len())) as u64
     }
 }
 
@@ -146,7 +68,7 @@ pub(crate) struct FieldDeny {
 
 impl CacheWeight for FieldDeny {
     fn cache_weight_bytes(&self) -> u64 {
-        self.tally.cache_weight_bytes()
+        Held(FieldTally::default()).cache_weight_bytes()
             + self
                 .rows
                 .get_serialized_size_in_bytes::<croaring::Portable>() as u64
@@ -155,10 +77,10 @@ impl CacheWeight for FieldDeny {
 
 /// The base rows a deny leaves, walked because it subtracted every row a side of F's tally keeps:
 /// the deny, and the tally of the rows it leaves. Held per field, the newest only.
-pub(crate) type FieldLeft = (Arc<FieldDeny>, Arc<FieldTally>);
+pub(crate) type FieldLeft = (Arc<FieldDeny>, Arc<Held>);
 
 /// A field's figures over one request's visible set in one view.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FieldFigures {
     /// The rows of the visible set.
     pub(crate) items: u64,
@@ -166,8 +88,8 @@ pub(crate) struct FieldFigures {
     pub(crate) none: u64,
     /// Those holding a finite value.
     pub(crate) count: u64,
-    /// Their mean, rounded once from their exact sum; `None` where there are none.
-    pub(crate) mean: Option<f64>,
+    /// Their exact sum, which a mean is rounded from once.
+    pub(crate) sum: ExactSum,
     pub(crate) min: Option<Number>,
     pub(crate) max: Option<Number>,
 }
@@ -250,15 +172,16 @@ impl Engine {
                 let tail = self
                     .figures
                     .field_tails
-                    .get_or_try_build_waiting(key, &cancel, || read.tally(&above, 1))
+                    .get_or_try_build_waiting(key, &cancel, || read.tally(&above, 1).map(Held))
                     .map_err(super::waited)?;
                 Some(tail)
             }
         };
 
-        let empty = FieldTally::empty();
+        let empty = FieldTally::default();
+        let base = &base.0;
         let d = deny.as_ref().map_or(&empty, |(_, d)| &d.tally);
-        let t = tail.as_deref().unwrap_or(&empty);
+        let t = tail.as_deref().map_or(&empty, |t| &t.0);
         let left = base.count - d.count;
         let (low, high) = match (&deny, left) {
             (_, 0) => (None, None),
@@ -273,8 +196,8 @@ impl Engine {
                         let walked =
                             self.field_left(served, deny_key, deny, fragment, base_rows, read)?;
                         (
-                            low.or_else(|| kept(&walked.low, &deny.rows)),
-                            high.or_else(|| kept(&walked.high, &deny.rows)),
+                            low.or_else(|| kept(&walked.0.low, &deny.rows)),
+                            high.or_else(|| kept(&walked.0.high, &deny.rows)),
                         )
                     }
                 }
@@ -289,13 +212,14 @@ impl Engine {
             items: mask.visible_total(),
             none: base.none - d.none + t.none,
             count,
-            mean: base.sum.clone().minus(&d.sum).plus(&t.sum).mean(count),
+            sum: base.sum.clone().minus(&d.sum).plus(&t.sum),
             min: pick(low, t.low.first().map(|v| v.0), true),
             max: pick(high, t.high.first().map(|v| v.0), false),
         })
     }
 
-    /// The field's tally over the fragment's base rows: held, read from disk, or walked.
+    /// The field's tally over the fragment's base rows: held, composed from the tallies the base
+    /// stores per key list, or, for a field it stores none of, walked.
     fn field_base(
         &self,
         served: &ServedView<'_>,
@@ -303,13 +227,8 @@ impl Engine {
         fragment: &Bitmap,
         base_rows: u32,
         read: &dyn FieldRead,
-    ) -> Result<Arc<FieldTally>> {
-        let dir = self
-            .figures
-            .dir
-            .as_ref()
-            .map(|root| persist::identity_dir(root, &key.identity));
-        let stem = persist::field_stem(&key.terms, &key.view, &key.column, key.kind);
+    ) -> Result<Arc<Held>> {
+        let stored = served.data.field_tallies.as_deref();
         let mut failed = None;
         let held = self.figures.get_or_build_in(
             &self.figures.fields,
@@ -317,27 +236,21 @@ impl Engine {
             &served.turn,
             served.cancel.as_ref(),
             |build| {
-                if let Some(tally) = dir
-                    .as_deref()
-                    .and_then(|dir| persist::read_field(dir, &stem))
+                if let Some((tallies, field)) =
+                    stored.and_then(|t| t.field(&key.column).map(|field| (t, field)))
                 {
-                    self.figures.counters.loads.fetch_add(1, Ordering::Relaxed);
-                    return Some(tally);
+                    let satisfied = served.session.satisfied();
+                    let mut tally = FieldTally::default();
+                    for (keys, per_list) in tallies.lists.iter().zip(&tallies.tallies) {
+                        let keys = keys.iter().map(|&k| TermId::new(k));
+                        if crate::compose::admits(satisfied, keys) {
+                            tally = tally.merged(&per_list[field], RESERVE);
+                        }
+                    }
+                    return Some(Held(tally));
                 }
                 self.figures.counters.fills.fetch_add(1, Ordering::Relaxed);
-                let tally = walk(fragment, None, base_rows, read, build, &mut failed)?;
-                if let Some(dir) = dir.clone() {
-                    let (written, stem) = (tally.clone(), stem.clone());
-                    let bound = Arc::clone(&self.figures.disk_bound);
-                    let root = self.figures.dir.clone();
-                    self.figures.worker.submit(move || {
-                        persist::write_field(&dir, &stem, &written);
-                        if let Some(root) = root {
-                            persist::hold_under(&root, bound.load(Ordering::Relaxed));
-                        }
-                    });
-                }
-                Some(tally)
+                walk(fragment, None, base_rows, read, build, &mut failed).map(Held)
             },
         );
         match (held, failed) {
@@ -357,7 +270,7 @@ impl Engine {
         fragment: &Bitmap,
         base_rows: u32,
         read: &dyn FieldRead,
-    ) -> Result<Arc<FieldTally>> {
+    ) -> Result<Arc<Held>> {
         let earlier = self
             .figures
             .field_left
@@ -367,8 +280,8 @@ impl Engine {
             .cloned();
         if let Some((walked_for, walked)) = earlier {
             let reusable = walked_for.rows.is_subset(&deny.rows)
-                && kept(&walked.low, &deny.rows).is_some()
-                && kept(&walked.high, &deny.rows).is_some();
+                && kept(&walked.0.low, &deny.rows).is_some()
+                && kept(&walked.0.high, &deny.rows).is_some();
             if reusable {
                 return Ok(walked);
             }
@@ -389,6 +302,7 @@ impl Engine {
                     build,
                     &mut failed,
                 )
+                .map(Held)
             },
         );
         let walked = match (held, failed) {
@@ -418,7 +332,7 @@ fn walk(
     build: &Build<'_>,
     failed: &mut Option<EngineError>,
 ) -> Option<FieldTally> {
-    let mut tally = FieldTally::empty();
+    let mut tally = FieldTally::default();
     let mut at = 0u32;
     while at < base_rows {
         let end = at.saturating_add(FILL_ROWS).min(base_rows);

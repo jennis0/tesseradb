@@ -40,7 +40,7 @@ use tessera_cache::{CacheWeight, Cancel, SingleFlightCache, WaitEnded, WaitingBu
 
 use super::counts::{CountsAt, Deltas, Reserves};
 use super::denied::DenyCorrection;
-use super::field::{FieldDeny, FieldLeft, FieldTally};
+use super::field::{FieldDeny, FieldLeft, Held};
 use super::labels::{HeldLabels, LabelStore};
 use super::worker::Worker;
 use super::Geometry;
@@ -504,14 +504,14 @@ pub struct FiguresCache {
     pub(super) tails: SingleFlightCache<TailKey, Tail>,
     /// The fields' tallies over each fragment's base rows, and over what a deny leaves of them,
     /// under a bound of the same size as `slots`'.
-    pub(super) fields: SingleFlightCache<FiguresKey, FieldTally>,
+    pub(super) fields: SingleFlightCache<FiguresKey, Held>,
     /// Per field, the newest tally of the base rows a deny leaves, which a later deny subtracting
     /// every row that one did may read before it walks.
     pub(super) field_left: Mutex<FxHashMap<FieldKey, FieldLeft>>,
     /// The fields' deny corrections, per fragment and deny version.
     pub(super) field_denies: SingleFlightCache<FieldDenyKey, FieldDeny>,
     /// The fields' tails, per session and generation.
-    pub(super) field_tails: SingleFlightCache<FieldTailKey, FieldTally>,
+    pub(super) field_tails: SingleFlightCache<FieldTailKey, Held>,
     /// Per `(view, layer, level)`, the labels of the view's denied base rows.
     pub(super) labels: LabelStore,
     /// Where entries are persisted: one directory per bundle identity beneath it. `None` holds

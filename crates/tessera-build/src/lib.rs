@@ -2040,6 +2040,20 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         )?]
     };
 
+    // ---- 8d. the view's field tallies (`tessera_store::field_tallies`) -------------------
+    //
+    // After every file they read: the segment, the row-to-entity table, the entity terms and the
+    // value columns. The streaming build calls the same function at the same point.
+    other_paths.push(tessera_store::field_tallies::derive_view(
+        &partition_dir,
+        &view.view_id,
+        SEG_ID,
+        n as u32,
+        &scalar_schema,
+        &band_schema,
+        &|name| tessera_filter::base_numbers(&partition_dir, name),
+    )?);
+
     // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([permutation_path, row_entity_path]);
     other_paths.extend(
@@ -2112,7 +2126,7 @@ fn spilled_column_names(
 /// One derivation, shared by both build implementations, so the two cannot come to disagree about
 /// a column's width — which would produce two bundles the byte-equality oracle calls different
 /// for a reason that is not the entity assignment it exists to check.
-fn scalar_schema_of(
+pub(crate) fn scalar_schema_of(
     schema: &crate::config::Schema,
 ) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
     // Render columns only — the segment's tail and the assembly's render lanes must name the same
@@ -2148,7 +2162,9 @@ pub(crate) fn band_copied_columns(
 }
 
 /// The columns the identity bands copy beside the render columns, in declared order.
-fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+pub(crate) fn band_schema_of(
+    schema: &crate::config::Schema,
+) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
     band_copied_columns(schema)
         .map(|(_, a)| (a.name.clone(), a.ty))
         .collect()

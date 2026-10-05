@@ -1454,9 +1454,9 @@ paths:
         same instant, its bin is its day.
 
         The smallest and largest value are the field's figures (**Summary**), exact over every item
-        this principal may see in `view`, so no visible value lies outside the bins. The figures
-        are counted once for every principal with the same grant and kept, so default edges cost no
-        pass over the values after the first request for the field in the view. Sending the first
+        this principal may see in `view`, so no visible value lies outside the bins. A build and a
+        compaction store the figures of the built rows, so default edges cost no pass over the
+        values. Sending the first
         answer's first `lower` and last `upper` back as `range`, with `bins` the number of bins it
         returned, gives the same edges, except on a timestamp field binned by months or years,
         whose bins differ in width, and where an edge was served as its column's smallest or
@@ -1484,10 +1484,12 @@ paths:
         `reference` and any region say. Its head's `total` and `reference_total` are still the
         set's and the reference's, and it has no `groups`. Every figure is exact. A deletion or a
         suppression applies to it from the next response, and an item this principal may not see,
-        or an item without a row in `view`, moves none of it. The figures of each grant are counted
-        once over the corpus's built rows and kept, and each response corrects them for its own
-        deletions, suppressions and rows written since, so a first request for a field in a view
-        reads every value once and later ones read only what has changed.
+        or an item without a row in `view`, moves none of it. A build and a compaction store, for
+        each view, the figures of its built rows for each set of access labels its items carry; a
+        response joins those of the sets this principal satisfies and corrects them for its own
+        deletions, suppressions and rows written since, so it reads only what has changed. A field
+        declared at a running service has no stored figures, and its built rows are read once for
+        each principal's terms.
 
         A histogram's table is always one page, of its bins, `rest` and `none`, whatever
         `page_rows` and `serve.aggregate_page_bytes` say, so its edges and counts are drawn
@@ -1513,10 +1515,11 @@ paths:
         `view`; `count` (`uint64`), those holding a finite value; `none` (`uint64`), those holding
         no value, so an item holding NaN or an infinity is in `items` and neither of the others;
         `min` and `max`, the smallest and largest finite value, typed as `lower` and `upper` are on
-        a histogram of the field without `range`, null where `count` is 0; and `mean` (`float64`),
-        the mean of the finite values, null where `count` is 0. The values are summed exactly,
-        whatever their size and order, and the mean is the exact sum over `count` rounded once to
-        the nearest `float64`, a tie to even.
+        a histogram of the field without `range`, null where `count` is 0; and `mean`, the mean of
+        the finite values, null where `count` is 0. The values are summed exactly, whatever their
+        size and order, and the mean is the exact sum over `count` rounded once: on a timestamp
+        field to the nearest whole microsecond, served as `timestamp[us, UTC]`, and on any other to
+        the nearest `float64`, served as one, a tie to even either way.
 
         **Reading a whole result.** A response carries at most `pages` pages and runs within its own
         byte budget, `serve.aggregate_response_bytes` (16 MiB by default), and the bulk reads' time
@@ -7343,7 +7346,7 @@ components:
           type: object
           additionalProperties: false
           required: [entries, bytes, hits, misses, evictions, fills, loads, exact, reserve_spent, not_admitted, labels_bytes, labels_bound_bytes, labels_rows_read, disk_bytes, disk_bound_bytes]
-          description: The per-artifact counts of levels served from a row column, and the figures of number and timestamp fields, held per grant over the grant's base rows and corrected per request.
+          description: The per-artifact counts of levels served from a row column, and the figures of number and timestamp fields, held per grant over the grant's base rows and corrected per request. A field's figures are joined from those the base stores per set of access labels.
           properties:
             entries: { type: integer, minimum: 0 }
             bytes: { type: integer, minimum: 0 }
@@ -7353,11 +7356,11 @@ components:
             fills:
               type: integer
               minimum: 0
-              description: Walks of a grant's base rows, for a level or a field. A growth or a publication between folds does not walk again.
+              description: Walks of a grant's base rows, for a level, or for a field the base stores no figures of. A growth or a publication between folds does not walk again.
             loads:
               type: integer
               minimum: 0
-              description: Counts or field figures read back from the cache directory rather than walked.
+              description: Counts read back from the cache directory rather than walked.
             exact:
               type: integer
               minimum: 0
@@ -7384,7 +7387,7 @@ components:
             disk_bytes:
               type: integer
               minimum: 0
-              description: Bytes of counts, labels and field figures in the engine's cache directory.
+              description: Bytes of counts and labels in the engine's cache directory.
             disk_bound_bytes:
               type: integer
               minimum: 0

@@ -49,7 +49,6 @@
 mod cache;
 mod counts;
 mod denied;
-mod exact;
 mod field;
 mod labels;
 mod persist;

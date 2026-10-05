@@ -1175,10 +1175,11 @@ class Viewer:
           one page. `{"field": name, "summary": True}` gives one row of a number or timestamp
           field's figures over every item this reader may see in the view, whatever the filters
           and the reference: `items`, `count` (those holding a finite value), `none` (those
-          holding none), `min`, `max` and `mean`, each exact. `"cells"` divides the set, or each
-          group, into the view's cells at a depth from 0 to 32, `{"depth": d}`, optionally only
-          those meeting a box, `{"depth": d, "area": [x0, y0, x1, y1]}`; a grouping by bins or a
-          summary takes no cells.
+          holding none), `min`, `max` and `mean`, each exact; a timestamp field's `mean` is a
+          UTC timestamp to the nearest microsecond, and any other's a float. `"cells"` divides
+          the set, or each group, into the view's cells at a depth from 0 to 32, `{"depth": d}`,
+          optionally only those meeting a box, `{"depth": d, "area": [x0, y0, x1, y1]}`; a
+          grouping by bins or a summary takes no cells.
         - `filters`: the set counted, as `Selection.filter` takes an expression. Without it, every
           item this reader may see in the view.
         - `reference`: a second set to compare with, drawn from what this reader may see. `{}` is

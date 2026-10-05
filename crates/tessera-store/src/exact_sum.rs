@@ -7,7 +7,8 @@
 //! past the word it starts in. Subtracting a sum adds its positive part to the negative magnitude
 //! and its negative part to the positive one.
 //!
-//! The mean is rounded once, to the nearest `f64` with a tie to even, from the exact quotient.
+//! The mean is rounded once from the exact quotient: to the nearest `f64`, or for a timestamp to
+//! the nearest whole microsecond, a tie to even either way.
 
 /// Words in one magnitude.
 const LIMBS: usize = 34;
@@ -17,7 +18,7 @@ const ONE: usize = 1074;
 
 /// An exact sum of finite `f64`s and integers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExactSum {
+pub struct ExactSum {
     positive: [u64; LIMBS],
     negative: [u64; LIMBS],
 }
@@ -78,7 +79,7 @@ fn add_words(a: &mut [u64; LIMBS], b: &[u64; LIMBS]) {
 impl ExactSum {
     /// Add a finite `f64`.
     #[inline]
-    pub(crate) fn add_float(&mut self, x: f64) {
+    pub fn add_float(&mut self, x: f64) {
         debug_assert!(x.is_finite());
         let bits = x.to_bits();
         let exponent = ((bits >> 52) & 0x7ff) as usize;
@@ -98,7 +99,7 @@ impl ExactSum {
     }
 
     /// Add an integer.
-    pub(crate) fn add_int(&mut self, x: i128) {
+    pub fn add_int(&mut self, x: i128) {
         if x == 0 {
             return;
         }
@@ -110,30 +111,27 @@ impl ExactSum {
     }
 
     /// `self + other`.
-    pub(crate) fn plus(mut self, other: &ExactSum) -> ExactSum {
+    pub fn plus(mut self, other: &ExactSum) -> ExactSum {
         add_words(&mut self.positive, &other.positive);
         add_words(&mut self.negative, &other.negative);
         self
     }
 
     /// `self - other`.
-    pub(crate) fn minus(mut self, other: &ExactSum) -> ExactSum {
+    pub fn minus(mut self, other: &ExactSum) -> ExactSum {
         add_words(&mut self.positive, &other.negative);
         add_words(&mut self.negative, &other.positive);
         self
     }
 
-    /// The sum over `count`, rounded once to the nearest `f64`. `None` where `count` is 0.
-    pub(crate) fn mean(&self, count: u64) -> Option<f64> {
-        if count == 0 {
-            return None;
-        }
+    /// The sum over `count`, exactly: the quotient's magnitude with 64 bits below the fixed
+    /// point's, whether a remainder was left, and whether it is negative.
+    fn quotient(&self, count: u64) -> ([u64; LIMBS + 1], bool, bool) {
         let (larger, smaller, negative) =
             match self.positive.iter().rev().cmp(self.negative.iter().rev()) {
                 std::cmp::Ordering::Less => (&self.negative, &self.positive, true),
                 _ => (&self.positive, &self.negative, false),
             };
-        // The magnitude, with 64 bits below the fixed point's, divided by `count`.
         let mut magnitude = [0u64; LIMBS + 1];
         let mut borrow = false;
         for i in 0..LIMBS {
@@ -148,17 +146,50 @@ impl ExactSum {
             *word = (wide / u128::from(count)) as u64;
             remainder = wide % u128::from(count);
         }
-        let rounded = rounded(&magnitude, remainder != 0, -(ONE as i32) - 64);
+        (magnitude, remainder != 0, negative)
+    }
+
+    /// The sum over `count`, rounded once to the nearest `f64`, a tie to even. `None` where
+    /// `count` is 0.
+    pub fn mean(&self, count: u64) -> Option<f64> {
+        if count == 0 {
+            return None;
+        }
+        let (magnitude, sticky, negative) = self.quotient(count);
+        let rounded = rounded(&magnitude, sticky, -(ONE as i32) - 64);
         Some(if negative { -rounded } else { rounded })
     }
 
+    /// The sum over `count`, rounded once to the nearest integer, a tie to even. `None` where
+    /// `count` is 0. Exact for any mean of integers that fit an `i128`.
+    pub fn mean_whole(&self, count: u64) -> Option<i128> {
+        if count == 0 {
+            return None;
+        }
+        let (magnitude, sticky, negative) = self.quotient(count);
+        let point = ONE + 64;
+        let bit = |b: usize| magnitude[b / 64] >> (b % 64) & 1 == 1;
+        let mut whole = (point..magnitude.len() * 64)
+            .filter(|&b| bit(b))
+            .fold(0u128, |m, b| {
+                m | 1u128.checked_shl((b - point) as u32).unwrap_or(0)
+            });
+        let half = bit(point - 1);
+        let below = sticky || (0..point - 1).any(bit);
+        if half && (below || whole & 1 == 1) {
+            whole += 1;
+        }
+        let whole = whole as i128;
+        Some(if negative { -whole } else { whole })
+    }
+
     /// The words as they are written to disk: the positive magnitude, then the negative.
-    pub(crate) fn words(&self) -> impl Iterator<Item = u64> + '_ {
+    pub fn words(&self) -> impl Iterator<Item = u64> + '_ {
         self.positive.iter().chain(&self.negative).copied()
     }
 
     /// The sum written as [`Self::words`] gives it, where there are as many words.
-    pub(crate) fn of_words(words: &[u64]) -> Option<ExactSum> {
+    pub fn of_words(words: &[u64]) -> Option<ExactSum> {
         let (positive, negative) = words.split_at_checked(LIMBS)?;
         Some(ExactSum {
             positive: positive.try_into().ok()?,
@@ -167,7 +198,7 @@ impl ExactSum {
     }
 
     /// How many words [`Self::words`] gives.
-    pub(crate) const WORDS: usize = 2 * LIMBS;
+    pub const WORDS: usize = 2 * LIMBS;
 }
 
 /// `words · 2^scale`, with `sticky` saying whether something smaller than its lowest bit was left

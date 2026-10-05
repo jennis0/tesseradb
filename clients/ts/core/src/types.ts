@@ -1722,8 +1722,9 @@ export type Grouping = {
  * With `summary: true`, the table is one row of the field's figures over every item this principal
  * may see in the view, whatever the filters and the reference say: `items`, `count` (those holding
  * a finite value) and `none` (those holding none), each a `bigint`; `min` and `max`, typed as a
- * histogram's edges, null where `count` is 0; and `mean`, a number, null where `count` is 0. Every
- * figure is exact, the mean rounded once from the exact sum. A summary takes no `cells`.
+ * histogram's edges, null where `count` is 0; and `mean`, null where `count` is 0: a timestamp on a
+ * timestamp field, rounded to the nearest microsecond, and a number on any other. Every figure is
+ * exact, the mean rounded once from the exact sum, a tie to even. A summary takes no `cells`.
  *
  * @category Requests and responses
  */

@@ -664,6 +664,26 @@ pub struct ValueColumn {
     block_ranks: std::sync::OnceLock<(u32, Vec<u64>)>,
 }
 
+/// Attribute `name`'s base column under a partition's directory, read per entity as a number, or
+/// `None` where no base column was written for it: what a build and a fold tally a field's values
+/// over a view's base rows from (`tessera_store::field_tallies`).
+#[allow(clippy::type_complexity)]
+pub fn base_numbers(
+    partition_dir: &Path,
+    name: &str,
+) -> io::Result<Option<Box<dyn Fn(u32) -> Option<tessera_types::scalar::Number> + Sync + Send>>> {
+    let dir = partition_dir.join("attrs").join(name);
+    if !dir.join(VALUES_FILE).exists() {
+        return Ok(None);
+    }
+    let column = ValueColumn::open_dir(&dir, Access::Mapped)?;
+    Ok(Some(Box::new(move |entity| {
+        column
+            .record_value_of(entity)
+            .and_then(|value| value.number())
+    })))
+}
+
 impl ValueColumn {
     /// A column every entity carries a value in.
     pub fn universal(codes: Codes) -> Self {

@@ -570,18 +570,23 @@ filter, the reference and any region play no part in it, so it describes what th
 as a card beside a histogram does. Every figure is exact. The sum is kept exactly, as an integer
 count of 2^-1074, the smallest step between two `float64` values, so subtracting the values of
 denied rows leaves exactly the sum of the rest, and the mean is that sum over the count rounded
-once to the nearest `float64`.
+once, a tie to even: on a timestamp field to the nearest microsecond, served as a timestamp, and
+on any other to the nearest `float64`.
 
 The figures are computed as a layer's artifact figures are, in three parts. The visible set `S`
 is the session's projection `P` less the rows the request's composition subtracts, `minus`, plus
 the rows it adds, `plus`. Below the bundle's base row count `B`:
 
-- **F**, the grant's base rows, `P ∩ [0, B)`, a function of the grant and the bundle identity
-  alone. A base row's value never changes between compactions: an edit gives the item a new
-  entity, whose row is above the base, and a compaction rotates the identity. F's count of finite
-  values, their sum, the items with no value, and the eight smallest and eight largest values with
-  their rows are walked once per grant, view and field, shared by every session with that grant,
-  and written to the engine's cache directory, so a restart reads them back.
+- **F**, the grant's base rows, `P ∩ [0, B)`. A build and a compaction store, for each view, a
+  tally of each field for each distinct list of index keys the base rows' items carry: the count
+  of finite values, their sum, the items with no value, and the eight smallest and eight largest
+  values with their rows (`field-tallies.bin`). The items of one key list are in a grant's base
+  rows together or not at all, decided by the rule the authorised set is built by: a list is
+  admitted where the grant satisfies any of its keys. F is the merge of the admitted lists'
+  tallies, and no request walks a base row to find it. A base row's value and its item's keys
+  never change between compactions: an edit gives the item a new entity, whose row is above the
+  base, and a compaction writes the file again. A field declared at a running service has no
+  stored tally, and its base rows are walked once per grant.
 - **D**, the base rows the request subtracts, `minus ∩ [0, B)`, which are the deleted and
   suppressed rows the grant holds there. Their count, sum and items with no value are read from
   their values once per deny version and subtracted from F's.
@@ -596,7 +601,7 @@ histogram's default edges, are corrected from that request on.
 
 ```mermaid
 flowchart LR
-  F["F: the grant's base rows<br/>walked once per grant and field,<br/>kept on disk"] --> S
+  F["F: the grant's base rows<br/>merged from the base's tallies<br/>per key list"] --> S
   D["D: denied base rows<br/>per deny version"] -->|subtracted| S
   T["T: rows above the base<br/>per session and generation"] -->|added| S
   S["the figures of the visible set:<br/>count, none, sum, smallest, largest"]

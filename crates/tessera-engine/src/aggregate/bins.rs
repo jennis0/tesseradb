@@ -946,7 +946,7 @@ impl Reader<'_> {
         let cx = self.cx;
         cx.check_cancelled()?;
         if rows.is_empty() {
-            return Ok(FieldTally::empty());
+            return Ok(FieldTally::default());
         }
         let empty = || Summary::<K>::new(keep);
         if self.field.drawn {

@@ -68,6 +68,9 @@ pub struct ViewData {
     /// `None` costs time and changes no answer: a session whose terms have no image walks its
     /// permutation instead, and arrives at the same rows.
     pub term_images: Option<Arc<crate::term_images::TermImages>>,
+    /// The figures of every number and timestamp field over the base rows, per key list
+    /// ([`crate::field_tallies`]), or `None` for a view with no base.
+    pub field_tallies: Option<Arc<crate::field_tallies::FieldTallies>>,
 }
 
 impl ViewData {
@@ -323,6 +326,7 @@ impl Bundle {
                 // the base permutation applied to a term's base posting, and neither publication
                 // touches either. The rows they add are walked (ruling B, the term-images memo).
                 term_images: view_data.term_images.clone(),
+                field_tallies: view_data.field_tallies.clone(),
             })
         })
     }
@@ -371,6 +375,7 @@ impl Bundle {
                 // the base permutation applied to a term's base posting, and neither publication
                 // touches either. The rows they add are walked (ruling B, the term-images memo).
                 term_images: view_data.term_images.clone(),
+                field_tallies: view_data.field_tallies.clone(),
             })
         })
     }
@@ -400,6 +405,7 @@ impl Bundle {
                 segments: view_data.segments.clone(),
                 incarnation: view_data.incarnation,
                 term_images: view_data.term_images.clone(),
+                field_tallies: view_data.field_tallies.clone(),
             })
         })
     }
@@ -446,6 +452,7 @@ impl Bundle {
                         // A view created while the service runs owns no row space until its first
                         // flush, so there is nothing to have projected.
                         term_images: None,
+                        field_tallies: None,
                     });
             }
         }
@@ -762,6 +769,31 @@ fn open_prefix(
                         None
                     };
 
+                    // `field-tallies.bin` beside it, which every base carries.
+                    let field_tallies = match has_base {
+                        false => None,
+                        true => {
+                            let rel = format!(
+                                "partitions/{}/{}/{}",
+                                partition_desc.phash,
+                                crate::view_rel(&seg_desc.view),
+                                crate::field_tallies::FIELD_TALLIES_FILE
+                            );
+                            let path = view_dir.join(crate::field_tallies::FIELD_TALLIES_FILE);
+                            ensure_verified(&rel, &segments_manifest, &manifest.files, &path)?;
+                            let tallies = crate::field_tallies::read(&path)?.ok_or_else(|| {
+                                StoreError::MalformedBundle {
+                                    detail: format!(
+                                        "view '{}' has a base and no {}; rebuild the bundle",
+                                        seg_desc.view,
+                                        crate::field_tallies::FIELD_TALLIES_FILE
+                                    ),
+                                }
+                            })?;
+                            Some(Arc::new(tallies))
+                        }
+                    };
+
                     // The first segment named for a view is its build segment: `permutation.bin`
                     // addresses that one's row space, and every later segment arrives as an
                     // extent above it.
@@ -785,6 +817,7 @@ fn open_prefix(
                             // permutation's bound have been checked: both are stamped into the
                             // file and the open compares them.
                             term_images: None,
+                            field_tallies,
                         },
                     );
                     views.get_mut(&seg_desc.view).expect("just inserted")
@@ -989,6 +1022,7 @@ fn open_prefix(
                 segments: Vec::new(),
                 incarnation: view.incarnation,
                 term_images: None,
+                field_tallies: None,
             });
         }
 

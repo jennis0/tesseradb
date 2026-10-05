@@ -771,13 +771,22 @@ impl Plan {
                 crate::figures::Number::Float(x) => Edge::Float(x),
             })
         };
+        // A timestamp's mean is the instant to the nearest microsecond, typed as its smallest and
+        // largest are; any other field's is a float.
+        let mean: ArrayRef = match field.kind() {
+            Kind::Timestamp => typed(
+                Kind::Timestamp,
+                &[figures.sum.mean_whole(figures.count).map(Edge::Int)],
+            ),
+            _ => Arc::new(Float64Array::from(vec![figures.sum.mean(figures.count)])),
+        };
         let columns: Vec<(&str, ArrayRef)> = vec![
             ("items", Arc::new(UInt64Array::from(vec![figures.items]))),
             ("count", Arc::new(UInt64Array::from(vec![figures.count]))),
             ("none", Arc::new(UInt64Array::from(vec![figures.none]))),
             ("min", typed(field.kind(), &[edge(figures.min)])),
             ("max", typed(field.kind(), &[edge(figures.max)])),
-            ("mean", Arc::new(Float64Array::from(vec![figures.mean]))),
+            ("mean", mean),
         ];
         let bytes = 6 * 8 + 1;
         let fields: Vec<ArrowField> = columns

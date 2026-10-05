@@ -644,8 +644,17 @@ def summary_oracle(column: str, items: list[int]) -> dict:
         "none": len(items) - len(values),
         "min": min(finite) if finite else None,
         "max": max(finite) if finite else None,
-        "mean": float(sum(Fraction(v) for v in finite) / len(finite)) if finite else None,
+        "mean": exact_mean(column, finite),
     }
+
+
+def exact_mean(column: str, finite: list):
+    """The contract's mean: the exact mean rounded once, a tie to even, to the nearest microsecond
+    on a timestamp field and to the nearest `float64` on any other."""
+    if not finite:
+        return None
+    mean = sum(Fraction(v) for v in finite) / len(finite)
+    return round(mean) if column in TIMESTAMPS else float(mean)
 
 
 def read_summary(server, token: str, column: str, filters: dict | None = None) -> tuple[dict, dict]:
@@ -661,6 +670,8 @@ def read_summary(server, token: str, column: str, filters: dict | None = None) -
     batch = ipc.open_stream(io.BytesIO(pages[0][0])).read_next_batch()
     assert batch.schema.names == ["items", "count", "none", "min", "max", "mean"]
     assert batch.column("min").type == EDGE_TYPES[column], batch.column("min").type
+    mean_type = EDGE_TYPES[column] if column in TIMESTAMPS else pa.float64()
+    assert batch.column("mean").type == mean_type, batch.column("mean").type
     row = {}
     for name in batch.schema.names:
         column_values = batch.column(name)

@@ -1822,15 +1822,18 @@ struct Figures {
     none: u64,
     min: Option<Val>,
     max: Option<Val>,
-    mean: Option<f64>,
+    /// A float, or on a timestamp field the instant.
+    mean: Option<Val>,
 }
 
 impl PartialEq for Figures {
-    /// The mean of a float field is summed in another order than the oracle's, so it is compared
-    /// to within its last digits.
+    /// The oracle's float mean is summed in floats, so it is compared to within its last digits; a
+    /// timestamp's is exact.
     fn eq(&self, other: &Self) -> bool {
         let near = match (self.mean, other.mean) {
-            (Some(a), Some(b)) => (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0),
+            (Some(Val::F(a)), Some(Val::F(b))) => {
+                (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+            }
             (a, b) => a == b,
         };
         (self.items, self.count, self.none, self.min, self.max)
@@ -1850,20 +1853,13 @@ fn figures_of(batch: &RecordBatch) -> Figures {
             .unwrap()
             .value(0)
     };
-    let mean = batch
-        .column_by_name("mean")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap()
-        .clone();
     Figures {
         items: u64_of("items"),
         count: u64_of("count"),
         none: u64_of("none"),
         min: value_at(batch, "min", 0),
         max: value_at(batch, "max", 0),
-        mean: (!mean.is_null(0)).then(|| mean.value(0)),
+        mean: value_at(batch, "mean", 0),
     }
 }
 
@@ -1901,7 +1897,24 @@ fn oracle(items: &[&Item], column: &str) -> Figures {
         none: (items.len() - values.len()) as u64,
         min: pick(true),
         max: pick(false),
-        mean: (!finite.is_empty()).then_some(sum + carried),
+        mean: match finite.first() {
+            None => None,
+            // The exact mean of the instants, to the nearest microsecond, a tie to even.
+            Some(Val::T(_)) => {
+                let total: i128 = finite
+                    .iter()
+                    .map(|v| match v {
+                        Val::T(t) => i128::from(*t),
+                        _ => unreachable!("one field's values are of one kind"),
+                    })
+                    .sum();
+                let n = finite.len() as i128;
+                let (whole, left) = (total.div_euclid(n), total.rem_euclid(n));
+                let up = 2 * left > n || (2 * left == n && whole % 2 != 0);
+                Some(Val::T((whole + i128::from(up)) as i64))
+            }
+            Some(_) => Some(Val::F(sum + carried)),
+        },
     }
 }
 
@@ -2026,6 +2039,32 @@ fn a_summary_is_the_oracles_over_the_whole_visible_set() {
         );
         assert_eq!(figures_of(&collect.pages[1].1), oracle(&all, "rank"));
     }
+}
+
+/// **A grant's figures are those of the key lists it satisfies.** Every item carries key `0`, and
+/// every third carries `1` as well, so the base holds two key lists. The subset viewer satisfies
+/// one of them and the broad viewer both, and each one's summary is the oracle's over the items of
+/// its lists alone, composed from the build's tallies without a row walked.
+#[test]
+fn a_grant_gets_the_figures_of_the_key_lists_it_satisfies() {
+    let fx = fixture();
+    for broad in [true, false] {
+        let session = fx.session(broad);
+        let lists: Vec<&Item> = fx.visible(broad, &|_| true).collect();
+        assert_eq!(
+            lists.iter().all(|i| i.subset),
+            !broad,
+            "the subset viewer's items are the second list's"
+        );
+        for column in COLUMNS {
+            assert_eq!(
+                summary_of(&fx.engine, &session, "s0", column, None),
+                oracle(&lists, column),
+                "{column}, broad {broad}"
+            );
+        }
+    }
+    assert_eq!(fx.engine.figures_stats().fills, 0, "no base row was walked");
 }
 
 /// **A summary that cannot be served is refused**: a cell level, a category, a bool and a field
@@ -2162,7 +2201,10 @@ fn a_huge_float_suppressed_leaves_the_mean_of_the_rest() {
             let served = summary_of(&fx.engine, &session, "s0", "score", None);
             let want = oracle(&seen, "score");
             assert_eq!(served, want, "{when}, broad {broad}");
-            assert!(served.mean.is_some_and(f64::is_finite), "{when}: {served:?}");
+            assert!(
+                matches!(served.mean, Some(Val::F(m)) if m.is_finite()),
+                "{when}: {served:?}"
+            );
         }
     };
     check(&[], "planted");
@@ -2172,8 +2214,11 @@ fn a_huge_float_suppressed_leaves_the_mean_of_the_rest() {
     }
     check(&huge, "suppressed");
     let session = fx.session(false);
-    let mean = summary_of(&fx.engine, &session, "s0", "score", None).mean.unwrap();
-    assert!(mean.abs() < 1_000.0, "the huge values left no trace: {mean}");
+    let mean = summary_of(&fx.engine, &session, "s0", "score", None).mean;
+    assert!(
+        matches!(mean, Some(Val::F(m)) if m.abs() < 1_000.0),
+        "the huge values left no trace: {mean:?}"
+    );
     for &source in &huge {
         let entity = item_of_id(&fx.engine, source).unwrap().unwrap();
         fx.engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
@@ -2246,6 +2291,7 @@ fn the_figures_are_the_oracles_through_every_change() {
     {
         let engine = engine_at(tmp.path(), &root, 3600);
         check(&engine, &items, &fates, "built");
+        assert_eq!(engine.figures_stats().fills, 0, "the build's tallies are composed, not walked");
 
         // Thirty new items, every third visible to the subset viewer, two holding new extremes.
         let mut added = Vec::new();
@@ -2433,11 +2479,9 @@ fn the_figures_are_the_oracles_through_every_change() {
 
         fold(&engine);
         check(&engine, &items, &fates, "compacted");
-        engine.figures_settled_for_test();
+        assert_eq!(engine.figures_stats().fills, 0, "the fold's tallies are composed, not walked");
     }
     let engine = engine_at(tmp.path(), &root, 3600);
     check(&engine, &items, &fates, "restarted");
-    let stats = engine.figures_stats();
-    assert_eq!(stats.fills, 0, "nothing was walked again");
-    assert!(stats.loads > 0, "the figures were read back");
+    assert_eq!(engine.figures_stats().fills, 0, "nothing was walked after the restart");
 }
