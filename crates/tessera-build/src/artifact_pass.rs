@@ -476,6 +476,22 @@ pub fn run(
         };
         match staged {
             Ok(Some(path)) => {
+                // A served column is filed only with its members beside it, and a level whose
+                // members would not be written composes both on first use.
+                if matches!(form, DerivedForm::RowColumn { .. }) {
+                    match derived::stage_row_members(&path, composed_as, scratch_dir) {
+                        Ok(members) => columns.push(filed(DerivedForm::RowMembers, members)),
+                        Err(error) => {
+                            eprintln!(
+                                "artifact pass: {layer} level {level}'s members would not be \
+                                 written beside its column ({error}); that level derives both on \
+                                 first use"
+                            );
+                            let _ = std::fs::remove_file(&path);
+                            continue;
+                        }
+                    }
+                }
                 if composed_as == ServingLayout::RowMajorLabel {
                     if let Some(segment) = &segment {
                         match derived::stage_band_labels(&path, &segment.bands, scratch_dir) {

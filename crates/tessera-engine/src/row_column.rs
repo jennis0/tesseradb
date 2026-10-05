@@ -39,17 +39,12 @@
 //! ~10 GB transient per level. Every write reaches the column and the extents beside it; nothing is
 //! transposed back.
 //!
-//! **Where a layer derives a hull, the artifact-major form is transposed out of the column** rather
-//! than
-//! projected a second time from the level's memberships ([`RowColumn::transpose`], and
-//! [`crate::artifacts::ArtifactRows::build_from_column`] is the caller): the column already holds
-//! the membership, addressed by row, so reaching the other address is one sequential pass instead
-//! of a decode and a permutation of every artifact's members. At rung 3's `mesh/descriptors` —
-//! 30,217 artifacts over 1.66×10⁹ membership entries — that is **14.5 s at open against 24 s**,
-//! the open as a whole 14.4 s against 23.9, and `/readyz` 24.8 s against 33.8
-//! (`probes/2026-09-02-cold-start/`). That same transpose is what a column-only form takes back
-//! when a flush, a merge or a publication reaches it, every amendment being expressed over the
-//! artifact-major half.
+//! **Where a layer derives a hull, the artifact-major form is read off the members written beside
+//! the column** ([`crate::row_members`], [`RowColumn::transpose`], and
+//! [`crate::artifacts::ArtifactRows::build_from_column`] is the caller) rather than projected a
+//! second time from the level's memberships: the members are the column's labels transposed once,
+//! when the column was written, so reaching the other address costs a copy of each bitmap out of the
+//! mapping.
 //!
 //! **Three things are not in the column and still project**: each content's **generating set**,
 //! which containment is tested against and which is a different set from the membership; a level
@@ -202,6 +197,12 @@ pub struct RowColumn {
     /// structure does. What has accumulated bounds the memory and not the write: a write costs its
     /// own batch ([`RowColumn::amend`]) while the column is unshared, however much is already held.
     added: Option<Added>,
+    /// **The base rows by artifact, and each artifact's covering**, written from this column's own
+    /// labels whenever the column was ([`crate::row_members`]). Held here so that whatever replaces
+    /// or drops the column replaces or drops them with it. `None` only on a column read for its
+    /// labels alone ([`Self::open_labels`]) and on an attribute predicate's, whose labels are a value
+    /// column's rather than a stored membership's.
+    members: Option<crate::row_members::LevelMembers>,
 }
 
 /// What one pass over a viewer's visible rows folded up, per ordinal: see
@@ -658,7 +659,40 @@ impl RowColumn {
     /// the first bytes rather than reading an offset table as labels — and the caller's answer to a
     /// refusal is to recompose the level, which is what every request did before this structure
     /// existed.
-    pub fn open(path: &std::path::Path, expected: ServingLayout) -> tessera_store::Result<Self> {
+    ///
+    /// `members` is the member file written beside it ([`crate::row_members`]); a column is not
+    /// served without them, so a refusal of either refuses both.
+    pub fn open(
+        path: &std::path::Path,
+        members: &std::path::Path,
+        expected: ServingLayout,
+    ) -> tessera_store::Result<Self> {
+        let mut column = Self::open_labels(path, expected)?;
+        let members = tessera_store::row_members::RowMembersPack::open(members)?;
+        if members.rows() != column.base_rows() || members.ordinals() as usize != column.len() {
+            return Err(tessera_store::StoreError::MalformedBundle {
+                detail: format!(
+                    "row-major column {}: its member file covers {} rows and {} ordinals where the \
+                     column has {} and {}; the two are written together, so one of them is another \
+                     level's",
+                    path.display(),
+                    members.rows(),
+                    members.ordinals(),
+                    column.base_rows(),
+                    column.len()
+                ),
+            });
+        }
+        column.members = Some(crate::row_members::LevelMembers::new(members));
+        Ok(column)
+    }
+
+    /// A fold-written column read for its labels alone, with no members beside it: for a reader
+    /// that turns the labels into something else, never for a column that is served.
+    pub fn open_labels(
+        path: &std::path::Path,
+        expected: ServingLayout,
+    ) -> tessera_store::Result<Self> {
         let pack = match expected {
             ServingLayout::RowMajorLabel => Pack::Label(LabelColumnPack::open(path)?),
             ServingLayout::RowMajorList => Pack::List(ListColumnPack::open(path)?),
@@ -719,6 +753,7 @@ impl RowColumn {
             // stored level only — so there is no amendment to carry, and `declared` above counts
             // none. Carrying one here would understate the proportional criterion's denominator.
             added: None,
+            members: self.members.clone(),
         }
     }
 
@@ -784,6 +819,9 @@ impl RowColumn {
             added.rows.add(*row);
         }
         added.rows.run_optimize();
+        if let Some(members) = &mut self.members {
+            members.grow(&kept);
+        }
         added.merge(kept);
         true
     }
@@ -996,174 +1034,19 @@ impl RowColumn {
     }
 
 
-    /// **The artifact-major bitmaps, derived by transposing this column** — the level's membership
-    /// in row space, read off the row form instead of projected a second time.
+    /// **The artifact-major bitmaps: the members written beside this column**, one per ordinal it
+    /// covers, a hole and an artifact no row labels both empty. Telling the two apart is the
+    /// caller's job, from the records, as it is on the projecting route.
     ///
-    /// A level recorded row-major has both forms at open: the column the fold wrote, and the
-    /// row form every artifact-major answer is still computed from (see the module doc). Building
-    /// the second by projecting every membership through the permutation costs a decode and a
-    /// projection of the whole level, whose entries are already sitting in this column.
-    /// Transposing them is the same information at one sequential read, and the two are asserted
-    /// equal artifact for artifact.
-    ///
-    /// **Measured at rung 3's `mesh/descriptors`** — 30,217 artifacts, 36M rows, 1.66×10⁹ entries,
-    /// warm cache, single-threaded (`probes/2026-09-02-cold-start/`): the projection takes
-    /// **23.6–25.1 s** and this takes **13.8–15.4 s**, of which 0.9 s counts, 4.9 s places, 6.8 s
-    /// encodes and 1.3 s deserialises the finished bitmaps.
-    ///
-    /// **The base alone**, which is exactly what [`RowSpace::project_base`] produces and therefore
-    /// what a projected form holds: `None` where a tail is attached, so a caller can never be
-    /// handed a form that stops short of the rows the live half labels.
-    ///
-    /// One [`Bitmap`] per ordinal this column covers, holes included — a hole transposes to an
-    /// empty bitmap, and telling an empty artifact from a hole is the caller's job, from the
-    /// records, exactly as it is on the projecting route.
-    ///
-    /// # Why it is blocked and counting-sorted rather than added row by row
-    ///
-    /// Appending each row to its ordinals' bitmaps as the walk reaches it touches a different
-    /// container on every value — 30,217 of them interleaved at rung 3 — and that measured
-    /// **68 s**, three times the projection it was meant to replace. The walk is instead cut into
-    /// blocks of **2¹⁶ rows, which is exactly one Roaring container**, each block counting-sorted
-    /// by ordinal so that every ordinal's rows arrive contiguous and ascending. Each run is then
-    /// the container's members, and it is handed to that ordinal's [`tessera_roaring::Sink`]
-    /// **finished** — the array form below croaring's threshold, stamped words above it — rather
-    /// than inserted value by value.
-    ///
-    /// The intermediate routes are all measured, because each looked like the answer:
-    /// `Bitmap::add_many` per run is **19 s** (the inserts alone 11.6 s); `Sink::push_block` for
-    /// every container is **24 s**, because a sparse container's payload is scanned out of 8 KB of
-    /// words whatever it holds; `Sink::push_members` staged is **17.3 s**, the staging flush
-    /// cloning every container a second time; and unstaged, which is this, **14.5 s**. The block is at least 2¹⁶ rows — a Roaring block, so a short
-    /// ordinal's run lands inside one container — and grows with the ordinal count so that the
-    /// per-block sweep over the offset table stays bounded by the row count rather than
-    /// multiplying by it.
+    /// **The base alone**, which is what [`RowSpace::project_base`] produces and so what a
+    /// projected form holds: `None` where a tail or an amendment is attached, so a caller is never
+    /// handed a form that stops short of rows the live half labels, and `None` on a column that
+    /// carries no members ([`Self::open_labels`], a predicate's).
     pub fn transpose(&self) -> Option<Vec<Bitmap>> {
-        // **And an amended column is refused for the tail's reason**: what a transposition must
-        // produce is the base alone, and an amendment names rows the base does not carry.
         if self.tail.is_some() || self.added.is_some() {
             return None;
         }
-        let ordinals = self.len();
-        if ordinals == 0 {
-            return Some(Vec::new());
-        }
-        let base_rows = self.base_rows();
-        // **One sink per ordinal, each holding its containers until the walk is done.** A sink
-        // that flushed as it filled would hand croaring a stream every 128 containers and union
-        // it in, and a union clones every container it takes — at a few hundred members a
-        // container that second copy is most of what the encoder costs. Unstaged, each artifact's
-        // membership is deserialised once and becomes the bitmap without a merge; what it costs
-        // instead is the serialized bytes of the whole level held until [`Sink::finish`], which
-        // is the row form this is about to produce anyway.
-        //
-        // Empty for a hole and for an artifact this column labels no row with, which is the same
-        // answer an empty projection gives.
-        let mut sinks: Vec<tessera_roaring::Sink> =
-            (0..ordinals)
-                .map(|_| tessera_roaring::Sink::unstaged())
-                .collect();
-        // The block's counting sort: how many rows each ordinal takes, where its run starts, how
-        // far it has been filled, and which ordinals the block touched at all. All four are
-        // allocated once for the whole walk; only `touched` is swept per block, so a level with far
-        // more ordinals than a block has rows costs its own size once rather than once per block.
-        let mut counts = vec![0usize; ordinals];
-        let mut starts = vec![0usize; ordinals];
-        let mut cursor = vec![0usize; ordinals];
-        let mut touched: Vec<u32> = Vec::new();
-        let mut values: Vec<u32> = Vec::new();
-        let mut words = [0u64; tessera_roaring::WORDS];
-        let block = tessera_roaring::BLOCK as u32;
-        let mut lo = 0u32;
-        while lo < base_rows {
-            let hi = lo.saturating_add(block).min(base_rows);
-            touched.clear();
-            {
-                let (counts, touched) = (&mut counts, &mut touched);
-                let mut count = |ordinal: u32| {
-                    let at = ordinal as usize;
-                    if counts[at] == 0 {
-                        touched.push(ordinal);
-                    }
-                    counts[at] += 1;
-                };
-                match &*self.pack {
-                    // **The values alone**, read straight through: counting needs the ordinal and
-                    // not the row, so the offset table is touched twice for the whole block.
-                    Pack::List(pack) => pack.for_each_value(lo as usize, hi as usize, count),
-                    Pack::Label(_) => {
-                        for row in lo..hi {
-                            self.for_each_label(row, &mut count);
-                        }
-                    }
-                }
-            }
-            let mut total = 0usize;
-            for ordinal in &touched {
-                let at = *ordinal as usize;
-                starts[at] = total;
-                cursor[at] = total;
-                total += counts[at];
-            }
-            values.clear();
-            values.resize(total, 0);
-            {
-                let (cursor, values) = (&mut cursor, &mut values);
-                let mut place = |row: u32, ordinal: u32| {
-                    let at = ordinal as usize;
-                    values[cursor[at]] = row;
-                    cursor[at] += 1;
-                };
-                match &*self.pack {
-                    Pack::List(pack) => pack.for_each_row_value(lo as usize, hi as usize, place),
-                    Pack::Label(_) => {
-                        for row in lo..hi {
-                            self.for_each_label(row, |ordinal| place(row, ordinal));
-                        }
-                    }
-                }
-            }
-            // **The container, handed over finished.** A block is 2¹⁶ rows and a Roaring block is
-            // 2¹⁶ values, so every row of this block lands in one container of one key — the words
-            // below *are* that container, and the sink writes it into the portable stream rather
-            // than croaring inserting it value by value.
-            let key = u16::try_from(lo >> 16).expect("a row below 2³² has a block key below 2¹⁶");
-            for ordinal in &touched {
-                let at = *ordinal as usize;
-                let (from, to) = (starts[at], cursor[at]);
-                // **The run is already the container's members, ascending**, which is the array
-                // form's whole case: below croaring's threshold the payload is those members as
-                // `u16`s, so stamping them into 8 KB of words for the encoder to scan back out
-                // would be 1,024 word reads for a few hundred members. Above it the payload *is*
-                // the words, and stamping them is what the block form takes.
-                if to - from <= tessera_roaring::ARRAY_MAX as usize {
-                    sinks[at].push_members(key, &values[from..to]);
-                } else {
-                    // Counted as it is stamped rather than taken from the run's length, because
-                    // `push_block` requires the popcount and a row a column listed twice would
-                    // otherwise inflate it — the descriptor and the payload must agree.
-                    let mut card = 0u32;
-                    for row in &values[from..to] {
-                        let offset = (row - lo) as usize;
-                        let bit = 1u64 << (offset & 63);
-                        let word = &mut words[offset >> 6];
-                        if *word & bit == 0 {
-                            *word |= bit;
-                            card += 1;
-                        }
-                    }
-                    sinks[at].push_block(key, card, &words);
-                    // Cleared by the rows that set it — O(members) rather than the 8 KB the block
-                    // is wide.
-                    for row in &values[from..to] {
-                        words[((row - lo) as usize) >> 6] = 0;
-                    }
-                }
-                counts[at] = 0;
-            }
-            lo = hi;
-        }
-        Some(sinks.into_iter().map(tessera_roaring::Sink::finish).collect())
+        self.members.as_ref()?.base_bitmaps(self.len())
     }
 
     /// The masked count of every artifact of this level: how many rows of the composed mask
@@ -1404,6 +1287,7 @@ impl RowColumn {
             declared,
             tail: None,
             added: None,
+            members: None,
         }
     }
 
@@ -1500,7 +1384,7 @@ impl RowColumn {
         };
         let _ = std::fs::remove_file(&path);
         match pack {
-            Ok(pack) => Some(Self::over(pack)),
+            Ok(pack) => Self::with_members(pack, scratch),
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -1554,7 +1438,7 @@ impl RowColumn {
         };
         let _ = std::fs::remove_file(&path);
         match pack {
-            Ok(pack) => Some(Self::over(pack)),
+            Ok(pack) => Self::with_members(pack, scratch),
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -1565,6 +1449,41 @@ impl RowColumn {
                 None
             }
         }
+    }
+
+    /// The column over `pack`, with the members written from its labels beside it, as the build and
+    /// the fold write them beside theirs. `None` where they could not be written or read back, an
+    /// I/O failure the caller treats as a column that did not compose.
+    fn with_members(pack: Pack, scratch: &std::path::Path) -> Option<Self> {
+        let labels = match &pack {
+            Pack::Label(pack) => tessera_store::derived::ColumnLabels::Label(pack),
+            Pack::List(pack) => tessera_store::derived::ColumnLabels::List(pack),
+        };
+        let opened = tessera_store::derived::project_row_members(labels, scratch).and_then(|path| {
+            let members = tessera_store::row_members::RowMembersPack::open(&path);
+            let _ = std::fs::remove_file(&path);
+            members
+        });
+        match opened {
+            Ok(members) => {
+                let mut column = Self::over(pack);
+                column.members = Some(crate::row_members::LevelMembers::new(members));
+                Some(column)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "a row-major column's members would not be written beside it; the column is \
+                     not composed"
+                );
+                None
+            }
+        }
+    }
+
+    /// This column's members by artifact and their coverings — see [`Self::members`]'s field.
+    pub fn members(&self) -> Option<&crate::row_members::LevelMembers> {
+        self.members.as_ref()
     }
 
     /// Frame a column this process just produced and read it back through the same checks a mapped
@@ -1709,7 +1628,7 @@ mod tests {
             let composed = composed(&membership, 8, layout).expect("builds");
             let path = tmp.path().join(name);
             std::fs::write(&path, composed.as_bytes()).unwrap();
-            let mapped = RowColumn::open(&path, layout).unwrap();
+            let mapped = RowColumn::open_labels(&path, layout).unwrap();
 
             assert_eq!(mapped.len(), composed.len());
             assert_eq!(mapped.row_count(), composed.row_count());
@@ -1732,8 +1651,8 @@ mod tests {
                 ServingLayout::RowMajorLabel => ServingLayout::RowMajorList,
                 _ => ServingLayout::RowMajorLabel,
             };
-            assert!(RowColumn::open(&path, other).is_err());
-            assert!(RowColumn::open(&path, ServingLayout::ArtifactMajor).is_err());
+            assert!(RowColumn::open_labels(&path, other).is_err());
+            assert!(RowColumn::open_labels(&path, ServingLayout::ArtifactMajor).is_err());
         }
     }
 
@@ -1771,32 +1690,6 @@ mod tests {
                     column.declared_size(ordinal),
                     rows.cardinality(),
                     "the declared size disagreed with the transposition at ordinal {ordinal}"
-                );
-            }
-        }
-    }
-
-    /// **Over a row space wide enough to cross the transposition\'s blocks**, which is where a
-    /// per-block offset table that did not reset, or a block boundary that dropped a row, would
-    /// show — 2¹⁶ rows is one block, so the fixture spans several and gives each artifact rows in
-    /// every one of them.
-    #[test]
-    fn a_transposition_crosses_its_own_block_boundary() {
-        const ROWS: u32 = 5 << 16;
-        const ORDINALS: u32 = 7;
-        let sets: Vec<Vec<u32>> = (0..ORDINALS)
-            .map(|ordinal| (0..ROWS).filter(|row| row % ORDINALS == ordinal).collect())
-            .collect();
-        let refs: Vec<Option<&[u32]>> = sets.iter().map(|s| Some(s.as_slice())).collect();
-        let membership = rows_of(&refs);
-        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-            let column = composed(&membership, ROWS, layout).expect("partitions");
-            let transposed = column.transpose().expect("no tail");
-            for ordinal in 0..ORDINALS {
-                assert_eq!(
-                    transposed[ordinal as usize].to_vec(),
-                    membership.get(ordinal).unwrap().to_vec(),
-                    "block-crossing transposition disagreed at ordinal {ordinal} under {layout:?}"
                 );
             }
         }

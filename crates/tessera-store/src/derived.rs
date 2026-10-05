@@ -568,6 +568,316 @@ pub fn project_row_column_pairs(
     }
 }
 
+/// The most row ranges one artifact's covering holds.
+pub const COVERING_RANGES: usize = 32;
+
+/// A row-major column's labels, read by [`project_row_members`].
+#[derive(Clone, Copy)]
+pub enum ColumnLabels<'a> {
+    Label(&'a crate::membership::LabelColumnPack),
+    List(&'a crate::membership::ListColumnPack),
+}
+
+impl ColumnLabels<'_> {
+    fn ordinals(&self) -> u32 {
+        match self {
+            ColumnLabels::Label(pack) => pack.ordinals(),
+            ColumnLabels::List(pack) => pack.ordinals(),
+        }
+    }
+
+    fn rows(&self) -> u32 {
+        match self {
+            ColumnLabels::Label(pack) => pack.rows(),
+            ColumnLabels::List(pack) => pack.rows(),
+        }
+    }
+
+    /// Every ordinal of the column, once for each row carrying it.
+    fn for_each_ordinal(&self, mut visit: impl FnMut(u32)) {
+        let rows = self.rows() as usize;
+        match self {
+            ColumnLabels::Label(pack) => {
+                pack.for_each_row_label(0, rows, |_, ordinal| visit(ordinal))
+            }
+            ColumnLabels::List(pack) => pack.for_each_value(0, rows, visit),
+        }
+    }
+
+    /// Every `(row, ordinal)` of the column, in row order.
+    fn for_each(&self, visit: impl FnMut(u32, u32)) {
+        let rows = self.rows() as usize;
+        match self {
+            ColumnLabels::Label(pack) => pack.for_each_row_label(0, rows, visit),
+            ColumnLabels::List(pack) => pack.for_each_row_value(0, rows, visit),
+        }
+    }
+}
+
+/// **One level's members by artifact and their coverings, written from its column's labels into a
+/// file under `scratch`** ([`crate::row_members`] for the format). The build, the fold and the
+/// engine's own compositions all call this on the column they have just written, so the two forms
+/// are always the column's transpose and never a second reading of the memberships.
+///
+/// Each artifact's covering is its row span split at its `COVERING_RANGES − 1` widest gaps between
+/// members, the wider gap first and the lower one on a tie: of the coverings with that many ranges,
+/// the one holding the fewest rows that are not members.
+///
+/// # What it holds while it runs
+///
+/// The pairs go to a disk partition by ordinal and each bucket is read back in turn, as the
+/// column's own composition does by row. A bucket holds at most
+/// [`crate::partition::PARTITION_BUCKET_RECORDS`] entries, or one artifact alone where that
+/// artifact has more. What stands is the bucket's rows, 4 B an entry, or for an artifact alone in
+/// its bucket only its bitmap as it grows. The coverings, 8 B a range, are held until the file is
+/// finished.
+pub fn project_row_members(
+    labels: ColumnLabels<'_>,
+    scratch: &Path,
+) -> crate::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(scratch).map_err(|source| crate::StoreError::Io {
+        path: scratch.to_path_buf(),
+        source,
+    })?;
+    let name = scratch_name();
+    let path = scratch.join(format!("{name}.members"));
+    let written = write_row_members(labels, scratch, &name, &path);
+    if written.is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
+    written.map(|()| path)
+}
+
+fn write_row_members(
+    labels: ColumnLabels<'_>,
+    scratch: &Path,
+    name: &str,
+    path: &Path,
+) -> crate::Result<()> {
+    let ordinals = labels.ordinals();
+    let mut counts = vec![0u64; ordinals as usize];
+    labels.for_each_ordinal(|ordinal| {
+        if let Some(count) = counts.get_mut(ordinal as usize) {
+            *count += 1;
+        }
+    });
+    let mut file = crate::row_members::RowMembersFile::create(
+        path,
+        ordinals,
+        labels.rows(),
+        COVERING_RANGES as u16,
+    )?;
+    let entries: u64 = counts.iter().sum();
+    if entries == 0 {
+        return file.finish();
+    }
+    // Each ordinal's bucket is looked up rather than searched for, since every pair takes one.
+    let boundaries = member_buckets(&counts, crate::partition::PARTITION_BUCKET_RECORDS);
+    let mut bucket_of = vec![0u32; ordinals as usize];
+    for (k, &lo) in boundaries.iter().enumerate() {
+        let hi = boundaries
+            .get(k + 1)
+            .map_or(ordinals as usize, |&hi| hi as usize);
+        bucket_of[lo as usize..hi].fill(k as u32);
+    }
+    let mut partition = crate::partition::Partition::create_routed(
+        scratch,
+        name,
+        boundaries.len(),
+        ROW_ORDINAL_RECORD,
+        entries,
+    )?;
+    let mut pushed: crate::Result<()> = Ok(());
+    labels.for_each(|row, ordinal| {
+        if pushed.is_err() || ordinal >= ordinals {
+            return;
+        }
+        let mut record = [0u8; ROW_ORDINAL_RECORD];
+        record[..4].copy_from_slice(&ordinal.to_le_bytes());
+        record[4..].copy_from_slice(&row.to_le_bytes());
+        if let Err(error) = partition.push_to(bucket_of[ordinal as usize] as usize, &record) {
+            pushed = Err(error);
+        }
+    });
+    drop(bucket_of);
+    pushed?;
+    let mut store = partition.finish()?;
+    let record = |bytes: &[u8]| {
+        (
+            u32::from_le_bytes(bytes[..4].try_into().expect("four bytes")),
+            u32::from_le_bytes(bytes[4..].try_into().expect("four bytes")),
+        )
+    };
+    for k in 0..boundaries.len() {
+        let lo = boundaries[k];
+        let hi = boundaries.get(k + 1).copied().unwrap_or(ordinals);
+        if hi - lo == 1 {
+            // One artifact alone, its rows arriving ascending in the order they were pushed.
+            let mut builder = MemberBuilder::new();
+            store.read_each(k, |bytes| {
+                builder.push(record(bytes).1);
+                Ok(())
+            })?;
+            let (members, covering) = builder.finish();
+            file.push(lo, &members, &covering)?;
+        } else {
+            // A run of ordinals: their rows counting-sorted by ordinal, which keeps each one's rows
+            // in the ascending order they were pushed in.
+            let mut starts: Vec<usize> = Vec::with_capacity((hi - lo) as usize + 1);
+            let mut total = 0usize;
+            for ordinal in lo..hi {
+                starts.push(total);
+                total += counts[ordinal as usize] as usize;
+            }
+            starts.push(total);
+            let mut cursor = starts.clone();
+            let mut rows = vec![0u32; total];
+            store.read_each(k, |bytes| {
+                let (ordinal, row) = record(bytes);
+                let at = &mut cursor[(ordinal - lo) as usize];
+                rows[*at] = row;
+                *at += 1;
+                Ok(())
+            })?;
+            for ordinal in lo..hi {
+                let at = (ordinal - lo) as usize;
+                let mine = &rows[starts[at]..starts[at + 1]];
+                if mine.is_empty() {
+                    continue;
+                }
+                let mut builder = MemberBuilder::new();
+                for &row in mine {
+                    builder.push(row);
+                }
+                let (members, covering) = builder.finish();
+                file.push(ordinal, &members, &covering)?;
+            }
+        }
+        store.delete(k)?;
+    }
+    file.finish()
+}
+
+/// The first ordinal of each bucket the member writer reads back in turn, from each ordinal's
+/// entry count. A bucket holds a run of ordinals of at most `target` entries between them, or a
+/// single ordinal of more, alone, which the writer builds as its rows stream rather than holding
+/// them.
+fn member_buckets(counts: &[u64], target: u64) -> Vec<u32> {
+    let mut boundaries = vec![0u32];
+    let mut held = 0u64;
+    for (ordinal, &count) in counts.iter().enumerate() {
+        let opened = *boundaries.last().expect("the first bucket opens at 0") as usize;
+        let over = held > 0 && held + count > target;
+        if (over || count > target) && ordinal > opened {
+            boundaries.push(ordinal as u32);
+            held = 0;
+        }
+        held += count;
+    }
+    boundaries
+}
+
+/// One artifact's bitmap and covering, built from its rows as they arrive ascending: each Roaring
+/// container handed over whole, and the widest gaps kept as they pass.
+struct MemberBuilder {
+    sink: tessera_roaring::Sink,
+    key: u32,
+    run: Vec<u32>,
+    first: Option<u32>,
+    last: u32,
+    /// The widest gaps so far as `(Reverse(length), start)`, so the heap's top is the one to drop:
+    /// the narrowest, and of equals the highest.
+    gaps: std::collections::BinaryHeap<(std::cmp::Reverse<u32>, u32)>,
+}
+
+impl MemberBuilder {
+    fn new() -> Self {
+        MemberBuilder {
+            sink: tessera_roaring::Sink::new(),
+            key: 0,
+            run: Vec::new(),
+            first: None,
+            last: 0,
+            gaps: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    fn push(&mut self, row: u32) {
+        match self.first {
+            None => self.first = Some(row),
+            Some(_) if row <= self.last => return,
+            Some(_) => {
+                let length = row - self.last - 1;
+                if length > 0 {
+                    let gap = (std::cmp::Reverse(length), self.last + 1);
+                    if self.gaps.len() < COVERING_RANGES - 1 {
+                        self.gaps.push(gap);
+                    } else if self.gaps.peek().is_some_and(|worst| gap < *worst) {
+                        self.gaps.pop();
+                        self.gaps.push(gap);
+                    }
+                }
+            }
+        }
+        self.last = row;
+        if row >> 16 != self.key && !self.run.is_empty() {
+            self.flush_run();
+        }
+        self.key = row >> 16;
+        self.run.push(row);
+    }
+
+    fn flush_run(&mut self) {
+        let key = u16::try_from(self.key).expect("a row below 2³² has a block key below 2¹⁶");
+        self.sink.push_members(key, &self.run);
+        self.run.clear();
+    }
+
+    fn finish(mut self) -> (Bitmap, Vec<(u32, u32)>) {
+        if !self.run.is_empty() {
+            self.flush_run();
+        }
+        let mut members = self.sink.finish();
+        members.run_optimize();
+        let Some(first) = self.first else {
+            return (members, Vec::new());
+        };
+        let mut gaps: Vec<(u32, u32)> = self
+            .gaps
+            .into_iter()
+            .map(|(std::cmp::Reverse(length), start)| (start, length))
+            .collect();
+        gaps.sort_unstable();
+        let mut covering = Vec::with_capacity(gaps.len() + 1);
+        let mut lo = first;
+        for (start, length) in gaps {
+            covering.push((lo, start - 1));
+            lo = start + length;
+        }
+        covering.push((lo, self.last));
+        (members, covering)
+    }
+}
+
+/// Write the member file for the column staged at `column`, laid out as `layout`, into `scratch`.
+/// What the build and the fold call beside each row-major column they compose.
+pub fn stage_row_members(
+    column: &Path,
+    layout: ServingLayout,
+    scratch: &Path,
+) -> crate::Result<std::path::PathBuf> {
+    match layout {
+        ServingLayout::RowMajorLabel => {
+            let pack = crate::membership::LabelColumnPack::open(column)?;
+            project_row_members(ColumnLabels::Label(&pack), scratch)
+        }
+        _ => {
+            let pack = crate::membership::ListColumnPack::open(column)?;
+            project_row_members(ColumnLabels::List(&pack), scratch)
+        }
+    }
+}
+
 /// What a level's column is composed as and filed under, given the layout it is served in and
 /// whether its observed memberships partition the rows ([`LevelShape::partitions`]), or `None`
 /// where it has no column.
@@ -1063,6 +1373,7 @@ pub struct DerivedIndex {
     containment: usize,
     tile_index: usize,
     row_column: usize,
+    row_members: usize,
     shape_rows: usize,
     shape_held: usize,
     labels: usize,
@@ -1141,6 +1452,7 @@ pub fn file_derived(
                 layout: ServingLayout::RowMajorList,
             } => (&mut index.row_column, "tsll"),
             DerivedForm::RowColumn { .. } => (&mut index.row_column, "tslb"),
+            DerivedForm::RowMembers => (&mut index.row_members, "tsrm"),
             DerivedForm::ShapeRows { .. } => (&mut index.shape_rows, "tssr"),
             DerivedForm::ShapeHeld => (&mut index.shape_held, "tssh"),
             DerivedForm::LevelLabels => (&mut index.labels, "tslb"),
@@ -2272,5 +2584,142 @@ mod derived_tests {
         assert_eq!(super::list_form_entries(u64::from(u32::MAX) + 1), None);
         // A layer of 47 entries a row over the rung-6 corpus, which is the case that reaches it.
         assert_eq!(super::list_form_entries(47 * 3_495_729_729), None);
+    }
+
+    /// The covering a test expects, written the long way: every gap between consecutive members,
+    /// the `n − 1` widest kept (the lower on a tie), and the span cut at them.
+    pub(crate) fn widest_gap_covering(rows: &[u32], n: usize) -> Vec<(u32, u32)> {
+        let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else {
+            return Vec::new();
+        };
+        let mut gaps: Vec<(u32, u32)> = rows
+            .windows(2)
+            .filter(|w| w[1] > w[0] + 1)
+            .map(|w| (w[1] - w[0] - 1, w[0] + 1))
+            .collect();
+        gaps.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        gaps.truncate(n - 1);
+        gaps.sort_by_key(|g| g.1);
+        let mut out = Vec::new();
+        let mut lo = first;
+        for (length, start) in gaps {
+            out.push((lo, start - 1));
+            lo = start + length;
+        }
+        out.push((lo, last));
+        out
+    }
+
+    /// Every artifact's members and covering, against the column's labels transposed by hand.
+    fn assert_members_match(pack: &crate::row_members::RowMembersPack, sets: &[Vec<u32>]) {
+        assert_eq!(pack.ordinals() as usize, sets.len());
+        for (ordinal, set) in sets.iter().enumerate() {
+            let ordinal = ordinal as u32;
+            let mut rows = set.clone();
+            rows.sort_unstable();
+            rows.dedup();
+            let held: Vec<u32> = pack
+                .members(ordinal)
+                .map(|view| view.iter().collect())
+                .unwrap_or_default();
+            assert_eq!(held, rows, "ordinal {ordinal}'s members");
+            assert_eq!(pack.member_count(ordinal) as usize, rows.len());
+            assert_eq!(
+                pack.covering(ordinal).collect::<Vec<_>>(),
+                widest_gap_covering(&rows, COVERING_RANGES),
+                "ordinal {ordinal}'s covering"
+            );
+        }
+    }
+
+    /// **Both column forms give the same members and coverings as the labels transposed by hand**:
+    /// a level of one artifact (alone in its bucket), artifacts with more gaps than a covering has
+    /// ranges, a hole, an empty artifact, and rows past one Roaring container.
+    #[test]
+    fn the_members_and_coverings_are_the_columns_labels_transposed() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let rows = 300_000u32;
+        let scattered: Vec<u32> = (0..200u32).map(|i| i * i * 7 % rows).collect();
+        let mut scattered_sorted = scattered.clone();
+        scattered_sorted.sort_unstable();
+        scattered_sorted.dedup();
+        let dense: Vec<u32> = (0..rows)
+            .filter(|r| r % 3 == 1 && !scattered_sorted.contains(r))
+            .collect();
+        let cases: Vec<Vec<Vec<u32>>> = vec![
+            vec![(10..70_000).step_by(5).collect()],
+            vec![
+                scattered_sorted.clone(),
+                Vec::new(),
+                dense.clone(),
+                vec![rows - 1],
+            ],
+        ];
+        for sets in &cases {
+            for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+                let column =
+                    project_row_column(sets.len() as u32, rows, layout, dir.path(), &walk_of(sets))
+                        .expect("a column")
+                        .expect("the sets partition");
+                let members = stage_row_members(&column, layout, dir.path()).expect("the members");
+                let pack = crate::row_members::RowMembersPack::open(&members).expect("they open");
+                assert_members_match(&pack, sets);
+                assert_eq!(pack.rows(), rows);
+                std::fs::remove_file(&column).unwrap();
+                std::fs::remove_file(&members).unwrap();
+            }
+        }
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().collect();
+        assert!(
+            left.is_empty(),
+            "the writer leaves nothing behind: {left:?}"
+        );
+    }
+
+    /// A list column's row may carry several artifacts, and each of them has the row.
+    #[test]
+    fn an_overlapping_level_gives_each_artifact_its_shared_rows() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let sets = vec![vec![0, 1, 2, 90], vec![1, 2, 3], vec![]];
+        let column = project_row_column(
+            3,
+            100,
+            ServingLayout::RowMajorList,
+            dir.path(),
+            &walk_of(&sets),
+        )
+        .unwrap()
+        .unwrap();
+        let members = stage_row_members(&column, ServingLayout::RowMajorList, dir.path()).unwrap();
+        let pack = crate::row_members::RowMembersPack::open(&members).unwrap();
+        assert_members_match(&pack, &sets);
+    }
+
+    /// An artifact over the target is alone in its bucket, whatever empty ordinals come before or
+    /// after it, so the writer streams its rows rather than holding them.
+    #[test]
+    fn an_artifact_over_the_target_is_alone_in_its_bucket() {
+        assert_eq!(member_buckets(&[0, 0, 10], 4), vec![0, 2]);
+        assert_eq!(member_buckets(&[0, 0, 10, 0, 1, 1], 4), vec![0, 2, 3]);
+        assert_eq!(member_buckets(&[1, 2, 10, 3], 4), vec![0, 2, 3]);
+        assert_eq!(member_buckets(&[1, 2, 1, 3], 4), vec![0, 3]);
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let sets = vec![
+            Vec::new(),
+            Vec::new(),
+            (0..5_000u32).map(|r| r * 3).collect(),
+        ];
+        let column = project_row_column(
+            3,
+            15_000,
+            ServingLayout::RowMajorLabel,
+            dir.path(),
+            &walk_of(&sets),
+        )
+        .unwrap()
+        .unwrap();
+        let members = stage_row_members(&column, ServingLayout::RowMajorLabel, dir.path()).unwrap();
+        let pack = crate::row_members::RowMembersPack::open(&members).unwrap();
+        assert_members_match(&pack, &sets);
     }
 }

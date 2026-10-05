@@ -1759,7 +1759,7 @@ impl ListColumnPack {
     /// all.
     ///
     /// For a **counting** pass, which is what a transposition of this column starts with
-    /// (`tessera-engine`'s `RowColumn::transpose`): how many rows carry each ordinal is a
+    /// ([`crate::derived::project_row_members`]): how many rows carry each ordinal is a
     /// question about the values alone, so the offset table is read twice for the range and never
     /// per row. At rung 3's `mesh/descriptors` that is 1.66×10⁹ entries, and resolving the width
     /// per value is the difference between one pass and several seconds of them.

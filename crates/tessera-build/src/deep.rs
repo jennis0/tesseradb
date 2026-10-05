@@ -107,6 +107,9 @@ pub struct VerifyDeepReport {
     /// Band label copies confirmed to hold their label column's label at every entry
     /// ([`check_band_labels`]).
     pub band_label_copies: u64,
+    /// Row-major columns whose member file was confirmed to be what their labels give
+    /// ([`check_row_members`]).
+    pub row_member_files: u64,
     /// Unique index entries confirmed to agree with their column's values in both directions,
     /// at most one live entity to a key ([`check_unique_indexes`]); 0 where no column is unique.
     pub unique_entries: u64,
@@ -145,6 +148,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         cells: 0,
         band_entries: 0,
         band_label_copies: 0,
+        row_member_files: 0,
         unique_entries: 0,
         edited_pairs: 0,
         edited_rows: 0,
@@ -173,6 +177,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         check_cut_index(phash, partition, &mut report)?;
         check_bands(&prefix_dir, phash, partition, &mut report)?;
         check_band_labels(&prefix_dir, partition, &mut report)?;
+        check_row_members(root, &prefix_dir, partition, &mut report)?;
         check_unique_indexes(
             root,
             &prefix_dir,
@@ -793,6 +798,89 @@ fn check_band_labels(
             }
         }
         report.band_label_copies += 1;
+    }
+    Ok(())
+}
+
+/// **Every row-major column has one member file beside it, and the file is what the column's
+/// labels give.** The members and coverings are written again from the column into a scratch
+/// directory beside the bundle and compared artifact by artifact. A refusal names the member file, or the column that
+/// has none.
+fn check_row_members(
+    root: &Path,
+    prefix_dir: &Path,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use tessera_store::manifest::DerivedForm;
+    use tessera_store::row_members::RowMembersPack;
+    let extents = &partition.manifest.derived_extents;
+    for members in extents.iter().filter(|e| e.form == DerivedForm::RowMembers) {
+        if !extents
+            .iter()
+            .any(|e| matches!(e.form, DerivedForm::RowColumn { .. }) && e.same_level(members))
+        {
+            return Err(disagrees(
+                prefix_dir.join(&members.path),
+                "names no row-major column".to_string(),
+            ));
+        }
+    }
+    // Beside the bundle, where the identity check's scratch goes: the writer spills 8 B a member
+    // entry of the level it is writing.
+    let scratch = crate::VerifyTmp::create(root)?;
+    let scratch = scratch.path();
+    for column in extents.iter() {
+        let DerivedForm::RowColumn { layout } = column.form else {
+            continue;
+        };
+        let column_path = prefix_dir.join(&column.path);
+        let mut beside = extents
+            .iter()
+            .filter(|e| e.form == DerivedForm::RowMembers && e.same_level(column));
+        let (Some(members), None) = (beside.next(), beside.next()) else {
+            return Err(disagrees(
+                column_path,
+                format!(
+                    "layer '{}' level {}'s column has no single member file beside it",
+                    column.layer, column.level
+                ),
+            ));
+        };
+        let members_path = prefix_dir.join(&members.path);
+        let stored = RowMembersPack::open(&members_path).map_err(BuildError::Store)?;
+        let fresh_path = tessera_store::derived::stage_row_members(&column_path, layout, scratch)
+            .map_err(BuildError::Store)?;
+        let fresh = RowMembersPack::open(&fresh_path);
+        let _ = fs::remove_file(&fresh_path);
+        let fresh = fresh.map_err(BuildError::Store)?;
+        if (stored.ordinals(), stored.rows()) != (fresh.ordinals(), fresh.rows()) {
+            return Err(disagrees(
+                members_path,
+                format!(
+                    "covers {} ordinals over {} rows and its column {} over {}",
+                    stored.ordinals(),
+                    stored.rows(),
+                    fresh.ordinals(),
+                    fresh.rows()
+                ),
+            ));
+        }
+        for ordinal in 0..fresh.ordinals() {
+            if stored.members(ordinal) != fresh.members(ordinal) {
+                return Err(disagrees(
+                    members_path,
+                    format!("holds other members for ordinal {ordinal} than its column labels"),
+                ));
+            }
+            if !stored.covering(ordinal).eq(fresh.covering(ordinal)) {
+                return Err(disagrees(
+                    members_path,
+                    format!("holds another covering for ordinal {ordinal} than its column gives"),
+                ));
+            }
+        }
+        report.row_member_files += 1;
     }
     Ok(())
 }

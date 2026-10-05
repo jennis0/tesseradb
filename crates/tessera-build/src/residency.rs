@@ -2013,6 +2013,13 @@ pub(crate) fn disk(
         row_column_bytes(args, n, &member_entries_by_layer(args)),
         Phases::ASSEMBLE,
     );
+    push(
+        "the artifact pass's member files beside the row-column lanes, at an estimated 2.2 B a \
+         member entry over the views each layer draws on"
+            .into(),
+        row_member_bytes(args, &member_entries_by_layer(args)),
+        Phases::ASSEMBLE,
+    );
     // **The buckets the pass composes through**, at 8 B a `(row, ordinal)` record. One level at a
     // time and released as each bucket is replayed, so the ceiling is the largest layer's declared
     // entries — a ceiling over its levels rather than a sum of them.
@@ -2257,6 +2264,25 @@ fn row_column_bytes(args: &crate::BuildArgs, n: u64, entries: &[u64]) -> u64 {
         });
     }
     bytes
+}
+
+/// **The member files a row-major level has beside its column**, for every layer a pin does not
+/// keep artifact-major: an estimate of 2.2 B a member entry, measured at 1.84 to 2.14 over GBIF's
+/// three taxonomy levels, where nearly every container is an array of two-byte members. A level of
+/// one member to a container costs several times that, and one of long runs a fraction of it.
+fn row_member_bytes(args: &crate::BuildArgs, entries: &[u64]) -> u64 {
+    use tessera_types::layer::ServingLayout;
+    args.layers
+        .iter()
+        .zip(entries)
+        .filter(|(layer, _)| layer.layout != Some(ServingLayout::ArtifactMajor))
+        .map(|(layer, &declared)| {
+            declared
+                .saturating_mul(22)
+                .saturating_mul(layer_views(args, layer))
+                / 10
+        })
+        .fold(0u64, u64::saturating_add)
 }
 
 /// **How many of this build's views a layer draws on**, which is what its lanes are one of a level.

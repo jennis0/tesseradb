@@ -248,6 +248,12 @@ tessera$ curl -sS --unix-socket /run/tessera/control.sock \
 }
 ```
 
+Between compactions, a write can stall the write side in one case. When a growth gives a row a
+second artifact in a level the server answers from one label per row, the server rewrites that
+level's column as a list, and its member file with it, on the thread that applies writes. Other
+writes wait until it finishes. The member file alone takes about two and a half minutes a level at
+the scale of a 3.5-billion-row corpus. The next compaction writes both files again.
+
 [Compaction](../system/write-path.md#compaction) in the write-path chapter describes it in full.
 
 ## Stopping and restarting
