@@ -308,6 +308,18 @@ fn build_bundle(dir: &Path, items: &[Item]) -> PathBuf {
 
 /// A bundle of `items`, each view holding the items listed beside it.
 fn build_views(dir: &Path, items: &[Item], views: &[(&str, &[Item])]) -> PathBuf {
+    let open: Vec<(&str, &[Item], Option<Vec<String>>)> =
+        views.iter().map(|&(view, held)| (view, held, None)).collect();
+    build_gated_views(dir, items, &open)
+}
+
+/// [`build_views`], each view reached by a viewer holding one of the labels beside it, or by every
+/// viewer where there are none.
+fn build_gated_views(
+    dir: &Path,
+    items: &[Item],
+    views: &[(&str, &[Item], Option<Vec<String>>)],
+) -> PathBuf {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points(&points, items);
@@ -319,11 +331,11 @@ fn build_views(dir: &Path, items: &[Item], views: &[(&str, &[Item])]) -> PathBuf
         .schema;
     let views = views
         .iter()
-        .map(|(view, held)| {
+        .map(|(view, held, visibility)| {
             let points = dir.join(format!("{view}-points.parquet"));
             write_points(&points, held);
             tessera_build::ViewArgs {
-                visibility: None,
+                visibility: visibility.clone(),
                 view_id: view.to_string(),
                 projection: tessera_spatial::Projection::None,
                 extent: extent(),
@@ -530,6 +542,45 @@ struct Row {
     reference: Option<u64>,
 }
 
+/// The value at row `i` of a column of bin edges or of a summary's smallest or largest value.
+fn value_at(batch: &RecordBatch, name: &str, i: usize) -> Option<Val> {
+    let column = batch.column_by_name(name).unwrap();
+    if column.is_null(i) {
+        return None;
+    }
+    Some(match column.data_type() {
+        DataType::Float64 => Val::F(
+            column
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(i),
+        ),
+        DataType::Int64 => Val::I(i128::from(
+            column
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(i),
+        )),
+        DataType::UInt64 => Val::I(i128::from(
+            column
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(i),
+        )),
+        DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) if &**tz == "UTC" => Val::T(
+            column
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .value(i),
+        ),
+        other => panic!("a value of type {other:?}"),
+    })
+}
+
 fn rows_of(batch: &RecordBatch) -> Vec<Row> {
     let group = batch
         .column_by_name("group")
@@ -544,43 +595,7 @@ fn rows_of(batch: &RecordBatch) -> Vec<Row> {
         .downcast_ref::<StringArray>()
         .unwrap()
         .clone();
-    let edge = |name: &str, i: usize| -> Option<Val> {
-        let column = batch.column_by_name(name).unwrap();
-        if column.is_null(i) {
-            return None;
-        }
-        Some(match column.data_type() {
-            DataType::Float64 => Val::F(
-                column
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(i),
-            ),
-            DataType::Int64 => Val::I(i128::from(
-                column
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .value(i),
-            )),
-            DataType::UInt64 => Val::I(i128::from(
-                column
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .value(i),
-            )),
-            DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) if &**tz == "UTC" => Val::T(
-                column
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .unwrap()
-                    .value(i),
-            ),
-            other => panic!("an edge of type {other:?}"),
-        })
-    };
+    let edge = |name: &str, i: usize| value_at(batch, name, i);
     let u64s = |name: &str| {
         batch
             .column_by_name(name)
@@ -1199,7 +1214,7 @@ fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
                     let n = items.len() as u64;
                     let v = all.len() as u64;
 
-                    // Default edges, from the visible set or its sample.
+                    // Default edges, from the whole visible set.
                     let groupings = [sampled(column, 12, None, s)];
                     let mut req = request(&groupings);
                     req.filter = filter.clone();
@@ -1215,8 +1230,6 @@ fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
                             sampled: !exact_by_size(s, n) || !exact_by_size(s, v),
                             items: taken.len() as u64,
                             reference_items: Some(reference.len() as u64),
-                            // Drawn from the visible set as the reference counted it.
-                            edges_sampled: !exact_by_size(s, v),
                         },
                         "{what}"
                     );
@@ -1225,7 +1238,7 @@ fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
                         true => exact_tables += 1,
                     }
                     let edges = edges_of(&rows);
-                    for item in &reference {
+                    for item in &all {
                         if let Some(v) = item.value(column).filter(|v| match v {
                             Val::F(f) => f.is_finite(),
                             _ => true,
@@ -1263,7 +1276,6 @@ fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
                     req.filter = filter;
                     let (head, rows) = table(&fx.engine, &session, req);
                     let counts = head.sample.expect("a sample was asked for");
-                    assert!(!counts.edges_sampled, "{what}: a range draws no edges");
                     let taken = counted(&items, s, &ids);
                     assert_eq!(counts.items, taken.len() as u64, "{what}");
                     let edges = edges_of(&rows);
@@ -1302,7 +1314,6 @@ fn a_set_within_the_sample_size_is_counted_exactly() {
             sampled: false,
             items: exact.0.total,
             reference_items: None,
-            edges_sampled: false,
         })
     );
 }
@@ -1338,7 +1349,6 @@ fn whether_a_set_is_sampled_depends_on_its_size_alone() {
                     sampled: !exact_by_size(s, n),
                     items: taken.len() as u64,
                     reference_items: None,
-                    edges_sampled: false,
                 }),
                 "{what}"
             );
@@ -1354,11 +1364,11 @@ fn whether_a_set_is_sampled_depends_on_its_size_alone() {
     }
 }
 
-/// **Default edges come from the visible set's sample even where the set itself is counted
-/// whole**, and say so; they are the edges the unfiltered table draws, whatever the filter or
-/// region, so they hold still. With a range nothing is drawn.
+/// **Default edges are exact whether or not the counts are sampled**: they are the edges of the
+/// table counted whole, they cover every visible value, though the extremes lie outside the
+/// sample, and they hold still under a filter or a region.
 #[test]
-fn default_edges_are_drawn_from_the_visible_sample_however_the_set_is_counted() {
+fn default_edges_are_exact_however_the_set_is_counted() {
     let fx = fixture();
     let ids = identities(&fx);
     let session = fx.session(true);
@@ -1370,10 +1380,11 @@ fn default_edges_are_drawn_from_the_visible_sample_however_the_set_is_counted() 
     let few: Vec<&Item> = fx.visible(true, &in_area).collect();
     assert!(!few.is_empty() && few.len() as u64 <= s, "the region holds {} items", few.len());
     for column in COLUMNS {
+        let exact = edges_of(&table(&fx.engine, &session, request(&[bins(column, 12, None)])).1);
         let groupings = [sampled(column, 12, None, s)];
         let (whole_head, whole_rows) = table(&fx.engine, &session, request(&groupings));
-        assert!(whole_head.sample.unwrap().edges_sampled, "{column}");
-        let edges = edges_of(&whole_rows);
+        assert!(whole_head.sample.unwrap().sampled, "{column}");
+        assert_eq!(edges_of(&whole_rows), exact, "{column}");
         for (name, filter) in [
             ("region", bbox(area[0], area[1], area[2], area[3])),
             ("kind", fx.kind_is("b")),
@@ -1381,8 +1392,7 @@ fn default_edges_are_drawn_from_the_visible_sample_however_the_set_is_counted() 
             let mut req = request(&groupings);
             req.filter = Some(filter);
             let (head, rows) = table(&fx.engine, &session, req);
-            assert!(head.sample.unwrap().edges_sampled, "{column}, {name}");
-            assert_eq!(edges_of(&rows), edges, "{column}, {name}: the edges moved");
+            assert_eq!(edges_of(&rows), exact, "{column}, {name}: the edges moved");
             if name == "region" {
                 assert_eq!(
                     head.sample.unwrap(),
@@ -1390,24 +1400,31 @@ fn default_edges_are_drawn_from_the_visible_sample_however_the_set_is_counted() 
                         sampled: false,
                         items: few.len() as u64,
                         reference_items: None,
-                        edges_sampled: true,
                     }
                 );
-                assert_eq!(rows, expected(&edges, &few, None, column), "{column}");
+                assert_eq!(rows, expected(&exact, &few, None, column), "{column}");
             }
         }
-        // The edges are readable edges around the sample's values, which the whole set's need
-        // not be.
-        for item in &visible_sample {
+        let finite = |items: &[&Item]| -> Vec<Val> {
+            items
+                .iter()
+                .filter_map(|i| i.value(column))
+                .filter(|v| !matches!(v, Val::F(f) if !f.is_finite()))
+                .collect()
+        };
+        let (seen, everything) = (finite(&visible_sample), finite(&all));
+        let outside = everything.iter().any(|&v| {
+            seen.iter().all(|&w| less(w, v)) || seen.iter().all(|&w| less(v, w))
+        });
+        assert!(outside, "{column}: the extremes lie outside the sample");
+        for item in &all {
             if let Some(v) = item.value(column).filter(|v| match v {
                 Val::F(f) => f.is_finite(),
                 _ => true,
             }) {
-                assert!(!less(v, edges[0]) && !less(edges[edges.len() - 1], v), "{column}");
+                assert!(!less(v, exact[0]) && !less(exact[exact.len() - 1], v), "{column}");
             }
         }
-        let exact_edges = edges_of(&table(&fx.engine, &session, request(&[bins(column, 12, None)])).1);
-        assert_ne!(edges, exact_edges, "{column}: the extremes lie outside the sample");
     }
 }
 
@@ -1759,4 +1776,529 @@ fn a_sample_read_partly_from_the_band_and_partly_by_scanning_is_the_oracles() {
         );
         assert_eq!(rows, want, "{column}");
     }
+}
+
+// ---- a field's figures ----------------------------------------------------------------------
+
+fn summary(column: &str) -> Grouping {
+    Grouping {
+        by: Some(By::Summary {
+            column: column.to_string(),
+        }),
+        cells: None,
+        area: None,
+    }
+}
+
+/// A field's figures as a summary's row carries them, or as the oracle works them out.
+#[derive(Debug, Clone, Copy)]
+struct Figures {
+    items: u64,
+    count: u64,
+    none: u64,
+    min: Option<Val>,
+    max: Option<Val>,
+    mean: Option<f64>,
+}
+
+impl PartialEq for Figures {
+    /// The mean of a float field is summed in another order than the oracle's, so it is compared
+    /// to within its last digits.
+    fn eq(&self, other: &Self) -> bool {
+        let near = match (self.mean, other.mean) {
+            (Some(a), Some(b)) => (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0),
+            (a, b) => a == b,
+        };
+        (self.items, self.count, self.none, self.min, self.max)
+            == (other.items, other.count, other.none, other.min, other.max)
+            && near
+    }
+}
+
+fn figures_of(batch: &RecordBatch) -> Figures {
+    assert_eq!(batch.num_rows(), 1, "a summary is one row");
+    let u64_of = |name: &str| {
+        batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0)
+    };
+    let mean = batch
+        .column_by_name("mean")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .clone();
+    Figures {
+        items: u64_of("items"),
+        count: u64_of("count"),
+        none: u64_of("none"),
+        min: value_at(batch, "min", 0),
+        max: value_at(batch, "max", 0),
+        mean: (!mean.is_null(0)).then(|| mean.value(0)),
+    }
+}
+
+/// The figures of `column` over `items`, worked out here.
+fn oracle(items: &[&Item], column: &str) -> Figures {
+    let values: Vec<Val> = items.iter().filter_map(|i| i.value(column)).collect();
+    let finite: Vec<Val> = values
+        .iter()
+        .copied()
+        .filter(|v| !matches!(v, Val::F(f) if !f.is_finite()))
+        .collect();
+    let pick = |smaller: bool| {
+        finite
+            .iter()
+            .copied()
+            .reduce(|a, b| if less(a, b) == smaller { a } else { b })
+    };
+    let sum: f64 = finite
+        .iter()
+        .map(|v| match *v {
+            Val::F(f) => f,
+            Val::I(i) => i as f64,
+            Val::T(t) => t as f64,
+        })
+        .sum();
+    Figures {
+        items: items.len() as u64,
+        count: finite.len() as u64,
+        none: (items.len() - values.len()) as u64,
+        min: pick(true),
+        max: pick(false),
+        mean: (!finite.is_empty()).then(|| sum / finite.len() as f64),
+    }
+}
+
+/// The summary of `column` in `view`, under `filter`.
+fn summary_of(
+    engine: &Engine,
+    session: &Session,
+    view: &str,
+    column: &str,
+    filter: Option<FilterExpr>,
+) -> Figures {
+    let groupings = [summary(column)];
+    let mut req = request(&groupings);
+    req.view = view;
+    req.filter = filter;
+    let (collect, trailer) = respond(engine, session, req).expect("the summary answers");
+    assert_eq!(trailer.next, None, "a summary is one page");
+    assert_eq!(collect.pages.len(), 1);
+    figures_of(&collect.pages[0].1)
+}
+
+/// The default edges of `column` in `view`, checked against `items`, the items the viewer may see
+/// there: every finite value lies within them, and the first and last bins hold one, so the edges
+/// are the readable ones around the smallest and largest value.
+fn check_edges(engine: &Engine, session: &Session, view: &str, column: &str, items: &[&Item], what: &str) {
+    for sample in [None, Some(5)] {
+        let groupings = [Grouping {
+            by: Some(By::Bins {
+                column: column.to_string(),
+                bins: 12,
+                range: None,
+                sample,
+            }),
+            cells: None,
+            area: None,
+        }];
+        let mut req = request(&groupings);
+        req.view = view;
+        let (_, rows) = table(engine, session, req);
+        let edges = edges_of(&rows);
+        let finite: Vec<Val> = items
+            .iter()
+            .filter_map(|i| i.value(column))
+            .filter(|v| !matches!(v, Val::F(f) if !f.is_finite()))
+            .collect();
+        if finite.is_empty() {
+            assert!(edges.is_empty(), "{what}, {column}: {edges:?}");
+            continue;
+        }
+        for &v in &finite {
+            assert!(
+                !less(v, edges[0]) && !less(edges[edges.len() - 1], v),
+                "{what}, {column}, sample {sample:?}: {v:?} outside {edges:?}"
+            );
+        }
+        let bins = edges.len() - 1;
+        let inside = |b: usize, v: Val| {
+            !less(v, edges[b]) && (less(v, edges[b + 1]) || (b + 1 == bins && same(v, edges[b + 1])))
+        };
+        assert!(
+            finite.iter().any(|&v| inside(0, v)) && finite.iter().any(|&v| inside(bins - 1, v)),
+            "{what}, {column}, sample {sample:?}: the end bins of {edges:?} hold no value"
+        );
+    }
+}
+
+/// **The summary of every field is the oracle's for each viewer, and a filter or a region leaves it
+/// as it is.**
+#[test]
+fn a_summary_is_the_oracles_over_the_whole_visible_set() {
+    let fx = fixture();
+    let area = [100.0, 200.0, 600.0, 750.0];
+    for broad in [true, false] {
+        let session = fx.session(broad);
+        let all: Vec<&Item> = fx.visible(broad, &|_| true).collect();
+        for column in COLUMNS {
+            let what = format!("{column}, broad {broad}");
+            let want = oracle(&all, column);
+            assert!(want.count > 0 && want.none > 0, "{what}: the fixture has both");
+            for filter in [None, Some(fx.kind_is("b")), Some(bbox(area[0], area[1], area[2], area[3]))] {
+                assert_eq!(summary_of(&fx.engine, &session, "s0", column, filter), want, "{what}");
+            }
+            check_edges(&fx.engine, &session, "s0", column, &all, &what);
+        }
+        // A summary beside other groupings is one table of its own, after the one before it.
+        let groupings = [bins("rank", 5, None), summary("rank"), Grouping { by: None, cells: None, area: None }];
+        let mut req = request(&groupings);
+        req.filter = Some(fx.kind_is("a"));
+        let (collect, _) = respond(&fx.engine, &session, req).unwrap();
+        assert_eq!(collect.tables.len(), 3);
+        assert_eq!(collect.tables[1].groups, None);
+        assert_eq!(collect.tables[1].total, fx.visible(broad, &|i| i.kind == "a").count() as u64);
+        assert_eq!(figures_of(&collect.pages[1].1), oracle(&all, "rank"));
+    }
+}
+
+/// **A summary that cannot be served is refused**: a cell level, a category, a bool and a field
+/// that is not declared.
+#[test]
+fn a_summary_that_cannot_be_served_is_refused() {
+    let fx = fixture();
+    let session = fx.session(true);
+    let refused = |grouping: Grouping| {
+        let groupings = [grouping];
+        match respond(&fx.engine, &session, request(&groupings)) {
+            Err(EngineError::AggregateRefused(why)) => why,
+            other => panic!("not refused: {:?}", other.map(|(_, t)| t)),
+        }
+    };
+    assert_eq!(
+        refused(Grouping { cells: Some(4), ..summary("rank") }),
+        AggregateRefused::SummaryWithCells
+    );
+    for column in ["kind", "flag", "nothing"] {
+        assert_eq!(
+            refused(summary(column)),
+            AggregateRefused::NotSummarisable(column.to_string())
+        );
+    }
+}
+
+/// **Items the viewer may not see move no figure.** The subset viewer's summaries over the whole
+/// corpus are its summaries over a bundle holding only the items it may see, though the items it
+/// may not see hold every field's smallest and largest value.
+#[test]
+fn invisible_items_move_no_figure() {
+    let fx = fixture();
+    let alone = fixture_of((0..N).map(built).filter(|i| i.subset).collect());
+    let (all, only) = (fx.session(false), alone.session(false));
+    let broad = fx.session(true);
+    for column in COLUMNS {
+        let seen = summary_of(&fx.engine, &all, "s0", column, None);
+        assert_eq!(seen, summary_of(&alone.engine, &only, "s0", column, None), "{column}");
+        let everything = summary_of(&fx.engine, &broad, "s0", column, None);
+        assert!(
+            everything.min != seen.min && everything.max != seen.max,
+            "{column}: the hidden items hold the extremes"
+        );
+    }
+}
+
+/// **A value in a view the viewer cannot reach moves no edge and no figure.** Items the subset
+/// viewer may see hold every field's extremes, and have rows only in view `s1`, which only the
+/// broad viewer reaches.
+#[test]
+fn a_value_in_a_view_the_viewer_cannot_reach_moves_no_edge() {
+    let mut items: Vec<Item> = (0..N).map(built).collect();
+    let outside = [3u64, 6, 9, 12];
+    for item in items.iter_mut().filter(|i| outside.contains(&i.source)) {
+        // The first two hold the smallest values, the last two the largest.
+        let sign = if item.source < 7 { -1 } else { 1 };
+        item.score = Some(f64::from(sign) * 9_000.0);
+        item.weight = Some(sign as f32 * 9e7);
+        item.rank = Some(sign * 9_000_000);
+        item.seen = Some(date(2050 + i64::from(sign) * 350, 1, 1));
+        item.when = Some(date(2050 + i64::from(sign) * 250, 1, 1));
+        assert!(item.subset);
+    }
+    let s0: Vec<Item> = items.iter().filter(|i| !outside.contains(&i.source)).cloned().collect();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_gated_views(
+        tmp.path(),
+        &items,
+        &[("s0", &s0, None), ("s1", &items, Some(vec!["0".to_string()]))],
+    );
+    let engine = engine_at(tmp.path(), &root, 3600);
+    let subset = engine.authorise(&subset_credential()).unwrap();
+    let broad = engine.authorise(&full_coverage_credential()).unwrap();
+    let in_s0: Vec<&Item> = s0.iter().filter(|i| i.subset).collect();
+    for column in COLUMNS {
+        assert_eq!(
+            summary_of(&engine, &subset, "s0", column, None),
+            oracle(&in_s0, column),
+            "{column}"
+        );
+        check_edges(&engine, &subset, "s0", column, &in_s0, "s0");
+        let reached: Vec<&Item> = items.iter().collect();
+        assert_eq!(
+            summary_of(&engine, &broad, "s1", column, None),
+            oracle(&reached, column),
+            "{column}: the broad viewer sees the extremes in s1"
+        );
+    }
+    let groupings = [summary("rank")];
+    let mut req = request(&groupings);
+    req.view = "s1";
+    assert!(matches!(
+        respond(&engine, &subset, req),
+        Err(EngineError::UnknownView(_))
+    ));
+}
+
+/// What the lifecycle test knows of each item beyond its values.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Fate {
+    suppressed: bool,
+    deleted: bool,
+}
+
+/// **The figures and the default edges are the oracle's through every change a running service
+/// makes**, for two viewers with different grants: after a build, an ingest before and after its
+/// flush, an edit, a suppression of the items holding the visible extremes, from the very next
+/// request, its lift, a deletion, a compaction and a restart. The restart reads the figures back
+/// rather than walking them.
+#[test]
+fn the_figures_are_the_oracles_through_every_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut items: Vec<Item> = (0..N).map(built).collect();
+    let root = build_bundle(tmp.path(), &items);
+    let mut fates: HashMap<u64, Fate> = HashMap::new();
+    let check = |engine: &Engine, items: &[Item], fates: &HashMap<u64, Fate>, when: &str| {
+        for broad in [true, false] {
+            let session = engine
+                .authorise(&if broad { full_coverage_credential() } else { subset_credential() })
+                .unwrap();
+            let visible: Vec<&Item> = items
+                .iter()
+                .filter(|i| {
+                    let fate = fates.get(&i.source).copied().unwrap_or_default();
+                    i.flushed && (broad || i.subset) && !fate.suppressed && !fate.deleted
+                })
+                .collect();
+            for column in COLUMNS {
+                let what = format!("{when}, {column}, broad {broad}");
+                assert_eq!(
+                    summary_of(engine, &session, "s0", column, None),
+                    oracle(&visible, column),
+                    "{what}"
+                );
+                check_edges(engine, &session, "s0", column, &visible, &what);
+            }
+        }
+    };
+    let flush = |engine: &Engine| {
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_until("the flush", Duration::from_secs(60), || {
+            engine.write_executor_stats().flushes > flushes && engine.generation().buffer.is_empty()
+        });
+    };
+    let change = |engine: &Engine, sources: &[u64], op: ChangeOp| {
+        for &source in sources {
+            let entity = item_of_id(engine, source).unwrap().expect("the item exists");
+            engine.accept_change(entity, op).expect("the change is accepted");
+        }
+    };
+    {
+        let engine = engine_at(tmp.path(), &root, 3600);
+        check(&engine, &items, &fates, "built");
+
+        // Thirty new items, every third visible to the subset viewer, two holding new extremes.
+        let mut added = Vec::new();
+        let rows: Vec<UnallocatedRow> = (0..30u64)
+            .map(|i| {
+                let source = INGESTED + i;
+                let subset = i.is_multiple_of(3);
+                let item = Item {
+                    source,
+                    kind: "a",
+                    score: (i % 4 != 0).then_some(match i {
+                        3 => 7_000.0,
+                        6 => -7_000.0,
+                        _ => 10.0 + i as f64,
+                    }),
+                    weight: Some(i as f32),
+                    rank: Some(match i {
+                        3 => 5_000_000,
+                        _ => i as i32,
+                    }),
+                    seen: Some(date(2031, 6, 1) + i as i64 * DAY),
+                    when: (i % 3 != 0).then(|| date(2024, 3, 2) + i as i64 * HOUR),
+                    subset,
+                    position: ((i * 23 % 1000) as f64, (i * 41 % 1000) as f64),
+                    flushed: false,
+                };
+                let descriptors: Vec<Vec<u8>> = match subset {
+                    true => vec![b"0".to_vec(), b"1".to_vec()],
+                    false => vec![b"0".to_vec()],
+                };
+                let row = UnallocatedRow {
+                    view: "s0".to_string(),
+                    join: None,
+                    terms: engine.resolve_terms(&descriptors),
+                    descriptors,
+                    x: item.position.0,
+                    y: item.position.1,
+                    scalars: vec![
+                        WalScalar::Utf8(item.kind.to_string()),
+                        item.score.map_or(WalScalar::Null, WalScalar::F64),
+                        item.weight.map_or(WalScalar::Null, WalScalar::F32),
+                        item.rank.map_or(WalScalar::Null, WalScalar::I32),
+                        item.seen.map_or(WalScalar::Null, WalScalar::TimestampUs),
+                        item.when.map_or(WalScalar::Null, WalScalar::TimestampUs),
+                        WalScalar::Bool(item.source.is_multiple_of(2)),
+                        WalScalar::U64(source),
+                    ],
+                    scoped: Vec::new(),
+                };
+                added.push(item);
+                row
+            })
+            .collect();
+        engine
+            .ingest_rows(rows, "figures".to_string(), [9u8; 32])
+            .expect("the ingest is accepted");
+        items.extend(added);
+        check(&engine, &items, &fates, "ingested, not flushed");
+        flush(&engine);
+        for item in items.iter_mut() {
+            item.flushed = true;
+        }
+        check(&engine, &items, &fates, "flushed");
+
+        // An edit moves an item to a new entity with a row above the base.
+        let edited = 30u64;
+        let rank = 4_000_000;
+        engine
+            .ingest(IngestRequest {
+                batch_id: "edit".to_string(),
+                body_hash: [3u8; 32],
+                view: None,
+                rows: vec![IngestRow {
+                    tessera_id: None,
+                    labels: None,
+                    position: None,
+                    scalars: (0..8)
+                        .map(|p| match p {
+                            3 => WalScalar::I32(rank),
+                            7 => WalScalar::U64(edited),
+                            _ => WalScalar::Null,
+                        })
+                        .collect(),
+                    scoped: Vec::new(),
+                    omitted: (0..7).filter(|&p| p != 3).collect(),
+                }],
+                artifacts: Default::default(),
+                strict: true,
+                tessera_id_column: false,
+            })
+            .expect("the edit is accepted");
+        items.iter_mut().find(|i| i.source == edited).unwrap().rank = Some(rank);
+        flush(&engine);
+        check(&engine, &items, &fates, "edited");
+
+        // The items holding each viewer's extremes, base and ingested, suppressed, then lifted.
+        let extremes: Vec<u64> = vec![1, 2, 4, 5, 8, 10, 11, 13, 14, 16, INGESTED + 3, INGESTED + 6, edited];
+        let shown = summary_of(
+            &engine,
+            &engine.authorise(&full_coverage_credential()).unwrap(),
+            "s0",
+            "score",
+            None,
+        );
+        change(&engine, &extremes, ChangeOp::Suppress);
+        for &source in &extremes {
+            fates.entry(source).or_default().suppressed = true;
+        }
+        check(&engine, &items, &fates, "suppressed");
+        assert_ne!(
+            summary_of(
+                &engine,
+                &engine.authorise(&full_coverage_credential()).unwrap(),
+                "s0",
+                "score",
+                None
+            ),
+            shown,
+            "the suppression moved the extremes"
+        );
+        // More items than a side's reserve holds, from the low end of `rank`, drawn, and the
+        // high end of `seen`, indexed alone: those sides are walked again.
+        let spent = engine.figures_stats().reserve_spent;
+        let by = |value: &dyn Fn(&Item) -> Option<i128>, low: bool| -> Vec<u64> {
+            let mut held: Vec<(i128, u64)> = items
+                .iter()
+                .filter(|i| !fates.get(&i.source).is_some_and(|f| f.suppressed))
+                .filter_map(|i| value(i).map(|v| (v, i.source)))
+                .collect();
+            held.sort();
+            if !low {
+                held.reverse();
+            }
+            held.iter().take(20).map(|&(_, source)| source).collect()
+        };
+        let many: Vec<u64> = by(&|i| i.rank.map(i128::from), true)
+            .into_iter()
+            .chain(by(&|i| i.seen.map(i128::from), false))
+            .collect();
+        change(&engine, &many, ChangeOp::Suppress);
+        for &source in &many {
+            fates.entry(source).or_default().suppressed = true;
+        }
+        check(&engine, &items, &fates, "suppressed past the reserve");
+        assert!(
+            engine.figures_stats().reserve_spent > spent,
+            "a side was walked again"
+        );
+        change(&engine, &many, ChangeOp::Unsuppress);
+        for &source in &many {
+            fates.entry(source).or_default().suppressed = false;
+        }
+        check(&engine, &items, &fates, "lifted past the reserve");
+
+        change(&engine, &extremes[..5], ChangeOp::Unsuppress);
+        for source in &extremes[..5] {
+            fates.entry(*source).or_default().suppressed = false;
+        }
+        check(&engine, &items, &fates, "lifted");
+
+        // Every fourth subset item deleted, and the ingested extremes.
+        let deleted: Vec<u64> = (0..N)
+            .filter(|s| s % 12 == 0)
+            .chain([INGESTED + 3, INGESTED + 9])
+            .collect();
+        change(&engine, &deleted, ChangeOp::Delete);
+        for &source in &deleted {
+            fates.entry(source).or_default().deleted = true;
+        }
+        check(&engine, &items, &fates, "deleted");
+
+        fold(&engine);
+        check(&engine, &items, &fates, "compacted");
+        engine.figures_settled_for_test();
+    }
+    let engine = engine_at(tmp.path(), &root, 3600);
+    check(&engine, &items, &fates, "restarted");
+    let stats = engine.figures_stats();
+    assert_eq!(stats.fills, 0, "nothing was walked again");
+    assert!(stats.loads > 0, "the figures were read back");
 }

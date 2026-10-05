@@ -20,10 +20,12 @@ use crate::row_column::RESERVE;
 
 use super::counts::{CountsAt, Dense, Grown, Reserves};
 use super::denied::DeniedLabels;
+use super::field::{FieldTally, Number};
 use super::Geometry;
 
 const COUNTS_MAGIC: &[u8; 8] = b"TSFCNT02";
 const DENIED_MAGIC: &[u8; 8] = b"TSFDNY02";
+const FIELD_MAGIC: &[u8; 8] = b"TSFFLD01";
 const HEADER: usize = 8 + 8 + 32;
 
 /// The directory a bundle identity's entries live in.
@@ -74,6 +76,19 @@ pub(crate) fn denied_stem(view: &str, layer: &str, level: u32) -> String {
         hasher.update(text.as_bytes());
     }
     hasher.update(level.to_le_bytes());
+    hex(&hasher.finalize())
+}
+
+/// What one field's tally over a fragment's base rows is a function of, as a file stem.
+pub(crate) fn field_stem(terms: &[u8; 32], view: &str, column: &str, kind: u8) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"field");
+    hasher.update(terms);
+    for text in [view, column] {
+        hasher.update((text.len() as u64).to_le_bytes());
+        hasher.update(text.as_bytes());
+    }
+    hasher.update([kind]);
     hex(&hasher.finalize())
 }
 
@@ -397,5 +412,68 @@ pub(crate) fn read_denied(
         offsets,
         ordinals,
         positions,
+    })
+}
+
+fn put_number(payload: &mut Vec<u8>, value: Number) {
+    let bits = match value {
+        Number::Int(i) => i as u128,
+        Number::Float(f) => u128::from(f.to_bits()),
+    };
+    payload.extend_from_slice(&bits.to_le_bytes());
+}
+
+/// Write a field's tally over a fragment's base rows. Nothing changes it between folds, so it has
+/// one version.
+pub(crate) fn write_field(dir: &Path, stem: &str, tally: &FieldTally) {
+    let float = matches!(tally.sum, Number::Float(_));
+    let mut payload = Vec::with_capacity(64 + 20 * (tally.low.len() + tally.high.len()));
+    payload.push(u8::from(float));
+    payload.extend_from_slice(&tally.none.to_le_bytes());
+    payload.extend_from_slice(&tally.count.to_le_bytes());
+    put_number(&mut payload, tally.sum);
+    for side in [&tally.low, &tally.high] {
+        payload.extend_from_slice(&(side.len() as u64).to_le_bytes());
+        for &(value, row) in side.iter() {
+            put_number(&mut payload, value);
+            payload.extend_from_slice(&row.to_le_bytes());
+        }
+    }
+    write(dir, stem, 0, "field", FIELD_MAGIC, &payload);
+}
+
+/// A field's tally over a fragment's base rows, where it is on disk with values of the kind
+/// `float` says.
+pub(crate) fn read_field(dir: &Path, stem: &str, float: bool) -> Option<FieldTally> {
+    let payload = read(dir, stem, 0, "field", FIELD_MAGIC)?;
+    let mut r = Reader(&payload);
+    if (r.u8()? != 0) != float {
+        return None;
+    }
+    let number = |r: &mut Reader<'_>| -> Option<Number> {
+        let bits = u128::from_le_bytes(r.take(16)?.try_into().ok()?);
+        Some(match float {
+            true => Number::Float(f64::from_bits(bits as u64)),
+            false => Number::Int(bits as i128),
+        })
+    };
+    let none = r.u64()?;
+    let count = r.u64()?;
+    let sum = number(&mut r)?;
+    let mut sides = [Vec::new(), Vec::new()];
+    for side in &mut sides {
+        let n = usize::try_from(r.u64()?).ok()?;
+        for _ in 0..n.min(payload.len()) {
+            let value = number(&mut r)?;
+            side.push((value, r.u32()?));
+        }
+    }
+    let [low, high] = sides;
+    r.0.is_empty().then_some(FieldTally {
+        none,
+        count,
+        sum,
+        low,
+        high,
     })
 }

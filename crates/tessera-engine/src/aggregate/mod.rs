@@ -2,7 +2,9 @@
 //! the values of a category field, across bins of a number or timestamp field, across the
 //! artifacts of one level of a layer, across the cells of the map, or across a group and cells
 //! together. Every figure is an exact count over the
-//! viewer's visible set, and a second set can be given to compare each figure with.
+//! viewer's visible set, and a second set can be given to compare each figure with. A summary of a
+//! number or timestamp field gives the count, smallest, largest and mean of its values over the
+//! whole visible set.
 //!
 //! [`Engine::aggregate_stream`] serves one response: a head, then each grouping's table in order,
 //! each table a head and pages of rows, then a trailer. Every page composes the visible set again
@@ -104,6 +106,10 @@ pub enum By {
         range: Option<(Scalar, Scalar)>,
         sample: Option<u64>,
     },
+    /// The count, smallest, largest and mean of a number or timestamp field's values, as a
+    /// resolved column name, over every item the viewer may see in the view, whatever the
+    /// request's set and reference.
+    Summary { column: String },
     /// The artifacts of one level of a layer. `level` is required on a layer with several levels
     /// and refused on one with a single level.
     Layer {
@@ -173,9 +179,6 @@ pub struct TableSample {
     pub items: u64,
     /// The items counted in the reference set, where one was given.
     pub reference_items: Option<u64>,
-    /// Whether the default edges were drawn from the visible set's sample; `false` where the
-    /// request gave a range or every visible item was read.
-    pub edges_sampled: bool,
 }
 
 /// Where a response is delivered: the head once, then for each table its head and its pages. A
@@ -243,6 +246,11 @@ pub enum AggregateRefused {
     NotBinnable(String),
     /// A grouping by bins of a `bool` field.
     BinsOnBool(String),
+    /// Not a number or timestamp field this deployment can summarise: not a number, or a number
+    /// declared with neither `index` nor `render`.
+    NotSummarisable(String),
+    /// A summary with a cell level.
+    SummaryWithCells,
     ZeroBins,
     /// A sample size of 0.
     ZeroSample,
@@ -296,6 +304,15 @@ impl std::fmt::Display for AggregateRefused {
                 f,
                 "field '{field}' cannot be binned; name a number or timestamp field declared \
                  with index or render"
+            ),
+            AggregateRefused::NotSummarisable(field) => write!(
+                f,
+                "field '{field}' cannot be summarised; name a number or timestamp field declared \
+                 with index or render"
+            ),
+            AggregateRefused::SummaryWithCells => write!(
+                f,
+                "a summary has no cell level; ask for cells in a grouping of its own"
             ),
             AggregateRefused::ZeroBins => write!(f, "bins is 0; ask for at least one bin"),
             AggregateRefused::ZeroSample => write!(
@@ -616,6 +633,12 @@ fn refuse_groupings(groupings: &[Grouping], caps: &AggregateCaps) -> Result<()> 
                 refuse_bins(*bins, range.as_ref(), grouping.cells.is_some(), caps)?;
                 if *sample == Some(0) {
                     return refused(AggregateRefused::ZeroSample);
+                }
+                continue;
+            }
+            Some(By::Summary { .. }) => {
+                if grouping.cells.is_some() {
+                    return refused(AggregateRefused::SummaryWithCells);
                 }
                 continue;
             }
