@@ -91,6 +91,17 @@ export function scopeKindOf(layer: Pick<Layer, 'hierarchy' | 'levels'>): 'levell
 }
 
 /**
+ * The whole map zoom a camera at `zoom` is read as: rounded down, after a zoom within a millionth of
+ * a whole number is taken as that number, since a camera framed at a whole zoom comes back from the
+ * data-to-world round trip a little either side of it.
+ *
+ * @internal
+ */
+export function wholeZoom(zoom: number): number {
+  return Math.floor(zoom + 1e-6);
+}
+
+/**
  * The levels the server answers a request naming no `levels` at, for one layer at one zoom,
  * mirroring the server's default. Where no level declares a zoom range every level answers;
  * otherwise a level answers where its range covers the zoom, inclusive, and a level with no range
@@ -99,7 +110,7 @@ export function scopeKindOf(layer: Pick<Layer, 'hierarchy' | 'levels'>): 'levell
  * @internal
  */
 export function declaredLevelsAt(layer: Pick<Layer, 'levels'>, zoom: number): number[] {
-  zoom = Math.floor(zoom);
+  zoom = wholeZoom(zoom);
   const declared = layer.levels;
   if (declared.length === 0) return [];
   if (!declared.some((d) => d.zoom !== null)) return declared.map((d) => d.level);
@@ -175,9 +186,9 @@ export const ARTIFACT_TILES_PER_REQUEST = 558;
 
 /**
  * The tile depth artifacts are asked at for a camera at `zoom` over `bbox`: map zoom + 2, the zoom
- * floored as the levels' zoom ranges are read, within 0 to {@link MAX_DEPTH}. Where `bbox` touches
- * more than `cap` tiles at that depth it is asked at the next coarser depth, until it fits. It does
- * not depend on the depth the points are drawn at.
+ * read by {@link wholeZoom} as the levels' zoom ranges are, within 0 to {@link MAX_DEPTH}. Where
+ * `bbox` touches more than `cap` tiles at that depth it is asked at the next coarser depth, until it
+ * fits. It does not depend on the depth the points are drawn at.
  *
  * Each level of a layer shows at most `perTile` artifacts in a tile, so the tiles asked for times
  * `perTile` bounds the artifacts a level draws.
@@ -185,7 +196,7 @@ export const ARTIFACT_TILES_PER_REQUEST = 558;
  * @internal
  */
 export function artifactDepth(bbox: [number, number, number, number], zoom: number, cap = ARTIFACT_TILES_PER_REQUEST): number {
-  let depth = Math.max(0, Math.min(MAX_DEPTH, Math.floor(zoom) + 2));
+  let depth = Math.max(0, Math.min(MAX_DEPTH, wholeZoom(zoom) + 2));
   while (depth > 0 && rectArea(tileRectOfBbox(bbox, depth)) > cap) depth -= 1;
   return depth;
 }

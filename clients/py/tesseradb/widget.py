@@ -103,11 +103,11 @@ class Map(anywidget.AnyWidget):
     - `artifacts_per_tile`: the most annotations each level of a layer shows in one tile of the
       map, largest first, at most the server's `max_artifacts_per_tile`. `None`, the default,
       draws no annotation and leaves colouring by a layer without colours, and the map says what
-      to set. The map asks for annotations by tile at map zoom + 2, the zoom rounded
-      down, a tile of 128 to 256 pixels, and at most 558 tiles in one request, the most a 3840 by
-      2160 screen touches, or the server's `max_tiles_per_request` where that is fewer; a larger
-      screen is asked for at zoom + 1, then at zoom. So the tiles in view times
-      `artifacts_per_tile` bounds the annotations one level draws.
+      to set. The map asks for annotations by tile at map zoom + 2, the zoom rounded down, a
+      tile of 128 to 256 pixels, and at most 558 tiles in one request, the most a 3840 by 2160
+      screen touches, or the server's `max_tiles_per_request` where that is fewer; a larger
+      screen is asked for at zoom + 1, then coarser, until its tiles fit. So the tiles in view
+      times `artifacts_per_tile` bounds the annotations one level draws.
 
     Read the widget's attributes in a later cell:
 

@@ -666,6 +666,40 @@ describe('the depth artifacts are asked at', () => {
     expect(calls.slice(deep).map((c) => c.zoom)).toEqual([2]);
     expect(calls[deep]!.tiles).toHaveLength(16);
   });
+
+  it('reads a camera framed at a whole zoom as that zoom', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    // A frame in degrees, whose ranges are not powers of two.
+    const q = {xMin: -180.123, xMax: 179.877, yMin: -85.0511, yMax: 85.0511};
+    const {client, viewportArtifacts} = fakeClient(() => response('ck'), {...META, views: [view('s0', {displayName: 'default', quantisation: q})]});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
+    await clock.advance(1);
+    store.setLayers(['clusters/a']);
+    // A fixed sequence of cameras over the world: whole zooms, odd screen sizes, scattered centres.
+    let seed = 7;
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    let checked = 0;
+    for (let i = 0; i < 60; i++) {
+      const zoom = 3 + Math.floor(next() * 10);
+      const width = 300 + Math.floor(next() * 1500);
+      const height = 200 + Math.floor(next() * 900);
+      // The data box a width by height screen shows at `zoom`, 512 world units being the frame.
+      const w = (width / 2 ** zoom) * ((q.xMax - q.xMin) / 512);
+      const h = (height / 2 ** zoom) * ((q.yMax - q.yMin) / 512);
+      const cx = q.xMin + w / 2 + next() * (q.xMax - q.xMin - w);
+      const cy = q.yMin + h / 2 + next() * (q.yMax - q.yMin - h);
+      const before = viewportArtifacts.mock.calls.length;
+      store.setView({bbox: [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], width, height});
+      await clock.advance(600);
+      scheduler.flush();
+      for (const call of viewportArtifacts.mock.calls.slice(before)) {
+        expect(call[1].zoom, `a camera at zoom ${zoom}`).toBe(zoom + 2);
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThan(45);
+  });
 });
 
 describe('the colours are rebuilt when the table moves and not per response', () => {

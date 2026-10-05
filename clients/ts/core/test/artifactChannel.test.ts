@@ -482,6 +482,8 @@ describe('the declared-map mirror', () => {
     });
     expect(declaredLevelsAt(levels, 4)).toEqual([0, 2]);
     expect(declaredLevelsAt(levels, 5)).toEqual([1, 2]);
+    // A camera framed at zoom 5 that the round trip brought back a hair under it.
+    expect(declaredLevelsAt(levels, 4.9999999)).toEqual([1, 2]);
   });
 });
 
@@ -591,7 +593,7 @@ describe('the depth asked', () => {
     expect(tiles[3]).toBe(at(2, 4));
   });
 
-  it('names no whole level above the world’s own depth across a camera script', async () => {
+  it('asks at the camera’s own zoom + 2 across a camera script, never at the last view’s depth, and within the cap', async () => {
     const {client, viewportArtifacts} = fakeClient();
     const {ch, clock} = channel(client);
     ch.setLayer('clusters/x');
@@ -612,9 +614,6 @@ describe('the depth asked', () => {
       await settle();
     }
     expect(viewportArtifacts.mock.calls.map((c) => c[1].zoom)).toEqual([2, 5, 8, 8, 11, 16, 2, 11, 5]);
-    for (const [i, call] of viewportArtifacts.mock.calls.entries()) {
-      const {zoom, tiles} = call[1];
-      if (zoom > 2) expect(tiles!.length, `request ${i} at depth ${zoom}`).toBeLessThan(4 ** zoom);
-    }
+    for (const call of viewportArtifacts.mock.calls) expect(call[1].tiles!.length).toBeLessThanOrEqual(ARTIFACT_TILES_PER_REQUEST);
   });
 });
