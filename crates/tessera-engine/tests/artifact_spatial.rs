@@ -37,7 +37,6 @@ use std::collections::BTreeMap;
 
 use common::*;
 use tessera_corpus::{Corpus, Grant};
-use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::ChangeOp;
@@ -361,12 +360,12 @@ impl Fixture {
 fn served(engine: &Engine, grant: &str, zoom: u8, bbox: [f64; 4]) -> BTreeMap<String, u64> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
-    let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
+    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
-        .viewport(&session, request)
+        .viewport_artifacts(&session, request)
         .expect("a viewport over the fixture")
-        .artifacts
+        .artifacts()
         .into_iter()
         .map(|artifact| {
             (
@@ -601,12 +600,12 @@ fn a_deny_reaches_a_boundary_and_its_members() {
 fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
-    let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
+    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     let row = engine
-        .viewport(&session, request)
+        .viewport_artifacts(&session, request)
         .expect("a viewport")
-        .artifacts
+        .artifacts()
         .into_iter()
         .find(|artifact| artifact.key.as_deref() == Some(key))
         .expect("the key is served");

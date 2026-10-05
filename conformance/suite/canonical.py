@@ -27,9 +27,10 @@ The steps, numbered as §12.2 numbers them:
 4. Points: the kind-3 payloads concatenated, compared as bytes in served order. Contracts §3.2
    orders points ascending by `tessera_id` within each tile, so comparing them *unsorted* is
    stronger than sorting them — a reordering is a defect, not noise.
-5. The underlay: its own stream, its own comparison. The artifacts frame likewise, and unsorted —
-   its row order is the serving pass's own and deterministic, so a reordering is a defect rather
-   than noise, exactly as for points.
+5. The underlay: its own stream, its own comparison. The artifacts of the same request, read from
+   `/v1/artifacts/viewport`, likewise, and unsorted — their frames follow the request's tiles and
+   each frame's rows a deterministic order, so a reordering is a defect rather than noise, exactly
+   as for points.
 6. Headers are excluded — this module takes body bytes only. §12.2's exception ("except where a
    stage's entitlement is about one") is the driver's business (build-order row 3), not a second
    input here.
@@ -65,6 +66,16 @@ from oracle import wire
 ELAPSED_TIME_FIELDS = frozenset({"stream_us", "arrow_serialise_ns"})
 
 
+def _payloads(body: bytes) -> list[bytes]:
+    """Each frame's payload, in order."""
+    out, at = [], 0
+    while at < len(body):
+        end = at + 5 + int.from_bytes(body[at + 1 : at + 5], "little")
+        out.append(body[at + 5 : end])
+        at = end
+    return out
+
+
 @dataclass(frozen=True)
 class Json:
     """A plain JSON response — `/v1/meta`, `/v1/categories/{column}`, `/v1/items/{id}`.
@@ -88,12 +99,11 @@ class Streamed:
     fields, re-serialised with sorted keys; it is a fourth compared surface because its `points`
     and `flushes` counts are deterministic functions of served content (module doc).
 
-    `artifacts` is `b""` whenever the response served none — which, unlike `underlay`'s absence, is
-    **not** a statement about the request. The server omits the frame when nothing qualifies, so an
-    empty surface here is the ordinary state of a deployment with no layers and is never asserted
-    non-vacuous. It is compared all the same: without it, two responses differing only in which
-    clusters they served would canonicalise identically, and a determinism break in the artifact
-    channel would pass every comparison in the suite.
+    `artifacts` is the `/v1/artifacts/viewport` answer to the same request where it names layers,
+    and `b""` where it names none. A frame of no rows still carries its schema, so a request naming
+    layers is never empty here. It is compared all the same as the rest: without it, two responses
+    differing only in which clusters they served would canonicalise identically, and a determinism
+    break in the artifact channel would pass every comparison in the suite.
     """
 
     tiles: bytes
@@ -117,18 +127,19 @@ class Streamed:
 Canonical = Json | Streamed
 
 
-def canonicalise_viewport(body: bytes) -> Streamed:
-    """One `/v1/viewport` body, canonicalised per the module doc's six steps.
+def canonicalise_viewport(body: bytes, artifacts: bytes | None = None) -> Streamed:
+    """One `/v1/viewport` body, and the `/v1/artifacts/viewport` body of the same request where
+    there is one, canonicalised per the module doc's six steps.
 
     Refuses (raises) rather than canonicalises anything malformed: a truncated body, an unknown
-    frame kind, a missing trailer, a trailer key outside the closed set, or a trailer whose
-    `points` count disagrees with the body — all via `oracle.wire.decode_frames`, so this module
-    cannot acquire a laxity that decoder does not have.
+    frame kind, a missing trailer, a trailer key outside the closed set, or a trailer whose counts
+    disagree with the body — all via `oracle.wire`, so this module cannot acquire a laxity that
+    decoder does not have.
     """
     # Step 1, and the grammar check. The decoded rows are discarded — the canonical form is bytes,
     # not decoded values — but the decode is what enforces the closed trailer key set and the
     # served-sum and points-count consistency rules before any bytes are trusted.
-    _tiles, _points, _sub_cells, _artifacts, trailer = wire.decode_frames(body)
+    _tiles, _points, _sub_cells, trailer = wire.decode_frames(body)
     frames = wire.split_frames(body)
 
     # Step 2. Sorted keys and fixed separators so the remainder has one serialisation; the wire
@@ -153,13 +164,18 @@ def canonicalise_viewport(body: bytes) -> Streamed:
     # unrequested, keeping absent distinct from schema-only-empty.
     points_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_POINTS)
     underlay_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_SUB_CELLS)
-    # Taken as bytes and **not sorted**, unlike tiles. Tile emission order is not contract, so it is
-    # normalised away; the artifact frame's row order is the serving pass's own (layer by layer,
-    # level by level, key by key) and is deterministic for a fixed registry and store. Sorting it
-    # would hide a reordering rather than canonicalise one.
-    artifacts_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_ARTIFACTS)
+    # Taken as bytes and **not sorted**, unlike tiles. The frames follow the request's tiles and
+    # each frame's rows the serving pass's own order (layer by layer, level by level, largest first
+    # then by identifier), deterministic for a fixed registry and store. Sorting it would hide a
+    # reordering rather than canonicalise one.
+    # Every artifacts frame's stream, in order; the trailer's times differ between two issues of
+    # one request.
+    artifacts_bytes = b""
+    if artifacts is not None:
+        wire.decode_artifact_frames(artifacts)
+        artifacts_bytes = b"".join(_payloads(artifacts)[:-1])
 
-    # Step 6 is structural: this function's one parameter is the body.
+    # Step 6 is structural: this function's parameters are bodies.
     return Streamed(
         tiles=sink.getvalue(),
         points=points_bytes,

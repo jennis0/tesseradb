@@ -398,6 +398,15 @@ async fn viewport(server: &TestServer, token: &str, body: &Value) -> reqwest::Re
         .unwrap()
 }
 
+fn artifacts_body(extra: Value) -> Value {
+    let mut body =
+        json!({ "view": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0], "per_tile": 50 });
+    for (key, value) in extra.as_object().unwrap() {
+        body[key] = value.clone();
+    }
+    body
+}
+
 fn viewport_body(extra: Value) -> Value {
     let mut body = json!({ "view": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200 });
     for (key, value) in extra.as_object().unwrap() {
@@ -461,6 +470,7 @@ fn the_description_names_every_route_on_the_three_planes_and_no_other() {
             "/v1/aggregate",
             "/v1/artifacts",
             "/v1/artifacts/browse",
+            "/v1/artifacts/viewport",
             "/v1/artifacts/{tessera_id}",
             "/v1/categories/{column}",
             "/v1/categories/{column}/suggest",
@@ -1634,13 +1644,9 @@ async fn viewport_carries_the_described_headers_and_framing() {
         "x-tessera-region {verdict:?} is not one of the described spellings"
     );
     assert_eq!(verdict, "exact");
-    let artifacts = decoded
-        .artifacts
-        .expect("the named layer is reachable, so kind 5 is present");
-    assert_eq!(artifacts.len(), 2);
     assert!(decoded.trailer.is_object());
 
-    // `k = 0`: the counts-only request. Tiles and artifacts as before, no points frame at all.
+    // `k = 0`: the counts-only request. Tiles as before, no points frame at all.
     let body = viewport_body(json!({ "k": 0, "layers": [LAYER] }));
     assert_valid(&doc, "ViewportRequest", &body);
     let resp = viewport(&f.server, token, &body).await;
@@ -1650,33 +1656,14 @@ async fn viewport_carries_the_described_headers_and_framing() {
     assert_eq!(decoded.point_frames, 0, "k = 0 emits no points frame");
     assert_eq!(decoded.points.len(), 0);
     assert_eq!(decoded.trailer["points"], json!(0));
-    assert_eq!(decoded.artifacts.map(|a| a.len()), Some(2));
 
-    // `layers: []`: no artifact pass, so no kind-5 frame — absent, never empty.
     let resp = viewport(&f.server, token, &viewport_body(json!({ "layers": [] }))).await;
     assert_eq!(resp.status().as_u16(), 200);
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    assert!(decoded.artifacts.is_none());
     assert!(
         decoded.sub_cells.is_none(),
         "no underlay requested, so no kind-2 frame"
     );
-
-    // A name this principal does not reach is intersected away — the narrow principal is served
-    // only the artifact it clears, and a made-up name beside the real one changes nothing.
-    let narrow = authorise_checked(&doc, &f.server, &["1"]).await;
-    let narrow_token = narrow["token"].as_str().unwrap();
-    let resp = viewport(
-        &f.server,
-        narrow_token,
-        &viewport_body(json!({ "k": 0, "layers": [LAYER, "no/such/layer"] })),
-    )
-    .await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    let served = decoded.artifacts.unwrap();
-    assert_eq!(served.len(), 1, "the narrow principal clears c0 only");
-    assert_eq!(served[0].key.as_deref(), Some("c0"));
 
     // The tiles form.
     let body = json!({ "view": "s0", "zoom": 1, "tiles": [0, 3], "k": 5 });
@@ -1706,6 +1693,89 @@ async fn viewport_carries_the_described_headers_and_framing() {
     .await;
     assert_refusal(&doc, resp, 404, "unknown").await;
     let resp = viewport(&f.server, "not-a-token", &viewport_body(json!({}))).await;
+    assert_refusal(&doc, resp, 401, "bad-credential").await;
+}
+
+/// `POST /v1/artifacts/viewport`: the request shape, the described headers, one frame per tile
+/// after the treed frame, the trailer, and the refusals.
+#[tokio::test]
+async fn the_artifacts_viewport_matches_the_description_with_its_refusals() {
+    let doc = description();
+    let f = fixture().await;
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let post = |token: &str, body: Value| {
+        f.server
+            .client
+            .post(f.server.viewer_url("/v1/artifacts/viewport"))
+            .bearer_auth(token.to_string())
+            .json(&body)
+            .send()
+    };
+
+    let body = artifacts_body(json!({
+        "layers": [LAYER],
+        "levels": "all",
+        "computed": ["centroid", "box"],
+        "filters": { "score": { "range": { "gte": 0 } } },
+        "highlight": { "archive": { "in": ["astro"] } },
+        "budget": 10,
+    }));
+    assert_valid(&doc, "ViewportArtifactsRequest", &body);
+    let resp = post(token, body).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let headers = doc["paths"]["/v1/artifacts/viewport"]["post"]["responses"]["200"]["headers"]
+        .as_object()
+        .unwrap();
+    for (name, spec) in headers {
+        assert_eq!(
+            resp.headers().contains_key(name.as_str()),
+            spec["required"].as_bool() == Some(true),
+            "the header {name} is present exactly when the description requires it"
+        );
+    }
+    let decoded = decode_artifact_frames(&resp.bytes().await.unwrap());
+    assert_eq!(decoded.frames.len(), 4, "a frame for each of the four depth-1 tiles");
+    let served = decoded.artifacts.expect("the named layer is reachable");
+    assert_eq!(served.len(), 2);
+    assert!(served.iter().all(|a| a.matched.is_some() && a.highlighted.is_some()));
+
+    // A name this principal does not reach is intersected away — the narrow principal is served
+    // only the artifact it clears, and a made-up name beside the real one changes nothing.
+    let narrow = authorise_checked(&doc, &f.server, &["1"]).await;
+    let narrow_token = narrow["token"].as_str().unwrap();
+    let resp = post(narrow_token, artifacts_body(json!({ "layers": [LAYER, "no/such/layer"] })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let served = decode_artifact_frames(&resp.bytes().await.unwrap()).artifacts.unwrap();
+    assert_eq!(served.len(), 1, "the narrow principal clears c0 only");
+    assert_eq!(served[0].key.as_deref(), Some("c0"));
+
+    // `layers: []` and the tiles form: a frame of no rows for each tile named.
+    let body = json!({ "view": "s0", "zoom": 1, "tiles": [0, 3], "per_tile": 5, "layers": [] });
+    assert_valid(&doc, "ViewportArtifactsRequest", &body);
+    let resp = post(token, body).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let decoded = decode_artifact_frames(&resp.bytes().await.unwrap());
+    assert_eq!(decoded.frames.len(), 2);
+    assert!(decoded.artifacts.is_none());
+
+    // Refusals.
+    let ceiling = f.server.state.limits.max_artifacts_per_tile;
+    let over = artifacts_body(json!({ "per_tile": ceiling + 1 }));
+    assert_refusal(&doc, post(token, over).await.unwrap(), 422, "contract").await;
+    let shape = artifacts_body(json!({ "computed": ["shape"] }));
+    assert_invalid(&doc, "ViewportArtifactsRequest", &shape);
+    assert_refusal(&doc, post(token, shape).await.unwrap(), 422, "contract").await;
+    let unasked = json!({ "view": "s0", "zoom": 1, "bbox": [0.0, 0.0, 1000.0, 1000.0] });
+    assert_invalid(&doc, "ViewportArtifactsRequest", &unasked);
+    assert_refusal(&doc, post(token, unasked).await.unwrap(), 422, "contract").await;
+    let both = artifacts_body(json!({ "tiles": [0] }));
+    assert_refusal(&doc, post(token, both).await.unwrap(), 422, "contract").await;
+    let nowhere = artifacts_body(json!({ "view": "no-such-view" }));
+    assert_refusal(&doc, post(token, nowhere).await.unwrap(), 404, "unknown").await;
+    let resp = post("not-a-token", artifacts_body(json!({}))).await.unwrap();
     assert_refusal(&doc, resp, 401, "bad-credential").await;
 }
 
@@ -2289,11 +2359,11 @@ async fn every_described_route_requires_its_planes_credential() {
     // Non-vacuity, both halves: the loop must have found the seven gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 12,
+        gated, 13,
         "the viewer plane's gated operations are logout, meta, categories, suggest's two forms, \
-         viewport, the items read, items, the artifacts read, artifacts, artifacts/browse and the \
-         aggregate; a change to that set belongs in this test's reasoning, not silently in its \
-         count"
+         viewport, the artifacts viewport, the items read, items, the artifacts read, artifacts, \
+         artifacts/browse and the aggregate; a change to that set belongs in this test's \
+         reasoning, not silently in its count"
     );
     assert_eq!(
         probes, 2,
@@ -2351,7 +2421,10 @@ fn malformed_viewer_requests(method: &reqwest::Method, path: &str) -> Vec<(Malfo
             (Malformed::Shape, 422),
             (Malformed::UnknownField, 422),
         ]);
-        if matches!(path, "/v1/viewport" | "/v1/items/{tessera_id}") {
+        if matches!(
+            path,
+            "/v1/viewport" | "/v1/artifacts/viewport" | "/v1/items/{tessera_id}"
+        ) {
             kinds.push((Malformed::UnknownPinField, 422));
         }
     }
@@ -2485,6 +2558,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
 fn viewer_body(path: &str) -> Value {
     match path {
         "/v1/viewport" => viewport_body(json!({})),
+        "/v1/artifacts/viewport" => artifacts_body(json!({})),
         "/v1/items" => json!({ "view": "s0", "fields": [] }),
         "/v1/items/{tessera_id}" => json!({}),
         "/v1/artifacts" => json!({ "view": "s0", "layer": LAYER, "fields": [] }),

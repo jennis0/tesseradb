@@ -54,12 +54,14 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `compute_admission` | integer | four per compute thread | Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and single-artifact reads, `/v1/artifacts/browse`, `/v1/aggregate`, a `/v1/categories/{column}/suggest` with `view` and `counts=true`, and `/session/authorise`, never the control plane. |
 | `compute_queue` | integer | twice `compute_admission` | Requests that may wait for an admission slot beyond those running. A request finding no place is refused with 429 at once. `compute_admission` and `compute_queue` together may not exceed 2305843009213693951. |
 | `admission_timeout_ms` | integer | `250` | Milliseconds a queued request waits for an admission slot before it is refused with 429. |
+| `artifact_admission` | integer | one per compute thread | `POST /v1/artifacts/viewport` requests computed at once, apart from `compute_admission`. As many more may wait, each for at most `admission_timeout_ms`; one past that is refused with 429, and `0` refuses every such request. A value above 1152921504606846975 is refused. |
 | `single_flight_wait_ms` | integer | `6000` | Milliseconds a request waits for another request's build of a shared cached structure before it is refused with 429. |
 | `max_k` | integer | `1000` | The largest `k` a viewport request may name; a larger one is lowered to it. A tile draws at most the smaller of this and `k_max_marks`. |
 | `k_min` | integer | `2` | The fewest marks a tile with a visible point draws. `tessera serve` refuses to start with `0`. |
 | `k_max_marks` | integer | `500` | The most marks a tile draws, and the `k` of a request that names none. |
 | `theta_target_marks` | integer | `16` | The marks the average occupied tile draws at any zoom; the threshold that samples points is derived from it. |
 | `max_tiles_per_request` | integer | `262144` | The most tiles one `POST /v1/viewport` may cover. A request covering more is refused with 422. |
+| `max_artifacts_per_tile` | integer | `1000` | The largest `per_tile` one `POST /v1/artifacts/viewport` may name: how many artifacts one level serves in one tile. A larger one is refused with 422. |
 | `max_underlay_offset` | integer | `4` | The largest `underlay_offset` a viewport request may name: how many zoom levels below the tiles its exact masked counts are served at. A larger one is refused with 422, and `0` refuses every underlay. At most 255. |
 | `max_underlay_cells` | integer | `8192` | The most underlay cells one viewport request may ask for, its tiles times 4 to the power of its `underlay_offset`. A request asking for more is refused with 422. |
 | `stream_flush_bytes` | integer | `1048576` (1 MiB) | Bytes a streamed viewport response gathers before it sends a frame. A frame always ends at a whole tile. |

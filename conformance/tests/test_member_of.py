@@ -104,7 +104,7 @@ def test_the_leaf_is_the_artifacts_masked_count_and_the_oracles(member_server):
     server, points = member_server
     for terms in PRINCIPALS:
         token = server.authorise(terms)["token"]
-        served = [a for a in decode_viewport_artifacts(server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)) if a.layer in (SHAPES, BOXES)]
+        served = [a for a in decode_viewport_artifacts(server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP)) if a.layer in (SHAPES, BOXES)]
         assert served, f"principal {terms}: the shape layers serve artifacts"
         column = member_column(points, served, terms)
         candidate = {p[0] for p in visible(points, terms)}
@@ -121,7 +121,7 @@ def test_it_composes_with_a_numeric_leaf_and_negates_within_the_visible_set(memb
     numeric = NumericColumn({p[0]: p[0] for p in points})
     for terms in PRINCIPALS:
         token = server.authorise(terms)["token"]
-        served = [a for a in decode_viewport_artifacts(server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)) if a.layer in (SHAPES, BOXES)]
+        served = [a for a in decode_viewport_artifacts(server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP)) if a.layer in (SHAPES, BOXES)]
         column = member_column(points, served, terms)
         candidate = {p[0] for p in visible(points, terms)}
         artifact = max(served, key=lambda a: a.masked_count)
@@ -142,10 +142,10 @@ def test_an_unknown_a_foreign_a_suppressed_and_a_withheld_artifact_are_one_respo
     server, points = member_server
     broad = server.authorise(["1", "2"])["token"]
     narrow = server.authorise(["1"])["token"]
-    served = [a for a in decode_viewport_artifacts(server.viewport(broad, VIEW_ID, 0, WHOLE_MAP, k=100_000)) if a.layer == GATED]
+    served = [a for a in decode_viewport_artifacts(server.artifacts_viewport(broad, VIEW_ID, 0, WHOLE_MAP)) if a.layer == GATED]
     assert len(served) == 1 and served[0].masked_count > 0, served
     strip = served[0]
-    assert not [a for a in decode_viewport_artifacts(server.viewport(narrow, VIEW_ID, 0, WHOLE_MAP, k=100_000)) if a.layer == GATED]
+    assert not [a for a in decode_viewport_artifacts(server.artifacts_viewport(narrow, VIEW_ID, 0, WHOLE_MAP)) if a.layer == GATED]
 
     def bytes_of(token: str, clause: dict) -> tuple[list, dict]:
         """The body's frames but the trailer, whose `stream_us` is a clock; and every header but

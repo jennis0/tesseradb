@@ -44,7 +44,9 @@ def served(server, terms) -> tuple[fx.Served, dict]:
     """The engine's answer in the oracle's shape, and the identifiers it served, by key."""
     token = server.authorise(terms)["token"]
     body = viewport(server, token)
-    rows = decode_viewport_artifacts(body)
+    rows = decode_viewport_artifacts(
+        server.artifacts_viewport(token, fx.VIEW_ID, 0, WHOLE, budget=1000)
+    )
     key_of = {row.tessera_id: (row.layer, row.key) for row in rows}
     out = {}
     for row in rows:
@@ -57,7 +59,8 @@ def served(server, terms) -> tuple[fx.Served, dict]:
 
 
 def membership_names_only_served(body: bytes, served_ids: set[int]) -> None:
-    """Every value of a points frame's membership column names an artifact of the same response."""
+    """Every value of a points frame's membership column names an artifact the same request is
+    served."""
     seen = 0
     for kind, payload in split_frames(body):
         if kind != FRAME_POINTS:

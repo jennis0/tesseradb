@@ -204,10 +204,15 @@ def names_seen(data: Path, terms: set[str] | None = None) -> dict[str, list[str]
     return {key: list(contents[key][0]) for key, visible in shown.items() if visible}
 
 
+def served(reader, view: str, layers: list[str], filters=None):
+    """The artifacts of `layers` a reader is served over the whole of `view`, as one tile at the
+    largest quota the server takes."""
+    per_tile = reader.meta()["selection"]["max_artifacts_per_tile"]
+    return reader.viewport_artifacts(view, 0, per_tile, layers=layers, filters=filters)
+
+
 def served_names(reader) -> dict[str, list[str]]:
-    artifacts = reader.view("papers").sample(layers=["topic_names"]).artifacts
-    if artifacts is None:
-        return {}
+    artifacts = served(reader, "papers", ["topic_names"])
     return dict(zip(artifacts.column("key").to_pylist(), artifacts.column("content").to_pylist()))
 
 
@@ -255,7 +260,7 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
     assert walk["before_week"] == {"papers": want["built"], last: want["last year before the week"]}
     assert walk["after_week"] == {"papers": want["papers"], last: want["last year"]}
     # Every paper of the last year, the week's included, is in one of that year's clusters.
-    clusters = walk["db"].view(last).sample(layers=["yearly"]).artifacts
+    clusters = served(walk["db"], last, ["yearly"])
     assert sum(clusters.column("masked_count").to_pylist()) == want["last year"]
 
     # Suppressing five machine-learning papers hides them from both readers, and lifting the
@@ -284,14 +289,14 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
     # it draws or colours by.
     assert len(maps) == 7
     for reader, widget in maps:
-        # A map given no view opens on the first one.
-        selection = reader.view(widget.view or reader.meta()["views"][0]["id"])
-        if widget.filters:
-            selection = selection.filter(widget.filters)
+        # A map given no view opens on the first one, and asks for its artifacts with the quota
+        # the notebook gave it.
+        view = widget.view or reader.meta()["views"][0]["id"]
         for layer in drawn_layers(widget):
-            served = selection.sample(layers=[layer]).artifacts
-            assert served is not None and layer in served.column("layer").to_pylist(), (
-                f"the map of {widget.view} is served nothing in {layer}"
+            assert widget.artifacts_per_tile, f"the map of {view} draws {layer} and was given no quota"
+            got = reader.viewport_artifacts(view, 0, widget.artifacts_per_tile, layers=[layer], filters=widget.filters)
+            assert layer in got.column("layer").to_pylist(), (
+                f"the map of {view} is served nothing in {layer}"
             )
 
 

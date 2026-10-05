@@ -34,7 +34,7 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
 use tessera_build::BuildArgs;
-use tessera_engine::{LayerSelection, ViewportRequest};
+use tessera_engine::LayerSelection;
 use tessera_types::layer::ServingLayout;
 
 const SPREAD: &str = "clusters/spread";
@@ -354,16 +354,17 @@ fn the_first_request_over_a_fresh_bundle_adopts_and_composes_nothing() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let started = std::time::Instant::now();
     let out = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0)
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(&[SPREAD, CLUMPED])),
         )
-        .expect("the first viewport over a freshly built bundle");
+        .expect("the first viewport over a freshly built bundle")
+        .artifacts();
     let elapsed = started.elapsed();
 
     assert_eq!(
-        out.artifacts.iter().filter(|a| a.layer == SPREAD).count(),
+        out.iter().filter(|a| a.layer == SPREAD).count(),
         SPREAD_ARTIFACTS as usize,
         "every artifact of the spread layer is served to a principal that sees the corpus"
     );
@@ -401,22 +402,22 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
     let engine = open_engine(&fx.root, &fx.cache, &fx.wal);
     let session = engine.authorise(&subset_credential()).unwrap();
     let row_major = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(&[SPREAD])),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::Named(&[SPREAD])),
         )
         .expect("a viewport over the row-major level")
-        .artifacts;
+        .artifacts();
 
     // The same question of the level that stayed artifact-major, as a control: both routes serve
     // every artifact holding a member this principal can see, and neither serves one that does not.
     let artifact_major = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(&[CLUMPED])),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::Named(&[CLUMPED])),
         )
         .expect("a viewport over the artifact-major level")
-        .artifacts;
+        .artifacts();
 
     let row_major_total: u64 = row_major.iter().map(|a| a.masked_count).sum();
     let artifact_major_total: u64 = artifact_major.iter().map(|a| a.masked_count).sum();

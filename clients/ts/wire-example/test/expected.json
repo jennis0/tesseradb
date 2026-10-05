@@ -1,5 +1,5 @@
 {
-  "_comment": "What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts per batch, and the first tessera_id of the points and artifacts batches as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.",
+  "_comment": "What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts (the tiles frame null in an artifacts body, the artifacts frames summed), and the first tessera_id of the points and artifacts as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.",
   "viewport-plain.bin": {
     "frames": [
       1,
@@ -9,8 +9,8 @@
     "tiles": 16,
     "sub_cells": null,
     "artifacts": null,
-    "points": 253,
-    "first_point_tessera_id": "57301764780671231",
+    "points": 257,
+    "first_point_tessera_id": "221550242349625936",
     "first_artifact_tessera_id": null
   },
   "viewport-underlay.bin": {
@@ -23,35 +23,48 @@
     "tiles": 16,
     "sub_cells": 256,
     "artifacts": null,
-    "points": 253,
-    "first_point_tessera_id": "57301764780671231",
+    "points": 257,
+    "first_point_tessera_id": "221550242349625936",
     "first_artifact_tessera_id": null
   },
   "viewport-artifacts.bin": {
     "frames": [
-      1,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
       5,
       4
     ],
-    "tiles": 15,
+    "tiles": null,
     "sub_cells": null,
-    "artifacts": 64,
+    "artifacts": 114,
     "points": 0,
     "first_point_tessera_id": null,
-    "first_artifact_tessera_id": "3649474027389272901"
+    "first_artifact_tessera_id": "9805232920100346745"
   },
   "viewport-membership.bin": {
     "frames": [
       1,
       3,
-      5,
       4
     ],
     "tiles": 15,
     "sub_cells": null,
-    "artifacts": 64,
-    "points": 249,
-    "first_point_tessera_id": "128645724586129090",
-    "first_artifact_tessera_id": "3649474027389272901"
+    "artifacts": null,
+    "points": 255,
+    "first_point_tessera_id": "127394664863414675",
+    "first_artifact_tessera_id": null
   }
 }

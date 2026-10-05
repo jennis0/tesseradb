@@ -1558,6 +1558,17 @@ class Database:
         self._refuse_before_the_first_commit("artifacts")
         return self.viewer().artifacts(view, layer, fields, **options)
 
+    def viewport_artifacts(self, view: str, zoom: int, per_tile: int, **options):
+        """The annotations in each map tile at `zoom`, as one pyarrow table with a `tile` column.
+
+        This is `Viewer.viewport_artifacts` as this database's own reader; `options` are its
+        keywords.
+
+            db.viewport_artifacts("papers", 2, per_tile=20, layers=["clusters"])
+        """
+        self._refuse_before_the_first_commit("viewport_artifacts")
+        return self.viewer().viewport_artifacts(view, zoom, per_tile, **options)
+
     def aggregate(
         self,
         view: str,

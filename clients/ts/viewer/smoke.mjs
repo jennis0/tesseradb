@@ -28,17 +28,8 @@ page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 page.on('response', (r) => {
   const u = new URL(r.url());
   if (!u.pathname.startsWith('/v1/') && !u.pathname.startsWith('/session/')) return;
-  // Which channel asked: the point path and the artifact channel (`k = 0`, a named layer) both
-  // post to `/v1/viewport`, and are counted apart.
-  let artifacts = false;
-  try {
-    const body = JSON.parse(r.request().postData() ?? '{}');
-    // The artifact channel asks for counts only with a named layer; the point path names layers
-    // too but always asks for points.
-    artifacts = body.k === 0 && Array.isArray(body.layers) && body.layers.length > 0;
-  } catch {
-    // A GET, or a body that is not JSON. Neither is the artifact channel.
-  }
+  // The artifact channel asks on its own route, so the point path's requests are `/v1/viewport`'s.
+  const artifacts = u.pathname === '/v1/artifacts/viewport';
   requests.push({path: u.pathname, status: r.status(), artifacts});
 });
 
@@ -141,7 +132,7 @@ const colourSeries = [];
 const colourOptions = await page.locator('#colour-by option').count().catch(() => 0);
 for (let i = 0; i < colourOptions; i++) {
   const value = await page.locator('#colour-by option').nth(i).getAttribute('value');
-  const viewportsBefore = requests.filter((r) => r.path === '/v1/viewport' && !r.artifacts).length;
+  const viewportsBefore = requests.filter((r) => r.path === '/v1/viewport').length;
   await page.selectOption('#colour-by', value);
   await settled();
   colourSeries.push({
@@ -149,7 +140,7 @@ for (let i = 0; i < colourOptions; i++) {
     counts: await counts(),
     lit: await litPixels(),
     viewportRequests:
-      requests.filter((r) => r.path === '/v1/viewport' && !r.artifacts).length - viewportsBefore,
+      requests.filter((r) => r.path === '/v1/viewport').length - viewportsBefore,
     legend: (await page.locator('#instruments').innerText())
       .split('\n')
       .filter((l) => l.trim())

@@ -196,6 +196,15 @@ async fn viewport_bytes(server: &TestServer, token: &str, body: serde_json::Valu
     decode_viewport_frames(&bytes).deterministic_bytes
 }
 
+/// The tile route's answer to the same request, without the trailer, which carries timings.
+async fn artifacts_bytes(server: &TestServer, token: &str, body: serde_json::Value) -> Vec<u8> {
+    let bytes = artifacts_raw(server, token, body).await;
+    let frames = tessera_wire::split_frames(&bytes).unwrap();
+    let (trailer, _) = frames.split_last().unwrap();
+    assert_eq!(trailer.0, tessera_wire::FRAME_TRAILER);
+    bytes[..bytes.len() - tessera_wire::FRAME_HEADER_BYTES - trailer.1.len()].to_vec()
+}
+
 async fn json_post(
     server: &TestServer,
     token: &str,
@@ -230,7 +239,7 @@ fn viewport(zoom: u8, extra: serde_json::Value) -> serde_json::Value {
 }
 
 fn keys_served(bytes: &[u8]) -> Vec<String> {
-    let mut keys: Vec<String> = decode_viewport_frames(bytes)
+    let mut keys: Vec<String> = decode_artifact_frames(bytes)
         .artifacts
         .unwrap_or_default()
         .into_iter()
@@ -240,7 +249,14 @@ fn keys_served(bytes: &[u8]) -> Vec<String> {
     keys
 }
 
-/// A raw viewport body, whole, for reading the artifacts frame.
+/// The tile route's body, whole, for the artifacts the same viewport request names.
+async fn artifacts_raw(server: &TestServer, token: &str, body: serde_json::Value) -> Vec<u8> {
+    let resp = post_viewport_artifacts(server, token, &artifacts_request(body)).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    resp.bytes().await.unwrap().to_vec()
+}
+
+/// A raw viewport body, whole.
 async fn viewport_raw(server: &TestServer, token: &str, body: serde_json::Value) -> Vec<u8> {
     let resp = server
         .client
@@ -267,16 +283,21 @@ async fn assert_indistinguishable(a: &Deployment, b: &Deployment) -> usize {
     assert_eq!(red_ids.len(), 4, "A holds four artifacts B does not");
     let mut compared = 0;
 
-    // The viewport: the artifacts frame, parent links, targets and the points' membership
-    // columns, at two depths.
+    // The viewport's points and their membership columns, and the artifacts of the same request
+    // with their parent links and targets, at two depths.
     for zoom in [0u8, 3] {
         let body = viewport(zoom, json!({}));
         assert_eq!(
             viewport_bytes(&a.server, &blue_a, body.clone()).await,
-            viewport_bytes(&b.server, &blue_b, body).await,
+            viewport_bytes(&b.server, &blue_b, body.clone()).await,
             "viewport at zoom {zoom}"
         );
-        compared += 1;
+        assert_eq!(
+            artifacts_bytes(&a.server, &blue_a, body.clone()).await,
+            artifacts_bytes(&b.server, &blue_b, body).await,
+            "artifacts viewport at zoom {zoom}"
+        );
+        compared += 2;
     }
 
     // A filter and a highlight naming a shared artifact, and each naming a withheld one: the
@@ -293,10 +314,15 @@ async fn assert_indistinguishable(a: &Deployment, b: &Deployment) -> usize {
                 let body = viewport(0, json!({ field: leaf }));
                 assert_eq!(
                     viewport_bytes(&a.server, &blue_a, body.clone()).await,
-                    viewport_bytes(&b.server, &blue_b, body).await,
+                    viewport_bytes(&b.server, &blue_b, body.clone()).await,
                     "{field} {leaf}"
                 );
-                compared += 1;
+                assert_eq!(
+                    artifacts_bytes(&a.server, &blue_a, body.clone()).await,
+                    artifacts_bytes(&b.server, &blue_b, body).await,
+                    "artifacts under {field} {leaf}"
+                );
+                compared += 2;
             }
         }
     }
@@ -377,8 +403,8 @@ async fn assert_indistinguishable(a: &Deployment, b: &Deployment) -> usize {
 async fn assert_red_is_served(a: &Deployment) {
     let red = token_for(&a.server, &["0", "red"]).await;
     let blue = token_for(&a.server, &["0", "blue"]).await;
-    let for_red = keys_served(&viewport_raw(&a.server, &red, viewport(0, json!({}))).await);
-    let for_blue = keys_served(&viewport_raw(&a.server, &blue, viewport(0, json!({}))).await);
+    let for_red = keys_served(&artifacts_raw(&a.server, &red, viewport(0, json!({}))).await);
+    let for_blue = keys_served(&artifacts_raw(&a.server, &blue, viewport(0, json!({}))).await);
     for key in ["p-red", "c-red", "list-red", "n-red"] {
         assert!(for_red.contains(&key.to_string()), "{key} in {for_red:?}");
         assert!(!for_blue.contains(&key.to_string()), "{key} in {for_blue:?}");
@@ -390,7 +416,7 @@ async fn assert_red_is_served(a: &Deployment) {
     }
     // A label list admits a viewer holding any one of its labels.
     let green = token_for(&a.server, &["0", "green"]).await;
-    let for_green = keys_served(&viewport_raw(&a.server, &green, viewport(0, json!({}))).await);
+    let for_green = keys_served(&artifacts_raw(&a.server, &green, viewport(0, json!({}))).await);
     assert!(for_green.contains(&"list-red".to_string()));
     assert!(!for_green.contains(&"p-red".to_string()));
 }
@@ -438,12 +464,12 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
     let blue = token_for(server, &["0", "blue"]).await;
     let served = |bytes: Vec<u8>| keys_served(&bytes);
 
-    assert!(served(viewport_raw(server, &blue, viewport(0, json!({}))).await)
+    assert!(served(artifacts_raw(server, &blue, viewport(0, json!({}))).await)
         .contains(&"open".to_string()));
     let (status, body) = patch(server, LAYER, json!([{ "key": "open", "access": ["red"] }])).await;
     assert_eq!(status, 200, "{body}");
     tick(server).await;
-    assert!(!served(viewport_raw(server, &blue, viewport(0, json!({}))).await)
+    assert!(!served(artifacts_raw(server, &blue, viewport(0, json!({}))).await)
         .contains(&"open".to_string()));
 
     let (status, _) = patch(server, LAYER, json!([{ "key": "open", "access": ["red"] }])).await;
@@ -451,7 +477,7 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
     let (status, _) = patch(server, LAYER, json!([{ "key": "open", "access": ["blue"] }])).await;
     assert_eq!(status, 409);
     tick(server).await;
-    assert!(!served(viewport_raw(server, &blue, viewport(0, json!({}))).await)
+    assert!(!served(artifacts_raw(server, &blue, viewport(0, json!({}))).await)
         .contains(&"open".to_string()));
 
     let resp = server
@@ -482,7 +508,7 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
             patch(server, LAYER, json!([{ "key": "open", "access": ["blue"] }])).await;
         assert_eq!(status, 409, "{stage}");
         let blue = token_for(server, &["0", "blue"]).await;
-        assert!(!keys_served(&viewport_raw(server, &blue, viewport(0, json!({}))).await)
+        assert!(!keys_served(&artifacts_raw(server, &blue, viewport(0, json!({}))).await)
             .contains(&"open".to_string()), "{stage}");
     }
 }
@@ -542,7 +568,7 @@ async fn an_arrow_growth_fills_a_label_as_the_json_form_does() {
     };
     async fn open_served(server: &TestServer) -> bool {
         let blue = token_for(server, &["0", "blue"]).await;
-        keys_served(&viewport_raw(server, &blue, viewport(0, json!({}))).await)
+        keys_served(&artifacts_raw(server, &blue, viewport(0, json!({}))).await)
             .contains(&"open".to_string())
     }
 
@@ -613,7 +639,7 @@ async fn a_record_without_access_on_a_layer_reading_labels_is_refused() {
     tick(&server).await;
     let token = token_for(&server, &["0"]).await;
     assert_eq!(
-        keys_served(&viewport_raw(&server, &token, viewport(0, json!({}))).await),
+        keys_served(&artifacts_raw(&server, &token, viewport(0, json!({}))).await),
         vec!["blank".to_string(), "emptied".to_string(), "nulled".to_string()]
     );
 }
@@ -638,11 +664,11 @@ async fn an_unlabelled_artifact_takes_a_named_default() {
     let red = token_for(&server, &["0", "red"]).await;
     let blue = token_for(&server, &["0", "blue"]).await;
     assert_eq!(
-        keys_served(&viewport_raw(&server, &red, viewport(0, json!({}))).await),
+        keys_served(&artifacts_raw(&server, &red, viewport(0, json!({}))).await),
         vec!["bare".to_string()]
     );
     assert_eq!(
-        keys_served(&viewport_raw(&server, &blue, viewport(0, json!({}))).await),
+        keys_served(&artifacts_raw(&server, &blue, viewport(0, json!({}))).await),
         vec!["blue".to_string()]
     );
 }
@@ -840,7 +866,7 @@ fn build_config(
 async fn served_counts(server: &TestServer, terms: &[&str]) -> Vec<(String, String, u64)> {
     let token = token_for(server, terms).await;
     let mut rows: Vec<(String, String, u64)> =
-        decode_viewport_frames(&viewport_raw(server, &token, viewport(0, json!({}))).await)
+        decode_artifact_frames(&artifacts_raw(server, &token, viewport(0, json!({}))).await)
             .artifacts
             .unwrap_or_default()
             .into_iter()
@@ -1007,7 +1033,7 @@ async fn a_padded_label_fills_as_its_trimmed_self() {
     let server = &d.server;
     let served_to = async |terms: &[&str], key: &str| {
         let token = token_for(server, terms).await;
-        keys_served(&viewport_raw(server, &token, viewport(0, json!({}))).await)
+        keys_served(&artifacts_raw(server, &token, viewport(0, json!({}))).await)
             .contains(&key.to_string())
     };
 
@@ -1040,7 +1066,7 @@ async fn a_padded_label_fills_as_its_trimmed_self() {
     let server = &d.server;
     let served_to = async |terms: &[&str], key: &str| {
         let token = token_for(server, terms).await;
-        keys_served(&viewport_raw(server, &token, viewport(0, json!({}))).await)
+        keys_served(&artifacts_raw(server, &token, viewport(0, json!({}))).await)
             .contains(&key.to_string())
     };
     for key in ["open", "p-open"] {
@@ -1224,7 +1250,7 @@ async fn a_label_that_is_not_an_expression_is_refused_rather_than_stored_as_none
     tick(&server).await;
     assert_eq!(
         keys_served(
-            &viewport_raw(
+            &artifacts_raw(
                 &server,
                 &token_for(&server, &["0"]).await,
                 viewport(0, json!({}))

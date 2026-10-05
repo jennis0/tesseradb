@@ -85,6 +85,10 @@ pub(crate) struct ArtifactsArgs {
     /// `--parent`.
     #[arg(long, value_name = "TEXT")]
     q: Option<String>,
+    /// Only the artifacts these `tessera_id`s name, comma-separated, such as the tags a points
+    /// read returned. One the token is not served has no row, as one naming nothing does.
+    #[arg(long, value_name = "TESSERA_IDS", value_delimiter = ',')]
+    ids: Option<Vec<u64>>,
     /// A filter expression as JSON. Only the artifacts with a visible member that matches are
     /// returned, each with a `matched_count` column.
     #[arg(long, value_name = "JSON")]
@@ -220,6 +224,11 @@ pub(crate) fn artifacts(args: ArtifactsArgs) -> ExitCode {
         }
         if let Some(q) = args.q {
             request.insert("q".into(), q.into());
+        }
+        if let Some(ids) = &args.ids {
+            // Decimal strings: a `tessera_id` past 2^53 is not exact as a JSON number.
+            let ids = ids.iter().map(|id| Value::from(id.to_string())).collect();
+            request.insert("ids".into(), Value::Array(ids));
         }
         if args.keep_unmatched {
             request.insert("keep_unmatched".into(), true.into());

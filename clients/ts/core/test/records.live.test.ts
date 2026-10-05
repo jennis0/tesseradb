@@ -340,15 +340,17 @@ describe('bulk reads against a live server', () => {
     const primary = (await client.categories(session.token, 'primary_category', {limit: 1000})).map((v) => v.key);
     const everything = (await client.authorise({terms: primary})).token;
     const bodies: {k?: number; layers?: string[]}[] = [];
+    const tiles: {layers?: string[]; per_tile?: number}[] = [];
     const watching = new TesseraClient({
       viewerUrl: (served as Served).viewerUrl,
       sessionUrl: (served as Served).sessionUrl,
       fetch: (url, init) => {
         if (String(url).endsWith('/v1/viewport') && init?.body) bodies.push(JSON.parse(String(init.body)) as {k?: number; layers?: string[]});
+        if (String(url).endsWith('/v1/artifacts/viewport') && init?.body) tiles.push(JSON.parse(String(init.body)) as {layers?: string[]; per_tile?: number});
         return fetch(url, init);
       }
     });
-    const store = createStore({viewerUrl: (served as Served).viewerUrl, token: everything, client: watching, prefetch: false});
+    const store = createStore({viewerUrl: (served as Served).viewerUrl, token: everything, client: watching, prefetch: false, artifacts: {perTile: meta.selection.maxArtifactsPerTile}});
     try {
       store.setColourBy('cluster:clusters/hdbscan');
       const q = meta.views.find((v) => v.id === 's0')!.quantisation;
@@ -369,11 +371,13 @@ describe('bulk reads against a live server', () => {
         expect(artifactName(x, a.attached)).toBe(i === -1 ? null : texts[i]);
       }
 
-      // The points carry the coloured layer's column and not its labels'; the channel asks for both.
+      // The points carry the coloured layer's column and not its labels'; the channel asks for both,
+      // with the quota the store was given, the largest the deployment takes, so no label of a
+      // served cluster is past it.
       const points = bodies.filter((b) => b.k !== 0);
       expect(points.length).toBeGreaterThan(0);
       for (const b of points) expect(b.layers).toEqual(['clusters/hdbscan']);
-      expect(bodies.some((b) => b.k === 0 && b.layers?.includes('topics/hdbscan'))).toBe(true);
+      expect(tiles.some((b) => b.layers?.includes('clusters/hdbscan') && b.layers.includes('topics/hdbscan') && b.per_tile === meta.selection.maxArtifactsPerTile)).toBe(true);
       for (const band of store.get('marks').bands) expect(Object.keys(band.membership)).toEqual(['clusters/hdbscan']);
     } finally {
       store.dispose();

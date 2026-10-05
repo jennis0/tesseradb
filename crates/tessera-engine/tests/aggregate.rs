@@ -2119,6 +2119,7 @@ fn an_attached_layer_counts_as_the_artifacts_route_does() {
                         level: None,
                         parent: None,
                         q: None,
+                        ids: None,
                         filter: Some(filter.clone()),
                         keep_unmatched: true,
                         count: false,

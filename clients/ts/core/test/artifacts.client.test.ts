@@ -1,12 +1,14 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {tableFromIPC} from 'apache-arrow';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
-import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
-import {splitFramedStreams} from '../src/frame.js';
-import type {Decoder} from '../src/decoder.js';
-import {refused, rejectsAsRefused, result} from './support.js';
+import type {TileSink} from '../src/client.js';
+import {FRAME_TRAILER, FrameReader} from '../src/frame.js';
+import {inlineDecoder, type Decoder} from '../src/decoder.js';
+import {framed, rejectsAsRefused, result} from './support.js';
+
+/** An artifacts trailer for `frames` frames of `rows` rows. */
+const trailer = (frames: number, rows: number) => new TextEncoder().encode(JSON.stringify({stream_us: 0, arrow_serialise_ns: 0, rows, frames}));
 
 /**
  * What the client puts on the wire for artifacts, and how it maps the reply. The transport is
@@ -81,14 +83,48 @@ describe('the viewport request', () => {
     });
   });
 
-  it('carries the row projection under its wire name, and only when named', async () => {
-    const seen = stubFetch(() => new Response(new ArrayBuffer(0), {status: 200}));
+});
+
+describe('the artifacts viewport request', () => {
+  it('always sends the quota, and every other field only when set, under its wire name', async () => {
+    const seen = stubFetch(() => new Response(framed([{kind: FRAME_TRAILER, payload: trailer(0, 0)}]), {status: 200}));
     const c = client();
-    await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x'], artifactRows: 'identity'});
-    await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x']});
-    // `"identity"` is the same rows in fewer columns; absent leaves the server's default, `"full"`.
-    expect(seen[0]!.body.artifact_rows).toBe('identity');
-    expect('artifact_rows' in seen[1]!.body).toBe(false);
+    await c.viewportArtifacts('tok', {view: 's0', zoom: 4, tiles: [3n, 1n], perTile: 25});
+    await c.viewportArtifacts('tok', {
+      view: 's0',
+      zoom: 4,
+      bbox: [0, 0, 1, 1],
+      perTile: 0,
+      layers: 'all',
+      levels: [1],
+      computed: [],
+      filters: {archive: {eq: 'cs'}},
+      highlight: {archive: {eq: 'cs'}},
+      budget: 64
+    });
+    expect(seen[0]!.url).toBe('http://viewer/v1/artifacts/viewport');
+    expect(seen[0]!.body).toEqual({view: 's0', zoom: 4, tiles: [3, 1], per_tile: 25});
+    expect(seen[1]!.body).toEqual({
+      view: 's0',
+      zoom: 4,
+      bbox: [0, 0, 1, 1],
+      per_tile: 0,
+      layers: 'all',
+      levels: [1],
+      computed: [],
+      filters: {archive: {eq: 'cs'}},
+      highlight: {archive: {eq: 'cs'}},
+      budget: 64
+    });
+  });
+});
+
+describe('the bulk read by identifier', () => {
+  it('sends the ids as decimal strings, so an id past 2^53 survives', async () => {
+    const seen = stubFetch(() => new Response(JSON.stringify({error: 'contract', detail: 'stop here'}), {status: 422}));
+    await expect(client().artifacts('tok', {view: 's0', layer: 'l', fields: ['level'], ids: [2n ** 60n + 1n, 5n]})).rejects.toThrow(TesseraError);
+    expect(seen[0]!.url).toBe('http://viewer/v1/artifacts');
+    expect(seen[0]!.body).toMatchObject({view: 's0', layer: 'l', fields: ['level'], ids: [String(2n ** 60n + 1n), '5']});
   });
 });
 
@@ -100,6 +136,7 @@ describe('/v1/meta', () => {
     theta_target_marks: 16,
     max_underlay_offset: 3,
     max_tiles_per_request: 4096,
+    max_artifacts_per_tile: 200,
     max_category_values: 1000,
     max_shape_vertices: 50_000,
     max_region_vertices: 10_000,
@@ -168,6 +205,7 @@ describe('/v1/meta', () => {
         maxK: 5000,
         thetaTargetMarks: 16,
         maxUnderlayOffset: 3,
+        maxArtifactsPerTile: 200,
         maxCategoryValues: 1000,
         maxShapeVertices: 50_000,
         maxRegionVertices: 10_000,
@@ -228,102 +266,83 @@ describe('/v1/meta', () => {
 });
 
 /**
- * The artifacts frame as a server sent it: the k-means layer of the notebook corpus, which declares
- * centroid, box and hull over clusters in different parts of the map, captured at `k = 0` by
- * `scripts/capture-golden.mjs`.
+ * An artifacts body as a server sent it: the k-means layer of the notebook corpus, which declares
+ * centroid and box over clusters in different parts of the map, at zoom 2 over the whole of view
+ * `s0`, captured by `scripts/capture-golden.mjs`.
  */
-describe('the artifacts frame, decoded from a captured response', () => {
-  const fixture = (name: string) =>
-    new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
+describe('the artifacts viewport, read from a captured response', () => {
+  const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
+  const read = async (name: string, onTile?: TileSink) => {
+    stubFetch(() => new Response(fixture(name), {status: 200, headers: {'x-tessera-identity-key': 'ik', etag: '"ck"'}}));
+    return new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()}).viewportArtifacts('tok', {view: 's0', zoom: 2, bbox: [0, 0, 1, 1], perTile: 50}, {onTile});
+  };
 
-  it('refuses an artifacts frame captured before the shape columns', () => {
-    // A captured body from an older server, with `hull_x`/`hull_y` and no `rung` column. Its tile
-    // frame is older too, so the artifacts frame is decoded alone.
-    refused(() => decodeArtifactsFrame(splitFramedStreams(fixture('viewport-artifacts-pre-r40.bin')).artifacts!));
+  it('hands over one frame per tile in wire order, with the response’s keys, and returns the same frames', async () => {
+    const handed: unknown[] = [];
+    const response = await read('viewport-artifacts.bin', (frame, keys) => {
+      handed.push(frame);
+      expect(keys).toEqual({identityKey: 'ik', contentKey: 'ck'});
+    });
+    expect(response.frames).toEqual(handed);
+    expect(response.frames).toHaveLength(16);
+    expect(response.frames.every((f) => !f.treed)).toBe(true);
+    // A tile with no artifact is a frame of no rows; one with any names its tile.
+    expect(response.frames.some((f) => f.artifacts.length === 0)).toBe(true);
+    for (const f of response.frames) if (f.artifacts.length > 0) expect(f.tile).not.toBeNull();
   });
 
-  it('carries one row per served artifact, and no points beside them', () => {
-    const result = decodeViewport(fixture('viewport-artifacts.bin'));
-    expect(result.artifacts.length).toBeGreaterThan(0);
-    // Captured at `k = 0`: an artifacts frame and no points frame.
-    expect(result.ids.length).toBe(0);
-    expect(result.membership).toEqual({});
-
-    for (const artifact of result.artifacts) {
-      expect(artifact.layer.length).toBeGreaterThan(0);
-      // Kept as a u64: a `tessera_id` does not survive a double.
-      expect(artifact.tesseraId).toBeTypeOf('bigint');
-      expect(artifact.maskedCount).toBeTypeOf('bigint');
-      // Served means it met its layer's criterion, so no row has a zero count.
-      expect(artifact.maskedCount).toBeGreaterThan(0n);
+  it('serves an artifact in each tile it has members in, with the same figures, largest first within a tile', async () => {
+    const {frames} = await read('viewport-artifacts.bin');
+    const seen = new Map<bigint, string>();
+    let repeated = 0;
+    for (const {artifacts} of frames) {
+      for (let i = 1; i < artifacts.length; i++) expect(artifacts[i - 1]!.maskedCount >= artifacts[i]!.maskedCount).toBe(true);
+      for (const a of artifacts) {
+        expect(a.tesseraId).toBeTypeOf('bigint');
+        expect(a.maskedCount).toBeGreaterThan(0n);
+        const figures = `${a.maskedCount}|${a.centroid}|${a.box}`;
+        if (seen.has(a.tesseraId)) {
+          repeated += 1;
+          expect(figures).toBe(seen.get(a.tesseraId));
+        }
+        seen.set(a.tesseraId, figures);
+      }
     }
-
-    // Identity is what the drill-down addresses, so a repeated one would make two clusters one.
-    const ids = new Set(result.artifacts.map((a) => a.tesseraId));
-    expect(ids.size).toBe(result.artifacts.length);
+    expect(repeated).toBeGreaterThan(0);
   });
 
-  it('reads a response with no artifacts frame as no artifacts, not as a failure', () => {
-    expect(decodeViewport(fixture('viewport-plain.bin')).artifacts).toEqual([]);
-  });
-
-  it('carries the derived geometry in the same grid units as the points', () => {
-    const result = decodeViewport(fixture('viewport-artifacts.bin'));
-    // The layer declares all three and the request narrowed none. A null would mean the layer
-    // declares none.
-    for (const a of result.artifacts) {
-      expect(a.centroid).not.toBeNull();
-      expect(a.box).not.toBeNull();
-      expect(a.shape).not.toBeNull();
-
+  it('carries the derived geometry in the same grid units as the points', async () => {
+    const {frames} = await read('viewport-artifacts.bin');
+    const artifacts = new Map(frames.flatMap((f) => f.artifacts).map((a) => [a.tesseraId, a]));
+    for (const a of artifacts.values()) {
       const [cx, cy] = a.centroid!;
       const [minX, minY, maxX, maxY] = a.box!;
-      // The centroid is a mean of the members' positions, so it lies inside their bounds; this
-      // catches transposed axes.
+      // A mean of the members' positions lies inside their bounds; this catches transposed axes.
       expect(cx).toBeGreaterThanOrEqual(minX);
       expect(cx).toBeLessThanOrEqual(maxX);
       expect(cy).toBeGreaterThanOrEqual(minY);
       expect(cy).toBeLessThanOrEqual(maxY);
-
-      // Grid units: the axes span 2^32, as `codes` does.
       expect(maxX).toBeLessThanOrEqual(2 ** 32);
-      // Parts, then rings, then vertices, each vertex a member's position and so inside the box.
-      // A group of one or two members is served as that point or that segment.
-      expect(a.shape!.length).toBeGreaterThan(0);
-      for (const part of a.shape!) {
-        for (const ring of part) {
-          expect(ring.length).toBeGreaterThan(0);
-          for (const [x, y] of ring) {
-            expect(x).toBeGreaterThanOrEqual(minX);
-            expect(x).toBeLessThanOrEqual(maxX);
-            expect(y).toBeGreaterThanOrEqual(minY);
-            expect(y).toBeLessThanOrEqual(maxY);
-          }
-        }
-      }
     }
-    // Different clusters, different shapes; one geometry on every row would mean row 0 was read for
-    // all.
-    const centroids = new Set(result.artifacts.map((a) => a.centroid!.join(',')));
-    expect(centroids.size).toBe(result.artifacts.length);
+    // Different clusters, different centroids; one on every row would mean row 0 was read for all.
+    expect(new Set([...artifacts.values()].map((a) => a.centroid!.join(','))).size).toBe(artifacts.size);
   });
 
-  it('reads every shape part, ring and vertex as Arrow reads the nested lists', () => {
+  it('refuses a body cut before its trailer, after handing over the frames that were whole', async () => {
     const body = fixture('viewport-artifacts.bin');
-    const result = decodeViewport(body);
-    const table = tableFromIPC(splitFramedStreams(body).artifacts!);
-    const nested = (name: string, i: number) =>
-      Array.from(table.getChild(name)!.get(i) as Iterable<Iterable<Iterable<number>>>, (rings) => Array.from(rings, (ring) => Array.from(ring)));
-    expect(result.artifacts.length).toBe(table.numRows);
-    result.artifacts.forEach((a, i) => {
-      const xs = nested('shape_x', i);
-      const ys = nested('shape_y', i);
-      expect(a.shape, `artifact ${i}`).toEqual(xs.map((rings, p) => rings.map((ring, r) => ring.map((x, v) => [x, ys[p]![r]![v]]))));
-    });
-    // The capture holds a shape of several parts and a ring of several vertices, so reading only
-    // the first of either is caught.
-    expect(result.artifacts.some((a) => a.shape!.length > 1)).toBe(true);
-    expect(result.artifacts.some((a) => a.shape!.some((part) => part.some((ring) => ring.length > 1)))).toBe(true);
+    const reader = new FrameReader('artifacts');
+    const frames = reader.push(body);
+    const cut = body.subarray(0, body.byteLength - 5 - frames.at(-1)!.payload.byteLength);
+    stubFetch(() => new Response(cut, {status: 200}));
+    const handed: unknown[] = [];
+    await rejectsAsRefused(
+      new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()}).viewportArtifacts(
+        'tok',
+        {view: 's0', zoom: 2, bbox: [0, 0, 1, 1], perTile: 50},
+        {onTile: (f) => void handed.push(f)}
+      )
+    );
+    expect(handed).toHaveLength(16);
   });
 });
 

@@ -141,12 +141,12 @@ fn both_credential() -> Vec<u8> {
 fn count_in(engine: &Engine, view: &str, key: &str) -> Option<u64> {
     let session = engine.authorise(&both_credential()).unwrap();
     engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            tessera_engine::ViewportRequest::new(view, 0, WHOLE, 10_000),
+            tessera_engine::ViewportArtifactsRequest::new(view, 0, WHOLE, usize::MAX),
         )
         .expect("a viewport over the whole map")
-        .artifacts
+        .artifacts()
         .into_iter()
         .find(|a| a.key.as_deref() == Some(key))
         .map(|a| a.masked_count)

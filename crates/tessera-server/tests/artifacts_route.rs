@@ -1,8 +1,9 @@
 //! `POST /v1/artifacts` over HTTP: a read carried across responses by its cursor returns every
 //! artifact a viewer is served once, in publication order, the set the viewport serves; the head
 //! counts what the read returns; compression changes the bytes and not the rows; a cursor is bound
-//! to its credential and its route; a withheld parent answers as a parent with no children; and
-//! the route takes its slot from the bulk-read lane.
+//! to its credential and its route; a withheld parent answers as a parent with no children; `ids`
+//! reads what the identifiers name, a withheld one answering as one naming nothing; and the route
+//! takes its slot from the bulk-read lane. The artifacts viewport's own lane is checked here too.
 
 mod common;
 
@@ -161,15 +162,15 @@ fn ids_of(responses: &[DecodedRecords]) -> Vec<u64> {
     responses.iter().flat_map(DecodedRecords::tessera_ids).collect()
 }
 
-/// The identifiers the viewport serves in the layer over the whole map.
+/// The identifiers the tile route serves in the layer over the whole map.
 async fn viewport_ids(server: &TestServer, token: &str) -> HashSet<u64> {
     let body = json!({
-        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 0,
-        "layers": [LAYER], "artifact_budget": 10_000,
+        "view": "s0", "zoom": 0, "per_tile": 1000, "bbox": [0.0, 0.0, 1000.0, 1000.0],
+        "layers": [LAYER], "budget": 10_000,
     });
-    let resp = post(server, "/v1/viewport", token, &body).await;
+    let resp = post(server, "/v1/artifacts/viewport", token, &body).await;
     assert_eq!(resp.status().as_u16(), 200);
-    decode_viewport_frames(&resp.bytes().await.unwrap())
+    decode_artifact_frames(&resp.bytes().await.unwrap())
         .artifacts
         .unwrap_or_default()
         .into_iter()
@@ -353,4 +354,107 @@ async fn a_full_bulk_lane_sheds_an_artifacts_read() {
     assert!(resp.headers().contains_key("retry-after"));
     drop(held);
     artifacts_ok(&f.server, &token, &body).await;
+}
+
+/// Every artifact of the layer by key, as the broad viewer is served it.
+async fn ids_by_key(f: &Fixture) -> std::collections::HashMap<String, u64> {
+    let broad = token_for(&f.server, &["0"]).await;
+    let all = read_all(
+        &f.server,
+        &broad,
+        &json!({ "view": "s0", "layer": LAYER, "fields": ["key"] }),
+    )
+    .await;
+    keys_of(&all).into_iter().zip(ids_of(&all)).collect()
+}
+
+/// **`ids` reads the artifacts it names, and a withheld one is one naming nothing**: the narrow
+/// viewer, not served the children, asking for a root and a child gets the same response as asking
+/// for the root and an identifier nobody issued — rows, head and cursor alike.
+#[tokio::test]
+async fn ids_read_what_they_name_and_a_withheld_one_answers_as_one_naming_nothing() {
+    let f = fixture().await;
+    let by_key = ids_by_key(&f).await;
+    let broad = token_for(&f.server, &["0"]).await;
+    let narrow = token_for(&f.server, &["1"]).await;
+    let read = |token: &str, ids: Vec<Value>| {
+        let body = json!({
+            "view": "s0", "layer": LAYER, "fields": ["key", "masked_count"], "ids": ids,
+            "count": true,
+        });
+        let server = &f.server;
+        let token = token.to_string();
+        async move { read_all(server, &token, &body).await }
+    };
+
+    // Both spellings of an identifier, out of order and repeated, read once each in publication
+    // order.
+    let named = vec![
+        json!(by_key["r3-c1"]),
+        json!(by_key["r1"].to_string()),
+        json!(by_key["r3-c1"]),
+    ];
+    let responses = read(&broad, named).await;
+    assert_eq!(keys_of(&responses), ["r1", "r3-c1"]);
+    assert_eq!(responses[0].head["served"], 2);
+
+    let withheld = read(&narrow, vec![json!(by_key["r2"]), json!(by_key["r2-c0"])]).await;
+    let unknown = read(&narrow, vec![json!(by_key["r2"]), json!(9_999_999_999u64)]).await;
+    assert_eq!(keys_of(&withheld), ["r2"]);
+    let pages = |responses: &[DecodedRecords]| -> Vec<RecordBatch> {
+        responses
+            .iter()
+            .flat_map(|r| r.pages.iter().map(|(batch, _)| batch.clone()))
+            .collect()
+    };
+    assert_eq!(pages(&withheld), pages(&unknown), "the rows tell the two apart");
+    assert_eq!(withheld[0].head, unknown[0].head, "the head tells the two apart");
+
+    // An identifier that is not one is refused, as `parent`'s is.
+    let resp = post(
+        &f.server,
+        "/v1/artifacts",
+        &narrow,
+        &json!({ "view": "s0", "layer": LAYER, "fields": [], "ids": ["r2"] }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 422);
+}
+
+/// **The artifacts viewport sheds under its own limit**, `serve.artifact_admission`, and
+/// `/control/status` reports the shed under its own block; a points viewport is not held behind it.
+#[tokio::test]
+async fn a_full_artifact_lane_sheds_an_artifacts_viewport_alone() {
+    let f = fixture().await;
+    let token = token_for(&f.server, &["0"]).await;
+    let gate = &f.server.state.artifact_gate;
+    let mut held = Vec::new();
+    for _ in 0..gate.compute_admission {
+        held.push(gate.admit().await.expect("the lane is free").0);
+    }
+    let before = control_status(&f.server).await["artifacts"]["shed_total"].as_u64().unwrap();
+    let body = json!({
+        "view": "s0", "zoom": 0, "per_tile": 10, "bbox": [0.0, 0.0, 1000.0, 1000.0],
+        "layers": [LAYER],
+    });
+    let resp = post(&f.server, "/v1/artifacts/viewport", &token, &body).await;
+    assert_eq!(resp.status().as_u16(), 429);
+    assert!(resp.headers().contains_key("retry-after"));
+    let status = control_status(&f.server).await;
+    assert_eq!(status["artifacts"]["shed_total"].as_u64().unwrap(), before + 1);
+    assert_eq!(status["compute"]["shed_total"].as_u64().unwrap(), 0);
+
+    let points = json!({
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 10, "layers": [LAYER],
+    });
+    assert_eq!(post(&f.server, "/v1/viewport", &token, &points).await.status().as_u16(), 200);
+
+    drop(held);
+    let resp = post(&f.server, "/v1/artifacts/viewport", &token, &body).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let decoded = decode_artifact_frames(&resp.bytes().await.unwrap());
+    // The treed layer's frame, then the one tile at zoom 0, which a treed layer leaves empty.
+    assert_eq!(decoded.frames.len(), 2);
+    assert!(decoded.frames[0].0.is_none() && !decoded.frames[0].1.is_empty());
+    assert!(decoded.frames[1].1.is_empty());
 }

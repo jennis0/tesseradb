@@ -22,7 +22,6 @@ mod common;
 use common::*;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{ArtifactOut, Engine};
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
@@ -70,12 +69,12 @@ fn declaration() -> LayerDeclaration {
 fn answers(engine: &Engine, credential: &[u8]) -> Vec<(Option<String>, u64)> {
     let session = engine.authorise(credential).unwrap();
     let mut out: Vec<(Option<String>, u64)> = engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, ROWS as usize),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport")
-        .artifacts
+        .artifacts()
         .iter()
         .map(|a: &ArtifactOut| (a.key.clone(), a.masked_count))
         .collect();

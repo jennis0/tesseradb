@@ -1,5 +1,5 @@
-// A worked decode of a `POST /v1/viewport` body in JavaScript, using `apache-arrow` and no
-// Tessera code. `docs/openapi/README.md` walks through it.
+// A worked decode of a `POST /v1/viewport` or `POST /v1/artifacts/viewport` body in JavaScript,
+// using `apache-arrow` and no Tessera code. `docs/openapi/README.md` walks through it.
 //
 //   node src/decode-viewport.mjs <body.bin>
 //
@@ -52,8 +52,9 @@ export function splitFrames(body) {
   if (last === undefined || last.kind !== KIND.TRAILER) {
     throw new Error('no trailing kind-4 frame: the response is incomplete');
   }
-  if (first === undefined || first.kind !== KIND.TILES) {
-    throw new Error('the first frame must be the tiles frame');
+  // A viewport body begins with its tiles frame; an artifacts viewport body is artifacts frames alone.
+  if (first === undefined || (first.kind !== KIND.TILES && frames.slice(0, -1).some((f) => f.kind !== KIND.ARTIFACTS))) {
+    throw new Error('a body begins with its tiles frame, or holds artifacts frames alone');
   }
   return frames;
 }
@@ -70,8 +71,9 @@ export function decodeViewport(body) {
   let tiles = null;
   /** @type {import('apache-arrow').Table | null} */
   let subCells = null;
-  /** @type {import('apache-arrow').Table | null} */
-  let artifacts = null;
+  /** One table per artifacts frame, in order: each is one tile's, so they are kept apart. */
+  /** @type {import('apache-arrow').Table[]} */
+  const artifacts = [];
   /** @type {import('apache-arrow').Table[]} */
   const points = [];
   /** @type {Record<string, unknown> | null} */
@@ -85,7 +87,7 @@ export function decodeViewport(body) {
         subCells = tableFromIPC(payload);
         break;
       case KIND.ARTIFACTS:
-        artifacts = tableFromIPC(payload);
+        artifacts.push(tableFromIPC(payload));
         break;
       case KIND.POINTS:
         // Each frame holds whole tiles; where frames split is not fixed, and they concatenate.
@@ -149,7 +151,7 @@ function main(path) {
   const {tiles, subCells, artifacts, points} = decodeViewport(body);
   console.log('first tiles rows:', firstRows(tiles ? [tiles] : [], 3));
   if (subCells) console.log('first sub-cells rows:', firstRows([subCells], 3));
-  if (artifacts) console.log('first artifacts rows:', firstRows([artifacts], 3));
+  if (artifacts.length > 0) console.log('first artifacts rows:', firstRows(artifacts, 3));
   console.log('first points rows:', firstRows(points, 3));
 }
 

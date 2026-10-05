@@ -1,12 +1,15 @@
 import {describe, expect, it} from 'vitest';
-import {gridToWorldXY, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
+import {gridToWorldXY, type Artifact, type ArtifactsProjection, type Meta, type Shape} from '@tesseradb/client';
 import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import {contourShapes, focusOutlines, outlineOf} from '../src/layer.js';
 import {ringWithin, shapeContains} from '../src/contours.js';
 
 /** The served shape as it is drawn, and which of the served shapes the map actually draws. */
 
-const artifact = (id: bigint, parent: bigint | null, count = 10n): Artifact => ({
+/** A served artifact with the shape read for it by identifier, or none. */
+type Shaped = Artifact & {shape: Shape | null};
+
+const artifact = (id: bigint, parent: bigint | null, count = 10n): Shaped => ({
   layer: 'clusters',
   tesseraId: id,
   key: `c-${id}`,
@@ -43,11 +46,18 @@ function withRungs(served: Artifact[]): Artifact[] {
   return served.map((a) => ({...a, rung: depthOf(a)}));
 }
 
-function projection(input: Artifact[]): ArtifactsProjection {
-  const served = withRungs(input);
+/** The artifact as served, without the shape read for it. */
+const servedOf = ({shape: _shape, ...a}: Shaped): Artifact => a;
+
+/** {@link outlineOf} for an artifact whose shape was read by identifier, or `fetched` in its place. */
+const outline = (a: Shaped, fetched?: Shape | null) => outlineOf(servedOf(a), fetched ?? a.shape);
+
+function projection(input: Shaped[]): ArtifactsProjection {
+  const served = withRungs(input.map(servedOf));
+  const shapes = new Map(input.filter((a) => a.shape !== null).map((a) => [a.tesseraId, a.shape!]));
   const table = new SessionArtifactTable();
   const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
-  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], attached: new Map(), lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
+  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], attached: new Map(), lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes, colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
 /** The unsigned area of a closed ring, by the shoelace formula. */
@@ -78,10 +88,10 @@ describe('outlineOf', () => {
     // reach into the notch; a smaller total area would not show that.
     const g = 2 ** 32 - 1;
     const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
-    const outline = outlineOf({...artifact(1n, null), shape: [[notched]]})!;
-    expect(outline.source).toBe('shape');
-    expect(outline.parts.length).toBe(1);
-    const drawn = outline.parts[0]![0]!;
+    const served = outline({...artifact(1n, null), shape: [[notched]]})!;
+    expect(served.source).toBe('shape');
+    expect(served.parts.length).toBe(1);
+    const drawn = served.parts[0]![0]!;
     // The wire's vertices, in the wire's order, through the one grid-to-world conversion.
     expect(drawn).toEqual(notched.map(gridToWorldXY));
     const side = drawn[1]![0];
@@ -102,18 +112,18 @@ describe('outlineOf', () => {
     // A box and a square hull both have four corners but are drawn differently (a box through
     // the smoothing would be an oval), so the caller is told which it has.
     const a = artifact(1n, null);
-    expect(outlineOf(a)!.source).toBe('shape');
-    expect(outlineOf({...a, shape: null})!.source).toBe('box');
-    expect(outlineOf({...a, shape: null})!.parts.map((p) => p.map((r) => r.length))).toEqual([[4]]);
-    expect(outlineOf({...a, shape: null, box: null})).toBeNull();
+    expect(outline(a)!.source).toBe('shape');
+    expect(outline({...a, shape: null})!.source).toBe('box');
+    expect(outline({...a, shape: null})!.parts.map((p) => p.map((r) => r.length))).toEqual([[4]]);
+    expect(outline({...a, shape: null, box: null})).toBeNull();
     // A ring of one or two vertices has no area to draw or pick, so the box answers instead.
-    expect(outlineOf({...a, shape: [[[[0, 0], [1, 1]]]]})!.source).toBe('box');
-    expect(outlineOf({...a, shape: []})!.source).toBe('box');
+    expect(outline({...a, shape: [[[[0, 0], [1, 1]]]]})!.source).toBe('box');
+    expect(outline({...a, shape: []})!.source).toBe('box');
     // A part whose outer is degenerate goes whole, its holes with it: a surviving hole drawn
     // first would be the polygon.
-    expect(outlineOf({...a, shape: [[[[0, 0], [1, 1]], [[2, 2], [3, 2], [3, 3]]]]})!.source).toBe('box');
+    expect(outline({...a, shape: [[[[0, 0], [1, 1]], [[2, 2], [3, 2], [3, 3]]]]})!.source).toBe('box');
     // A shape that arrived by identifier wins over the artifact's own, and is still a shape.
-    const fetched = outlineOf({...a, shape: null}, [[[[0, 0], [1, 0], [1, 1]]]])!;
+    const fetched = outline({...a, shape: null}, [[[[0, 0], [1, 0], [1, 1]]]])!;
     expect([fetched.source, fetched.parts.length]).toEqual(['shape', 1]);
   });
 
@@ -122,7 +132,7 @@ describe('outlineOf', () => {
     const left: [number, number][] = [[0, 0], [g / 4, 0], [g / 4, g / 4], [0, g / 4]];
     const right: [number, number][] = [[(3 * g) / 4, (3 * g) / 4], [g, (3 * g) / 4], [g, g], [(3 * g) / 4, g]];
     // Two separated clouds and a one-member group: the wire's three parts, of which two draw.
-    const parts = outlineOf({...artifact(1n, null), shape: [[left], [right], [[[g / 2, g / 2]]]]})!.parts;
+    const parts = outline({...artifact(1n, null), shape: [[left], [right], [[[g / 2, g / 2]]]]})!.parts;
     expect(parts).toEqual([[left.map(gridToWorldXY)], [right.map(gridToWorldXY)]]);
     // No part reaches the ground between them, which is the whole reason the wire is nested.
     const middle: [number, number] = [gridToWorldXY([g / 2, g / 2])[0], gridToWorldXY([g / 2, g / 2])[1]];
@@ -135,11 +145,11 @@ describe('outlineOf', () => {
     const g = 2 ** 32 - 1;
     const outer: [number, number][] = [[0, 0], [g, 0], [g, g], [0, g]];
     const hole: [number, number][] = [[g / 4, g / 4], [(3 * g) / 4, g / 4], [(3 * g) / 4, (3 * g) / 4], [g / 4, (3 * g) / 4]];
-    const outline = outlineOf({...artifact(1n, null), shape: [[outer, hole]]})!;
-    expect(outline.parts.length).toBe(1);
-    expect(outline.parts[0]!.map((r) => r.length)).toEqual([4, 4]);
+    const served = outline({...artifact(1n, null), shape: [[outer, hole]]})!;
+    expect(served.parts.length).toBe(1);
+    expect(served.parts[0]!.map((r) => r.length)).toEqual([4, 4]);
     // A degenerate hole is dropped and the part stays.
-    expect(outlineOf({...artifact(1n, null), shape: [[outer, [[1, 1], [2, 2]]]]})!.parts[0]!.length).toBe(1);
+    expect(outline({...artifact(1n, null), shape: [[outer, [[1, 1], [2, 2]]]]})!.parts[0]!.length).toBe(1);
   });
 });
 
@@ -167,7 +177,7 @@ describe('contourShapes — what may be hovered', () => {
     // A clustering's topic labels carry no shape, so `outlineOf` would fall back to their box and
     // put a rectangle over the map with nothing drawn on it, hoverable and pointing at a thing
     // the viewer cannot see. Their text is drawn beneath the name they attach to.
-    const topic: Artifact = {...artifact(9n, null), layer: 'topics', shape: null};
+    const topic: Shaped = {...artifact(9n, null), layer: 'topics', shape: null};
     const p = projection([artifact(1n, null), topic]);
     expect(ids(p, {meta: meta([{name: 'clusters'}, {name: 'topics', depsOn: ['clusters']}])})).toEqual(['1']);
     // With no roster to say which layer depends on which, every served layer answers.
@@ -255,7 +265,7 @@ describe('focusOutlines — what draws', () => {
   });
 
   it('leaves a dependent layer’s artifacts out — their box is not a shape', () => {
-    const topic: Artifact = {...artifact(9n, null), layer: 'topics', shape: null};
+    const topic: Shaped = {...artifact(9n, null), layer: 'topics', shape: null};
     const p = projection([artifact(1n, null), topic]);
     const roster = meta([{name: 'clusters'}, {name: 'topics', depsOn: ['clusters']}]);
     expect(focusOutlines(p, options({hovered: 9n, meta: roster}))).toEqual([]);

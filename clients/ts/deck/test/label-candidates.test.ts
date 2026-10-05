@@ -19,7 +19,6 @@ const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'cl
   maskedCount: count,
   centroid: [Number(id) * 2 ** 24, Number(id) * 2 ** 24],
   box: null,
-  shape: null,
   content,
   parentIds: parent === null ? [] : [parent],
   rung: 0,

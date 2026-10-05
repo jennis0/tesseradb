@@ -55,6 +55,9 @@ pub enum ShedCause {
     /// `serve.bulk_admission` bulk reads were already running. `Retry-After` is
     /// [`RETRY_AFTER_SECS`].
     BulkGate,
+    /// `serve.artifact_admission` artifact viewports were already running and as many waiting.
+    /// `Retry-After` is [`RETRY_AFTER_SECS`].
+    ArtifactGate,
     /// The ingest work queue or the ingest buffer is full; `retry_after_s` is estimated from the
     /// drain rate. `/control/changes` never answers 429: [`map_change_batch_error`] has no route to
     /// it.
@@ -87,6 +90,9 @@ impl ShedCause {
             }
             ShedCause::BulkGate => {
                 "the server is at its bulk-read admission bound; retry shortly".to_string()
+            }
+            ShedCause::ArtifactGate => {
+                "the server is at its artifact-viewport admission bound; retry shortly".to_string()
             }
             ShedCause::WriteQueue => {
                 format!("the write queue is full; retry after {retry_after_s}s")

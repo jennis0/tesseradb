@@ -4,8 +4,8 @@ import {createStore, type Store} from '../src/store.js';
 import type {FilterDraft} from '../src/filters.js';
 import {withMember} from '../src/members.js';
 import {artifactName} from '../src/names.js';
-import type {Artifact, Layer, MembershipColumn, Meta, ViewportPart, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view, scalar} from './support.js';
+import type {Artifact, Layer, MembershipColumn, Meta, ViewportArtifactsRequest, ViewportPart, ViewportResponse} from '../src/types.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, tileAnswers, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -65,18 +65,20 @@ function regionOf(expr: unknown): boolean {
  * A fake client with the verbs the store calls and a log of viewport requests. A request with a
  * `region` leaf is answered with the verdict `exact`.
  */
-function fakeClient(reply: (req: FakeRequest) => ViewportResponse, meta: Meta = META) {
+function fakeClient(reply: (req: FakeRequest) => ViewportResponse, meta: Meta = META, rowsFor: (tile: bigint, req: ViewportArtifactsRequest) => Artifact[] = () => []) {
   const viewport = vi.fn(async (_token: string, req: FakeRequest) => ({...reply(req), region: regionOf(req.filters) ? {exact: true as const, depth: null} : null}));
+  const viewportArtifacts = vi.fn(tileAnswers(rowsFor));
   const client = {
     meta: async () => meta,
     viewport,
+    viewportArtifacts,
     item: async () => ({fields: {archive: 'cs'}}),
     artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, shape: null}),
     categories: async () => [{code: 5, key: 'cs', title: 'CS'}],
     suggest: async () => ({status: 'ok' as const, column: 'admin4', q: '', values: [], more: false}),
     close: () => {}
   } as unknown as TesseraClient;
-  return {client, viewport};
+  return {client, viewport, viewportArtifacts};
 }
 
 /** Builds a store and drives it to its first shown frame. */
@@ -89,7 +91,8 @@ async function warm(reply: (req: FakeRequest) => ViewportResponse, opts: {clock:
     clock: opts.clock,
     scheduler: opts.scheduler,
     prefetch: false,
-    replica: {revalidateAfterMs: Infinity}
+    replica: {revalidateAfterMs: Infinity},
+    artifacts: {perTile: 10}
   });
   // Let warm() resolve: meta, replica, presenter built.
   await opts.clock.advance(1);
@@ -120,7 +123,7 @@ describe('setView converts a data bbox to the driver’s target and zoom', () =>
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {client, viewport} = fakeClient(() => response('ck'));
-    const store = createStore({viewerUrl: 'http://v', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://v', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     // Before warm() has resolved: no meta yet.
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     expect(viewport).not.toHaveBeenCalled();
@@ -316,7 +319,7 @@ describe('the drops', () => {
     const browse = vi.fn(async () => ({artifacts: [], parents: [], next: null}));
     const {client} = fakeClient(() => response('ck'));
     (client as unknown as {browse: typeof browse}).browse = browse;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
 
     await store.browse({layer: 'mesh/descriptors'});
@@ -393,7 +396,7 @@ describe('suggest in the store', () => {
     const {client} = fakeClient(() => response('ck'));
     const suggest = vi.fn(async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}));
     (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
 
     store.suggest('archive', '', 'filter');
@@ -418,7 +421,7 @@ describe('suggest in the store', () => {
     const {client} = fakeClient(() => response('ck'));
     const suggest = vi.fn(async (_token: string, column: string, q: string, _opts: {filters?: unknown}) => ({status: 'ok' as const, column, q, values: [], more: false, total: 7}));
     (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
     const filtersOfLastAsk = () => suggest.mock.calls.at(-1)?.[3].filters;
 
@@ -472,7 +475,7 @@ describe('suggest in the store, with requests held in flight', () => {
         });
       });
     Object.assign(client, {suggest});
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
     const inFlight = () => sent.filter((h) => !h.signal.aborted && !answered.has(h));
     const answered = new Set<Held>();
@@ -608,7 +611,7 @@ describe('setLayers before meta', () => {
   it('is honoured once the channel exists, and the projection shows the intent meanwhile', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const {client, viewport} = fakeClient(() => response('ck'));
+    const {client, viewportArtifacts} = fakeClient(() => response('ck'));
     const store = createStore({
       viewerUrl: 'http://viewer',
       token: 'tok',
@@ -616,7 +619,8 @@ describe('setLayers before meta', () => {
       clock,
       scheduler,
       prefetch: false,
-      replica: {revalidateAfterMs: Infinity}
+      replica: {revalidateAfterMs: Infinity},
+      artifacts: {perTile: 10}
     });
     // Before meta has landed.
     store.setLayers(['clusters/a']);
@@ -628,11 +632,8 @@ describe('setLayers before meta', () => {
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
-    // The artifact channel's own request (`k = 0`) names the layer chosen before meta.
-    const named = viewport.mock.calls.some((call) => {
-      const req = call[1] as {k?: number; layers?: string[] | 'all'};
-      return req.k === 0 && Array.isArray(req.layers) && req.layers[0] === 'clusters/a';
-    });
+    // The artifact channel's own request names the layer chosen before meta.
+    const named = viewportArtifacts.mock.calls.some((call) => Array.isArray(call[1].layers) && call[1].layers[0] === 'clusters/a');
     expect(named).toBe(true);
   });
 });
@@ -646,10 +647,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
       artifact(1n, {layer: 'clusters/a', key: 'c1', maskedCount: 5n, centroid: [1, 2]}),
       artifact(2n, {layer: 'clusters/a', key: 'c2', maskedCount: 7n, centroid: [3, 4]})
     ];
-    const {client} = fakeClient(() => {
-      const r = response('ck');
-      return {...r, result: {...r.result, artifacts: served}};
-    });
+    const {client} = fakeClient(() => response('ck'), META, () => served);
     const store = createStore({
       viewerUrl: 'http://viewer',
       token: 'tok',
@@ -657,7 +655,8 @@ describe('the colours are rebuilt when the table moves and not per response', ()
       clock,
       scheduler,
       prefetch: false,
-      replica: {revalidateAfterMs: Infinity}
+      replica: {revalidateAfterMs: Infinity},
+      artifacts: {perTile: 10}
     });
     store.setLayers(['clusters/a']);
     store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
@@ -684,11 +683,8 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     const cluster = (id: bigint, centroid: [number, number]) =>
       artifact(id, {layer: 'clusters/a', key: `c${id}`, maskedCount: 5n, centroid});
     let served = [cluster(1n, [1, 2]), cluster(2n, [3, 4])];
-    const {client} = fakeClient(() => {
-      const r = response('ck');
-      return {...r, result: {...r.result, artifacts: served, artifactsIdentity: null}};
-    });
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const {client} = fakeClient(() => response('ck'), META, () => served);
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     store.setLayers(['clusters/a']);
     store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
     await clock.advance(600);
@@ -918,7 +914,8 @@ describe('the store holds the drawn shape by identifier', () => {
       clock,
       scheduler: fakeScheduler(),
       prefetch: false,
-      replica: {revalidateAfterMs: Infinity}
+      replica: {revalidateAfterMs: Infinity},
+      artifacts: {perTile: 10}
     });
     await clock.advance(1);
     return {store, artifact, clock};
@@ -962,12 +959,9 @@ describe('clear() and a refused request reach the region and the shapes', () => 
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
-    const {client} = fakeClient((req) => {
-      const r = response('ck');
-      return (req.layers ?? []).length === 0 ? r : {...r, result: {...r.result, artifacts: [artifact(2n, {layer: 'regions'})]}};
-    }, SHAPED);
+    const {client} = fakeClient(() => response('ck'), SHAPED, () => [artifact(2n, {layer: 'regions'})]);
     Object.assign(client, {artifact: vi.fn(async () => ({layer: 'regions', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}))});
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     store.setLayers(['regions']);
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await clock.advance(600);
@@ -1068,14 +1062,17 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
         if (first && first.target === null && name !== 'mesh') membership[name] = {index: Uint16Array.from(r.result.ids, () => 1), ids: BigUint64Array.of(first.tesseraId)};
       }
     }
-    return {...r, layersAsked: named, result: {...r.result, membership, artifacts: named.flatMap((n) => ROWS[n] ?? []), artifactsIdentity: null}};
+    return {...r, layersAsked: named, result: {...r.result, membership}};
   }
+
+  /** The tile answer: every named layer's rows in every tile. */
+  const tileRows = (_tile: bigint, req: ViewportArtifactsRequest) => (Array.isArray(req.layers) ? req.layers : []).flatMap((n) => ROWS[n] ?? []);
 
   async function open(traces: {kind: string; fields: Record<string, number | string>}[] = [], declared: Meta = LAYERED) {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const {client, viewport} = fakeClient(answer, declared);
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, instruments: {onTrace: (kind, fields) => traces.push({kind, fields})}});
+    const {client, viewport, viewportArtifacts} = fakeClient(answer, declared, tileRows);
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}, instruments: {onTrace: (kind, fields) => traces.push({kind, fields})}});
     await clock.advance(1);
     const settle = async () => {
       await clock.advance(600);
@@ -1084,13 +1081,14 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
       scheduler.flush();
     };
     const asked = () => viewport.mock.calls.map((c) => c[1] as FakeRequest & {levels?: number[]; artifactBudget?: number});
-    return {store, settle, asked};
+    const tilesAsked = () => viewportArtifacts.mock.calls.map((c) => c[1]);
+    return {store, settle, asked, tilesAsked};
   }
 
   const layersOf = (artifacts: readonly Artifact[]) => [...new Set(artifacts.map((a) => a.layer))];
 
   it('colours by a layer with nothing drawn: points carry its column and not its labels’, the channel asks for both, and nothing of it is drawn', async () => {
-    const {store, settle, asked} = await open();
+    const {store, settle, asked, tilesAsked} = await open();
     store.setColourBy('cluster:topics');
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await settle();
@@ -1101,10 +1099,11 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
       // The colour layer alone: a label's membership column is read by nothing.
       expect(r.layers).toEqual(['topics']);
       expect(r.levels).toEqual([0, 1, 2, 3]);
-      expect(r.artifactBudget).toBeGreaterThan(0);
+      // No budget was given, so none is sent.
+      expect('artifactBudget' in r).toBe(false);
     }
     // The channel asks for the labels too, which name the legend's rows.
-    expect(asked().some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('topics') && r.layers.includes('topic_names'))).toBe(true);
+    expect(tilesAsked().some((r) => Array.isArray(r.layers) && r.layers.includes('topics') && r.layers.includes('topic_names'))).toBe(true);
 
     const bands = store.get('marks').bands;
     expect(bands.length).toBeGreaterThan(0);
@@ -1170,21 +1169,23 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
   });
 
   it('asks for nothing when the colour layer is already drawn, and for the layer when it is not', async () => {
-    const {store, settle, asked} = await open();
+    const {store, settle, asked, tilesAsked} = await open();
     store.setLayers(['topics']);
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await settle();
     const before = asked().length;
+    const tilesBefore = tilesAsked().length;
 
     store.setColourBy('cluster:topics');
     await settle();
     expect(asked().length).toBe(before);
+    expect(tilesAsked().length).toBe(tilesBefore);
     expect(layersOf(store.get('artifacts').colourServed)).toEqual(['topics']);
 
     store.setColourBy('cluster:kmeans');
     await settle();
     const after = asked().slice(before);
-    expect(after.some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('kmeans'))).toBe(true);
+    expect(tilesAsked().slice(tilesBefore).some((r) => Array.isArray(r.layers) && r.layers.includes('kmeans'))).toBe(true);
     expect(after.some((r) => r.k !== 0 && Array.isArray(r.layers) && r.layers.includes('kmeans'))).toBe(true);
     expect(store.get('artifacts').layers).toEqual(['topics', 'topic_names']);
   });
@@ -1210,7 +1211,7 @@ describe('the token', () => {
     const {client, viewport} = fakeClient(() => response('ck'));
     let issued = 0;
     const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
     expect(authorise).toHaveBeenCalledTimes(1);
 
@@ -1234,7 +1235,7 @@ describe('the token', () => {
       if (authorise.mock.calls.length === 2) await new Promise<void>((resolve) => (answer = resolve));
       return {token: `t${authorise.mock.calls.length}`, expiresAt: (Date.now() + 60_000) / 1000};
     });
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
     await clock.advance(59_000);
     expect(authorise).toHaveBeenCalledTimes(2);
@@ -1262,7 +1263,7 @@ describe('the token', () => {
       await new Promise<void>((resolve) => (land = resolve));
       return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
     });
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     // Opening an artifact clears the picked item, so the item is read as it lands.
     const items: unknown[] = [];
     store.subscribe('selection', (selection) => items.push(selection.item));
@@ -1292,7 +1293,7 @@ describe('the token', () => {
     const authorise = vi.fn(async () => {
       throw new TesseraError(401, 'bad-credential', 'refused');
     });
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
 
     await store.pick(7n);
     expect(await store.describe(8n)).toBeNull();
@@ -1319,7 +1320,7 @@ describe('the token', () => {
       await new Promise<void>((resolve) => (land = resolve));
       return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
     });
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
 
     const opened = store.openArtifact(9n);
     store.needShape(10n);
@@ -1351,7 +1352,7 @@ describe('the token', () => {
       await new Promise<void>((resolve) => (land = resolve));
       return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
     });
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     const before = store.get('selection');
 
     const waiting = [store.pick(7n), store.openArtifact(9n), store.describe(8n), store.browse({layer: 'l'}).catch(() => null)];
@@ -1382,7 +1383,7 @@ describe('the token', () => {
       if (refuse) throw new TesseraError(401, 'bad-credential', 'refused');
       return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
     });
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
     expect(store.get('status').status).toBe('refused');
     expect(store.get('meta')).toBeNull();
@@ -1404,7 +1405,7 @@ describe('the token', () => {
       if (++issued > 1) throw new TesseraError(401, 'bad-credential', 'refused');
       return {token: 't1', expiresAt: (Date.now() + 1_000) / 1000};
     });
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
     store.setLayers(['l']);
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
@@ -1456,8 +1457,7 @@ describe('a store serves one viewer', () => {
     const v = VIEWERS[who];
     const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: 3}, () => 5)}};
     const world = Float32Array.from([0.1, 0.1, 4.5, 4.5, 9, 1]);
-    const artifacts = (req.layers ?? []).length === 0 ? [] : [artifact(v.artifact)];
-    return responseOf(servedResult(3, [tile(0n, v.visible)], {scalars, world, artifacts}), {contentKey: `ck-${who}`, identityKey: v.identityKey});
+    return responseOf(servedResult(3, [tile(0n, v.visible)], {scalars, world}), {contentKey: `ck-${who}`, identityKey: v.identityKey});
   }
 
   /** Whose answers a store is showing: the identity key of every band drawn, every tile counted and every artifact served. */
@@ -1493,11 +1493,16 @@ describe('a store serves one viewer', () => {
         return answer;
       }
     );
+    const viewportArtifacts = vi.fn((token: string, req: ViewportArtifactsRequest, o?: Parameters<ReturnType<typeof tileAnswers>>[2]) => {
+      const who = whose(token);
+      return tileAnswers(() => [artifact(VIEWERS[who].artifact)], () => ({identityKey: VIEWERS[who].identityKey, contentKey: `ck-${who}`}))(token, req, o);
+    });
     const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
     const metaRead = vi.fn(async (token: string) => opts.metaOf?.(token) ?? SHAPED);
     const client = {
       meta: metaRead,
       viewport,
+      viewportArtifacts,
       item: async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}),
       artifact: async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}),
       categories: async () => [],
@@ -1506,7 +1511,7 @@ describe('a store serves one viewer', () => {
     } as unknown as TesseraClient;
     let issued = 0;
     const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     return {store, viewport, authorise, metaRead, clock, scheduler};
   }
 
@@ -1721,12 +1726,20 @@ describe('a store serves one viewer', () => {
       const who = whose(token);
       return {...answerOf(who, req), identityKey: `${who}:${req.view}`};
     });
+    // A viewer's artifact in every tile, under the identity key its points come under.
+    const viewportArtifacts = vi.fn(async (token: string, req: ViewportArtifactsRequest, o?: Parameters<ReturnType<typeof tileAnswers>>[2]) => {
+      const asked = {view: req.view, filters: req.filters ?? undefined} as FakeRequest;
+      if (opts.refuse?.(token, asked)) throw new TesseraError(422, 'bad-filter', 'this principal cannot filter on that column');
+      if (opts.hold?.(token, asked)) return new Promise<never>(() => {});
+      const who = whose(token);
+      return tileAnswers(() => [artifact(VIEWERS[who].artifact)], () => ({identityKey: `${who}:${req.view}`, contentKey: `ck-${who}`}))(token, req, o);
+    });
     const {client} = fakeClient(() => response('ck'));
-    Object.assign(client, {viewport, meta: async (token: string) => opts.metaOf(token)});
+    Object.assign(client, {viewport, viewportArtifacts, meta: async (token: string) => opts.metaOf(token)});
     let issued = 0;
     const authorise = vi.fn(opts.authorise ?? (async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000})));
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    return {store, client, viewport, authorise, clock, scheduler};
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
+    return {store, client, viewport, viewportArtifacts, authorise, clock, scheduler};
   }
 
   /** Whose answers a store shows, by the viewer each band, tile count, artifact and meta came from. */
@@ -1842,7 +1855,7 @@ describe('a store serves one viewer', () => {
   it('empties the colours of every held view’s artifacts when it forgets', async () => {
     const both = {...TWO_VIEWS, layers: [layer('l', {views: ['s0', 's1'], computedContent: ['centroid', 'box', 'hull'], shape: 'derived'})]};
     const metas = {a: meta(both), b: meta(both)};
-    const {store, viewport, clock, scheduler} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    const {store, viewport, viewportArtifacts, clock, scheduler} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
     // Each view serves its own artifact, and its points are members of it, so each view's rows
     // hold an ordinal in the table.
     const answered = viewport.getMockImplementation()!;
@@ -1850,8 +1863,11 @@ describe('a store serves one viewer', () => {
       const r = await answered(token, req);
       const id = VIEWERS.a.artifact + (req.view === 's1' ? 100n : 0n);
       const membership = {l: {index: Uint16Array.from({length: r.result.ids.length}, () => 1), ids: BigUint64Array.of(id)}};
-      return {...r, result: {...r.result, membership, artifacts: r.result.artifacts.map((a) => ({...a, tesseraId: id}))}};
+      return {...r, result: {...r.result, membership}};
     });
+    viewportArtifacts.mockImplementation(async (token, req, o) =>
+      tileAnswers(() => [artifact(VIEWERS.a.artifact + (req.view === 's1' ? 100n : 0n))], () => ({identityKey: `a:${req.view}`, contentKey: 'ck-a'}))(token, req, o)
+    );
     store.setLayers(['l']);
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await settled(clock, scheduler);
@@ -2088,7 +2104,7 @@ describe('a store serves one viewer', () => {
     // The host's supplier answers for whoever is signed in.
     let signedIn: Who = 'a';
     const authorise = vi.fn(async () => ({token: `t-${signedIn}`, expiresAt: (Date.now() + 3_600_000) / 1000}));
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     store.setLayers(['l']);
     store.setColourBy('archive');
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
@@ -2139,7 +2155,7 @@ describe('the item a click opens and the record a hover names', () => {
       return detail;
     });
     (client as unknown as {item: typeof item}).item = item;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
 
     await store.pick(7n);
@@ -2159,7 +2175,7 @@ describe('the item a click opens and the record a hover names', () => {
       return {fields: {title: `paper ${id}`}, views: [], scoped: {}, labels: []};
     });
     (client as unknown as {item: typeof item}).item = item;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
 
     await store.openArtifact(9n);
@@ -2195,7 +2211,7 @@ describe('the item a click opens and the record a hover names', () => {
         return {layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: null};
       })
     });
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
 
     const picked = store.pick(7n);
@@ -2214,7 +2230,7 @@ describe('the item a click opens and the record a hover names', () => {
     const {client} = fakeClient(() => response('ck'));
     const item = vi.fn(async (_token: string, id: bigint) => ({fields: {title: `paper ${id}`}, views: [], scoped: {}, labels: []}));
     (client as unknown as {item: typeof item}).item = item;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
 
     expect(await store.describe(7n)).toEqual({title: 'paper 7'});

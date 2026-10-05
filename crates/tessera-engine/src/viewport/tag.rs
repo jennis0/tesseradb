@@ -164,6 +164,31 @@ impl Engine {
             .collect()
     }
 
+    /// The layers a walk tagging points must cover, in the request's order: each layer tagged
+    /// from the walk, and each requested layer one of them depends on, whose served set decides
+    /// whether a dependent's target is held.
+    pub(super) fn walk_set(&self, names: &[String], taggings: &[Tagging]) -> Vec<String> {
+        let walked: Vec<&String> = names
+            .iter()
+            .zip(taggings)
+            .filter(|(_, tagging)| matches!(tagging, Tagging::Walk))
+            .map(|(name, _)| name)
+            .collect();
+        if walked.is_empty() {
+            return Vec::new();
+        }
+        let targets: std::collections::BTreeSet<String> = walked
+            .iter()
+            .filter_map(|name| self.write.live().registered_layer(name))
+            .flat_map(|layer| layer.declaration.depends_on)
+            .collect();
+        names
+            .iter()
+            .filter(|name| walked.contains(name) || targets.contains(*name))
+            .cloned()
+            .collect()
+    }
+
     /// One layer's tag for every point, aligned to `points`.
     pub(super) fn tag_layer(
         &self,

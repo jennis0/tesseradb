@@ -205,30 +205,27 @@ async fn publish(
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
-/// The drawn geometry of every served artifact, by layer — the frame the client is handed.
+/// The drawn geometry of every served artifact, by layer, read by its identifier.
 async fn shapes_by_layer(
     server: &TestServer,
 ) -> std::collections::BTreeMap<String, Vec<Vec<Vec<[u32; 2]>>>> {
     let auth = authorise(server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1.0, 1.0], "k": 200,
-            "layers": "all", "computed": ["shape"]
-        }))
-        .send()
-        .await
-        .unwrap();
+    let body = json!({
+        "view": "s0", "zoom": 0, "per_tile": 1000, "bbox": [0.0, 0.0, 1.0, 1.0],
+        "layers": "all", "computed": []
+    });
+    let resp = post_viewport_artifacts(server, token, &body).await;
     assert_eq!(resp.status().as_u16(), 200);
-    decode_viewport_frames(&resp.bytes().await.unwrap())
+    let mut shapes = std::collections::BTreeMap::new();
+    for row in decode_artifact_frames(&resp.bytes().await.unwrap())
         .artifacts
-        .expect("the artifacts frame")
-        .into_iter()
-        .map(|row| (row.layer, row.shape.expect("a drawn geometry")))
-        .collect()
+        .expect("an artifact is served")
+    {
+        let shape = shape_by_id(server, token, "s0", row.tessera_id, 0).await;
+        shapes.insert(row.layer, shape.expect("a drawn geometry"));
+    }
+    shapes
 }
 
 /// **One triangle in degrees, four declarations, one placement.** The membership shape and the

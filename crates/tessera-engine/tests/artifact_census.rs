@@ -26,7 +26,6 @@ use std::collections::BTreeMap;
 
 use common::*;
 use tessera_corpus::{Corpus, Grant};
-use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::IncomingArtifact;
@@ -134,12 +133,12 @@ fn declaration(name: &str) -> LayerDeclaration {
 fn served_counts(engine: &Engine) -> BTreeMap<String, u64> {
     let session = engine.authorise(&census_credential()).unwrap();
     engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
-        .artifacts
+        .artifacts()
         .into_iter()
         .map(|a| {
             (

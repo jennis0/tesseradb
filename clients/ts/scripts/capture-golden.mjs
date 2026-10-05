@@ -5,8 +5,7 @@
 //
 // The binary and the notebook corpus are found as the live tests find them (`core/test/served.ts`).
 // `python3` with pyarrow writes the wide corpus's Parquet file. Every file in `core/test/fixtures`
-// is rewritten except `viewport-artifacts-pre-r40.bin`, and `wire-example/test/expected.json` with
-// them. Each capture checks the arrangement its tests rely on, and where the server did not
+// is rewritten, and `wire-example/test/expected.json` with them. Each capture checks the arrangement its tests rely on, and where the server did not
 // provide it the script stops and writes nothing.
 //
 // Each build generates its own identity key, so a recapture serves new `tessera_id`s and rewrites
@@ -66,7 +65,7 @@ const tables = (body, kind) => frames(body).filter((f) => f.kind === kind).map((
 const column = (table, name) => Array.from(table.getChild(name));
 const total = (table, name) => column(table, name).reduce((sum, v) => sum + Number(v), 0);
 
-/** A session for `terms` on `served`, and the three viewer routes the goldens come from. */
+/** A session for `terms` on `served`, and the viewer routes the goldens come from. */
 async function session(served, terms) {
   const {token} = await authorise(served.sessionUrl, served.operatorCredential, {terms});
   const call = async (path, body) => {
@@ -81,6 +80,7 @@ async function session(served, terms) {
   return {
     meta: async () => (await call('/v1/meta')).json(),
     viewport: async (body) => new Uint8Array(await (await call('/v1/viewport', body)).arrayBuffer()),
+    artifacts: async (body) => new Uint8Array(await (await call('/v1/artifacts/viewport', body)).arrayBuffer()),
     browse: async (body) => (await call('/v1/artifacts/browse', body)).json()
   };
 }
@@ -198,7 +198,7 @@ async function captureWide() {
       const golden = await session(served, ['golden']);
       const meta = await golden.meta();
       const q = meta.views[0].quantisation;
-      // `layers: []`, so these two carry no artifacts frame.
+      // `layers: []`, so the points carry no membership column.
       const base = {view: 's0', zoom: 2, bbox: [q.x_min, q.y_min, q.x_max, q.y_max], k: 20, layers: []};
       const plain = await golden.viewport(base);
       const underlay = await golden.viewport({...base, underlay_offset: 2});
@@ -234,8 +234,9 @@ const PRINCIPAL = [
 ];
 
 /**
- * `viewport-artifacts.bin`, `viewport-membership.bin`, the three highlight bodies and the three
- * browse pages, over the notebook corpus as `PRINCIPAL`.
+ * `viewport-artifacts.bin` and `artifacts-highlight.bin` (`POST /v1/artifacts/viewport` bodies),
+ * `viewport-membership.bin`, the three highlight bodies and the three browse pages, over the
+ * notebook corpus as `PRINCIPAL`.
  */
 async function captureNotebook() {
   const served = await start();
@@ -245,32 +246,27 @@ async function captureNotebook() {
     const q = (await reader.meta()).views.find((v) => v.id === 's0').quantisation;
     const full = [q.x_min, q.y_min, q.x_max, q.y_max];
 
-    // The k-means layer declares centroid, box and hull, over clusters in different parts of the
-    // map. At `k = 0` the body is tiles, artifacts and trailer; named with points it adds the
-    // points frame and its membership column.
+    // The k-means layer declares centroid and box, over clusters in different parts of the map. The
+    // artifacts body is one frame per tile and a trailer; the points, named with the layer, carry
+    // its membership column.
     const clusters = {view: 's0', zoom: 2, bbox: full, layers: ['clusters/kmeans']};
-    const channel = await reader.viewport({...clusters, k: 0});
+    const channel = await reader.artifacts({...clusters, per_tile: 50});
     const membership = await reader.viewport({...clusters, k: 50});
-    check(frames(channel).map((f) => f.kind).join() === '1,5,4', 'the k = 0 capture is not tiles, artifacts and trailer');
-    const artifacts = tables(membership, 5)[0];
-    check(artifacts?.getChild('shape_x') != null, 'the clusters carry no shape');
-    const centroids = new Set(column(artifacts, 'centroid_x').map((x, i) => `${x},${artifacts.getChild('centroid_y').get(i)}`));
-    check(artifacts.numRows >= 3 && centroids.size === artifacts.numRows, 'the clusters do not have distinct centroids');
-    // Every row of the `k = 0` body carries a shape, and between them they hold a shape of several
-    // parts and a ring of several vertices, so a decoder reading only the first of either fails.
-    const shapes = column(tables(channel, 5)[0], 'shape_x');
-    check(shapes.every((parts) => parts !== null), 'an artifact of the k = 0 capture carries no shape');
-    check(shapes.some((parts) => parts.length > 1), 'no artifact of the k = 0 capture has a shape of several parts');
-    check(
-      shapes.some((parts) => Array.from(parts).some((rings) => Array.from(rings).some((ring) => ring.length > 1))),
-      'no ring of the k = 0 capture has several vertices'
-    );
+    const kinds = frames(channel).map((f) => f.kind);
+    check(kinds.at(-1) === 4 && kinds.slice(0, -1).every((k) => k === 5) && kinds.length === 17, 'the artifacts capture is not sixteen artifacts frames and a trailer');
+    const tileFrames = tables(channel, 5);
+    check(tileFrames.some((t) => t.numRows === 0), 'no tile of the artifacts capture is empty');
+    const rows = tileFrames.flatMap((t) => column(t, 'tessera_id').map((id, i) => ({id, x: t.getChild('centroid_x').get(i), y: t.getChild('centroid_y').get(i)})));
+    const distinct = new Map(rows.map((r) => [r.id, `${r.x},${r.y}`]));
+    check(distinct.size >= 3 && new Set(distinct.values()).size === distinct.size, 'the clusters do not have distinct centroids');
+    check(rows.length > distinct.size, 'no cluster is served in two tiles');
+    check(frames(membership).map((f) => f.kind).join() === '1,3,4', 'the membership capture is not tiles, points and trailer');
     const members = tables(membership, 3).flatMap((t) => column(t, 'membership:clusters/kmeans'));
     check(members.some((m) => m !== null), 'no served point is named a member');
 
     // One request in three shapes. The taxonomy's artifacts are archives and subject classes, so
     // the filter admits some of them and the highlight fewer.
-    const request = {view: 's0', zoom: 3, bbox: full, k: 20, layers: ['taxonomy/arxiv'], computed: ['centroid'], filters: {archive: {in: ['cs', 'math']}}};
+    const request = {view: 's0', zoom: 3, bbox: full, k: 20, layers: ['taxonomy/arxiv'], filters: {archive: {in: ['cs', 'math']}}};
     const lit = {...request, highlight: {archive: {in: ['cs']}}};
     const highlight = await reader.viewport(lit);
     const pointRows = await reader.viewport({...lit, point_rows: 'highlight'});
@@ -280,9 +276,11 @@ async function captureNotebook() {
     check(0 < highlighted && highlighted < matched && matched < visible, `the tiles do not count highlighted < matched < visible, all above zero (${highlighted}, ${matched}, ${visible})`);
     const bits = tables(highlight, 3).flatMap((t) => column(t, 'highlighted'));
     check(bits.some((b) => b) && bits.some((b) => !b), 'the served points are all highlighted or none are');
-    const litArtifacts = tables(highlight, 5)[0];
-    const matchedBits = column(litArtifacts, 'matched');
-    const highlightedBits = column(litArtifacts, 'highlighted');
+    const {k: _k, ...asked} = lit;
+    const litArtifacts = await reader.artifacts({...asked, zoom: 1, per_tile: 50, computed: ['centroid']});
+    const artifactRows = tables(litArtifacts, 5);
+    const matchedBits = artifactRows.flatMap((t) => column(t, 'matched'));
+    const highlightedBits = artifactRows.flatMap((t) => column(t, 'highlighted'));
     check(matchedBits.some((b) => b) && matchedBits.some((b) => !b), 'the filter admits every artifact or none');
     check(highlightedBits.some((b) => b) && highlightedBits.some((b, i) => !b && matchedBits[i]), 'the highlight lights no artifact, or every one the filter admits');
 
@@ -301,6 +299,7 @@ async function captureNotebook() {
     check(browsed.some((id) => BigInt(id) > 2n ** 53n), 'no browsed tessera_id is past 2^53');
 
     captured.set('viewport-artifacts.bin', channel);
+    captured.set('artifacts-highlight.bin', litArtifacts);
     captured.set('viewport-membership.bin', membership);
     captured.set('viewport-highlight.bin', highlight);
     captured.set('viewport-point-rows-highlight.bin', pointRows);
@@ -316,16 +315,17 @@ async function captureNotebook() {
 /** What both worked decodes must read from a body: frame kinds, row counts and first ids. */
 function answer(body) {
   const points = tables(body, 3);
-  const artifacts = tables(body, 5)[0] ?? null;
+  const artifacts = tables(body, 5);
   const firstPoint = points.find((t) => t.numRows > 0)?.getChild('tessera_id').get(0);
+  const firstArtifact = artifacts.find((t) => t.numRows > 0)?.getChild('tessera_id').get(0);
   return {
     frames: frames(body).map((f) => f.kind),
-    tiles: tables(body, 1)[0].numRows,
+    tiles: tables(body, 1)[0]?.numRows ?? null,
     sub_cells: tables(body, 2)[0]?.numRows ?? null,
-    artifacts: artifacts?.numRows ?? null,
+    artifacts: artifacts.length === 0 ? null : artifacts.reduce((n, t) => n + t.numRows, 0),
     points: points.reduce((n, t) => n + t.numRows, 0),
     first_point_tessera_id: firstPoint === undefined ? null : String(firstPoint),
-    first_artifact_tessera_id: artifacts ? String(artifacts.getChild('tessera_id').get(0)) : null
+    first_artifact_tessera_id: firstArtifact === undefined ? null : String(firstArtifact)
   };
 }
 
@@ -334,7 +334,7 @@ await captureNotebook();
 
 const expected = {
   _comment:
-    'What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts per batch, and the first tessera_id of the points and artifacts batches as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.'
+    'What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts (the tiles frame null in an artifacts body, the artifacts frames summed), and the first tessera_id of the points and artifacts as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.'
 };
 for (const name of ['viewport-plain.bin', 'viewport-underlay.bin', 'viewport-artifacts.bin', 'viewport-membership.bin']) {
   expected[name] = answer(captured.get(name));

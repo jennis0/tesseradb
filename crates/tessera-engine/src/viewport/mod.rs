@@ -2,8 +2,8 @@
 //! mask (`open_view`), the request's tiles and their row ranges (`resolve_tiles`, `tile_ranges`),
 //! the display threshold θ (`theta`), narrows to any filter (`narrow_to_filters`), sweeps every
 //! tile for its count and selection (`sweep_tiles`), tags the selected points with the artifacts
-//! of each requested layer (`tag`), gathers and emits them (`emit_points`), and then serves the
-//! annotation artifacts (`serve_artifacts`).
+//! of each requested layer (`tag`), and gathers and emits them (`emit_points`). The artifacts
+//! themselves are served tile by tile by [`Engine::viewport_artifacts_stream`] (`tiled`).
 //! [`Engine::viewport`] runs the same producer into a collecting sink and returns the batch
 //! [`ViewportOut`]. Selection itself — floor, threshold and cap over `tessera_id`, evaluated
 //! inside the mask — lives in [`crate::select`]; this module resolves the per-request parameters
@@ -69,6 +69,7 @@ mod row_filter;
 mod served;
 mod sweep;
 mod tag;
+mod tiled;
 
 pub use item::{ItemField, ItemOut, ItemScoped, ItemView};
 pub use meta::{EngineMeta, LeafColumn, MetaGroup, MetaRoster, MetaView, TileAddress};
@@ -76,12 +77,17 @@ pub use out::{
     ArtifactOut, ColumnBuf, PointColumns, PointScalar, ScalarOut, SinkClosed, SinkResult,
     SubCellCount, TileCount, ViewCoordinates, ViewportHead, ViewportOut, ViewportSink,
 };
-pub use request::{
-    ArtifactRows, ComputedSelection, LayerSelection, LevelSelection, PointRows, ViewportRequest,
+pub use request::{ComputedSelection, LayerSelection, LevelSelection, PointRows, ViewportRequest};
+pub use tiled::{
+    ArtifactsFrame, ViewportArtifactsHead, ViewportArtifactsOut, ViewportArtifactsRequest,
+    ViewportArtifactsSink,
 };
+pub(crate) use request::ArtifactRows;
 pub use sweep::{segments_with_row_bases, SERIAL_FALLBACK_MAX_ROWS, TILE_PAR_MIN_TILES};
 
-pub(crate) use artifacts::{authored_rings, response_rungs, DependencyContext, Supplied};
+pub(crate) use artifacts::{
+    authored_rings, response_rungs, ArtifactAsk, DependencyContext, Supplied,
+};
 pub(crate) use item::{
     category_code, category_key, flushed_row_scalar, slice_value, stored_field_out,
 };
@@ -185,7 +191,6 @@ impl Engine {
             stale: head.stale,
             region: head.region,
             tiles: sink.tiles,
-            artifacts: sink.artifacts,
             points,
             sub_cells: sink.sub_cells,
             scalar_names: head.render_scalars.iter().map(|d| d.name.clone()).collect(),
@@ -321,21 +326,40 @@ impl Engine {
         probe.skip();
 
         // Each requested layer is tagged on its points from its labels where it has no lineage
-        // and the request names nothing it depends on, and from the walk's served set otherwise.
-        // Only a layer tagged from the walk holds the points back behind it.
+        // and the request names nothing it depends on, and from the served set of a walk of its
+        // artifacts otherwise. Only a layer tagged from the walk holds the points back behind it.
         let reachable = self.reachable_layers(session);
         let names = artifacts::requested_layers(req.layers, &reachable);
         let taggings = self.taggings(&served, &names);
         let gathers = !highlight_only && swept.iter().any(|ts| !ts.rows.is_empty());
-        let walked_first = if gathers && taggings.iter().any(|t| matches!(t, Tagging::Walk)) {
-            Some(self.serve_artifacts(&served, &mask, &tiling, &req)?)
-        } else {
-            None
-        };
         let membership = if gathers {
             let points = tag::tagged_points(&served, &swept);
             let ctx = DependencyContext::new(&served, &mask, &reachable);
             let dependency_served = self.dependency_gate(&ctx);
+            let walked = match self.walk_set(&names, &taggings) {
+                walk if walk.is_empty() => None,
+                walk => {
+                    let in_request: std::collections::BTreeSet<String> =
+                        walk.iter().cloned().collect();
+                    let ask = ArtifactAsk {
+                        zoom: req.zoom,
+                        levels: req.levels,
+                        computed: ComputedSelection::Named(&[]),
+                        budget: req.artifact_budget,
+                        rows: ArtifactRows::Identity,
+                        cancel: req.cancel.clone(),
+                    };
+                    Some(self.serve_artifacts(
+                        &served,
+                        &mask,
+                        &tiling,
+                        &ask,
+                        walk,
+                        &in_request,
+                        &dependency_served,
+                    )?)
+                }
+            };
             let mut labelled = Vec::new();
             for tagging in &taggings {
                 if let Tagging::Labels(registered) = tagging {
@@ -358,12 +382,13 @@ impl Engine {
                 .map(|(name, _)| name.as_str())
                 .collect();
             let rows: Vec<u32> = points.iter().map(|p| p.row).collect();
-            let mut columns = walked_first
+            let mut columns = walked
                 .as_ref()
-                .map(|(_, layers)| {
+                .map(|settled| {
                     crate::membership_column::Resolved::new(
                         rows.clone(),
-                        layers
+                        settled
+                            .served_layers
                             .iter()
                             .filter(|layer| walk_names.contains(&layer.name.as_str())),
                     )
@@ -399,17 +424,6 @@ impl Engine {
         )?;
         drop(drawing);
 
-        // The artifacts, after every point: no point waits on a frame its tag does not need.
-        let (artifacts, _) = match walked_first {
-            Some(walked) => walked,
-            None => self.serve_artifacts(&served, &mask, &tiling, &req)?,
-        };
-        if !artifacts.is_empty() {
-            sink.artifacts(&artifacts)
-                .map_err(|SinkClosed| EngineError::Cancelled)?;
-        }
-        probe.skip();
-
         // `total_ns` is this call's wall clock, which under streaming includes the sink's sends —
         // consumer-paced time, not compute.
         Ok(probe.finish())
@@ -433,11 +447,6 @@ impl ViewportSink for Sending<'_> {
     fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult {
         let _sending = self.cache.sending(self.turn);
         self.sink.counts(tiles, sub_cells)
-    }
-
-    fn artifacts(&mut self, artifacts: &[ArtifactOut]) -> SinkResult {
-        let _sending = self.cache.sending(self.turn);
-        self.sink.artifacts(artifacts)
     }
 
     fn points(&mut self, chunk: PointColumns) -> SinkResult {

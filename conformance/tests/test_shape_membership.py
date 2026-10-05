@@ -355,7 +355,7 @@ def check_stage(server, points, stage: str) -> None:
     for terms in PRINCIPALS:
         token = server.authorise(terms)["token"]
         body = server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
-        artifacts = decode_viewport_artifacts(body)
+        artifacts = decode_viewport_artifacts(server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP))
         served = {(a.layer, a.key): a for a in artifacts if a.layer in (SHAPES, BOXES)}
         expected = expected_counts(points, terms)
         got = {k: a.masked_count for k, a in served.items()}

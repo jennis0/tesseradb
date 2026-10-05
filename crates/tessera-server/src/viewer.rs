@@ -1,6 +1,6 @@
-//! The viewer plane: `/v1/meta`, `/v1/categories`, `/v1/viewport`, `/v1/items`,
-//! `/v1/items/{tessera_id}`, `/v1/artifacts` and `/v1/aggregate`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
-//! session plane's `/session/authorise`.
+//! The viewer plane: `/v1/meta`, `/v1/categories`, `/v1/viewport`, `/v1/artifacts/viewport`,
+//! `/v1/items`, `/v1/items/{tessera_id}`, `/v1/artifacts` and `/v1/aggregate`, plus `/healthz` and
+//! `/readyz`. Bearer auth is a session token minted by the session plane's `/session/authorise`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,15 +13,13 @@ use serde::{Deserialize, Serialize};
 
 use tessera_types::{GenerationStamp, TesseraId};
 use tessera_wire::{
-    artifacts_frame, artifacts_identity_frame, points_frame, points_highlight_frame,
-    sub_cells_frame, tiles_frame,
-    trailer_frame, ArtifactRow, ScalarColumn,
+    points_frame, points_highlight_frame, sub_cells_frame, tiles_frame, trailer_frame,
+    ScalarColumn,
 };
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{
-    CancelToken, ComputedSelection, LayerSelection, LevelSelection, SinkResult,
-    ViewportHead, ViewportSink,
+    CancelToken, LayerSelection, LevelSelection, SinkResult, ViewportHead, ViewportSink,
 };
 
 use crate::error::{map_engine_error, ApiError};
@@ -46,6 +44,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/items", post(crate::records::items))
         .route("/v1/items/{tessera_id}", post(item))
         .route("/v1/artifacts", post(crate::records::artifacts))
+        .route("/v1/artifacts/viewport", post(crate::artifact_tiles::viewport_artifacts))
         .route("/v1/artifacts/{tessera_id}", post(artifact))
         .route("/v1/artifacts/browse", post(browse))
         .route("/v1/aggregate", post(crate::aggregate::aggregate))
@@ -77,7 +76,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// from; a presented stamp only sets the response's `stale` flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PinDto {
+pub(crate) struct PinDto {
     prefix: String,
     segments_version: u64,
 }
@@ -266,6 +265,8 @@ async fn meta(
             "theta_target_marks": selection.theta_target_marks,
             "max_underlay_offset": selection.max_underlay_offset,
             "max_tiles_per_request": selection.max_tiles_per_request,
+            // `POST /v1/artifacts/viewport`'s ceiling on `per_tile`.
+            "max_artifacts_per_tile": state.limits.max_artifacts_per_tile,
             "max_category_values": state.limits.max_category_values,
             // `/v1/categories/{column}/suggest`'s page ceiling (also `limit`'s default) and walk
             // budget; a page with `more: true` that is not full hit the walk budget.
@@ -725,33 +726,22 @@ struct ViewportReq {
     /// column is a 422 and an unknown value an empty operand.
     #[serde(default)]
     filters: Option<serde_json::Value>,
-    /// The annotation layers to answer for, which also sets the membership columns the points
-    /// frames carry. Absent or `[]` is none and costs nothing; `"all"` is every reachable layer. A
-    /// layer the principal cannot reach is absent from the answer, as an unregistered one is.
+    /// The annotation layers whose artifacts tag the points, one membership column each. Absent
+    /// or `[]` is none and costs nothing; `"all"` is every reachable layer. A layer the principal
+    /// cannot reach is absent from the answer, as an unregistered one is.
     #[serde(default)]
     layers: Option<LayersReq>,
-    /// At most how many artifacts to return, met by serving ancestors in place of descendants,
-    /// never by sampling. A flat layer has no ancestors, so there it has no effect.
+    /// The budget a layer tagged by walking its artifacts is cut to, met by tagging with ancestors
+    /// in place of descendants, never by sampling.
     #[serde(default)]
     artifact_budget: Option<u32>,
-    /// Which declared levels of each named layer to answer for. Absent follows each layer's zoom
-    /// ranges (every level if none declares one); `"all"` is every level; `[]` is none. A layer
-    /// with no levels ignores this, and a level a layer lacks is absent rather than refused.
+    /// Which declared levels of each named layer tag the points. Absent follows each layer's zoom
+    /// ranges (every level if none declares one); `"all"` is every level; `[]` is none.
     #[serde(default)]
     levels: Option<LevelsReq>,
-    /// Which declared computed properties (`centroid`, `box`, `shape`) to serve, intersected with
-    /// each layer's declaration; absent is the declaration's set and `[]` is none. A name outside
-    /// the vocabulary is a 422, since the vocabulary is published schema.
-    #[serde(default)]
-    computed: Option<Vec<String>>,
-    /// Artifact row columns: `"full"` (the default) or `"identity"`, the same rows as `layer`,
-    /// `tessera_id`, `rung` and `matched` only, for a caller that already holds the payload. Rows
-    /// and bits are identical either way, so the projection discloses nothing.
-    #[serde(default)]
-    artifact_rows: Option<ArtifactRowsReq>,
     /// The highlight expression, in `filters`' grammar. It never changes which rows are served; it
-    /// adds `highlighted` to the tiles, points and artifacts frames, each counted within the
-    /// filtered candidate.
+    /// adds `highlighted` to the tiles and points frames, each counted within the filtered
+    /// candidate.
     #[serde(default)]
     highlight: Option<serde_json::Value>,
     /// Point columns: `"full"` (the default), a list of render column names (`tessera_id`, `code`
@@ -770,7 +760,7 @@ enum PointRowsReq {
     Columns(Vec<String>),
 }
 
-/// The `point_rows` field's two words; see [`ArtifactRowsReq`].
+/// The `point_rows` field's two words. An unknown word is a 422 naming both.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PointRowsWord {
@@ -778,19 +768,11 @@ enum PointRowsWord {
     Highlight,
 }
 
-/// The `artifact_rows` field's two values. An unknown value is a 422 naming both.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ArtifactRowsReq {
-    Full,
-    Identity,
-}
-
 /// The `layers` field: a list of names or `"all"`. Untagged, so any other string is a 422 rather
 /// than a name that matches no layer.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum LayersReq {
+pub(crate) enum LayersReq {
     All(AllLayers),
     Named(Vec<String>),
 }
@@ -798,14 +780,14 @@ enum LayersReq {
 /// The `levels` field: a list of level numbers or `"all"`, untagged as [`LayersReq`] is.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum LevelsReq {
+pub(crate) enum LevelsReq {
     All(AllLevels),
     Named(Vec<u32>),
 }
 
 /// The literal `"all"` and only that, for `levels`.
 #[derive(Debug)]
-struct AllLevels;
+pub(crate) struct AllLevels;
 
 impl<'de> Deserialize<'de> for AllLevels {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -823,7 +805,7 @@ impl<'de> Deserialize<'de> for AllLevels {
 
 /// The literal `"all"` (`RESERVED_LAYER_SELECTION`) and only that, for `layers`.
 #[derive(Debug)]
-struct AllLayers;
+pub(crate) struct AllLayers;
 
 impl<'de> Deserialize<'de> for AllLayers {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -864,17 +846,12 @@ struct WireSink {
     permits: GatePermits,
     /// Taken after admission and before spawning, so blocking-pool wait counts in `server_us`.
     start: Instant,
-    /// Which artifacts frame shape [`Self::artifacts`] writes; the engine computes the same rows
-    /// either way.
-    artifact_rows: tessera_engine::ArtifactRows,
     /// Whether [`Self::points`] writes the `(tessera_id, highlighted)` frame where a chunk carries
     /// the bits.
     highlight_rows: bool,
     arrow_serialise_ns: u64,
     points_total: u64,
     flushes: u64,
-    /// Served artifacts whose shape hit its vertex budget, so a coarse drawing shows in the trace.
-    shape_guard_fired: u64,
 }
 
 impl ViewportSink for WireSink {
@@ -920,38 +897,6 @@ impl ViewportSink for WireSink {
         };
         // A refusal means the client disconnected during the sweep: stop.
         self.producer.open(first)
-    }
-
-    /// Never called with an empty slice. Sent as a body frame after the last points frame, so
-    /// neither the counts nor the points wait on the artifact sweep.
-    fn artifacts(&mut self, artifacts: &[tessera_engine::ArtifactOut]) -> SinkResult {
-        let serialise_start = Instant::now();
-        self.shape_guard_fired += artifacts.iter().filter(|a| a.shape_guard_fired).count() as u64;
-        let rows: Vec<ArtifactRow<'_>> = artifacts
-            .iter()
-            .map(|a| ArtifactRow {
-                layer: a.layer.as_str(),
-                tessera_id: a.tessera_id.raw(),
-                key: a.key.as_deref(),
-                masked_count: a.masked_count,
-                centroid: a.derived.centroid,
-                bbox: a.derived.bbox,
-                shape: a.derived.shape.as_deref(),
-                content: &a.content,
-                parent_ids: a.parent_ids.iter().map(|id| id.raw()).collect(),
-                rung: a.rung,
-                matched: a.matched,
-                highlighted: a.highlighted,
-                target: a.target.map(|id| id.raw()),
-            })
-            .collect();
-        // The projection changes which columns are written, never which artifacts are served.
-        let frame = match self.artifact_rows {
-            tessera_engine::ArtifactRows::Full => artifacts_frame(&rows),
-            tessera_engine::ArtifactRows::Identity => artifacts_identity_frame(&rows),
-        };
-        self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
-        self.producer.send(frame)
     }
 
     fn points(&mut self, chunk: tessera_engine::PointColumns) -> SinkResult {
@@ -1086,14 +1031,7 @@ fn run_viewport_stream(
         .unwrap_or_else(|| state.engine.config().k_max_marks)
         .min(state.limits.max_k);
 
-    // Deduplicated, keeping the first occurrence and the caller's order: a repeated tile would be
-    // counted twice, and the response follows the request's order so a client can ask centre-out.
-    let tiles = req.tiles.map(|list| {
-        let mut seen = std::collections::HashSet::with_capacity(list.len());
-        list.into_iter()
-            .filter(|t| seen.insert(*t))
-            .collect::<Vec<_>>()
-    });
+    let tiles = distinct_tiles(req.tiles);
     // Validated as present-and-alone by the handler before admission; the default here is inert.
     let bbox = req.bbox.unwrap_or([0.0, 0.0, 0.0, 0.0]);
 
@@ -1128,52 +1066,12 @@ fn run_viewport_stream(
     // No principal is logged.
     let named_view = view_id.clone();
     let named_zoom = req.zoom;
-    let named_layers = match &req.layers {
-        Some(LayersReq::All(_)) => tessera_types::layer::RESERVED_LAYER_SELECTION.to_string(),
-        Some(LayersReq::Named(names)) => names.join(","),
-        None => String::new(),
-    };
-
-    // Omitted means no layers.
-    let layer_names: Vec<&str> = match &req.layers {
-        Some(LayersReq::Named(names)) => names.iter().map(String::as_str).collect(),
-        Some(LayersReq::All(_)) | None => Vec::new(),
-    };
-    let layers = match &req.layers {
-        Some(LayersReq::All(_)) => LayerSelection::All,
-        Some(LayersReq::Named(_)) | None => LayerSelection::Named(&layer_names),
-    };
-    // Omitted follows each layer's declared zoom ranges, unlike `layers`: naming a layer already
-    // opted in to the artifact pass. Every level, the costly answer, must be asked for.
-    let level_numbers: Vec<u32> = match &req.levels {
-        Some(LevelsReq::Named(levels)) => levels.clone(),
-        Some(LevelsReq::All(_)) | None => Vec::new(),
-    };
-    let levels = match &req.levels {
-        Some(LevelsReq::All(_)) => LevelSelection::All,
-        Some(LevelsReq::Named(_)) => LevelSelection::Named(&level_numbers),
-        None => LevelSelection::Declared,
-    };
-    // Omitted is the declaration's own set. Unknown names were refused by the handler, so the
-    // `filter_map` drops none.
-    let computed_named: Vec<tessera_engine::ComputedProperty> = req
-        .computed
-        .iter()
-        .flatten()
-        .filter_map(|name| tessera_engine::ComputedProperty::parse_ask(name))
-        .collect();
-    let computed = match &req.computed {
-        Some(_) => ComputedSelection::Named(&computed_named),
-        None => ComputedSelection::Declared,
-    };
-    // Omitted is `"full"`. Both the engine (which then skips payloads) and the sink (which writes
-    // the four-column frame) are told; the rows are the same either way.
-    let artifact_rows = match req.artifact_rows {
-        Some(ArtifactRowsReq::Identity) => tessera_engine::ArtifactRows::Identity,
-        Some(ArtifactRowsReq::Full) | None => tessera_engine::ArtifactRows::Full,
-    };
-    sink.artifact_rows = artifact_rows;
-    // The same shape one field over: omitted is `"full"`, and the projection is the opt-in.
+    let named_layers = layers_named(req.layers.as_ref());
+    let layer_names = layer_names(req.layers.as_ref());
+    let layers = layer_selection(req.layers.as_ref(), &layer_names);
+    let level_numbers = level_numbers(req.levels.as_ref());
+    let levels = level_selection(req.levels.as_ref(), &level_numbers);
+    // Omitted is `"full"`, and the projection is the opt-in.
     let point_rows = match &req.point_rows {
         Some(PointRowsReq::Word(PointRowsWord::Highlight)) => tessera_engine::PointRows::Highlight,
         Some(PointRowsReq::Word(PointRowsWord::Full)) | None => tessera_engine::PointRows::Full,
@@ -1187,8 +1085,6 @@ fn run_viewport_stream(
         .layers(layers)
         .artifact_budget(req.artifact_budget)
         .levels(levels)
-        .computed(computed)
-        .artifact_rows(artifact_rows)
         .point_rows(point_rows)
         .cancel(Some(cancel));
     if let Some(filter) = filter {
@@ -1214,9 +1110,7 @@ fn run_viewport_stream(
                 "flushes": sink.flushes,
             });
             if state.limits.stage_timing {
-                if let Some(csv) =
-                    stage_header(&timings, sink.arrow_serialise_ns, sink.shape_guard_fired)
-                {
+                if let Some(csv) = stage_header(&timings, sink.arrow_serialise_ns) {
                     trailer["stage_ns"] = serde_json::Value::String(csv);
                 }
             }
@@ -1258,6 +1152,96 @@ fn run_viewport_stream(
     // `sink` drops here, after the state stores, releasing the channel sender and the slot permit.
 }
 
+/// Refuses a request's extent unless it names a depth of at most 16 and exactly one of a valid
+/// `bbox` and a list of `tiles` at that depth.
+pub(crate) fn check_extent(
+    zoom: u8,
+    bbox: Option<&[f64; 4]>,
+    tiles: Option<&[u64]>,
+) -> Result<(), ApiError> {
+    if zoom > 16 {
+        return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
+    }
+    match (bbox, tiles) {
+        (Some(bbox), None) => check_bbox("bbox", bbox),
+        (None, Some(tiles)) => {
+            // A prefix carries no depth, so one with bits above `zoom` is refused rather than
+            // masked off.
+            let shift = 2 * u32::from(zoom);
+            match tiles.iter().find(|&&prefix| shift < 64 && prefix >> shift != 0) {
+                Some(bad) => Err(ApiError::Contract(format!(
+                    "tile prefix {bad} has bits above depth {zoom}"
+                ))),
+                None => Ok(()),
+            }
+        }
+        (Some(_), Some(_)) => Err(ApiError::Contract(
+            "send exactly one of bbox and tiles, not both".to_string(),
+        )),
+        (None, None) => Err(ApiError::Contract(
+            "send exactly one of bbox and tiles".to_string(),
+        )),
+    }
+}
+
+/// `tiles` without repeats, keeping the first of each and the caller's order: a repeated tile
+/// would be answered twice, and a response follows the request's order so a client can ask
+/// centre-out.
+pub(crate) fn distinct_tiles(tiles: Option<Vec<u64>>) -> Option<Vec<u64>> {
+    tiles.map(|list| {
+        let mut seen = std::collections::HashSet::with_capacity(list.len());
+        list.into_iter().filter(|t| seen.insert(*t)).collect()
+    })
+}
+
+/// The caller's `layers` as the shed log names them.
+pub(crate) fn layers_named(layers: Option<&LayersReq>) -> String {
+    match layers {
+        Some(LayersReq::All(_)) => tessera_types::layer::RESERVED_LAYER_SELECTION.to_string(),
+        Some(LayersReq::Named(names)) => names.join(","),
+        None => String::new(),
+    }
+}
+
+/// The names in `layers`; omitted means no layers.
+pub(crate) fn layer_names(layers: Option<&LayersReq>) -> Vec<&str> {
+    match layers {
+        Some(LayersReq::Named(names)) => names.iter().map(String::as_str).collect(),
+        Some(LayersReq::All(_)) | None => Vec::new(),
+    }
+}
+
+pub(crate) fn layer_selection<'a>(
+    layers: Option<&LayersReq>,
+    names: &'a [&'a str],
+) -> LayerSelection<'a> {
+    match layers {
+        Some(LayersReq::All(_)) => LayerSelection::All,
+        Some(LayersReq::Named(_)) | None => LayerSelection::Named(names),
+    }
+}
+
+/// The numbers in `levels`.
+pub(crate) fn level_numbers(levels: Option<&LevelsReq>) -> Vec<u32> {
+    match levels {
+        Some(LevelsReq::Named(levels)) => levels.clone(),
+        Some(LevelsReq::All(_)) | None => Vec::new(),
+    }
+}
+
+/// Omitted follows each layer's declared zoom ranges, unlike `layers`: naming a layer already
+/// opted in. Every level, the costly answer, must be asked for.
+pub(crate) fn level_selection<'a>(
+    levels: Option<&LevelsReq>,
+    numbers: &'a [u32],
+) -> LevelSelection<'a> {
+    match levels {
+        Some(LevelsReq::All(_)) => LevelSelection::All,
+        Some(LevelsReq::Named(_)) => LevelSelection::Named(numbers),
+        None => LevelSelection::Declared,
+    }
+}
+
 /// Refuses a bbox that is not `[x0, y0, x1, y1]` with `x0 <= x1`, `y0 <= y1`, all finite; `name`
 /// is the key that carried it.
 pub(crate) fn check_bbox(name: &str, bbox: &[f64; 4]) -> Result<(), ApiError> {
@@ -1274,52 +1258,7 @@ async fn viewport(
     ViewerSession(session): ViewerSession,
     ApiJson(req): ApiJson<ViewportReq>,
 ) -> Result<Response, ApiError> {
-    if req.zoom > 16 {
-        return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
-    }
-
-    // Exactly one of `bbox` and `tiles`.
-    match (&req.bbox, &req.tiles) {
-        (Some(bbox), None) => check_bbox("bbox", bbox)?,
-        (None, Some(tiles)) => {
-            // A prefix carries no depth, so one with bits above `zoom` is refused rather than
-            // masked off.
-            let shift = 2 * u32::from(req.zoom);
-            if let Some(bad) = tiles
-                .iter()
-                .find(|&&prefix| shift < 64 && prefix >> shift != 0)
-            {
-                return Err(ApiError::Contract(format!(
-                    "tile prefix {bad} has bits above depth {}",
-                    req.zoom
-                )));
-            }
-        }
-        (Some(_), Some(_)) => {
-            return Err(ApiError::Contract(
-                "send exactly one of bbox and tiles, not both".to_string(),
-            ));
-        }
-        (None, None) => {
-            return Err(ApiError::Contract(
-                "send exactly one of bbox and tiles".to_string(),
-            ));
-        }
-    }
-
-    // An unknown computed-property name is refused before admission; the vocabulary is
-    // published schema, so the refusal discloses nothing.
-    if let Some(names) = &req.computed {
-        if let Some(bad) = names
-            .iter()
-            .find(|name| tessera_engine::ComputedProperty::parse_ask(name).is_none())
-        {
-            return Err(ApiError::Contract(format!(
-                "`computed` names {bad:?}; the computed properties are {}",
-                tessera_engine::ComputedProperty::ASK_VOCABULARY.join(", ")
-            )));
-        }
-    }
+    check_extent(req.zoom, req.bbox.as_ref(), req.tiles.as_deref())?;
 
     // Created before admission so one token covers the whole request; the guard then moves into
     // the response body.
@@ -1349,10 +1288,8 @@ async fn viewport(
         permits: gate_permits,
         start,
         // Set from the request inside the producer.
-        artifact_rows: tessera_engine::ArtifactRows::Full,
         highlight_rows: false,
         arrow_serialise_ns: 0,
-        shape_guard_fired: 0,
         points_total: 0,
         flushes: 0,
     };
@@ -1394,11 +1331,7 @@ async fn viewport(
 /// `bench-timing` feature. Per-tile durations are summed across sweep workers, so above the
 /// serial fallback they can exceed wall time.
 #[cfg(feature = "bench-timing")]
-fn stage_header(
-    t: &tessera_engine::StageTimings,
-    arrow_serialise_ns: u64,
-    shape_guard_fired: u64,
-) -> Option<String> {
+fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
     // Append only: consumers read this CSV by position.
     Some(format!(
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
@@ -1424,8 +1357,8 @@ fn stage_header(
         t.theta_anchor_ns,
         t.underlay_ns,
         t.underlay_cells_evaluated,
-        // Served artifacts whose shape hit its vertex budget.
-        shape_guard_fired,
+        // A position no figure fills, kept so the fields after it keep their places.
+        0,
         // The walk that resolves the occupied-tile count, the one part of θ that scales with the
         // corpus.
         t.theta_occupancy_ns,
@@ -1434,11 +1367,7 @@ fn stage_header(
 }
 
 #[cfg(not(feature = "bench-timing"))]
-fn stage_header(
-    _t: &tessera_engine::StageTimings,
-    _arrow_serialise_ns: u64,
-    _shape_guard_fired: u64,
-) -> Option<String> {
+fn stage_header(_t: &tessera_engine::StageTimings, _arrow_serialise_ns: u64) -> Option<String> {
     None
 }
 

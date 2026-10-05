@@ -72,7 +72,7 @@ def served(server, token: str, zoom: int = 0) -> dict[str, tuple[int, tuple[str,
     present**: a missing key is a `KeyError` at the point of use and an unexpected one shows up in
     the set comparison, where a list of rows would let either pass unnoticed.
     """
-    body = server.viewport(token, lf.VIEW_ID, zoom, WHOLE_MAP, k=1000)
+    body = server.artifacts_viewport(token, lf.VIEW_ID, zoom, WHOLE_MAP)
     return {
         artifact.key: (artifact.masked_count, tuple(artifact.content))
         for artifact in decode_viewport_artifacts(body)

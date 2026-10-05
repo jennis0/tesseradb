@@ -327,7 +327,7 @@ loopback, so what this admits are pages on this machine.
 ## Reading it: the map, a reader, and the queries
 
 ```python
-db.map(colour_by="cluster:clusters/kmeans")   # the interactive map of everything, in this cell
+db.map(colour_by="cluster:clusters/kmeans", artifacts_per_tile=50)  # the map of everything
 db.viewer(["cs.LG"]).map()                    # what someone holding only "cs.LG" sees
 ```
 
@@ -340,7 +340,9 @@ sees everything. `db.viewer(terms)` is a reader holding exactly the terms named.
 carries is accepted and reaches nothing, and an empty list is refused.
 
 `map(view=None, layers=None, colour_by=None, filters=None, height=480)` is the notebook widget
-described below, pointed at this database's server with a token made for the reader.
+described below, pointed at this database's server with a token made for the reader. Give it
+`artifacts_per_tile`, the most annotations each level shows in one tile of the map, to draw a
+layer or colour by one: without it the map draws no annotation and has no layer colours.
 
 ### A selection
 
@@ -373,7 +375,7 @@ and lie inside the box. A box whose outline is longer than the server's `max_reg
 setting allows is counted over the grid cells covering it, so the number can include items just
 outside the box. Two boxes that do not overlap select nothing.
 
-`map(colour_by=None, layers=None, height=480)` opens the widget on the selection's view with its
+`map(colour_by=None, layers=None, height=480, artifacts_per_tile=None)` opens the widget on the selection's view with its
 filters applied and its camera on the box. The map draws everything in frame, including items
 just outside the box.
 
@@ -386,16 +388,23 @@ reads every row. The result reads as a pyarrow table of
 `point_rows=["venue"]`. A category column holds each value's key, as a dictionary column, and null for a
 value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `tessera.counts` (`visible`, `matched`, `highlighted`
 and `served`, over the tiles the request touched), `tessera.request` and `tessera.trailer`.
-Beside the points it has `artifacts`, the annotations served with them, and `sub_cells`, finer
-counts that `underlay_offset` asks for; each is `None` when there were none. The other keywords
-are sent as given: `tiles`, `highlight` (a second filter that marks points without changing which
-are drawn), `layers`, `levels`, `computed`, `artifact_budget`, `artifact_rows`, `point_rows`,
-`underlay_offset` and `pin`.
+Each layer named in `layers` adds a `membership:<layer>` column: the `tessera_id` of the
+annotation of that layer holding the point, or null. Beside the points it has `sub_cells`, finer
+counts that `underlay_offset` asks for, or `None`. The other keywords are sent as given: `tiles`,
+`highlight` (a second filter that marks points without changing which are drawn), `layers`,
+`levels`, `artifact_budget`, `point_rows`, `underlay_offset` and `pin`.
+
+`viewport_artifacts(view, zoom, per_tile, ...)` is the annotations a map draws at a zoom, as one
+pyarrow table with a `tile` column: in each tile, at most `per_tile` annotations of each level,
+the largest first, and an annotation in several tiles has a row in each with the same counts.
+`artifacts(view, layer, fields, ids=[...])` reads the annotations a sample's tags name.
 
 ```python
-drawn = db.view("s0").sample(layers="all", highlight={"primary_category": {"eq": "cs.LG"}})
+drawn = db.view("s0").sample(layers=["topics"], highlight={"primary_category": {"eq": "cs.LG"}})
 drawn.num_rows                                # the points drawn
-drawn.artifacts.to_pylist()                   # the annotations drawn beside them
+tags = drawn.column("membership:topics")      # each point's topic, or null
+here = db.viewport_artifacts("s0", 2, per_tile=20, layers=["topics"])
+here.to_pandas()                              # the topics of each tile at zoom 2
 ```
 
 ### Counts by group: `aggregate`
@@ -557,7 +566,7 @@ it leaves in no view, as `remove()` deletes one, and the answer's `deleted` says
 
 ```python
 v = tesseradb.connect("https://tessera.example/viewer", token=my_token)
-v.map(colour_by="cluster:clusters/kmeans")
+v.map(colour_by="cluster:clusters/kmeans", artifacts_per_tile=50)
 v.view("s0").count()
 
 token = tesseradb.login("https://tessera.example/viewer", principal="ann", password=password)

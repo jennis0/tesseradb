@@ -109,7 +109,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, BuildArgs};
-use tessera_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig, ViewportRequest};
+use tessera_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
@@ -651,12 +651,47 @@ pub const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
     let session = engine.authorise(credential).unwrap();
     engine
-        .viewport(
+        .viewport_artifacts(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
-        .artifacts
+        .artifacts()
+}
+
+/// Each artifact a tile-by-tile answer served, once, with its filter and highlight bits taken over
+/// every tile it was served in: what one answer over the whole of the request's tiles says.
+pub fn over_every_tile(out: &tessera_engine::ViewportArtifactsOut) -> Vec<ArtifactOut> {
+    let mut merged: Vec<ArtifactOut> = Vec::new();
+    for artifact in out.frames.iter().flat_map(|frame| &frame.artifacts) {
+        match merged.iter_mut().find(|held| held.tessera_id == artifact.tessera_id) {
+            Some(held) => {
+                held.matched = held.matched.zip(artifact.matched).map(|(a, b)| a || b);
+                held.highlighted = held
+                    .highlighted
+                    .zip(artifact.highlighted)
+                    .map(|(a, b)| a || b);
+            }
+            None => merged.push(artifact.clone()),
+        }
+    }
+    merged
+}
+
+/// The drawn shape a principal is served for an artifact, read by its identifier: the one route a
+/// shape is served on.
+pub fn shape_of(
+    engine: &Engine,
+    credential: &[u8],
+    id: TesseraId,
+) -> Option<Vec<Vec<Vec<[u32; 2]>>>> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .artifact(&session, id, "s0", None)
+        .unwrap()
+        .expect("the artifact is served")
+        .derived
+        .shape
 }
 
 /// The entity an artifact's served identifier names.

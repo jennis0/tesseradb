@@ -381,6 +381,7 @@ fn request<'a>(layer: &'a str, fields: &'a [String]) -> ArtifactsRequest<'a> {
         level: None,
         parent: None,
         q: None,
+        ids: None,
         filter: None,
         keep_unmatched: false,
         count: false,
@@ -1540,14 +1541,15 @@ fn an_authored_shape_names_no_other_view_on_the_viewport() {
     ] {
         let out = a
             .engine
-            .viewport(
+            .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportRequest::new("s0", 0, WHOLE_MAP, 0)
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                     .layers(tessera_engine::LayerSelection::Named(&[AUTHORED]))
                     .computed(computed),
             )
-            .unwrap();
-        let served: Vec<_> = out.artifacts.iter().filter(|x| x.layer == AUTHORED).collect();
+            .unwrap()
+            .artifacts();
+        let served: Vec<_> = out.iter().filter(|x| x.layer == AUTHORED).collect();
         assert_eq!(served.len(), 1, "the artifact is served");
         a.assert_clean("the viewport", &format!("{served:?}"));
     }

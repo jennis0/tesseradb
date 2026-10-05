@@ -622,7 +622,7 @@ paths:
     post:
       tags: [viewer]
       operationId: viewport
-      summary: Masked counts per tile, a sample of points, and the annotation artifacts, over a region at a depth.
+      summary: Masked counts per tile and a sample of points, over a region at a depth.
       description: |
         **The body is not JSON.** It is a sequence of frames, each a `u8` kind, a `u32`
         little-endian payload length and the payload, which is a complete Arrow IPC stream, or JSON
@@ -631,8 +631,6 @@ paths:
         - `1` tiles: exactly one, first.
         - `2` sub-cells: exactly one when `underlay_offset` is present and not zero.
         - `3` points: zero or more, each holding whole tiles.
-        - `5` artifacts: at most one, after the tiles and every points frame. Absent, not empty,
-          when no artifact is served.
         - `4` trailer: exactly one, last.
 
         A body without a trailer is incomplete, whatever the transport said. An unknown kind is a
@@ -642,29 +640,22 @@ paths:
         **Region and sample.** The request names exactly one of `bbox` and `tiles`. `k` is the
         most points a tile returns: it defaults to `selection.k_max_marks` and is capped by
         `selection.max_k`. A tile may return fewer than `k` while more are visible, which is how
-        the client reads density. `k = 0` asks for counts only: the tiles and artifacts frames as
-        at any `k`, and no points frame. A client keeps `k` the same or raises it as it zooms in;
-        the server cannot check this.
+        the client reads density. `k = 0` asks for counts only: the tiles frame as at any `k`, and
+        no points frame. A client keeps `k` the same or raises it as it zooms in; the server cannot
+        check this.
 
-        **Artifacts.** `layers` decides whether an artifacts frame can appear. `artifact_budget`
-        is met by serving ancestors in place of their descendants, never by sampling, and has no
-        effect on a flat layer. The frame's `matched` column answers `filters` for each artifact,
-        and is null where the request carries no filter. Its `layer` column is
-        dictionary-encoded. Its `rung` column is the declared level on a levelled layer, the depth
-        in this response's own parent links on a treed layer, and `0` on a flat one. The
-        `shape_x` and `shape_y` columns, `list<list<list<uint32>>>` of parts, rings and vertices,
-        follow the fixed columns, and are absent from the schema when no served layer draws a
-        shape or the request asked for none. A null in any column means the layer declares no such
-        property. `target` (`uint64`) is the `tessera_id` of the artifact a row is attached to, a
-        row of the same frame, such as the cluster a label names; null where the row is attached
-        to nothing. A label's `masked_count` is its own.
+        **Layers.** Each layer `layers` names that serves an artifact holding a served point adds
+        a `membership:<layer>` column to the points frames: the `tessera_id` of the deepest
+        artifact of the layer the point belongs to that this principal is served, or null. The
+        artifacts themselves are served by `POST /v1/artifacts/viewport`. A nested or `dag`
+        layer is cut to `artifact_budget`, met by tagging with ancestors in place of their
+        descendants.
 
-        **Highlight.** A request carrying `highlight` gains three columns and loses none:
+        **Highlight.** A request carrying `highlight` gains two columns and loses none:
         `highlighted` fifth on the tiles frame (`uint64`, present on every response and equal to
-        `matched` where there is no highlight), `highlighted` on the points frame (`bool`, after
-        the render columns and before the membership columns, present only with a highlight), and
-        `highlighted` on the artifacts frame (`bool`, after `matched`). The rows served are the
-        same with and without a highlight.
+        `matched` where there is no highlight), and `highlighted` on the points frame (`bool`,
+        after the render columns and before the membership columns, present only with a
+        highlight). The rows served are the same with and without a highlight.
 
         Subject to compute admission.
       security:
@@ -743,7 +734,7 @@ paths:
             - an `underlay_offset` beyond `selection.max_underlay_offset`, past depth 16, or over the sub-cell budget, which is refused and not clamped;
             - an unknown filter column, or an operator outside its column's family (an unknown value is an empty operand and is not refused);
             - `none_of` naming a text column or two columns;
-            - a `layers`, `levels`, `computed`, `artifact_rows` or `point_rows` value outside its schema;
+            - a `layers`, `levels` or `point_rows` value outside its schema;
             - a `point_rows` list naming a column that is not one of the view's render columns.
           content:
             application/json:
@@ -965,6 +956,9 @@ paths:
         visible set composed again, so a deletion or suppression accepted during a read applies
         from the next page.
 
+        **Cursor.** As `POST /v1/items`' cursor, bound also to this route, to `layer` and `level`,
+        and to the set of `ids`: a cursor sent with any of them changed is `422`.
+
         **Rows.** Every artifact of `layer` this principal is served when its page is built,
         ordered by level and then by publication order within the level. Each page applies the
         viewport's own test to each artifact it walks: the artifact's label, its layer's existence
@@ -973,7 +967,9 @@ paths:
         served only while the artifact it is attached to is. Publication order is the publisher's
         and is not grouped by access labels.
 
-        **Narrowing.** `level` reads one level of a levelled layer. `parent` reads the artifacts
+        **Narrowing.** `ids` reads the artifacts those `tessera_id`s name, such as the tags of
+        points a client holds no artifact for; one this principal is not served has no row, as
+        one naming nothing does. `level` reads one level of a levelled layer. `parent` reads the artifacts
         naming that artifact among their parents; a parent this principal is not served answers
         as a parent with no children does. `q` keeps the artifacts whose key, or whose first
         served text content, contains it, ignoring case; an authored shape is not text and is not
@@ -1094,6 +1090,142 @@ paths:
         "500":
           $ref: "#/components/responses/FailClosed"
 
+  /v1/artifacts/viewport:
+    post:
+      tags: [viewer]
+      operationId: viewportArtifacts
+      summary: The artifacts of the named layers in each tile, largest first up to a quota, over a region at a depth.
+      description: |
+        **What things are here.** The body is framed as `POST /v1/viewport`'s is. The kinds:
+
+        - `5` artifacts: first, one whose `tile` column is null, holding the artifacts of the
+          nested and `dag` layers named. Absent where it would hold none.
+        - `5` artifacts: then exactly one for each tile, in the request's order with repeats
+          removed, or in the order the `bbox` resolves to as on `POST /v1/viewport`. A tile holding
+          none is a frame of no rows.
+        - `4` trailer: exactly one, last: `stream_us`, `arrow_serialise_ns`, `rows` (the rows
+          sent) and `frames`.
+
+        A body without a trailer is incomplete. Every frame is whole, so a client may keep each
+        tile's frame as it arrives.
+
+        **A tile's frame.** For each layer named, and each of its levels selected, the artifacts
+        this principal is served that hold a member the principal can see inside the tile, at most
+        `per_tile` of them, the largest first: by `masked_count`, descending, and then by
+        `tessera_id`. An artifact with visible members in several tiles is in each of their frames,
+        with the same `masked_count`, centroid and box: every number is over the artifact's whole
+        membership as this principal sees it, never over the tile. Levels follow the layers'
+        order, a layer after any it depends on, and each level's rows follow their own.
+
+        **The treed frame.** A nested or `dag` layer is walked over every requested tile together
+        and cut to `budget`, met by serving ancestors in place of their descendants, never by
+        sampling, as one frame with no tile. `rung` there is the depth in that frame's own parent
+        links.
+
+        **Columns.** Seventeen, at fixed positions: `layer` (dictionary-encoded), `tessera_id`,
+        `key`, `masked_count`, `centroid_x`, `centroid_y`, `box_min_x`, `box_min_y`, `box_max_x`,
+        `box_max_y`, `content`, `parent_ids`, `rung`, `matched`, `highlighted`, `target`, and
+        `tile` (`uint32`, the tile's Morton prefix at `zoom`). A null in a geometry column means
+        the layer declares no such property or the request asked for none. `parent_ids` names the
+        parents that are rows of the same frame. `target` is the `tessera_id` of the artifact a row
+        is attached to, such as the cluster a label names, in the same frame or the treed frame;
+        null where the row is attached to nothing. A dependent is served in a tile only where its
+        target is in that tile's frame or the treed frame, when the request names its target's
+        layer, and one that is not takes no place in the quota. A label's `masked_count` is its own. `matched`
+        is whether a member this principal can see inside the tile matches `filters`, and
+        `highlighted` the same for `filters` and `highlight` together; each is null where the
+        request carries no such expression, and a label takes its target's. A filter changes
+        nothing else: the same artifacts are served with the same counts, filtered or not. No
+        frame carries a shape; `POST /v1/artifacts/{tessera_id}` serves an artifact's.
+
+        Subject to its own admission, `serve.artifact_admission`. Cancelled between tiles when the
+        client goes away.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ViewportArtifactsRequest"
+      responses:
+        "200":
+          description: The framed body. Its headers are `POST /v1/viewport`'s, and carry the same coordinates.
+          headers:
+            etag:
+              description: The content key, quoted, as on `POST /v1/viewport`.
+              required: true
+              schema:
+                type: string
+            x-tessera-identity-key:
+              description: The identity key, as on `POST /v1/viewport`.
+              required: true
+              schema:
+                type: string
+            x-tessera-pin:
+              description: The generation this response was computed from, as on `POST /v1/viewport`.
+              required: true
+              schema:
+                type: string
+            x-tessera-stale:
+              description: "`1` where the request's `pin` differs from this response's `x-tessera-pin`, and `0` otherwise."
+              required: true
+              schema:
+                type: string
+                enum: ["0", "1"]
+            x-tessera-region:
+              description: Present exactly when `filters` or `highlight` carry a `region` leaf, as on `POST /v1/viewport`.
+              required: false
+              schema:
+                type: string
+                pattern: "^(exact|cover; depth=[0-9]+)$"
+            x-tessera-server-us:
+              description: Server time from admission until the first frame was ready, in microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+            x-tessera-admission-us:
+              description: Time spent waiting for admission, in microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Framed Arrow IPC streams and one JSON trailer.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: Unknown `view`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: |
+            The request needs to change:
+
+            - `zoom` above 16;
+            - neither or both of `bbox` and `tiles`, a `bbox` that is not finite or has a maximum below its minimum, or a tile prefix with bits above `zoom`;
+            - more tiles than `selection.max_tiles_per_request`;
+            - a `per_tile` above `selection.max_artifacts_per_tile`;
+            - an unknown filter column, or an operator outside its column's family;
+            - a `layers`, `levels` or `computed` value outside its schema.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
   /v1/artifacts/browse:
     post:
       tags: [viewer]
@@ -1102,8 +1234,8 @@ paths:
       description: |
         This route does not depend on the viewport. A layer whose artifacts are spread across the
         map may draw nothing at any zoom the viewport's budget reaches; this route serves the same
-        artifacts by relation instead of by position, each row carrying the masked count the
-        artifacts frame carries.
+        artifacts by relation instead of by position, each row carrying the masked count
+        `POST /v1/artifacts/viewport` carries.
 
         **Three forms.** With neither `parent` nor `q` it returns the layer's roots, the artifacts
         with no served parent. `parent` returns the artifacts naming that one among their parents,
@@ -1116,7 +1248,7 @@ paths:
         text of an artifact attached to it that `POST /v1/artifacts` would serve this principal
         when reading that label layer. Label layers are taken in the order `/v1/meta` lists them;
         within one, by level, then artifacts with a key in key order, then those without in
-        publication order, which is the order the viewport's artifacts frame serves a level in. A
+        publication order. A
         label this principal would not be served names nothing and matches no `q`, and `filters`
         does not change a name.
 
@@ -4424,7 +4556,7 @@ components:
       type: object
       additionalProperties: false
       description: The sampling parameters and request ceilings. They are the same for every principal, and a client needs them to read a count of drawn points as a density.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows, max_page_rows, max_page_bytes, max_aggregate_groupings, max_aggregate_top, max_aggregate_named, max_aggregate_bins, max_aggregate_cells]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_artifacts_per_tile, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows, max_page_rows, max_page_bytes, max_aggregate_groupings, max_aggregate_top, max_aggregate_named, max_aggregate_bins, max_aggregate_cells]
       properties:
         k_min:
           type: integer
@@ -4447,6 +4579,10 @@ components:
           type: integer
           minimum: 0
           description: The most tiles a viewport request may cover. A client needs it to tell this `422` from an error in its own arithmetic.
+        max_artifacts_per_tile:
+          type: integer
+          minimum: 0
+          description: The largest `per_tile` a `POST /v1/artifacts/viewport` request may name.
         max_category_values:
           type: integer
           minimum: 0
@@ -4567,15 +4703,15 @@ components:
             artifact. `authored` is a supplied `polygon`, `circle` or `ellipse` content, served
             under that content's own requirement and also the same for every principal. A client
             may keep a `predicate` or `authored` shape against a `tessera_id` across principals,
-            and may not keep a `derived` one. The geometry itself is the artifacts frame's
-            `shape_x` and `shape_y` and `ArtifactResponse.shape`, nested alike for every kind.
+            and may not keep a `derived` one. The geometry itself is `ArtifactResponse.shape` and
+            the bulk read's `shape`.
           oneOf:
             - type: "null"
             - type: string
               enum: [derived, predicate, authored]
         supplied_content:
           type: array
-          description: The types of the content the publisher supplies, in the order of the artifacts frame's `content` column. An artifact whose content a principal may not read is not served to that principal at all.
+          description: The types of the content the publisher supplies, in the order of an artifact's `content`. An artifact whose content a principal may not read is not served to that principal at all.
           items: { type: string }
         depends_on:
           type: array
@@ -4734,14 +4870,7 @@ components:
           minimum: 0
           description: The most points a tile returns. Defaults to `k_max_marks` and is capped by `max_k`. `0` asks for counts only. Keep it the same or raise it as the zoom deepens.
         filters:
-          description: |
-            The filter. It narrows which points are drawn, and answers one boolean for each served
-            artifact: the artifacts frame's `matched` is `true` where a member this principal may
-            see, inside the requested tiles, matches. `matched` is null on every response to a
-            request with no filter.
-
-            A filter changes nothing else about an artifact. The same artifacts are served with the
-            same `masked_count`, filtered or not.
+          description: The filter. It narrows which points are drawn and counted as `matched`.
           allOf:
             - $ref: "#/components/schemas/FilterExpr"
         highlight:
@@ -4756,8 +4885,8 @@ components:
 
             It is evaluated over the rows `filters` selects, so every answer is the conjunction of
             the two: the tiles frame's `highlighted` count (of the tile's `matched`, how many also
-            satisfy it), the points frame's `highlighted` bit per served point, and the artifacts
-            frame's `highlighted` bit. `highlighted ≤ matched ≤ visible` in every tile.
+            satisfy it) and the points frame's `highlighted` bit per served point.
+            `highlighted ≤ matched ≤ visible` in every tile.
 
             Two highlights are one expression under `all_of` or `any_of`.
           allOf:
@@ -4770,11 +4899,11 @@ components:
           description: Serve exact masked counts at depth `zoom + underlay_offset` as the sub-cells frame. Absent or `0` serves none and adds no bytes. Above `max_underlay_offset`, past depth 16, or over the sub-cell budget, it is refused, not clamped.
         layers:
           description: |
-            Which annotation layers to answer for, and so whether an artifacts frame can appear.
-            Absent or `[]` is none, with no artifact pass and no cost. `"all"` is every layer this
-            principal reaches. An array is the named layers this principal reaches: a name it does
-            not reach is left out whether or not it was asked for, so naming a layer does not tell
-            the caller whether it exists.
+            The annotation layers whose artifacts tag the points, one membership column each.
+            Absent or `[]` is none, at no cost. `"all"` is every layer this principal reaches. An
+            array is the named layers this principal reaches: a name it does not reach is left out
+            whether or not it was asked for, so naming a layer does not tell the caller whether it
+            exists.
           oneOf:
             - type: array
               items: { type: string }
@@ -4783,10 +4912,10 @@ components:
         artifact_budget:
           type: integer
           minimum: 0
-          description: The most artifacts the client wants back. Met by serving ancestors in place of their descendants, never by sampling; accepted and without effect on a flat layer. Unbounded when absent.
+          description: The most artifacts a nested or `dag` layer tags with, met by tagging with ancestors in place of their descendants, never by sampling; without effect on any other layer. Unbounded when absent.
         levels:
           description: |
-            Which of each named layer's declared levels to answer for.
+            Which of each named layer's declared levels tag the points.
 
             Absent follows each layer's declaration: the levels whose `zoom` range covers this
             request's `zoom`, on the same 0 to 16 depth. The string `"all"` answers for every
@@ -4798,8 +4927,8 @@ components:
             affected by this field in any form. A layer that declares levels but no `zoom` range on
             any of them serves every level when the field is absent.
 
-            The default differs from `layers`' because naming a layer has already asked for the
-            artifact pass; what remains is which levels to pay for, and every level is the costly
+            The default differs from `layers`' because naming a layer has already asked for its
+            artifacts; what remains is which levels to pay for, and every level is the costly
             answer, so it is asked for by name. The field applies to every layer named, against
             each layer's own levels.
           oneOf:
@@ -4807,48 +4936,10 @@ components:
               items: { type: integer, minimum: 0 }
             - type: string
               const: all
-        computed:
-          description: |
-            Which of each layer's declared computed properties to serve.
-
-            Absent is each layer's declaration. An array is that array intersected with each
-            layer's declaration, and `[]` is none: counts and no geometry, with the artifacts frame
-            still served. It narrows and cannot widen: a property a layer does not declare is not
-            served for naming it. A name outside the three is `422`, where an unreachable layer's
-            name is left out; the three words and each layer's set are published in `/v1/meta`, so
-            the refusal discloses nothing.
-
-            It controls cost, not disclosure. A derived shape is computed per artifact per request
-            from the members the principal can see, while a client draws one at a time. Measured on
-            a corpus of 2.42 million members, one request took 2,032 ms and 263 KB with shapes and
-            164 ms and 26 KB without. Fetch the shape to draw from
-            `POST /v1/artifacts/{tessera_id}`, which serves the same geometry and ignores this
-            field.
-
-            `shape` names the layer's one drawn geometry, of whichever kind `/v1/meta`'s `shape`
-            gives it: the derived hull, the membership shape, or the authored one. `hull` is the
-            declaration's word and is not accepted here. A predicate or authored shape is served at
-            this request's `zoom`: vertices that would move the drawn edge by less than a pixel at
-            that depth are dropped, and at most 2,048 are sent.
-          type: array
-          items:
-            type: string
-            enum: [centroid, box, shape]
-        artifact_rows:
-          description: |
-            The columns of each artifact row. Absent or `"full"` is every column. `"identity"` is
-            the same rows as five columns, `layer` (dictionary-encoded), `tessera_id`, `rung`,
-            `matched` and `highlighted`, with the others absent from the schema rather than null.
-            The rows, the `matched` and `highlighted` bits and the `rung` values are the same under
-            either value, so the membership columns of the points frames still resolve, and the
-            projection discloses nothing the full answer would not. It is for a filter change over
-            rows the caller already holds. Any other value is `422`.
-          type: string
-          enum: [full, identity]
         point_rows:
           description: |
-            The columns of each served point, as `artifact_rows` is for artifacts. The points and
-            the per-tile `served` counts are the same under every value; only the columns change.
+            The columns of each served point. The points and the per-tile `served` counts are the
+            same under every value; only the columns change.
 
             Absent or `"full"` is every render column. A list names the render columns to serve:
             each point is `tessera_id`, `code` and those columns, in the view's declaration order,
@@ -4868,6 +4959,71 @@ components:
               enum: [full, highlight]
             - type: array
               items: { type: string }
+
+    ViewportArtifactsRequest:
+      type: object
+      additionalProperties: false
+      required: [view, zoom, per_tile]
+      description: Exactly one of `bbox` and `tiles`.
+      properties:
+        view:
+          type: string
+          description: A view id from `/v1/meta`.
+        zoom:
+          type: integer
+          minimum: 0
+          maximum: 16
+          description: The tile depth.
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: number }
+          description: "`[x0, y0, x1, y1]`, as on `POST /v1/viewport`."
+        tiles:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+          description: Depth-`zoom` Morton prefixes, in place of `bbox`, answered one frame each in this order with repeats removed.
+        layers:
+          description: The layers to answer for, as `POST /v1/viewport` names them. Absent or `[]` is none.
+          oneOf:
+            - type: array
+              items: { type: string }
+            - type: string
+              const: all
+        levels:
+          description: Which of each named layer's declared levels to answer for, as `POST /v1/viewport` names them. Absent follows each layer's declared zoom ranges.
+          oneOf:
+            - type: array
+              items: { type: integer, minimum: 0 }
+            - type: string
+              const: all
+        per_tile:
+          type: integer
+          minimum: 0
+          description: The most artifacts one level serves in one tile, at most `selection.max_artifacts_per_tile`.
+        computed:
+          description: Which of each layer's declared `centroid` and `box` to serve. Absent is each layer's declaration, and `[]` is none, the artifacts still served and counted. It narrows and cannot widen. Any other word is `422`; a shape is read by `tessera_id`.
+          type: array
+          items:
+            type: string
+            enum: [centroid, box]
+        filters:
+          description: Answered as each row's `matched` bit, inside its tile. It changes nothing else.
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
+        highlight:
+          description: Answered, with `filters`, as each row's `highlighted` bit, inside its tile.
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
+        pin:
+          $ref: "#/components/schemas/Pin"
+        budget:
+          type: integer
+          minimum: 0
+          description: The most artifacts the treed frame holds, met by serving ancestors in place of their descendants; without effect on any other layer. Unbounded when absent.
 
     BrowseRequest:
       type: object
@@ -5200,6 +5356,15 @@ components:
         q:
           type: string
           description: Only artifacts whose key, or first served text content, contains this, ignoring case. Not with `parent`.
+        ids:
+          type: array
+          items:
+            oneOf:
+              - type: integer
+                minimum: 0
+              - type: string
+                pattern: "^[0-9]+$"
+          description: "`tessera_id`s. Only the artifacts of `layer` they name that this principal is served. An identifier this principal is not served, and one naming nothing in the layer, have no row and are one answer."
         filters:
           $ref: "#/components/schemas/FilterExpr"
         keep_unmatched:
@@ -6795,7 +6960,7 @@ components:
       type: object
       additionalProperties: false
       description: The `GET /control/status` document. Counters count from the process's start; gauges are read when the request is answered. Byte figures are bytes and times are in the unit their name gives.
-      required: [entity_id_high_water, publication, partitions, compute, bulk, write_executor, ingest, limits, segments, overlay, compaction, fragmentation, row_projection_cache, projection_builds_by_route, fragment_cache, sessions, masked_count_cache, region_cache, derived_cache, suggest_sets, occupancy, heap]
+      required: [entity_id_high_water, publication, partitions, compute, bulk, artifacts, write_executor, ingest, limits, segments, overlay, compaction, fragmentation, row_projection_cache, projection_builds_by_route, fragment_cache, sessions, masked_count_cache, region_cache, derived_cache, suggest_sets, occupancy, heap]
       properties:
         entity_id_high_water:
           type: integer
@@ -6876,6 +7041,28 @@ components:
             shed_total:
               type: integer
               minimum: 0
+        artifacts:
+          type: object
+          additionalProperties: false
+          required: [admission, queue, in_flight, waiting, shed_total]
+          description: The admission limit `POST /v1/artifacts/viewport` runs under, `serve.artifact_admission`, as many waiting as running. A response holds its slot until its last tile.
+          properties:
+            admission:
+              type: integer
+              minimum: 0
+            queue:
+              type: integer
+              minimum: 0
+            in_flight:
+              type: integer
+              minimum: 0
+            waiting:
+              type: integer
+              minimum: 0
+            shed_total:
+              type: integer
+              minimum: 0
+              description: Requests this limit answered `429`.
         write_executor:
           $ref: "#/components/schemas/WriteExecutorStatus"
         ingest:

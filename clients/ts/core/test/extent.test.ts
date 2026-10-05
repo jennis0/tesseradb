@@ -3,8 +3,7 @@ import {TesseraClient} from '../src/client.js';
 import {GRID32, gridToWorld, WORLD_SIZE} from '../src/coords.js';
 import {outlineOf} from '../../deck/src/layer.js';
 import {createStore} from '../src/store.js';
-import {artifactBudgetFor} from '../src/artifactBudget.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, view} from './support.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, tileAnswers, view} from './support.js';
 
 /**
  * `extentOf` reads the served `box` in wire units, 32 bits per axis as `code`, and the outlines
@@ -26,7 +25,7 @@ const FAR = artifact(7n, {
   box: [GRID32 * 0.75, GRID32 * 0.75, GRID32 - 1, GRID32 - 1]
 });
 
-const reply = () => response(servedResult(1, [tile(0n, 10n)], {artifacts: [FAR]}));
+const reply = () => response(servedResult(1, [tile(0n, 10n)]));
 
 describe('extentOf reads the wire box in 32-bit grid units, as the outlines do', () => {
   it('fits an artifact at the far corner inside the corpus extent, and agrees with outlineOf', async () => {
@@ -35,12 +34,13 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     const client = {
       meta: async () => META,
       viewport: vi.fn(async () => reply()),
+      viewportArtifacts: vi.fn(tileAnswers(() => [FAR])),
       item: async () => ({fields: {}}),
       artifact: async () => ({layer: 'clusters/a', key: 'far', maskedCount: 10n}),
       categories: async () => [],
       close: () => {}
     } as unknown as TesseraClient;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 12}});
     store.setLayers(['clusters/a']);
     await clock.advance(1);
     store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
@@ -48,13 +48,15 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     scheduler.flush();
     await clock.advance(600);
     expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([7n]);
-    // Both asks, the channel's `k = 0` and the point path's, carry the view's artifact budget.
-    const asks = (client.viewport as unknown as {mock: {calls: [string, {k?: number; layers?: string[]; artifactBudget?: number}][]}}).mock.calls.map((c) => c[1]);
-    const channel = asks.filter((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.length > 0);
-    const points = asks.filter((r) => r.k !== 0);
-    expect(channel.length).toBeGreaterThan(0);
+    // The channel asks with the quota the store was given; the point path names the layer for its
+    // tag, and no budget, since none was given.
+    const tiles = (client.viewportArtifacts as unknown as {mock: {calls: [string, {perTile: number; layers?: string[]}][]}}).mock.calls.map((c) => c[1]);
+    expect(tiles.length).toBeGreaterThan(0);
+    for (const r of tiles) expect(r).toMatchObject({perTile: 12, layers: ['clusters/a']});
+    const points = (client.viewport as unknown as {mock: {calls: [string, {k?: number; layers?: string[]; artifactBudget?: number}][]}}).mock.calls.map((c) => c[1]).filter((r) => r.k !== 0);
     expect(points.length).toBeGreaterThan(0);
-    for (const r of [...channel, ...points]) expect(r.artifactBudget).toBe(artifactBudgetFor(Math.log2(800 / 512)));
+    for (const r of points) expect(r).toMatchObject({layers: ['clusters/a']});
+    for (const r of points) expect('artifactBudget' in r).toBe(false);
 
     const extent = store.extentOf(7n)!;
     expect(extent).not.toBeNull();

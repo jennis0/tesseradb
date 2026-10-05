@@ -574,6 +574,8 @@ export type Meta = {
     thetaTargetMarks: number;
     /** The largest `underlayOffset` a viewport request may ask for. */
     maxUnderlayOffset: number;
+    /** The largest `perTile` a {@link TesseraClient.viewportArtifacts} request may name. */
+    maxArtifactsPerTile: number;
     /**
      * The page size, and the largest one, of {@link TesseraClient.categories}. A page shorter than
      * this means the value set ended.
@@ -749,8 +751,8 @@ export type ViewportRequest = {
   tiles?: bigint[];
   /**
    * The most points each tile serves. Defaults to `selection.kMaxMarks`, and is capped at the
-   * smaller of `selection.maxK` and `selection.kMaxMarks`. `0` asks for counts and artifacts with
-   * no points. Do not decrease it as the view zooms in, or points already drawn drop out.
+   * smaller of `selection.maxK` and `selection.kMaxMarks`. `0` asks for the counts with no
+   * points. Do not decrease it as the view zooms in, or points already drawn drop out.
    */
   k?: number;
   /**
@@ -768,15 +770,15 @@ export type ViewportRequest = {
   stamp?: string | null;
   /**
    * The filter, or `null` for none. It narrows which points are served and each tile's `matched`
-   * count; `visible`, which artifacts are served and their `maskedCount` do not change. The
+   * count; `visible` does not change. The
    * response's `identityKey` does not change with the filter either, so a client holding points
    * from one filter drops them itself when the filter changes.
    */
   filters?: FilterExpr | null;
   /**
    * A second expression in the grammar of `filters`, or `null` for none. It does not change which
-   * points are served. It adds a `highlighted` count to each tile, a bit to each point and a bit to
-   * each artifact, each answering `all_of[filters, highlight]`. Several highlights are one
+   * points are served. It adds a `highlighted` count to each tile and a bit to each point, each
+   * answering `all_of[filters, highlight]`. Several highlights are one
    * expression under `any_of` or `all_of`.
    */
   highlight?: FilterExpr | null;
@@ -793,50 +795,80 @@ export type ViewportRequest = {
    */
   pointRows?: 'full' | 'highlight' | readonly string[];
   /**
-   * Which annotation layers to serve artifacts for. Omitted or `[]` is none; `'all'` is every
-   * layer this principal reaches; an array is the named layers this principal reaches. A name it
-   * cannot reach is ignored, as an unknown name is. It also decides which membership columns the
-   * points carry.
+   * The annotation layers whose artifacts tag the points: each named layer this principal reaches
+   * adds a membership column ({@link ViewportResult.membership}). Omitted or `[]` is none; `'all'`
+   * is every layer this principal reaches. A name it cannot reach is ignored, as an unknown name
+   * is. The artifacts themselves come from {@link TesseraClient.viewportArtifacts}.
    */
   layers?: string[] | 'all';
   /**
-   * Which declared levels of each named layer to serve. Omitted serves the levels whose `zoom`
-   * range covers the request's `zoom`, or every level where no level declares a range. `'all'` is
-   * every level, `[]` is none, and an array is those levels. A layer with no levels ignores it. A
-   * level a layer does not hold is left out of the answer and is not refused.
+   * Which declared levels of each named layer tag the points. Omitted follows the levels whose
+   * `zoom` range covers the request's `zoom`, or every level where no level declares a range.
+   * `'all'` is every level, `[]` is none, and an array is those levels. A layer with no levels
+   * ignores it. A level a layer does not hold is left out and is not refused.
    */
   levels?: number[] | 'all';
   /**
-   * The most artifacts to serve. The server meets it by serving ancestors in place of their
-   * descendants, and does not drop artifacts to meet it. It applies to the treed kinds (`nested`,
-   * `dag`); a flat layer has no ancestors and ignores it. Unbounded when omitted.
+   * The most artifacts a `nested` or `dag` layer tags with. The server meets it by tagging with
+   * ancestors in place of their descendants. Any other layer ignores it. Unbounded when omitted.
    */
   artifactBudget?: number;
-  /**
-   * Which declared geometry each artifact carries: any of `'centroid'`, `'box'` and `'shape'`.
-   * Omitted is each layer's declaration; an array is intersected with it, and `[]` is none. It
-   * never adds a property a layer does not declare. A derived shape is computed per artifact per
-   * request, so a client drawing one outline leaves `'shape'` out here and fetches that one with
-   * {@link TesseraClient.artifact}.
-   */
-  computed?: ComputedProperty[];
-  /**
-   * Which columns each served artifact carries. `'full'`, the default, is every column.
-   * `'identity'` serves the same artifacts as {@link ArtifactIdentity} rows in
-   * {@link ViewportResult.artifactsIdentity}, for a client that already holds the rest. The
-   * artifacts served, their `matched` and `highlighted` bits and their `rung` are the same under
-   * either value.
-   */
-  artifactRows?: 'full' | 'identity';
 };
 
 /**
- * The geometries a viewport request may ask for. `shape` is the layer's one drawn outline, of
- * whichever kind {@link Layer.shape} names: a hull, a membership shape or an authored one.
+ * The body of `POST /v1/artifacts/viewport`, as {@link TesseraClient.viewportArtifacts} takes it:
+ * the artifacts of the named layers in each tile of a region. Send exactly one of `bbox` and
+ * `tiles`. A field left unset is not sent, so the server's default applies.
+ *
+ * @category Requests and responses
+ */
+export type ViewportArtifactsRequest = {
+  /** A view id from {@link Meta.views}. An unknown view, or one this principal cannot reach, is a `404`. */
+  view: string;
+  /** The tile depth to answer at, `0` to `16`. */
+  zoom: number;
+  /** The region, as {@link ViewportRequest.bbox} names it. */
+  bbox?: [number, number, number, number];
+  /**
+   * The depth-`zoom` tiles to answer for, as Morton prefixes, in place of `bbox`. Each is answered
+   * by one frame, in the order given, with repeats removed.
+   */
+  tiles?: bigint[];
+  /** The layers to answer for, as {@link ViewportRequest.layers} names them. Omitted or `[]` is none. */
+  layers?: string[] | 'all';
+  /** Which levels of each named layer to answer for, as {@link ViewportRequest.levels} names them. */
+  levels?: number[] | 'all';
+  /**
+   * The most artifacts one level serves in one tile, largest first. Required, and at most
+   * `selection.maxArtifactsPerTile` from {@link TesseraClient.meta}; over it the request is a `422`.
+   */
+  perTile: number;
+  /**
+   * Which declared geometry each artifact carries: any of `'centroid'` and `'box'`. Omitted is each
+   * layer's declaration; an array is intersected with it, and `[]` is none. A shape is read by
+   * identifier with {@link TesseraClient.artifact}.
+   */
+  computed?: ComputedProperty[];
+  /** Answered as each artifact's {@link Artifact.matched}, inside its tile. It changes nothing else. */
+  filters?: FilterExpr | null;
+  /** Answered, with `filters`, as each artifact's {@link Artifact.highlighted}, inside its tile. */
+  highlight?: FilterExpr | null;
+  /** As {@link ViewportRequest.stamp}. */
+  stamp?: string | null;
+  /**
+   * The most artifacts the treed frame holds, met by serving ancestors in place of their
+   * descendants. It applies to the `nested` and `dag` layers named; unbounded when omitted.
+   */
+  budget?: number;
+};
+
+/**
+ * The geometries an artifacts request may ask for. An artifact's drawn outline is read by
+ * identifier, with {@link TesseraClient.artifact}.
  *
  * @category Meta
  */
-export type ComputedProperty = 'centroid' | 'box' | 'shape';
+export type ComputedProperty = 'centroid' | 'box';
 
 /**
  * The kinds of a layer's drawn outline: `derived`, the hull of the members this principal can
@@ -896,11 +928,12 @@ export type SubCell = {
 };
 
 /**
- * One annotation artifact (a cluster, a boundary, a topic) as a viewport serves it.
+ * One annotation artifact (a cluster, a boundary, a topic) as an artifacts frame serves it.
  *
  * `maskedCount` is how many of the artifact's members this principal can see. It is not the
  * artifact's size, and two principals can get different numbers for the same `tesseraId`. It
- * counts members out of view too, so it does not change as the map moves.
+ * counts members out of view too, so it does not change as the map moves, and an artifact served
+ * in several tiles carries the same figures in each.
  *
  * An artifact withheld from this principal is absent, and nothing in the response shows that it
  * exists.
@@ -926,13 +959,6 @@ export type Artifact = {
   /** The bounding box of the members this principal can see, `[minX, minY, maxX, maxY]` in 32-bit grid units; `null` as for `centroid`. */
   box: [number, number, number, number] | null;
   /**
-   * The artifact's drawn outline ({@link Shape}), of the kind {@link Layer.shape} names. `null`
-   * where the layer draws none or the request's `computed` left it out. In a derived hull, each
-   * separate group of visible members is its own part, and a group of one or two members is a ring
-   * of one or two vertices. Two parts may overlap.
-   */
-  shape: Shape | null;
-  /**
    * The publisher's supplied content (label text, a name, a polygon), one entry per type in the
    * layer's {@link Layer.suppliedContent}. Empty where the layer declares none. Where an artifact
    * has several ranked descriptions, this is the one this principal qualifies for, so two
@@ -940,7 +966,7 @@ export type Artifact = {
    */
   content: string[];
   /**
-   * The artifact's parents that are also in this response, ascending by `tesseraId`. A tree gives
+   * The artifact's parents that are also in this frame, ascending by `tesseraId`. A tree gives
    * at most one; a `dag` layer may give several, and the first is the same one every time. Empty
    * for a root, for a flat artifact and for one whose parent this principal was not served; the
    * three are not told apart. Treat an artifact with no parent here as a root.
@@ -948,52 +974,31 @@ export type Artifact = {
   parentIds: bigint[];
   /**
    * The level to draw the artifact at: its declared level on a `stacked` or `tiered` layer, its
-   * depth among this response's parent links on a `nested` or `dag` layer (a root reads `0`), and
+   * depth among the treed frame's parent links on a `nested` or `dag` layer (a root reads `0`), and
    * `0` on a flat layer. Draw by this value; do not derive it from `parentIds`.
    */
   rung: number;
   /**
-   * Whether a member this principal can see, inside the requested tiles, satisfies the request's
-   * filter. `null` where the request carried no filter. A filter changes only this field: which
-   * artifacts are served, their counts and their geometry stay the same. A member off screen does
-   * not count until the view covers it. Do not derive it from the points held, which are a sample.
+   * Whether a member this principal can see, inside the frame's tile (the requested tiles, in the
+   * treed frame), satisfies the request's filter. `null` where the request carried no filter. A
+   * filter changes only this field: which artifacts are served, their counts and their geometry
+   * stay the same. Do not derive it from the points held, which are a sample.
    */
   matched: boolean | null;
   /**
    * `matched` for `all_of[filters, highlight]`: whether a member this principal can see, inside the
-   * requested tiles, satisfies both. `null` where the request carried no `highlight`. The cautions
+   * same tiles, satisfies both. `null` where the request carried no `highlight`. The cautions
    * on `matched` apply.
    */
   highlighted: boolean | null;
   /**
-   * The `tesseraId` of the artifact in this response that this one attaches to, as a topic label
-   * attaches to its cluster; `null` where it attaches to nothing. The target is always in the same
-   * response: an artifact whose target is not served is not served either. An attached artifact's
+   * The `tesseraId` of the artifact this one attaches to, as a topic label attaches to its
+   * cluster; `null` where it attaches to nothing. The target is in the same frame or in the
+   * response's treed frame: an artifact whose target is not served is not served either. An attached artifact's
    * `matched` and `highlighted` are its target's. Its `maskedCount` counts its own members, or its
    * target's where it declares none, and is not the number to show beside a label.
    */
   target: bigint | null;
-};
-
-/**
- * One artifact row in the identity projection (`artifactRows: 'identity'`). The rows, and their
- * `rung`, `matched` and `highlighted` values, are those the full answer to the same request would
- * carry; the other columns are left out. A client joins each row to what it holds by
- * `(layer, tesseraId)`, and asks again with `'full'` for any row it cannot resolve.
- *
- * @category Requests and responses
- */
-export type ArtifactIdentity = {
-  /** The name of the layer the artifact belongs to. */
-  layer: string;
-  /** The artifact's `tessera_id`. */
-  tesseraId: bigint;
-  /** The level to draw the artifact at, as on {@link Artifact}. */
-  rung: number;
-  /** As {@link Artifact.matched}; `null` with no filter. */
-  matched: boolean | null;
-  /** As {@link Artifact.highlighted}; `null` with no highlight. */
-  highlighted: boolean | null;
 };
 
 /**
@@ -1025,10 +1030,10 @@ export type ViewportResult = {
   /** The `render` columns the request's `pointRows` named, keyed by column name. */
   scalars: Record<string, ScalarColumn>;
   /**
-   * One column per layer that served artifacts, keyed by layer name. For point `i`, `index[i]` is
-   * `0` where the point is under no served artifact of the layer, and otherwise `1 + d`, where
-   * `ids[d]` is the `tessera_id` of the deepest served artifact holding it. Every such id is an
-   * artifact this response served. Empty when the response served no artifacts.
+   * One column per layer the request named that tags some point, keyed by layer name. For point
+   * `i`, `index[i]` is `0` where the point is under no artifact of the layer this principal is
+   * served, and otherwise `1 + d`, where `ids[d]` is the `tessera_id` of the deepest such artifact
+   * holding it. {@link TesseraClient.artifacts} with `ids` reads those artifacts.
    */
   membership: Record<string, MembershipColumn>;
   /**
@@ -1045,17 +1050,6 @@ export type ViewportResult = {
   pointsProjection: 'full' | 'highlight';
   /** The underlay's cells, where the request set `underlayOffset`; `null` otherwise. */
   subCells: SubCell[] | null;
-  /**
-   * The artifacts served; empty when none were, or when the response used the identity
-   * projection. The response does not say why none were served: no layer asked for or reachable,
-   * none in view, or none qualifying are one answer.
-   */
-  artifacts: Artifact[];
-  /**
-   * The artifact rows when the request set `artifactRows: 'identity'` and some artifact was
-   * served; `null` otherwise. When this is set, `artifacts` is empty.
-   */
-  artifactsIdentity: ArtifactIdentity[] | null;
 };
 
 /**
@@ -1065,8 +1059,8 @@ export type ViewportResult = {
  */
 export type MembershipColumn = {
   /**
-   * Per point, `0` for no served artifact, otherwise one more than the position in `ids` of the
-   * artifact holding the point. A `Uint16Array` when there are at most 65,535 points.
+   * Per point, `0` for no artifact, otherwise one more than the position in `ids` of the artifact
+   * holding the point. A `Uint16Array` when there are at most 65,535 points.
    */
   index: Uint16Array | Uint32Array;
   /** The distinct artifact `tessera_id`s the column names, in the order first seen. */
@@ -1137,14 +1131,14 @@ export type Timings = {
  * One points frame of a streamed viewport response, handed to a {@link PartSink} as it arrives.
  *
  * A part holds whole tiles: `result.tiles` is the run of tiles its points cover, in the
- * response's tile order. Its `subCells` is `null`, and its `artifacts` are the whole response's.
+ * response's tile order. Its `subCells` is `null`.
  * A part carries the response's keys because it arrives before the response resolves, so it can
  * be stored under the right principal and matched to the request it answers.
  *
  * @category Requests and responses
  */
 export type ViewportPart = {
-  /** This frame's points, with the tiles they cover and the response's artifacts. */
+  /** This frame's points, with the tiles they cover. */
   result: ViewportResult;
   /** As {@link ViewportResponse.identityKey}. */
   identityKey: string;
@@ -1159,7 +1153,7 @@ export type ViewportPart = {
 /**
  * A viewport response's counts, handed to a {@link CountsSink} once the tiles frame has landed,
  * and the sub-cells frame where the request set `underlayOffset`. The server sends them first, so
- * they arrive before any artifact or point.
+ * they arrive before any point.
  *
  * @category Requests and responses
  */
@@ -1235,6 +1229,55 @@ export type ViewportResponse = {
    */
   stale: boolean;
   /** The verdict on the request's `region` leaves (`x-tessera-region`); `null` when the request carried none. */
+  region: RegionVerdict | null;
+  /** The size of the response body, in bytes. */
+  bytes: number;
+};
+
+/**
+ * One artifacts frame of a `POST /v1/artifacts/viewport` response, handed to the `onTile` sink of
+ * {@link TesseraClient.viewportArtifacts} as it arrives.
+ *
+ * @category Requests and responses
+ */
+export type ViewportArtifactsFrame = {
+  /**
+   * Whether this is the treed frame: the `nested` and `dag` layers' artifacts over every requested
+   * tile, cut to the request's `budget`. It comes first, and is absent where it would hold none.
+   */
+  treed: boolean;
+  /**
+   * The tile this frame answers, as its Morton prefix at the request's `zoom`; `null` for the
+   * treed frame. A tile with no artifact is a frame of no rows, and a `bbox` request's frame of no
+   * rows does not name its tile, so it is `null` there too.
+   */
+  tile: bigint | null;
+  /**
+   * The artifacts of each named layer and level that hold a member this principal can see inside
+   * the tile, at most `perTile` per level, largest first: by `maskedCount`, then by `tesseraId`.
+   */
+  artifacts: Artifact[];
+};
+
+/**
+ * A `POST /v1/artifacts/viewport` response, as {@link TesseraClient.viewportArtifacts} returns it.
+ *
+ * @category Requests and responses
+ */
+export type ViewportArtifactsResponse = {
+  /** Every frame, in wire order: the treed frame where there is one, then one per tile. */
+  frames: ViewportArtifactsFrame[];
+  /** The server's timings. `stageNs` is always `null`: this route reports none. */
+  timings: Timings;
+  /** As {@link ViewportResponse.identityKey}. */
+  identityKey: string;
+  /** As {@link ViewportResponse.contentKey}. */
+  contentKey: string;
+  /** As {@link ViewportResponse.pin}. */
+  pin: string | null;
+  /** As {@link ViewportResponse.stale}. */
+  stale: boolean;
+  /** As {@link ViewportResponse.region}. */
   region: RegionVerdict | null;
   /** The size of the response body, in bytes. */
   bytes: number;
@@ -1509,6 +1552,11 @@ export type ArtifactsRequest = {
   parent?: bigint;
   /** Only the artifacts whose key, or first served text content, contains this, ignoring case. A `422` together with `parent`. */
   q?: string;
+  /**
+   * Only the artifacts of `layer` these `tessera_id`s name, such as a point's tags. One this
+   * principal is not served has no row, as one naming nothing does.
+   */
+  ids?: bigint[];
   /** Only artifacts with a visible member matching it, and a `matched_count` column. */
   filters?: FilterExpr;
   /** With `filters`, every served artifact, one with no matching member having a `matched_count` of zero. */

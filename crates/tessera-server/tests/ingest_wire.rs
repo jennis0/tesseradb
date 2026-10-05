@@ -361,7 +361,10 @@ async fn viewport(
     .await;
     let frames = decode_viewport_frames(&resp.bytes().await.unwrap());
     let ids = frames.points.iter().map(|(id, _)| *id).collect();
-    (ids, frames.artifacts.unwrap_or_default())
+    let artifacts = post_viewport_artifacts(server, token, &artifacts_request(request)).await;
+    assert_eq!(artifacts.status().as_u16(), 200);
+    let artifacts = decode_artifact_frames(&artifacts.bytes().await.unwrap()).artifacts;
+    (ids, artifacts.unwrap_or_default())
 }
 
 /// The drill-down of one item, with the two identifiers that differ by construction removed,

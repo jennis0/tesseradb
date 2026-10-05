@@ -8,8 +8,7 @@
 //! GeoNames bundle with 256 KiB blocks** (`admin/hierarchy`, zoom 7 over the eastern United
 //! States, nothing cold): 2 518 served artifacts at level 2 cost 408 ms against 1.3 ms for the
 //! same viewport with no layer, and 23 821 at level 3 cost 3.75 s — ≈163 µs per artifact, all of
-//! it this read, and unchanged under `artifact_rows: "identity"`, which materialises nothing but
-//! still had to prove the content was there.
+//! it this read, even where nothing is materialised and only the content's presence is proved.
 //!
 //! So a level's contents are gathered in one pass over the blob — block by block, in entity order,
 //! each block decompressed once ([`tessera_filter::RecordStack::for_each_row_in`]) — and held.

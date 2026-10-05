@@ -695,6 +695,12 @@ pub fn generous_bulk_gate() -> ComputeGate {
     ComputeGate::for_bulk_reads(16)
 }
 
+/// The artifact viewport's lane every mount takes: sixteen at once and as many waiting, each for
+/// at most 250 ms.
+pub fn generous_artifact_gate() -> ComputeGate {
+    ComputeGate::for_artifacts(16, 250)
+}
+
 /// A server whose two admission gates and `[serve]` limits the caller chooses: the bulk-read tests
 /// set the lane, the page ceilings, the response budgets and the stream budgets through `tune`.
 pub async fn spawn_server_with_bulk_reads(
@@ -1038,6 +1044,7 @@ async fn mount_server_with_flush(
         compute_gate,
         password_gate: generous_password_gate(),
         bulk_gate,
+        artifact_gate: generous_artifact_gate(),
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         catalogue,
         oidc: test_verifier(),
@@ -1587,12 +1594,6 @@ pub struct DecodedViewport {
     pub points: Vec<PointRow>,
     /// `(cell, count)`, or `None` where no underlay was asked for.
     pub sub_cells: Option<Vec<(u64, u64)>>,
-    /// The artifacts frame in the full projection. `None` where the body carried no artifacts
-    /// frame or carried the identity projection, which is in
-    /// [`DecodedViewport::artifacts_identity`]; `Some(vec![])` is a frame with no rows.
-    pub artifacts: Option<Vec<ArtifactRow>>,
-    /// The artifacts frame in the identity projection (`artifact_rows: "identity"`).
-    pub artifacts_identity: Option<Vec<ArtifactIdentityRow>>,
     /// The trailer, parsed. The decoder asserts its key set.
     pub trailer: serde_json::Value,
     /// How many points frames the body carried.
@@ -1601,7 +1602,7 @@ pub struct DecodedViewport {
     pub deterministic_bytes: Vec<u8>,
 }
 
-/// One row of the artifacts frame in the full projection.
+/// One row of an artifacts frame.
 ///
 /// `PartialEq` and not `Eq`: a centroid is a mean and travels as `f64`.
 #[derive(Debug, Clone, PartialEq)]
@@ -1615,33 +1616,23 @@ pub struct ArtifactRow {
     /// is *the layer declares none* and never *withheld*.
     pub centroid: Option<[f64; 2]>,
     pub bbox: Option<[u32; 4]>,
-    /// The artifact's drawn geometry as parts, then rings, then vertices. `None` where no served
-    /// layer declares one or this row has none.
-    pub shape: Option<Vec<Vec<Vec<[u32; 2]>>>>,
     /// The artifact's supplied content, one entry per kind its layer declares.
     pub content: Vec<String>,
+    /// Its parents that are rows of the same frame, ascending.
+    pub parent_ids: Vec<u64>,
     /// The rung this artifact is drawn at: its level on a levelled layer, its depth in this
     /// response on a treed one, 0 on a flat one.
     pub rung: u32,
-    /// Whether a member this principal may see, inside the requested tiles, matched the request's
+    /// Whether a member this principal may see, inside the frame's tile, matched the request's
     /// filter. `None` where the request carried none.
     pub matched: Option<bool>,
     /// The same bit for the filter and the highlight together.
     pub highlighted: Option<bool>,
-    /// The `tessera_id` of the artifact this row is attached to, a row of the same frame. `None`
-    /// for an artifact attached to nothing.
+    /// The `tessera_id` of the artifact this row is attached to, in the same frame or the frame
+    /// of treed layers. `None` for an artifact attached to nothing.
     pub target: Option<u64>,
-}
-
-/// The identity projection's four columns (`artifact_rows: "identity"`), read back by a test.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactIdentityRow {
-    pub layer: String,
-    pub tessera_id: u64,
-    pub rung: u32,
-    pub matched: Option<bool>,
-    /// The same bit for the filter and the highlight together.
-    pub highlighted: Option<bool>,
+    /// The tile whose visible members put the row in its frame; `None` for a treed layer's.
+    pub tile: Option<u32>,
 }
 
 fn str_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> arrow::array::StringArray {
@@ -1685,8 +1676,6 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     let mut served = Vec::new();
     let mut points = Vec::new();
     let mut sub_cells: Option<Vec<(u64, u64)>> = None;
-    let mut artifacts: Option<Vec<ArtifactRow>> = None;
-    let mut artifacts_identity: Option<Vec<ArtifactIdentityRow>> = None;
     let mut trailer: Option<serde_json::Value> = None;
     let mut point_frames = 0usize;
     let mut deterministic_end = 0usize;
@@ -1726,214 +1715,6 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                 }
                 deterministic_end = at + frame_len;
             }
-            tessera_wire::FRAME_ARTIFACTS => {
-                assert!(
-                    artifacts.is_none() && artifacts_identity.is_none(),
-                    "exactly one artifacts frame"
-                );
-                let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
-                // The identity projection has five columns; the full one has more.
-                let identity = reader.schema().fields().len() == 5;
-                for batch in reader {
-                    let batch = batch.unwrap();
-                    // `layer` is dictionary-encoded in both projections (u16 keys over utf8).
-                    let layer_at = |i: usize| -> String {
-                        let column = batch
-                            .column(0)
-                            .as_any()
-                            .downcast_ref::<arrow::array::DictionaryArray<
-                                arrow::datatypes::UInt16Type,
-                            >>()
-                            .expect("`layer` is dictionary-encoded, u16 keys over utf8");
-                        let values = column
-                            .values()
-                            .as_any()
-                            .downcast_ref::<arrow::array::StringArray>()
-                            .unwrap();
-                        values
-                            .value(column.key(i).expect("layer is never null"))
-                            .to_string()
-                    };
-                    let tessera_id = u64_col(&batch, 1);
-                    let u32_col_at = |col: usize, name: &str| {
-                        batch
-                            .column(col)
-                            .as_any()
-                            .downcast_ref::<arrow::array::UInt32Array>()
-                            .unwrap_or_else(|| panic!("`{name}` is a UInt32 at column {col}"))
-                            .clone()
-                    };
-                    let bool_at = |col: usize, i: usize, name: &str| {
-                        let column = batch
-                            .column(col)
-                            .as_any()
-                            .downcast_ref::<arrow::array::BooleanArray>()
-                            .unwrap_or_else(|| {
-                                panic!("`{name}` is a nullable Boolean at column {col}")
-                            });
-                        column.is_valid(i).then(|| column.value(i))
-                    };
-                    if identity {
-                        // (layer, tessera_id, rung, matched, highlighted), by position.
-                        let rows = artifacts_identity.get_or_insert_with(Vec::new);
-                        let rung = u32_col_at(2, "rung");
-                        for i in 0..batch.num_rows() {
-                            rows.push(ArtifactIdentityRow {
-                                layer: layer_at(i),
-                                tessera_id: tessera_id.value(i),
-                                rung: rung.value(i),
-                                matched: bool_at(3, i, "matched"),
-                                highlighted: bool_at(4, i, "highlighted"),
-                            });
-                        }
-                        continue;
-                    }
-                    let rows = artifacts.get_or_insert_with(Vec::new);
-                    let key = str_col(&batch, 2);
-                    let masked_count = u64_col(&batch, 3);
-                    let f64_at = |col: usize, i: usize| {
-                        let a = batch
-                            .column(col)
-                            .as_any()
-                            .downcast_ref::<arrow::array::Float64Array>()
-                            .unwrap();
-                        a.is_valid(i).then(|| a.value(i))
-                    };
-                    let u32_at = |col: usize, i: usize| {
-                        let a = batch
-                            .column(col)
-                            .as_any()
-                            .downcast_ref::<arrow::array::UInt32Array>()
-                            .unwrap();
-                        a.is_valid(i).then(|| a.value(i))
-                    };
-                    // The two shape columns follow the fixed columns, present only where a served
-                    // layer declares a drawn geometry.
-                    let shapes = batch.num_columns() > 16;
-                    if shapes {
-                        assert_eq!(
-                            batch.num_columns(),
-                            18,
-                            "shape_x and shape_y travel together"
-                        );
-                        assert_eq!(batch.schema().field(16).name(), "shape_x");
-                        assert_eq!(batch.schema().field(17).name(), "shape_y");
-                    }
-                    // One axis of the shape, as parts of rings.
-                    let shape_axis = |col: usize, i: usize| {
-                        let a = batch
-                            .column(col)
-                            .as_any()
-                            .downcast_ref::<arrow::array::ListArray>()
-                            .unwrap();
-                        a.is_valid(i).then(|| {
-                            let parts = a.value(i);
-                            let parts = parts
-                                .as_any()
-                                .downcast_ref::<arrow::array::ListArray>()
-                                .expect("shape_x/shape_y are a list of parts");
-                            (0..parts.len())
-                                .map(|p| {
-                                    let rings = parts.value(p);
-                                    let rings = rings
-                                        .as_any()
-                                        .downcast_ref::<arrow::array::ListArray>()
-                                        .expect("a part is a list of rings");
-                                    (0..rings.len())
-                                        .map(|r| {
-                                            let values = rings.value(r);
-                                            let values = values
-                                                .as_any()
-                                                .downcast_ref::<arrow::array::UInt32Array>()
-                                                .unwrap();
-                                            (0..values.len())
-                                                .map(|k| values.value(k))
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .collect::<Vec<_>>()
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                    };
-                    for i in 0..batch.num_rows() {
-                        let shape = if !shapes {
-                            None
-                        } else {
-                            match (shape_axis(16, i), shape_axis(17, i)) {
-                                (Some(xs), Some(ys)) => {
-                                    assert_eq!(xs.len(), ys.len(), "the axes disagree on parts");
-                                    Some(
-                                        xs.into_iter()
-                                            .zip(ys)
-                                            .map(|(px, py)| {
-                                                assert_eq!(px.len(), py.len(), "rings differ");
-                                                px.into_iter()
-                                                    .zip(py)
-                                                    .map(|(rx, ry)| {
-                                                        assert_eq!(rx.len(), ry.len());
-                                                        rx.into_iter()
-                                                            .zip(ry)
-                                                            .map(|(x, y)| [x, y])
-                                                            .collect::<Vec<_>>()
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                            })
-                                            .collect(),
-                                    )
-                                }
-                                (None, None) => None,
-                                _ => panic!("a shape with one axis and not the other"),
-                            }
-                        };
-                        rows.push(ArtifactRow {
-                            layer: layer_at(i),
-                            tessera_id: tessera_id.value(i),
-                            key: key.is_valid(i).then(|| key.value(i).to_string()),
-                            masked_count: masked_count.value(i),
-                            centroid: f64_at(4, i)
-                                .map(|x| [x, f64_at(5, i).expect("both axes or neither")]),
-                            bbox: u32_at(6, i).map(|min_x| {
-                                [
-                                    min_x,
-                                    u32_at(7, i).unwrap(),
-                                    u32_at(8, i).unwrap(),
-                                    u32_at(9, i).unwrap(),
-                                ]
-                            }),
-                            shape,
-                            content: {
-                                let a = batch
-                                    .column(10)
-                                    .as_any()
-                                    .downcast_ref::<arrow::array::ListArray>()
-                                    .expect("content is a list of utf8");
-                                let values = a.value(i);
-                                let values = values
-                                    .as_any()
-                                    .downcast_ref::<arrow::array::StringArray>()
-                                    .expect("a content is utf8");
-                                (0..values.len())
-                                    .map(|k| values.value(k).to_string())
-                                    .collect()
-                            },
-                            // Read by position, so a column inserted ahead fails the test.
-                            rung: u32_col_at(12, "rung").value(i),
-                            // Null where the request carried no filter.
-                            matched: bool_at(13, i, "matched"),
-                            highlighted: bool_at(14, i, "highlighted"),
-                            target: {
-                                let a = batch
-                                    .column(15)
-                                    .as_any()
-                                    .downcast_ref::<arrow::array::UInt64Array>()
-                                    .expect("`target` is a nullable UInt64");
-                                a.is_valid(i).then(|| a.value(i))
-                            },
-                        });
-                    }
-                }
-                deterministic_end = at + frame_len;
-            }
             tessera_wire::FRAME_POINTS => {
                 point_frames += 1;
                 let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
@@ -1962,7 +1743,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                 );
                 trailer = Some(parsed);
             }
-            other => panic!("split_frames returned an unknown kind {other}"),
+            other => panic!("a viewport body carries no frame of kind {other}"),
         }
         at += frame_len;
     }
@@ -1991,12 +1772,193 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
         served,
         points,
         sub_cells,
-        artifacts,
-        artifacts_identity,
         trailer,
         point_frames,
         deterministic_bytes: bytes[..deterministic_end].to_vec(),
     }
+}
+
+/// One decoded `POST /v1/artifacts/viewport` body.
+pub struct DecodedArtifacts {
+    /// Each frame's tile and rows, in order: the treed frame first where there is one.
+    pub frames: Vec<(Option<u32>, Vec<ArtifactRow>)>,
+    /// Every artifact served anywhere in the body, once, with its filter and highlight bits taken
+    /// over every tile it was served in; `None` where the body served none.
+    pub artifacts: Option<Vec<ArtifactRow>>,
+    pub trailer: serde_json::Value,
+}
+
+/// Decode a complete `/v1/artifacts/viewport` body, failing the test unless every frame is an
+/// artifacts frame whose rows all name its one tile, the treed frame comes first and holds a row,
+/// and one trailer is last and counts the rows.
+pub fn decode_artifact_frames(bytes: &[u8]) -> DecodedArtifacts {
+    let frames = tessera_wire::split_frames(bytes).expect("well-formed frame sequence");
+    let (last, body) = frames.split_last().expect("a body ends in a trailer");
+    assert_eq!(last.0, tessera_wire::FRAME_TRAILER, "the trailer frame is last");
+    let trailer: serde_json::Value = serde_json::from_slice(last.1).unwrap();
+    let mut keys: Vec<&str> = trailer.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["arrow_serialise_ns", "frames", "rows", "stream_us"]);
+    let mut decoded = Vec::new();
+    for (index, (kind, payload)) in body.iter().enumerate() {
+        assert_eq!(*kind, tessera_wire::FRAME_ARTIFACTS, "frame {index} is an artifacts frame");
+        let rows = decode_artifact_rows(payload);
+        let tile = rows.first().map_or(Some(u32::MAX), |row| row.tile);
+        assert!(
+            rows.iter().all(|row| row.tile == tile),
+            "every row of a frame names its one tile"
+        );
+        if tile.is_none() {
+            assert_eq!(index, 0, "the treed frame comes first");
+        }
+        decoded.push((tile.filter(|_| !rows.is_empty()), rows));
+    }
+    assert_eq!(trailer["frames"].as_u64().unwrap(), decoded.len() as u64);
+    assert_eq!(
+        trailer["rows"].as_u64().unwrap(),
+        decoded.iter().map(|(_, rows)| rows.len() as u64).sum::<u64>()
+    );
+    let mut merged: Vec<ArtifactRow> = Vec::new();
+    for row in decoded.iter().flat_map(|(_, rows)| rows) {
+        match merged.iter_mut().find(|held| held.tessera_id == row.tessera_id) {
+            Some(held) => {
+                held.matched = held.matched.zip(row.matched).map(|(a, b)| a || b);
+                held.highlighted = held.highlighted.zip(row.highlighted).map(|(a, b)| a || b);
+            }
+            None => merged.push(ArtifactRow {
+                tile: None,
+                ..row.clone()
+            }),
+        }
+    }
+    DecodedArtifacts {
+        frames: decoded,
+        artifacts: (!merged.is_empty()).then_some(merged),
+        trailer,
+    }
+}
+
+/// The rows of one artifacts frame, every column read by position.
+pub fn decode_artifact_rows(payload: &[u8]) -> Vec<ArtifactRow> {
+    let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
+    assert_eq!(reader.schema().fields().len(), 17, "seventeen columns, no more");
+    assert_eq!(reader.schema().field(16).name(), "tile");
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch.unwrap();
+        let layer = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::UInt16Type>>()
+            .expect("`layer` is dictionary-encoded, u16 keys over utf8");
+        let layer_values = layer
+            .values()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        let tessera_id = u64_col(&batch, 1);
+        let key = str_col(&batch, 2);
+        let masked_count = u64_col(&batch, 3);
+        let f64_at = |col: usize, i: usize| {
+            let a = batch.column(col).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+            a.is_valid(i).then(|| a.value(i))
+        };
+        let u32_at = |col: usize, i: usize| {
+            let a = batch.column(col).as_any().downcast_ref::<arrow::array::UInt32Array>().unwrap();
+            a.is_valid(i).then(|| a.value(i))
+        };
+        let u64_at = |col: usize, i: usize| {
+            let a = batch.column(col).as_any().downcast_ref::<UInt64Array>().unwrap();
+            a.is_valid(i).then(|| a.value(i))
+        };
+        let bool_at = |col: usize, i: usize| {
+            let a = batch.column(col).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+            a.is_valid(i).then(|| a.value(i))
+        };
+        let list_at = |col: usize, i: usize| {
+            batch.column(col).as_any().downcast_ref::<arrow::array::ListArray>().unwrap().value(i)
+        };
+        for i in 0..batch.num_rows() {
+            let content = list_at(10, i);
+            let content = content.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+            let parents = list_at(11, i);
+            let parents = parents.as_any().downcast_ref::<UInt64Array>().unwrap();
+            rows.push(ArtifactRow {
+                layer: layer_values.value(layer.key(i).expect("layer is never null")).to_string(),
+                tessera_id: tessera_id.value(i),
+                key: key.is_valid(i).then(|| key.value(i).to_string()),
+                masked_count: masked_count.value(i),
+                centroid: f64_at(4, i).map(|x| [x, f64_at(5, i).expect("both axes or neither")]),
+                bbox: u32_at(6, i).map(|min_x| {
+                    [min_x, u32_at(7, i).unwrap(), u32_at(8, i).unwrap(), u32_at(9, i).unwrap()]
+                }),
+                content: (0..content.len()).map(|k| content.value(k).to_string()).collect(),
+                parent_ids: parents.values().to_vec(),
+                rung: u32_at(12, i).expect("rung is never null"),
+                matched: bool_at(13, i),
+                highlighted: bool_at(14, i),
+                target: u64_at(15, i),
+                tile: u32_at(16, i),
+            });
+        }
+    }
+    rows
+}
+
+/// A `/v1/viewport` body turned into the `/v1/artifacts/viewport` body asking for the same
+/// artifacts: every one per tile, its budget under the new name, and no point-only key.
+pub fn artifacts_request(mut viewport: serde_json::Value) -> serde_json::Value {
+    let body = viewport.as_object_mut().expect("a request body is an object");
+    for key in ["k", "point_rows", "underlay_offset", "artifact_rows"] {
+        body.remove(key);
+    }
+    if let Some(budget) = body.remove("artifact_budget") {
+        body.insert("budget".into(), budget);
+    }
+    if let Some(computed) = body.get_mut("computed").and_then(|c| c.as_array_mut()) {
+        computed.retain(|word| word != "shape");
+    }
+    body.entry("per_tile")
+        .or_insert(serde_json::json!(tessera_config::defaults::DEFAULT_MAX_ARTIFACTS_PER_TILE));
+    viewport
+}
+
+/// One artifact's drawn shape as `POST /v1/artifacts/{tessera_id}` serves it at depth `zoom`, as
+/// parts of rings of `[x, y]`; `None` where it serves none.
+pub async fn shape_by_id(
+    server: &TestServer,
+    token: &str,
+    view: &str,
+    tessera_id: u64,
+    zoom: u8,
+) -> Option<Vec<Vec<Vec<[u32; 2]>>>> {
+    let resp = server
+        .client
+        .post(server.viewer_url(&format!("/v1/artifacts/{tessera_id}")))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "view": view, "zoom": zoom }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    serde_json::from_value(body.get("shape")?.clone()).ok()
+}
+
+/// `POST /v1/artifacts/viewport` with `body` as it stands.
+pub async fn post_viewport_artifacts(
+    server: &TestServer,
+    token: &str,
+    body: &serde_json::Value,
+) -> reqwest::Response {
+    server
+        .client
+        .post(server.viewer_url("/v1/artifacts/viewport"))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .unwrap()
 }
 
 /// A viewport body's tiles as `(tile, visible, matched)` and points as `(tessera_id, code)`.

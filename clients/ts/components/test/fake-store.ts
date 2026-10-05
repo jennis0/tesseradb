@@ -34,6 +34,7 @@ export function meta(over: Partial<Meta> = {}): Meta {
       kMaxMarks: 500,
       maxK: 5000,
       thetaTargetMarks: 10,
+      maxArtifactsPerTile: 1000,
       maxUnderlayOffset: 0,
       maxCategoryValues: 1000,
       maxRegionVertices: 10_000,
