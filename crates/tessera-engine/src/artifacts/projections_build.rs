@@ -623,7 +623,8 @@ impl ArtifactProjections {
         if key.prefix != at.prefix || key.level_version > at.level_version {
             return None;
         }
-        Some((column.clone(), key.level_version < at.level_version))
+        // Renewed: each form that claims the column amends its copy apart from the others.
+        Some((column.clone().renewed(), key.level_version < at.level_version))
     }
 
     /// This level's containment partition, composing it if what is held is stale.

@@ -217,6 +217,7 @@ impl MaskedCounts {
             placed,
             sums,
             boxes,
+            ..
         } = accumulation;
         MaskedCounts {
             counts,
