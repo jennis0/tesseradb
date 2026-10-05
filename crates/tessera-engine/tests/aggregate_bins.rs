@@ -604,6 +604,9 @@ fn expected(edges: &[Val], items: &[&Item], reference: Option<&[&Item]>, column:
     out
 }
 
+/// Which items a filter admits, as the oracle reads it.
+type Keep<'a> = &'a dyn Fn(&Item) -> bool;
+
 const COLUMNS: [&str; 5] = ["score", "weight", "rank", "seen", "when"];
 
 // ---- the tests ------------------------------------------------------------------------------
@@ -622,7 +625,7 @@ fn bin_counts_are_the_oracles_and_the_edges_hold_still() {
         for column in COLUMNS {
             let groupings = [bins(column, 12, None)];
             let mut held: Option<Vec<Val>> = None;
-            let filters: [(&str, Option<FilterExpr>, &dyn Fn(&Item) -> bool); 3] = [
+            let filters: [(&str, Option<FilterExpr>, Keep); 3] = [
                 ("none", None, &|_| true),
                 ("kind", Some(fx.kind_is("b")), &|i| i.kind == "b"),
                 ("region", Some(bbox(area[0], area[1], area[2], area[3])), &|i| {
@@ -919,7 +922,7 @@ fn a_flushed_ingest_is_binned() {
             let item = Item {
                 source: 1_000_000 + i,
                 kind: "a",
-                score: (i % 4 != 0).then(|| 1_000.0 + i as f64),
+                score: (i % 4 != 0).then_some(1_000.0 + i as f64),
                 weight: Some(i as f32),
                 rank: Some(i as i32),
                 seen: Some(date(2030, 6, 1) + i as i64 * DAY),

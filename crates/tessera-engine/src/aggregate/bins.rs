@@ -799,57 +799,42 @@ fn readable_times(min: i64, max: i64, n: u32) -> Vec<i64> {
 /// The edges of `step`'s bins from the one holding `min` to the one holding `max`, where they
 /// number at most `n` and every edge is an `i64`.
 fn step_edges(step: Step, min: i64, max: i64, n: i128) -> Option<Vec<i64>> {
-    let (first, count, start): (i128, i128, Box<dyn Fn(i128) -> Option<i128>>) = match step {
-        Step::Fixed { width, offset } => {
-            let (width, offset) = (i128::from(width), i128::from(offset));
-            let first = (i128::from(min) - offset).div_euclid(width);
-            let last = (i128::from(max) - offset).div_euclid(width);
-            (
-                first,
-                last - first + 1,
-                Box::new(move |k| Some(k * width + offset)),
-            )
-        }
-        Step::Months(k) => {
-            let k = i128::from(k);
-            let month = |t: i64| {
-                let (year, month) = civil_from_days(t.div_euclid(DAY));
-                i128::from(year) * 12 + i128::from(month - 1)
-            };
-            let first = month(min).div_euclid(k);
-            let last = month(max).div_euclid(k);
-            (
-                first,
-                last - first + 1,
-                Box::new(move |i| {
-                    let index = i * k;
-                    let year = i64::try_from(index.div_euclid(12)).ok()?;
-                    let month = (index.rem_euclid(12) + 1) as i64;
-                    Some(i128::from(days_from_civil(year, month, 1)) * i128::from(DAY))
-                }),
-            )
-        }
-        Step::Years(k) => {
-            let k = i128::from(k);
-            let year = |t: i64| i128::from(civil_from_days(t.div_euclid(DAY)).0);
-            let first = year(min).div_euclid(k);
-            let last = year(max).div_euclid(k);
-            (
-                first,
-                last - first + 1,
-                Box::new(move |i| {
-                    let year = i64::try_from(i * k).ok()?;
-                    Some(i128::from(days_from_civil(year, 1, 1)) * i128::from(DAY))
-                }),
-            )
-        }
-    };
-    if count > n {
+    let (first, last) = (step_index(step, min), step_index(step, max));
+    if last - first + 1 > n {
         return None;
     }
-    (first..=first + count)
-        .map(|i| start(i).and_then(|edge| i64::try_from(edge).ok()))
+    (first..=last + 1)
+        .map(|k| step_start(step, k).and_then(|edge| i64::try_from(edge).ok()))
         .collect()
+}
+
+/// Which of `step`'s bins holds `t`, counted from the bin starting at the epoch, January of year 0
+/// or year 0.
+fn step_index(step: Step, t: i64) -> i128 {
+    match step {
+        Step::Fixed { width, offset } => (i128::from(t) - i128::from(offset)).div_euclid(i128::from(width)),
+        Step::Months(k) => {
+            let (year, month) = civil_from_days(t.div_euclid(DAY));
+            (i128::from(year) * 12 + i128::from(month - 1)).div_euclid(i128::from(k))
+        }
+        Step::Years(k) => i128::from(civil_from_days(t.div_euclid(DAY)).0).div_euclid(i128::from(k)),
+    }
+}
+
+/// Where `step`'s bin `k` starts, in microseconds.
+fn step_start(step: Step, k: i128) -> Option<i128> {
+    let day_of = |year: i128, month: i64| -> Option<i128> {
+        let year = i64::try_from(year).ok()?;
+        Some(i128::from(days_from_civil(year, month, 1)) * i128::from(DAY))
+    };
+    match step {
+        Step::Fixed { width, offset } => Some(k * i128::from(width) + i128::from(offset)),
+        Step::Months(m) => {
+            let index = k * i128::from(m);
+            day_of(index.div_euclid(12), (index.rem_euclid(12) + 1) as i64)
+        }
+        Step::Years(m) => day_of(k * i128::from(m), 1),
+    }
 }
 
 /// Days since 1970-01-01 of a date in the proleptic Gregorian calendar.

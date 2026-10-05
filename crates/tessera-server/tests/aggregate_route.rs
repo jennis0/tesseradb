@@ -1250,11 +1250,11 @@ async fn a_number_or_timestamp_field_is_counted_in_bins() {
             v >= lo && (v < hi || (b == last && v == hi))
         })
     };
-    let score = |e: u64| score_of(e);
-    let stamp = |e: u64| stamp_of(e).map(|t| t as f64);
-    let fields: [(&str, bool, &dyn Fn(u64) -> Option<f64>); 2] =
-        [("score", false, &score), ("stamp", true, &stamp)];
-    for (field, timestamps, value) in fields {
+    fn stamp(e: u64) -> Option<f64> {
+        stamp_of(e).map(|t| t as f64)
+    }
+    type ValueOf = fn(u64) -> Option<f64>;
+    for (field, timestamps, value) in [("score", false, score_of as ValueOf), ("stamp", true, stamp)] {
         let mut held = None;
         for filters in [json!(null), json!({ "archive": { "eq": "hep" } }), left_half()] {
             let mut body = json!({ "view": "s0", "reference": {},
