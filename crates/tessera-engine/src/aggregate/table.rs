@@ -777,7 +777,7 @@ impl Plan {
             ("none", Arc::new(UInt64Array::from(vec![figures.none]))),
             ("min", typed(field.kind(), &[edge(figures.min)])),
             ("max", typed(field.kind(), &[edge(figures.max)])),
-            ("mean", Arc::new(Float64Array::from(vec![figures.mean()]))),
+            ("mean", Arc::new(Float64Array::from(vec![figures.mean]))),
         ];
         let bytes = 6 * 8 + 1;
         let fields: Vec<ArrowField> = columns

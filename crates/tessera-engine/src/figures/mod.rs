@@ -49,6 +49,7 @@
 mod cache;
 mod counts;
 mod denied;
+mod exact;
 mod field;
 mod labels;
 mod persist;
@@ -71,7 +72,7 @@ use crate::Engine;
 
 pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity};
 pub use cache::{FiguresStats, DEFAULT_DISK_BYTES, DEFAULT_GIVE_WAY_MS};
-pub(crate) use field::{by_value, FieldFigures, FieldRead, FieldTally, Number};
+pub(crate) use field::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number};
 
 use cache::{
     Counters, DenyKey, FiguresKey, FragmentCounts, FragmentKey, LevelAddress, Tail, TailKey,
@@ -628,9 +629,7 @@ impl Engine {
         places: &[Placement<'_>],
     ) -> Result<Option<Arc<DenyCorrection>>> {
         let identity = served.mask_identity;
-        let mut denied = served.denied.clone();
-        denied.remove_range(column.base_rows()..);
-        let (deny_version, failing) = deny_version(served, column.base_rows(), &subtracted);
+        let (deny_version, failing) = deny_version(served, served.denied, &subtracted);
         let key = DenyKey {
             terms: identity.terms,
             identity: identity.fragment_identity,
@@ -645,6 +644,8 @@ impl Engine {
         if let tessera_cache::Peek::Ready(held) = self.figures.denies.peek(&key) {
             return Ok(Some(held));
         }
+        let mut denied = served.denied.clone();
+        denied.remove_range(column.base_rows()..);
         let labels = match subtracted.intersect(&denied) {
             false => None,
             true => {
@@ -957,17 +958,16 @@ fn write_labels(
     persist::hold_under(root, bound.load(Ordering::Relaxed));
 }
 
-/// What a correction for `subtracted`, the mask's `minus` below `base_rows`, is a function of
-/// beside its fragment: the view's deny version, and the overlay's version where the mask also
-/// subtracts buffered rows the viewer fails below the base, which no deny version follows.
+/// What a correction for `subtracted`, the mask's `minus` below the base, is a function of beside
+/// its fragment: the view's deny version, and the overlay's version where the mask also subtracts
+/// buffered rows the viewer fails below the base, which no deny version follows. `denied` is the
+/// view's denied rows, whole or below the base: `subtracted` lies below it either way.
 fn deny_version(
     served: &ServedView<'_>,
-    base_rows: u32,
+    denied: &Bitmap,
     subtracted: &Bitmap,
 ) -> (u64, Option<u64>) {
-    let mut denied = served.denied.clone();
-    denied.remove_range(base_rows..);
-    let failing = !subtracted.is_subset(&denied);
+    let failing = !subtracted.is_subset(denied);
     (
         served.generation.deny_version(served.name),
         failing.then_some(served.mask_identity.overlay_version),

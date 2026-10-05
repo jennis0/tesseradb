@@ -1723,7 +1723,7 @@ export type Grouping = {
  * may see in the view, whatever the filters and the reference say: `items`, `count` (those holding
  * a finite value) and `none` (those holding none), each a `bigint`; `min` and `max`, typed as a
  * histogram's edges, null where `count` is 0; and `mean`, a number, null where `count` is 0. Every
- * figure is exact, the mean of a float field to its last digits. A summary takes no `cells`.
+ * figure is exact, the mean rounded once from the exact sum. A summary takes no `cells`.
  *
  * @category Requests and responses
  */

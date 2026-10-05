@@ -671,13 +671,8 @@ def read_summary(server, token: str, column: str, filters: dict | None = None) -
 
 
 def same_summary(served: dict, want: dict) -> bool:
-    """Equal, the mean to within the last digits of a `float64` sum taken in another order."""
-    exact = {k: v for k, v in served.items() if k != "mean"}
-    if exact != {k: v for k, v in want.items() if k != "mean"}:
-        return False
-    if served["mean"] is None or want["mean"] is None:
-        return served["mean"] == want["mean"]
-    return math.isclose(served["mean"], want["mean"], rel_tol=1e-12, abs_tol=1e-9)
+    """Equal, the mean too: the contract rounds the exact mean once, as `float(Fraction)` does."""
+    return served == want
 
 
 @pytest.mark.parametrize("principal", list(fx.PRINCIPALS))

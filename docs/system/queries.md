@@ -567,9 +567,10 @@ the viewer may see in the view, how many hold a finite value, how many hold none
 smallest, largest and mean of the finite values. A NaN or an infinity counts among the items and
 in neither of the other two. The summary is taken over the whole visible set in the view, and the
 filter, the reference and any region play no part in it, so it describes what the viewer may see,
-as a card beside a histogram does. Every figure is exact. A float field's values are summed in
-`float64`, in pieces and corrected by subtraction, so the mean's last digits can differ from a sum
-taken in another order.
+as a card beside a histogram does. Every figure is exact. The sum is kept exactly, as an integer
+count of 2^-1074, the smallest step between two `float64` values, so subtracting the values of
+denied rows leaves exactly the sum of the rest, and the mean is that sum over the count rounded
+once to the nearest `float64`.
 
 The figures are computed as a layer's artifact figures are, in three parts. The visible set `S`
 is the session's projection `P` less the rows the request's composition subtracts, `minus`, plus
@@ -604,20 +605,10 @@ flowchart LR
 *The three parts of a field's figures. The smallest and largest of F − D come from F's eight most
 extreme rows on each side, or from a walk of F − D where D holds all eight.*
 
-Measured on the 25.8-million-item GBIF bundle with its files in the page cache, for a principal
-reading every item, the first summary of `year`, an indexed `u16`, walked the base rows in 50 to
-58 ms. Later summaries answered in about 1 ms, the first after a suppression of 10,000 items in
-5 ms, and the first after a restart, read back from disk, in 1 ms. A histogram of `year` with
-default edges took 27 ms, against 40 ms when its edges took a pass of their own, and a sampled one
-2.7 ms against 4.9 ms. One grant's figures of one field take about 420 bytes on disk, whatever the
-corpus's size. Scaled linearly to the 3.5-billion-item bundle, a modelled figure, the first walk
-would take 7 to 8 seconds with the files in memory, and a histogram with default edges would no
-longer pay the 1.7 seconds its edges' pass would take.
-
 **Not built yet:** a summary over a filtered set, which would need a walk of the set's values for
-each request; bins of a number or timestamp field within cells; breakdowns of keyword fields and of integer fields by value; a
-grouping of one kind inside another of the same kind, such as cells within cells; and counts
-across views. A caller asks for each such figure through `/v1/items` and computes it.
+each request; bins of a number or timestamp field within cells; breakdowns of keyword fields and
+of integer fields by value; a grouping of one kind inside another of the same kind, such as cells
+within cells; and counts across views. A caller asks for each such figure through `/v1/items` and computes it.
 
 The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps
 each aggregate a component registers with `Store.setAggregate` counted over the store's current

@@ -28,8 +28,8 @@
 //! artifact for counts alone and 40 B with a centroid's sums and a box. A layer that serves a box
 //! keeps a reserve beside it as an entry of its own, 4 B an artifact and 128 B more for each
 //! artifact with more than sixteen placed rows, so an entry too large for the bound loses its
-//! reserve and keeps its counts. A field's tally over a fragment's base rows is a few hundred bytes,
-//! held under the same bound in a cache of its own.
+//! reserve and keeps its counts. A field's tally over a fragment's base rows is under a kilobyte,
+//! held in a cache of its own under a bound of the same size.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
@@ -40,7 +40,7 @@ use tessera_cache::{CacheWeight, Cancel, SingleFlightCache, WaitEnded, WaitingBu
 
 use super::counts::{CountsAt, Deltas, Reserves};
 use super::denied::DenyCorrection;
-use super::field::{FieldDeny, FieldTally};
+use super::field::{FieldDeny, FieldLeft, FieldTally};
 use super::labels::{HeldLabels, LabelStore};
 use super::worker::Worker;
 use super::Geometry;
@@ -73,6 +73,9 @@ pub(crate) enum FiguresKey {
     Exact(ExactKey),
     /// A field's tally over one fragment's base rows ([`FieldKey`]).
     Field(FieldKey),
+    /// A field's tally over a fragment's base rows less one deny's, walked where the deny
+    /// subtracts every extreme value the fragment's tally keeps on a side.
+    FieldLeft(FieldDenyKey),
 }
 
 /// A field's tally over a fragment's base rows: a function of the fragment's base rows and their
@@ -499,8 +502,12 @@ pub struct FiguresCache {
     pub(super) denies: SingleFlightCache<DenyKey, DenyCorrection>,
     /// The tails, per session and generation.
     pub(super) tails: SingleFlightCache<TailKey, Tail>,
-    /// The fields' tallies over each fragment's base rows, under the same bound as `slots`.
+    /// The fields' tallies over each fragment's base rows, and over what a deny leaves of them,
+    /// under a bound of the same size as `slots`'.
     pub(super) fields: SingleFlightCache<FiguresKey, FieldTally>,
+    /// Per field, the newest tally of the base rows a deny leaves, which a later deny subtracting
+    /// every row that one did may read before it walks.
+    pub(super) field_left: Mutex<FxHashMap<FieldKey, FieldLeft>>,
     /// The fields' deny corrections, per fragment and deny version.
     pub(super) field_denies: SingleFlightCache<FieldDenyKey, FieldDeny>,
     /// The fields' tails, per session and generation.
@@ -570,6 +577,7 @@ impl FiguresCache {
             denies,
             tails,
             fields,
+            field_left: Mutex::default(),
             field_denies,
             field_tails,
             labels: LabelStore {
@@ -902,7 +910,7 @@ impl Drop for FiguresCache {
             };
             let reserve = match &key {
                 FiguresKey::Fragment(key) => self.reserve(key, newest.dense.filled_at),
-                FiguresKey::Exact(_) | FiguresKey::Field(_) => None,
+                FiguresKey::Exact(_) | FiguresKey::Field(_) | FiguresKey::FieldLeft(_) => None,
             };
             super::persist::write_counts(&written.dir, &written.stem, &newest, reserve.as_deref());
         }

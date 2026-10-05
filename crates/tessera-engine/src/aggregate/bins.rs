@@ -59,7 +59,7 @@ use super::values::pieces;
 use super::{AggregateRefused, AggregateTimings};
 use crate::cells::CellSet;
 use crate::error::{EngineError, Result};
-use crate::figures::{by_value, FieldFigures, FieldRead, FieldTally, Number};
+use crate::figures::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number};
 use crate::filter::Scalar;
 use crate::Generation;
 
@@ -759,11 +759,17 @@ struct Counts {
 
 /// A value as a pass compares it: `i128` for an integer or a timestamp, which holds every stored
 /// integer exactly, and `f64` for a float or for an integer binned by a fractional bound.
-trait Num: Copy + PartialOrd + Send + Sync + std::ops::Add<Output = Self> {
+trait Num: Copy + PartialOrd + Send + Sync {
+    /// What a sum of these is held in while a pass adds them, exactly.
+    type Sum: Default + Send;
+
     fn int(x: i128) -> Self;
     fn float(x: f64) -> Self;
     fn finite(self) -> bool;
     fn number(self) -> Number;
+    fn add_to(sum: &mut Self::Sum, x: Self);
+    fn joined(sum: Self::Sum, other: Self::Sum) -> Self::Sum;
+    fn exact(sum: Self::Sum) -> ExactSum;
 
     fn of_record(value: &RecordValue) -> Option<Self> {
         Some(match *value {
@@ -813,6 +819,18 @@ impl Num for i128 {
     fn number(self) -> Number {
         Number::Int(self)
     }
+    type Sum = i128;
+    fn add_to(sum: &mut i128, x: Self) {
+        *sum += x;
+    }
+    fn joined(sum: i128, other: i128) -> i128 {
+        sum + other
+    }
+    fn exact(sum: i128) -> ExactSum {
+        let mut exact = ExactSum::default();
+        exact.add_int(sum);
+        exact
+    }
 }
 
 impl Num for f64 {
@@ -828,6 +846,16 @@ impl Num for f64 {
     fn number(self) -> Number {
         Number::Float(self)
     }
+    type Sum = ExactSum;
+    fn add_to(sum: &mut ExactSum, x: Self) {
+        sum.add_float(x);
+    }
+    fn joined(sum: ExactSum, other: ExactSum) -> ExactSum {
+        sum.plus(&other)
+    }
+    fn exact(sum: ExactSum) -> ExactSum {
+        sum
+    }
 }
 
 /// What a pass accumulates, piece by piece, then merged. `at` is where the value was read: the
@@ -837,12 +865,12 @@ trait Tally<K>: Send {
     fn merge(self, other: Self) -> Self;
 }
 
-/// The count and sum of the finite values seen, and the `keep` smallest and largest of them, each
-/// with where it was read.
-struct Summary<K> {
+/// The count and exact sum of the finite values seen, and the `keep` smallest and largest of them,
+/// each with where it was read.
+struct Summary<K: Num> {
     keep: usize,
     count: u64,
-    sum: K,
+    sum: K::Sum,
     low: Vec<(K, u32)>,
     high: Vec<(K, u32)>,
 }
@@ -852,34 +880,10 @@ impl<K: Num> Summary<K> {
         Summary {
             keep,
             count: 0,
-            sum: K::int(0),
+            sum: K::Sum::default(),
             low: Vec::new(),
             high: Vec::new(),
         }
-    }
-
-    fn below(a: &(K, u32), b: &(K, u32)) -> bool {
-        a.0 < b.0 || (a.0 == b.0 && a.1 < b.1)
-    }
-
-    fn above(a: &(K, u32), b: &(K, u32)) -> bool {
-        a.0 > b.0 || (a.0 == b.0 && a.1 < b.1)
-    }
-
-    /// `value` among `side`'s `keep` first by `before`, where it is one of them.
-    #[inline]
-    fn keep_one(
-        side: &mut Vec<(K, u32)>,
-        keep: usize,
-        value: (K, u32),
-        before: fn(&(K, u32), &(K, u32)) -> bool,
-    ) {
-        if side.len() == keep && side.last().is_none_or(|last| !before(&value, last)) {
-            return;
-        }
-        let at = side.partition_point(|held| before(held, &value));
-        side.insert(at, value);
-        side.truncate(keep);
     }
 
     fn finish(self, none: u64) -> FieldTally {
@@ -887,7 +891,7 @@ impl<K: Num> Summary<K> {
         FieldTally {
             none,
             count: self.count,
-            sum: self.sum.number(),
+            sum: K::exact(self.sum),
             low: side(self.low),
             high: side(self.high),
         }
@@ -901,21 +905,21 @@ impl<K: Num> Tally<K> for Summary<K> {
             return;
         }
         self.count += 1;
-        self.sum = self.sum + x;
+        K::add_to(&mut self.sum, x);
         if self.keep > 0 {
-            Self::keep_one(&mut self.low, self.keep, (x, at), Self::below);
-            Self::keep_one(&mut self.high, self.keep, (x, at), Self::above);
+            keep_extreme(&mut self.low, self.keep, (x, at), false);
+            keep_extreme(&mut self.high, self.keep, (x, at), true);
         }
     }
 
     fn merge(mut self, other: Self) -> Self {
         self.count += other.count;
-        self.sum = self.sum + other.sum;
+        self.sum = K::joined(self.sum, other.sum);
         for value in other.low {
-            Self::keep_one(&mut self.low, self.keep, value, Self::below);
+            keep_extreme(&mut self.low, self.keep, value, false);
         }
         for value in other.high {
-            Self::keep_one(&mut self.high, self.keep, value, Self::above);
+            keep_extreme(&mut self.high, self.keep, value, true);
         }
         self
     }
@@ -929,12 +933,8 @@ struct Reader<'a> {
 }
 
 impl FieldRead for Reader<'_> {
-    fn float(&self) -> bool {
-        self.field.kind == Kind::Float
-    }
-
     fn tally(&self, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
-        match self.float() {
+        match self.field.kind == Kind::Float {
             true => self.read::<f64>(rows, keep),
             false => self.read::<i128>(rows, keep),
         }
@@ -946,7 +946,7 @@ impl Reader<'_> {
         let cx = self.cx;
         cx.check_cancelled()?;
         if rows.is_empty() {
-            return Ok(FieldTally::empty(self.float()));
+            return Ok(FieldTally::empty());
         }
         let empty = || Summary::<K>::new(keep);
         if self.field.drawn {
@@ -962,10 +962,12 @@ impl Reader<'_> {
             .pool
             .install(|| self.field.pass_entities(cx, &entities, empty));
         let mut tally = summary.finish(none);
-        // The kept values were read by entity, and a deny names rows.
+        // The kept values were read by entity, and a deny names rows: each is placed again by its
+        // row.
         let row_space = &cx.open.served.data.row_space;
-        for side in [&mut tally.low, &mut tally.high] {
-            for kept in side.iter_mut() {
+        for (high, side) in [(false, &mut tally.low), (true, &mut tally.high)] {
+            let mut placed = Vec::with_capacity(side.len());
+            for mut kept in side.drain(..) {
                 let row = row_space
                     .row_of(tessera_types::EntityId::new(u64::from(kept.1)))
                     .ok_or_else(|| {
@@ -975,10 +977,10 @@ impl Reader<'_> {
                         ))
                     })?;
                 kept.1 = row.raw();
+                keep_extreme(&mut placed, keep, kept, high);
             }
+            *side = placed;
         }
-        tally.low.sort_by(|a, b| by_value(a, b, false));
-        tally.high.sort_by(|a, b| by_value(a, b, true));
         Ok(tally)
     }
 }

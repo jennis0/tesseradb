@@ -1881,21 +1881,27 @@ fn oracle(items: &[&Item], column: &str) -> Figures {
             .copied()
             .reduce(|a, b| if less(a, b) == smaller { a } else { b })
     };
-    let sum: f64 = finite
-        .iter()
-        .map(|v| match *v {
+    // Each value over the count, summed with the error of each addition carried, so a sum past
+    // the float range, or one a large value cancels, is still near the exact mean.
+    let n = finite.len() as f64;
+    let (mut sum, mut carried) = (0.0f64, 0.0f64);
+    for v in &finite {
+        let x = match *v {
             Val::F(f) => f,
             Val::I(i) => i as f64,
             Val::T(t) => t as f64,
-        })
-        .sum();
+        } / n;
+        let next = sum + x;
+        carried += if sum.abs() >= x.abs() { (sum - next) + x } else { (x - next) + sum };
+        sum = next;
+    }
     Figures {
         items: items.len() as u64,
         count: finite.len() as u64,
         none: (items.len() - values.len()) as u64,
         min: pick(true),
         max: pick(false),
-        mean: (!finite.is_empty()).then(|| sum / finite.len() as f64),
+        mean: (!finite.is_empty()).then_some(sum + carried),
     }
 }
 
@@ -2130,6 +2136,49 @@ fn a_value_in_a_view_the_viewer_cannot_reach_moves_no_edge() {
         respond(&engine, &subset, req),
         Err(EngineError::UnknownView(_))
     ));
+}
+
+/// **A float's mean is exact however large the values a deny subtracts.** Two items the subset
+/// viewer may see hold 1.7e308, whose sum passes the float range, and a third holds 1e17, which
+/// swallows the small values beside it in a float sum. Suppressed, they leave the mean of the
+/// rest, and lifted, they bring it back.
+#[test]
+fn a_huge_float_suppressed_leaves_the_mean_of_the_rest() {
+    let mut items: Vec<Item> = (0..N).map(built).collect();
+    for item in items.iter_mut() {
+        match item.source {
+            3 | 6 => item.score = Some(1.7e308),
+            9 => item.score = Some(1e17),
+            _ => {}
+        }
+    }
+    let fx = fixture_of(items);
+    let huge = [3u64, 6, 9];
+    let check = |hidden: &[u64], when: &str| {
+        for broad in [true, false] {
+            let session = fx.session(broad);
+            let shown = |i: &Item| !hidden.contains(&i.source);
+            let seen: Vec<&Item> = fx.visible(broad, &shown).collect();
+            let served = summary_of(&fx.engine, &session, "s0", "score", None);
+            let want = oracle(&seen, "score");
+            assert_eq!(served, want, "{when}, broad {broad}");
+            assert!(served.mean.is_some_and(f64::is_finite), "{when}: {served:?}");
+        }
+    };
+    check(&[], "planted");
+    for &source in &huge {
+        let entity = item_of_id(&fx.engine, source).unwrap().unwrap();
+        fx.engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+    }
+    check(&huge, "suppressed");
+    let session = fx.session(false);
+    let mean = summary_of(&fx.engine, &session, "s0", "score", None).mean.unwrap();
+    assert!(mean.abs() < 1_000.0, "the huge values left no trace: {mean}");
+    for &source in &huge {
+        let entity = item_of_id(&fx.engine, source).unwrap().unwrap();
+        fx.engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
+    }
+    check(&[], "lifted");
 }
 
 /// What the lifecycle test knows of each item beyond its values.

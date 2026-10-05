@@ -75,16 +75,16 @@ A growth between compactions adds to them in place. The figures of a number or t
 (the count of its finite values, their sum, the items with none, and its eight smallest and eight
 largest values with their rows) are counted the same way, once per grant over the grant's base
 rows, keyed by the grant, the bundle identity, the view and the field. These shared counts include
-rows that are deleted or suppressed, so no request is served them alone. Every request subtracts the rows its own
-composed visible set removes from the base, read from the overlay it loaded at its start, and adds
-its own rows above the base. A field's smallest and largest value are the first of the kept
+rows that are deleted or suppressed, so no request is served them alone. Every request subtracts
+the rows its own composed visible set removes from the base, read from the overlay it loaded at
+its start, and adds its own rows above the base. A field's smallest and largest value are the first of the kept
 extremes whose row the request does not subtract, and where it subtracts all eight kept on a side,
 a walk of the grant's base rows less those it subtracts. A request that starts after a suppression
 is accepted therefore subtracts the suppressed rows, even where it waits for counts whose build
 began before the suppression. The figures served are the visible set's, as a walk of that set row
 by row would produce them, and a suppressed item's value moves no field's smallest or largest value
-from the next request. What the sharing does disclose, through response time, is in the residual table
-below.
+from the next request. What the sharing does disclose, through response time, is in the residual
+table below.
 
 A client (the TypeScript or Python library, or a component built on it) is not a trust boundary at
 all. Every count, sample and label it receives has already been computed inside the viewer's own

@@ -1514,10 +1514,9 @@ paths:
         no value, so an item holding NaN or an infinity is in `items` and neither of the others;
         `min` and `max`, the smallest and largest finite value, typed as `lower` and `upper` are on
         a histogram of the field without `range`, null where `count` is 0; and `mean` (`float64`),
-        the mean of the finite values, null where `count` is 0. A float field's values are summed
-        in `float64`, in an order of the server's own, so the mean's last digits can differ from a
-        sum taken in another order; an integer or timestamp field's sum is exact before the
-        division.
+        the mean of the finite values, null where `count` is 0. The values are summed exactly,
+        whatever their size and order, and the mean is the exact sum over `count` rounded once to
+        the nearest `float64`, a tie to even.
 
         **Reading a whole result.** A response carries at most `pages` pages and runs within its own
         byte budget, `serve.aggregate_response_bytes` (16 MiB by default), and the bulk reads' time
