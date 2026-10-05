@@ -956,6 +956,9 @@ paths:
         visible set composed again, so a deletion or suppression accepted during a read applies
         from the next page.
 
+        **Cursor.** As `POST /v1/items`' cursor, bound also to this route, to `layer` and `level`,
+        and to the set of `ids`: a cursor sent with any of them changed is `422`.
+
         **Rows.** Every artifact of `layer` this principal is served when its page is built,
         ordered by level and then by publication order within the level. Each page applies the
         viewport's own test to each artifact it walks: the artifact's label, its layer's existence
@@ -1112,7 +1115,7 @@ paths:
         `tessera_id`. An artifact with visible members in several tiles is in each of their frames,
         with the same `masked_count`, centroid and box: every number is over the artifact's whole
         membership as this principal sees it, never over the tile. Levels follow the layers'
-        order, and each level's rows follow its own.
+        order, a layer after any it depends on, and each level's rows follow their own.
 
         **The treed frame.** A nested or `dag` layer is walked over every requested tile together
         and cut to `budget`, met by serving ancestors in place of their descendants, never by
@@ -1126,7 +1129,9 @@ paths:
         the layer declares no such property or the request asked for none. `parent_ids` names the
         parents that are rows of the same frame. `target` is the `tessera_id` of the artifact a row
         is attached to, such as the cluster a label names, in the same frame or the treed frame;
-        null where the row is attached to nothing. A label's `masked_count` is its own. `matched`
+        null where the row is attached to nothing. A dependent is served in a tile only where its
+        target is in that tile's frame or the treed frame, when the request names its target's
+        layer, and one that is not takes no place in the quota. A label's `masked_count` is its own. `matched`
         is whether a member this principal can see inside the tile matches `filters`, and
         `highlighted` the same for `filters` and `highlight` together; each is null where the
         request carries no such expression, and a label takes its target's. A filter changes
@@ -1229,8 +1234,8 @@ paths:
       description: |
         This route does not depend on the viewport. A layer whose artifacts are spread across the
         map may draw nothing at any zoom the viewport's budget reaches; this route serves the same
-        artifacts by relation instead of by position, each row carrying the masked count the
-        artifacts frame carries.
+        artifacts by relation instead of by position, each row carrying the masked count
+        `POST /v1/artifacts/viewport` carries.
 
         **Three forms.** With neither `parent` nor `q` it returns the layer's roots, the artifacts
         with no served parent. `parent` returns the artifacts naming that one among their parents,
@@ -1243,7 +1248,7 @@ paths:
         text of an artifact attached to it that `POST /v1/artifacts` would serve this principal
         when reading that label layer. Label layers are taken in the order `/v1/meta` lists them;
         within one, by level, then artifacts with a key in key order, then those without in
-        publication order, which is the order the viewport's artifacts frame serves a level in. A
+        publication order. A
         label this principal would not be served names nothing and matches no `q`, and `filters`
         does not change a name.
 
@@ -4678,15 +4683,15 @@ components:
             artifact. `authored` is a supplied `polygon`, `circle` or `ellipse` content, served
             under that content's own requirement and also the same for every principal. A client
             may keep a `predicate` or `authored` shape against a `tessera_id` across principals,
-            and may not keep a `derived` one. The geometry itself is the artifacts frame's
-            `shape_x` and `shape_y` and `ArtifactResponse.shape`, nested alike for every kind.
+            and may not keep a `derived` one. The geometry itself is `ArtifactResponse.shape` and
+            the bulk read's `shape`.
           oneOf:
             - type: "null"
             - type: string
               enum: [derived, predicate, authored]
         supplied_content:
           type: array
-          description: The types of the content the publisher supplies, in the order of the artifacts frame's `content` column. An artifact whose content a principal may not read is not served to that principal at all.
+          description: The types of the content the publisher supplies, in the order of an artifact's `content`. An artifact whose content a principal may not read is not served to that principal at all.
           items: { type: string }
         depends_on:
           type: array
