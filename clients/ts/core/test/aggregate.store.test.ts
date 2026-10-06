@@ -661,6 +661,32 @@ describe('an aggregate across a change of viewer or corpus', () => {
     expect(store.get('aggregates').get('match')!.result!.tables[0]!.total).toBe(7);
   });
 
+  it('asks the counts in view again, their request unchanged, when a frame observes a new content key', async () => {
+    let key = 'ck-1';
+    const {store, pending, clock, scheduler} = await storeWith({contentKey: () => key, revalidateAfterMs: 100});
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    await flush();
+    const strip = () => pending.filter((p) => p.req.reference !== undefined);
+    expect(strip()).toHaveLength(1);
+    strip()[0]!.release(7);
+    await flush();
+    // A rest on the same box with the same corpus asks nothing.
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(50);
+    await flush();
+    expect(strip()).toHaveLength(1);
+    key = 'ck-2';
+    await clock.advance(200);
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    await flush();
+    expect(strip()).toHaveLength(2);
+    expect(strip()[1]!.req).toEqual(strip()[0]!.req);
+  });
+
   it('limits a view aggregate’s reference to the same area, so its lift compares with what is visible there', async () => {
     const {store, pending, clock} = await storeWith();
     store.setAggregate('lift', {groupings: [TOP], subject: 'view', reference: 'visible'});

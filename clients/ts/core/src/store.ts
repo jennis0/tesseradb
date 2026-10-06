@@ -1404,7 +1404,7 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
-   * Ask every registered aggregate again, its request unchanged, once the point path observes a
+   * Ask every registered aggregate and the counts in view again, their requests unchanged, once the point path observes a
    * content key other than the one it observed before: an ingest, a deletion or a suppression
    * this viewer can see.
    */
@@ -1412,7 +1412,9 @@ export function createStore(options: StoreOptions): Store {
     if (observed === '') return;
     const before = corpusKey;
     corpusKey = observed;
-    if (before !== '' && before !== observed) aggregates.refresh(false);
+    if (before === '' || before === observed) return;
+    aggregates.refresh(false);
+    askInView(false);
   }
 
   function onTrace(kind: string, fields: Record<string, number | string>): void {
