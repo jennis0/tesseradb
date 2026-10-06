@@ -205,10 +205,10 @@ fn the_leaf_is_the_artifacts_masked_count_under_either_layout() {
         let what = format!("{layout:?}");
         // The declared layout is the served one here — a single artifact's memberships cannot
         // overlap, so nothing falls back and each arm of the loop exercises the route it names.
-        // With no pin, a flat level is registered in the list form.
+        // With no pin, a flat level's first publication of one artifact chooses the label form.
         assert_eq!(
             fx.engine.recorded_layout(LAYER, 0),
-            Some(layout.unwrap_or(ServingLayout::RowMajorList)),
+            Some(layout.unwrap_or(ServingLayout::RowMajorLabel)),
             "{what}: the level is served in the layout the loop asked for"
         );
         let broad = viewport(&fx.engine, &full_coverage_credential(), Some(member_of(fx.id)));

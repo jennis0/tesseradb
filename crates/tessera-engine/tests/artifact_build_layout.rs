@@ -455,3 +455,99 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
          over either — whichever route each level is served by"
     );
 }
+
+/// **A layer published at a running service is served from the layout a build gives it, and keeps
+/// it across a restart.** The clumped layer's declaration and memberships are published again
+/// under another name: its level records the label column the build recorded. The same memberships with one item in two artifacts record the list
+/// column, as a build of them would. Both hold after a restart that replays the log, both levels are
+/// served from their column, and every count is the built layer's.
+#[test]
+fn a_layer_published_at_runtime_takes_the_layout_a_build_gives_it() {
+    const RUNTIME: &str = "runtime/clumped";
+    const OVERLAPPING: &str = "runtime/overlapping";
+    let fx = fixture();
+    let engine = open_engine_publishing(&fx.root, &fx.cache, &fx.wal);
+    engine.set_background_refresh_for_test(false);
+    let built = engine
+        .generation()
+        .bundle
+        .partitions
+        .values()
+        .next()
+        .unwrap()
+        .manifest
+        .layers
+        .iter()
+        .find(|l| l.declaration.name == CLUMPED)
+        .expect("the clumped layer is built")
+        .clone();
+    assert_eq!(built.layout_of(0), ServingLayout::RowMajorLabel);
+
+    let map = source_to_new_map(&fx.root, "v00000");
+    let (_, rows) = clumped_members();
+    let mut members: std::collections::BTreeMap<String, Vec<tessera_types::EntityId>> =
+        Default::default();
+    for (key, source) in &rows {
+        members
+            .entry(key.clone())
+            .or_default()
+            .push(tessera_types::EntityId::new(map[source]));
+    }
+    let publish = |name: &str, overlap: bool| {
+        let mut declaration = built.declaration.clone();
+        declaration.name = name.into();
+        engine.register_layer(declaration).unwrap();
+        let artifacts = members
+            .iter()
+            .enumerate()
+            .map(|(i, (key, entities))| {
+                let mut entities = entities.clone();
+                if overlap && i == 1 {
+                    entities.push(members.values().next().unwrap()[0]);
+                }
+                tessera_lifecycle::IncomingArtifact::from_entities(Some(key.clone()), entities)
+            })
+            .collect();
+        engine.publish_artifacts(name.into(), 0, artifacts).unwrap();
+    };
+    publish(RUNTIME, false);
+    publish(OVERLAPPING, true);
+    tick(&engine);
+
+    let counts = |engine: &tessera_engine::Engine, layer: &str| {
+        let session = engine.authorise(&subset_credential()).unwrap();
+        let mut out: Vec<(Option<String>, u64)> = engine
+            .viewport_artifacts(
+                &session,
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                    .layers(LayerSelection::Named(&[layer])),
+            )
+            .expect("a viewport")
+            .artifacts()
+            .iter()
+            .map(|a| (a.key.clone(), a.masked_count))
+            .collect();
+        out.sort();
+        out
+    };
+    let check = |engine: &tessera_engine::Engine, when: &str| {
+        assert_eq!(
+            engine.recorded_layout(RUNTIME, 0),
+            Some(ServingLayout::RowMajorLabel),
+            "{when}: the build's layout"
+        );
+        assert_eq!(
+            engine.recorded_layout(OVERLAPPING, 0),
+            Some(ServingLayout::RowMajorList),
+            "{when}: an item in two artifacts"
+        );
+        assert_eq!(counts(engine, RUNTIME), counts(engine, CLUMPED), "{when}");
+        assert!(!counts(engine, OVERLAPPING).is_empty());
+        assert_eq!(engine.layout_fallbacks(), 0, "{when}: every level kept its column");
+    };
+    check(&engine, "published");
+    drop(engine);
+    let reopened = open_engine_publishing(&fx.root, &fx.cache, &fx.wal);
+    reopened.set_background_refresh_for_test(false);
+    check(&reopened, "after a restart");
+}

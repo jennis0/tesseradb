@@ -1922,7 +1922,7 @@ impl Executor {
                             ));
                         }
                     }
-                    observed.unwrap_or_else(tessera_store::derived::LevelShape::empty)
+                    observed.unwrap_or_else(crate::layout::LevelShape::empty)
                 } else {
                     // A borrowing level's filed column is true when written and not read
                     // afterwards: the borrowed set moves with the target's version, so the engine
