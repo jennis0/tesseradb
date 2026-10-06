@@ -7,7 +7,7 @@ import type {AggregateRequest, AggregateResult, FilterExpr} from '../src/types.j
 import {TesseraError} from '../src/client.js';
 import {tileRectOfBbox} from '../src/budget.js';
 import {mortonOfTile, tileXY} from '../src/coords.js';
-import {fakeClock, fakeScheduler, meta, response, result as viewportResult, tile, view} from './support.js';
+import {fakeClock, fakeScheduler, meta, response, result as viewportResult, tile, view, camera} from './support.js';
 
 /**
  * The store's counts in view (`view.inView`) against a fake server that counts as the real one
@@ -94,9 +94,9 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 describe('the counts in view', () => {
   it('asks once the camera has rested, over the camera’s box, with the box as the reference', async () => {
     const {store, asked, clock} = await storeWith();
-    store.setView({bbox: BOX, width: 400, height: 400});
+    store.setView(camera(store.frame(), BOX, 400, 400));
     await clock.advance(100);
-    store.setView({bbox: BOX, width: 400, height: 400});
+    store.setView(camera(store.frame(), BOX, 400, 400));
     await clock.advance(100);
     await flush();
     expect(asked).toHaveLength(0);
@@ -108,7 +108,7 @@ describe('the counts in view', () => {
 
   it('keeps the visible count when a filter changes and the camera does not', async () => {
     const {store, asked, clock} = await storeWith();
-    store.setView({bbox: BOX, width: 400, height: 400});
+    store.setView(camera(store.frame(), BOX, 400, 400));
     await clock.advance(300);
     await flush();
     store.setFilters(CS);
@@ -121,7 +121,7 @@ describe('the counts in view', () => {
 
   it('counts the highlight beside the filters while one is set', async () => {
     const {store, clock} = await storeWith();
-    store.setView({bbox: BOX, width: 400, height: 400});
+    store.setView(camera(store.frame(), BOX, 400, 400));
     await clock.advance(300);
     store.setFilters(LIT);
     await flush();
@@ -132,7 +132,7 @@ describe('the counts in view', () => {
 
   it('counts the selected region in place of the box, and the region carries the same figures', async () => {
     const {store, asked, clock} = await storeWith();
-    store.setView({bbox: [0, 0, 1, 1], width: 400, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 1, 1], 400, 400));
     await clock.advance(300);
     store.setFilters(CS);
     store.select({kind: 'box', bbox: BOX});
@@ -147,12 +147,12 @@ describe('the counts in view', () => {
 
   it('asks nothing more as the camera moves while a region is selected, and stays shown', async () => {
     const {store, asked, clock} = await storeWith();
-    store.setView({bbox: [0, 0, 1, 1], width: 400, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 1, 1], 400, 400));
     await clock.advance(300);
     store.select({kind: 'box', bbox: BOX});
     await flush();
     const before = asked.length;
-    store.setView({bbox: [0.2, 0.2, 0.8, 0.8], width: 400, height: 400});
+    store.setView(camera(store.frame(), [0.2, 0.2, 0.8, 0.8], 400, 400));
     await clock.advance(300);
     await flush();
     expect(asked).toHaveLength(before);
@@ -161,7 +161,7 @@ describe('the counts in view', () => {
 
   it('keeps figures on show when the count is refused, marked refused, from the frame where none landed', async () => {
     const {store, clock} = await storeWith({refuse: true});
-    store.setView({bbox: BOX, width: 400, height: 400});
+    store.setView(camera(store.frame(), BOX, 400, 400));
     await clock.advance(300);
     await flush();
     const n = store.get('view').inView;
@@ -183,13 +183,13 @@ describe('the counts in view', () => {
       scheduler.flush();
       await flush();
     };
-    store.setView({bbox: a, width: 400, height: 400});
+    store.setView(camera(store.frame(), a, 400, 400));
     await settle(1_000);
     expect(shown()).toBe(inside(a));
     expect(shown()).toBeGreaterThan(0);
     // The camera pans; until the next count lands the figures on show are the first box's, and the
     // shown count is taken over that box too.
-    store.setView({bbox: b, width: 400, height: 400});
+    store.setView(camera(store.frame(), b, 400, 400));
     const frames = store.get('view').composition;
     await settle(200);
     expect(store.get('view').composition).not.toBe(frames);

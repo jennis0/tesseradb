@@ -9,7 +9,7 @@ import {refusalOf} from '../src/presented.js';
 import {createStore} from '../src/store.js';
 import type {RecordsRead} from '../src/records.js';
 import type {ArtifactsRequest, BrowseRow, ItemsRequest, Meta, Session, ViewportRequest} from '../src/types.js';
-import {rejectsAsRefused} from './support.js';
+import {camera, rejectsAsRefused} from './support.js';
 import {start, type Served} from './served.js';
 
 /**
@@ -354,7 +354,7 @@ describe('bulk reads against a live server', () => {
     try {
       store.setColourBy('cluster:clusters/hdbscan');
       const q = meta.views.find((v) => v.id === 's0')!.quantisation;
-      store.setView({bbox: [q.xMin, q.yMin, q.xMax, q.yMax], width: 800, height: 800});
+      store.setView(camera(q, [q.xMin, q.yMin, q.xMax, q.yMax], 800, 800));
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline && (store.get('artifacts').colourServed.length === 0 || store.get('marks').bands.length === 0)) await new Promise((r) => setTimeout(r, 50));
       const a = store.get('artifacts');

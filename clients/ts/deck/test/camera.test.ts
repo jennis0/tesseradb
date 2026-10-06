@@ -18,16 +18,18 @@ describe('viewInputOf', () => {
   });
 
   it('asks for the whole extent when the world fills the canvas', () => {
-    expect(viewInputOf(store(EXTENT), {target: [256, 256, 0], zoom: 0}, 512, 512)).toEqual({bbox: [-180, -90, 180, 90], width: 512, height: 512});
+    expect(viewInputOf(store(EXTENT), {target: [256, 256, 0], zoom: 0}, 512, 512)).toEqual({bbox: [-180, -90, 180, 90], zoom: 0, width: 512, height: 512});
   });
 
   it('asks for the quarter the camera shows at zoom 1', () => {
     const input = viewInputOf(store(EXTENT), {target: [128, 128], zoom: 1}, 512, 512);
-    expect(input).toEqual({bbox: [-180, -90, 0, 0], width: 512, height: 512});
+    expect(input).toEqual({bbox: [-180, -90, 0, 0], zoom: 1, width: 512, height: 512});
   });
 
   it('clamps a camera that shows past the world to the extent', () => {
     const input = viewInputOf(store(EXTENT), {target: [256, 256], zoom: -1}, 512, 256);
     expect(input?.bbox).toEqual([-180, -90, 180, 90]);
+    // The camera's own zoom, not the zoom at which the clamped box fills the canvas.
+    expect(input?.zoom).toBe(-1);
   });
 });
