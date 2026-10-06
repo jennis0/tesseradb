@@ -52,6 +52,7 @@ const store = createAppState({
   lastError: null,
   depthChoice: null,
   budget: DEFAULT_BUDGET,
+  artifactsPerTile: config.artifactsPerTile,
   mTarget: 16,
   lastVisibleInView: null,
   lastTimings: null,
@@ -178,13 +179,13 @@ function dropBasemap(): void {
 }
 
 /**
- * Write the current view to the URL as `?view=<id>`, so a link shows the same view. `replaceState`,
- * so stepping through a roster does not fill the history.
+ * Write a setting to the URL, as `?view=<id>` or `?per-tile=<n>`, so a link opens the same.
+ * `replaceState`, so stepping through a roster does not fill the history.
  */
-function writeViewToUrl(id: string): void {
+function writeToUrl(name: 'view' | 'per-tile', value: string): void {
   const url = new URL(location.href);
-  if (url.searchParams.get('view') === id) return;
-  url.searchParams.set('view', id);
+  if (url.searchParams.get(name) === value) return;
+  url.searchParams.set(name, value);
   history.replaceState(null, '', url);
 }
 
@@ -204,7 +205,7 @@ function onViewChanged(id: string): void {
   store.update((s) => {
     s.view = id;
   });
-  writeViewToUrl(id);
+  writeToUrl('view', id);
   dropBasemap();
   followCameraWithBasemap(view);
   const camera = keepsFrame && view.tileScheme !== null && view.tile !== null ? lastCamera : null;
@@ -274,7 +275,7 @@ function renderReadouts(): string {
  */
 function controlsSignature(): string {
   const s = store.state;
-  return [s.datasetId, s.switching ? '1' : '0', s.termsLabel, s.terms.length, s.budget].join('|');
+  return [s.datasetId, s.switching ? '1' : '0', s.termsLabel, s.terms.length, s.budget, s.artifactsPerTile].join('|');
 }
 
 // Under 1000 px the instruments open over the explorer from a button; see `style.css`.
@@ -334,6 +335,34 @@ function bindControls() {
     });
     dataStore?.setBudget(Number(budgetInput.value));
   });
+
+  const perTileInput = document.getElementById('per-tile') as HTMLInputElement | null;
+  perTileInput?.addEventListener('change', () => {
+    const perTile = Number(perTileInput.value);
+    trace.event('per-tile', {n: perTile});
+    store.update((s) => {
+      s.artifactsPerTile = perTile;
+    });
+    writeToUrl('per-tile', String(perTile));
+    reopenSession();
+  });
+}
+
+/**
+ * Open the store again on the same principal and session, keeping the drawn layers and the colour,
+ * for a setting the store takes only when it opens. Filters and the selection start empty, as they
+ * do for a new principal.
+ */
+function reopenSession(): void {
+  const preset = presets.find((p) => p.label === store.state.termsLabel);
+  const previous = dataStore;
+  if (!preset || !previous) return;
+  const layers = previous.get('artifacts').layers;
+  const colourBy = previous.get('legend').colourBy;
+  const {session, meta} = store.state;
+  openSession(preset, session && meta ? {session, meta} : undefined);
+  dataStore?.setColourBy(colourBy);
+  dataStore?.setLayers(layers);
 }
 
 installTrace(explorer);
@@ -416,7 +445,7 @@ function openSession(
     view: store.state.view,
     prefetch,
     driver: {prefetchLayers: config.prefetchLayers},
-    artifacts: {perTile: config.artifactsPerTile},
+    artifacts: {perTile: store.state.artifactsPerTile},
     replica: {
       // The absorb lane: the split and store phases per response, and the longest single slice.
       onPhase: (kind, ms, n) => {
@@ -572,7 +601,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     explorer.titleField = dataset.titleField ?? '';
     // The heading names the dataset as the dataset picker does.
     explorer.datasetTitle = dataset.label;
-    writeViewToUrl(opening.id);
+    writeToUrl('view', opening.id);
     followCameraWithBasemap(opening);
     void installBasemap(opening);
     trace.event('session', {
@@ -598,6 +627,7 @@ async function start() {
   const params = new URLSearchParams(location.search);
   const requested = params.get('dataset');
   const chosen = datasets.find((d) => d.id === requested) ?? datasets[0]!;
+  writeToUrl('per-tile', String(store.state.artifactsPerTile));
   // `?view=` applies to the first activation only, since a view id belongs to a bundle.
   await activate(chosen, params.get('view'));
 }

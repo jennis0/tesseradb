@@ -39,7 +39,7 @@ export type ViewerConfig = {
    * lands on decoded ground. Each costs up to about four times the viewport's bytes over new ground.
    */
   prefetchLayers: number;
-  /** The most artifacts one level shows in one tile (`?per-tile=`, default 50). */
+  /** The most artifacts one level shows in one tile at opening (`?per-tile=`, default 50); the Source panel changes it. */
   artifactsPerTile: number;
 };
 
