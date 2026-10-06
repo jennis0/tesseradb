@@ -95,13 +95,17 @@ describe('<tessera-field-card> on a category', () => {
     expect(deep(host, '[part="more"]')!.textContent).toBe('5 more in view');
   });
 
-  it('shows a value in view that is not among the commonest matching with its count in view alone', async () => {
+  it('asks for a value in view that is not among the commonest matching by name, and shows both its counts', async () => {
     const {host, store} = await mountCard('archive');
     await answer(host, store, [{rows: [{key: 'rare', count: 7}], total: 7, groups: 1}], [{rows: [{key: 'cs', count: 1000}], total: 5000}]);
+    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {field: 'archive', top: 100}}, {by: {field: 'archive', values: ['rare']}}], without: 'archive'});
+    answerAggregate(store, 'field-match', aggregateEntry([{rows: [{key: 'cs', count: 1000}], total: 5000}, {rows: [{key: 'rare', count: 50}]}]));
+    await settle(host);
+    // Its answer does not change what is asked.
+    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {field: 'archive', top: 100}}, {by: {field: 'archive', values: ['rare']}}], without: 'archive'});
     const [rare] = rows(host);
-    expect(rare!.dataset.key).toBe('rare');
-    expect(rare!.querySelector('[part="count"]')!.textContent).toBe('7');
-    expect(parseFloat((rare!.querySelector('[part="bar-match"]') as HTMLElement).style.width)).toBe(0);
+    expect(rare!.querySelector('[part="count"]')!.textContent).toBe('7 / 50');
+    expect(parseFloat((rare!.querySelector('[part="bar-match"]') as HTMLElement).style.width)).toBe(1);
   });
 
   it('puts a value in or out of the filter and the highlight from its row', async () => {
@@ -302,6 +306,9 @@ describe('<tessera-field-card> on a layer', () => {
     expect(spec(store, 'field-match')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 8n]}}, {by: {layer: 'topics', top: 1}}], withoutMembersOf: 'topics'});
     await answer(host, store, [{rows: [{key: 8n, count: 5}, {key: 7n, count: 9}], total: 14}], [{rows: [{key: 8n, count: 50}, {key: 7n, count: 90}], total: 140}, {rows: [{key: 7n, count: 90}], groups: 12}]);
     expect(deep(host, 'tessera-cluster-filter')!.getAttribute('placeholder')).toBe('Search 12 clusters');
+    // A share of a few per cent still reads as a bar; plain percentages otherwise.
+    const optics = rows(host)[0]!;
+    expect((optics.querySelector('[part="bar-match"]') as HTMLElement).getAttribute('style')).toContain('max(3px, 64.3%)');
     await new Promise((r) => setTimeout(r, 0));
     await settle(host);
     expect(rows(host).map((r) => [r.querySelector('[part="name"]')!.textContent, r.querySelector('[part="path"]')?.textContent ?? ''])).toEqual([
@@ -357,7 +364,7 @@ describe('<tessera-field-card> across a change of viewer', () => {
 describe('<tessera-field-card> on text', () => {
   it('is the field’s search box, and counts nothing', async () => {
     const {host, store} = await mountCard('title');
-    expect(deep(host, 'tessera-filter[bare]')).not.toBeNull();
+    expect(deep(host, 'tessera-filter')).not.toBeNull();
     expect(deep(host, '[part="paint"]')).toBeNull();
     expect(registered(store).size).toBe(0);
   });

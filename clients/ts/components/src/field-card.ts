@@ -37,6 +37,8 @@ import './cluster-filter.js';
 /** The rows a category or cluster card lists, and the rows "N more" opens it to. */
 const ROWS = 5;
 const MORE_ROWS = 20;
+/** The narrowest a cluster's bar is drawn where it is not empty, in pixels. */
+const MIN_BAR_PX = 3;
 /** The values the counts over everything matching are asked for, so the rows in view find theirs. */
 const MATCH_TOP = 100;
 /** The clusters a cluster card ranks, the largest a browse lists. */
@@ -838,8 +840,8 @@ export class TesseraFieldCard extends TesseraElement {
   }
 
   /** The groupings a category or cluster card counts; the values its clauses name are always counted. */
-  private rowGroupings(store: Store, meta: Meta, kind: Kind, top: number): AggregateSpec['groupings'] | null {
-    const named = [...new Set([...this.clauseKeys(store, 'filter'), ...this.clauseKeys(store, 'highlight')])].sort();
+  private rowGroupings(store: Store, meta: Meta, kind: Kind, top: number, also: readonly string[] = []): AggregateSpec['groupings'] | null {
+    const named = [...new Set([...this.clauseKeys(store, 'filter'), ...this.clauseKeys(store, 'highlight'), ...also])].sort();
     if (kind === 'category') {
       return [{by: {field: this.field, top}}, ...(named.length > 0 ? [{by: {field: this.field, values: named}}] : [])];
     }
@@ -850,6 +852,21 @@ export class TesseraFieldCard extends TesseraElement {
     const extra = named.map((id) => BigInt(id)).filter((id) => !listed.some((r) => r.tesseraId === id));
     const rows = [...listed, ...extra.map((id) => ({tesseraId: id, rung: this.met.get(id)?.rung ?? level}))];
     return rows.length === 0 ? null : artifactGroupings(layer, rows, meta.selection);
+  }
+
+  /**
+   * The values in view that the whole match's commonest values do not list, which it then asks for
+   * by name, so each row has both its counts. Judged against the commonest values alone, so the
+   * answer naming them does not change what is asked.
+   */
+  private outsideMatchTop(): string[] {
+    const matchTop = this.matchCounts.entry()?.result?.tables[0];
+    const inView = this.subjectCounts.entry()?.result?.tables[0];
+    if (!matchTop || !inView) return [];
+    const listed = new Set(listedGroups(matchTop).map((g) => g.key));
+    return listedGroups(inView)
+      .map((g) => g.key)
+      .filter((k) => !listed.has(k));
   }
 
   /** The specs the card keeps registered: the subject's counts, the whole match's and a number's figures. */
@@ -871,7 +888,7 @@ export class TesseraFieldCard extends TesseraElement {
     const level = layer ? this.levelOf(layer) : undefined;
     const match =
       kind === 'category'
-        ? this.rowGroupings(store, meta, kind, Math.min(MATCH_TOP, meta.selection.maxAggregateTop))
+        ? this.rowGroupings(store, meta, kind, Math.min(MATCH_TOP, meta.selection.maxAggregateTop), this.outsideMatchTop())
         : subject && layer
           ? [...subject.slice(0, meta.selection.maxAggregateGroupings - 1), {by: {layer: layer.name, ...(level === undefined || layer.levels.length <= 1 ? {} : {level}), top: 1}}]
           : null;
@@ -1084,7 +1101,7 @@ export class TesseraFieldCard extends TesseraElement {
       html`<div part="head"><span part="title">${title}</span>${this.folded && this.compact && colouring ? html`<span class="painted" role="img" aria-label="Colouring the map">${icon('drop', 11, 2)}</span>` : nothing}${sub}${this.folded ? this.spark(s, kind, colouring) : nothing}${paint}${fold}</div>`;
     if (kind === 'histogram') return this.histogram(s, meta, head, colouring);
     if (kind === 'search') {
-      const body = this.folded ? nothing : html`<tessera-filter class="text" exportparts=${exportparts('filter')} column=${this.field} bare placeholder=${`Search ${title.toLowerCase()}`} .store=${s}></tessera-filter>`;
+      const body = this.folded ? nothing : html`<tessera-filter class="text" exportparts=${exportparts('filter')} column=${this.field} placeholder=${`Search ${title.toLowerCase()}`} .store=${s}></tessera-filter>`;
       return html`${head(html`<span part="sub"></span>`)}${body}`;
     }
     return this.valueCard(s, kind, layer, head, colouring);
@@ -1186,6 +1203,8 @@ export class TesseraFieldCard extends TesseraElement {
     const allTotal = keptTotal(countsByKey(match), match?.result?.tables[0]);
     const same = subTotal === allTotal;
     const pct = (n: number | null, total: number) => (n === null || total <= 0 ? 0 : Math.min(100, (100 * n) / total));
+    // A layer's clusters are often a few per cent each; a bar that is not empty stays visible.
+    const width = (share: number) => (share > 0 && kind === 'cluster' ? `max(${MIN_BAR_PX}px, ${share.toFixed(1)}%)` : `${share.toFixed(1)}%`);
     const groups = kind === 'category' ? (subject?.result?.tables[0]?.groups ?? null) : all.length;
     const more = groups === null ? 0 : groups - shown.length;
     const editable = kind === 'category' && colouring;
@@ -1213,7 +1232,7 @@ export class TesseraFieldCard extends TesseraElement {
         <span class="mark">${mark}</span>
         <span class="label">
           <span class="names"><span part="name" title=${r.name} ?data-unnamed=${r.name === UNNAMED}>${r.name}</span>${r.path ? html`<span part="path" title=${r.path}>${r.path}</span>` : nothing}</span>
-          <span class="bars" aria-hidden="true"><span part="bar-match" style=${`width:${out ? 0 : pct(r.all, allTotal).toFixed(1)}%`}></span><span part="bar-subject" style=${`width:${out ? 0 : pct(r.sub, subTotal).toFixed(1)}%${r.swatch ? `;background:${r.swatch}` : ''}`}></span></span>
+          <span class="bars" aria-hidden="true"><span part="bar-match" style=${`width:${width(out ? 0 : pct(r.all, allTotal))}`}></span><span part="bar-subject" style=${`width:${width(out ? 0 : pct(r.sub, subTotal))}${r.swatch ? `;background:${r.swatch}` : ''}`}></span></span>
         </span>
         ${counts}
         <span part="verbs">
@@ -1225,8 +1244,8 @@ export class TesseraFieldCard extends TesseraElement {
     const values = (kind === 'category' ? match?.result?.tables[0] : match?.result?.tables.at(-1))?.groups ?? null;
     const search =
       kind === 'category'
-        ? html`<tessera-filter class="search" exportparts=${exportparts('filter')} column=${this.field} bare placeholder=${values === null ? 'Search values' : `Search ${values.toLocaleString('en-GB')} values`} .store=${s}></tessera-filter>`
-        : html`<tessera-cluster-filter class="search" exportparts=${exportparts('cluster-filter')} layer=${layer!.name} bare placeholder=${values === null ? 'Search clusters' : `Search ${values.toLocaleString('en-GB')} clusters`} .store=${s}></tessera-cluster-filter>`;
+        ? html`<tessera-filter class="search" exportparts=${exportparts('filter')} column=${this.field} placeholder=${values === null ? 'Search values' : `Search ${values.toLocaleString('en-GB')} values`} .store=${s}></tessera-filter>`
+        : html`<tessera-cluster-filter class="search" exportparts=${exportparts('cluster-filter')} layer=${layer!.name} placeholder=${values === null ? 'Search clusters' : `Search ${values.toLocaleString('en-GB')} clusters`} .store=${s}></tessera-cluster-filter>`;
     const moreButton =
       more > 0 || this.expanded
         ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = !this.expanded)}>${this.expanded ? 'Show fewer' : `${more.toLocaleString('en-GB')} more${this.highlighting(s) ? '' : ' in view'}`}</button>`

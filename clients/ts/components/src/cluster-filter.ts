@@ -1,7 +1,7 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {artifactName, withMember, withoutMember, type BrowseRow, type ClauseVerb, type Layer, type MemberClause, type Refusal} from '@tesseradb/client';
+import {artifactName, withMember, withoutMember, type BrowseRow, type Layer, type MemberClause, type Refusal} from '@tesseradb/client';
 import {refusalOf} from '@tesseradb/client/internal';
 import {HeldAggregate, artifactGroupings, countsByKey} from './aggregate.js';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
@@ -29,9 +29,8 @@ const PATH_DEPTH = 3;
 type Offer = {row: BrowseRow; path: string[] | null; beyond: boolean};
 
 /**
- * The clusters of one layer as a filter field: a search box whose list offers the layer's
- * artifacts, and the clusters chosen as chips under it, each a `member_of` clause
- * (`Store.setMembers`) in the position `verb` names.
+ * The search box of a layer's field card: its list offers the layer's artifacts, and choosing one
+ * puts its `member_of` clause on in the filter position (`Store.setMembers`).
  *
  * With the box empty, the list offers the layer's top-level clusters (its roots, or its first level
  * on a levelled layer), largest first. Typing searches the layer's names through
@@ -39,35 +38,28 @@ type Offer = {row: BrowseRow; path: string[] | null; beyond: boolean};
  * names of its nearest parents in grey, cut from the left so the nearest stay. On a levelled layer
  * the path names only parents the list has already met. Each row's count is exact, from the
  * aggregate route (`Store.setAggregate`) over the rows listed, one grouping per level on a layer
- * with several: under the store's filters without this layer's own filter clauses in the filter
- * position, so a cluster its clauses exclude is still counted, and under the whole filter in the
- * highlight position, where a cluster counted 0 cannot be chosen. A row shows no count until the
- * answer lands. The list opens over what sits below the box, in the top layer.
+ * with several, under the store's filters without this layer's own filter clauses, so a cluster
+ * its clauses exclude is still counted. A row shows no count until the answer lands. The list opens
+ * over what sits below the box, in the top layer.
  *
  * Choosing a row puts its clause on, with the row's name as the clause's label, and pressing a
- * chosen row takes it off. A chip names its cluster by its label, "Outside" before it where the
- * clause selects everything outside; its × takes the clause off. The arrow keys move through the
- * list, Enter chooses the row reached, the first by default, and Escape closes the list.
+ * chosen row takes it off. The arrow keys move through the list, Enter chooses the row reached, the
+ * first by default, and Escape closes the list.
  *
- * `bare` draws the search box alone, without the layer's title or the chips, for a host such as
- * `<tessera-field-card>` that shows those itself.
- *
- * @summary One layer's clusters as a filter field.
+ * @summary A layer's field card's search box.
  * @tagname tessera-cluster-filter
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A row or
- *   a chip's × put a `member_of` clause on or took it off.
- * @csspart label - The layer's title.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A row put
+ *   a `member_of` clause on or took it off.
  * @csspart entry - The search box.
  * @csspart values - The list, while it is open.
- * @csspart option - One cluster in the list, with `data-id`, `aria-selected` while its clause is on,
- *   and `aria-disabled` where it cannot be chosen.
+ * @csspart option - One cluster in the list, with `data-id` and `aria-selected` while its clause is
+ *   on.
  * @csspart name - A row's name, with `data-unnamed` where it has none.
  * @csspart path - A row's path of parents' names.
  * @csspart value-count - A row's exact count.
  * @csspart more - The note under the box: no match, or that more match than the list holds.
  * @csspart refusal - The words "Clusters unavailable", with `data-code`, where the list was refused.
- * @csspart chosen - A chosen cluster's chip, with `data-id`.
  */
 export class TesseraClusterFilter extends TesseraElement {
   static override styles = [
@@ -77,30 +69,14 @@ export class TesseraClusterFilter extends TesseraElement {
       :host {
         display: block;
       }
-      .head {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 8px;
-        margin-bottom: 8px;
-      }
-      [part='label'] {
-        font-weight: 600;
-        color: var(--_tessera-ink);
-      }
-      :host([bare]) .input {
+      .input {
         height: 28px;
         gap: 6px;
         padding: 0 8px;
         font-size: 12px;
       }
-      :host([bare]) .input input {
+      .input input {
         font-size: 12px;
-      }
-      :host([verb='highlight']) .input:focus-within {
-        outline: 0;
-        border: 1.5px solid var(--_tessera-highlight);
-        padding: 0 9.5px;
       }
       .combo {
         position: relative;
@@ -137,15 +113,6 @@ export class TesseraClusterFilter extends TesseraElement {
         background: var(--_tessera-surface-2);
         font-weight: 600;
       }
-      :host([verb='highlight']) [part~='option'][aria-selected='true'] {
-        background: var(--_tessera-highlight-soft);
-        color: var(--_tessera-highlight);
-      }
-      [part~='option'][aria-disabled='true'] {
-        cursor: default;
-        background: none;
-        color: var(--_tessera-ink-3);
-      }
       .opt {
         display: flex;
         flex-direction: column;
@@ -176,21 +143,11 @@ export class TesseraClusterFilter extends TesseraElement {
         font-size: 12px;
         color: var(--_tessera-ink-3);
       }
-      .chosen {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        margin-top: 8px;
-      }
     `
   ];
 
   /** The layer whose clusters are offered, a name `meta.layers` lists. Unset or unknown, the field renders nothing. */
   @property() accessor layer = '';
-  /** The position the field's clauses join: `filter` or `highlight`. */
-  @property({reflect: true}) accessor verb: ClauseVerb = 'filter';
-  /** Draws the search box alone. */
-  @property({type: Boolean, reflect: true}) accessor bare = false;
   /** The search box's placeholder, in place of the field's own. */
   @property() accessor placeholder = '';
 
@@ -344,7 +301,7 @@ export class TesseraClusterFilter extends TesseraElement {
 
   /** The clauses this field holds: the layer's, in its position. */
   private held(): MemberClause[] {
-    return (this.resolvedStore?.get('filters').members ?? []).filter((m) => m.layer === this.layer && m.verb === this.verb);
+    return (this.resolvedStore?.get('filters').members ?? []).filter((m) => m.layer === this.layer && m.verb === 'filter');
   }
 
   private toggle(row: BrowseRow): void {
@@ -355,20 +312,13 @@ export class TesseraClusterFilter extends TesseraElement {
     const name = artifactName(row);
     s.setMembers(
       on
-        ? withoutMember(members, this.layer, row.tesseraId, this.verb)
-        : withMember(members, {layer: this.layer, artifact: row.tesseraId, outside: false, verb: this.verb, ...(name === null ? {} : {label: name})})
+        ? withoutMember(members, this.layer, row.tesseraId, 'filter')
+        : withMember(members, {layer: this.layer, artifact: row.tesseraId, outside: false, verb: 'filter', ...(name === null ? {} : {label: name})})
     );
-    emit(this, 'tessera-clausechange', {id: idString(row.tesseraId), layer: this.layer, outside: false, verb: this.verb, on: !on});
+    emit(this, 'tessera-clausechange', {id: idString(row.tesseraId), layer: this.layer, outside: false, verb: 'filter', on: !on});
     this.search = '';
     this.found = null;
     this.listOpen = false;
-  }
-
-  private drop(clause: MemberClause): void {
-    const s = this.resolvedStore;
-    if (!s) return;
-    s.setMembers(withoutMember(s.get('filters').members, clause.layer, clause.artifact, clause.verb));
-    emit(this, 'tessera-clausechange', {id: idString(clause.artifact), layer: clause.layer, outside: clause.outside, verb: clause.verb, on: false});
   }
 
   private type(text: string): void {
@@ -445,7 +395,7 @@ export class TesseraClusterFilter extends TesseraElement {
     this.counts.set(
       this.resolvedStore,
       layer && limits && offers.length > 0
-        ? {groupings: artifactGroupings(layer, offers.map((o) => o.row), limits), ...(this.verb === 'filter' ? {withoutMembersOf: layer.name} : {})}
+        ? {groupings: artifactGroupings(layer, offers.map((o) => o.row), limits), withoutMembersOf: layer.name}
         : null
     );
   }
@@ -455,37 +405,33 @@ export class TesseraClusterFilter extends TesseraElement {
     const layer = this.declared();
     if (!s || !layer) return nothing;
     const title = layer.title || layer.name;
-    const chosen = this.held();
-    const on = new Set(chosen.filter((m) => !m.outside).map((m) => m.artifact));
+    const on = new Set(this.held().filter((m) => !m.outside).map((m) => m.artifact));
     const counts = countsByKey(this.counts.entry());
     const countOf = (o: Offer) => counts?.get(o.row.tesseraId.toString());
     const listed = this.listed();
     // Largest first once the counts land; the server's order until then.
     const offers = listed === null ? [] : counts === null ? listed : [...listed].sort((a, b) => (countOf(b) ?? -1) - (countOf(a) ?? -1));
-    const out = (o: Offer) => this.verb === 'highlight' && countOf(o) === 0 && !on.has(o.row.tesseraId);
-    const choosable = offers.filter((o) => !out(o));
-    const active = choosable.find((o) => o.row.tesseraId === this.activeId) ?? choosable[0] ?? null;
+    const active = offers.find((o) => o.row.tesseraId === this.activeId) ?? offers[0] ?? null;
     const move = (by: 1 | -1) => {
-      if (choosable.length === 0) return;
-      const at = active ? choosable.indexOf(active) : -1;
-      this.activeId = choosable[(at + by + choosable.length) % choosable.length]!.row.tesseraId;
+      if (offers.length === 0) return;
+      const at = active ? offers.indexOf(active) : -1;
+      this.activeId = offers[(at + by + offers.length) % offers.length]!.row.tesseraId;
     };
     const open = this.listOpen && offers.length > 0;
     const option = (o: Offer) => {
       const name = artifactName(o.row);
       const count = countOf(o);
-      const left = out(o);
       const full = o.path && o.path.length > 0 ? pathText(o.path, o.beyond, o.path.length) : '';
       const path = o.path && o.path.length > 0 ? pathText(o.path, o.beyond, this.pathFits.get(o.row.tesseraId) ?? o.path.length) : '';
       return html`<button type="button" part="option" role="option" id=${`c-${o.row.tesseraId}`} tabindex="-1" data-id=${idString(o.row.tesseraId)} ?data-active=${o === active}
-        aria-selected=${on.has(o.row.tesseraId) ? 'true' : 'false'} aria-disabled=${left ? 'true' : 'false'}
-        @mousedown=${(e: Event) => e.preventDefault()} @click=${() => !left && this.toggle(o.row)}>
+        aria-selected=${on.has(o.row.tesseraId) ? 'true' : 'false'}
+        @mousedown=${(e: Event) => e.preventDefault()} @click=${() => this.toggle(o.row)}>
         <span class="opt"><span part="name" ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>${path ? html`<span part="path" data-id=${idString(o.row.tesseraId)} title=${full}><bdi>${path}</bdi></span>` : nothing}</span>
         ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
       </button>`;
     };
     const box = html`<div class="combo">
-      <div class="input">${icon('search', this.bare ? 12 : 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder=${this.placeholder || 'Type a name'}
+      <div class="input">${icon('search', 12)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder=${this.placeholder || 'Type a name'}
         role="combobox" aria-expanded=${open ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${open && active ? `c-${active.row.tesseraId}` : nothing}
         aria-label=${`${title}: find a cluster`} .value=${this.search}
         @focus=${() => {
@@ -518,17 +464,7 @@ export class TesseraClusterFilter extends TesseraElement {
             ? html`<span part="more">Type more to narrow the list</span>`
             : nothing
         : nothing;
-    const chips =
-      chosen.length > 0
-        ? html`<div class="chosen">
-            ${chosen.map((m) => {
-              const text = `${m.outside ? 'Outside ' : ''}${m.label ?? UNNAMED}`;
-              return html`<span part="chosen" class="chip" data-verb=${this.verb} data-id=${idString(m.artifact)}>${text}<button type="button" aria-label=${`Remove ${text}`} @click=${() => this.drop(m)}>${icon('close', 12)}</button></span>`;
-            })}
-          </div>`
-        : nothing;
-    if (this.bare) return html`${box}${note}`;
-    return html`<div class="head"><label part="label" for="ctl">${title}</label></div>${box}${note}${chips}`;
+    return html`${box}${note}`;
   }
 }
 

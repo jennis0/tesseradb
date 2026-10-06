@@ -20,8 +20,8 @@ export const PARTS = {
   'view-picker': ['field', 'select'],
   'key-picker': ['entry', 'field', 'label', 'select', 'step'],
   'layer-picker': ['entry', 'name', 'note', 'title', ...STATE],
-  filter: ['aside', 'bar', 'chosen', 'entry', 'hint', 'label', 'mode', 'more', 'tick', 'top', 'top-value', 'value-count', 'values', 'refusal'],
-  'cluster-filter': ['chosen', 'entry', 'label', 'more', 'name', 'option', 'path', 'refusal', 'value-count', 'values'],
+  filter: ['bar', 'entry', 'mode', 'more', 'operator', 'operators', 'refusal', 'tick', 'value-count', 'values'],
+  'cluster-filter': ['entry', 'more', 'name', 'option', 'path', 'refusal', 'value-count', 'values'],
   'filter-panel': ['add', 'add-list', 'add-note', 'add-option', 'add-search', 'all', 'all-count', 'card', 'chip', 'chips', 'clear', 'clear-highlight', 'edit', 'subject', 'subject-count', 'subject-key', 'subject-name', ...STATE],
   'field-card': [
     'axis',
