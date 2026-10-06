@@ -73,6 +73,17 @@ The first open at zoom 0, the level-0 request and the tag read together, takes 1
 
 Every reopen loads its figures from the cache and fills none, before and after.
 
+The 100% viewer's zoom 9 after a restart was slower after than before in that one run. Before, the tag read loads the genus and species figures from the cache and zoom 9 finds them held; after, zoom 9 loads them. Two more rounds of the 100% viewer alone, alternating main at df5b7057 and this branch at its head, with the one-minute load between 2.0 and 2.3 at each reopen (`runs/gbif-100-*.json`):
+
+| step after a restart | main, round 1 | branch, round 1 | main, round 2 | branch, round 2 |
+|---|---:|---:|---:|---:|
+| world, level 0 | 2,898 | 411 | 2,129 | 410 |
+| tags by identifier, first | 719 | 1.1 | 534 | 0.9 |
+| zoom 9 | 2,880 | 2,074 | 2,325 | 2,058 |
+| the three together | 6,497 | 2,486 | 4,988 | 2,469 |
+
+Zoom 9 read 1.6 to 1.7 GB from disk on main and 0.21 to 0.24 GB on the branch, with 3,335 major faults against 214: each fault on a member bitmap now reads its page and not 8 MB around it.
+
 ## What the profile showed
 
 A level's fill is one parallel walk of the fragment's base rows on the 12-thread count pool. For each visible row it reads the row's label from the level's label column (2 bytes a row for family, 4 for genus and species) and, because the layer declares a centroid and a box, the row's position from `morton.u32` and the residual column (8 bytes a row). It adds the row to its artifact's count, placed count, position sums and box, and offers it to the artifact's reserve of extreme rows. It intersects no member bitmaps. Building the dense counts from the walk took under 110 ms, and the cache's write to disk runs on its worker after the request.
@@ -107,7 +118,7 @@ The figures' keys, the persisted format and the lookup the aggregate route reads
 
 ## A flat layer published at runtime
 
-A layer registered at a running service recorded every level served from a column as a list column, until a fold observed its memberships. A level's first publication now chooses its layout by the rule a build applies (`tessera_types::layer::choose`, moved there from `tessera_store::derived`), over the memberships the publication carries, before the store applies it. Replay calls the same function at the same point, so a restart records the same layout. A registration's initial layouts are the same rule over a level that may overlap. The memberships are observed in entity space; their spread over rows is not known there, so a level not served from a column stays artifact-major until a fold, as before.
+A layer registered at a running service recorded every level served from a column as a list column, until a fold observed its memberships. A level's first publication now chooses its layout by the rule a build applies (`tessera_types::layer::choose`, moved there from `tessera_store::derived`), over the memberships the publication carries. A later publication or growth that adds an item to a second artifact of a label level, which no declaration fixes, records the list column, and the level's held forms are dropped so the next read builds the list form. Both are decided from the artifact store before the record lands (`LayerRegistry::settle_layout`), and replay calls the same function at the same record, so a restart records the same layout. A registration's initial layouts are the same rule over a level that may overlap. An artifact that declares no members counts with its target's, as the fold counts it. The memberships are observed in entity space; their spread over rows is not known there, so a level not served from a column stays artifact-major until a fold, as before.
 
 `runtime_layer.py` is the serving-layers bench's probe pointed at a bundle built at this branch (`data/ladder/gbif-64p/bundle-first-open-fills`, format 35, 2.1 GB, built in 74 s), since the bench's own gbif-64p bundle is format 34. It registers `genus-flat`, the genus level declared again as a flat layer, publishes its 56,893 artifacts and 25,088,942 members in 9 requests, and reads it.
 
