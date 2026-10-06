@@ -115,7 +115,7 @@ class Map(anywidget.AnyWidget):
       popover. The defaults are 1,000 and 2,000,000. Neither changes `budget`.
     - `cluster_budget`: the most clusters a `nested` or `dag` layer is drawn with, met by drawing
       parents in place of their children, and the cut a cluster card ranks at. The default is
-      1,000; `0` leaves the map's own, every cluster.
+      1,000; `0` draws every cluster, and setting it to `0` later goes back to every cluster.
     - `cluster_budget_min`, `cluster_budget_max`: the ends of the Most clusters slider, shown in
       the Layers popover while such a layer is drawn. The defaults are 10 and 10,000. Neither
       changes `cluster_budget`.

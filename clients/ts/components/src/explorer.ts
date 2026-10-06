@@ -742,8 +742,8 @@ export class TesseraExplorer extends TesseraElement {
   /** The most marks Most points offers, passed to the map's `budget-max`. */
   @property({type: Number, attribute: 'budget-max'}) accessor budgetMax = 2_000_000;
   /**
-   * The most clusters a `nested` or `dag` layer is cut to, passed to the map's `cluster-budget`.
-   * Most clusters in the Layers popover sets the store's itself.
+   * The most clusters a `nested` or `dag` layer is cut to, passed to the map's `cluster-budget`;
+   * `0` is the finest cut. Most clusters in the Layers popover sets the store's itself.
    */
   @property({type: Number, attribute: 'cluster-budget'}) accessor clusterBudget = 1_000;
   /** The fewest clusters Most clusters offers. */
@@ -1058,7 +1058,7 @@ export class TesseraExplorer extends TesseraElement {
           budget=${this.budget || nothing}
           .budgetMin=${this.budgetMin}
           .budgetMax=${this.budgetMax}
-          cluster-budget=${this.clusterBudget || nothing}
+          .clusterBudget=${this.clusterBudget}
           controls-corner=${compact ? 'bottom-left' : 'top-left'}
           .clusterLevel=${level}
           .noPoints=${this.noPoints}

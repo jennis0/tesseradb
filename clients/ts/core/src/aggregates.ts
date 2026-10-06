@@ -12,7 +12,15 @@ import type {AggregateRequest, AggregateResult, AggregateTable, FilterExpr, Grou
  *
  * @category Store
  */
-export type AggregateSpecGrouping = Grouping | (Omit<Grouping, 'by'> & {by: {layer: string; top: number; cut: 'drawn'}});
+export type AggregateSpecGrouping = Grouping | DrawnGrouping;
+
+/** A grouping ranking a tree layer's top artifacts at the cut the store's map draws. */
+type DrawnGrouping = Omit<Grouping, 'by'> & {by: {layer: string; top: number; cut: 'drawn'}};
+
+/** Whether `grouping` ranks at the cut the store's map draws. */
+export function isDrawn(grouping: AggregateSpecGrouping): grouping is DrawnGrouping {
+  return grouping.by !== undefined && 'cut' in grouping.by && grouping.by.cut === 'drawn';
+}
 
 /**
  * What a component registers with {@link Store.setAggregate}: the groupings to count, the set they

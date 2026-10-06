@@ -100,7 +100,7 @@ struct ByReq {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CutReq {
-    zoom: u64,
+    zoom: u8,
     bbox: [f64; 4],
     #[serde(default)]
     budget: Option<u32>,
@@ -417,19 +417,9 @@ fn by_of(
                     return bad("`cut` goes with `top`; send `top` beside it, or leave it out")
                 }
                 Some(cut) => {
-                    let zoom = match u8::try_from(cut.zoom) {
-                        Ok(zoom) if zoom <= 16 => zoom,
-                        _ => {
-                            return Err(ApiError::Contract(format!(
-                                "cut zoom {} is past the deepest tile depth; send a zoom from 0 \
-                                 to 16",
-                                cut.zoom
-                            )))
-                        }
-                    };
                     check_bbox("cut.bbox", &cut.bbox)?;
                     Some(Cut {
-                        zoom,
+                        zoom: cut.zoom,
                         bbox: cut.bbox,
                         budget: cut.budget,
                     })

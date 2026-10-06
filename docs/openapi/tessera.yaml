@@ -1407,19 +1407,22 @@ paths:
         listed ones; `none`, the items in no such artifact. Artifacts can overlap, so a layer's
         rows can sum to more than the set. An artifact is listed on the viewport's test against
         the principal's visible set, never the filtered set, and an id that names nothing or
-        nothing this principal is served gets no row.
-
-        **A tree's cut.** On a `nested` or `dag` layer, `top` takes `cut`, and is refused without
-        it. The artifacts the table ranks, and the ones `rest` and `none` are taken against, are
-        those the treed frame of `POST /v1/artifacts/viewport` serves for the same `view`, and
-        `cut`'s `zoom`, `bbox` and `budget` as that request's: the artifacts this principal is
-        served with a member it may see in the tiles, cut to the budget by drawing ancestors in
-        place of their descendants. On a layer declared with `prune_children: false`, which draws
-        ancestors beside their descendants, only the drawn artifacts with no drawn artifact
-        beneath them on any path are ranked. The filter never decides which artifacts are drawn;
-        it changes only their counts and so their order. `cut` on any other layer is refused. Cells: one row per non-empty cell, by
+        nothing this principal is served gets no row. Cells: one row per non-empty cell, by
         ascending `cell`, within each group in group order. With `reference`, a row appears where
         either count is non-zero. `rest` and `none` appear only where non-zero.
+
+        **A tree's cut.** On a `nested` or `dag` layer, `top` takes `cut`, and is refused without
+        it. The artifacts the table ranks are those the treed frame of
+        `POST /v1/artifacts/viewport` serves for the same `view`, and `cut`'s `zoom`, `bbox` and
+        `budget` as that request's: the artifacts this principal is served with a member it may
+        see in the tiles, cut to the budget by drawing ancestors in place of their descendants.
+        On a layer declared with `prune_children: false`, which draws ancestors beside their
+        descendants, only the drawn artifacts with no drawn artifact beneath them on any path are
+        ranked. `rest` and `none` are counted against the ranked artifacts: `rest` holds the items
+        in a ranked artifact other than the listed ones, and `none` the items in no ranked
+        artifact, so an item held only by a drawn ancestor counts in `none`. The filter never
+        decides which artifacts are drawn; it changes only their counts and so their order.
+        `cut` on any other layer is refused.
 
         **Bins.** A field with `bins`: one row per bin, by ascending edge, each appearing even with
         a count of 0; then `rest`, the items whose value lies in no bin; then `none`, the items
@@ -1509,8 +1512,9 @@ paths:
         **Columns**, in this order, each only where stated: `group` (`dictionary<int8, utf8>`, with
         `by`): `listed`, `rest` or `none`. `key` (with `by`): a field's vocabulary key as
         `dictionary<int32, utf8>`, or an artifact's `tessera_id` as `uint64`; null on `rest` and
-        `none`. `title` (`dictionary<int32, utf8>`, with `by` on a field): the value's title as
-        `/v1/categories` gives it, null where it has none. `lower` and `upper` (with `bins`, in
+        `none`. `title` (`dictionary<int32, utf8>`, with `by` on a field or a layer): a value's
+        title as `/v1/categories` gives it, or an artifact's name as `/v1/artifacts/browse` gives
+        it to this principal; null where it has none. `lower` and `upper` (with `bins`, in
         place of `key` and `title`): the bin's edges, `int64` on a signed integer field, `uint64` on
         an unsigned one, `float64` on a float field and on an integer field whose `range` has a
         fractional bound, and `timestamp[us, UTC]` on a timestamp field; null on `rest` and `none`.

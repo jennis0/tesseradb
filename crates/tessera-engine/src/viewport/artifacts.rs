@@ -85,6 +85,13 @@ impl Supplied {
         }
         self.values.first().map(String::as_str)
     }
+
+    /// The artifact's own name: its first text, where that is not empty.
+    pub(crate) fn name(&self) -> Option<String> {
+        self.first_text()
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    }
 }
 
 /// A drawn geometry as the wire carries it: parts, then rings, then vertices in grid units.
@@ -978,19 +985,7 @@ impl Engine {
         sets: &ViewportSets<'_>,
         dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Walked> {
-        // Built once per request: the same segment list for every artifact in the response.
-        let locator = crate::derived::RowLocator::new(served.segments.clone());
-        // The postings are the generation's, not the layer's.
-        let source = served.generation.partition_source();
-        let pass = ArtifactPass {
-            served,
-            ask,
-            mask,
-            dependency_served,
-            locator: &locator,
-            source: &source,
-            shard: served.generation.bundle.manifest.identity.shard_id,
-        };
+        let pass = ArtifactPass::new(served, ask, mask, dependency_served);
 
         let mut walked = Walked::default();
         for name in names {
@@ -1161,7 +1156,7 @@ impl Engine {
             served,
             &layer.registered,
             layer.vocabulary,
-            pass.source,
+            &pass.source,
             level,
         );
         // Decided by the level's layout, never the request: artifact-major counts per artifact,
@@ -1228,10 +1223,8 @@ impl Engine {
         dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
         cancel: &Option<CancelToken>,
     ) -> Result<Option<DrawnCut>> {
-        let mut probe = Probe::new();
         let tiles_req = ViewportRequest::new(served.name, zoom, bbox, 0).cancel(cancel.clone());
-        let tiles = self.resolve_tiles(served, &tiles_req, &mut probe)?;
-        let tiling = tile_ranges(tiles, &served.segments, &mut probe);
+        let tiling = self.tiling(served, &tiles_req, &mut Probe::new())?;
         let ask = ArtifactAsk {
             zoom,
             levels: LevelSelection::All,
@@ -1240,17 +1233,7 @@ impl Engine {
             rows: ArtifactRows::Full,
             cancel: cancel.clone(),
         };
-        let locator = crate::derived::RowLocator::new(served.segments.clone());
-        let source = served.generation.partition_source();
-        let pass = ArtifactPass {
-            served,
-            ask: &ask,
-            mask,
-            dependency_served,
-            locator: &locator,
-            source: &source,
-            shard: served.generation.bundle.manifest.identity.shard_id,
-        };
+        let pass = ArtifactPass::new(served, &ask, mask, dependency_served);
         let Some(layer) = self.layer_pass(&pass, layer.to_string()) else {
             return Ok(None);
         };
@@ -1511,7 +1494,7 @@ impl Engine {
                 }
                 None => (*self.derived_geometry.get_or_derive(key, || {
                     let visible = rows.visible_rows(ordinal, pass.mask);
-                    crate::derived::compute(&layer.declared_derived, &visible, pass.locator)
+                    crate::derived::compute(&layer.declared_derived, &visible, &pass.locator)
                 }))
                 .clone(),
             }
@@ -1596,9 +1579,29 @@ pub(super) struct ArtifactPass<'a> {
     pub(super) mask: &'a crate::compose::EffectiveMask,
     /// The dependency prerequisite, closed over this request's state.
     pub(super) dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
-    pub(super) locator: &'a crate::derived::RowLocator<'a>,
-    pub(super) source: &'a crate::containment::PartitionSource<'a>,
+    pub(super) locator: crate::derived::RowLocator<'a>,
+    /// The postings, which are the generation's, not any layer's.
+    pub(super) source: crate::containment::PartitionSource<'a>,
     pub(super) shard: u32,
+}
+
+impl<'a> ArtifactPass<'a> {
+    pub(super) fn new(
+        served: &'a ServedView<'a>,
+        ask: &'a ArtifactAsk<'a>,
+        mask: &'a crate::compose::EffectiveMask,
+        dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+    ) -> Self {
+        ArtifactPass {
+            served,
+            ask,
+            mask,
+            dependency_served,
+            locator: crate::derived::RowLocator::new(served.segments.clone()),
+            source: served.generation.partition_source(),
+            shard: served.generation.bundle.manifest.identity.shard_id,
+        }
+    }
 }
 
 /// One layer of that pass: the registration this walk reads it through, and what is parsed once

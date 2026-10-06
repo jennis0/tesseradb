@@ -2576,6 +2576,7 @@ fn every_column_has_its_type_and_a_title_is_the_vocabularys() {
             with(vec![
                 ("group", text(DataType::Int8)),
                 ("key", DataType::UInt64),
+                ("title", text(DataType::Int32)),
                 ("cell", DataType::UInt64),
             ])
         );

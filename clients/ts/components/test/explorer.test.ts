@@ -807,6 +807,15 @@ describe('<tessera-explorer> the cluster budget', () => {
     expect(budgets(other.store)).toEqual([40]);
   });
 
+  it('goes back to the finest cut when the cluster budget is set to 0', async () => {
+    const {host, el, store} = await withLayers();
+    el.clusterBudget = 0;
+    await settle(host);
+    expect(budgets(store)).toEqual([1_000, null]);
+    const none = await withLayers('<tessera-explorer cluster-budget="0"></tessera-explorer>');
+    expect(budgets(none.store)).toEqual([]);
+  });
+
   it('offers Most clusters only while a tree layer is drawn, from cluster-budget-min to cluster-budget-max, and sets the cut only when it is let go', async () => {
     const {host, shadow, store} = await withLayers('<tessera-explorer cluster-budget-min="10" cluster-budget-max="10000"></tessera-explorer>');
     const slider = () => shadow.querySelector<HTMLInputElement>('[part="most-clusters"]');

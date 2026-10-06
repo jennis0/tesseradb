@@ -83,6 +83,29 @@ def test_the_artifacts_of_a_layer(db):
     assert sorted(clusters.column("key").to_pylist()) == sorted(ids)
 
 
+def named_papers(db) -> None:
+    """The papers, and two named clusters over the first ten."""
+    papers(db)
+    db.declare_layer(
+        "named",
+        kind="flat",
+        supplied=[("name", "text", "inherited")],
+        artifacts=[
+            {"key": "a", "members": {"paper": [f"p{i}" for i in range(6)]}, "contents": [["Alpha"]]},
+            {"key": "b", "members": {"paper": [f"p{i}" for i in range(6, 10)]}, "contents": [["Beta"]]},
+        ],
+    )
+
+
+def test_a_layer_row_is_titled_with_the_name_browse_gives(served, corpus):
+    db = served(named_papers)
+    (named,) = db.aggregate("map", [{"by": {"layer": "named", "top": 5}}])
+    listed = [r for r in rows(named) if r["group"] == "listed"]
+    assert [(r["title"], r["count"]) for r in listed] == [("Alpha", 6), ("Beta", 4)]
+    browsed = db.viewer().browse_artifacts("map", "named")["artifacts"]
+    assert {r["key"]: r["title"] for r in listed} == {int(r["tessera_id"]): r["name"] for r in browsed}
+
+
 def test_a_selection_counts_what_count_counts(db):
     """The selection's filters and box are the request's filters."""
     part = db.view("map").filter({"n": {"range": {"gte": 3}}}).within((0.0, 0.0, 12.0, 1.0))

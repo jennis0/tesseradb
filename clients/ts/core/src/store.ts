@@ -1,4 +1,4 @@
-import {Aggregates, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
+import {Aggregates, isDrawn, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
@@ -1015,7 +1015,9 @@ export function createStore(options: StoreOptions): Store {
     (spec) => {
       const area = countedArea();
       if (area === null) return null;
-      const body = {groupings: spec.groupings as Grouping[], filters: withArea(aggregateFilters(spec), area)!, reference: withArea(null, area)!};
+      const groupings = drawnGroupings(spec);
+      if (groupings === null) return null;
+      const body = {groupings, filters: withArea(aggregateFilters(spec), area)!, reference: withArea(null, area)!};
       if (!area.selected) boxOf.set(body, lastView!.input.bbox);
       return body;
     }
@@ -1913,7 +1915,7 @@ export function createStore(options: StoreOptions): Store {
 
   /** Whether `spec` ranks a layer at the cut the map draws. */
   function drawsCut(spec: AggregateSpec): boolean {
-    return spec.groupings.some((g) => g.by !== undefined && 'cut' in g.by && g.by.cut === 'drawn');
+    return spec.groupings.some(isDrawn);
   }
 
   /**
@@ -1921,10 +1923,14 @@ export function createStore(options: StoreOptions): Store {
    * before the current view has noted a camera.
    */
   function drawnGroupings(spec: AggregateSpec): Grouping[] | null {
-    if (!drawsCut(spec)) return spec.groupings as Grouping[];
-    const cut = views.current?.channel.drawnCut() ?? null;
-    if (cut === null) return null;
-    return spec.groupings.map((g) => (g.by !== undefined && 'cut' in g.by && g.by.cut === 'drawn' ? {...g, by: {...g.by, cut}} : (g as Grouping)));
+    const cut = drawsCut(spec) ? (views.current?.channel.drawnCut() ?? null) : null;
+    const groupings: Grouping[] = [];
+    for (const g of spec.groupings) {
+      if (!isDrawn(g)) groupings.push(g);
+      else if (cut === null) return null;
+      else groupings.push({...g, by: {...g.by, cut}});
+    }
+    return groupings;
   }
 
   /** Register an aggregate. One counted in view waits for the camera to rest where it is moving. */

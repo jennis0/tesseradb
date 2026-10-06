@@ -107,22 +107,7 @@ impl Layer {
             _ => {}
         }
         if let Some(cut) = cut {
-            let q = generation
-                .bundle
-                .manifest
-                .quantisation_of(view)
-                .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-            let extent = tessera_spatial::Bounds {
-                x_min: q.x_min,
-                x_max: q.x_max,
-                y_min: q.y_min,
-                y_max: q.y_max,
-            };
-            let demanded = tessera_spatial::tiles_for_bbox_count(cut.bbox, cut.zoom, &extent);
-            let limit = engine.config.max_tiles_per_request;
-            if demanded > limit as u64 {
-                return Err(EngineError::TooManyTiles { demanded, limit });
-            }
+            engine.tile_extent(generation, view, cut.zoom, cut.bbox, None)?;
         }
         Ok(Layer {
             name: layer.to_string(),
@@ -167,7 +152,12 @@ impl Layer {
             .ok()
             .filter(|layer| layer.entity == self.entity)
             .filter(|layer| (self.level as usize) < layer.runs.len());
+        let reachable = engine.reachable_layers(served_view.session);
+        let context = DependencyContext::new(served_view, mask, &reachable);
+        let dependency_served = engine.dependency_gate(&context);
         let mut ordinals: Vec<u32> = Vec::new();
+        // Each served ordinal's rank, which its content is read under.
+        let mut ranks: FxHashMap<u32, Option<u32>> = FxHashMap::default();
         let mut targets = Targets::default();
         let read = match &registered {
             None => None,
@@ -175,9 +165,6 @@ impl Layer {
                 // With a cut, the level's figures are the entry the map's treed frame reads.
                 let read =
                     engine.read_level(served_view, mask, layer, self.level, self.cut.is_some())?;
-                let reachable = engine.reachable_layers(served_view.session);
-                let context = DependencyContext::new(served_view, mask, &reachable);
-                let dependency_served = engine.dependency_gate(&context);
                 let readable = |ordinal: u32, entity: EntityId, rank: Option<u32>| {
                     read.content(engine, generation, layer, ordinal, entity, rank)
                         .is_some()
@@ -202,6 +189,7 @@ impl Layer {
                             for (ordinal, entity, _, rank) in drawn.passing_in(&listed) {
                                 if readable(ordinal, entity, rank) {
                                     ordinals.push(ordinal);
+                                    ranks.insert(ordinal, rank);
                                 }
                             }
                         }
@@ -225,6 +213,7 @@ impl Layer {
                             };
                             if readable(ordinal, entity, rank) {
                                 ordinals.push(ordinal);
+                                ranks.insert(ordinal, rank);
                             }
                         }
                     }
@@ -397,6 +386,36 @@ impl Layer {
                     .collect()
             }
         };
+        // Each listed artifact's name, as `/v1/artifacts/browse` names it to this viewer.
+        let titles = match (&served.read, &registered) {
+            (Some(read), Some(layer)) => {
+                let attached = crate::browse::AttachedLevels::default();
+                let namer = crate::browse::Namer::new(
+                    engine,
+                    served_view,
+                    mask,
+                    layer,
+                    &reachable,
+                    &context,
+                    &dependency_served,
+                    &attached,
+                );
+                served
+                    .listed
+                    .iter()
+                    .map(|&o| {
+                        let rank = *ranks.get(&o)?;
+                        let entity = EntityId::new(entity_at(o)?);
+                        let own = read
+                            .content(engine, generation, layer, o, entity, rank)
+                            .and_then(|content| content.name());
+                        namer.name(own, self.level, o)
+                    })
+                    .collect()
+            }
+            _ => vec![None; served.listed.len()],
+        };
+        context.finish()?;
         let named = matches!(self.pick, Pick::Named(_));
         let chosen: Vec<u64> = match chosen {
             Some(chosen) => chosen.to_vec(),
@@ -424,7 +443,7 @@ impl Layer {
                     .map(|&o| named && served.serves(o))
                     .collect(),
                 keys,
-                titles: None,
+                titles: Some(titles),
                 distinct: counts.iter().filter(|&&n| n > 0).count() as u64,
                 sample: None,
             },

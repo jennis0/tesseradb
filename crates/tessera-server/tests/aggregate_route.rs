@@ -450,6 +450,7 @@ async fn the_body_and_its_columns_are_the_contracts() {
         vec![
             ("group".into(), dictionary(DataType::Int8)),
             ("key".into(), DataType::UInt64),
+            ("title".into(), dictionary(DataType::Int32)),
             ("count".into(), DataType::UInt64),
             ("reference_count".into(), DataType::UInt64),
             ("lift".into(), DataType::Float64),
@@ -1574,4 +1575,110 @@ async fn a_tree_is_ranked_at_the_cut_the_map_draws() {
     )
     .await;
     assert_eq!(refused(resp, 422).await, "contract");
+}
+
+/// Publishes `artifacts` to `layer` as the operator.
+async fn publish(server: &TestServer, layer: &str, artifacts: Value) {
+    let resp = server
+        .client
+        .put(server.control_url(&format!(
+            "/control/layers/{}/artifacts",
+            layer.replace('/', "%2F")
+        )))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "artifacts": artifacts }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "{}", resp.text().await.unwrap());
+}
+
+/// **A layer row's title is the name `/v1/artifacts/browse` gives the same viewer**: the
+/// artifact's own name, else that of a label attached to it which the viewer is served; a name
+/// browse withholds from a viewer, the aggregate withholds too.
+#[tokio::test]
+async fn a_layer_rows_title_is_the_name_browse_gives() {
+    const NAMED: &str = "groups/named";
+    const LABELS: &str = "groups/named/labels";
+    let f = fixture().await;
+    let supplied = json!({
+        "computed": [],
+        "supplied": [{ "name": "name", "type": "text", "require_member_visibility": "inherited" }]
+    });
+    let mut named = flat_layer(NAMED);
+    named["content"] = supplied.clone();
+    register(&f.server, named).await;
+    let mut labels = flat_layer(LABELS);
+    labels["artifact_visibility"] = json!({ "field": "team", "default": "inherited" });
+    labels["content"] = supplied;
+    labels["depends_on"] = json!([NAMED]);
+    register(&f.server, labels).await;
+    publish(
+        &f.server,
+        NAMED,
+        json!([
+            { "key": "own", "members": members(0..400), "content": [{ "values": ["Own"] }] },
+            { "key": "labelled", "members": members(400..700), "content": [{ "values": [""] }] },
+            { "key": "red-labelled", "members": members(700..900), "content": [{ "values": [""] }] },
+            { "key": "bare", "members": members(900..1000), "content": [{ "values": [""] }] },
+        ]),
+    )
+    .await;
+    publish(
+        &f.server,
+        LABELS,
+        json!([
+            { "key": "l-open", "attached_to": { "layer": NAMED, "key": "labelled" },
+              "content": [{ "values": ["Labelled"] }], "access": null },
+            { "key": "l-red", "attached_to": { "layer": NAMED, "key": "red-labelled" },
+              "content": [{ "values": ["Red"] }], "access": ["red"] },
+        ]),
+    )
+    .await;
+    tick(&f.server).await;
+
+    for (terms, expected) in [
+        (vec!["0"], [Some("Own"), Some("Labelled"), None, None]),
+        (vec!["0", "red"], [Some("Own"), Some("Labelled"), Some("Red"), None]),
+    ] {
+        let token = token_for(&f.server, &terms).await;
+        let resp = post(
+            &f.server,
+            "/v1/artifacts/browse",
+            &token,
+            &json!({ "view": "s0", "layer": NAMED, "limit": 50 }),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: Value = resp.json().await.unwrap();
+        let browsed: BTreeMap<u64, Option<String>> = body["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let id = row["tessera_id"].as_str().unwrap().parse().unwrap();
+                (id, row["name"].as_str().map(str::to_string))
+            })
+            .collect();
+        let (_, decoded) = aggregate_ok(
+            &f.server,
+            &token,
+            &json!({ "view": "s0", "groupings": [{ "by": { "layer": NAMED, "top": 10 } }] }),
+        )
+        .await;
+        let titled: Vec<(u64, Option<String>)> = table(&[decoded], 0)
+            .into_iter()
+            .filter(|row| row.group.as_deref() == Some("listed"))
+            .map(|row| match row.key {
+                Some(AggregateKey::Id(id)) => (id, row.title),
+                other => panic!("a listed artifact's key is its id, not {other:?}"),
+            })
+            .collect();
+        assert_eq!(titled.len(), browsed.len(), "terms {terms:?}");
+        for (id, title) in &titled {
+            assert_eq!(Some(title), browsed.get(id), "terms {terms:?}, artifact {id}");
+        }
+        let titles: Vec<Option<&str>> = titled.iter().map(|(_, t)| t.as_deref()).collect();
+        assert_eq!(titles, expected, "terms {terms:?}");
+    }
 }

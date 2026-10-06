@@ -364,8 +364,7 @@ impl Engine {
             .cancel(req.cancel.clone());
         tiles_req.filter = req.filter.take();
         tiles_req.highlight = req.highlight.take();
-        let tiles = self.resolve_tiles(&served, &tiles_req, &mut probe)?;
-        let tiling = tile_ranges(tiles, &served.segments, &mut probe);
+        let tiling = self.tiling(&served, &tiles_req, &mut probe)?;
         check_cancelled(&req.cancel)?;
         let v_total = mask.visible_total();
         let (mask, region) =
@@ -421,17 +420,7 @@ impl Engine {
         }
         let outside = treed_frame.served_at;
 
-        let locator = crate::derived::RowLocator::new(served.segments.clone());
-        let source = generation.partition_source();
-        let pass = ArtifactPass {
-            served: &served,
-            ask: &ask,
-            mask: &mask,
-            dependency_served: &dependency_served,
-            locator: &locator,
-            source: &source,
-            shard: generation.bundle.manifest.identity.shard_id,
-        };
+        let pass = ArtifactPass::new(&served, &ask, &mask, &dependency_served);
         let layers = targets_first(
             tiled
                 .into_iter()

@@ -323,22 +323,21 @@ describe('<tessera-field-card> on a date', () => {
 describe('<tessera-field-card> on a layer', () => {
   const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 1, parentIds, childCount: 0});
 
-  it('ranks the clusters the map draws by their counts in view, leaving out its own clauses, and names each as the map or a browse page does', async () => {
+  it('ranks the clusters the map draws by their counts in view, leaving out its own clauses, and names each as its table does, with its path from browse pages', async () => {
     const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
     const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
     const store = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
     store.set('view', {...store.get('view'), id: 's0'});
-    store.set('artifacts', {...store.get('artifacts'), served: [{layer: 'topics', tesseraId: 7n, key: null, maskedCount: 10n, centroid: null, box: null, content: ['optics'], parentIds: [], rung: 0, matched: null, highlighted: null, target: null}]});
-    store.setBrowse('p:7', {artifacts: [], parents: [row(1n, 'physics')], next: null});
+    store.setBrowse('p:7', {artifacts: [], parents: [row(1n, 'physics', [0n])], next: null});
+    store.setBrowse('p:1', {artifacts: [], parents: [row(0n, 'science')], next: null});
     store.setBrowse('p:8', {artifacts: [], parents: [], next: null});
-    store.setBrowse('roots', {artifacts: [row(8n, 'lasers')], parents: [], next: null});
     card.store = store;
     await settle(host);
     const ranked = (top: number) => ({by: {layer: 'topics', top, cut: 'drawn'}});
     expect(spec(store, 'field-subject')).toEqual({groupings: [ranked(5)], subject: 'view', highlighted: true, withoutMembersOf: 'topics'});
     // The whole match counts how many clusters are drawn, which the search box names.
     expect(spec(store, 'field-match')).toEqual({groupings: [ranked(1)], withoutMembersOf: 'topics'});
-    answerAggregate(store, 'field-subject', aggregateEntry([{rows: [{key: 7n, count: 9}, {key: 8n, count: 5}], total: 14}]));
+    answerAggregate(store, 'field-subject', aggregateEntry([{rows: [{key: 7n, count: 9, title: 'optics'}, {key: 8n, count: 5, title: 'lasers'}], total: 14}]));
     await settle(host);
     await new Promise((r) => setTimeout(r, 0));
     await settle(host);
@@ -355,11 +354,11 @@ describe('<tessera-field-card> on a layer', () => {
       await settle(host);
     }
     expect(rows(host).map((r) => [r.querySelector('[part="name"]')!.textContent, r.querySelector('[part="path"]')?.textContent ?? ''])).toEqual([
-      ['optics', 'physics'],
+      ['optics', 'science › physics'],
       ['lasers', '']
     ]);
-    // The map named the first, so only its parents were asked for.
-    expect(store.calls.filter((c) => c.name === 'browse').map((c) => (c.args[0] as {parent?: bigint}).parent ?? 'roots')).toEqual([7n, 8n, 'roots']);
+    // Each cluster's parents, and its first parent's, and nothing else.
+    expect(store.calls.filter((c) => c.name === 'browse').map((c) => (c.args[0] as {parent?: bigint}).parent ?? 'roots')).toEqual([7n, 8n, 1n]);
     const clauses: unknown[] = [];
     host.addEventListener('tessera-clausechange', (e) => clauses.push((e as CustomEvent).detail));
     (rows(host)[1]!.querySelector('[part="highlight"]') as HTMLButtonElement).click();
@@ -405,11 +404,10 @@ describe('<tessera-field-card> across a change of viewer', () => {
     const after = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
     after.set('view', {...after.get('view'), id: 's0'});
     after.setBrowse('p:3', {artifacts: [], parents: [], next: null});
-    after.setBrowse('roots', {artifacts: [row(3n, 'theirs')], parents: [], next: null});
     card.store = after;
     await settle(host);
     release();
-    answerAggregate(after, 'field-subject', aggregateEntry([{rows: [{key: 3n, count: 4}], total: 4}]));
+    answerAggregate(after, 'field-subject', aggregateEntry([{rows: [{key: 3n, count: 4, title: 'theirs'}], total: 4}]));
     for (let i = 0; i < 3; i++) {
       await new Promise((r) => setTimeout(r, 0));
       await settle(host);

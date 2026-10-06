@@ -139,6 +139,8 @@ describe('the token protocol', () => {
     expect(explorer.clusterBudget).toBe(1_200);
     model.set('cluster_budget', 300);
     expect(explorer.clusterBudget).toBe(300);
+    model.set('cluster_budget', 0);
+    expect(explorer.clusterBudget).toBe(0);
   });
 
   it('sends the budget up when Most points is let go, and takes the old one back from the kernel', async () => {

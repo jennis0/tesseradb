@@ -1780,7 +1780,8 @@ export type AggregateCells = {
  *
  * The columns are, in this order and each only where stated: `group` (`listed`, `rest` or `none`,
  * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null
- * on `rest` and `none`); `title` (the value's title, with `by` on a field); in place of `key` and
+ * on `rest` and `none`); `title` (a value's title, or an artifact's name as
+ * {@link TesseraClient.browse} gives it, with `by`; null where there is none); in place of `key` and
  * `title` with `bins`, `lower` and `upper` (a bin's edges: a `bigint` on an integer field, a number
  * on one whose range has a fractional bound, a number on a float field, and a timestamp in
  * milliseconds since the Unix epoch, as Arrow reads one, on a timestamp field; null on `rest` and

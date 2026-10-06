@@ -736,7 +736,7 @@ class Selection:
         - `budget_min`, `budget_max`: the ends of the Most points slider in the map's Layers
           popover. Neither changes `budget`.
         - `cluster_budget`: the most clusters a `nested` or `dag` layer is drawn with, met by
-          drawing parents in place of their children. `0` leaves the map's own, every cluster.
+          drawing parents in place of their children. `0` draws every cluster.
         - `cluster_budget_min`, `cluster_budget_max`: the ends of the Most clusters slider, shown
           while such a layer is drawn. Neither changes `cluster_budget`.
 
@@ -1211,7 +1211,8 @@ class Viewer:
           and `lift`.
 
         A table's columns are, where they apply: `group` (`listed`, `rest` or `none`), `key` (a
-        category's key or an artifact's `tessera_id`), `title`, `lower` and `upper` (a bin's edges:
+        category's key or an artifact's `tessera_id`), `title` (a category's title, or an artifact's
+        name as `browse_artifacts` gives it), `lower` and `upper` (a bin's edges:
         an integer on an integer field, exactly, a float on a float field or on an integer field
         whose range has a fractional bound and a UTC timestamp on a timestamp field; a bin holds
         `lower` up to but not including `upper`, and the last bin also holds its `upper`), `cell`

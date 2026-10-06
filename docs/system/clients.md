@@ -358,7 +358,8 @@ answered.
 
 A cluster card ranks a `nested` or `dag` layer's clusters at the cut its map draws, registering
 `{by: {layer, top: n, cut: 'drawn'}}`, and a flat or levelled layer's at its level. It names each
-row as the map names it, and otherwise from the layer's browse pages, which also give its path.
+row by the name its table gives, which is the name the layer's browse pages give the same viewer,
+and asks the browse pages only for its path.
 
 ## Not built
 

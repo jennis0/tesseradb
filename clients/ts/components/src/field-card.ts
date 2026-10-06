@@ -132,8 +132,9 @@ function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
  * the filter. A levelled layer's card has a Level choice in its heading, the deepest level by
  * default, which fires `tessera-levelchange`. A cluster card ranks a `nested` or `dag` layer's
  * clusters at the cut the map draws (`cut: 'drawn'`), and a flat or levelled layer's at its level.
- * A cluster is named as the map names it, and otherwise from the layer's browse pages, which also
- * name its path.
+ * A cluster is named as the aggregate's table names it, which is the name the layer's browse pages
+ * give the same viewer. On a `nested` or `dag` layer its path is named from a browse page of its
+ * parents and one of its first parent's.
  *
  * A number or date card draws about twenty bins over the values the viewer may see, the pale bar
  * the whole match and the solid one the subject, each bin's height its share of its own set, scaled
@@ -737,12 +738,12 @@ export class TesseraFieldCard extends TesseraElement {
   /** The whole match's counts of the values in view its commonest do not list. */
   private readonly outsideCounts = new HeldAggregate('field-outside');
   private unwatchChoices: (() => void) | null = null;
-  /** Every cluster the card has met on a browse page, for names and parents. */
+  /** Every cluster the card has met on a browse page, for the names of the paths. */
   private readonly met = new Map<bigint, BrowseRow>();
   /** Each cluster's served parents, once asked for. */
   private readonly parentsOf = new Map<bigint, bigint[]>();
-  /** The browse pages asked for, by form: a cluster's parents, a parent's children, a level's roots. */
-  private readonly asked = new Set<string>();
+  /** The clusters whose parents a browse page was asked for. */
+  private readonly asked = new Set<bigint>();
   /** Moved by {@link resetServerData}, so an answer asked for before is dropped. */
   private epoch = 0;
 
@@ -752,7 +753,7 @@ export class TesseraFieldCard extends TesseraElement {
   /**
    * Draw again only when what the card reads changed: its counts, the clauses, the colouring, the
    * view, or the colours of a layer's clusters, and on a cluster card the clusters the map draws,
-   * which name its rows. The store publishes as each frame arrives, which changes none of these.
+   * whose swatches it reads. The store publishes as each frame arrives, which changes none of these.
    */
   protected override onStoreChange(): void {
     const s = this.resolvedStore;
@@ -948,42 +949,29 @@ export class TesseraFieldCard extends TesseraElement {
   }
 
   /**
-   * Ask the layer's browse pages for what names the clusters in `ids` the map does not: on a
-   * `nested` or `dag` layer each cluster's served parents, which name its path, and then the
-   * children of its first parent, or the roots where it has none, which name it; on any other
-   * layer the largest clusters at the card's level. Each page is asked for once.
+   * On a `nested` or `dag` layer, ask a browse page for the served parents of each cluster in
+   * `ids`, and then for its first parent's, which name its path. Each is asked for once.
    */
-  private askNames(s: Store, meta: Meta, layer: Layer, ids: bigint[], named: (id: bigint) => boolean): void {
-    const treed = layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag';
-    const level = this.levelOf(layer);
-    const limit = Math.max(1, meta.selection.maxBrowseRows);
+  private askPaths(s: Store, layer: Layer, ids: bigint[]): void {
+    if (layer.hierarchy.kind !== 'nested' && layer.hierarchy.kind !== 'dag') return;
     const epoch = this.epoch;
-    const page = (form: string, req: {parent?: bigint; level?: number; limit: number}, took: (rows: BrowseRow[], parents: BrowseRow[]) => void) => {
-      if (this.asked.has(form)) return;
-      this.asked.add(form);
+    const ask = (id: bigint) => {
+      if (this.asked.has(id)) return;
+      this.asked.add(id);
       void s
-        .browse({layer: layer.name, filters: null, ...req})
+        .browse({layer: layer.name, filters: null, parent: id, limit: 1})
         .then((p) => {
           if (epoch !== this.epoch) return;
-          for (const r of [...p.parents, ...p.artifacts]) this.met.set(r.tesseraId, r);
-          took(p.artifacts, p.parents);
+          for (const r of p.parents) this.met.set(r.tesseraId, r);
+          this.parentsOf.set(id, p.parents.map((r) => r.tesseraId));
           this.requestUpdate();
         })
         .catch(() => undefined);
     };
     for (const id of ids) {
-      if (!treed) {
-        if (!named(id)) page(`level:${level ?? ''}`, {limit, ...(level === undefined ? {} : {level})}, () => {});
-        continue;
-      }
-      const parents = this.parentsOf.get(id);
-      if (parents === undefined) {
-        page(`parents:${id}`, {parent: id, limit: 1}, (_, ps) => this.parentsOf.set(id, ps.map((r) => r.tesseraId)));
-        continue;
-      }
-      if (named(id)) continue;
-      if (parents.length > 0) page(`children:${parents[0]}`, {parent: parents[0]!, limit}, () => {});
-      else page('roots', {limit}, () => {});
+      ask(id);
+      const first = this.parentsOf.get(id)?.[0];
+      if (first !== undefined) ask(first);
     }
   }
 
@@ -1127,6 +1115,8 @@ export class TesseraFieldCard extends TesseraElement {
       }));
     }
     const layer = this.declaredLayer(s.get('meta'));
+    const titles = new Map<string, string>();
+    for (const t of [...(subject?.result?.tables ?? []), ...(match?.result?.tables ?? [])]) for (const g of listedGroups(t)) if (g.title) titles.set(g.key, g.title);
     const ids = [...new Set([...named, ...(sub ? [...sub.keys()] : [])])];
     const keys = ids.filter((k) => named.includes(k) || (sub?.get(k) ?? 0) > 0);
     keys.sort((a, b) => Number(named.includes(b)) - Number(named.includes(a)) || (sub?.get(b) ?? 0) - (sub?.get(a) ?? 0) || (all?.get(b) ?? 0) - (all?.get(a) ?? 0));
@@ -1135,21 +1125,13 @@ export class TesseraFieldCard extends TesseraElement {
       const id = BigInt(key);
       let swatch: string | null = null;
       if (colouring && layer) swatch = rgb(artifacts.colours.get(artifacts.table.ordinalOf(layer.name, id)) ?? NEUTRAL);
-      return {key, name: this.nameOf(s, id) ?? UNNAMED, path: this.pathOf(id), sub: sub?.get(key) ?? null, all: all?.get(key) ?? null, swatch};
+      return {key, name: titles.get(key) ?? this.clauseName(s, id) ?? UNNAMED, path: this.pathOf(id), sub: sub?.get(key) ?? null, all: all?.get(key) ?? null, swatch};
     });
   }
 
-  /** A cluster's name: as the map names it, else as a browse page did, else as its clause does. */
-  private nameOf(s: Store, id: bigint): string | null {
-    const artifacts = s.get('artifacts');
-    const drawn = [...artifacts.served, ...artifacts.colourServed].find((a) => a.layer === this.layerName && a.tesseraId === id);
-    const row = this.met.get(id);
-    return (
-      (drawn ? artifactName(drawn, artifacts.attached) : null) ??
-      (row ? artifactName(row) : null) ??
-      s.get('filters').members.find((m) => m.artifact === id && m.layer === this.layerName)?.label ??
-      null
-    );
+  /** The name a cluster's clause carries, for a cluster no table lists. */
+  private clauseName(s: Store, id: bigint): string | null {
+    return s.get('filters').members.find((m) => m.artifact === id && m.layer === this.layerName)?.label ?? null;
   }
 
   /** A category value's colour on the map: the one chosen for it, else its palette colour by rank. */
@@ -1176,8 +1158,7 @@ export class TesseraFieldCard extends TesseraElement {
     const filtered = this.clauseKeys(s, 'filter');
     const lit = this.clauseKeys(s, 'highlight');
     const shown = all.slice(0, Math.max(this.expanded ? MORE_ROWS : ROWS, all.filter((r) => filtered.has(r.key) || lit.has(r.key)).length));
-    const meta = s.get('meta');
-    if (layer && meta) this.askNames(s, meta, layer, shown.map((r) => BigInt(r.key)), (id) => this.nameOf(s, id) !== null);
+    if (layer) this.askPaths(s, layer, shown.map((r) => BigInt(r.key)));
     // The shares are of each set's total, or of what the field's own filter keeps where it has one.
     const keptTotal = (counts: Map<string, number> | null, table: AggregateTable | undefined) =>
       filtered.size > 0 && counts ? [...filtered].reduce((t, k) => t + (counts.get(k) ?? 0), 0) : (table?.total ?? 0);
