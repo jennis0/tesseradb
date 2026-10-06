@@ -618,7 +618,8 @@ export interface Store {
    * id again; when the filters, the highlight, the `member_of` clauses or the selected region
    * change and the request they compose differs from the one last sent; for a `view` aggregate,
    * once the camera has rested 250 ms somewhere new; at a view switch; at {@link Store.refresh};
-   * and once it has read `/v1/meta` again after forgetting what the server answered. A `view`
+   * when a frame observes a new content key; and once it has read `/v1/meta` again after
+   * forgetting what the server answered, composing its request under that meta. A `view`
    * aggregate registered while the camera moves is sent once it rests. Aggregates asked for
    * together whose requests differ only in their groupings go as one request, up to
    * `meta.selection.maxAggregateGroupings` groupings each. Waits for `/v1/meta`. Each call sends a
@@ -869,6 +870,8 @@ export function createStore(options: StoreOptions): Store {
   let meta: Meta | null = null;
   let budget = options.budget ?? DEFAULT_BUDGET;
   let contentKeyAtFrame = '';
+  /** The content key the registered aggregates were last asked under, by {@link observeCorpus}. */
+  let corpusKey = '';
 
   /** One byte budget across every view's bands, evicted least recently drawn across them. */
   let bandBudget = new BandBudget(options.replica?.cacheBytes ?? DEFAULT_CACHE_BYTES);
@@ -964,6 +967,7 @@ export function createStore(options: StoreOptions): Store {
   );
 
   const aggregates = new Aggregates(
+    ready,
     async (_spec, body, signal) => {
       const asked = await viewed();
       const result = await aggregate(asked.token, {view: asked.view, ...body}, signal);
@@ -982,6 +986,7 @@ export function createStore(options: StoreOptions): Store {
    * `highlighted` the set under the highlight as well, registered only while one is set.
    */
   const inView = new Aggregates(
+    ready,
     async (_spec, body, signal) => {
       const asked = await viewed();
       const result = await aggregate(asked.token, {view: asked.view, ...body}, signal);
@@ -1391,10 +1396,23 @@ export function createStore(options: StoreOptions): Store {
    */
   function recomputeStale(): void {
     const observed = views.current?.replica.currentContentKey ?? '';
+    observeCorpus(observed);
     const stale = contentKeyAtFrame !== '' && observed !== '' && observed !== contentKeyAtFrame;
     if (stale !== projections.status.stale) {
       replaceProjection('status', {...projections.status, stale, sessionWarm: true});
     }
+  }
+
+  /**
+   * Ask every registered aggregate again, its request unchanged, once the point path observes a
+   * content key other than the one it observed before: an ingest, a deletion or a suppression
+   * this viewer can see.
+   */
+  function observeCorpus(observed: string): void {
+    if (observed === '') return;
+    const before = corpusKey;
+    corpusKey = observed;
+    if (before !== '' && before !== observed) aggregates.refresh(false);
   }
 
   function onTrace(kind: string, fields: Record<string, number | string>): void {
@@ -1422,6 +1440,7 @@ export function createStore(options: StoreOptions): Store {
     const frame = p.frame;
     // A derive (`p.fetched` set) redrew the marks under the current content key; a fold did not.
     const observed = replica?.currentContentKey ?? '';
+    if (p.fetched) observeCorpus(observed);
     if (p.fetched) contentKeyAtFrame = observed;
     const stale = contentKeyAtFrame !== '' && observed !== '' && observed !== contentKeyAtFrame;
 
@@ -1703,6 +1722,7 @@ export function createStore(options: StoreOptions): Store {
     incoming.presenter.setBudget(budget);
     // The content key, the bands asked for again and the shapes were the outgoing view's.
     contentKeyAtFrame = '';
+    corpusKey = '';
     colourAsked.clear();
     shapes.forget('all');
 
@@ -1859,13 +1879,15 @@ export function createStore(options: StoreOptions): Store {
   function aggregateBody(spec: AggregateSpec): AggregateBody | null {
     const subject = spec.subject ?? 'match';
     let filters: FilterExpr | null = null;
+    let reference: FilterExpr | undefined = spec.reference === 'visible' ? {} : spec.reference;
     if (subject === 'match') filters = aggregateFilters(spec);
     if (subject === 'view') {
       const area = countedArea();
       if (area === null) return null;
       filters = withArea(aggregateFilters(spec), area);
+      // Drawn from the same area, as the counts in view's own reference is.
+      if (spec.reference !== undefined) reference = withRegion(spec.reference === 'visible' ? null : spec.reference, area.operand, area.outside)!;
     }
-    const reference = spec.reference === 'visible' ? {} : spec.reference;
     return {groupings: spec.groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})};
   }
 
@@ -1893,9 +1915,10 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * Ask for the counts in view again, now or once the camera has rested, and with them each
-   * registered aggregate counted in view whose request has changed.
+   * registered aggregate counted in view whose request has changed. With `changed`, as at a rest,
+   * the counts in view are asked only where their request has changed too.
    */
-  function askInView(rest: boolean, drop = false): void {
+  function askInView(rest: boolean, drop = false, changed = false): void {
     if (inViewTimer !== null) clock.cancel(inViewTimer);
     inViewTimer = null;
     if (countedArea() === null) return;
@@ -1911,12 +1934,12 @@ export function createStore(options: StoreOptions): Store {
         inView.set('counts', {groupings: [{}]});
         return;
       }
-      inView.refresh(drop);
+      inView.refresh(drop, {changed});
       return;
     }
     inViewTimer = clock.after(IN_VIEW_REST_MS, () => {
       inViewTimer = null;
-      askInView(false);
+      askInView(false, false, true);
     });
   }
 
@@ -2165,6 +2188,7 @@ export function createStore(options: StoreOptions): Store {
     records.forget();
     clearSelection();
     contentKeyAtFrame = '';
+    corpusKey = '';
     colourAsked.clear();
     awaitingSwitchFrame = false;
     replaceProjection('view', noFrame(views.id));

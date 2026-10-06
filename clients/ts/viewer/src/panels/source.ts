@@ -50,7 +50,7 @@ export function renderSource(state: AppState, datasets: Dataset[], presets: Pres
     'Source',
     `${dataset}
      ${principal}
-     <input id="budget" type="range" min="1000" max="500000" step="1000" value="${state.budget}" />
+     <input id="budget" type="range" min="1000" max="2000000" step="1000" value="${state.budget}" />
      ${row('mark budget', fmt(state.budget))}
      ${row('visible at build', active ? fmt(active.visible) : '—')}
      ${row('prose indexed', current?.prose.length ? current.prose.join(', ') : 'none')}

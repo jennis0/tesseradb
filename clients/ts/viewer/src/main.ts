@@ -1,6 +1,6 @@
 import '@tesseradb/components';
 import type {TesseraExplorer, MapProbe} from '@tesseradb/components';
-import {TesseraClient, createStore, dataToWorldXY, type Store as DataStore} from '@tesseradb/client';
+import {DEFAULT_BUDGET, TesseraClient, createStore, dataToWorldXY, type Store as DataStore} from '@tesseradb/client';
 import {refusalOf} from '@tesseradb/client/internal';
 import type {ViewInfo} from '@tesseradb/client';
 import {basemapLayer, coverFor, type BasemapCover, type Camera} from './basemap.js';
@@ -35,8 +35,6 @@ let datasets: Dataset[] = [];
 /** The active dataset's presets; term ids are per bundle. */
 let presets: Dataset['presets'] = [];
 
-/** The mark budget a session opens with: the budget slider's maximum in `panels/source.ts`. */
-const DEFAULT_BUDGET = 500_000;
 /** The column preferred for colour where a dataset has no artifact layer. */
 const DEFAULT_COLOUR_BY = 'archive';
 

@@ -172,7 +172,7 @@ def test_size_settings_are_synced_and_leave_the_map_s_choice_by_default(make):
 
 def test_the_point_budget_and_its_range_are_synced_down_with_their_defaults(make):
     state = make(token="t").get_state()
-    assert [state[k] for k in ("budget", "budget_min", "budget_max")] == [250_000, 1_000, 2_000_000]
+    assert [state[k] for k in ("budget", "budget_min", "budget_max")] == [0, 1_000, 2_000_000]
     m = make(token="t", budget=40_000, budget_min=500, budget_max=90_000)
     assert [m.get_state()[k] for k in ("budget", "budget_min", "budget_max")] == [40_000, 500, 90_000]
     m.budget = 60_000

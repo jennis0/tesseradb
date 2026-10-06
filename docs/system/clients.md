@@ -293,11 +293,17 @@ asks again:
 | `subject` | The set | Asked again |
 |---|---|---|
 | `match`, the default | what the store's filters admit, under the selected region | when the filters, the highlight, the `member_of` clauses or the selected region change and the request they compose differs from the one last sent |
-| `view` | the same, within the area the counts in view cover: the camera's box, or the selected region while one is selected | as `match`, and once the camera has rested for 250 ms somewhere new, never while it moves |
-| `visible` | every item this viewer may see in the view; no filters are sent | only at a view switch, at `refresh()` and after a change of viewer |
+| `view` | the same, within the area the counts in view cover: the camera's box, or the selected region while one is selected | as `match`, at once over the area as it stands; after a pan, only once the camera has rested for 250 ms somewhere new |
+| `visible` | every item this viewer may see in the view; no filters are sent | only at a view switch, at `refresh()`, after a change of viewer and after a change of corpus |
 
-Every registration is also asked again at a view switch, at `refresh()`, and once the store has
-read `/v1/meta` again after forgetting what the server answered. A change that leaves a
+A `view` registration's `reference` is limited to the same area, as the counts in view's own
+reference is, so a lift compares the subject with what is visible in the area.
+
+Every registration is also asked again at a view switch, at `refresh()`, once the store has read
+`/v1/meta` again after forgetting what the server answered, and when a frame the map fetches
+observes a new content key, so an ingest, a deletion or a suppression reaches the counts as it
+reaches the map. Its request is composed once the store has `/v1/meta` for the viewer it asks
+as, so it names only what that meta offers. A change that leaves a
 registration's request as it was sends nothing for it: a category control leaving out its own
 clause is not asked again when only that clause changes, and a `match` registration without
 `highlighted` is not asked again when the highlight does. A `view` registration made while the

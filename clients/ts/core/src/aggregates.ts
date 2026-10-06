@@ -19,8 +19,10 @@ export type AggregateSpec = {
    *
    * - `match`, the default: what the store's filters admit, under the selected region.
    * - `view`: the same, within the area the counts in view cover: the camera's box, or the
-   *   selected region while one is selected. It is asked for once the camera has rested for
-   *   250 ms, and never while the camera moves.
+   *   selected region while one is selected. A pan asks again only once the camera has rested for
+   *   250 ms; a change of filter, highlight or selection, or a view switch, asks at once over the
+   *   area as it stands. A `reference` is limited to the same area, so a lift compares with what
+   *   is in it.
    * - `visible`: every item this viewer may see in the view. No filters are sent, so `without`,
    *   `withoutMembersOf` and `highlighted` change nothing.
    */
@@ -147,8 +149,9 @@ function summaryOf(table: AggregateTable): FieldSummary | null {
  * `429` or `503` is sent again after {@link retryDelayMs}; a newer ask cancels the wait.
  *
  * `compose` gives the request a spec sends now, less its view, or `null` where it cannot be sent
- * yet; `ask` sends it, and a retry sends it again unchanged. A refresh that asks only where the
- * request changed compares it with the one last sent.
+ * yet. A request is composed once `ready` has resolved, so it names what the `/v1/meta` read then
+ * offers, and `ask` sends it; a retry composes it again. A refresh that asks only where the request
+ * changed compares what `compose` gives at the refresh with the request last sent.
  */
 export class Aggregates {
   private readonly specs = new Map<string, AggregateSpec>();
@@ -161,6 +164,7 @@ export class Aggregates {
   private disposed = false;
 
   constructor(
+    private readonly ready: () => Promise<unknown>,
     private readonly ask: (spec: AggregateSpec, body: AggregateBody, signal: AbortSignal) => Promise<{result: AggregateResult; view: string}>,
     private readonly publish: (entries: AggregatesProjection) => void,
     private readonly clock: Clock,
@@ -219,7 +223,7 @@ export class Aggregates {
 
   private run(ids: string[], drop: boolean, changed: boolean, now: boolean): void {
     const next = new Map(this.entries);
-    const asked: [string, AggregateBody][] = [];
+    const asked: string[] = [];
     for (const id of ids) {
       const body = now ? this.compose(this.specs.get(id)!) : null;
       const key = body === null ? null : bodyKey(body);
@@ -240,20 +244,31 @@ export class Aggregates {
         this.sent.delete(id);
       } else {
         this.sent.set(id, key);
-        asked.push([id, body!]);
+        asked.push(id);
       }
     }
     if (ids.every((id) => next.get(id) === this.entries.get(id))) return;
     this.replace(next);
-    for (const [id, body] of asked) void this.one(id, this.specs.get(id)!, body, 0);
+    for (const id of asked) void this.one(id, this.specs.get(id)!, 0);
   }
 
-  private async one(id: string, spec: AggregateSpec, body: AggregateBody, attempt: number): Promise<void> {
+  private async one(id: string, spec: AggregateSpec, attempt: number): Promise<void> {
     const controller = new AbortController();
     this.asking.set(id, controller);
     let entry: AggregateEntry;
     let wait: number | null = null;
     try {
+      await this.ready();
+      if (this.asking.get(id) !== controller || controller.signal.aborted) return;
+      const body = this.compose(spec);
+      if (body === null) {
+        // Not sendable under the meta just read, as a `view` aggregate with no camera; it stays
+        // loading until a refresh finds it sendable.
+        this.asking.delete(id);
+        this.sent.delete(id);
+        return;
+      }
+      this.sent.set(id, bodyKey(body));
       const {result, view} = await this.ask(spec, body, controller.signal);
       entry = {status: 'shown', result, view, refusal: null, summaries: summariesOf(spec, result)};
     } catch (error) {
@@ -275,7 +290,7 @@ export class Aggregates {
       id,
       this.clock.after(wait, () => {
         this.waiting.delete(id);
-        if (!this.disposed && this.specs.get(id) === spec) void this.one(id, spec, body, attempt + 1);
+        if (!this.disposed && this.specs.get(id) === spec) void this.one(id, spec, attempt + 1);
       })
     );
   }

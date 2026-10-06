@@ -599,8 +599,8 @@ counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.c
 `m.bbox` redraws. Ids are decimal strings (a `tessera_id` is a `u64`). Marimo users: the widget's
 `.value` re-runs a cell at every settle; `m.observe(fn, names="selected")` reacts to a pick alone.
 
-`budget` is how many points the map aims to draw on screen, 250,000 unless you give another, and
-setting `m.budget` in a later cell applies it. `budget_min` and `budget_max`, 1,000 and 2,000,000
+`budget` is how many points the map aims to draw on screen. Its default, `0`, leaves the map's own,
+250,000, and setting `m.budget` in a later cell applies it. `budget_min` and `budget_max`, 1,000 and 2,000,000
 unless you give others, are the fewest and the most a control for it offers; neither changes
 `budget`. `db.map`, `viewer.map` and `selection.map` all take the three and pass them on.
 

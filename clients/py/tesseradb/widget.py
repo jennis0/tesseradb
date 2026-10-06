@@ -108,7 +108,8 @@ class Map(anywidget.AnyWidget):
       screen touches, or the server's `max_tiles_per_request` where that is fewer; a larger
       screen is asked for at zoom + 1, then coarser, until its tiles fit. So the tiles in view
       times `artifacts_per_tile` bounds the annotations one level draws.
-    - `budget`: how many points the map aims to draw on screen. The default is 250,000.
+    - `budget`: how many points the map aims to draw on screen. `0`, the default, leaves the
+      map's own, 250,000.
     - `budget_min`, `budget_max`: the fewest and the most points a control for `budget` offers.
       The defaults are 1,000 and 2,000,000. Neither changes `budget`.
 
@@ -160,7 +161,7 @@ class Map(anywidget.AnyWidget):
     title_field = traitlets.Unicode(None, allow_none=True).tag(sync=True)
     # The store's quota of annotations per level per tile; `None` draws none.
     artifacts_per_tile = traitlets.Int(None, allow_none=True).tag(sync=True)
-    budget = traitlets.Int(250_000).tag(sync=True)
+    budget = traitlets.Int(0).tag(sync=True)
     budget_min = traitlets.Int(1_000).tag(sync=True)
     budget_max = traitlets.Int(2_000_000).tag(sync=True)
     # Both ways, synced up at the settle.
@@ -200,7 +201,7 @@ class Map(anywidget.AnyWidget):
         explorer_layout: str = "docked",
         title_field: Optional[str] = None,
         artifacts_per_tile: Optional[int] = None,
-        budget: int = 250_000,
+        budget: int = 0,
         budget_min: int = 1_000,
         budget_max: int = 2_000_000,
         **kwargs: Any,

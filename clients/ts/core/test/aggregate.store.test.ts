@@ -36,8 +36,22 @@ function answer(req: AggregateRequest, total: number, identityKey = 'ik'): Aggre
  * A store over a fake client whose `aggregate` waits until the test releases it, so a request in
  * flight is a state the test can hold.
  */
-async function storeWith(opts: {refuse?: boolean; identityKey?: string; meta?: Meta; answer?: (req: AggregateRequest, total: number, identityKey?: string) => AggregateResult} = {}) {
+async function storeWith(
+  opts: {
+    refuse?: boolean;
+    identityKey?: string;
+    /** The meta each read returns in turn, the last one from then on. */
+    meta?: Meta | Meta[];
+    answer?: (req: AggregateRequest, total: number, identityKey?: string) => AggregateResult;
+    /** The content key each viewport answer carries. */
+    contentKey?: () => string;
+    revalidateAfterMs?: number;
+  } = {}
+) {
   const clock = fakeClock();
+  const scheduler = fakeScheduler();
+  const metas = opts.meta === undefined ? [META] : Array.isArray(opts.meta) ? opts.meta : [opts.meta];
+  let reads = 0;
   const pending: {req: AggregateRequest; signal: AbortSignal; release: (total: number, identityKey?: string) => void; fail: (error: unknown) => void}[] = [];
   const aggregate = vi.fn(
     (_token: string, req: AggregateRequest, signal: AbortSignal) =>
@@ -52,14 +66,22 @@ async function storeWith(opts: {refuse?: boolean; identityKey?: string; meta?: M
       })
   );
   const client = {
-    meta: async () => opts.meta ?? META,
-    viewport: async () => response(viewportResult()),
+    meta: async () => metas[Math.min(reads++, metas.length - 1)],
+    viewport: async () => response(viewportResult(), opts.contentKey ? {contentKey: opts.contentKey()} : {}),
     aggregate,
     close: () => {}
   } as unknown as TesseraClient;
-  const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler: fakeScheduler(), prefetch: false});
+  const store = createStore({
+    viewerUrl: 'http://viewer',
+    token: 'tok',
+    client,
+    clock,
+    scheduler,
+    prefetch: false,
+    ...(opts.revalidateAfterMs === undefined ? {} : {replica: {revalidateAfterMs: opts.revalidateAfterMs}})
+  });
   await clock.advance(1);
-  return {store, pending, aggregate, clock};
+  return {store, pending, aggregate, clock, scheduler};
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -541,5 +563,112 @@ describe('the point budget', () => {
     expect(DEFAULT_BUDGET).toBe(250_000);
     expect(made().budget).toBe(250_000);
     expect(made(1_000).budget).toBe(1_000);
+  });
+});
+
+describe('an aggregate across a change of viewer or corpus', () => {
+  const BOX: [number, number, number, number] = [0.1, 0.2, 0.6, 0.7];
+  const TOP = {by: {field: 'archive', top: 5}};
+  const registered = (p: {req: AggregateRequest}) => p.req.reference === undefined;
+  const inView = (p: {req: AggregateRequest}) => registered(p) && JSON.stringify(p.req.filters ?? null).includes('bbox');
+
+  it('is composed under the next viewer’s meta, so a clause on a column it does not list is not sent', async () => {
+    const next = meta({...META, filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]});
+    const {store, pending, clock} = await storeWith({meta: [META, next]});
+    store.setFilters({filter: {year: {family: 'numeric', gte: 2020, lte: null}}, highlight: {}});
+    store.setAggregate('a', {groupings: [TOP]});
+    await flush();
+    expect(JSON.stringify(pending[0]!.req.filters)).toContain('year');
+    store.clear();
+    await clock.advance(1);
+    await flush();
+    expect(pending).toHaveLength(2);
+    expect(JSON.stringify(pending[1]!.req.filters ?? null)).not.toContain('year');
+  });
+
+  it('is not sent over the old camera’s box in a view the next viewer is not offered', async () => {
+    const next = meta({...META, views: [view('s1')]});
+    const {store, pending, clock} = await storeWith({meta: [META, next]});
+    store.setAggregate('subject', {groupings: [TOP], subject: 'view'});
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(300);
+    await flush();
+    pending.filter(inView)[0]!.release(7);
+    await flush();
+    const before = pending.length;
+    store.clear();
+    await clock.advance(1);
+    await flush();
+    await clock.advance(300);
+    await flush();
+    expect(pending.slice(before).filter((p) => JSON.stringify(p.req).includes('bbox'))).toEqual([]);
+    expect(store.get('aggregates').get('subject')).toMatchObject({status: 'loading', result: null});
+  });
+
+  it('shows nothing for the next viewer from requests in flight across clear(), released afterwards', async () => {
+    const {store, pending, clock} = await storeWith();
+    store.setAggregate('subject', {groupings: [TOP], subject: 'view'});
+    store.setAggregate('subject2', {groupings: [{by: {field: 'archive', top: 3}}], subject: 'view'});
+    store.setAggregate('match', {groupings: [TOP]});
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(300);
+    await flush();
+    const old = pending.filter(registered);
+    expect(old.filter(inView)).toHaveLength(1);
+    expect(old.filter(inView)[0]!.req.groupings).toHaveLength(2);
+    store.clear();
+    for (const p of old) p.release(7);
+    await clock.advance(1);
+    await flush();
+    for (const id of ['subject', 'subject2', 'match']) expect(store.get('aggregates').get(id)).toMatchObject({status: 'loading', result: null});
+  });
+
+  it('sends nothing when the rest the camera was waiting for falls after clear()', async () => {
+    const {store, pending, clock} = await storeWith();
+    store.setAggregate('subject', {groupings: [TOP], subject: 'view'});
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(100);
+    store.clear();
+    await clock.advance(1);
+    await flush();
+    const sent = pending.length;
+    await clock.advance(300);
+    await flush();
+    expect(pending.length).toBe(sent);
+  });
+
+  it('is asked again, its request unchanged, when a frame observes a new content key', async () => {
+    let key = 'ck-1';
+    const {store, pending, clock, scheduler} = await storeWith({contentKey: () => key, revalidateAfterMs: 100});
+    store.setAggregate('match', {groupings: [TOP]});
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    await flush();
+    const whole = () => pending.filter((p) => registered(p) && !inView(p));
+    expect(whole()).toHaveLength(1);
+    whole()[0]!.release(7);
+    await flush();
+    key = 'ck-2';
+    await clock.advance(200);
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    await flush();
+    expect(whole()).toHaveLength(2);
+    expect(whole()[1]!.req).toEqual(whole()[0]!.req);
+    // The answer held stays while the new one loads.
+    expect(store.get('aggregates').get('match')!.result!.tables[0]!.total).toBe(7);
+  });
+
+  it('limits a view aggregate’s reference to the same area, so its lift compares with what is visible there', async () => {
+    const {store, pending, clock} = await storeWith();
+    store.setAggregate('lift', {groupings: [TOP], subject: 'view', reference: 'visible'});
+    store.setAggregate('other', {groupings: [TOP], subject: 'view', reference: {archive: {in: ['hep']}}});
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(300);
+    await flush();
+    const asked = pending.filter((p) => JSON.stringify(p.req.filters ?? null).includes('bbox') && p.req.groupings[0] === TOP);
+    expect(asked.map((p) => p.req.reference)).toEqual([{region: {bbox: BOX}}, {all_of: [{archive: {in: ['hep']}}, {region: {bbox: BOX}}]}]);
   });
 });

@@ -290,7 +290,7 @@ def test_a_map_opens_on_the_selections_view_filters_and_box(db, points, stub_bun
     assert m.bbox == list(box)
     assert m.colour_by == "primary_category" and m.layers == [] and m.height == 320
     assert m.size_by == "citations"
-    assert (m.budget, m.budget_min, m.budget_max) == (250_000, 1_000, 2_000_000)
+    assert (m.budget, m.budget_min, m.budget_max) == (0, 1_000, 2_000_000)
 
 
 def test_every_route_to_a_map_takes_the_point_budget(db, stub_bundle):
