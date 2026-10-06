@@ -1,7 +1,7 @@
 
 #### First open at zoom 0, a viewer new to the server
 
-| viewer | measure | new off p50 / max ms | new on p50 / max ms |
+| viewer | measure | new off middle / max ms | new on middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 12 / 32 | 12 / 14 |
 | 100% | first points | 72 / 128 | 53 / 55 |
@@ -27,7 +27,7 @@
 
 #### The same viewer opening again
 
-| viewer | measure | new off p50 / max ms | new on p50 / max ms |
+| viewer | measure | new off middle / max ms | new on middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 13 / 30 | 11 / 11 |
 | 100% | first points | 46 / 95 | 42 / 44 |
@@ -53,7 +53,7 @@
 
 #### Reopen: the server restarted over its cache
 
-| viewer | measure | new off p50 / max ms | new on p50 / max ms |
+| viewer | measure | new off middle / max ms | new on middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 13 / 19 | 13 / 25 |
 | 100% | first points | 50 / 88 | 45 / 89 |
@@ -79,7 +79,7 @@
 
 #### Zoom 9, genus and species, two regions per run
 
-| viewer | measure | new off p50 / max ms | new on p50 / max ms |
+| viewer | measure | new off middle / max ms | new on middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 12 / 40 | 14 / 44 |
 | 100% | last byte of points | 74 / 162 | 323 / 522 |
@@ -105,7 +105,7 @@
 
 #### Pan at zoom 9
 
-| viewer | measure | new off p50 / max ms | new on p50 / max ms |
+| viewer | measure | new off middle / max ms | new on middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 5 / 11 | 7 / 255 |
 | 100% | last byte of points | 19 / 60 | 366 / 386 |
@@ -131,7 +131,7 @@
 
 #### Pan at zoom 6
 
-| viewer | measure | new off p50 / max ms | new on p50 / max ms |
+| viewer | measure | new off middle / max ms | new on middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 5 / 31 | 8 / 8 |
 | 100% | last byte of points | 18 / 283 | 324 / 344 |
@@ -157,7 +157,7 @@
 
 #### Zoom out to the world from zoom 14
 
-| viewer | measure | new off p50 / max ms | new on p50 / max ms |
+| viewer | measure | new off middle / max ms | new on middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | — | 257 / 287 |
 | 100% | last byte of points | — | 283 / 665 |
@@ -200,131 +200,64 @@
 
 #### Requests and bytes over the whole run, by kind
 
-| run | kind | requests | MB | idle | whole-level |
-|---|---|---:|---:|---:|---:|
-| new-off-1 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| new-off-1 | aggregate | 69 | 0.1 | 0 | 0 |
-| new-off-1 | artifacts | 62 | 11.8 | 0 | 9 |
-| new-off-1 | artifacts-by-id | 60 | 1.7 | 0 | 0 |
-| new-off-1 | counts | 9 | 2.2 | 0 | 0 |
-| new-off-1 | marks | 197 | 171.2 | 0 | 0 |
-| new-off-1 | meta | 9 | 0.0 | 0 | 0 |
-| new-off-2 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| new-off-2 | aggregate | 69 | 0.1 | 0 | 0 |
-| new-off-2 | artifacts | 62 | 11.8 | 0 | 9 |
-| new-off-2 | artifacts-by-id | 63 | 1.7 | 0 | 0 |
-| new-off-2 | counts | 9 | 2.2 | 0 | 0 |
-| new-off-2 | marks | 197 | 171.2 | 0 | 0 |
-| new-off-2 | meta | 9 | 0.0 | 0 | 0 |
-| new-off-3 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| new-off-3 | aggregate | 69 | 0.1 | 0 | 0 |
-| new-off-3 | artifacts | 62 | 11.8 | 0 | 9 |
-| new-off-3 | artifacts-by-id | 56 | 1.7 | 0 | 0 |
-| new-off-3 | counts | 9 | 2.2 | 0 | 0 |
-| new-off-3 | marks | 197 | 171.2 | 0 | 0 |
-| new-off-3 | meta | 9 | 0.0 | 0 | 0 |
-| new-on-1 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| new-on-1 | aggregate | 69 | 0.1 | 0 | 0 |
-| new-on-1 | artifacts | 174 | 22.0 | 112 | 18 |
-| new-on-1 | artifacts-by-id | 50 | 1.8 | 0 | 0 |
-| new-on-1 | counts | 9 | 2.2 | 0 | 0 |
-| new-on-1 | marks | 287 | 343.4 | 0 | 0 |
-| new-on-1 | meta | 9 | 0.0 | 0 | 0 |
-| new-on-2 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| new-on-2 | aggregate | 69 | 0.1 | 0 | 0 |
-| new-on-2 | artifacts | 174 | 22.0 | 113 | 18 |
-| new-on-2 | artifacts-by-id | 49 | 1.8 | 0 | 0 |
-| new-on-2 | counts | 9 | 2.2 | 0 | 0 |
-| new-on-2 | marks | 287 | 343.4 | 0 | 0 |
-| new-on-2 | meta | 9 | 0.0 | 0 | 0 |
-| new-on-3 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| new-on-3 | aggregate | 69 | 0.1 | 0 | 0 |
-| new-on-3 | artifacts | 174 | 22.0 | 112 | 18 |
-| new-on-3 | artifacts-by-id | 55 | 1.8 | 0 | 0 |
-| new-on-3 | counts | 9 | 2.2 | 0 | 0 |
-| new-on-3 | marks | 287 | 343.4 | 0 | 0 |
-| new-on-3 | meta | 9 | 0.0 | 0 | 0 |
+| run | kind | requests | MB | whole-level |
+|---|---|---:|---:|---:|
+| new-off-1 | /session/authorise | 9 | 0.0 | 0 |
+| new-off-1 | aggregate | 69 | 0.1 | 0 |
+| new-off-1 | artifacts | 62 | 11.8 | 0 |
+| new-off-1 | artifacts-by-id | 60 | 1.7 | 0 |
+| new-off-1 | counts | 9 | 2.2 | 0 |
+| new-off-1 | marks | 197 | 171.2 | 0 |
+| new-off-1 | meta | 9 | 0.0 | 0 |
+| new-off-2 | /session/authorise | 9 | 0.0 | 0 |
+| new-off-2 | aggregate | 69 | 0.1 | 0 |
+| new-off-2 | artifacts | 62 | 11.8 | 0 |
+| new-off-2 | artifacts-by-id | 63 | 1.7 | 0 |
+| new-off-2 | counts | 9 | 2.2 | 0 |
+| new-off-2 | marks | 197 | 171.2 | 0 |
+| new-off-2 | meta | 9 | 0.0 | 0 |
+| new-off-3 | /session/authorise | 9 | 0.0 | 0 |
+| new-off-3 | aggregate | 69 | 0.1 | 0 |
+| new-off-3 | artifacts | 62 | 11.8 | 0 |
+| new-off-3 | artifacts-by-id | 56 | 1.7 | 0 |
+| new-off-3 | counts | 9 | 2.2 | 0 |
+| new-off-3 | marks | 197 | 171.2 | 0 |
+| new-off-3 | meta | 9 | 0.0 | 0 |
+| new-on-1 | /session/authorise | 9 | 0.0 | 0 |
+| new-on-1 | aggregate | 69 | 0.1 | 0 |
+| new-on-1 | artifacts | 174 | 22.0 | 0 |
+| new-on-1 | artifacts-by-id | 50 | 1.8 | 0 |
+| new-on-1 | counts | 9 | 2.2 | 0 |
+| new-on-1 | marks | 287 | 343.4 | 0 |
+| new-on-1 | meta | 9 | 0.0 | 0 |
+| new-on-2 | /session/authorise | 9 | 0.0 | 0 |
+| new-on-2 | aggregate | 69 | 0.1 | 0 |
+| new-on-2 | artifacts | 174 | 22.0 | 0 |
+| new-on-2 | artifacts-by-id | 49 | 1.8 | 0 |
+| new-on-2 | counts | 9 | 2.2 | 0 |
+| new-on-2 | marks | 287 | 343.4 | 0 |
+| new-on-2 | meta | 9 | 0.0 | 0 |
+| new-on-3 | /session/authorise | 9 | 0.0 | 0 |
+| new-on-3 | aggregate | 69 | 0.1 | 0 |
+| new-on-3 | artifacts | 174 | 22.0 | 0 |
+| new-on-3 | artifacts-by-id | 55 | 1.8 | 0 |
+| new-on-3 | counts | 9 | 2.2 | 0 |
+| new-on-3 | marks | 287 | 343.4 | 0 |
+| new-on-3 | meta | 9 | 0.0 | 0 |
 
 #### Whole-level artifact requests
 
-- new-off-1 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 37 ms
-- new-off-1 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 17 ms
-- new-off-1 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 74 ms
-- new-off-1 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 11 ms
-- new-off-1 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 75 ms
-- new-off-1 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 8 ms
-- new-off-1 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 15 ms
-- new-off-1 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 11 ms
-- new-off-1 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 14 ms
-- new-off-2 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 31 ms
-- new-off-2 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 10 ms
-- new-off-2 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 53 ms
-- new-off-2 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 14 ms
-- new-off-2 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 114 ms
-- new-off-2 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 17 ms
-- new-off-2 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 13 ms
-- new-off-2 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 11 ms
-- new-off-2 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 10 ms
-- new-off-3 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 22 ms
-- new-off-3 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 9 ms
-- new-off-3 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 29 ms
-- new-off-3 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 10 ms
-- new-off-3 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 50 ms
-- new-off-3 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 9 ms
-- new-off-3 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 13 ms
-- new-off-3 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 11 ms
-- new-off-3 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 9 ms
-- new-on-1 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 23 ms
-- new-on-1 1%/first artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-1 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 9 ms
-- new-on-1 1%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-1 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 33 ms
-- new-on-1 25%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-1 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 14 ms
-- new-on-1 25%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-1 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 56 ms
-- new-on-1 100%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-1 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 8 ms
-- new-on-1 100%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 7 ms
-- new-on-1 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 14 ms
-- new-on-1 1%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-1 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 11 ms
-- new-on-1 25%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-1 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 12 ms
-- new-on-1 100%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 5 ms
-- new-on-2 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 22 ms
-- new-on-2 1%/first artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-2 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 9 ms
-- new-on-2 1%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-2 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 30 ms
-- new-on-2 25%/first artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-2 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 11 ms
-- new-on-2 25%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-2 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 57 ms
-- new-on-2 100%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 5 ms
-- new-on-2 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 8 ms
-- new-on-2 100%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 5 ms
-- new-on-2 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 13 ms
-- new-on-2 1%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-2 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 10 ms
-- new-on-2 25%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-2 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 9 ms
-- new-on-2 100%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 5 ms
-- new-on-3 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 93 ms
-- new-on-3 1%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 14 ms
-- new-on-3 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 9 ms
-- new-on-3 1%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 11 ms
-- new-on-3 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 29 ms
-- new-on-3 25%/first artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-3 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 10 ms
-- new-on-3 25%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-3 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 61 ms
-- new-on-3 100%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 5 ms
-- new-on-3 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 8 ms
-- new-on-3 100%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 12 ms
-- new-on-3 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 14 ms
-- new-on-3 1%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-3 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 10 ms
-- new-on-3 25%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 6 ms
-- new-on-3 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 8 ms
-- new-on-3 100%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 5 ms
+
+#### What each prefetch-on run sent beyond its prefetch-off pair
+
+| run | kind | requests | MB | slowest ms |
+|---|---|---:|---:|---:|
+| new-on-1 | artifacts | 139 | 13.1 | 23 |
+| new-on-1 | artifacts-by-id | 36 | 1.0 | 499 |
+| new-on-1 | marks | 115 | 206.4 | 59 |
+| new-on-2 | artifacts | 139 | 13.1 | 17 |
+| new-on-2 | artifacts-by-id | 36 | 1.2 | 22 |
+| new-on-2 | marks | 115 | 206.4 | 51 |
+| new-on-3 | artifacts | 139 | 13.1 | 19 |
+| new-on-3 | artifacts-by-id | 40 | 1.2 | 22 |
+| new-on-3 | marks | 115 | 206.4 | 48 |

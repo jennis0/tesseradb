@@ -1,8 +1,9 @@
 """What a viewer's first reads of the taxonomy cost on full GBIF, step by step.
 
-    python3 probes/2026-10-06-first-open-fills/first_open.py <tessera> <bench run.json> <out.json> [--reopen]
+    python3 probes/2026-10-06-first-open-fills/first_open.py --deployment data/ladder/gbif \
+        --binary <tessera> --run <bench run.json> --out <out.json> [--reopen] [--cap 24G] [--swap 2G]
 
-It starts the binary on a fresh cache over `data/ladder/gbif`, under the bench's cap, with the
+It starts the binary on a fresh cache over the deployment's bundle, under the cap, with the
 bundle's pages evicted first. For each of the bench's viewers in turn it sends what the store's
 first open sends for the layer (the world at depth 2, level 0), then the read by identifier of the
 artifacts that answered, as the store reads its points' tags, then the same read again, then genus
@@ -16,6 +17,7 @@ major faults, the one-minute load, and any `PROBE` lines a binary with timers wr
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -27,23 +29,13 @@ from pathlib import Path
 import requests
 from pyarrow import ipc
 
-REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from test_corpora.common.deployment import Deployment, read_env_file, tomllib  # noqa: E402
-from test_corpora.common.serve_battery import frames  # noqa: E402
+from test_corpora.common.deployment import Deployment
+from test_corpora.common.interactive_bench import box_at, evict, size_bytes
+from test_corpora.common.serve_battery import frames
 
-DEPLOYMENT = Path("/home/joe/code/tessera/data/ladder/gbif")
-SCREEN = (1600, 900)
 LAYER = "taxonomy/tree"
-
-
-def evict(bundle: Path) -> None:
-    for root, _, files in os.walk(bundle):
-        for name in files:
-            fd = os.open(os.path.join(root, name), os.O_RDONLY)
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-            os.close(fd)
 
 
 def device_of(path: Path) -> str:
@@ -69,19 +61,9 @@ def majfaults(cgroup: Path | None) -> int:
     return 0
 
 
-def box_at(q: dict, centre: list[float], z: int) -> list[float]:
-    w, h = SCREEN
-    sy = (q["y_max"] - q["y_min"]) / 2**z
-    sx = (q["x_max"] - q["x_min"]) / 2**z * (w / h)
-    return [centre[0] - sx / 2, centre[1] - sy / 2, centre[0] + sx / 2, centre[1] + sy / 2]
-
-
-def run_steps(served: Deployment, run: dict, control: dict, device: str, phase: str, out: list) -> None:
+def run_steps(served: Deployment, run: dict, device: str, phase: str, out: list) -> None:
     log = served.log_path
 
-    def status() -> dict:
-        s = requests.get(f"{served.control}/control/status", headers=control, timeout=60).json()
-        return s["masked_count_cache"]
 
     def timed(http: requests.Session, url: str, body: dict, viewer: str, step: str, **extra) -> bytes:
         offset = log.stat().st_size
@@ -107,7 +89,7 @@ def run_steps(served: Deployment, run: dict, control: dict, device: str, phase: 
             "disk_mb": round((sectors_read(device) - sectors) * 512 / 2**20, 1),
             "majfaults": majfaults(served.cgroup) - faults,
             "load1": os.getloadavg()[0],
-            "figures": status(),
+            "figures": served.figures_status(),
             "probes": probes,
             **extra,
         }
@@ -121,15 +103,7 @@ def run_steps(served: Deployment, run: dict, control: dict, device: str, phase: 
     for p in run["principals"]:
         if wanted and p["label"] not in wanted.split(","):
             continue
-        r = requests.post(
-            f"{served.session}/session/authorise",
-            json={"terms": p["term_list"]},
-            headers=control,
-            timeout=120,
-        )
-        r.raise_for_status()
-        http = requests.Session()
-        http.headers["Authorization"] = f"Bearer {r.json()['token']}"
+        http = served.viewer_session(p["term_list"])
         meta = http.get(f"{served.viewer}/v1/meta", timeout=120).json()
         view = meta["views"][0]
         q = view["quantisation"]
@@ -177,23 +151,25 @@ def run_steps(served: Deployment, run: dict, control: dict, device: str, phase: 
 
 
 def main() -> int:
-    binary, run_json, out = sys.argv[1:4]
-    reopen = "--reopen" in sys.argv[4:]
-    run = json.loads(Path(run_json).read_text())
-    settings = tomllib.loads((DEPLOYMENT / "tessera.toml").read_text())
-    serve = settings["serve"]
-    ports = tuple(int(serve[k].rsplit(":", 1)[1]) for k in ("viewer", "session", "control"))
-    bundle = (DEPLOYMENT / settings["bundle"]["path"]).resolve()
-    device = device_of(bundle)
-    cred = (dict(os.environ) | read_env_file(DEPLOYMENT / ".env"))[serve["operator_credential_env"]]
-    control = {"Authorization": f"Bearer {cred}"}
-    scratch = DEPLOYMENT / "bench-scratch-first-open"
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--deployment", type=Path, required=True)
+    ap.add_argument("--binary", type=Path, required=True)
+    ap.add_argument("--run", type=Path, required=True)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--reopen", action="store_true")
+    ap.add_argument("--cap", default="24G")
+    ap.add_argument("--swap", default="2G")
+    args = ap.parse_args()
+    run = json.loads(args.run.read_text())
+    scratch = args.deployment / "bench-scratch-first-open"
     shutil.rmtree(scratch, ignore_errors=True)
-    served = Deployment(
-        DEPLOYMENT, bundle, scratch, ports, Path(binary), cap_bytes=24 * 2**30, swap_bytes=2 * 2**30
+    served = Deployment.of(
+        args.deployment, args.binary, scratch, cap_bytes=size_bytes(args.cap), swap_bytes=size_bytes(args.swap)
     )
-    result: dict = {"binary": binary, "steps": [], "opens": []}
-    phases = ["fresh"] + (["reopen"] if reopen else [])
+    bundle = served.bundle
+    device = device_of(bundle)
+    result: dict = {"binary": str(args.binary), "steps": [], "opens": []}
+    phases = ["fresh"] + (["reopen"] if args.reopen else [])
     try:
         for phase in phases:
             evict(bundle)
@@ -201,14 +177,14 @@ def main() -> int:
             served.start(log=scratch / f"serve-{phase}.log")
             result["opens"].append({"phase": phase, "open_s": round(time.time() - t0, 1), "load1": os.getloadavg()[0]})
             print(json.dumps(result["opens"][-1]), flush=True)
-            run_steps(served, run, control, device, phase, result["steps"])
+            run_steps(served, run, device, phase, result["steps"])
             served.stop()
     finally:
         served.stop()
         result["cache_bytes"] = sum(
             f.stat().st_size for f in (scratch / "cache").rglob("*") if f.is_file()
         )
-        Path(out).write_text(json.dumps(result, indent=1))
+        args.out.write_text(json.dumps(result, indent=1))
         shutil.rmtree(scratch, ignore_errors=True)
     return 0
 

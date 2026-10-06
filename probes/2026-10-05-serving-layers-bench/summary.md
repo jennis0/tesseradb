@@ -1,7 +1,7 @@
 
 #### First open at zoom 0, a viewer new to the server
 
-| viewer | measure | old p50 / max ms | new p50 / max ms |
+| viewer | measure | old middle / max ms | new middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 12 / 29 | 12 / 30 |
 | 100% | first points | 62 / 102 | 62 / 117 |
@@ -27,7 +27,7 @@
 
 #### The same viewer opening again
 
-| viewer | measure | old p50 / max ms | new p50 / max ms |
+| viewer | measure | old middle / max ms | new middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 15 / 38 | 13 / 13 |
 | 100% | first points | 48 / 89 | 44 / 46 |
@@ -53,7 +53,7 @@
 
 #### Reopen: the server restarted over its cache
 
-| viewer | measure | old p50 / max ms | new p50 / max ms |
+| viewer | measure | old middle / max ms | new middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 13 / 39 | 23 / 42 |
 | 100% | first points | 51 / 104 | 108 / 116 |
@@ -79,7 +79,7 @@
 
 #### Zoom 9, genus and species, two regions per run
 
-| viewer | measure | old p50 / max ms | new p50 / max ms |
+| viewer | measure | old middle / max ms | new middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 18 / 58 | 15 / 39 |
 | 100% | last byte of points | 245 / 918 | 84 / 178 |
@@ -105,7 +105,7 @@
 
 #### Pan at zoom 9
 
-| viewer | measure | old p50 / max ms | new p50 / max ms |
+| viewer | measure | old middle / max ms | new middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 17 / 97 | 8 / 11 |
 | 100% | last byte of points | 132 / 539 | 22 / 66 |
@@ -131,7 +131,7 @@
 
 #### Pan at zoom 6
 
-| viewer | measure | old p50 / max ms | new p50 / max ms |
+| viewer | measure | old middle / max ms | new middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 23 / 42 | 9 / 17 |
 | 100% | last byte of points | 153 / 428 | 21 / 220 |
@@ -157,7 +157,7 @@
 
 #### Zoom out to the world from zoom 14
 
-| viewer | measure | old p50 / max ms | new p50 / max ms |
+| viewer | measure | old middle / max ms | new middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | — | — |
 | 100% | last byte of points | — | — |
@@ -196,56 +196,56 @@
 
 #### Requests and bytes over the whole run, by kind
 
-| run | kind | requests | MB | idle | whole-level |
-|---|---|---:|---:|---:|---:|
-| old-1 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| old-1 | aggregate | 69 | 0.1 | 0 | 0 |
-| old-1 | artifacts | 15 | 7.3 | 0 | 0 |
-| old-1 | counts | 9 | 2.2 | 0 | 0 |
-| old-1 | marks | 197 | 201.4 | 0 | 0 |
-| old-1 | meta | 9 | 0.0 | 0 | 0 |
-| old-1 | promotion | 6 | 37.4 | 6 | 6 |
-| old-2 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| old-2 | aggregate | 69 | 0.1 | 0 | 0 |
-| old-2 | artifacts | 15 | 7.3 | 0 | 0 |
-| old-2 | counts | 9 | 2.2 | 0 | 0 |
-| old-2 | marks | 197 | 201.4 | 0 | 0 |
-| old-2 | meta | 9 | 0.0 | 0 | 0 |
-| old-2 | promotion | 6 | 37.4 | 6 | 6 |
-| new-1 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| new-1 | aggregate | 69 | 0.1 | 0 | 0 |
-| new-1 | artifacts | 50 | 4,681.3 | 1 | 5 |
-| new-1 | artifacts-by-id | 78 | 1.8 | 0 | 0 |
-| new-1 | counts | 9 | 2.2 | 0 | 0 |
-| new-1 | marks | 197 | 171.1 | 0 | 0 |
-| new-1 | meta | 9 | 0.0 | 0 | 0 |
-| new-2 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| new-2 | aggregate | 69 | 0.1 | 0 | 0 |
-| new-2 | artifacts | 50 | 4,681.3 | 0 | 5 |
-| new-2 | artifacts-by-id | 70 | 1.7 | 0 | 0 |
-| new-2 | counts | 9 | 2.2 | 0 | 0 |
-| new-2 | marks | 197 | 171.1 | 0 | 0 |
-| new-2 | meta | 9 | 0.0 | 0 | 0 |
+| run | kind | requests | MB | whole-level |
+|---|---|---:|---:|---:|
+| old-1 | /session/authorise | 9 | 0.0 | 0 |
+| old-1 | aggregate | 69 | 0.1 | 0 |
+| old-1 | artifacts | 15 | 7.3 | 0 |
+| old-1 | counts | 9 | 2.2 | 0 |
+| old-1 | marks | 197 | 201.4 | 0 |
+| old-1 | meta | 9 | 0.0 | 0 |
+| old-1 | promotion | 6 | 37.4 | 6 |
+| old-2 | /session/authorise | 9 | 0.0 | 0 |
+| old-2 | aggregate | 69 | 0.1 | 0 |
+| old-2 | artifacts | 15 | 7.3 | 0 |
+| old-2 | counts | 9 | 2.2 | 0 |
+| old-2 | marks | 197 | 201.4 | 0 |
+| old-2 | meta | 9 | 0.0 | 0 |
+| old-2 | promotion | 6 | 37.4 | 6 |
+| new-1 | /session/authorise | 9 | 0.0 | 0 |
+| new-1 | aggregate | 69 | 0.1 | 0 |
+| new-1 | artifacts | 50 | 4,681.3 | 5 |
+| new-1 | artifacts-by-id | 78 | 1.8 | 0 |
+| new-1 | counts | 9 | 2.2 | 0 |
+| new-1 | marks | 197 | 171.1 | 0 |
+| new-1 | meta | 9 | 0.0 | 0 |
+| new-2 | /session/authorise | 9 | 0.0 | 0 |
+| new-2 | aggregate | 69 | 0.1 | 0 |
+| new-2 | artifacts | 50 | 4,681.3 | 5 |
+| new-2 | artifacts-by-id | 70 | 1.7 | 0 |
+| new-2 | counts | 9 | 2.2 | 0 |
+| new-2 | marks | 197 | 171.1 | 0 |
+| new-2 | meta | 9 | 0.0 | 0 |
 
 #### Whole-level artifact requests
 
-- old-1 1%/map/1 promotion (idle): depth 0, tiles bbox, levels [1], 0.4 MB, 21 ms
-- old-1 1%/map/3 promotion (idle): depth 0, tiles bbox, levels [2], 0.5 MB, 320 ms
-- old-1 25%/map/1 promotion (idle): depth 0, tiles bbox, levels [1], 2.3 MB, 35 ms
-- old-1 25%/map/3 promotion (idle): depth 0, tiles bbox, levels [2], 6.6 MB, 767 ms
-- old-1 100%/map/1 promotion (idle): depth 0, tiles bbox, levels [1], 5.6 MB, 134 ms
-- old-1 100%/map/3 promotion (idle): depth 0, tiles bbox, levels [2], 22.0 MB, 2,396 ms
-- old-2 1%/map/1 promotion (idle): depth 0, tiles bbox, levels [1], 0.4 MB, 22 ms
-- old-2 1%/map/3 promotion (idle): depth 0, tiles bbox, levels [2], 0.5 MB, 95 ms
-- old-2 25%/map/1 promotion (idle): depth 0, tiles bbox, levels [1], 2.3 MB, 39 ms
-- old-2 25%/map/3 promotion (idle): depth 0, tiles bbox, levels [2], 6.6 MB, 453 ms
-- old-2 100%/map/1 promotion (idle): depth 0, tiles bbox, levels [1], 5.6 MB, 116 ms
-- old-2 100%/map/3 promotion (idle): depth 0, tiles bbox, levels [2], 22.0 MB, 2,170 ms
+- old-1 1%/map/1 promotion: depth 0, tiles bbox, levels [1], 0.4 MB, 21 ms
+- old-1 1%/map/3 promotion: depth 0, tiles bbox, levels [2], 0.5 MB, 320 ms
+- old-1 25%/map/1 promotion: depth 0, tiles bbox, levels [1], 2.3 MB, 35 ms
+- old-1 25%/map/3 promotion: depth 0, tiles bbox, levels [2], 6.6 MB, 767 ms
+- old-1 100%/map/1 promotion: depth 0, tiles bbox, levels [1], 5.6 MB, 134 ms
+- old-1 100%/map/3 promotion: depth 0, tiles bbox, levels [2], 22.0 MB, 2,396 ms
+- old-2 1%/map/1 promotion: depth 0, tiles bbox, levels [1], 0.4 MB, 22 ms
+- old-2 1%/map/3 promotion: depth 0, tiles bbox, levels [2], 0.5 MB, 95 ms
+- old-2 25%/map/1 promotion: depth 0, tiles bbox, levels [1], 2.3 MB, 39 ms
+- old-2 25%/map/3 promotion: depth 0, tiles bbox, levels [2], 6.6 MB, 453 ms
+- old-2 100%/map/1 promotion: depth 0, tiles bbox, levels [1], 5.6 MB, 116 ms
+- old-2 100%/map/3 promotion: depth 0, tiles bbox, levels [2], 22.0 MB, 2,170 ms
 - new-1 1%/map/9 artifacts: depth 3, tiles 64, levels [0], 0.3 MB, 27 ms
 - new-1 1%/map/19 artifacts: depth 9, tiles 262144, levels [0], 711.1 MB, 15,088 ms
 - new-1 25%/map/19 artifacts: depth 9, tiles 262144, levels [0], 731.7 MB, 10,341 ms
 - new-1 100%/map/9 artifacts: depth 9, tiles 262144, levels [0], 838.2 MB, 10,870 ms
-- new-1 100%/map/19 artifacts (idle): depth 9, tiles 262144, levels [0], 838.2 MB, 17,587 ms
+- new-1 100%/map/19 artifacts: depth 9, tiles 262144, levels [0], 838.2 MB, 17,587 ms
 - new-2 1%/map/9 artifacts: depth 3, tiles 64, levels [0], 0.3 MB, 18 ms
 - new-2 1%/map/19 artifacts: depth 9, tiles 262144, levels [0], 711.1 MB, 8,473 ms
 - new-2 25%/map/19 artifacts: depth 9, tiles 262144, levels [0], 731.7 MB, 17,059 ms

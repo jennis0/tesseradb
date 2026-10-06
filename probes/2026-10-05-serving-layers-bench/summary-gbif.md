@@ -1,7 +1,7 @@
 
 #### First open at zoom 0, a viewer new to the server
 
-| viewer | measure | prefetch off p50 / max ms | prefetch on p50 / max ms |
+| viewer | measure | prefetch off middle / max ms | prefetch on middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 154 / 190 | 156 / 160 |
 | 100% | first points | 896 / 1,101 | 607 / 752 |
@@ -27,7 +27,7 @@
 
 #### The same viewer opening again
 
-| viewer | measure | prefetch off p50 / max ms | prefetch on p50 / max ms |
+| viewer | measure | prefetch off middle / max ms | prefetch on middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 291 / 336 | 260 / 331 |
 | 100% | first points | 1,144 / 1,320 | 741 / 1,273 |
@@ -53,7 +53,7 @@
 
 #### Reopen: the server restarted over its cache
 
-| viewer | measure | prefetch off p50 / max ms | prefetch on p50 / max ms |
+| viewer | measure | prefetch off middle / max ms | prefetch on middle / max ms |
 |---|---|---:|---:|
 | 100% | counts | 170 / 317 | 158 / 160 |
 | 100% | first points | 485 / 925 | 421 / 464 |
@@ -79,7 +79,7 @@
 
 #### Zoom 9, genus and species, two regions per run
 
-| viewer | measure | prefetch off p50 / max ms | prefetch on p50 / max ms |
+| viewer | measure | prefetch off middle / max ms | prefetch on middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 152 / 449 | 151 / 463 |
 | 100% | last byte of points | 834 / 1,163 | 1,339 / 1,497 |
@@ -105,7 +105,7 @@
 
 #### Pan at zoom 9
 
-| viewer | measure | prefetch off p50 / max ms | prefetch on p50 / max ms |
+| viewer | measure | prefetch off middle / max ms | prefetch on middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 7 / 56 | 10 / 197 |
 | 100% | last byte of points | 24 / 143 | 608 / 1,756 |
@@ -131,7 +131,7 @@
 
 #### Pan at zoom 6
 
-| viewer | measure | prefetch off p50 / max ms | prefetch on p50 / max ms |
+| viewer | measure | prefetch off middle / max ms | prefetch on middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | 29 / 200 | 85 / 190 |
 | 100% | last byte of points | 346 / 897 | 804 / 2,310 |
@@ -157,7 +157,7 @@
 
 #### Zoom out to the world from zoom 14
 
-| viewer | measure | prefetch off p50 / max ms | prefetch on p50 / max ms |
+| viewer | measure | prefetch off middle / max ms | prefetch on middle / max ms |
 |---|---|---:|---:|
 | 100% | first points | — | 327 / 381 |
 | 100% | last byte of points | — | 585 / 769 |
@@ -196,90 +196,47 @@
 
 #### Requests and bytes over the whole run, by kind
 
-| run | kind | requests | MB | idle | whole-level |
-|---|---|---:|---:|---:|---:|
-| gbif-new-off-1 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| gbif-new-off-1 | aggregate | 69 | 0.1 | 0 | 0 |
-| gbif-new-off-1 | artifacts | 63 | 16.2 | 0 | 9 |
-| gbif-new-off-1 | artifacts-by-id | 90 | 4.5 | 0 | 0 |
-| gbif-new-off-1 | counts | 9 | 6.8 | 0 | 0 |
-| gbif-new-off-1 | marks | 176 | 320.6 | 0 | 0 |
-| gbif-new-off-1 | meta | 9 | 0.0 | 0 | 0 |
-| gbif-new-off-2 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| gbif-new-off-2 | aggregate | 69 | 0.1 | 0 | 0 |
-| gbif-new-off-2 | artifacts | 63 | 16.2 | 0 | 9 |
-| gbif-new-off-2 | artifacts-by-id | 97 | 4.5 | 0 | 0 |
-| gbif-new-off-2 | counts | 9 | 6.8 | 0 | 0 |
-| gbif-new-off-2 | marks | 176 | 320.6 | 0 | 0 |
-| gbif-new-off-2 | meta | 9 | 0.0 | 0 | 0 |
-| gbif-new-on-1 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| gbif-new-on-1 | aggregate | 69 | 0.1 | 0 | 0 |
-| gbif-new-on-1 | artifacts | 178 | 30.8 | 101 | 18 |
-| gbif-new-on-1 | artifacts-by-id | 93 | 4.3 | 0 | 0 |
-| gbif-new-on-1 | counts | 9 | 6.8 | 0 | 0 |
-| gbif-new-on-1 | marks | 262 | 653.7 | 0 | 0 |
-| gbif-new-on-1 | meta | 9 | 0.0 | 0 | 0 |
-| gbif-new-on-2 | /session/authorise | 9 | 0.0 | 0 | 0 |
-| gbif-new-on-2 | aggregate | 69 | 0.1 | 0 | 0 |
-| gbif-new-on-2 | artifacts | 178 | 30.8 | 100 | 18 |
-| gbif-new-on-2 | artifacts-by-id | 89 | 4.3 | 0 | 0 |
-| gbif-new-on-2 | counts | 9 | 6.8 | 0 | 0 |
-| gbif-new-on-2 | marks | 262 | 654.9 | 0 | 0 |
-| gbif-new-on-2 | meta | 9 | 0.0 | 0 | 0 |
+| run | kind | requests | MB | whole-level |
+|---|---|---:|---:|---:|
+| gbif-new-off-1 | /session/authorise | 9 | 0.0 | 0 |
+| gbif-new-off-1 | aggregate | 69 | 0.1 | 0 |
+| gbif-new-off-1 | artifacts | 63 | 16.2 | 0 |
+| gbif-new-off-1 | artifacts-by-id | 90 | 4.5 | 0 |
+| gbif-new-off-1 | counts | 9 | 6.8 | 0 |
+| gbif-new-off-1 | marks | 176 | 320.6 | 0 |
+| gbif-new-off-1 | meta | 9 | 0.0 | 0 |
+| gbif-new-off-2 | /session/authorise | 9 | 0.0 | 0 |
+| gbif-new-off-2 | aggregate | 69 | 0.1 | 0 |
+| gbif-new-off-2 | artifacts | 63 | 16.2 | 0 |
+| gbif-new-off-2 | artifacts-by-id | 97 | 4.5 | 0 |
+| gbif-new-off-2 | counts | 9 | 6.8 | 0 |
+| gbif-new-off-2 | marks | 176 | 320.6 | 0 |
+| gbif-new-off-2 | meta | 9 | 0.0 | 0 |
+| gbif-new-on-1 | /session/authorise | 9 | 0.0 | 0 |
+| gbif-new-on-1 | aggregate | 69 | 0.1 | 0 |
+| gbif-new-on-1 | artifacts | 178 | 30.8 | 0 |
+| gbif-new-on-1 | artifacts-by-id | 93 | 4.3 | 0 |
+| gbif-new-on-1 | counts | 9 | 6.8 | 0 |
+| gbif-new-on-1 | marks | 262 | 653.7 | 0 |
+| gbif-new-on-1 | meta | 9 | 0.0 | 0 |
+| gbif-new-on-2 | /session/authorise | 9 | 0.0 | 0 |
+| gbif-new-on-2 | aggregate | 69 | 0.1 | 0 |
+| gbif-new-on-2 | artifacts | 178 | 30.8 | 0 |
+| gbif-new-on-2 | artifacts-by-id | 89 | 4.3 | 0 |
+| gbif-new-on-2 | counts | 9 | 6.8 | 0 |
+| gbif-new-on-2 | marks | 262 | 654.9 | 0 |
+| gbif-new-on-2 | meta | 9 | 0.0 | 0 |
 
 #### Whole-level artifact requests
 
-- gbif-new-off-1 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 6,252 ms
-- gbif-new-off-1 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 166 ms
-- gbif-new-off-1 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 8,857 ms
-- gbif-new-off-1 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,644 ms
-- gbif-new-off-1 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 11,496 ms
-- gbif-new-off-1 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,890 ms
-- gbif-new-off-1 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 2,175 ms
-- gbif-new-off-1 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,066 ms
-- gbif-new-off-1 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 746 ms
-- gbif-new-off-2 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 6,591 ms
-- gbif-new-off-2 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 194 ms
-- gbif-new-off-2 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 10,597 ms
-- gbif-new-off-2 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,959 ms
-- gbif-new-off-2 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 12,576 ms
-- gbif-new-off-2 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,451 ms
-- gbif-new-off-2 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 2,703 ms
-- gbif-new-off-2 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,586 ms
-- gbif-new-off-2 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,384 ms
-- gbif-new-on-1 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 5,798 ms
-- gbif-new-on-1 1%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 2,503 ms
-- gbif-new-on-1 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 657 ms
-- gbif-new-on-1 1%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 130 ms
-- gbif-new-on-1 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 8,912 ms
-- gbif-new-on-1 25%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 131 ms
-- gbif-new-on-1 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,761 ms
-- gbif-new-on-1 25%/again artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 44 ms
-- gbif-new-on-1 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 14,789 ms
-- gbif-new-on-1 100%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 4,919 ms
-- gbif-new-on-1 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,755 ms
-- gbif-new-on-1 100%/again artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 29 ms
-- gbif-new-on-1 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,950 ms
-- gbif-new-on-1 1%/reopen artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 135 ms
-- gbif-new-on-1 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 648 ms
-- gbif-new-on-1 25%/reopen artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 44 ms
-- gbif-new-on-1 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 206 ms
-- gbif-new-on-1 100%/reopen artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 30 ms
-- gbif-new-on-2 1%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 6,640 ms
-- gbif-new-on-2 1%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 312 ms
-- gbif-new-on-2 1%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 733 ms
-- gbif-new-on-2 1%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 139 ms
-- gbif-new-on-2 25%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 8,357 ms
-- gbif-new-on-2 25%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 3,060 ms
-- gbif-new-on-2 25%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 926 ms
-- gbif-new-on-2 25%/again artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 37 ms
-- gbif-new-on-2 100%/first artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 14,685 ms
-- gbif-new-on-2 100%/first artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 4,841 ms
-- gbif-new-on-2 100%/again artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,729 ms
-- gbif-new-on-2 100%/again artifacts (idle): depth 1, tiles 4, levels [0], 0.0 MB, 31 ms
-- gbif-new-on-2 1%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 2,966 ms
-- gbif-new-on-2 1%/reopen artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 1,342 ms
-- gbif-new-on-2 25%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 1,204 ms
-- gbif-new-on-2 25%/reopen artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 546 ms
-- gbif-new-on-2 100%/reopen artifacts: depth 2, tiles 16, levels [0], 0.1 MB, 385 ms
-- gbif-new-on-2 100%/reopen artifacts: depth 1, tiles 4, levels [0], 0.0 MB, 28 ms
+
+#### What each prefetch-on run sent beyond its prefetch-off pair
+
+| run | kind | requests | MB | slowest ms |
+|---|---|---:|---:|---:|
+| gbif-new-on-1 | artifacts | 142 | 19.0 | 4,919 |
+| gbif-new-on-1 | artifacts-by-id | 69 | 3.2 | 627 |
+| gbif-new-on-1 | marks | 113 | 412.1 | 9,124 |
+| gbif-new-on-2 | artifacts | 142 | 19.0 | 4,969 |
+| gbif-new-on-2 | artifacts-by-id | 69 | 3.2 | 534 |
+| gbif-new-on-2 | marks | 113 | 413.3 | 11,309 |

@@ -8,12 +8,11 @@ figures that compare between runs:
   byte of points, last byte of the view's artifacts (`layers`), the last byte of a points request
   that ran beside an artifacts request (`points_beside_layers`), and the last byte of everything
   the view asked for (`settled`), twice: once for a principal new to the server and once more for
-  the same principal. An older core's idle promotion of a whole level is not in `settled`.
-  Requests sent a second or more into a step with nothing else in flight (a timer's work, or a
-  request the store sent late) are timed as `idle`, and each artifacts request asking for every
-  tile of its depth is counted in `whole_level_requests`.
-* **Reopen** (`--reopen`, with `--start`). The server restarted over the same cache, and each
-  principal opening once more.
+  the same principal. An older core's idle promotion of a whole level is not in `settled`. Each
+  artifacts request asking for a whole level (a promotion, or every tile of a depth more than two
+  below the map zoom) is counted in `whole_level_requests`.
+* **Reopen** (`--reopen`, with `--start`). The server restarted over the same cache, with the
+  bundle's pages evicted again, and each principal opening once more.
 * **Map.** For each principal, a fixed camera script from the whole extent the session opened on:
   into its own two densest regions down to zoom 14, with pans, and back out after each.
 * **Lookups.** For the narrowest and the broadest principal: an item card by `tessera_id`, and a
@@ -28,6 +27,10 @@ background prefetch is off (its `?prefetch=0`, and in a newer core the artifact 
 of neighbouring and parent tiles with it) unless `--prefetch` is given, since a move cancels it
 part-way, and revalidation never falls due, since it runs on a sixty-second clock.
 
+With `--prefetch`, `--reference` names a run of the same script with prefetch off. A request
+beyond what that run sent at the same step is the prefetch's work (`extra`): it is kept out of
+the step's points and layers, timed as `extra`, and counted, and `settled` still includes it.
+
 The core is `clients/ts/core` of this checkout unless `--core` names another build of it, so an
 older server is measured with the client of its own commit. A newer core draws layers only with a
 number of artifacts per tile (`--per-tile`). The run reads `/control/status` after each phase and
@@ -37,13 +40,14 @@ directory holds at each start and after each phase.
 Every run sends the same requests: the principals' term sets are fixed, the 100% principal holds
 every term, and the camera script is fixed per principal. `--compare` diffs two runs' request logs
 as well as their figures. A principal is new to the server only on a server this run started
-(`--start`), which begins with an empty cache; attached to a running server, the first opening is
-whatever the server has already seen, and the result says which.
+(`--start`), which begins with an empty cache and the bundle's pages evicted; attached to a running
+server, the first opening is whatever the server has already seen, and the result says which.
 
     python3 -m test_corpora.common.interactive_bench \\
-        --deployment /home/joe/code/tessera/data/ladder/gbif --out run.json [--compare old.json] \\
+        --deployment data/ladder/gbif --out run.json [--compare old.json] \\
         [--start --binary /path/to/tessera [--keep-serving] [--reopen]] \\
-        [--core /path/to/clients/ts/core/dist/index.js] [--targets 0.01,0.25,1] [--per-tile 50]
+        [--core /path/to/clients/ts/core/dist/index.js] [--targets 0.01,0.25,1] [--per-tile 50] \\
+        [--prefetch [--reference prefetch-off-run.json]]
 
 Build the TypeScript core first: `npm --prefix clients/ts run build -w @tesseradb/client`.
 """
@@ -69,7 +73,7 @@ import requests
 from pyarrow import ipc
 
 from .deployment import Deployment, read_env_file, tomllib
-from .serve_battery import compose_ladder, frames
+from .serve_battery import Evictor, compose_ladder, frames
 
 REPO = Path(__file__).resolve().parents[2]
 NODE_SCRIPT = Path(__file__).with_suffix(".mjs")
@@ -144,6 +148,39 @@ def principals(ranks: list[dict], targets: Sequence[float] = TARGETS) -> list[di
     return out
 
 
+def box_at(q: dict, centre: Sequence[float], z: float, screen: tuple[int, int] = SCREEN) -> list[float]:
+    """The data-space box a screen shows at map zoom `z` around `centre`, as the Node side's
+    `boxAt`: zoom 0 fits the extent's height. `q` is a view's `quantisation` from `/v1/meta`."""
+    w, h = screen
+    sy = (q["y_max"] - q["y_min"]) / 2**z
+    sx = (q["x_max"] - q["x_min"]) / 2**z * (w / h)
+    return [centre[0] - sx / 2, centre[1] - sy / 2, centre[0] + sx / 2, centre[1] + sy / 2]
+
+
+def size_bytes(text: str) -> int:
+    """`24G` or `512M` as bytes, as `systemd-run`'s memory properties take them."""
+    unit = {"G": 2**30, "M": 2**20}
+    if not text or text[-1] not in unit or not text[:-1].isdigit():
+        raise ValueError(f"{text!r} is not a size; write a whole number of G or M, such as 24G")
+    return int(text[:-1]) * unit[text[-1]]
+
+
+def evict(*roots: Path) -> None:
+    """Drop the pages of every file under `roots`, so the next reads come from disk."""
+    Evictor(list(roots), None, None).evict()
+
+
+def reference_keys(path: str | None) -> list | None:
+    """A reference run's requests, counted by what they sent, for the Node side to match."""
+    if not path:
+        return None
+    counts: dict[str, int] = {}
+    for r in json.loads(Path(path).read_text()).get("requests", []):
+        key = json.dumps(list(sent(r)), separators=(",", ":"), ensure_ascii=False)
+        counts[key] = counts.get(key, 0) + 1
+    return sorted(counts.items())
+
+
 def write_plan(path: Path, args, people: list[dict], phase: str = "run") -> None:
     core = Path(args.core).resolve()
     plan = {
@@ -165,6 +202,7 @@ def write_plan(path: Path, args, people: list[dict], phase: str = "run") -> None
         "per_tile": args.per_tile,
         "prefetch": args.prefetch,
         "phase": phase,
+        "reference": reference_keys(args.reference),
     }
     path.write_text(json.dumps(plan))
 
@@ -207,7 +245,7 @@ class Figures:
                 f"session.{label}.points_beside_layers.{which}",
                 [o.get("points_beside_layers_ms")],
             )
-            self.put(f"session.{label}.idle.{which}", [o.get("idle_ms")])
+            self.put(f"session.{label}.extra.{which}", [o.get("extra_ms")])
 
     def map(self, entry: dict) -> None:
         label = entry["label"]
@@ -317,7 +355,8 @@ def lookups(
 
 
 def volumes(node: dict, phase: str) -> dict:
-    """Bytes received, per open and per map band and move, and the idle and whole-level requests by kind."""
+    """Bytes received, per open and per map band and move, and the prefetch's and whole-level
+    requests by kind."""
     out: dict = {}
     for e in node["principals"]:
         for which in ("first", "again", "reopen"):
@@ -346,9 +385,9 @@ def volumes(node: dict, phase: str) -> dict:
             k: sum(1 for r in requests_ if r["kind"] == k)
             for k in sorted({r["kind"] for r in requests_})
         },
-        "idle_requests_by_kind": {
-            k: sum(1 for r in requests_ if r["kind"] == k and r.get("idle"))
-            for k in sorted({r["kind"] for r in requests_ if r.get("idle")})
+        "extra_requests_by_kind": {
+            k: sum(1 for r in requests_ if r["kind"] == k and r.get("extra"))
+            for k in sorted({r["kind"] for r in requests_ if r.get("extra")})
         },
         "whole_level_requests": sum(1 for r in requests_ if r.get("whole_level")),
     }
@@ -613,6 +652,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="leave the store's idle prefetch on, as the demo viewer does without ?prefetch=0",
     )
+    ap.add_argument(
+        "--reference",
+        help="with --prefetch, a run of the same script with prefetch off: what this run sent "
+        "beyond it is the prefetch's work, kept out of points and layers",
+    )
     ap.add_argument("--out", required=True)
     ap.add_argument(
         "--compare", help="an earlier run's JSON to compare figures and requests with"
@@ -655,20 +699,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             ap.error(
                 f"ports {busy} are in use; stop what holds them or attach without --start"
             )
-        unit = {"G": 2**30, "M": 2**20}
         served = Deployment(
             directory,
             bundle,
             Path(args.scratch) if args.scratch else directory / "interactive-bench",
             ports,
             Path(args.binary),
-            cap_bytes=int(args.cap[:-1]) * unit[args.cap[-1]],
-            swap_bytes=int(args.swap[:-1]) * unit[args.swap[-1]],
+            cap_bytes=size_bytes(args.cap),
+            swap_bytes=size_bytes(args.swap),
         )
         served.clear_scratch()
     figures = Figures()
     try:
         if served is not None:
+            evict(bundle)
             t0 = time.time()
             served.start()
             result["server"] = {
@@ -769,6 +813,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.reopen:
             served.stop()
+            evict(bundle)
             t0 = time.time()
             served.start()
             result["server"]["reopen_s"] = round(time.time() - t0, 1)

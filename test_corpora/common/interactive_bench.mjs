@@ -149,13 +149,11 @@ function wireFetch(url, init = {}) {
   const id = nextId++;
   const body = typeof init.body === 'string' ? init.body : init.body ? new TextDecoder().decode(init.body) : null;
   const t0 = now();
-  // Sent a second or more into a step, with nothing in flight and nothing ending for a second: a
-  // timer's work, such as an older core's promotion or a newer one's prefetch, or a request the
-  // store sent late. Recorded, not used to classify.
-  const idle = step?.t0 !== undefined && t0 - step.t0 >= IDLE_MS && inFlight === 0 && t0 - lastActivity >= IDLE_MS;
-  const record = {id, step: step?.id ?? null, path: new URL(url).pathname, method: init.method ?? 'GET', body, t0, idle};
+  const record = {id, step: step?.id ?? null, path: new URL(url).pathname, method: init.method ?? 'GET', body, t0};
+  record.start_ms = step?.t0 === undefined ? null : Math.round((t0 - step.t0) * 10) / 10;
   record.kind = kindOf(record);
-  record.whole_level = wholeLevel(record);
+  record.whole_level = wholeLevel(record, step?.zoom ?? 0);
+  record.extra = beyondReference(record);
   record.framed = FRAMED.has(record.path);
   log.push(record);
   inFlight += 1;
@@ -168,14 +166,12 @@ function wireFetch(url, init = {}) {
   });
 }
 
-const IDLE_MS = 1000;
 const FRAMED = new Set(['/v1/viewport', '/v1/items', '/v1/artifacts/viewport']);
 
 /**
- * What a request is for. `artifacts` is a request for artifacts in view, whichever route the core
- * asks on (with the store's prefetch on, a newer core's prefetch of neighbouring and parent tiles
- * is among them); `promotion` is an older core's idle fetch of one whole level, which `settled`
- * leaves out. `artifacts-by-id` reads the tags a newer core's held tiles do not name.
+ * What a request is for. `artifacts` is a request for artifacts, whichever route the core asks
+ * on; `promotion` is an older core's idle fetch of one whole level, which `settled` leaves out.
+ * `artifacts-by-id` reads the tags a newer core's held tiles do not name.
  */
 function kindOf(record) {
   if (record.path === '/v1/artifacts/viewport') return 'artifacts';
@@ -188,21 +184,33 @@ function kindOf(record) {
   return b.artifact_budget === undefined ? 'promotion' : 'artifacts';
 }
 
-/** The open view's extent in data units, `[xMin, yMin, xMax, yMax]`, set as each principal opens. */
-let extent = null;
-
-function worldCovered(bbox) {
-  return extent !== null && bbox[0] <= extent[0] && bbox[1] <= extent[1] && bbox[2] >= extent[2] && bbox[3] >= extent[3];
+/**
+ * Whether an artifact request asks for a whole level: an older core's promotion, or every tile of a
+ * depth more than two below the map zoom, which no view at that zoom needs. A view of the world
+ * asks for every tile of its own depth and is not counted.
+ */
+function wholeLevel(record, mapZoom) {
+  if (record.kind === 'promotion') return true;
+  if (record.kind !== 'artifacts' || record.path !== '/v1/artifacts/viewport') return false;
+  const b = JSON.parse(record.body);
+  return b.zoom > Math.floor(mapZoom) + 2 && (b.tiles?.length ?? 0) >= 4 ** b.zoom;
 }
 
-/** Whether an artifact request asks for every tile of its depth, above depth 0. */
-function wholeLevel(record) {
-  if (record.kind !== 'artifacts' && record.kind !== 'promotion') return false;
-  if (record.kind === 'promotion') return true;
-  const b = JSON.parse(record.body);
-  if (!b.zoom) return false;
-  if (b.tiles) return b.tiles.length >= 4 ** b.zoom;
-  return b.bbox !== undefined && worldCovered(b.bbox);
+/**
+ * The requests a reference run (the same script with the store's prefetch off) sent, counted by
+ * what they sent, as `interactive_bench.py`'s `sent` keys them. A request beyond those is the
+ * prefetch's work, and is kept out of a step's points and layers.
+ */
+const reference = new Map(plan.reference ?? []);
+
+function beyondReference(record) {
+  if (!plan.reference) return false;
+  const body = record.path === '/session/authorise' && record.body ? '<body>' : record.body;
+  const key = JSON.stringify([record.step, record.method, record.path, body]);
+  const left = reference.get(key) ?? 0;
+  if (left === 0) return true;
+  reference.set(key, left - 1);
+  return false;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -239,20 +247,22 @@ async function show(store, q, s) {
   const ok = await settled(t0);
   const requests = log.filter((r) => r.step === s.id);
   const rel = (r, field) => (r[field] === null || r[field] === undefined ? null : r.t0 - t0 + r[field]);
+  // The view's own requests: without a prefetch's work beyond the reference run.
+  const viewed = requests.filter((r) => !r.extra);
   const firstOf = (field) => {
-    const v = requests.filter((r) => r.kind === 'marks' || r.kind === 'counts').map((r) => rel(r, field)).filter((x) => x !== null);
+    const v = viewed.filter((r) => r.kind === 'marks' || r.kind === 'counts').map((r) => rel(r, field)).filter((x) => x !== null);
     return v.length ? Math.min(...v) : null;
   };
-  const lastByte = requests.filter((r) => r.kind === 'marks').map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
-  // What the view asked for, without an older core's promotion; idle work is also timed apart.
-  const own = requests.filter((r) => r.kind !== 'promotion');
-  const settledAt = own.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
-  const idleAt = requests.filter((r) => r.idle).map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
-  const layers = own.filter((r) => r.kind === 'artifacts');
+  const lastByte = viewed.filter((r) => r.kind === 'marks').map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
+  // Everything the store asked for but an older core's promotion, the prefetch's work included.
+  const settledAt = requests.filter((r) => r.kind !== 'promotion').map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
+  const extra = requests.filter((r) => r.extra);
+  const extraAt = extra.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
+  const layers = viewed.filter((r) => r.kind === 'artifacts');
   const layersAt = layers.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
   // The points requests in flight at some moment an artifacts request of the view was.
   const span = (r) => [r.t0, r.t0 + (r.last_byte_ms ?? 0)];
-  const beside = requests.filter((r) => r.kind === 'marks' && layers.some((a) => span(a)[0] < span(r)[1] && span(r)[0] < span(a)[1]));
+  const beside = viewed.filter((r) => r.kind === 'marks' && layers.some((a) => span(a)[0] < span(r)[1] && span(r)[0] < span(a)[1]));
   const besideAt = beside.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
   const result = {
     ...s,
@@ -265,8 +275,8 @@ async function show(store, q, s) {
     settled_ms: settledAt.length ? Math.max(...settledAt) : null,
     layers_ms: layersAt.length ? Math.max(...layersAt) : null,
     points_beside_layers_ms: besideAt.length ? Math.max(...besideAt) : null,
-    idle_ms: idleAt.length ? Math.max(...idleAt) : null,
-    idle_requests: requests.filter((r) => r.idle).length,
+    extra_ms: extraAt.length ? Math.max(...extraAt) : null,
+    extra_requests: extra.length,
     whole_level: requests.filter((r) => r.whole_level).length,
     bytes: requests.reduce((n, r) => n + (r.bytes ?? 0), 0),
     kinds: Object.fromEntries([...new Set(requests.map((r) => r.kind))].map((k) => [k, requests.filter((r) => r.kind === k).length])),
@@ -292,7 +302,6 @@ async function open(principal, label, keepIds) {
   const meta = await client.meta(session.token);
   const view = meta.views[0];
   const q = view.quantisation;
-  extent = [q.xMin, q.yMin, q.xMax, q.yMax];
   const ids = new Set();
   const storeClient = new TesseraClient({viewerUrl: plan.viewer, sessionUrl: '', decoder: inlineDecoder(), fetch: wireFetch});
   if (keepIds) {
@@ -341,8 +350,8 @@ async function open(principal, label, keepIds) {
       settled_ms: rel(opened.settled_ms),
       layers_ms: rel(opened.layers_ms),
       points_beside_layers_ms: rel(opened.points_beside_layers_ms),
-      idle_ms: rel(opened.idle_ms),
-      idle_requests: opened.idle_requests,
+      extra_ms: rel(opened.extra_ms),
+      extra_requests: opened.extra_requests,
       whole_level: opened.whole_level,
       bytes: opened.bytes,
       kinds: opened.kinds,

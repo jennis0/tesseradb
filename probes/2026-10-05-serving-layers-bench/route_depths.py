@@ -2,51 +2,34 @@
 bench's principals: what the route costs when a client asks for about a screen's worth of
 256-pixel tiles, beside what the TypeScript store asks for in the bench.
 
-    python3 probes/2026-10-05-serving-layers-bench/route_depths.py <tessera> <bench run.json> <out.json>
+    python3 probes/2026-10-05-serving-layers-bench/route_depths.py --deployment <dir> \
+        --binary <tessera> --run <bench run.json> --out <out.json> [--cap 24G] [--swap 2G]
 
-It starts the binary on a fresh cache over the bench deployment, with the bundle's pages evicted
-first, under the same memory cap as the bench.
+It starts the binary on a fresh cache over the deployment's bundle, with the bundle's pages
+evicted first, under the cap. The bench run gives the principals and their densest regions.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
-import os
 import sys
 import time
 from pathlib import Path
 
 import requests
 
-REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from test_corpora.common.deployment import Deployment, read_env_file, tomllib  # noqa: E402
-from test_corpora.common.serve_battery import frames  # noqa: E402
+from test_corpora.common.deployment import Deployment
+from test_corpora.common.interactive_bench import box_at, evict, size_bytes
+from test_corpora.common.serve_battery import frames
 
-DEPLOYMENT = Path("/home/joe/code/tessera/data/ladder/gbif-64p/bench-stage5")
-SCREEN = (1600, 900)
 ZOOMS = (0, 3, 6, 9, 12)
 OFFSETS = (2, 4)
 PER_TILE = 50
 REPEATS = 5
-
-
-def evict(bundle: Path) -> None:
-    for root, _, files in os.walk(bundle):
-        for name in files:
-            fd = os.open(os.path.join(root, name), os.O_RDONLY)
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-            os.close(fd)
-
-
-def box_at(q: dict, centre: list[float], z: int) -> list[float]:
-    """As the bench's `boxAt`: the data-space box the screen shows at map zoom `z`."""
-    w, h = SCREEN
-    sy = (q["y_max"] - q["y_min"]) / 2**z
-    sx = (q["x_max"] - q["x_min"]) / 2**z * (w / h)
-    return [centre[0] - sx / 2, centre[1] - sy / 2, centre[0] + sx / 2, centre[1] + sy / 2]
 
 
 def levels_at(layer: dict, z: int) -> list[int]:
@@ -68,38 +51,29 @@ def ask(http: requests.Session, viewer: str, body: dict) -> dict:
 
 
 def main() -> int:
-    binary, run_json, out = sys.argv[1:4]
-    run = json.loads(Path(run_json).read_text())
-    settings = tomllib.loads((DEPLOYMENT / "tessera.toml").read_text())
-    serve = settings["serve"]
-    ports = tuple(int(serve[k].rsplit(":", 1)[1]) for k in ("viewer", "session", "control"))
-    bundle = (DEPLOYMENT / settings["bundle"]["path"]).resolve()
-    cred = (dict(os.environ) | read_env_file(DEPLOYMENT / ".env"))[serve["operator_credential_env"]]
-    served = Deployment(
-        DEPLOYMENT,
-        bundle,
-        DEPLOYMENT / "scratch-route",
-        ports,
-        Path(binary),
-        cap_bytes=24 * 2**30,
-        swap_bytes=2 * 2**30,
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--deployment", type=Path, required=True)
+    ap.add_argument("--binary", type=Path, required=True)
+    ap.add_argument("--run", type=Path, required=True)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--cap", default="24G")
+    ap.add_argument("--swap", default="2G")
+    args = ap.parse_args()
+    run = json.loads(args.run.read_text())
+    served = Deployment.of(
+        args.deployment,
+        args.binary,
+        args.deployment / "bench-scratch-route",
+        cap_bytes=size_bytes(args.cap),
+        swap_bytes=size_bytes(args.swap),
     )
     served.clear_scratch()
-    evict(bundle)
-    served.start()
-    result: dict = {"binary": binary, "bundle": str(bundle), "per_tile": PER_TILE, "rows": []}
+    result: dict = {"binary": str(args.binary), "bundle": str(served.bundle), "per_tile": PER_TILE, "rows": []}
     try:
+        evict(served.bundle)
+        served.start()
         for p in run["principals"]:
-            r = requests.post(
-                f"{served.session}/session/authorise",
-                json={"terms": p["term_list"]},
-                headers={"Authorization": f"Bearer {cred}"},
-                timeout=120,
-            )
-            r.raise_for_status()
-            token = r.json()["token"]
-            http = requests.Session()
-            http.headers["Authorization"] = f"Bearer {token}"
+            http = served.viewer_session(p["term_list"])
             meta = http.get(f"{served.viewer}/v1/meta", timeout=120).json()
             view = meta["views"][0]
             layer = meta["layers"][0]
@@ -134,14 +108,10 @@ def main() -> int:
                     }
                     result["rows"].append(row)
                     print(json.dumps(row), flush=True)
-        result["status"] = requests.get(
-            f"{served.control}/control/status",
-            headers={"Authorization": f"Bearer {cred}"},
-            timeout=60,
-        ).json()["masked_count_cache"]
+        result["status"] = served.figures_status()
     finally:
         served.stop()
-    Path(out).write_text(json.dumps(result, indent=1))
+    args.out.write_text(json.dumps(result, indent=1))
     return 0
 
 
