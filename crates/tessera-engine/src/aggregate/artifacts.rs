@@ -10,7 +10,7 @@
 
 use croaring::Bitmap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_types::layer::{HierarchyKind, RegisteredLayer};
+use tessera_types::layer::{HierarchyKind, RegisteredLayer, ServingLayout};
 use tessera_types::{EntityId, TesseraId};
 
 use super::set::Cx;
@@ -175,6 +175,18 @@ impl Layer {
             .as_ref()
             .is_some_and(|layer| !layer.declaration.depends_on.is_empty());
         let row_major = !attached && read.as_ref().is_some_and(|r| r.rows.column().is_some());
+        // Over the whole visible set, each artifact's count is its figure, already held.
+        let figures = read
+            .as_ref()
+            .filter(|_| row_major && cx.sets.set.is_whole())
+            .and_then(|read| read.counts.as_deref());
+        // And where the column is a label column, a row is in at most one artifact, so the groups'
+        // sizes are sums of those figures.
+        let summed = figures.is_some()
+            && read
+                .as_ref()
+                .and_then(|read| read.rows.column())
+                .is_some_and(|column| column.layout() == ServingLayout::RowMajorLabel);
         let set_rows = cx.sets.set.rows(cx);
         let reference_rows = cx.sets.reference.as_ref().map(|r| r.rows(cx));
         let (counts, members) = match &read {
@@ -183,9 +195,8 @@ impl Layer {
                 Some((Vec::new(), reference_rows.map(|_| Vec::new()))),
             ),
             Some(read) if row_major => {
-                // Over the whole visible set, each count is the artifact's figure, already held;
-                // a narrower set is counted by scanning its rows.
-                let counts = match read.counts.as_deref().filter(|_| cx.sets.set.is_whole()) {
+                // A narrower set is counted by scanning its rows.
+                let counts = match figures {
                     Some(figures) => ordinals.iter().map(|&o| figures.get(o)).collect(),
                     None => {
                         let histogram = read
@@ -297,8 +308,12 @@ impl Layer {
                 sizes
             }
             None => {
-                let in_set = served.pass_sizes(cx, cx.sets.set.cells(cx))?;
+                let in_set = match summed {
+                    true => served.summed_sizes(&counts, cx.sets.set.size()),
+                    false => served.pass_sizes(cx, cx.sets.set.cells(cx))?,
+                };
                 let in_reference = match &cx.sets.reference {
+                    Some(reference) if summed && reference.is_whole() => Some(in_set.clone()),
                     Some(reference) => Some(served.pass_sizes(cx, reference.cells(cx))?),
                     None => None,
                 };
@@ -493,6 +508,20 @@ impl Served {
             sizes[entry.group as usize] += entry.count;
         }
         Ok(sizes)
+    }
+
+    /// Each group's items in a set of `size` items where no item is in two artifacts, from each
+    /// served artifact's count in the set (`counts`, in the order of the served ordinals): the
+    /// listed artifacts, the rest, and none.
+    fn summed_sizes(&self, counts: &[u64], size: u64) -> Vec<u64> {
+        let count_of = |ordinal: u32| match self.ordinals.binary_search(&ordinal) {
+            Ok(at) => counts[at],
+            Err(_) => 0,
+        };
+        let listed: Vec<u64> = self.listed.iter().map(|&o| count_of(o)).collect();
+        let served: u64 = counts.iter().sum();
+        let rest = served - listed.iter().sum::<u64>();
+        listed.into_iter().chain([rest, size - served]).collect()
     }
 
     /// The groups' own sets from each served artifact's members among `rows`, in the order of

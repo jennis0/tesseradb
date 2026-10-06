@@ -1787,8 +1787,9 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
 }
 
 /// **Over the whole visible set a column level's counts are its figures, and over a filter that
-/// admits every item they are counted from the rows**: the two rank the same artifacts and count
-/// the same groups as the oracle, for the label and the list column, with built items suppressed,
+/// admits every item they are counted from the rows**: the two serve the oracle's table, its listed
+/// artifacts, the rest, none and the whole visible set as the reference, for the label and the
+/// list column, with built items suppressed,
 /// an artifact whose members are all suppressed, and artifacts holding items ingested and flushed
 /// since the build.
 #[test]
@@ -1853,34 +1854,55 @@ fn a_column_level_counts_the_whole_set_as_it_counts_the_same_set_filtered() {
             .visible(true, &|i| !suppressed.contains(&i.source))
             .map(|i| i.source)
             .collect();
-        let mut expected: Vec<(u64, String)> = planted
+        let in_any = |s: &u64, keys: &[&str]| {
+            planted
+                .iter()
+                .any(|(key, members)| keys.contains(key) && members.contains(s))
+        };
+        let mut ranked: Vec<(u64, String, &str)> = planted
             .iter()
             .zip(&ids)
-            .map(|((_, members), id)| {
+            .map(|((key, members), id)| {
                 let count = members.iter().filter(|s| visible.contains(s)).count() as u64;
-                (count, id.raw().to_string())
+                (count, id.raw().to_string(), *key)
             })
+            .filter(|(count, _, _)| *count > 0)
             .collect();
-        expected.retain(|(count, _)| *count > 0);
-        expected.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        let groups = expected.len() as u64;
-        expected.truncate(2);
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let groups = ranked.len() as u64;
+        let all: Vec<&str> = planted.iter().map(|(key, _)| *key).collect();
+        let top: Vec<&str> = ranked.iter().take(2).map(|(_, _, key)| *key).collect();
+        let rest = visible
+            .iter()
+            .filter(|s| in_any(s, &all) && !in_any(s, &top))
+            .count() as u64;
+        let none = visible.iter().filter(|s| !in_any(s, &all)).count() as u64;
+        let mut want: Vec<(String, Option<String>, u64, Option<u64>)> = ranked
+            .iter()
+            .take(2)
+            .map(|(count, id, _)| ("listed".to_string(), Some(id.clone()), *count, Some(*count)))
+            .collect();
+        for (group, count) in [("rest", rest), ("none", none)] {
+            if count > 0 {
+                want.push((group.to_string(), None, count, Some(count)));
+            }
+        }
         let groupings = [layer(name, Pick::Top(2))];
-        let listed = |filter: Option<FilterExpr>| -> (Option<u64>, Vec<(u64, String)>) {
+        let served = |filter: Option<FilterExpr>| {
             let mut req = request(&groupings);
-            req.filter = filter;
+            req.filter = filter.clone();
+            req.reference = Some(Reference::Visible);
             let (head, rows) = table(&fx.engine, &session, req);
-            let listed = rows
+            let rows: Vec<(String, Option<String>, u64, Option<u64>)> = rows
                 .into_iter()
-                .filter(|r| r.group.as_deref() == Some("listed"))
-                .map(|r| (r.count, r.key.unwrap()))
+                .map(|r| (r.group.unwrap(), r.key, r.count, r.reference))
                 .collect();
-            (head.groups, listed)
+            (head.groups, rows)
         };
-        let expected = (Some(groups), expected);
-        assert_eq!(listed(None), expected, "{name}: the whole set");
+        let expected = (Some(groups), want);
+        assert_eq!(served(None), expected, "{name}: the whole set");
         assert_eq!(
-            listed(Some(FilterExpr::AllOf(Vec::new()))),
+            served(Some(FilterExpr::AllOf(Vec::new()))),
             expected,
             "{name}: a filter admitting every item"
         );
