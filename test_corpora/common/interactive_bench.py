@@ -31,7 +31,8 @@ part-way, and revalidation never falls due, since it runs on a sixty-second cloc
 The core is `clients/ts/core` of this checkout unless `--core` names another build of it, so an
 older server is measured with the client of its own commit. A newer core draws layers only with a
 number of artifacts per tile (`--per-tile`). The run reads `/control/status` after each phase and
-keeps its `masked_count_cache` figures.
+keeps its `masked_count_cache` figures, and keeps the server's memory and the bytes its cache
+directory holds at each start and after each phase.
 
 Every run sends the same requests: the principals' term sets are fixed, the 100% principal holds
 every term, and the camera script is fixed per principal. `--compare` diffs two runs' request logs
@@ -429,6 +430,13 @@ def process_memory(pid: int | None) -> dict:
     return out
 
 
+def directory_bytes(path: Path | None) -> int | None:
+    """The bytes of the files under `path`: what a started server has written to its cache."""
+    if path is None or not path.is_dir():
+        return None
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
 def binary_identity(path: str | None) -> dict:
     if not path:
         return {}
@@ -669,6 +677,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "open_s": round(time.time() - t0, 1),
                 "pid": served.pid,
                 "memory_at_ready": process_memory(served.pid),
+                "cache_bytes_at_ready": directory_bytes(served.cache),
             }
             log(f"served pid={served.pid}, open {result['server']['open_s']} s")
             pid = served.pid
@@ -756,12 +765,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         result["requests"] = node["requests"]
         result["server"]["memory_after"] = process_memory(pid)
+        result["server"]["cache_bytes_after"] = directory_bytes(served.cache if served else None)
 
         if args.reopen:
             served.stop()
             t0 = time.time()
             served.start()
             result["server"]["reopen_s"] = round(time.time() - t0, 1)
+            result["server"]["memory_at_reopen"] = process_memory(served.pid)
+            result["server"]["cache_bytes_at_reopen"] = directory_bytes(served.cache)
             log(f"restarted pid={served.pid}, open {result['server']['reopen_s']} s")
             write_plan(work / "reopen.json", args, people, phase="reopen")
             subprocess.run(
@@ -777,6 +789,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result["status"]["reopen"] = control_status(control, cred)
             result["requests"] += [{**r, "phase": "reopen"} for r in again["requests"]]
             result["server"]["memory_after_reopen"] = process_memory(served.pid)
+            result["server"]["cache_bytes_after_reopen"] = directory_bytes(served.cache)
     finally:
         if served is not None and not args.keep_serving:
             served.stop()

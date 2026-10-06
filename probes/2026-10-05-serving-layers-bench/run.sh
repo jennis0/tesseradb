@@ -6,11 +6,15 @@
 #
 #   bash probes/2026-10-05-serving-layers-bench/run.sh <old tessera> <old core index.js> <new tessera> \
 #       [rounds] [first round] [prefix]
+#
+# DEPLOYMENT names another deployment directory, SIDES the binaries to run ("old new", or "new"
+# alone, when the old binary and core may be given as "-"), MODES the prefetch settings ("off on").
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 old_bin=$1 old_core=$2 new_bin=$3 rounds=${4:-3} first=${5:-1} prefix=${6:-}
-deployment=/home/joe/code/tessera/data/ladder/gbif-64p/bench-stage5
+deployment=${DEPLOYMENT:-/home/joe/code/tessera/data/ladder/gbif-64p/bench-stage5}
+sides=${SIDES:-old new} modes=${MODES:-off on}
 bundle=$(python3 -c "import tomllib,sys; d=tomllib.load(open(sys.argv[1]+'/tessera.toml','rb')); print(d['bundle']['path'])" "$deployment")
 bundle=$(cd "$deployment" && realpath "$bundle")
 mkdir -p "$here/runs"
@@ -36,15 +40,15 @@ quiet() {
 cd "$repo"
 for i in $(seq "$first" $((first + rounds - 1))); do
   quiet
-  for mode in off on; do
-    for side in old new; do
+  for mode in $modes; do
+    for side in $sides; do
       if [ "$side" = old ]; then bin=$old_bin core=(--core "$old_core"); else bin=$new_bin core=(); fi
       if [ "$mode" = on ]; then pf=(--prefetch); else pf=(); fi
       name="$prefix$side-$mode-$i"
       evict
       uptime > "$here/runs/$name.load"
       python3 -m test_corpora.common.interactive_bench --deployment "$deployment" \
-        --start --reopen --binary "$bin" "${core[@]}" "${pf[@]}" --scratch "$deployment/scratch-$side" \
+        --start --reopen --binary "$bin" "${core[@]}" "${pf[@]}" --scratch "$deployment/bench-scratch-$side" \
         --targets 0.01,0.25,1 --per-tile 50 --out "$here/runs/$name.json" \
         > "$here/runs/$name.txt" 2> "$here/runs/$name.log"
       uptime >> "$here/runs/$name.load"

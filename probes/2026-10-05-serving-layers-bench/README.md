@@ -7,6 +7,146 @@ The interactive bench (`test_corpora/common/interactive_bench.py`) run against t
 
 The first run, against main at 58b215ea, is kept below under "First run". It found the two faults 7b73e9c1 fixes: the store asked at the points' tile depth, and the species level was served as rows.
 
+## Full GBIF: main 818122e3, 2026-10-06
+
+The bench on `data/ladder/gbif/bundle`: 3,495,729,729 occurrences, format 35, 276 GB, built at 818122e3. The binary is 818122e3's release build. The TypeScript core is from e979764a, whose server code is the same as 818122e3's. The old binary cannot read format 35, so the comparison is with `test_corpora/gbif/bench-baseline.json`. That baseline was recorded on 2026-10-04 at be547754, before this campaign, with artifacts in the points viewport and an idle promotion of each whole level.
+
+Every server ran under `MemoryMax=24G`, `MemorySwapMax=2G`, with the bundle's pages evicted before it started. Each run used a fresh cache, then a restart over the kept cache. There were two rounds, each with prefetch off and then on. The viewers see 1%, 25% and 100% of the corpus. GBIF's access field is `countrycode` alone, so every viewer is a set of countries. No year-based or other uncorrelated 1% viewer can be granted on this corpus, and the 1% viewer (5 countries) is spatially clustered.
+
+### Verify
+
+`tessera verify bundle` (not `--deep`) under the 24 GB cap passed in 370 s:
+
+```
+OK bundle (v00000): 1 partition(s), 1 view(s), 1 segment(s), 3495729729 rows, entity_id_high_water 3495729729
+```
+
+### Headline
+
+1. **A new viewer's first open settles late, because the read of point tags by identifier fills every level.**
+   - For the 100% viewer, settled is 39 s against the baseline's 9.9 s. For the 1% viewer it is 11.7 s against 3.9 s.
+   - The points are fast: the last byte of points arrives at 1.1 s for 100%, against the baseline's 9.9 s. The family level arrives at 11.7 s.
+   - The read by identifier then takes 29.7 s. It fills the genus and species figures, which a zoom-0 view does not show.
+   - The engine's artifacts read builds every level of the layer (`records/artifacts.rs`, `with_scope`: `(0..layer.runs.len()).map(... read_level ...)`), whatever level the identifiers name.
+2. **Once the figures are filled, the campaign's goals hold.** On reopen, the 100% viewer settles in 1.5 s, the family level arrives in 0.97 s and the read by identifier takes 0.53 s, all loaded from disk with no fill.
+   - Genus and species at zoom 9 arrive in 1.1 s at the median for every viewer. The baseline's zoom-9 points request, which carried the artifacts, took 2.1 s at the median and 12.3 s at most for 100%.
+   - Pans at zoom 9 settle in 287 to 568 ms.
+   - The zoom out to the world sends no artifact request.
+3. **There is no idle whole-level fetch.** With prefetch off the store sends no request on a timer. The baseline's idle promotions moved 340 MB, the species level for 100% alone being 167 MB in 3.1 s.
+   - The only fetches the bench flags as whole-level are the opening view's 16 tiles at depth 2 and, with prefetch on, the parent prefetch's 4 tiles at depth 1. Both are the whole world, and each is 0.1 MB or less.
+   - A run's artifact traffic is 16.2 MB with prefetch off and 30.8 MB with it on, plus 4.3 to 4.5 MB of tags read by identifier.
+
+### First reads, timed per level
+
+`gbif_first_reads.py` ran on a binary with temporary timers around each fill and each level read; the timers are not committed. On a fresh server it sent, for each viewer in turn:
+- what the first open sends for the layer (the world at depth 2, level 0);
+- the read by identifier of the artifacts that answered;
+- the same read again;
+- genus and species at zoom 9.
+
+| viewer | rows in the fill | level 0 request | level 0 fill | tags by identifier, first | of which genus fill | of which species fill | again | zoom 9 after | figures held after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1% | 34,956,939 | 5,892 ms | 3,027 ms | 9,021 ms | 4,530 ms | 4,450 ms | 2 ms | 2,073 ms | 80 MB |
+| 25% | 873,932,430 | 7,331 ms | 5,598 ms | 17,590 ms | 8,526 ms | 8,984 ms | 1 ms | 1,645 ms | 100 MB more |
+| 100% | 3,495,729,729 | 9,429 ms | 6,933 ms | 24,905 ms | 10,702 ms | 14,044 ms | 1 ms | 1,395 ms | 160 MB more |
+
+The first read by identifier is the genus fill plus the species fill, to within 30 ms. Each fill walks the level's column over the viewer's rows, cold from disk. The full taxonomy's figures for one viewer take 12 s to fill for 1%, 23 s for 25% and 32 s for 100%. The level-0 request takes 1.7 to 2.9 s more than its fill. I did not split that time further.
+
+### The owed measurements
+
+- **Fill time and memory per viewer:** as in the table above. The figures for the three viewers hold 340 MB in memory and on disk. Anonymous memory stayed at 5 to 6.6 GB throughout, and resident memory at the cap, 24 GB, at the server's open.
+- **Status counters:** fills 9 per run, one per viewer per level. On reopen: loads 9, fills 0. `not_admitted`, `reserve_spent`, `labels_rows_read` and `exact` are 0, since the bench makes no deny. `disk_bytes` under the figures directory is 339,891,297 after the run and after the reopen.
+- **Persisted write volume:** the cache directory held 340,497,989 bytes after a run, 339,899,489 of them figures. A reopen wrote nothing more. Nothing was written to the bundle or the write-ahead log. This kernel has no `/proc/<pid>/io` and the user's cgroups have no I/O controller, so the process's own write bytes could not be read. The bench now records the cache directory's size at each start and after each phase.
+- **Tagging nested or DAG layers with no `artifact_budget`:** not measured. GBIF's only layer, `taxonomy/tree`, is tiered.
+- **The first tag read by identifier:** it pays for the genus and species fills, as above.
+- **A flat layer published at runtime:** skipped. A copy of the 276 GB bundle does not fit in the 172 GB free, and a runtime publication writes into the bundle it serves. The gbif-64p figure is in "Second run".
+
+### Tables: prefetch off against on
+
+Each cell is the median and the largest value over the two rounds, with two regions per round for a map step. The baseline column is be547754's prefetch-off run, where it has the same viewer and measure; its settled includes no promotion at a first open. The full tables are in `summary-gbif.md`.
+
+#### First open at zoom 0, a viewer new to the server
+
+| viewer | measure | prefetch off | prefetch on | baseline |
+|---|---|---:|---:|---:|
+| 100% | counts | 154 / 190 | 156 / 160 | 137 |
+| 100% | first points | 896 / 1,101 | 607 / 752 | 1,046 |
+| 100% | last byte of points | 1,091 / 1,475 | 10,997 / 13,406 | 9,853 |
+| 100% | last byte of layers | 11,704 / 12,824 | 21,261 / 21,434 | in the points |
+| 100% | settled | 39,245 / 41,441 | 45,109 / 46,019 | 9,853 |
+| 25% | first points | 519 / 642 | 472 / 496 | |
+| 25% | last byte of layers | 9,061 / 10,801 | 10,761 / 13,134 | |
+| 25% | settled | 24,106 / 33,506 | 25,963 / 26,488 | |
+| 1% | first points | 810 / 861 | 1,012 / 1,016 | 983 |
+| 1% | last byte of points | 4,650 / 5,712 | 4,948 / 5,798 | 3,867 |
+| 1% | last byte of layers | 6,460 / 6,799 | 8,670 / 10,016 | in the points |
+| 1% | settled | 11,660 / 15,344 | 14,727 / 15,001 | 3,867 |
+
+"Points beside layer work" equals the last byte of points here: every points request of the open ran while the level-0 request was filling, and none waited for it.
+
+#### Reopen: the server restarted over its cache
+
+| viewer | measure | prefetch off | prefetch on |
+|---|---|---:|---:|
+| 100% | first points | 485 / 925 | 421 / 464 |
+| 100% | last byte of layers | 971 / 1,595 | 1,977 / 2,173 |
+| 100% | settled | 1,513 / 2,518 | 1,977 / 2,173 |
+| 25% | last byte of layers | 1,267 / 1,802 | 2,399 / 3,464 |
+| 25% | settled | 6,545 / 6,962 | 2,963 / 4,671 |
+| 1% | last byte of layers | 2,383 / 2,933 | 3,798 / 6,024 |
+| 1% | settled | 2,629 / 3,194 | 3,798 / 6,024 |
+
+The server took 199 to 216 s to open each time.
+
+#### Map steps
+
+| viewer | step | measure | prefetch off | prefetch on | baseline |
+|---|---|---|---:|---:|---:|
+| 100% | zoom 9 | last byte of points | 834 / 1,163 | 1,339 / 1,497 | 2,109 / 12,257 |
+| 100% | zoom 9 | last byte of layers | 1,139 / 2,442 | 5,800 / 9,134 | in the points |
+| 25% | zoom 9 | last byte of layers | 1,145 / 1,267 | 4,773 / 6,176 | |
+| 1% | zoom 9 | last byte of points | 460 / 518 | 493 / 698 | 391 / 1,501 |
+| 1% | zoom 9 | last byte of layers | 638 / 1,893 | 3,789 / 4,999 | in the points |
+| 100% | pan at zoom 9 | settled | 354 / 386 | 3,477 / 3,824 | |
+| 25% | pan at zoom 9 | settled | 568 / 1,116 | 3,726 / 4,101 | |
+| 1% | pan at zoom 9 | settled | 287 / 325 | 3,478 / 3,624 | |
+| 100% | pan at zoom 6 | settled | 346 / 920 | 3,596 / 3,895 | |
+| 100% | zoom out to the world | settled | 289 / 295 | 297 / 769 | |
+| 1% | zoom out to the world | settled | 272 / 289 | 271 / 294 | |
+
+With prefetch on, the store sends about 101 idle artifact requests per run, 14 MB in all, the slowest 3.7 s, and its points prefetch adds 86 points requests and 333 MB. Settled then marks the end of that background work, which includes two 1.5 s idle timers after each move; it is not a wait the viewer sees. The baseline's settled has no counterpart for the map steps, because its idle promotions ran inside them.
+
+### Machine load
+
+The one-minute load average at each run's start and end:
+- verify: 0.8 then 1.3;
+- round 1: prefetch off 1.7 then 3.6, prefetch on 3.5 then 4.4;
+- round 2: prefetch off 1.7 then 16.3, prefetch on 18.4 then 2.1, while another session's work overlapped;
+- first-reads probe: 3.9 then 8.0.
+
+Round 2's figures are within the spread of round 1's, apart from the 25% viewer's first open, whose largest value (33.5 s) came from round 2. The files are `runs/gbif-*.load`.
+
+### Commands
+
+```bash
+B=$SCRATCH/bin/tessera-818122e3     # 818122e3 release build
+cd data/ladder/gbif && set -a && . ./.env && set +a
+systemd-run --user --scope --collect -p MemoryMax=24G -p MemorySwapMax=2G -- $B verify bundle
+cd $W
+DEPLOYMENT=/home/joe/code/tessera/data/ladder/gbif SIDES=new \
+  bash probes/2026-10-05-serving-layers-bench/run.sh - - $B 2 1 gbif-
+python3 probes/2026-10-05-serving-layers-bench/gbif_first_reads.py <binary with the timers> \
+  probes/2026-10-05-serving-layers-bench/runs/gbif-new-off-1.json probes/2026-10-05-serving-layers-bench/runs/gbif-first-reads.json
+python3 probes/2026-10-05-serving-layers-bench/summarise.py gbif-new-off-1 gbif-new-off-2 -- \
+  gbif-new-on-1 gbif-new-on-2 --labels "prefetch off,prefetch on" > probes/2026-10-05-serving-layers-bench/summary-gbif.md
+```
+
+The run files are in `data/ladder/gbif/bench-runs-2026-10-06/`.
+
+### Ready
+
+The bench runs full GBIF in 12 to 16 minutes a run with the reopen. Before the next GBIF run, fix the read by identifier so it fills only the levels its identifiers name. Until then, a new viewer's zoom-0 open pays for the genus and species fills, 9 to 25 s here.
+
 ## Second run: main 7b73e9c1, 2026-10-06
 
 Three rounds, each on a fresh server with the bundle's pages evicted, then a restart over the kept cache. Each round ran old and new with the store's prefetch off, then with it on. The viewers see 1%, 25% and 100% of the corpus. Each cell is the median and the largest value over the three rounds, with two regions per round for a map step.
