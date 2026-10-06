@@ -51,8 +51,9 @@ bundle grows from 1.9 to 2.0 GB, with 74 MB of species members and coverings.
 
 ## Files
 
-- `tprof.patch`: temporary counters around each phase of the tile walk and of the covering index.
-  They print one `TPROF` line per request to the server's log. Never merge it.
+- The counters were a temporary patch around each phase of the tile walk and of the covering
+  index, printing one `TPROF` line per request to the server's log. It is not kept here; it is
+  in the history at a12c2824 (`git show a12c2824:probes/2026-10-06-species-tiles/tprof.patch`).
 - `tile_phases.py`: starts the server on the bench deployment under `MemoryMax=24G`, asks the
   route for each viewer and level, and records each request's counters. `DEPLOYMENT` picks the
   deployment, `REPEATS` and `PER_TILE` change the asks.
@@ -63,7 +64,7 @@ bundle grows from 1.9 to 2.0 GB, with 74 MB of species members and coverings.
 
 ```bash
 W=$PWD   # the worktree
-git apply probes/2026-10-06-species-tiles/tprof.patch
+git show a12c2824:probes/2026-10-06-species-tiles/tprof.patch | git apply
 export CARGO_TARGET_DIR=$W/target CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_RELEASE_DEBUG=0
 cargo build --release -p tessera-cli
 RUN=$W/../stage5-bench/probes/2026-10-05-serving-layers-bench/runs/smoke-new.json
@@ -82,7 +83,7 @@ systemd-run --user --scope --collect -p MemoryMax=24G -p MemorySwapMax=2G -- \
   $W/target/release/tessera build --deployment tessera.toml
 cd $W && DEPLOYMENT=/home/joe/code/tessera/data/ladder/gbif-64p/bench-species-column \
   python3 probes/2026-10-06-species-tiles/tile_phases.py $W/target/release/tessera $RUN column.json
-git apply -R probes/2026-10-06-species-tiles/tprof.patch
+git checkout -- crates && rm crates/tessera-engine/src/tprof.rs
 ```
 
 ## The other routes that read the species level

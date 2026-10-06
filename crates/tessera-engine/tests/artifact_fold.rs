@@ -52,7 +52,9 @@ fn declaration(name: &str) -> LayerDeclaration {
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
-        layout: None,
+        // Pinned to rows: these cases are about the tile index and the containment partition an
+        // artifact-major level folds into, which a flat level is not served in otherwise.
+        layout: Some(tessera_types::layer::ServingLayout::ArtifactMajor),
         shape: None,
     }
 }

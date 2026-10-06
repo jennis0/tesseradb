@@ -7,12 +7,16 @@
 //! claiming the new one, and the reader would then either adopt a file the manifest mis-describes or
 //! quietly recompose one on every request for the process's life.
 //!
-//! **The flip here is the real heuristic on a real shape, not a hook.** The fixture is large enough
-//! that a membership spread across it touches ten or more Roaring containers — which is what
-//! `blocks per artifact` counts, and what the threshold is expressed in — and holds more artifacts
-//! than the count tiebreak wants. Nothing overrides anything: the level is registered with no pin,
-//! is artifact-major at publication because a level with no artifacts has no shape to observe, and
-//! flips when the fold looks at what actually landed.
+//! **The flip here is the real heuristic on a real shape, not a hook.** The level is a treed one,
+//! since a flat, stacked or tiered level with stored memberships is served from a column from its
+//! registration and has nothing to flip. The fixture is large enough that a membership spread across
+//! it touches ten or more Roaring containers, and holds more artifacts than the count tiebreak
+//! wants. Nothing overrides anything: the level is registered with no pin, is artifact-major at
+//! publication because a level with no artifacts has no shape to observe, and flips when the fold
+//! looks at what actually landed.
+//!
+//! Beside it, a flat level of clumped, disjoint memberships, which the tile index places and which
+//! is served from a column from its runtime publication, and in the label form after the fold.
 //!
 //! It is in a file of its own because it builds a corpus two orders of magnitude larger than the
 //! other artifact fixtures — the smallest one in which the measured axis is expressible at all.
@@ -53,7 +57,7 @@ fn declaration() -> LayerDeclaration {
         artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
-            kind: HierarchyKind::Flat,
+            kind: HierarchyKind::Nested,
             prune_children: false,
         },
         content: ContentDeclaration::default(),
@@ -242,4 +246,113 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         0,
         "nothing was recomposed, which is what writing the column bought"
     );
+}
+
+/// **A flat level the tile index places is served from a column from its runtime publication**:
+/// the list form until a fold has observed its memberships, the label form after a fold that finds
+/// them disjoint, and the label column a restart adopts. Every answer is the members each viewer
+/// can see, on both sides of the fold and after the restart.
+#[test]
+fn a_flat_level_is_served_from_a_column_from_its_publication() {
+    const FLAT: &str = "clusters/clumped";
+    const ROWS: u64 = 20_000;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        ROWS,
+    );
+    let map = source_to_new_map(&root, "v00000");
+    let engine = open_engine_publishing(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    engine.set_background_refresh_for_test(false);
+    let mut flat = declaration();
+    flat.name = FLAT.into();
+    flat.hierarchy.kind = HierarchyKind::Flat;
+    engine.register_layer(flat).unwrap();
+    // Fifty contiguous blocks of source ids: few, disjoint and clumped, which the old pick kept
+    // artifact-major on both counts.
+    let block = 300u64;
+    let batch: Vec<IncomingArtifact> = (0..50u64)
+        .map(|i| {
+            let members = (i * block..(i + 1) * block)
+                .map(|s| EntityId::new(map[&s]))
+                .collect::<Vec<_>>();
+            IncomingArtifact::from_entities(Some(format!("c{i:02}")), members)
+        })
+        .collect();
+    engine.publish_artifacts(FLAT.into(), 0, batch).unwrap();
+
+    let expected = |credential: &[u8]| -> Vec<(Option<String>, u64)> {
+        let mut out: Vec<(Option<String>, u64)> = (0..50u64)
+            .map(|i| {
+                let seen = (i * block..(i + 1) * block)
+                    .filter(|&s| credential == full_coverage_credential() || subset_sees(s))
+                    .count() as u64;
+                (Some(format!("c{i:02}")), seen)
+            })
+            .filter(|(_, seen)| *seen > 0)
+            .collect();
+        out.sort();
+        out
+    };
+    let only = |engine: &Engine, credential: &[u8]| -> Vec<(Option<String>, u64)> {
+        let session = engine.authorise(credential).unwrap();
+        let mut out: Vec<(Option<String>, u64)> = engine
+            .viewport_artifacts(
+                &session,
+                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                    .layers(tessera_engine::LayerSelection::Named(&[FLAT])),
+            )
+            .expect("a viewport")
+            .artifacts()
+            .iter()
+            .map(|a: &ArtifactOut| (a.key.clone(), a.masked_count))
+            .collect();
+        out.sort();
+        out
+    };
+
+    assert_eq!(
+        engine.recorded_layout(FLAT, 0),
+        Some(ServingLayout::RowMajorList),
+        "a registration records the list form, which holds any membership"
+    );
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(only(&engine, &credential), expected(&credential));
+    }
+    assert!(engine.columns_composed() > 0, "the publication composed a column");
+    assert_eq!(engine.layout_fallbacks(), 0);
+
+    fold(&engine);
+    assert_eq!(
+        engine.recorded_layout(FLAT, 0),
+        Some(ServingLayout::RowMajorLabel),
+        "the fold observed disjoint memberships"
+    );
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(only(&engine, &credential), expected(&credential));
+    }
+
+    drop(engine);
+    let reopened = open_engine_publishing(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    reopened.set_background_refresh_for_test(false);
+    assert_eq!(
+        reopened.recorded_layout(FLAT, 0),
+        Some(ServingLayout::RowMajorLabel)
+    );
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(only(&reopened, &credential), expected(&credential));
+    }
+    assert!(reopened.columns_adopted() > 0);
+    assert_eq!(reopened.columns_composed(), 0);
 }
