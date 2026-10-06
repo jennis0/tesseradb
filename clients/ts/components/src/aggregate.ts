@@ -116,4 +116,12 @@ export class HeldAggregate {
   entry(): AggregateEntry | undefined {
     return this.store?.get('aggregates').get(this.id);
   }
+
+  /**
+   * The entry `store` holds for this registration, or nothing where the registration is held with
+   * another store, as in the moment after an element adopts a new one.
+   */
+  entryFor(store: Store | null): AggregateEntry | undefined {
+    return store !== null && store === this.store ? this.entry() : undefined;
+  }
 }

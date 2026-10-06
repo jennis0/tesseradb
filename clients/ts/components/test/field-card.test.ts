@@ -77,6 +77,15 @@ describe('<tessera-field-card> on a category', () => {
     expect(spec(store, 'field-match')).toMatchObject({groupings: [{by: {field: 'archive', top: 100}}, {by: {field: 'archive', values: ['cs', 'math']}}]});
   });
 
+  it('names no more values than the server counts by name', async () => {
+    const host = await mount('<tessera-field-card field="archive"></tessera-field-card>');
+    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const store = fakeStore({meta: {...META, selection: {...META.selection, maxAggregateNamed: 2}}, status: status({}), filters: filtersOf({filter: {archive: {family: 'category', keys: ['a', 'b', 'c']}}, highlight: {}})});
+    card.store = store;
+    await settle(host);
+    expect(spec(store, 'field-subject')).toMatchObject({groupings: [{by: {field: 'archive', top: 5}}, {by: {field: 'archive', values: ['a', 'b']}}]});
+  });
+
   it('draws each value with its two counts and bars, each a share of its own set', async () => {
     const {host, store} = await mountCard('archive');
     await answer(
@@ -95,17 +104,40 @@ describe('<tessera-field-card> on a category', () => {
     expect(deep(host, '[part="more"]')!.textContent).toBe('5 more in view');
   });
 
-  it('asks for a value in view that is not among the commonest matching by name, and shows both its counts', async () => {
+  it('asks for the values in view outside the commonest matching by name, once, and keeps the whole match’s request as it was', async () => {
     const {host, store} = await mountCard('archive');
-    await answer(host, store, [{rows: [{key: 'rare', count: 7}], total: 7, groups: 1}], [{rows: [{key: 'cs', count: 1000}], total: 5000}]);
-    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {field: 'archive', top: 100}}, {by: {field: 'archive', values: ['rare']}}], without: 'archive'});
-    answerAggregate(store, 'field-match', aggregateEntry([{rows: [{key: 'cs', count: 1000}], total: 5000}, {rows: [{key: 'rare', count: 50}]}]));
-    await settle(host);
-    // Its answer does not change what is asked.
-    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {field: 'archive', top: 100}}, {by: {field: 'archive', values: ['rare']}}], without: 'archive'});
-    const [rare] = rows(host);
-    expect(rare!.querySelector('[part="count"]')!.textContent).toBe('7 / 50');
-    expect(parseFloat((rare!.querySelector('[part="bar-match"]') as HTMLElement).style.width)).toBe(1);
+    // As the real store: a registration made again drops the answer held, and each request is
+    // answered from what the view holds.
+    let inView = [{key: 'cs', count: 3}, {key: 'rare', count: 7}];
+    const answerFor = (id: string, spec: {groupings: {by?: {values?: string[]}}[]}) =>
+      id.startsWith('field-subject')
+        ? aggregateEntry([{rows: inView, total: 10, groups: inView.length}])
+        : id.startsWith('field-match')
+          ? aggregateEntry([{rows: [{key: 'cs', count: 1000}], total: 5000}])
+          : aggregateEntry([{rows: (spec.groupings[0]!.by!.values ?? []).map((key) => ({key, count: 50}))}]);
+    store.setAggregate = (id: string, given: unknown) => {
+      store.calls.push({name: 'setAggregate', args: [id, given]});
+      const held = new Map(store.get('aggregates'));
+      held.delete(id);
+      store.set('aggregates', held);
+      if (given === null) return;
+      queueMicrotask(() => store.set('aggregates', new Map(store.get('aggregates')).set(id, answerFor(id, given as never))));
+    };
+    const asked = (prefix: string) => store.calls.filter((c) => c.name === 'setAggregate' && (c.args[0] as string).startsWith(prefix) && c.args[1] !== null);
+    // The registrations the card made on mounting are answered as the store would.
+    for (const [id, given] of registered(store)) store.set('aggregates', new Map(store.get('aggregates')).set(id, answerFor(id, given as never)));
+    for (let i = 0; i < 4; i++) await settle(host);
+    expect(asked('field-match').map((c) => c.args[1])).toEqual([{groupings: [{by: {field: 'archive', top: 100}}], without: 'archive'}]);
+    expect(asked('field-outside').map((c) => c.args[1])).toEqual([{groupings: [{by: {field: 'archive', values: ['rare']}}], without: 'archive'}]);
+    const rare = rows(host).find((r) => r.dataset.key === 'rare')!;
+    expect(rare.querySelector('[part="count"]')!.textContent).toBe('7 / 50');
+    expect(parseFloat((rare.querySelector('[part="bar-match"]') as HTMLElement).style.width)).toBe(1);
+    // A pan whose view holds the same values outside asks nothing more for them.
+    inView = [{key: 'cs', count: 2}, {key: 'rare', count: 5}];
+    store.set('aggregates', new Map(store.get('aggregates')).set([...registered(store).keys()].find((id) => id.startsWith('field-subject'))!, answerFor('field-subject', {groupings: []})));
+    for (let i = 0; i < 4; i++) await settle(host);
+    expect(asked('field-outside')).toHaveLength(1);
+    expect(asked('field-match')).toHaveLength(1);
   });
 
   it('puts a value in or out of the filter and the highlight from its row', async () => {
