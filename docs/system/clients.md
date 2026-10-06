@@ -91,6 +91,15 @@ Most points slider offers, and passes all three to its map. The slider sets the 
 when it is let go. The notebook widget takes them as `budget`, `budget_min` and `budget_max`, and
 every Python route to a map passes them on.
 
+The cluster budget is the most artifacts a `nested` or `dag` layer is cut to, met by drawing
+ancestors in place of their descendants. The store starts with `artifacts.budget`, or the finest
+cut, and `Store.setClusterBudget` changes it, asking again for the treed layers drawn and for every
+aggregate registered with `cut: 'drawn'`. The explorer takes it as `cluster-budget`, 1,000 by
+default, with `cluster-budget-min` and `cluster-budget-max`, 10 and 10,000, for its Most clusters
+slider, which sits beside Most points while a `nested` or `dag` layer is drawn and sets the store's
+cluster budget when it is let go. The notebook widget takes them as `cluster_budget`,
+`cluster_budget_min` and `cluster_budget_max`.
+
 Told where the camera is, it works out which requests are worth making and issues them. Told a
 filter changed, it recomposes one expression from every active clause and sends it whole. Given a
 response, it decides which already-held geometry still answers for the view and which needs
@@ -346,6 +355,10 @@ With `highlighted`, the counts in view are the highlighted items' while a highli
 matched items' once it is cleared. A change of viewer drops every entry's answer before the store
 asks again, through `clear()` or the identity key, as it drops the rest of what the server
 answered.
+
+A cluster card ranks a `nested` or `dag` layer's clusters at the cut its map draws, registering
+`{by: {layer, top: n, cut: 'drawn'}}`, and a flat or levelled layer's at its level. It names each
+row as the map names it, and otherwise from the layer's browse pages, which also give its path.
 
 ## Not built
 

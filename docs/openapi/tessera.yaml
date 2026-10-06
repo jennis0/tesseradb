@@ -1407,7 +1407,17 @@ paths:
         listed ones; `none`, the items in no such artifact. Artifacts can overlap, so a layer's
         rows can sum to more than the set. An artifact is listed on the viewport's test against
         the principal's visible set, never the filtered set, and an id that names nothing or
-        nothing this principal is served gets no row. Cells: one row per non-empty cell, by
+        nothing this principal is served gets no row.
+
+        **A tree's cut.** On a `nested` or `dag` layer, `top` takes `cut`, and is refused without
+        it. The artifacts the table ranks, and the ones `rest` and `none` are taken against, are
+        those the treed frame of `POST /v1/artifacts/viewport` serves for the same `view`, and
+        `cut`'s `zoom`, `bbox` and `budget` as that request's: the artifacts this principal is
+        served with a member it may see in the tiles, cut to the budget by drawing ancestors in
+        place of their descendants. On a layer declared with `prune_children: false`, which draws
+        ancestors beside their descendants, only the drawn artifacts with no drawn artifact
+        beneath them on any path are ranked. The filter never decides which artifacts are drawn;
+        it changes only their counts and so their order. `cut` on any other layer is refused. Cells: one row per non-empty cell, by
         ascending `cell`, within each group in group order. With `reference`, a row appears where
         either count is non-zero. `rest` and `none` appear only where non-zero.
 
@@ -1608,6 +1618,7 @@ paths:
             - `bins` on a field that is not a number or timestamp, each kind with its own detail; on a `bool`, with a detail saying it has no bins; and on a number or timestamp field declared with neither `index` nor `render`, with a detail saying to name a number or timestamp field declared with `index` or `render`;
             - an unknown field, and a field that is not a category, each with its own detail; a category declared with none of `index`, `render` or a `derived` vocabulary, with a detail saying to declare it with `index` or `render`;
             - a layer outside the list `/v1/meta` publishes to this principal; no `level` on a layer with several, a `level` the layer does not hold, or one given on a layer with a single level;
+            - `top` on a `nested` or `dag` layer without `cut`; `cut` on any other layer or on a field; a `cut` whose `zoom` is above 16, whose `bbox` is not `[x0, y0, x1, y1]` with `x0 ≤ x1`, `y0 ≤ y1`, all finite, or which spans more tiles than `max_tiles_per_request`;
             - `depth` above 32, whatever its size; an `area` that is not `[x0, y0, x1, y1]` with `x0 ≤ x1`, `y0 ≤ y1`, all finite;
             - more cells at `depth` in the area than `selection.max_aggregate_cells`: one detail naming the count, the limit and the deepest depth at which the area fits;
             - `page_rows` or `pages` of 0;
@@ -5576,7 +5587,8 @@ components:
         is a number or timestamp field declared with `index` or `render`. A group-scoped field resolves under
         `view` as a filter leaf on it does, or is pinned as `<field>@<key>`. `layer` is one `/v1/meta` publishes to
         this principal, and `level` follows `BrowseRequest.level`: required on a layer with
-        several levels and refused on one with a single level.
+        several levels and refused on one with a single level. On a `nested` or `dag` layer `top`
+        requires `cut`; see **A tree's cut**.
       oneOf:
         - type: object
           additionalProperties: false
@@ -5636,6 +5648,8 @@ components:
               type: integer
               minimum: 1
               description: At most `selection.max_aggregate_top`.
+            cut:
+              $ref: "#/components/schemas/AggregateCut"
         - type: object
           additionalProperties: false
           required: [layer, artifacts]
@@ -5652,6 +5666,28 @@ components:
                     minimum: 0
                   - type: string
                     pattern: "^[0-9]+$"
+
+    AggregateCut:
+      type: object
+      additionalProperties: false
+      required: [zoom, bbox]
+      description: Where and how finely a `nested` or `dag` layer is drawn, named as `POST /v1/artifacts/viewport` names them; see **A tree's cut**.
+      properties:
+        zoom:
+          type: integer
+          minimum: 0
+          maximum: 16
+          description: The tile depth.
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: number }
+          description: "As the viewport's `bbox`: `[x0, y0, x1, y1]` in the coordinates of the view's quantisation extent, with `x0 ≤ x1`, `y0 ≤ y1`, all finite. Its tiles at `zoom` may number at most `max_tiles_per_request`."
+        budget:
+          type: integer
+          minimum: 0
+          description: The most artifacts the cut draws, met by drawing ancestors in place of their descendants. Absent is the finest cut.
 
     AggregateTableHead:
       type: object

@@ -67,6 +67,8 @@ export type TesseraEventDetails = {
   'tessera-fold': {field: string; folded: boolean};
   /** Most points was let go: the store now aims to draw `budget` marks on screen. */
   'tessera-budgetchange': {budget: number};
+  /** Most clusters was let go: a `nested` or `dag` layer is now cut to at most `budget` clusters. */
+  'tessera-clusterbudgetchange': {budget: number};
   /** The level to colour and label at is now `level`; null is the level drawn by default. */
   'tessera-levelchange': {level: number | null};
   /**

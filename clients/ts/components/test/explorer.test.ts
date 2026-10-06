@@ -780,3 +780,58 @@ describe('<tessera-explorer> the Colour section', () => {
     expect(changes).toEqual([{palette: 'tableau10', ramp: 'viridis', scale: 'linear', reverse: true}]);
   });
 });
+
+describe('<tessera-explorer> the cluster budget', () => {
+  const tree = {name: 'tree', title: 'tree', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'nested', pruneChildren: true}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1} as unknown as Meta['layers'][number];
+  const flat = {...tree, name: 'flat', hierarchy: {kind: 'flat', pruneChildren: false}} as unknown as Meta['layers'][number];
+  const budgets = (store: FakeStore) => store.calls.filter((c) => c.name === 'setClusterBudget').map((c) => c.args[0]);
+
+  async function withLayers(markup = '<tessera-explorer></tessera-explorer>') {
+    const host = await mount(markup);
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; clusterBudget: number};
+    const store = fakeStore({meta: {...META, layers: [tree, flat]}, status: status({})});
+    el.store = store;
+    await settle(host);
+    el.shadowRoot!.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
+    await settle(host);
+    return {host, el, store, shadow: el.shadowRoot!};
+  }
+
+  it('cuts a tree layer to 1,000 clusters unless the host says otherwise, and passes a change on', async () => {
+    const {host, el, store} = await withLayers();
+    expect(budgets(store)).toEqual([1_000]);
+    el.clusterBudget = 250;
+    await settle(host);
+    expect(budgets(store)).toEqual([1_000, 250]);
+    const other = await withLayers('<tessera-explorer cluster-budget="40"></tessera-explorer>');
+    expect(budgets(other.store)).toEqual([40]);
+  });
+
+  it('offers Most clusters only while a tree layer is drawn, from cluster-budget-min to cluster-budget-max, and sets the cut only when it is let go', async () => {
+    const {host, shadow, store} = await withLayers('<tessera-explorer cluster-budget-min="10" cluster-budget-max="10000"></tessera-explorer>');
+    const slider = () => shadow.querySelector<HTMLInputElement>('[part="most-clusters"]');
+    expect(slider()).toBeNull();
+    store.set('artifacts', {...store.get('artifacts'), layers: ['flat']});
+    await settle(host);
+    expect(slider()).toBeNull();
+    store.set('artifacts', {...store.get('artifacts'), layers: ['flat', 'tree']});
+    await settle(host);
+    expect(slider()).not.toBeNull();
+    const value = () => shadow.querySelector('[part="most-clusters-value"]')!.textContent;
+    expect(value()).toBe('1K');
+    const seen: unknown[] = [];
+    host.addEventListener('tessera-clusterbudgetchange', (e) => seen.push((e as CustomEvent).detail));
+    slider()!.value = '1000';
+    slider()!.dispatchEvent(new Event('input'));
+    await settle(host);
+    expect(value()).toBe('10K');
+    slider()!.value = '500';
+    slider()!.dispatchEvent(new Event('input'));
+    await settle(host);
+    expect(budgets(store)).toEqual([1_000]);
+    slider()!.dispatchEvent(new Event('change'));
+    await settle(host);
+    expect(budgets(store).at(-1)).toBe(320);
+    expect(seen).toEqual([{budget: 320}]);
+  });
+});

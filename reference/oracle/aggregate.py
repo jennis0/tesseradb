@@ -182,3 +182,68 @@ def _row(group, key, cell, count, reference_count, total, reference_total) -> Ro
         if reference_count is not None
         else None,
     )
+
+
+def drawn_cut(parents: dict, passing: set, budget: int | None, prune: bool) -> set:
+    """What a treed layer draws, from its stored parent lists and the nodes that pass, read
+    straight from the rule: the viewer's tree is the passing nodes, each linked to its nearest
+    passing ancestors on every path, and depth is counted in passing nodes. At depth `d` each
+    head (a passing node, or with `prune` one with no passing node beneath it) is represented on
+    each of its root paths by the deepest node at or above `d`. The cut drawn is the deepest whose
+    size fits `budget`, depth 0 where none does, and the finest with no budget."""
+
+    def induced(node) -> set:
+        out: set = set()
+        for up in parents.get(node, []):
+            out |= {up} if up in passing else induced(up)
+        return out
+
+    ups = {node: induced(node) for node in passing}
+
+    def rung(node) -> int:
+        return max((rung(up) + 1 for up in ups[node]), default=0)
+
+    def paths(node) -> list[list]:
+        if not ups[node]:
+            return [[node]]
+        return [path + [node] for up in ups[node] for path in paths(up)]
+
+    def ancestors(node) -> set:
+        out: set = set()
+        stack = [node]
+        while stack:
+            for up in ups[stack.pop()]:
+                if up not in out:
+                    out.add(up)
+                    stack.append(up)
+        return out
+
+    beneath = {up for node in passing for up in ancestors(node)}
+    heads = [node for node in passing if not prune or node not in beneath]
+
+    def at(depth: int) -> set:
+        return {
+            max((n for n in path if rung(n) <= depth), key=rung)
+            for head in heads
+            for path in paths(head)
+        }
+
+    finest = at(len(passing))
+    if budget is None or len(finest) <= budget:
+        return finest
+    for depth in range(len(passing) - 1, -1, -1):
+        if len(at(depth)) <= budget:
+            return at(depth)
+    return at(0)
+
+
+def frontier(parents: dict, drawn: set) -> set:
+    """The nodes of `drawn` with no node of `drawn` beneath them on any stored path."""
+    above: set = set()
+    stack = [up for node in drawn for up in parents.get(node, [])]
+    while stack:
+        node = stack.pop()
+        if node not in above:
+            above.add(node)
+            stack.extend(parents.get(node, []))
+    return drawn - above

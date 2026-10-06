@@ -89,6 +89,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     projections,
     calls,
     budget: 250_000,
+    clusterBudget: null,
     get: (name) => projections[name],
     set(name, value) {
       projections[name] = value;
@@ -125,6 +126,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setPointColumns: spy('setPointColumns'),
     setPalette: spy('setPalette'),
     setBudget: spy('setBudget'),
+    setClusterBudget: spy('setClusterBudget'),
     setCurrentView: spy('setCurrentView'),
     // The unit square, so a component's data↔world conversion is the identity here and a test
     // asserting on world coordinates is asserting on what it wrote.

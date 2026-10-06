@@ -233,3 +233,52 @@ def test_a_later_request_refused_raises_the_tables_read(db, monkeypatch):
         db.viewer().aggregate("map", [{"cells": {"depth": 4}}])
     assert stopped.value.cursor == bodies[2]["cursor"]
     assert [len(t) for t in stopped.value.rows] == [2]
+
+
+def tree_papers(db) -> None:
+    """The papers, and a tree over them: a root over all twenty, two branches of ten and four
+    leaves of five."""
+    papers(db)
+    db.declare_layer("tree", kind="nested", prune_children=True)
+    nodes = [("root", None, range(20))]
+    nodes += [(f"b{b}", "root", range(b * 10, b * 10 + 10)) for b in range(2)]
+    nodes += [(f"l{leaf}", f"b{leaf // 2}", range(leaf * 5, leaf * 5 + 5)) for leaf in range(4)]
+    db.insert(
+        "tree",
+        artifacts=pa.table(
+            {
+                "level": pa.array([0] * len(nodes), pa.uint32()),
+                "key": pa.array([key for key, _, _ in nodes]),
+                "parent": pa.array([parent for _, parent, _ in nodes]),
+            }
+        ),
+        key="key",
+        level="level",
+        parent="parent",
+    )
+    members = [(key, f"p{i}") for key, _, held in nodes for i in held]
+    db.insert(
+        "tree",
+        members=pa.table(
+            {
+                "level": pa.array([0] * len(members), pa.uint32()),
+                "key": pa.array([key for key, _ in members]),
+                "paper": pa.array([paper for _, paper in members]),
+            }
+        ),
+        key="key",
+        level="level",
+    )
+
+
+def test_a_tree_ranks_the_clusters_the_map_draws(served, corpus):
+    """A tree's top artifacts are taken at the cut the map draws: the four leaves with no budget,
+    the root under a budget of one; without a cut the server refuses the grouping."""
+    db = served(tree_papers)
+    whole = {"zoom": 0, "bbox": [-5.0, -5.0, 40.0, 40.0]}
+    (leaves,) = db.aggregate("map", [{"by": {"layer": "tree", "top": 10, "cut": whole}}])
+    assert [(r["group"], r["count"]) for r in rows(leaves)] == [("listed", 5)] * 4
+    (root,) = db.aggregate("map", [{"by": {"layer": "tree", "top": 10, "cut": {**whole, "budget": 1}}}])
+    assert [(r["group"], r["count"]) for r in rows(root)] == [("listed", 20)]
+    with pytest.raises(Refusal, match="422"):
+        db.aggregate("map", [{"by": {"layer": "tree", "top": 10}}])

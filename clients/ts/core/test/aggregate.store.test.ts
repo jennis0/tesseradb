@@ -698,3 +698,39 @@ describe('an aggregate across a change of viewer or corpus', () => {
     expect(asked.map((p) => p.req.reference)).toEqual([{region: {bbox: BOX}}, {all_of: [{archive: {in: ['hep']}}, {region: {bbox: BOX}}]}]);
   });
 });
+
+describe('an aggregate ranking a layer at the drawn cut', () => {
+  const BOX: [number, number, number, number] = [0.1, 0.2, 0.6, 0.7];
+  const TREE = {by: {layer: 'tree', top: 5, cut: 'drawn' as const}};
+  type Cut = {zoom: number; bbox: number[]; budget?: number};
+  const ranked = (p: {req: AggregateRequest}) => p.req.groupings.some((g) => g.by !== undefined && 'cut' in g.by);
+  const cutOf = (p: {req: AggregateRequest}) => (p.req.groupings[0]!.by as {cut: Cut}).cut;
+
+  it('waits for the camera, sends the cut the map draws, and asks again when the cluster budget changes', async () => {
+    const {store, pending, clock} = await storeWith();
+    store.setAggregate('card', {groupings: [TREE]});
+    await flush();
+    expect(pending.filter(ranked)).toHaveLength(0);
+    expect(store.get('aggregates').get('card')).toMatchObject({status: 'loading', result: null});
+    store.setView(camera(store.frame(), BOX, 400, 400));
+    await clock.advance(300);
+    await flush();
+    expect(pending.filter(ranked)).toHaveLength(1);
+    const cut = cutOf(pending.filter(ranked)[0]!);
+    expect(cut.zoom).toBeGreaterThan(0);
+    expect(cut.bbox[0]).toBeLessThanOrEqual(BOX[0]);
+    expect(cut.bbox[2]).toBeGreaterThanOrEqual(BOX[2]);
+    expect('budget' in cut).toBe(false);
+    expect(store.clusterBudget).toBeNull();
+    store.setClusterBudget(40);
+    await flush();
+    expect(pending.filter(ranked).map(cutOf)).toEqual([cut, {...cut, budget: 40}]);
+    expect(store.clusterBudget).toBe(40);
+    // Not a whole number above zero, or the same budget: nothing changes and nothing is asked.
+    store.setClusterBudget(0);
+    store.setClusterBudget(2.5);
+    store.setClusterBudget(40);
+    await flush();
+    expect(pending.filter(ranked)).toHaveLength(2);
+  });
+});

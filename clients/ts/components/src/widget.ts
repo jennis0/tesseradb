@@ -28,8 +28,9 @@ import './explorer.js';
  * A page reload makes a new model, which sends `ready` again.
  *
  * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height`,
- * `title_field`, `artifacts_per_tile`, `budget_min` and `budget_max` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
- * `size_max`, `size_scale` and `filters` go both ways, and so does `budget`, sent up when Most points is let go;
+ * `title_field`, `artifacts_per_tile`, `budget_min`, `budget_max`, `cluster_budget_min` and `cluster_budget_max` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
+ * `size_max`, `size_scale` and `filters` go both ways, and so do `budget`, sent up when Most points is let go,
+ * and `cluster_budget`, sent up when Most clusters is let go;
  * `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
  * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
  * `tessera_id` is a `u64`.
@@ -479,7 +480,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   model.on('change:title_field', () => {
     for (const v of state.views.values()) v.explorer.titleField = titleFieldOf(model);
   });
-  for (const key of ['budget', 'budget_min', 'budget_max']) {
+  for (const key of ['budget', 'budget_min', 'budget_max', 'cluster_budget', 'cluster_budget_min', 'cluster_budget_max']) {
     model.on(`change:${key}`, () => {
       if (state.syncingUp) return;
       for (const v of state.views.values()) applyBudget(v.explorer, model);
@@ -501,8 +502,16 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       syncUp({budget});
     };
     explorer.addEventListener('tessera-budgetchange', onBudget);
+    // Most clusters likewise.
+    const onClusterBudget = (e: Event) => {
+      const {budget} = (e as CustomEvent<{budget: number}>).detail;
+      explorer.clusterBudget = budget;
+      syncUp({cluster_budget: budget});
+    };
+    explorer.addEventListener('tessera-clusterbudgetchange', onClusterBudget);
     return () => {
       explorer.removeEventListener('tessera-budgetchange', onBudget);
+      explorer.removeEventListener('tessera-clusterbudgetchange', onClusterBudget);
       state.views.delete(explorer);
       teardown(v);
       if (state.active === v) state.active = [...state.views.values()].at(-1) ?? null;
@@ -517,12 +526,18 @@ function titleFieldOf(model: WidgetModel): string {
   return typeof f === 'string' ? f : '';
 }
 
-/** The point budget and the range a control for it offers, as the kernel set them; a value it left unset leaves the explorer's. */
+/**
+ * The point budget, the cluster budget and the range a control for each offers, as the kernel set
+ * them; a value it left unset leaves the explorer's.
+ */
 function applyBudget(explorer: TesseraExplorer, model: WidgetModel): void {
-  const [budget, min, max] = ['budget', 'budget_min', 'budget_max'].map((key) => model.get(key));
+  const [budget, min, max, clusters, clustersMin, clustersMax] = ['budget', 'budget_min', 'budget_max', 'cluster_budget', 'cluster_budget_min', 'cluster_budget_max'].map((key) => model.get(key));
   if (typeof budget === 'number') explorer.budget = budget;
   if (typeof min === 'number') explorer.budgetMin = min;
   if (typeof max === 'number') explorer.budgetMax = max;
+  if (typeof clusters === 'number') explorer.clusterBudget = clusters;
+  if (typeof clustersMin === 'number') explorer.clusterBudgetMin = clustersMin;
+  if (typeof clustersMax === 'number') explorer.clusterBudgetMax = clustersMax;
 }
 
 const mounts = new WeakMap<ModelState, (explorer: TesseraExplorer) => () => void>();

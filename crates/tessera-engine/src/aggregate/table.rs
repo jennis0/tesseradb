@@ -285,8 +285,13 @@ impl Plan {
                 sample,
             }) => Outer::Bins(Bins::of(generation, column, *bins, *range, *sample)?),
             Some(By::Summary { column }) => Outer::Summary(Numbers::of(generation, column, true)?),
-            Some(By::Layer { layer, level, pick }) => Outer::Layer(Layer::of(
-                engine, session, generation, view, layer, *level, pick,
+            Some(By::Layer {
+                layer,
+                level,
+                pick,
+                cut,
+            }) => Outer::Layer(Layer::of(
+                engine, session, generation, view, layer, *level, pick, *cut,
             )?),
         };
         let (area, area_cells) = match grouping.cells {

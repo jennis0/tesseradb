@@ -713,6 +713,9 @@ class Selection:
         budget: int = 0,
         budget_min: int = 1_000,
         budget_max: int = 2_000_000,
+        cluster_budget: int = 1_000,
+        cluster_budget_min: int = 10,
+        cluster_budget_max: int = 10_000,
     ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
@@ -732,6 +735,10 @@ class Selection:
           map's own, 250,000.
         - `budget_min`, `budget_max`: the ends of the Most points slider in the map's Layers
           popover. Neither changes `budget`.
+        - `cluster_budget`: the most clusters a `nested` or `dag` layer is drawn with, met by
+          drawing parents in place of their children. `0` leaves the map's own, every cluster.
+        - `cluster_budget_min`, `cluster_budget_max`: the ends of the Most clusters slider, shown
+          while such a layer is drawn. Neither changes `cluster_budget`.
 
         Items outside the box are still drawn when they are in frame.
 
@@ -749,6 +756,9 @@ class Selection:
             budget=budget,
             budget_min=budget_min,
             budget_max=budget_max,
+            cluster_budget=cluster_budget,
+            cluster_budget_min=cluster_budget_min,
+            cluster_budget_max=cluster_budget_max,
         )
 
     def _expression(self) -> Optional[dict]:
@@ -1169,7 +1179,11 @@ class Viewer:
         - `groupings`: one dictionary per table. `{}` is the size of the set. `"by"` groups the
           items by a category field, `{"field": name, "top": n}` or `{"field": name, "values":
           [key, ...]}`, or by the artifacts of one level of a layer, `{"layer": name, "level": k,
-          "top": n}` or `{"layer": name, "level": k, "artifacts": [tessera_id, ...]}`, or counts
+          "top": n}` or `{"layer": name, "level": k, "artifacts": [tessera_id, ...]}`. On a
+          `nested` or `dag` layer, `top` needs `"cut": {"zoom": z, "bbox": [x0, y0, x1, y1],
+          "budget": b}`, the map's tile depth (0 to 16), box and cluster budget (optional): the
+          artifacts listed are those the map draws there, and where the layer was declared with
+          `prune_children=False` only those with nothing drawn beneath them. Or it counts
           a number or timestamp field in bins, `{"field": name, "bins": n}`. With `"range":
           [lower, upper]` the bins cut that range into `n` equal widths: an integer's in whole
           numbers, or in floats where either bound is fractional, and a timestamp's in whole
@@ -1224,6 +1238,8 @@ class Viewer:
             [years] = v.aggregate("papers", [{"by": {"field": "submitted", "bins": 20}}])
             [sampled] = v.aggregate("papers", [{"by": {"field": "year", "bins": 20, "sample": 100_000}}])
             [year] = v.aggregate("papers", [{"by": {"field": "year", "summary": True}}])
+            cut = {"zoom": 3, "bbox": [0, 0, 100, 100], "budget": 1000}
+            [topics] = v.aggregate("papers", [{"by": {"layer": "topics", "top": 10, "cut": cut}}])
         """
         import pyarrow as pa
         from pyarrow import ipc

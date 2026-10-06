@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use tessera_engine::{
     AggregateCaps, AggregateHead, AggregateRefused, AggregateRequest, AggregateSink, By,
-    CancelToken, EngineError, Grouping, PageEnd, Pick, RecordsLimits, RecordsSink, RecordsTrailer,
+    CancelToken, Cut, EngineError, Grouping, PageEnd, Pick, RecordsLimits, RecordsSink, RecordsTrailer,
     Reference,
     SinkResult, TableHead,
 };
@@ -61,7 +61,8 @@ struct GroupingReq {
 }
 
 /// A grouping's outer level: `field` with `top` or `values`, with `bins` and optionally `range`,
-/// or with `summary`; or `layer` with `top` or `artifacts` and, on a levelled layer, `level`.
+/// or with `summary`; or `layer` with `top` or `artifacts` and, on a levelled layer, `level`, or
+/// on a treed layer, `cut`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ByReq {
@@ -90,6 +91,19 @@ struct ByReq {
     /// `tessera_id`s, each a number or its decimal string.
     #[serde(default)]
     artifacts: Option<Vec<Value>>,
+    /// On a treed layer: list the artifacts the map draws at this zoom, bbox and budget.
+    #[serde(default)]
+    cut: Option<CutReq>,
+}
+
+/// As `POST /v1/artifacts/viewport` names them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CutReq {
+    zoom: u64,
+    bbox: [f64; 4],
+    #[serde(default)]
+    budget: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,10 +296,10 @@ fn by_of(
     let bad = |detail: &str| Err(ApiError::Contract(detail.to_string()));
     match (&by.field, &by.layer) {
         (Some(field), None) => {
-            if by.artifacts.is_some() || by.level.is_some() {
+            if by.artifacts.is_some() || by.level.is_some() || by.cut.is_some() {
                 return bad(
-                    "`artifacts` and `level` go with `layer`; a field takes `top`, `values`, \
-                     `bins` or `summary`",
+                    "`artifacts`, `level` and `cut` go with `layer`; a field takes `top`, \
+                     `values`, `bins` or `summary`",
                 );
             }
             let picked = by.top.is_some() || by.values.is_some() || by.bins.is_some();
@@ -397,10 +411,35 @@ fn by_of(
                 }
                 (None, None) => return bad("`by` carries neither `top` nor `artifacts`; send one"),
             };
+            let cut = match &by.cut {
+                None => None,
+                Some(_) if by.top.is_none() => {
+                    return bad("`cut` goes with `top`; send `top` beside it, or leave it out")
+                }
+                Some(cut) => {
+                    let zoom = match u8::try_from(cut.zoom) {
+                        Ok(zoom) if zoom <= 16 => zoom,
+                        _ => {
+                            return Err(ApiError::Contract(format!(
+                                "cut zoom {} is past the deepest tile depth; send a zoom from 0 \
+                                 to 16",
+                                cut.zoom
+                            )))
+                        }
+                    };
+                    check_bbox("cut.bbox", &cut.bbox)?;
+                    Some(Cut {
+                        zoom,
+                        bbox: cut.bbox,
+                        budget: cut.budget,
+                    })
+                }
+            };
             Ok(By::Layer {
                 layer: layer.clone(),
                 level: by.level,
                 pick,
+                cut,
             })
         }
         (Some(_), Some(_)) => bad("`by` names both `field` and `layer`; name one"),

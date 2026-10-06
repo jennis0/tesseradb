@@ -122,8 +122,13 @@ pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8;
                 sample,
             }) => format!("bins {column:?} {bins} {range:?} sample {sample:?}"),
             Some(By::Summary { column }) => format!("summary {column:?}"),
-            Some(By::Layer { layer, level, pick }) => {
-                format!("layer {layer:?} {level:?} {}", pick_text(pick))
+            Some(By::Layer {
+                layer,
+                level,
+                pick,
+                cut,
+            }) => {
+                format!("layer {layer:?} {level:?} {} cut {cut:?}", pick_text(pick))
             }
         };
         part(format!("{by} cells {:?} area {:?}", grouping.cells, grouping.area));
