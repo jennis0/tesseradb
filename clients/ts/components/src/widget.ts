@@ -28,8 +28,8 @@ import './explorer.js';
  * A page reload makes a new model, which sends `ready` again.
  *
  * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height`,
- * `title_field`, `artifacts_per_tile`, `budget`, `budget_min` and `budget_max` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
- * `size_max`, `size_scale` and `filters` go both ways;
+ * `title_field`, `artifacts_per_tile`, `budget_min` and `budget_max` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
+ * `size_max`, `size_scale` and `filters` go both ways, and so does `budget`, sent up when Most points is let go;
  * `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
  * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
  * `tessera_id` is a `u64`.
@@ -481,6 +481,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   });
   for (const key of ['budget', 'budget_min', 'budget_max']) {
     model.on(`change:${key}`, () => {
+      if (state.syncingUp) return;
       for (const v of state.views.values()) applyBudget(v.explorer, model);
     });
   }
@@ -492,7 +493,16 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     state.views.set(explorer, v);
     state.active = v;
     equip(v);
+    // Most points sets the store's budget; the kernel learns it as it is let go, not per frame.
+    // The explorer's property follows, so the kernel setting the old budget back is a change.
+    const onBudget = (e: Event) => {
+      const {budget} = (e as CustomEvent<{budget: number}>).detail;
+      explorer.budget = budget;
+      syncUp({budget});
+    };
+    explorer.addEventListener('tessera-budgetchange', onBudget);
     return () => {
+      explorer.removeEventListener('tessera-budgetchange', onBudget);
       state.views.delete(explorer);
       teardown(v);
       if (state.active === v) state.active = [...state.views.values()].at(-1) ?? null;

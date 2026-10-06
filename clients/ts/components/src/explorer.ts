@@ -112,8 +112,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * including elements a host puts in its slots.
  *
  * The heading names what is shown: `dataset-title` where the host sets one, with the view's name
- * under it, else the view's name alone. A view's name that is only its id, such as `s0`, is left
- * out. With several views the view's name is the view choice.
+ * under it, else the view's name alone. A view's name that is only its id is left out. With
+ * several views the view's name is the view choice.
  *
  * The left holds the heading and the field column (`<tessera-filter-panel>`): what the cards count,
  * In view or Highlighted beside All matching, the clauses applied as chips with Clear all, one
@@ -181,6 +181,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-displaychange']>} tessera-displaychange - A setting in the Points or Density section changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-sizechange']>} tessera-sizechange - Size by, the size range or the scale changed in the Points section.
  * @fires {CustomEvent<TesseraEventDetails['tessera-budgetchange']>} tessera-budgetchange - Most points was let go at a new number.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-fold']>} tessera-fold - A field card was folded to one line or opened.
  * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A colour was chosen or reset for one value on a field card.
  * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette, the ramp, its scale or its direction was chosen in the Colour section.
  * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
@@ -951,7 +952,7 @@ export class TesseraExplorer extends TesseraElement {
     // name alone. With one view the name is text; with several it is the view choice.
     const shown = meta?.views.find((v) => v.id === s?.get('view').id) ?? (meta?.views.length === 1 ? meta.views[0] : undefined);
     // A name that is only the view's id says nothing to a reader.
-    const viewName = shown && shown.displayName !== shown.id && !/^s\d+$/.test(shown.displayName) ? shown.displayName : '';
+    const viewName = shown && shown.displayName !== shown.id ? shown.displayName : '';
     const viewText = (cls: string) => (pickersShown || !viewName ? nothing : html`<span part="view-name" class=${cls}>${viewName}</span>`);
     const names = this.datasetTitle
       ? html`<div class="names"><span part="dataset-title" class="title">${this.datasetTitle}</span><div class="sub">${pickers}${viewText('')}</div></div>`

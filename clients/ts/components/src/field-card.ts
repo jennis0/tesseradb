@@ -441,20 +441,30 @@ export class TesseraFieldCard extends TesseraElement {
       :host([highlighting]) [part='count'] .sub {
         color: var(--_tessera-highlight);
       }
-      /* The verbs take the counts' place while the row is hovered or focused. */
+      /* The verbs share the counts' cell and take their place while the row is hovered or holds
+         focus. Hidden, they stay in the tab order, so Tab reaches them and shows them. */
+      [part='count'],
       [part='verbs'] {
-        display: none;
+        grid-column: 3;
+        grid-row: 1;
+      }
+      [part='verbs'] {
+        display: flex;
+        justify-self: end;
         gap: 4px;
+        opacity: 0;
+        pointer-events: none;
       }
       [part~='row']:hover [part='verbs'],
       [part~='row']:focus-within [part='verbs'],
       [part~='row'][data-shown] [part='verbs'] {
-        display: flex;
+        opacity: 1;
+        pointer-events: auto;
       }
       [part~='row']:hover [part='count'],
       [part~='row']:focus-within [part='count'],
       [part~='row'][data-shown] [part='count'] {
-        display: none;
+        visibility: hidden;
       }
       [part='verbs'] button {
         width: 22px;
@@ -591,6 +601,15 @@ export class TesseraFieldCard extends TesseraElement {
       }
       .text {
         margin-top: 6px;
+      }
+      /* Read out, not drawn. */
+      .hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
       }
       /* The colour picker, in the top layer beside the card. */
       .pop {
@@ -766,6 +785,7 @@ export class TesseraFieldCard extends TesseraElement {
     this.matchCounts.set(null, null);
     this.figures.set(null, null);
     this.closePicker(false);
+    document.removeEventListener('pointerdown', this.onPressOutsideBrush, true);
     if (this.livePick) cancelAnimationFrame(this.livePick.frame);
     this.livePick = null;
     super.disconnectedCallback();
@@ -845,7 +865,16 @@ export class TesseraFieldCard extends TesseraElement {
       };
     }
     const subject = this.rowGroupings(store, meta, kind, this.expanded ? MORE_ROWS : ROWS);
-    const match = kind === 'category' ? this.rowGroupings(store, meta, kind, Math.min(MATCH_TOP, meta.selection.maxAggregateTop)) : subject;
+    // A layer's whole match also counts its clusters, by one more grouping whose table says how many
+    // there are; the search box names that number.
+    const layer = this.declaredLayer(meta);
+    const level = layer ? this.levelOf(layer) : undefined;
+    const match =
+      kind === 'category'
+        ? this.rowGroupings(store, meta, kind, Math.min(MATCH_TOP, meta.selection.maxAggregateTop))
+        : subject && layer
+          ? [...subject.slice(0, meta.selection.maxAggregateGroupings - 1), {by: {layer: layer.name, ...(level === undefined || layer.levels.length <= 1 ? {} : {level}), top: 1}}]
+          : null;
     return {
       subject: subject ? {groupings: subject, subject: 'view', highlighted: true, ...leaveOut} : null,
       match: match && !this.folded ? {groupings: match, ...leaveOut} : null,
@@ -866,7 +895,18 @@ export class TesseraFieldCard extends TesseraElement {
     this.matchCounts.set(s, specs.match);
     this.figures.set(s, specs.figures);
     this.placePicker(changed);
+    if (changed.has('brush')) {
+      if (this.brush?.open) document.addEventListener('pointerdown', this.onPressOutsideBrush, true);
+      else document.removeEventListener('pointerdown', this.onPressOutsideBrush, true);
+    }
   }
+
+  /** A press outside an open range box closes it, as Escape does. */
+  private onPressOutsideBrush = (e: PointerEvent): void => {
+    const box = this.renderRoot.querySelector('[part="brush"]');
+    if (box && e.composedPath().includes(box)) return;
+    this.brush = null;
+  };
 
   /** Whether a highlight is set, in which case the subject is the highlighted items. */
   private highlighting(store: Store): boolean {
@@ -889,21 +929,24 @@ export class TesseraFieldCard extends TesseraElement {
     const shallower = level === undefined ? [] : layer.levels.map((l) => l.level).filter((l) => l < level);
     const browse = (at: number | undefined) => s.browse({layer: layer.name, filters: null, limit, ...(at === undefined ? {} : {level: at})});
     const walked = layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag';
-    // The shallower levels name the parents of the level counted.
-    const fetched = walked
-      ? this.walk(layer.name, limit)
-      : Promise.all([browse(level), ...shallower.map((l) => browse(l).catch(() => null))]).then(([page, ...parents]) => {
-          for (const p of parents) for (const r of p?.artifacts ?? []) this.met.set(r.tesseraId, r);
-          return page.artifacts;
-        });
+    // What a fetch met is held apart and kept only if the card still answers for the store and
+    // viewer it was asked under: a page asked for one viewer names nothing to the next.
+    const current = () => epoch === this.epoch;
+    const fetched: Promise<{rows: BrowseRow[]; met: BrowseRow[]} | null> = walked
+      ? this.walk(s, layer.name, limit, current)
+      : // The shallower levels name the parents of the level counted.
+        Promise.all([browse(level), ...shallower.map((l) => browse(l).catch(() => null))]).then(([page, ...parents]) => ({
+          rows: page.artifacts,
+          met: parents.flatMap((p) => p?.artifacts ?? [])
+        }));
     void fetched
-      .then((rows) => {
-        if (epoch !== this.epoch) return;
-        for (const r of rows) this.met.set(r.tesseraId, r);
-        this.candidates = rows;
+      .then((found) => {
+        if (!found || !current()) return;
+        for (const r of [...found.met, ...found.rows]) this.met.set(r.tesseraId, r);
+        this.candidates = found.rows;
       })
       .catch(() => {
-        if (epoch !== this.epoch) return;
+        if (!current()) return;
         this.candidates = [];
       });
   }
@@ -912,24 +955,27 @@ export class TesseraFieldCard extends TesseraElement {
    * The deepest clusters of a nested or tree layer the card can rank: from the roots, each round
    * replaces the {@link WALK_FAN} largest clusters that have children by their children, read
    * together, until `most` are held or {@link WALK_PAGES} pages have been read. Every cluster
-   * passed through is kept, to name paths.
+   * passed through is returned in `met`, to name paths. The walk stops, answering `null`, as soon
+   * as `current` says the card has moved to another store or viewer.
    */
-  private async walk(layer: string, most: number): Promise<BrowseRow[]> {
-    const s = this.resolvedStore!;
+  private async walk(s: Store, layer: string, most: number, current: () => boolean): Promise<{rows: BrowseRow[]; met: BrowseRow[]} | null> {
     const page = (parent?: bigint) => s.browse({layer, filters: null, limit: Math.min(most, WALK_PAGE_ROWS), ...(parent === undefined ? {} : {parent})});
     let frontier = (await page()).artifacts;
+    if (!current()) return null;
+    const met: BrowseRow[] = [];
     const bySize = (a: BrowseRow, b: BrowseRow) => (b.maskedCount > a.maskedCount ? 1 : b.maskedCount < a.maskedCount ? -1 : 0);
     for (let pages = 1; pages < WALK_PAGES && frontier.length < most; ) {
       const open = frontier.filter((r) => r.childCount > 0).sort(bySize).slice(0, Math.min(WALK_FAN, WALK_PAGES - pages));
       if (open.length === 0) break;
       pages += open.length;
       const children = await Promise.all(open.map((r) => page(r.tesseraId).then((p) => p.artifacts)));
-      for (const r of open) this.met.set(r.tesseraId, r);
+      if (!current()) return null;
+      met.push(...open);
       // A cluster whose children are not served stays, as the deepest the viewer may see there.
       const replaced = new Map(open.map((r, i) => [r, children[i]!.length > 0 ? children[i]! : [{...r, childCount: 0}]]));
       frontier = frontier.flatMap((r) => replaced.get(r) ?? [r]);
     }
-    return frontier.slice(0, most);
+    return {rows: frontier.slice(0, most), met};
   }
 
   /** The parents of a cluster on a nested or tree layer, asked for once, so its path can be named. */
@@ -1167,7 +1213,7 @@ export class TesseraFieldCard extends TesseraElement {
         <span class="mark">${mark}</span>
         <span class="label">
           <span class="names"><span part="name" title=${r.name} ?data-unnamed=${r.name === UNNAMED}>${r.name}</span>${r.path ? html`<span part="path" title=${r.path}>${r.path}</span>` : nothing}</span>
-          <span class="bars" aria-hidden="true"><span part="bar-match" style=${`width:${out ? 0 : pct(r.all, allTotal).toFixed(1)}%`}></span><span part="bar-subject" style=${`width:${out ? 0 : pct(r.sub, subTotal).toFixed(1)}%`}></span></span>
+          <span class="bars" aria-hidden="true"><span part="bar-match" style=${`width:${out ? 0 : pct(r.all, allTotal).toFixed(1)}%`}></span><span part="bar-subject" style=${`width:${out ? 0 : pct(r.sub, subTotal).toFixed(1)}%${r.swatch ? `;background:${r.swatch}` : ''}`}></span></span>
         </span>
         ${counts}
         <span part="verbs">
@@ -1176,14 +1222,14 @@ export class TesseraFieldCard extends TesseraElement {
         </span>
       </div>`;
     };
-    const values = kind === 'category' ? (match?.result?.tables[0]?.groups ?? null) : null;
+    const values = (kind === 'category' ? match?.result?.tables[0] : match?.result?.tables.at(-1))?.groups ?? null;
     const search =
       kind === 'category'
         ? html`<tessera-filter class="search" exportparts=${exportparts('filter')} column=${this.field} bare placeholder=${values === null ? 'Search values' : `Search ${values.toLocaleString('en-GB')} values`} .store=${s}></tessera-filter>`
-        : html`<tessera-cluster-filter class="search" exportparts=${exportparts('cluster-filter')} layer=${layer!.name} bare placeholder="Search clusters" .store=${s}></tessera-cluster-filter>`;
+        : html`<tessera-cluster-filter class="search" exportparts=${exportparts('cluster-filter')} layer=${layer!.name} bare placeholder=${values === null ? 'Search clusters' : `Search ${values.toLocaleString('en-GB')} clusters`} .store=${s}></tessera-cluster-filter>`;
     const moreButton =
       more > 0 || this.expanded
-        ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = !this.expanded)}>${this.expanded ? 'Show fewer' : `${more.toLocaleString('en-GB')} more`}</button>`
+        ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = !this.expanded)}>${this.expanded ? 'Show fewer' : `${more.toLocaleString('en-GB')} more${this.highlighting(s) ? '' : ' in view'}`}</button>`
         : nothing;
     // An answer with nothing in it says so, where a list would otherwise stand empty.
     const empty = shown.length === 0 && subject?.result ? html`<span class="none">${subTotal === 0 ? 'None in view' : 'None counted'}</span>` : nothing;
@@ -1247,6 +1293,8 @@ export class TesseraFieldCard extends TesseraElement {
           </div>`
         : nothing;
     const title = (b: Bin) => `${value(b.lower)} – ${value(b.upper)}: ${approx}${countText(subOf(b))} in view, ${approx}${countText(allOf(b))} matching`;
+    // While a range is being chosen, a reader hears it and its count as it moves.
+    const said = range && !brush?.open ? `${range.text}, ${approx}${countText(range.count)} items` : '';
     return html`${head(sub)}<div class="hist">
         <div part="plot" role="group" tabindex="0" aria-label=${`${columnCaption(this.field)}: drag or use Shift and the arrow keys to choose a range`}
           @pointerdown=${(e: PointerEvent) => this.brushStart(e, bins.length)} @pointermove=${(e: PointerEvent) => this.brushMove(e, bins.length)}
@@ -1257,6 +1305,7 @@ export class TesseraFieldCard extends TesseraElement {
           ${clauseBand('filter')}${clauseBand('highlight')}${brushBand}
         </div>
         ${ramp}${axis}${box}
+        <span class="hidden" role="status" aria-live="polite">${said}</span>
       </div>`;
   }
 

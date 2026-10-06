@@ -114,12 +114,12 @@ export const displayStyles = css`
   .slider::-webkit-slider-runnable-track {
     height: 4px;
     border-radius: 2px;
-    background: linear-gradient(to right, var(--_tessera-accent) var(--fill, 0%), var(--_tessera-line) var(--fill, 0%));
+    background: linear-gradient(to right, var(--_tessera-accent) var(--fill, 0%), var(--_tessera-line-control) var(--fill, 0%));
   }
   .slider::-moz-range-track {
     height: 4px;
     border-radius: 2px;
-    background: linear-gradient(to right, var(--_tessera-accent) var(--fill, 0%), var(--_tessera-line) var(--fill, 0%));
+    background: linear-gradient(to right, var(--_tessera-accent) var(--fill, 0%), var(--_tessera-line-control) var(--fill, 0%));
   }
   .slider::-webkit-slider-thumb {
     -webkit-appearance: none;

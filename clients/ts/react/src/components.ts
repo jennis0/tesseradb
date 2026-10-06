@@ -90,9 +90,9 @@ export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreEleme
  * elements inside it emit them and each event bubbles out of it: `onPick`, `onMiss`, `onHover`,
  * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactFit`,
  * `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`, `onDisplayChange`,
- * `onSizeChange`, `onBudgetChange`, `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`,
- * `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for the `tessera-` event
- * of the same name in lower case.
+ * `onSizeChange`, `onBudgetChange`, `onFold`, `onFilterChange`, `onStateChange`, `onExpired`,
+ * `onOpen`, `onClose`, `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for the `tessera-`
+ * event of the same name in lower case.
  */
 export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', ExplorerElement, {
   ...mapEvents,
@@ -104,6 +104,7 @@ export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', Expl
   onDisplayChange: ev('tessera-displaychange'),
   onSizeChange: ev('tessera-sizechange'),
   onBudgetChange: ev('tessera-budgetchange'),
+  onFold: ev('tessera-fold'),
   onFilterChange: ev('tessera-filterchange'),
   onStateChange: ev('tessera-statechange'),
   onExpired: ev('tessera-expired'),
@@ -135,9 +136,20 @@ export const TesseraFilter = wrap('tessera-filter', FilterElement, {onFilterChan
 export const TesseraClusterFilter = wrap('tessera-cluster-filter', ClusterFilterElement, {onClauseChange: ev('tessera-clausechange')});
 /**
  * `<tessera-filter-panel>` as a React component. Event props: `onFilterChange`
- * (`tessera-filterchange`) and `onChipOpen` (`tessera-chipopen`).
+ * (`tessera-filterchange`), `onChipOpen` (`tessera-chipopen`), and from its cards
+ * `onClauseChange` (`tessera-clausechange`), `onColourChange` (`tessera-colourchange`),
+ * `onLevelChange` (`tessera-levelchange`), `onValueColour` (`tessera-valuecolour`) and `onFold`
+ * (`tessera-fold`).
  */
-export const TesseraFilterPanel = wrap('tessera-filter-panel', FilterPanelElement, {onFilterChange: ev('tessera-filterchange'), onChipOpen: ev('tessera-chipopen')});
+export const TesseraFilterPanel = wrap('tessera-filter-panel', FilterPanelElement, {
+  onFilterChange: ev('tessera-filterchange'),
+  onChipOpen: ev('tessera-chipopen'),
+  onClauseChange: ev('tessera-clausechange'),
+  onColourChange: ev('tessera-colourchange'),
+  onLevelChange: ev('tessera-levelchange'),
+  onValueColour: ev('tessera-valuecolour'),
+  onFold: ev('tessera-fold')
+});
 /** `<tessera-selection>` as a React component. Event prop: `onSelectChange` (`tessera-selectchange`). */
 export const TesseraSelection = wrap('tessera-selection', SelectionElement, {onSelectChange: ev('tessera-selectchange')});
 /** `<tessera-layer-picker>` as a React component. Event prop: `onLayerChange` (`tessera-layerchange`). */
@@ -159,10 +171,11 @@ export const TesseraArtifactCard = wrap('tessera-artifact-card', ArtifactCardEle
 /**
  * `<tessera-field-card>` as a React component. Event props: `onFilterChange`
  * (`tessera-filterchange`), `onClauseChange` (`tessera-clausechange`), `onColourChange`
- * (`tessera-colourchange`), `onLevelChange` (`tessera-levelchange`) and `onValueColour`
- * (`tessera-valuecolour`).
+ * (`tessera-colourchange`), `onLevelChange` (`tessera-levelchange`), `onValueColour`
+ * (`tessera-valuecolour`) and `onFold` (`tessera-fold`).
  */
 export const TesseraFieldCard = wrap('tessera-field-card', FieldCardElement, {
+  onFold: ev('tessera-fold'),
   onFilterChange: ev('tessera-filterchange'),
   onClauseChange: ev('tessera-clausechange'),
   onColourChange: ev('tessera-colourchange'),

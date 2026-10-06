@@ -92,7 +92,16 @@ describe('<tessera-field-card> on a category', () => {
     const widths = (r: HTMLElement) => [parseFloat((r.querySelector('[part="bar-subject"]') as HTMLElement).style.width), parseFloat((r.querySelector('[part="bar-match"]') as HTMLElement).style.width)];
     // A plain share of each set, never stretched to the largest row.
     expect(widths(rows(host)[0]!)).toEqual([30, 10]);
-    expect(deep(host, '[part="more"]')!.textContent).toBe('5 more');
+    expect(deep(host, '[part="more"]')!.textContent).toBe('5 more in view');
+  });
+
+  it('shows a value in view that is not among the commonest matching with its count in view alone', async () => {
+    const {host, store} = await mountCard('archive');
+    await answer(host, store, [{rows: [{key: 'rare', count: 7}], total: 7, groups: 1}], [{rows: [{key: 'cs', count: 1000}], total: 5000}]);
+    const [rare] = rows(host);
+    expect(rare!.dataset.key).toBe('rare');
+    expect(rare!.querySelector('[part="count"]')!.textContent).toBe('7');
+    expect(parseFloat((rare!.querySelector('[part="bar-match"]') as HTMLElement).style.width)).toBe(0);
   });
 
   it('puts a value in or out of the filter and the highlight from its row', async () => {
@@ -149,6 +158,9 @@ describe('<tessera-field-card> on a category', () => {
     // The colouring card shows each value's colour, which opens the colour picker.
     const swatch = rows(host)[0]!.querySelector('button[part="swatch"]') as HTMLButtonElement;
     expect(swatch.getAttribute('style')).toContain('--c:');
+    // Its solid bar is drawn in the value's own colour.
+    const colour = /--c:([^;]+)/.exec(swatch.getAttribute('style')!)![1]!;
+    expect((rows(host)[0]!.querySelector('[part="bar-subject"]') as HTMLElement).getAttribute('style')).toContain(`background:${colour}`);
     swatch.click();
     await settle(host);
     expect(deep(host, '[part="colour-popover"]')).not.toBeNull();
@@ -246,6 +258,22 @@ describe('<tessera-field-card> on a date', () => {
     plot.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
     await settle(host);
     expect(deep(host, '[part="brush"]')!.textContent).toContain('≈1,000 items');
+    // A press anywhere else closes the box.
+    document.body.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, composed: true}));
+    await settle(host);
+    expect(deep(host, '[part="brush"]')).toBeNull();
+  });
+
+  it('says the range the arrow keys move and its count, for a reader, while it is chosen', async () => {
+    const {host, store} = await mountCard('submitted_at');
+    await answer(host, store, [{rows: bins([1, 2, 3, 4]), total: 10}], [{rows: bins([10, 20, 30, 40]), total: 100}]);
+    const plot = deep(host, '[part="plot"]') as HTMLElement;
+    const live = () => deep(host, '[role="status"][aria-live="polite"]')!.textContent!.trim();
+    expect(live()).toBe('');
+    plot.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
+    plot.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', shiftKey: true, bubbles: true}));
+    await settle(host);
+    expect(live()).toBe('2019 – 2020, 30 items');
   });
 
   it('gives the field’s figures in its heading', async () => {
@@ -270,7 +298,10 @@ describe('<tessera-field-card> on a layer', () => {
     await new Promise((r) => setTimeout(r, 0));
     await settle(host);
     expect(spec(store, 'field-subject')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 8n]}}], subject: 'view', highlighted: true, withoutMembersOf: 'topics'});
-    await answer(host, store, [{rows: [{key: 8n, count: 5}, {key: 7n, count: 9}], total: 14}], [{rows: [{key: 8n, count: 50}, {key: 7n, count: 90}], total: 140}]);
+    // The whole match also counts the layer's clusters, which the search box names.
+    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 8n]}}, {by: {layer: 'topics', top: 1}}], withoutMembersOf: 'topics'});
+    await answer(host, store, [{rows: [{key: 8n, count: 5}, {key: 7n, count: 9}], total: 14}], [{rows: [{key: 8n, count: 50}, {key: 7n, count: 90}], total: 140}, {rows: [{key: 7n, count: 90}], groups: 12}]);
+    expect(deep(host, 'tessera-cluster-filter')!.getAttribute('placeholder')).toBe('Search 12 clusters');
     await new Promise((r) => setTimeout(r, 0));
     await settle(host);
     expect(rows(host).map((r) => [r.querySelector('[part="name"]')!.textContent, r.querySelector('[part="path"]')?.textContent ?? ''])).toEqual([
@@ -282,6 +313,44 @@ describe('<tessera-field-card> on a layer', () => {
     (rows(host)[1]!.querySelector('[part="highlight"]') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([{layer: 'topics', artifact: 8n, outside: false, verb: 'highlight', label: 'lasers'}]);
     expect(clauses).toEqual([{id: '8', layer: 'topics', outside: false, verb: 'highlight', on: true}]);
+  });
+});
+
+describe('<tessera-field-card> across a change of viewer', () => {
+  it('drops a walk still running for the viewer before, so nothing it met names a cluster to the next', async () => {
+    const row = (id: bigint, name: string, childCount: number, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 0, parentIds, childCount});
+    const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
+    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const before = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
+    before.set('view', {...before.get('view'), id: 's0'});
+    before.setBrowse('roots', {artifacts: [row(1n, 'seen only by the first viewer', 1)], parents: [], next: null});
+    // The page under the root waits until the viewer has changed.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const browse = before.browse.bind(before);
+    before.browse = async (req) => {
+      if (req.parent === 1n) {
+        await held;
+        return {artifacts: [row(2n, 'also the first viewer’s', 0, [1n])], parents: [], next: null};
+      }
+      return browse(req);
+    };
+    card.store = before;
+    await settle(host);
+
+    const after = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
+    after.set('view', {...after.get('view'), id: 's0'});
+    // The next viewer is served a cluster under one the first viewer saw and it is not served.
+    after.setBrowse('roots', {artifacts: [row(3n, 'theirs', 0, [1n])], parents: [], next: null});
+    card.store = after;
+    await settle(host);
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    await settle(host);
+    answerAggregate(after, 'field-subject', aggregateEntry([{rows: [{key: 3n, count: 4}], total: 4}]));
+    await settle(host);
+    expect(rows(host).map((r) => [r.querySelector('[part="name"]')!.textContent, r.querySelector('[part="path"]')?.textContent ?? ''])).toEqual([['theirs', '']]);
+    expect(deepAll(host, '[part="name"], [part="path"]').map((e) => e.textContent).join(' ')).not.toContain('first viewer');
   });
 });
 

@@ -27,7 +27,8 @@ import {css} from 'lit';
  *   the map toolbar.
  * @cssprop --tessera-line-2 - The colour of the rules between sections and between the status
  *   strip's cells.
- * @cssprop --tessera-line-control - The colour of borders around inputs, at 3:1 against the surface.
+ * @cssprop --tessera-line-control - The colour of borders around inputs and of a slider's unfilled
+ *   track, at 3:1 against the surface.
  * @cssprop --tessera-accent - The colour of the active map tool, primary buttons, badges, checked
  *   boxes and focus rings.
  * @cssprop --tessera-accent-ink - The text colour on an accent background.
@@ -70,10 +71,11 @@ export const tokens = css`
     --_tessera-accent-ink: var(--tessera-accent-ink, light-dark(#ffffff, #111317));
     --_tessera-highlight: var(--tessera-highlight, light-dark(#5b3fc4, #c3a6ee));
     --_tessera-highlight-soft: var(--tessera-highlight-soft, light-dark(#f1edfb, #2c2340));
-    /* Each bar stands 3:1 against the surface, and the solid bars 3:1 against the pale one beneath. */
+    /* Each bar stands 3:1 against the surface and a hovered row, and a solid bar 3:1 against the
+       pale one beneath. */
     --_tessera-bar: var(--tessera-bar, light-dark(#3a3e45, #d5d9df));
-    --_tessera-bar-highlight: var(--tessera-bar-highlight, light-dark(#45289f, #d7c4f7));
-    --_tessera-bar-match: var(--tessera-bar-match, light-dark(#8a8f96, #6b7079));
+    --_tessera-bar-highlight: var(--tessera-bar-highlight, light-dark(#42269a, #d7c4f7));
+    --_tessera-bar-match: var(--tessera-bar-match, light-dark(#868b92, #6b7079));
     --_tessera-warn: var(--tessera-warn, light-dark(#c98a0a, #e0a940));
     --_tessera-refuse: var(--tessera-refuse, light-dark(#b42318, #f0857a));
     --_tessera-ok: var(--tessera-ok, light-dark(#1f7a4d, #5cc98a));
