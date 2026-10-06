@@ -13,7 +13,9 @@
 //! is built by ([`crate::compose::admits`]), so F's tally is the merge of the tallies of the lists
 //! the grant satisfies. A base row's value and its item's keys do not change between folds: an
 //! edit gives its item a new entity, whose row is above the base, and a fold writes the file again.
-//! The composition is held per grant, bundle identity, view and field. A field the file holds no
+//! The composition is held per grant, bundle identity, view and field. A composition whose row
+//! count is not the fragment's base rows, and a deny that subtracts more than F holds, are answered
+//! by a walk instead and counted, as a disagreement between the stored tallies and the base. A field the file holds no
 //! tally of, as one declared at a running service, has its base rows walked instead.
 //!
 //! D's tally is held per deny version and read at the request's start, so a request that starts
