@@ -2215,7 +2215,7 @@ pub(crate) fn identity_disk(args: &crate::BuildArgs) -> crate::error::Result<(u6
 /// What the artifact pass's row-column lanes cost **one** view.
 ///
 /// **The lane's size depends on which of two forms a level takes, and a flat `4 × n` a level is
-/// only one of them.** `tessera_store::derived::choose` picks from the memberships the build has
+/// only one of them.** `tessera_types::layer::choose` picks from the memberships the build has
 /// just resolved: a level whose memberships partition the corpus is a label lane (`.tslb`) at one
 /// narrow ordinal a row, and one whose memberships overlap is a list lane (`.tsll`) — a `u32`
 /// offset a row *and* one ordinal an entry. The 10⁷ MedCPT sample's MeSH list lane is

@@ -318,7 +318,7 @@ impl Figures {
         source.counters.spent.fetch_add(1, Ordering::Relaxed);
         let fragment = source.projection.bitmap();
         let mut rows = match source.column.members() {
-            Some(members) => members.members(ordinal).to_bitmap().and(fragment),
+            Some(members) => members.bitmap(ordinal).and(fragment),
             None => {
                 let mut rows = Vec::new();
                 for row in fragment.iter().take_while(|&row| row < source.base_rows) {

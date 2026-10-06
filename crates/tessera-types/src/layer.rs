@@ -108,7 +108,7 @@ pub enum ServingLayout {
     /// count is `|membership ∩ M_auth|` per served artifact.
     ///
     /// The default: what a treed or spatial level is served in until its observed shape says
-    /// otherwise (`tessera_store::derived::choose`).
+    /// otherwise ([`choose`]).
     #[default]
     ArtifactMajor,
     /// One artifact label per **row**, for a level whose memberships partition the corpus.
@@ -680,7 +680,7 @@ pub struct LayerDeclaration {
     /// The layout pin: serve every level of this layer in the named form, at the build and at
     /// every fold after it. `None` is the automatic pick: a column for a layer with stored
     /// memberships answered tile by tile ([`LayerDeclaration::served_from_a_column`]), and for any
-    /// other layer the form its observed spread chooses (`tessera_store::derived::choose`).
+    /// other layer the form its observed spread chooses ([`choose`]).
     ///
     /// Defaults to `None`: both forms compute the same quantities from inside the viewer's visible
     /// set and no request or response names one, so a declaration that omits it says nothing about
@@ -969,7 +969,10 @@ pub struct RegisteredLayer {
     /// The serving layout **per level**, parallel to [`RegisteredLayer::runs`].
     ///
     /// Set at registration by [`RegisteredLayer::initial_layouts`], and kept when a replay applies
-    /// the registration again over a manifest that recorded it. **Re-evaluated inside every fold's
+    /// the registration again over a manifest that recorded it. A level's first publication
+    /// chooses again over the memberships it carries, on the live path and on replay at the same
+    /// record. A level recorded as the automatic label column whose memberships later overlap is
+    /// served from a list column until a fold records one. **Re-evaluated inside every fold's
     /// artifact pass**, before the registry snapshot the manifest is written from, so the record
     /// and the files the same fold wrote cannot disagree.
     ///
@@ -995,17 +998,99 @@ impl RegisteredLayer {
     }
 
     /// The record every level of a freshly registered layer starts at, before any membership has
-    /// been observed: the declaration's own layout where it fixes one
-    /// ([`LayerDeclaration::fixed_layout`]), the list column for a layer served from a column
-    /// ([`LayerDeclaration::served_from_a_column`]), and artifact-major otherwise. The list form
-    /// holds any membership, so nothing published before the next fold can be refused it; that fold
-    /// observes whether the memberships are disjoint and records the label form where they are.
+    /// been observed: [`choose`] over a level that may overlap. That is the declaration's own
+    /// layout where it fixes one, the list column for a layer served from a column, which holds any
+    /// membership, and artifact-major otherwise. The first publication into a level observes its
+    /// memberships and chooses again (`LayerRegistry::settle_layout`), and so does every fold.
     pub fn initial_layouts(declaration: &LayerDeclaration) -> Vec<ServingLayout> {
-        let automatic = match declaration.served_from_a_column() {
-            true => ServingLayout::RowMajorList,
-            false => ServingLayout::ArtifactMajor,
-        };
-        vec![declaration.fixed_layout().unwrap_or(automatic); declaration.run_count()]
+        vec![choose(declaration, LevelShape::unobserved()); declaration.run_count()]
+    }
+}
+
+/// The fraction of a treed or spatial level's artifacts too wide for any index node at or above
+/// which the level is served from a column. A level with stored memberships answered tile by tile
+/// is served from a column whatever its shape ([`LayerDeclaration::served_from_a_column`]), so
+/// this decides only for the levels the whole-viewport walk answers.
+///
+/// Provisional. Below it the tile index places most of the level and the walk pays for the
+/// viewport's perimeter; above it a quarter of the level is returned for every viewport whatever
+/// its size, and one scan of the viewport's visible rows costs less. Nothing has varied the
+/// fraction through 0.1 to 0.9 to measure the crossover.
+pub const ROW_MAJOR_EVERYWHERE_FRACTION: f64 = 0.25;
+
+/// The artifact count below which a treed or spatial level stays artifact-major whatever its
+/// spread: under a thousand artifacts either form answers a whole map in milliseconds. Provisional,
+/// and a tiebreak rather than a bound: a pin overrides it.
+pub const ROW_MAJOR_MIN_ARTIFACTS: u64 = 1_000;
+
+/// What one level looks like, as a build, a fold or a level's first publication observes it —
+/// **after** any retirements the caller has already executed, which is exactly the case the fold's
+/// re-evaluation exists for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelShape {
+    /// How many live artifacts the level holds. Holes are not counted: a retired slot is not an
+    /// artifact, and counting it would keep a level that has been emptied looking populous.
+    pub artifacts: u64,
+    /// Reported and never read by the pick: the mean number of Roaring containers a membership
+    /// touches, which says how much work a membership is and not how far it is spread.
+    pub blocks_per_artifact: f64,
+    /// The fraction of live artifacts whose extent is too wide for every node of the tile index:
+    /// the set the walk cannot place and returns for every viewport. What decides a treed or
+    /// spatial level's layout ([`ROW_MAJOR_EVERYWHERE_FRACTION`]). Zero for a level with no
+    /// artifacts.
+    pub everywhere_fraction: f64,
+    /// Whether the memberships are disjoint — which decides the **label/list** split and is not a
+    /// choice. Observed rather than declared: single-valuedness is a property of the data.
+    pub partitions: bool,
+}
+
+impl LevelShape {
+    /// What a registration knows of a level before anything is published to it: nothing, so its
+    /// memberships may overlap.
+    pub fn unobserved() -> Self {
+        LevelShape {
+            partitions: false,
+            ..LevelShape::empty()
+        }
+    }
+
+    /// The shape of a level with nothing in it.
+    pub fn empty() -> Self {
+        LevelShape {
+            artifacts: 0,
+            blocks_per_artifact: 0.0,
+            everywhere_fraction: 0.0,
+            partitions: true,
+        }
+    }
+}
+
+/// **The one rule**, read by the build, by every fold, by a publication into a level that holds no
+/// artifact, and through [`RegisteredLayer::initial_layouts`] by a registration.
+///
+/// What the declaration fixes comes first ([`LayerDeclaration::fixed_layout`]): an attribute
+/// membership's label column, or the pin, which no fold re-derives. A level with stored memberships
+/// answered tile by tile is then served from a column whatever its shape; any other level is served
+/// from a column where it is populous and too scattered for the tile index
+/// ([`ROW_MAJOR_EVERYWHERE_FRACTION`]). The label form where the memberships are disjoint, the list
+/// form where they overlap.
+///
+/// A pinned `column` on a level whose memberships overlap is not corrected here: the column is
+/// declined where it is built, and the level is served artifact-major with a warning.
+pub fn choose(declaration: &LayerDeclaration, shape: LevelShape) -> ServingLayout {
+    if let Some(fixed) = declaration.fixed_layout() {
+        return fixed;
+    }
+    let column = declaration.served_from_a_column()
+        || (shape.artifacts >= ROW_MAJOR_MIN_ARTIFACTS
+            && shape.everywhere_fraction >= ROW_MAJOR_EVERYWHERE_FRACTION);
+    if !column {
+        return ServingLayout::ArtifactMajor;
+    }
+    if shape.partitions {
+        ServingLayout::RowMajorLabel
+    } else {
+        ServingLayout::RowMajorList
     }
 }
 

@@ -354,6 +354,14 @@ impl RowMembersPack {
                 last = Some(hi);
             }
         }
+        // A reader probes a few containers of one artifact's bitmap, and read-ahead around each
+        // fault would read the bitmaps of many others. A reader of whole bitmaps asks for them
+        // with [`Self::will_need`]. The tables and the ranges are read whole, and keep it.
+        let _ = pack.map.advise_range(
+            memmap2::Advice::Random,
+            pack.payload_at,
+            pack.ranges_at - pack.payload_at,
+        );
         Ok(pack)
     }
 
@@ -403,9 +411,38 @@ impl RowMembersPack {
             return None;
         }
         let from = self.payload_at + offset;
+        // A frozen bitmap ends with its containers' keys, counts and kinds, 5 bytes a container,
+        // then a word whose high bits count the containers: the part a view reads whole. Reading
+        // the word faults its page in, so the rest is asked for only where it starts on an earlier
+        // page.
+        let to = from + len;
+        if len >= 4 {
+            let containers = (le_u32(&self.map, to - 4) >> 15) as usize;
+            let tail = (containers * 5 + 4).min(len);
+            let page = crate::bands::page_size();
+            if (to - tail) / page != (to - 1) / page {
+                let _ = self
+                    .map
+                    .advise_range(memmap2::Advice::WillNeed, to - tail, tail);
+            }
+        }
         // SAFETY: the open proved the range aligned and inside the payload, and the payload is what
         // the writer serialised there (module doc).
-        Some(unsafe { BitmapView::deserialize::<Frozen>(&self.map[from..from + len]) })
+        Some(unsafe { BitmapView::deserialize::<Frozen>(&self.map[from..to]) })
+    }
+
+    /// Ask for the artifact's whole bitmap to be read now and in the background, for a reader
+    /// about to read all of it.
+    pub fn will_need(&self, ordinal: u32) {
+        if ordinal >= self.ordinals {
+            return;
+        }
+        let (offset, len, _) = self.entry(ordinal);
+        if len > 0 {
+            let _ = self
+                .map
+                .advise_range(memmap2::Advice::WillNeed, self.payload_at + offset, len);
+        }
     }
 
     /// How many members the artifact has.

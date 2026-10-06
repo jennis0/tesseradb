@@ -1,0 +1,151 @@
+{
+ "binary": "/tmp/claude-1000/-home-joe-code-tessera/047cca2f-36eb-4e53-8db7-c14e31d59060/scratchpad/bin/tessera-7a04f80b",
+ "bundle": "/home/joe/code/tessera/data/ladder/gbif-64p/first-open-fills/scratch-runtime-layer/bundle",
+ "layer": "genus-flat",
+ "reads": [
+  {
+   "principal": "1%",
+   "layer": "genus-flat",
+   "map_zoom": 0,
+   "depth": 2,
+   "tiles": 16,
+   "bytes": 106589,
+   "first_ms": 3403.4,
+   "first_ended_at": 1791286608.739167,
+   "warm_p50_ms": 12.8,
+   "warm_max_ms": 13.5
+  },
+  {
+   "principal": "1%",
+   "layer": "genus-flat",
+   "map_zoom": 9,
+   "depth": 11,
+   "tiles": 40,
+   "bytes": 219411,
+   "first_ms": 7.8,
+   "first_ended_at": 1791286608.8119576,
+   "warm_p50_ms": 5.7,
+   "warm_max_ms": 6.1
+  },
+  {
+   "principal": "1%",
+   "layer": "taxonomy/tree",
+   "map_zoom": 0,
+   "depth": 2,
+   "tiles": 16,
+   "bytes": 106587,
+   "first_ms": 61.5,
+   "first_ended_at": 1791286608.901208,
+   "warm_p50_ms": 11.6,
+   "warm_max_ms": 12.1
+  },
+  {
+   "principal": "1%",
+   "layer": "taxonomy/tree",
+   "map_zoom": 9,
+   "depth": 11,
+   "tiles": 40,
+   "bytes": 219411,
+   "first_ms": 7.0,
+   "first_ended_at": 1791286608.9667063,
+   "warm_p50_ms": 4.6,
+   "warm_max_ms": 4.8
+  },
+  {
+   "principal": "100%",
+   "layer": "genus-flat",
+   "map_zoom": 0,
+   "depth": 2,
+   "tiles": 16,
+   "bytes": 153756,
+   "first_ms": 497.6,
+   "first_ended_at": 1791286609.4957616,
+   "warm_p50_ms": 11.3,
+   "warm_max_ms": 11.6
+  },
+  {
+   "principal": "100%",
+   "layer": "genus-flat",
+   "map_zoom": 9,
+   "depth": 11,
+   "tiles": 40,
+   "bytes": 381845,
+   "first_ms": 25.8,
+   "first_ended_at": 1791286609.5782552,
+   "warm_p50_ms": 11.7,
+   "warm_max_ms": 12.2
+  },
+  {
+   "principal": "100%",
+   "layer": "taxonomy/tree",
+   "map_zoom": 0,
+   "depth": 2,
+   "tiles": 16,
+   "bytes": 153756,
+   "first_ms": 104.6,
+   "first_ended_at": 1791286609.7415147,
+   "warm_p50_ms": 11.8,
+   "warm_max_ms": 13.2
+  },
+  {
+   "principal": "100%",
+   "layer": "taxonomy/tree",
+   "map_zoom": 9,
+   "depth": 11,
+   "tiles": 40,
+   "bytes": 381845,
+   "first_ms": 13.6,
+   "first_ended_at": 1791286609.814924,
+   "warm_p50_ms": 11.4,
+   "warm_max_ms": 11.5
+  }
+ ],
+ "register_ms": 4.8,
+ "publish": {
+  "artifacts": 56893,
+  "members": 25088942,
+  "requests": 9,
+  "ms": 14618.9
+ },
+ "status_before_reads": {
+  "bytes": 0,
+  "disk_bound_bytes": 8589934592,
+  "disk_bytes": 0,
+  "entries": 0,
+  "evictions": 0,
+  "exact": 0,
+  "field_fills": 0,
+  "field_mismatches": 0,
+  "fills": 0,
+  "hits": 0,
+  "labels_bound_bytes": 268435456,
+  "labels_bytes": 0,
+  "labels_rows_read": 0,
+  "loads": 0,
+  "misses": 0,
+  "not_admitted": 0,
+  "reserve_spent": 0
+ },
+ "status_after_reads": {
+  "bytes": 7976800,
+  "disk_bound_bytes": 8589934592,
+  "disk_bytes": 7977124,
+  "entries": 4,
+  "evictions": 0,
+  "exact": 0,
+  "field_fills": 0,
+  "field_mismatches": 0,
+  "fills": 4,
+  "hits": 44,
+  "labels_bound_bytes": 268435456,
+  "labels_bytes": 0,
+  "labels_rows_read": 0,
+  "loads": 0,
+  "misses": 4,
+  "not_admitted": 0,
+  "reserve_spent": 0
+ },
+ "log": [
+  "2026-10-06T11:36:48.698145Z  INFO tessera_engine::artifacts::projections_build: a level's row form and tile index are built layer=genus-flat level=0 view=geo ordinals=56893 everywhere=17736 adopted=false transposed=false rows_held=true layout=RowMajorLabel blocks_per_artifact=12.506916492362857"
+ ]
+}

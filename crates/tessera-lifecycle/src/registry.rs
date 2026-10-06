@@ -34,13 +34,35 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tessera_types::layer::{
-    DeclarationError, EntityRun, LayerDeclaration, MembershipSource, RegisteredLayer, ReservedRuns,
+    DeclarationError, EntityRun, LayerDeclaration, LevelShape, MembershipSource, RegisteredLayer,
+    ReservedRuns,
 };
 use tessera_types::EntityId;
 
 use crate::alloc::{AllocError, Allocator};
-use crate::membership::{serialise_members, ArtifactStore, IncomingArtifact};
+use crate::membership::{deserialise_members, serialise_members, ArtifactStore, IncomingArtifact};
 use crate::wal::{PublishedArtifact, WalRecord};
+
+/// The shape of the level one publication fills: how many of its artifacts have members of their
+/// own, and whether any item is a member of two.
+fn publication_shape(artifacts: &[PublishedArtifact]) -> LevelShape {
+    let mut shape = LevelShape::empty();
+    let mut claimed = croaring::Bitmap::new();
+    for members in artifacts
+        .iter()
+        .filter_map(|a| deserialise_members(&a.members))
+        .filter(|members| !members.is_empty())
+    {
+        shape.artifacts += 1;
+        if shape.partitions && claimed.intersect(&members) {
+            shape.partitions = false;
+        }
+        if shape.partitions {
+            claimed.or_inplace(&members);
+        }
+    }
+    shape
+}
 
 /// Why a registry operation was refused.
 #[derive(Debug, Clone, PartialEq)]
@@ -2783,6 +2805,43 @@ impl LayerRegistry {
         moved
     }
 
+    /// Choose the layout of the level `record` publishes into, where the level holds no artifact
+    /// before it: the rule a build applies ([`tessera_types::layer::choose`]) over the
+    /// memberships this publication carries. Called before `store` applies the record, on the live
+    /// path and on replay alike, so both record the same layout. Returns the level where its
+    /// layout moved: a form held in the layout it had before is not asked for again. The cost is
+    /// one union of the publication's own memberships.
+    ///
+    /// The memberships are observed in entity space, where an item in two artifacts is an overlap
+    /// whether or not it has a row yet. Their spread over rows is not known here, so a level not
+    /// served from a column stays artifact-major until a fold observes it. An artifact that
+    /// declares no members and takes its target's counts as having none: a level holding one is
+    /// served artifact-major whatever its record says. A later publication or growth that makes a
+    /// label level overlap leaves the record to the next fold, and the level is served from a list
+    /// column meanwhile (`ArtifactRows::lists_on_overlap` in the engine).
+    pub fn settle_layout(
+        &mut self,
+        store: &ArtifactStore,
+        record: &WalRecord,
+    ) -> Option<(String, u32)> {
+        let WalRecord::ArtifactPublish {
+            layer,
+            level,
+            artifacts,
+            ..
+        } = record
+        else {
+            return None;
+        };
+        if store.level(layer, *level).next().is_some() {
+            return None;
+        }
+        let declaration = &self.layers.get(layer)?.declaration;
+        let chosen = tessera_types::layer::choose(declaration, publication_shape(artifacts));
+        self.set_layout(layer, *level, chosen)
+            .then(|| (layer.clone(), *level))
+    }
+
     /// This registry as a manifest carries it: every live layer, and every name ever dropped.
     pub fn snapshot(&self) -> (Vec<RegisteredLayer>, Vec<String>) {
         (
@@ -2967,7 +3026,8 @@ mod tests {
         }
     }
     use tessera_types::layer::{
-        ExistenceCriterion, Hierarchy, HierarchyKind, MembershipSource, RESERVED_BLOCK,
+        ExistenceCriterion, Hierarchy, HierarchyKind, MembershipSource, ServingLayout,
+        RESERVED_BLOCK,
     };
 
     fn declaration(name: &str) -> LayerDeclaration {
@@ -3224,8 +3284,77 @@ mod tests {
             &AnyView,
         )?;
         reg.apply(&record);
+        reg.settle_layout(store, &record);
         assert_eq!(store.apply(&record, 0), 0);
         Ok(record)
+    }
+
+    /// **A level's first publication chooses its layout by the rule a build applies, and a replay
+    /// of the log chooses the same.** Disjoint memberships take the label column and overlapping
+    /// ones the list column; a pin and a treed layer keep what the declaration says. A later
+    /// publication leaves the record to the next fold.
+    #[test]
+    fn a_levels_first_publication_chooses_its_layout_and_a_replay_chooses_the_same() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        let mut pinned = declaration("clusters/pinned");
+        pinned.layout = Some(ServingLayout::RowMajorLabel);
+        let mut treed = declaration("clusters/treed");
+        treed.hierarchy.kind = HierarchyKind::Nested;
+        let mut log = Vec::new();
+        for d in [
+            declaration("clusters/disjoint"),
+            declaration("clusters/overlapping"),
+            pinned,
+            treed,
+        ] {
+            let record = reg.prepare_create(d, &mut alloc).unwrap();
+            reg.apply(&record);
+            log.push(record);
+        }
+        let layout = |reg: &LayerRegistry, name: &str| reg.get(name).unwrap().layout_of(0);
+        assert_eq!(layout(&reg, "clusters/disjoint"), ServingLayout::RowMajorList);
+        assert_eq!(layout(&reg, "clusters/treed"), ServingLayout::ArtifactMajor);
+
+        let disjoint = [incoming("a", &[1, 2]), incoming("b", &[3, 4])];
+        let overlapping = [incoming("a", &[1, 2]), incoming("b", &[2, 3])];
+        for (name, batch) in [
+            ("clusters/disjoint", &disjoint),
+            ("clusters/overlapping", &overlapping),
+            ("clusters/pinned", &overlapping),
+            ("clusters/treed", &disjoint),
+        ] {
+            log.push(publish(&mut reg, &mut store, &mut alloc, name, batch).unwrap());
+        }
+        log.push(
+            publish(&mut reg, &mut store, &mut alloc, "clusters/disjoint", &[incoming("c", &[4])])
+                .unwrap(),
+        );
+        let want = [
+            ("clusters/disjoint", ServingLayout::RowMajorLabel),
+            ("clusters/overlapping", ServingLayout::RowMajorList),
+            ("clusters/pinned", ServingLayout::RowMajorLabel),
+            ("clusters/treed", ServingLayout::ArtifactMajor),
+        ];
+        for (name, layout_wanted) in want {
+            assert_eq!(layout(&reg, name), layout_wanted, "{name}");
+        }
+
+        // Replay as an open does it: every record into the registry, then the memberships, each
+        // publication settled before it lands.
+        let mut replayed = LayerRegistry::new();
+        let mut replayed_store = ArtifactStore::new();
+        for record in &log {
+            replayed.apply(record);
+        }
+        for record in &log {
+            replayed.settle_layout(&replayed_store, record);
+            assert_eq!(replayed_store.apply(record, 0), 0);
+        }
+        for (name, layout_wanted) in want {
+            assert_eq!(layout(&replayed, name), layout_wanted, "replayed {name}");
+        }
     }
 
     /// **An attachment resolves to an address, and the target must already be there.** The caller

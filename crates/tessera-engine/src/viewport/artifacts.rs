@@ -269,7 +269,7 @@ impl Engine {
                                     recorded,
                                     predicate.as_ref(),
                                     generation.segments_version,
-                                    crate::artifacts::serves_column_only(&layer.declaration),
+                                    &layer.declaration,
                                 ),
                                 store.lineage_version(&layer.declaration.name, level),
                             )
@@ -398,7 +398,7 @@ impl Engine {
                 recorded,
                 predicate.as_ref(),
                 generation.segments_version,
-                crate::artifacts::serves_column_only(&layer.declaration),
+                &layer.declaration,
             )
         });
         let counts = self.figures(
@@ -874,7 +874,7 @@ impl Engine {
                 recorded,
                 predicate.as_ref(),
                 ctx.served.generation.segments_version,
-                crate::artifacts::serves_column_only(&layer.declaration),
+                &layer.declaration,
             )
         });
         // The target's own figures, under the same key the viewport would read.
@@ -1137,7 +1137,7 @@ impl Engine {
                     recorded,
                     predicate.as_ref(),
                     generation.segments_version,
-                    crate::artifacts::serves_column_only(&registered.declaration),
+                    &registered.declaration,
                 ),
                 store.lineage_version(name, level),
             )

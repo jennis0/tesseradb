@@ -24,6 +24,9 @@
 // A viewport is a list of row ranges, and several here hold one.
 #![allow(clippy::single_range_in_vec_init)]
 
+mod common;
+
+use common::held_rows_declaration;
 use std::sync::Arc;
 
 use croaring::Bitmap;
@@ -624,7 +627,7 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert!(before
         .index()
@@ -741,7 +744,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert_eq!(projections.indexes_adopted(), 1);
     assert_eq!(rows.index().len(), fx.ordinals as usize);
@@ -761,7 +764,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
             tessera_types::layer::ServingLayout::ArtifactMajor,
             None,
             0,
-            false,
+            &held_rows_declaration(LAYER),
         );
         assert_eq!(
             projections.indexes_adopted(),
@@ -785,7 +788,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert_eq!(projections.indexes_adopted(), 0);
 
@@ -804,7 +807,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert_eq!(projections.indexes_adopted(), 0);
 
@@ -825,7 +828,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert_eq!(projections.indexes_adopted(), 0);
 }
@@ -993,7 +996,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
                 layout,
                 None,
                 0,
-                false,
+                &held_rows_declaration(LAYER),
             )
             .0
     };

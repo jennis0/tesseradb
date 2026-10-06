@@ -54,11 +54,11 @@ use tessera_store::read::SegmentData;
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
 // the call sites below reading as what they do rather than as which file they are in.
 use tessera_store::derived;
-use tessera_store::derived::{DerivedIndex, Filed, LevelShape, PostingSlice, SignatureIndex};
+use tessera_store::derived::{DerivedIndex, Filed, PostingSlice, SignatureIndex};
 use tessera_store::manifest::DerivedForm;
 use tessera_store::permutation::ProjectScratch;
 use tessera_store::RowSpace;
-use tessera_types::layer::{MembershipSource, RegisteredLayer, ServingLayout};
+use tessera_types::layer::{LevelShape, MembershipSource, RegisteredLayer, ServingLayout};
 
 use crate::layers::PublishedLayers;
 
@@ -321,7 +321,7 @@ pub fn run(
                 );
             }
         });
-        let layout = derived::choose(&registered.declaration, shape);
+        let layout = tessera_types::layer::choose(&registered.declaration, shape);
         pass.levels.push(LevelLayoutReport {
             view: view.to_string(),
             layer: layer.clone(),
@@ -752,7 +752,7 @@ pub fn containment(
 /// into the build show it and neither has to reconstruct it.
 ///
 /// The `everywhere` fraction decides a treed or spatial level's layout
-/// (`tessera_store::derived::ROW_MAJOR_EVERYWHERE_FRACTION`), and blocks per artifact says how much
+/// (`tessera_types::layer::ROW_MAJOR_EVERYWHERE_FRACTION`), and blocks per artifact says how much
 /// work a membership is; both are reported for every level.
 pub fn report(pass: &ArtifactPass) {
     if pass.levels.is_empty() {

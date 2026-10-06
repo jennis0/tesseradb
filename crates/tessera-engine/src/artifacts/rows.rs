@@ -138,6 +138,10 @@ pub struct ArtifactRows {
     /// cluster had when the label's form was built. Read at every cache hit
     /// ([`ArtifactRows::inherited_current`]) beside [`ArtifactRows::covers`].
     pub(super) inherited: Vec<(String, u32, u64)>,
+    /// Whether a label column this level's memberships stop fitting is replaced by a list column:
+    /// the layout is the automatic pick, which a later observation may change. A pinned label
+    /// column is served artifact-major instead.
+    pub(super) lists_on_overlap: bool,
 }
 
 /// What one viewport's narrowing produced, on whichever route the level's layout takes. Neither

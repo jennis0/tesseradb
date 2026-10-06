@@ -16,6 +16,9 @@
 //! order is a shuffle rather than the entity order, some sets are lossy in projection, and the
 //! overlay is live under both arms.
 
+mod common;
+
+use common::held_rows_declaration;
 use std::sync::Arc;
 
 use croaring::Bitmap;
@@ -607,7 +610,7 @@ fn a_level_composes_its_partition_once_for_every_view() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert!(rows.partition().is_some());
     assert_eq!(projections.partitions(), 1);
@@ -627,7 +630,7 @@ fn a_level_composes_its_partition_once_for_every_view() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert!(second.partition().is_some());
     assert_eq!(projections.builds(), 2, "two views, two row forms");
@@ -707,7 +710,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert!(rows.partition().is_some());
     assert_eq!(
@@ -736,7 +739,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
             tessera_types::layer::ServingLayout::ArtifactMajor,
             None,
             0,
-            false,
+            &held_rows_declaration(LAYER),
         );
         assert!(rows.partition().is_some());
         assert_eq!(projections.partitions(), 1, "the level recomposed instead");
@@ -792,7 +795,7 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
-        false,
+        &held_rows_declaration(LAYER),
     );
     assert_eq!(
         projections.partitions(),

@@ -825,3 +825,32 @@ pub fn restore_wal(dir: &Path, snapshot: &[(std::ffi::OsString, Vec<u8>)]) {
         std::fs::write(dir.join(name), bytes).unwrap();
     }
 }
+
+/// A flat layer that derives a hull, so its levels hold their rows: the declaration a test building
+/// forms directly through `ArtifactProjections::get_or_build` builds them for.
+pub fn held_rows_declaration(name: &str) -> tessera_types::layer::LayerDeclaration {
+    use tessera_types::layer::*;
+    LayerDeclaration {
+        scope: Default::default(),
+        name: name.into(),
+        title: None,
+        views: vec!["s0".into()],
+        membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: ArtifactVisibility::inherited(),
+        require_member_visibility: None,
+        hierarchy: Hierarchy {
+            kind: HierarchyKind::Flat,
+            prune_children: false,
+        },
+        content: ContentDeclaration {
+            computed: vec!["hull".into()],
+            supplied: Vec::new(),
+        },
+        depends_on: Vec::new(),
+        levels: Vec::new(),
+        layout: None,
+        shape: None,
+    }
+}

@@ -249,8 +249,9 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
 }
 
 /// **A flat level the tile index places is served from a column from its runtime publication**:
-/// the list form until a fold has observed its memberships, the label form after a fold that finds
-/// them disjoint, and the label column a restart adopts, also when the restart replays the log as it
+/// the list form at registration, which holds any membership, the label form once its first
+/// publication shows the memberships disjoint, the same after a fold that finds them disjoint, and
+/// the label column a restart adopts, also when the restart replays the log as it
 /// stood before the fold rotated it, registration included. Every answer is the members each viewer
 /// can see, on both sides of the fold and after each restart.
 #[test]
@@ -276,6 +277,11 @@ fn a_flat_level_is_served_from_a_column_from_its_publication() {
     flat.name = FLAT.into();
     flat.hierarchy.kind = HierarchyKind::Flat;
     engine.register_layer(flat).unwrap();
+    assert_eq!(
+        engine.recorded_layout(FLAT, 0),
+        Some(ServingLayout::RowMajorList),
+        "a registration records the list form, which holds any membership"
+    );
     // Fifty contiguous blocks of source ids: few, disjoint and clumped, which the old pick kept
     // artifact-major on both counts.
     let block = 300u64;
@@ -321,8 +327,8 @@ fn a_flat_level_is_served_from_a_column_from_its_publication() {
 
     assert_eq!(
         engine.recorded_layout(FLAT, 0),
-        Some(ServingLayout::RowMajorList),
-        "a registration records the list form, which holds any membership"
+        Some(ServingLayout::RowMajorLabel),
+        "the first publication observed disjoint memberships"
     );
     for credential in [full_coverage_credential(), subset_credential()] {
         assert_eq!(only(&engine, &credential), expected(&credential));
