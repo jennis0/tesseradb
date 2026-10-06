@@ -127,3 +127,34 @@ Two are slower with the column:
   set's rows and reading their labels (`filtered_counts`), one thread over 25.8 million rows. A
   level stored as rows intersects each artifact's members on the pool instead. The 1% and 25%
   viewers, and every filtered aggregate, are faster with the column.
+
+## After the rule change
+
+The layout rule now serves every `flat`, `stacked` or `tiered` level with stored memberships from
+a column, so gbif-64p built with no pin (`bundle-species-auto`, deployment
+`bench-species-auto`) serves species from a label column. An unfiltered aggregate over a column
+level now reads its figures: the counts that rank the groups, and on a label column the groups'
+sizes. `other_routes.py` with `ROUTES` naming the routes that changed, one binary (the branch's
+last product commit) on both bundles, at 01:44 BST with the load average at 6 to 8:
+
+| viewer | route | species as rows: first / warm ms | species as column: first / warm ms |
+|---|---|---:|---:|
+| 1% | aggregate by species | 31 / 33 | 4 / 4 |
+| 1% | aggregate by species, filtered | 39 / 38 | 15 / 12 |
+| 1% | artifact by id x20 | 19 / 13 | 963 / 13 |
+| 1% | tiles, depth 11, 40 tiles | 216 / 204 | 69 / 4 |
+| 1% | tiles, depth 13, 510 tiles | 1,599 / 1,949 | 37 / 28 |
+| 25% | aggregate by species | 88 / 76 | 11 / 7 |
+| 25% | aggregate by species, filtered | 64 / 67 | 29 / 30 |
+| 25% | artifact by id x20 | 33 / 14 | 537 / 13 |
+| 25% | tiles, depth 11, 40 tiles | 450 / 362 | 10 / 10 |
+| 25% | tiles, depth 13, 510 tiles | 4,128 / 4,031 | 105 / 103 |
+| 100% | aggregate by species | 199 / 174 | 28 / 16 |
+| 100% | aggregate by species, filtered | 103 / 96 | 67 / 68 |
+| 100% | artifact by id x20 | 127 / 12 | 476 / 13 |
+| 100% | tiles, depth 11, 40 tiles | 546 / 417 | 14 / 11 |
+| 100% | tiles, depth 13, 510 tiles | 6,334 / 4,796 | 126 / 127 |
+
+The first `/v1/artifacts/{id}` of each viewer still pays the species figures fill with geometry,
+once per grant and kept on disk; the aggregate's fill has no geometry and is a separate entry.
+The runs are `runs/changed-routes-rows.json` and `runs/changed-routes-column.json`.

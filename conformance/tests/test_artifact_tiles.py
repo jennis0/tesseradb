@@ -84,7 +84,9 @@ def tiles_server(tmp_path_factory):
         ),
         work / "groups.parquet",
     )
-    config = config_toml().replace('pairs  = "pairs.parquet"', 'pairs  = "pairs.parquet"\ngroups = "groups.parquet"', 1)
+    config = config_toml().replace(
+        'pairs  = "pairs.parquet"', 'pairs  = "pairs.parquet"\ngroups = "groups.parquet"', 1
+    )
     assert "groups.parquet" in config
     (work / "gated.toml").write_text(config + gated_layer_toml() + groups_layer_toml())
     bundle = work / "bundle-gated"

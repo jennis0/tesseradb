@@ -30,6 +30,8 @@ DEPLOYMENT = Path(
 )
 SCREEN = (1600, 900)
 REPEATS = int(os.environ.get("REPEATS", "5"))
+#: Route names separated by `|` to time; absent is every route.
+ROUTES = [r for r in os.environ.get("ROUTES", "").split("|") if r]
 LEVEL = 2
 FILTER = {"kingdom": {"eq": "Plantae"}}
 
@@ -169,6 +171,30 @@ def main() -> int:
                     http.post(f"{v}/v1/artifacts/{i}", json={"view": view}, timeout=600)
                     for i in ids[:20]
                 ][-1],
+                "tiles z9 depth 11": lambda: http.post(
+                    f"{v}/v1/artifacts/viewport",
+                    json={
+                        "view": view,
+                        "zoom": 11,
+                        "bbox": box_at(q, centre, 9),
+                        "layers": [layer],
+                        "levels": [LEVEL],
+                        "per_tile": 50,
+                    },
+                    timeout=600,
+                ),
+                "tiles z9 depth 13": lambda: http.post(
+                    f"{v}/v1/artifacts/viewport",
+                    json={
+                        "view": view,
+                        "zoom": 13,
+                        "bbox": box_at(q, centre, 9),
+                        "layers": [layer],
+                        "levels": [LEVEL],
+                        "per_tile": 50,
+                    },
+                    timeout=600,
+                ),
                 "bulk read 100 ids": lambda: http.post(
                     f"{v}/v1/artifacts",
                     json={
@@ -181,6 +207,8 @@ def main() -> int:
                 ),
             }
             for name, call in asks.items():
+                if ROUTES and name not in ROUTES:
+                    continue
                 cold, resp = timed(call)
                 warm = sorted(timed(call)[0] for _ in range(REPEATS))
                 row = {
