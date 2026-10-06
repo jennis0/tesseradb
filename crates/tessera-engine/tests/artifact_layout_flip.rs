@@ -250,8 +250,9 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
 
 /// **A flat level the tile index places is served from a column from its runtime publication**:
 /// the list form until a fold has observed its memberships, the label form after a fold that finds
-/// them disjoint, and the label column a restart adopts. Every answer is the members each viewer
-/// can see, on both sides of the fold and after the restart.
+/// them disjoint, and the label column a restart adopts, also when the restart replays the log as it
+/// stood before the fold rotated it, registration included. Every answer is the members each viewer
+/// can see, on both sides of the fold and after each restart.
 #[test]
 fn a_flat_level_is_served_from_a_column_from_its_publication() {
     const FLAT: &str = "clusters/clumped";
@@ -329,6 +330,7 @@ fn a_flat_level_is_served_from_a_column_from_its_publication() {
     assert!(engine.columns_composed() > 0, "the publication composed a column");
     assert_eq!(engine.layout_fallbacks(), 0);
 
+    let pre_rotation = snapshot_wal(tmp.path());
     fold(&engine);
     assert_eq!(
         engine.recorded_layout(FLAT, 0),
@@ -355,4 +357,29 @@ fn a_flat_level_is_served_from_a_column_from_its_publication() {
     }
     assert!(reopened.columns_adopted() > 0);
     assert_eq!(reopened.columns_composed(), 0);
+    drop(reopened);
+
+    // A restart between the fold's manifest and its rotation: the registration is replayed over
+    // the manifest that recorded the label column.
+    restore_wal(tmp.path(), &pre_rotation);
+    let replayed = open_engine_publishing(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    replayed.set_background_refresh_for_test(false);
+    assert_eq!(
+        replayed.recorded_layout(FLAT, 0),
+        Some(ServingLayout::RowMajorLabel),
+        "a replayed registration keeps the layout the fold recorded"
+    );
+    for credential in [full_coverage_credential(), subset_credential()] {
+        assert_eq!(only(&replayed, &credential), expected(&credential));
+    }
+    assert!(replayed.columns_adopted() > 0);
+    assert_eq!(
+        replayed.columns_composed(),
+        0,
+        "the fold's column is adopted, not composed again"
+    );
 }

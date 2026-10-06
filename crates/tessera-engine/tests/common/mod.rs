@@ -791,3 +791,37 @@ pub fn unique_holders(
         })
         .collect())
 }
+
+/// Every WAL member file in `dir`, by name and bytes.
+///
+/// The log is a **sequence** — `wal-000001.log` and its `.sync` sidecar, beside the stem the engine
+/// was opened with — not one file, so copying the stem copies nothing. Rotation seals a member,
+/// opens the next and reclaims the ones behind it, which is exactly the state
+/// a test of a restart before the rotation takes a copy of before the fold rotates.
+pub fn snapshot_wal(dir: &Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+    let mut members: Vec<(std::ffi::OsString, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("wal-"))
+        .map(|e| (e.file_name(), std::fs::read(e.path()).unwrap()))
+        .collect();
+    assert!(
+        !members.is_empty(),
+        "the engine writes a WAL sequence, not one file"
+    );
+    members.sort_by(|a, b| a.0.cmp(&b.0));
+    members
+}
+
+/// Put `snapshot` back, removing whatever members are there now — the on-disc state a crash between
+/// the `CURRENT` flip and the WAL rotation leaves.
+pub fn restore_wal(dir: &Path, snapshot: &[(std::ffi::OsString, Vec<u8>)]) {
+    for entry in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
+        if entry.file_name().to_string_lossy().starts_with("wal-") {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    for (name, bytes) in snapshot {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+}

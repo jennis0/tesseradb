@@ -1789,7 +1789,7 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
 /// **Over the whole visible set a column level's counts are its figures, and over a filter that
 /// admits every item they are counted from the rows**: the two serve the oracle's table, its listed
 /// artifacts, the rest, none and the whole visible set as the reference, for the label and the
-/// list column, with built items suppressed,
+/// list column, top and named, read whole and a row a page, with built items suppressed,
 /// an artifact whose members are all suppressed, and artifacts holding items ingested and flushed
 /// since the build.
 #[test]
@@ -1906,6 +1906,48 @@ fn a_column_level_counts_the_whole_set_as_it_counts_the_same_set_filtered() {
             expected,
             "{name}: a filter admitting every item"
         );
+
+        // Named artifacts, among them the one whose members are all suppressed, and each table
+        // read a row a page through its cursor: the two paths agree, and a named artifact's count
+        // is the oracle's.
+        let at = |key: &str| planted.iter().position(|(k, _)| *k == key).unwrap();
+        let named = [layer(name, Pick::Named(vec![ids[at("e")], ids[at("c")], ids[at("a")]]))];
+        let read = |groupings: &[Grouping], filter: Option<FilterExpr>, paged: bool| {
+            let mut req = request(groupings);
+            req.filter = filter;
+            req.reference = Some(Reference::Visible);
+            if paged {
+                req.page_rows = Some(1);
+                req.pages = Some(1);
+            }
+            read_all(&fx.engine, &session, req)[&0]
+                .1
+                .iter()
+                .map(|r| (r.group.clone().unwrap(), r.key.clone(), r.count, r.reference))
+                .collect::<Vec<_>>()
+        };
+        for (what, groupings) in [("named", &named[..]), ("top", &groupings[..])] {
+            let whole = read(groupings, None, false);
+            for (filter, paged) in [
+                (None, true),
+                (Some(FilterExpr::AllOf(Vec::new())), false),
+                (Some(FilterExpr::AllOf(Vec::new())), true),
+            ] {
+                assert_eq!(
+                    read(groupings, filter.clone(), paged),
+                    whole,
+                    "{name}, {what}: filtered {}, paged {paged}",
+                    filter.is_some()
+                );
+            }
+        }
+        for (_, key, count, _) in read(&named, None, false) {
+            if let Some(key) = key {
+                let (_, members) = &planted[ids.iter().position(|id| id.raw().to_string() == key).unwrap()];
+                let want = members.iter().filter(|s| visible.contains(s)).count() as u64;
+                assert_eq!(count, want, "{name}: named {key}");
+            }
+        }
     }
     assert_eq!(fx.engine.layout_fallbacks(), 0, "both levels kept their column");
 }

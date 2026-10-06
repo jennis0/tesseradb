@@ -304,7 +304,7 @@ fn the_build_records_the_layout_its_own_row_space_chooses() {
 /// The manifest names the files the pass wrote, on coordinates a reader can adopt: a column for
 /// each flat level, an index for the treed level, and neither for the other.
 #[test]
-fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
+fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_one() {
     let fx = fixture();
     let manifest = manifest(&fx);
 

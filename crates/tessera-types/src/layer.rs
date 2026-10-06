@@ -78,8 +78,7 @@ pub enum MembershipSource {
     Attribute(String),
 }
 
-/// How a level's membership is **stored and scanned** at serving time
-/// ([decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+/// How a level's membership is **stored and scanned** at serving time.
 ///
 /// **Not a contract, and nothing on the wire names one.** Both forms answer identically — the same
 /// served set, the same counts, the same ranks and parents — so no request field selects one, no
@@ -678,19 +677,14 @@ pub struct LayerDeclaration {
     /// Empty for a treed or flat layer.
     #[serde(default)]
     pub levels: Vec<LevelDeclaration>,
-    /// **The layout pin**: serve every level of this layer in the named form, at the build and at
-    /// every fold after it. `None` — the automatic pick, which is the normal state.
+    /// The layout pin: serve every level of this layer in the named form, at the build and at
+    /// every fold after it. `None` is the automatic pick: a column for a layer with stored
+    /// memberships answered tile by tile ([`LayerDeclaration::served_from_a_column`]), and for any
+    /// other layer the form its observed spread chooses (`tessera_store::derived::choose`).
     ///
-    /// **`#[serde(default)]`, and that is not the register's exception being taken lightly.** The
-    /// two fields with no default are disclosure controls whose absent value would be a grant (C27,
-    /// C28). A layout is neither: both forms compute the same quantities from inside `M_auth`, no
-    /// request field names one and no response reports one, so a declaration that omits this is a
-    /// declaration that has no opinion about storage — which is a complete statement rather than an
-    /// unfilled one.
-    ///
-    /// **An override a fold could overturn is not an override** (decision 0094). A pinned layer is
-    /// rebuilt in its declared form at every fold, and the observations the automatic pick *would*
-    /// have read are recorded beside it so an operator can see what they were.
+    /// Defaults to `None`: both forms compute the same quantities from inside the viewer's visible
+    /// set and no request or response names one, so a declaration that omits it says nothing about
+    /// access. A fold never overturns a pin; it records the observations beside it.
     #[serde(default)]
     pub layout: Option<ServingLayout>,
     /// **What kind of shape a `membership = "spatial"` layer's artifacts carry.**
@@ -972,19 +966,17 @@ pub struct RegisteredLayer {
     /// Bumped by any edit that changes who may reach this layer, so a session's cached resolution
     /// is invalidated rather than outliving the gate it was computed from.
     pub version: u64,
-    /// The serving layout **per level**, parallel to [`RegisteredLayer::runs`] — decision 0094's
-    /// record.
+    /// The serving layout **per level**, parallel to [`RegisteredLayer::runs`].
     ///
-    /// Set at registration from the pin, or [`ServingLayout::ArtifactMajor`] where there is none: a
-    /// level with no artifacts has no shape to observe, and the conservative pick is the form every
-    /// derived structure already exists for. **Re-evaluated inside every fold's artifact pass**,
-    /// before the registry snapshot the manifest is written from, so the record and the files the
-    /// same fold wrote cannot disagree.
+    /// Set at registration by [`RegisteredLayer::initial_layouts`], and kept when a replay applies
+    /// the registration again over a manifest that recorded it. **Re-evaluated inside every fold's
+    /// artifact pass**, before the registry snapshot the manifest is written from, so the record
+    /// and the files the same fold wrote cannot disagree.
     ///
-    /// **A flip does not bump [`RegisteredLayer::version`]** (selection memo §5). That version gates
-    /// reachability and is a fail-closed guard against a reader holding a stale idea of a layer;
-    /// a layout is not a client-visible fact, so bumping it would make every session re-resolve a
-    /// layer for a change none of them can observe.
+    /// **A flip does not bump [`RegisteredLayer::version`].** That version gates reachability and
+    /// is a fail-closed guard against a reader holding a stale idea of a layer; a layout is not a
+    /// client-visible fact, so bumping it would make every session re-resolve a layer for a change
+    /// none of them can observe.
     ///
     /// Shorter than `runs` is read as [`ServingLayout::ArtifactMajor`] for the levels past its end
     /// — see [`RegisteredLayer::layout_of`] — which is the fail-safe direction: the worst outcome
