@@ -528,7 +528,8 @@ impl ArtifactProjections {
                     layer = %layer,
                     level,
                     view = %view,
-                    "this level's {amendment} memberships no longer partition under its pin, so                      it is served artifact-major. Every answer is unchanged; the layout is not"
+                    "this level's {amendment} memberships no longer partition under its pin, so \
+                     it is served artifact-major. Every answer is unchanged; the layout is not"
                 );
                 return true;
             }
@@ -552,7 +553,8 @@ impl ArtifactProjections {
             level,
             view = %view,
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "this level's {amendment} memberships no longer partition, so its column is              recomposed in the list form. Every answer is unchanged"
+            "this level's {amendment} memberships no longer partition, so its column is \
+             recomposed in the list form. Every answer is unchanged"
         );
         true
     }
