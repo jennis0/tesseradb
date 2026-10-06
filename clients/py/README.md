@@ -602,7 +602,7 @@ counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.c
 `budget` is how many points the map aims to draw on screen, 250,000 unless you give another, and
 setting `m.budget` in a later cell applies it. `budget_min` and `budget_max`, 1,000 and 2,000,000
 unless you give others, are the fewest and the most a control for it offers; neither changes
-`budget`. `db.map(budget=1_000_000)` passes it through, as it passes any keyword `Map` takes.
+`budget`. `db.map`, `viewer.map` and `selection.map` all take the three and pass them on.
 
 `tesseradb.authorise(session_url, credential, ...)` mints on the session plane: with an API key
 holding `authorise-as`, for a `principal` or an OIDC `access_token`, as an integrator's backend

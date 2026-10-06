@@ -5,7 +5,7 @@ import {repeat} from 'lit/directives/repeat.js';
 import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, cellDepth, nearestStop} from '@tesseradb/deck';
-import {DEFAULT_BUDGET, WORLD_SIZE, activeCount, artifactName, emptyDraft} from '@tesseradb/client';
+import {WORLD_SIZE, activeCount, artifactName, emptyDraft} from '@tesseradb/client';
 import {hasOneLayout, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import {listedAt} from './artifact-list.js';
@@ -780,8 +780,8 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'title-field'}) accessor titleField = '';
   /** The field the item card shows under its headline. Unset, it shows none. */
   @property({attribute: 'subtitle-field'}) accessor subtitleField = '';
-  /** How many marks to aim for on screen, passed to the map's `budget`. `0` leaves the store's own. */
-  @property({type: Number}) accessor budget = DEFAULT_BUDGET;
+  /** How many marks to aim for on screen, passed to the map's `budget`. `0`, the default, leaves the store's own, which starts at 250000. */
+  @property({type: Number}) accessor budget = 0;
   /** The fewest marks a control for `budget` offers, passed to the map's `budget-min`. */
   @property({type: Number, attribute: 'budget-min'}) accessor budgetMin = 1_000;
   /** The most marks a control for `budget` offers, passed to the map's `budget-max`. */

@@ -710,6 +710,9 @@ class Selection:
         height: int = 480,
         size_by: Optional[str] = None,
         artifacts_per_tile: Optional[int] = None,
+        budget: int = 250_000,
+        budget_min: int = 1_000,
+        budget_max: int = 2_000_000,
     ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
@@ -725,6 +728,9 @@ class Selection:
         - `artifacts_per_tile`: the most annotations each level of a layer shows in one tile of
           the map, largest first, at most the server's `max_artifacts_per_tile`. Without it the
           map draws no annotation, colouring by a layer has no colours, and the map says so.
+        - `budget`: how many points the map aims to draw on screen.
+        - `budget_min`, `budget_max`: the fewest and the most points a control for `budget`
+          offers. Neither changes `budget`.
 
         Items outside the box are still drawn when they are in frame.
 
@@ -739,6 +745,9 @@ class Selection:
             bbox=self.box,
             size_by=size_by,
             artifacts_per_tile=artifacts_per_tile,
+            budget=budget,
+            budget_min=budget_min,
+            budget_max=budget_max,
         )
 
     def _expression(self) -> Optional[dict]:

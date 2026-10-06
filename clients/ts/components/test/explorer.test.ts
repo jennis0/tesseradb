@@ -694,10 +694,10 @@ describe('<tessera-explorer> the point budget', () => {
   const budgets = (store: FakeStore) => store.calls.filter((c) => c.name === 'setBudget').map((c) => c.args[0]);
   const mapOf = (shadow: ShadowRoot) => shadow.querySelector('tessera-map') as unknown as {budget: number; budgetMin: number; budgetMax: number};
 
-  it('aims for 250,000 marks, offering 1,000 to 2,000,000, unless the host says otherwise', async () => {
+  it('leaves the store’s budget unless the host sets one, and offers 1,000 to 2,000,000', async () => {
     const {store, shadow} = await explorer();
-    expect(budgets(store)).toEqual([250_000]);
-    expect(mapOf(shadow)).toMatchObject({budget: 250_000, budgetMin: 1_000, budgetMax: 2_000_000});
+    expect(budgets(store)).toEqual([]);
+    expect(mapOf(shadow)).toMatchObject({budget: 0, budgetMin: 1_000, budgetMax: 2_000_000});
   });
 
   it('passes the host’s budget and range to the map and the budget to the store, and a change of budget too', async () => {
