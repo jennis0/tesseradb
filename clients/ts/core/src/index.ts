@@ -61,7 +61,7 @@ export {memberKey, memberLeaf, memberOf, withMember, withMembers, withoutMember,
 export {GRID32, MAX_DEPTH, WORLD_SIZE, dataToWorldXY, gridToWorld, gridToWorldXY} from './coords.js';
 export {lonLatOfCell} from './projection.js';
 
-export {TesseraClient, TesseraError, type PartSink, type TesseraClientOptions} from './client.js';
+export {TesseraClient, TesseraError, type PartSink, type TesseraClientOptions, type TileSink} from './client.js';
 export {inlineDecoder, setWorkerFactory, type Decoder} from './decoder.js';
 export {RecordsRead} from './records.js';
 export {PartialAggregate} from './aggregate.js';

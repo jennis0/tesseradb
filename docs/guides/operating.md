@@ -79,7 +79,7 @@ The server holds these caches, each with a limit you can set under `[serve]`:
 | `row_projection_cache_bytes` | 2 GiB | For each session, which rows of the bundle it may see |
 | `fragment_cache_bytes` | 1 GiB | For each distinct set of granted labels, the items it covers. Copies on disc in the cache directory outlive the memory |
 | `masked_count_cache_bytes` | 1 GiB | Visible member counts, centroids and boxes for annotation levels served from a column, one entry per grant and level. Per artifact: 4 B for counts alone, 40 B with a centroid and a box, and for a layer serving a box 4 B more plus 128 B for each artifact with more than sixteen placed rows. A level of 1.4 million artifacts is 56 MB a grant counted with geometry, and a layer serving a box keeps at most 185 MB more of reserves in a cache of its own, so the default holds the counts of about nineteen such grant-levels and the reserves of at least five. Deployments where every user holds their own terms need one entry per user per level. An entry larger than the bound is served and not kept, which `masked_count_cache.not_admitted` on `/control/status` counts. Empty in a corpus without such a layer |
-| `figures_disk_bytes` | 8 GiB | The same entries, and the labels of denied rows they are corrected with, kept in the cache directory so a restart reads them back rather than walking each grant's rows again. Size it as the memory bound above times the number of grant-levels a restart should find, plus about 24 B per denied row per level. Past it, the files least recently written or read are removed |
+| `figures_disk_bytes` | 8 GiB | The same entries, and the labels of denied rows they are corrected with, kept in the cache directory, so a restart reads them back and does not walk each grant's rows again. Size it as the memory bound above times the number of grant-levels a restart should find, plus about 24 B per denied row per level. Past it, the files least recently written or read are removed |
 | `region_cache_bytes` | 256 MiB | Drawn filter regions broken into map tiles, shared between viewers |
 | `occupancy_cache_bytes` | 32 MiB | How many tiles at each zoom hold something a session can see |
 
@@ -131,13 +131,18 @@ free, which is too much if the server is running beside it.
 
 ## Annotation layers and new viewers
 
-Plan for one cost when viewers first open an annotation layer. Every level of a `flat`, `stacked` or
-`tiered` layer whose memberships are enumerated is served from a column, one entry per row naming
-its artifacts. The first time a viewer reads such a level under a grant the server has not seen,
-whether by drawing it, colouring points by it or listing its artifacts, the server walks every row
-the last build or compaction wrote that the grant may see, and counts each artifact's members, with
-their positions where the layer serves a centroid or a box. Every later request under that grant
-reads the result, corrected for whatever has been deleted, suppressed or ingested since.
+Plan for one cost when viewers first open an annotation layer. A grant is the set of labels a
+viewer holds, and every viewer holding the same set shares one. The cost falls on an annotation
+level served from a column, which holds one entry per row naming its artifacts. Unless the layer
+declares `layout = "rows"`, that is every level of a `flat`, `stacked` or `tiered` layer whose
+memberships are enumerated, every attribute layer's level, and a `nested`, `dag` or shape level of
+at least 1,000 artifacts of which a quarter are spread too widely for the map's index. The
+first time a viewer reads such a level under a grant the server has not seen, the server walks
+every row the last build or compaction wrote that the grant may see, and counts each artifact's
+members, with their positions where the layer serves a centroid or a box. Drawing a layer or
+listing its artifacts reads its levels. Colouring points by a layer reads them when the map then
+reads the artifacts its points are tagged with. Every later request under that grant reads the
+result, corrected for whatever has been deleted, suppressed or ingested since.
 
 The walk takes longer the more of the corpus the grant sees. On a bundle of the 3,495,729,729 GBIF
 occurrences, with 12 threads, under a 24 GB memory cap and starting with nothing in the page cache,
@@ -152,16 +157,21 @@ one level of the taxonomy layer took:
 *One run each, from `probes/2026-10-06-first-open-fills/`. The layer serves a centroid and a box.*
 
 So a viewer who sees 1% of that corpus waits between a fifth of a second and a second for each level
-the first time, and one who sees everything waits 9 to 12 seconds. A grant is a set of labels, and
-every viewer holding the same set shares one result. A deployment whose viewers fall into a few
-groups pays the walk a few times for each level. A deployment in which every user holds labels of
-their own, such as a label per document, pays it for each user and each level they open.
+the first time, and one who sees everything waits 9 to 12 seconds. A request that shows several
+levels for the first time fills them one after another. In the same runs, opening the map at its
+widest view with the family level took 1.8, 4.0 and 9.1 seconds for the three viewers, and the
+first view at zoom 9, which shows genus and species, took 2.7, 6.2 and 24.5 seconds. Most of the 1%
+viewer's 1.8 seconds went on testing which artifacts lie in each tile, not on the walk.
 
-The result is written to the cache directory, so a restart reads it back rather than walking
-again. A compaction changes the bundle's identity, and each grant walks again the next time it
-reads each level. `figures_disk_bytes` decides how many results the directory keeps, and
-`masked_count_cache_bytes` how many stay in memory. `/control/status` counts walks under
-`masked_count_cache.fills` and results read back from disc under `masked_count_cache.loads`.
+A deployment whose viewers fall into a few groups pays the walk a few times for each level. A
+deployment in which every user holds labels of their own, such as a label per document, pays it for
+each user and each level they open.
+
+The result is written to the cache directory, and a restart reads it back. A compaction changes
+the bundle's identity, and each grant walks again the next time it reads each level.
+`figures_disk_bytes` decides how many results the directory keeps, and `masked_count_cache_bytes`
+how many stay in memory. `/control/status` counts walks under `masked_count_cache.fills` and
+results read back from disc under `masked_count_cache.loads`.
 
 The artifacts a map draws come from `POST /v1/artifacts/viewport`, which has an admission limit of
 its own, `artifact_admission`, one request per compute thread by default. A request past it, and
@@ -295,13 +305,15 @@ tessera$ curl -sS --unix-socket /run/tessera/control.sock \
 }
 ```
 
-Between compactions, a write can stall the write side in one case. When a growth or a publication
-gives an item a second artifact in a level the server answers from one label per row, and the
-server holds that level in memory, it rewrites the level's column as a list, and its member file
-with it, on the thread that applies writes. Other writes wait until it finishes. The member file
-alone takes about two and a half minutes a level at the scale of a 3.5-billion-row corpus. A level
-the server does not hold is composed as a list by the next request that reads it. The next
-compaction records the level as a list and writes both files again.
+Between compactions, a write can stall the write side in one case. When a growth, a publication, a
+flush or a merge leaves an item with a second artifact in a level the server answers from one label
+per row, and the server holds that level in memory, it rewrites the level's column as a list, and
+its member file with it, on the thread that applies writes. Other writes wait until it finishes.
+The member file alone takes about two and a half minutes a level at the scale of a 3.5-billion-row
+corpus. A level whose layer declares `layout = "column"`, and whose rows the server holds artifact
+by artifact, is served by artifact instead, with no rewrite. A level the server does not hold is
+composed as a list by the next request that reads it. The next compaction records the level as a
+list and writes both files again.
 
 [Compaction](../system/write-path.md#compaction) in the write-path chapter describes it in full.
 

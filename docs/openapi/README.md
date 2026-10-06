@@ -11,9 +11,10 @@ Three things a power user who installs nothing needs, and where each is:
 ## What the description is, and is not
 
 `tessera.yaml` is **hand-authored**. The JSON DTOs live in `tessera-server`, some private, the
-control plane's answers built with `json!`, and the Arrow-facing structs carry a deliberate *no serde derive*. Nothing generates the description from them, so the test is what stops it drifting:
-every closed DTO is declared `additionalProperties: false`, and a field added to a response and
-not to the file fails the test rather than surfacing on a stranger's screen.
+control plane's answers built with `json!`, and the Arrow-facing structs carry a deliberate *no
+serde derive*. Nothing generates the description from them, so the test is what stops it drifting:
+every closed DTO is declared `additionalProperties: false`, and a field added to a response and not
+to the file fails the test rather than surfacing on a stranger's screen.
 
 What it can say only in prose: the bodies of `/v1/viewport`, `/v1/artifacts/viewport`,
 `/v1/items`, `/v1/artifacts` and `/v1/aggregate` are not JSON, and are declared as
@@ -83,8 +84,8 @@ first tiles rows: [{'tile': 0, 'visible': 86, 'matched': 86, 'served': 2, 'highl
 
 The whole decoder is `split_frames` (the framing, no Arrow) and `decode_viewport` (one
 `ipc.open_stream(...).read_all()` per Arrow payload, `json.loads` for the trailer). Its test is
-`reference/tests/test_wire_example.py`; run `python3 -m pytest reference/tests/test_wire_example.py`.
-It skips, saying so, if `pyarrow` is not importable.
+`reference/tests/test_wire_example.py`; run `python3 -m pytest
+reference/tests/test_wire_example.py`. It skips, saying so, if `pyarrow` is not importable.
 
 **JavaScript, with `apache-arrow`**: `clients/ts/wire-example/src/decode-viewport.mjs`, its own
 workspace under `clients/ts` with no dependency on the client packages, here over a
@@ -109,11 +110,12 @@ first artifacts rows: [
 ...
 ```
 
-That fixture answers a request for one layer of clusters at zoom 2 with a `per_tile` of 50. It holds one
-frame for each of the sixteen tiles, one of them empty, and no frame for nested or `dag` layers. The `u64` columns come off Arrow JS as `BigInt` and are printed as
-decimal strings; a decoder that narrows a `tessera_id` to a JS `number` has already lost bits on
-this fixture's first id. Its test is `clients/ts/wire-example/test/decode.test.ts`, run by
-`bash scripts/check-clients.sh` with the rest of the client gate.
+That fixture answers a request for one layer of clusters at zoom 2 with a `per_tile` of 50. It holds
+one frame for each of the sixteen tiles, one of them empty, and no frame for nested or `dag` layers.
+The `u64` columns come off Arrow JS as `BigInt` and are printed as decimal strings; a decoder that
+narrows a `tessera_id` to a JS `number` has already lost bits on this fixture's first id. Its test
+is `clients/ts/wire-example/test/decode.test.ts`, run by `bash scripts/check-clients.sh` with the
+rest of the client gate.
 
 Both decoders are strict on purpose: a truncated body, a missing trailer and an unknown kind each
 raise, and both tests prove it on the fixtures.

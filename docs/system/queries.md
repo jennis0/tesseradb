@@ -58,11 +58,12 @@ conformance test compares these values with the source corpus for every item, ov
 columns, a timestamp and a bool that hold both absences and genuine zeros, with absences written
 by the build and by a flush, live, after a restart and after a fold.
 
-Where a request names annotation layers, each point carries, for each of them, the `tessera_id`
-of the artifact it belongs to that this viewer is served, the deepest where the layer has several,
-or a null. A client colours points by a layer from these tags. The artifacts themselves, with their
-counts, centroids and boxes, are not in a viewport response. They are read tile by tile from
-[their own route](#the-artifacts-in-each-tile).
+Where a request names annotation layers, each point carries, for each of them, the `tessera_id` of
+the artifact it belongs to that this viewer is served, the deepest where the layer has several, or a
+null. A `nested` or `dag` layer's tags are cut to the request's `artifact_budget`, so a tag can name
+an ancestor of the artifact the point belongs to. A client colours points by a layer from these
+tags. The artifacts themselves, with their counts, centroids and boxes, are not in a viewport
+response. They are read tile by tile from [their own route](#the-artifacts-in-each-tile).
 
 ## The visible set and the filtered set
 
@@ -139,13 +140,14 @@ changes when one is accepted.
 
 ## The artifacts in each tile
 
-`POST /v1/artifacts/viewport` answers which artifacts lie in each tile: clusters, regions,
-hierarchy nodes and their labels. It names a view, a zoom and either a bounding box or a list of
-tiles, as a viewport request does, with the layers to answer for and a quota, `per_tile`, which is
-required. A request may also name the levels of each layer to answer for, by default those whose
-declared zoom range holds the request's zoom; which of `centroid` and `box` to serve, narrowing what
-the layer declares; a filter and a highlight; and a budget for `nested` and `dag` layers. A `per_tile` above `selection.max_artifacts_per_tile` in `/v1/meta` is refused, as
-is a request for a shape, which is read by an artifact's `tessera_id` instead.
+`POST /v1/artifacts/viewport` answers which artifacts lie in each tile: clusters, regions, hierarchy
+nodes and their labels. It names a view, a zoom and either a bounding box or a list of tiles, as a
+viewport request does, with the layers to answer for and a quota, `per_tile`, which is required. A
+request may also name the levels of each layer to answer for, by default those whose declared zoom
+range holds the request's zoom; which of `centroid` and `box` to serve, as `computed`, narrowing
+what the layer declares; a filter and a highlight; and a budget for `nested` and `dag` layers. A
+`per_tile` above `selection.max_artifacts_per_tile` in `/v1/meta` is refused, as is a request for a
+shape, which is read by an artifact's `tessera_id` instead.
 
 For each tile, and each level of a `flat`, `stacked` or `tiered` layer, the response holds the
 artifacts this viewer is served that have a member the viewer can see in the tile, at most
@@ -153,7 +155,7 @@ artifacts this viewer is served that have a member the viewer can see in the til
 the whole view, largest first, and then by `tessera_id`
 ([annotations](annotations.md#how-many-artifacts-a-tile-shows)). An artifact with visible members
 in several tiles is in each tile's frame, with the same count, centroid and box. Every number is
-over the artifact's whole membership as this viewer sees it and never over the tile, so a client
+taken over all of the artifact's members this viewer can see, wherever they lie, so a client
 holding several tiles can draw an artifact once. The filter and highlight flags are the exception:
 each is taken over the artifact's visible members inside the tile. A filter changes nothing else,
 and a filtered request serves the same artifacts with the same counts.
@@ -166,26 +168,31 @@ those layers, when the request also names the target's layer.
 ### How a client asks for a layer
 
 The TypeScript store asks for the artifacts of the layers it draws by tile, at a depth of the
-camera's zoom rounded down, plus two, so a tile is 128 to 256 pixels across. A request names at
+camera's zoom rounded down, plus two, so a tile is 128 to 256 pixels across. The depth stops at 16,
+so from a camera zoom of 15 a tile is wider than 256 pixels. A request names at
 most 558 tiles, the most a 3840 by 2160 screen touches at that depth, or
 `selection.max_tiles_per_request` where that is fewer, and a larger screen is asked for one depth
 coarser, then another, until its tiles fit. The store has no quota of its own: a host sets
 `artifacts.perTile` when it creates the store, and without it a drawn layer shows nothing and the
 store says what to set. So the tiles in view times `perTile` bounds the artifacts one level draws.
 
-Each tile's frame depends only on the tile, the layer, the level, the filter and the response's
-identity and content keys, so the store holds frames by layer, level, depth and tile. A view that
-has settled asks only for the tiles it does not hold, the centre first. At idle the store asks for
-the ring of tiles around the view and for the view one depth coarser, so a pan or a step out draws
-from held tiles. Held tiles are capped, the least recently drawn leaving first, and all of them are
-dropped when either key changes. A layer the points are coloured by is named in the viewport
-request, so each point carries its tag. Where a tag names an artifact no held tile carries, such as
-one past a tile's quota, the store reads it with a bulk read by `ids`.
+Each tile's frame depends only on the tile, the layers the request names, their levels, the filter
+and the response's identity and content keys. The layers named matter because a dependent is served
+only where its target is in the frame. The store holds each frame by filter, depth and tile, and
+records inside it which layer and level pairs it answered. A view that has settled asks only for the
+tiles it does not hold, the centre first. A `nested` or `dag` layer is cut over the whole request,
+so the store holds its frame for the view alone and asks for every tile each time. At idle the store
+asks for the ring of tiles around the view and for the view one depth coarser, so a pan or a step
+out draws from held tiles. Held tiles are capped, the least recently drawn leaving first, and all of
+them are dropped when either key changes. A layer the points are coloured by is named in the
+viewport request, so each point carries its tag. Where a tag names an artifact no held tile carries,
+such as one past a tile's quota, the store reads it with a bulk read by `ids`.
 
 The Python client reads the same route with `Viewer.viewport_artifacts` and
 `Database.viewport_artifacts`, each returning a `pyarrow.Table` with a `tile` column, and reads
-artifacts by identifier with `ids=` on `Viewer.artifacts` and `Database.artifacts`. `tessera artifacts --ids` does the same at the
-command line, which has no viewport command and so no tile route.
+artifacts by identifier with `ids=` on `Viewer.artifacts` and `Database.artifacts`. `tessera
+artifacts --ids` does the same at the command line, which has no viewport command and so no tile
+route.
 
 ## Filters
 
@@ -342,10 +349,10 @@ states.
 ## Reading items and artifacts in bulk
 
 Two routes return in bulk what the map is computed from. `POST /v1/items` returns every item the
-viewer may see in one view that matches a filter, with the fields the caller names.
-`POST /v1/artifacts` returns every artifact of one layer the viewer is served, or the ones a list
-of `tessera_id`s names, with the properties the caller names. Both answer with pages of Apache
-Arrow record batches, framed as a viewport response is. A caller reads a whole result by passing each
+viewer may see in one view that matches a filter, with the fields the caller names. `POST
+/v1/artifacts` returns every artifact of one layer the viewer is served, or the ones a list of
+`tessera_id`s names, with the properties the caller names. Both answer with pages of Apache Arrow
+record batches, framed as a viewport response is. A caller reads a whole result by passing each
 response's cursor back in its next request until the cursor is null, and the server keeps nothing
 between requests.
 

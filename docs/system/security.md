@@ -66,32 +66,37 @@ lock it out of password login with ten wrong attempts every fifteen minutes; its
 sessions are unaffected.
 
 Every cache that holds a viewer's visible set, or a quantity computed from it, is keyed to one
-session and is never read by another session, with two exceptions keyed on the session's grant: the
-index keys it satisfies, or every key for a session that reads every item. The authorised set is
-shared by every session with the same grant. The per-artifact counts, position sums and boxes of an
-annotation level served from a column are counted once per grant over the grant's rows in the
-bundle's base, keyed by the grant, the bundle identity, which a compaction rotates, and the level's
-column. A growth between compactions adds to them in place. They are written to the server's cache
-directory and read back after a restart, beside the labels of each view's deleted and suppressed
-base rows, which the server holds per view and level, whoever is asking. The figures of a number or
-timestamp field (the count of its finite values, their sum, the items with none, and its eight
-smallest and eight largest values with their rows) are stored in the bundle by a build and a
-compaction, per view and per list of index keys the base rows' items carry, and a grant's are the
-merge of the lists it satisfies, by the same rule that builds its authorised set. The
-merge is held per grant, bundle identity, view and field. These shared counts include rows that are
-deleted or suppressed, so no request is served them alone. Every request subtracts the rows its own
-composed visible set removes from the base, read from the overlay it loaded at its start, and adds
-its own rows above the base. For an annotation level the subtraction is cached under the view's deny
-version, which moves whenever the deleted and suppressed rows below the base change, and the rows
-above the base under the overlay's version, which every deny moves. A request that starts after a
-suppression therefore reads a subtraction or a set of rows that reflects it. A field's smallest and
-largest value are the first of the kept extremes whose row the request does not subtract, and where
-it subtracts all eight kept on a side, a walk of the grant's base rows less those it subtracts. A
-request that starts after a suppression is accepted therefore subtracts the suppressed rows, even
-where it waits for counts whose build began before the suppression. The figures served are the
-visible set's, as a walk of that set row by row would produce them, and a suppressed item's value
-moves no field's smallest or largest value from the next request. What the sharing does disclose,
-through response time, is in the residual table below.
+session and is never read by another session, with three exceptions, each keyed on the session's
+grant: the index keys it satisfies, or every key for a session that reads every item. The first is
+the authorised set, shared by every session with the same grant. The other two are counts over the
+grant's base rows. A view's base is the rows the last build or compaction wrote; a flush adds rows
+above it.
+
+The per-artifact counts, position sums and boxes of an annotation level served from a column are
+counted once per grant over the grant's base rows, keyed by the grant, the bundle identity, which a
+compaction rotates, and the level's column. A growth between compactions adds to them in place. They
+are written to the server's cache directory and read back after a restart. Beside them the server
+holds the labels of every deleted and suppressed base row in each view, per view and level, whoever
+is asking.
+
+The figures of a number or timestamp field (the count of its finite values, their sum, the items
+with none, and its eight smallest and eight largest values with their rows) are stored in the bundle
+by a build and a compaction, per view and per list of index keys the base rows' items carry. A
+grant's are the merge of the lists it satisfies, by the same rule that builds its authorised set,
+and the merge is held per grant, bundle identity, view and field.
+
+Both kinds of shared count include rows that are deleted or suppressed, so no request is served them
+alone. Every request subtracts the base rows its own composed visible set removes, read from the
+overlay it loaded at its start, and adds its own rows above the base. For an annotation level the
+subtraction is cached under the view's deny version, which moves whenever the deleted and suppressed
+base rows change, and the rows above the base under the overlay's version, which every deny moves. A
+field's smallest and largest value are the first of the kept extremes whose row the request does not
+subtract, and where it subtracts all eight kept on a side, a walk of the grant's base rows less
+those it subtracts. A request that starts after a suppression is accepted therefore subtracts the
+suppressed rows, even where it waits for counts whose build began before the suppression. The
+figures served are the visible set's, as a walk of that set row by row would produce them, and a
+suppressed item's value moves no field's smallest or largest value from the next request. What the
+sharing does disclose, through response time, is in the residual table below.
 
 A client (the TypeScript or Python library, or a component built on it) is not a trust boundary at
 all. Every count, sample and label it receives has already been computed inside the viewer's own
@@ -273,8 +278,8 @@ complete as a response and says that the read is not ([serving](serving.md#bulk-
 
 `POST /v1/items` and `POST /v1/artifacts` answer under the properties above. Every page composes the
 visible set again, an item's labels are the clauses of its labels the viewer satisfies, as on the
-item card, and an artifact is served on its layer's terms, as on the viewport. An item's unique
-values are fields like any other, returned only on request, in that item's own row.
+item card, and an artifact is served on its layer's terms, as in the artifacts of each tile. An
+item's unique values are fields like any other, returned only on request, in that item's own row.
 
 A read of items whose filter bounds its matches through a unique field's index or an artifact's
 membership is driven from those matches ([queries](queries.md#filters-across-pages)). The bound is
@@ -338,7 +343,8 @@ taken over items the viewer may see, and a deletion or suppression applies from 
 
 A value of a `derived` vocabulary gets a row only where the viewer can see an item carrying it, and
 is never counted in `rest`. A named value the viewer may not see gets no row, exactly as a value
-that does not exist. The artifacts of a layer are listed on the terms the viewport serves them on,
+that does not exist. The artifacts of a layer are listed on the terms the artifacts of each tile are
+served on,
 tested against the visible set and never the filtered set, and an item held only by an artifact
 withheld from the viewer counts as `none`, so a withheld artifact cannot show through `rest`. A
 histogram with no range takes its edges from the smallest and largest value among the items the
@@ -361,11 +367,12 @@ which puts this route in the timing row below.
 
 Seven channels let a viewer learn something beyond the items they are entitled to see, past what
 the properties above bound. Each row states its own status: most channels are accepted for the
-reason given, and one, the per-tile timing channel, remains open.
+reason given, one, the per-tile timing channel, remains open, and the timing of an annotation
+level's correction for denied rows, in the first row, has not been ruled on.
 
 | What a viewer can learn | How | Severity | Why | Specification rows |
 |---|---|---|---|---|
-| Roughly how much of the corpus lies outside their own set; that a token, keyword, category value or unique field value they can name exists somewhere in the corpus, and coarsely how widely; and that the corpus is being written to | Response time for a viewport, a filter, a category listing, a count by group or a bulk read in either order grows with the work a request does over rows and terms the viewer cannot see, not only their own. A changed content key on a response says the corpus has changed since the viewer's last request | Low | Only the per-tile timing component of this row is open and unquantified: correlating cost with the viewer's own visible count leaves a residual nobody has bounded. A response's cost also varies with how many artifacts in view were withheld by their own label or their membership requirement, since each is found before it is tested, and the identifier route does more work for a withheld artifact than for an identifier naming nothing; a viewer needs an artifact's `tessera_id` to probe the second, and is never served one for an artifact withheld from them. On the route that serves the artifacts of each tile, the candidates a tile tests are proposed by coverings of every member, seen or not, so how long a tile takes also depends on where members the viewer cannot see lie; which artifacts the tile serves does not. Every other component (the category, text and suggestion timing variants, and the content key itself) is bounded to a quantity the viewer already possesses or is about to receive, and is accepted on that basis. A count by group reads each value's per-value record over the whole corpus where the field keeps one, as a category listing's visibility test and a suggestion's do, so its time depends on how many values exist and coarsely how widely each is held, including a value named in the request that the viewer cannot see. That is accepted, on the same basis as the listing and suggestion timing. A sampled histogram reads every entry of a band in the pieces it reads from the band, including deleted, suppressed and invisible rows, and chooses between the band and a scan of the set's own rows by comparing the band's entries with the set's rows, so its time depends on how many rows below the cut the viewer cannot see. The answer does not: both reads take the same items. The entry count is bounded by the view's rows below the cut, a coarse figure about the whole view; it is accepted on the same basis. A finer per-term version of the content key, and a timing channel over how many partitions a token reaches, are specified but not built: a deployment holds one partition today and nothing finer than the coarse content key reaches the wire | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
+| Roughly how much of the corpus lies outside their own set; that a token, keyword, category value or unique field value they can name exists somewhere in the corpus, and coarsely how widely; and that the corpus is being written to | Response time for a viewport, a filter, a category listing, a count by group or a bulk read in either order grows with the work a request does over rows and terms the viewer cannot see, not only their own. A changed content key on a response says the corpus has changed since the viewer's last request | Low | Only the per-tile timing component of this row is open and unquantified: correlating cost with the viewer's own visible count leaves a residual nobody has bounded. A response's cost also varies with how many artifacts in view were withheld by their own label or their membership requirement, since each is found before it is tested, and the identifier route does more work for a withheld artifact than for an identifier naming nothing; a viewer needs an artifact's `tessera_id` to probe the second, and is never served one for an artifact withheld from them. On the route that serves the artifacts of each tile, the candidates a tile tests are proposed by coverings of every member, seen or not, so how long a tile takes also depends on where members the viewer cannot see lie; which artifacts the tile serves does not. Not yet ruled on: a viewer whose visible set has lost any base row to a deletion or suppression has those rows subtracted from an annotation level's counts using labels the server reads for every deleted and suppressed base row in the view, under any grant. Where more than 4,096 of those rows have no label held, the request walks the viewer's whole visible set instead, which takes seconds on a corpus of GBIF's size, while the labels are read in the background. Such a viewer's response time therefore moves with how many rows were deleted or suppressed anywhere in the view since the labels were last read, including rows under keys the viewer does not hold. The channel is coarse, and it reveals the volume of deletions and suppressions in the view, never which rows. Every other component (the category, text and suggestion timing variants, and the content key itself) is bounded to a quantity the viewer already possesses or is about to receive, and is accepted on that basis. A count by group reads each value's per-value record over the whole corpus where the field keeps one, as a category listing's visibility test and a suggestion's do, so its time depends on how many values exist and coarsely how widely each is held, including a value named in the request that the viewer cannot see. That is accepted, on the same basis as the listing and suggestion timing. A sampled histogram reads every entry of a band in the pieces it reads from the band, including deleted, suppressed and invisible rows, and chooses between the band and a scan of the set's own rows by comparing the band's entries with the set's rows, so its time depends on how many rows below the cut the viewer cannot see. The answer does not: both reads take the same items. The entry count is bounded by the view's rows below the cut, a coarse figure about the whole view; it is accepted on the same basis. A finer per-term version of the content key, and a timing channel over how many partitions a token reaches, are specified but not built: a deployment holds one partition today and nothing finer than the coarse content key reaches the wire | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
 | When an item they once saw was deleted or suppressed; and, by comparing `tessera_id`s out of band, that two viewers are looking at the same item | A `tessera_id` is stable for the item's life in one bundle, so a held one stops resolving on the viewer's next request after the change. Two viewers who compare `tessera_id`s for items they can each see can tell they name the same item. An operator's unique values carry whatever structure the operator put in them | Medium | The price of a `tessera_id` a client can bookmark and share. Nothing lets a client vary the key | C6, C17 |
 | A lower bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count from below | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |

@@ -341,9 +341,15 @@ declaration and its data:
 *The form of each level. Every form answers with the same artifacts and the same counts; the form
 decides only what a request costs.*
 
-A build and a compaction choose each level's form from its memberships. A level published at a
-running service takes the form a build would give it, chosen at its first publication from the
-memberships that publication carries, and a restart replays the same choice.
+A build and a compaction choose each level's form from its memberships. An enumerated level of a
+`flat`, `stacked` or `tiered` layer published at a running service takes the form a build would
+give it, chosen at its first publication from the memberships that publication carries, and a
+restart replays the same choice. That choice sees how many artifacts the publication holds and
+whether they overlap, and never how widely their rows are spread. So a `nested`, `dag` or shape
+level published at a running service is stored by artifact until a compaction chooses its form,
+where a build might serve it from a column. So is a level holding an artifact that declares no
+members of its own, such as a label that takes its target's. The answers are the same either way;
+the speed differs.
 
 Beside a level's column, the bundle stores each artifact's members as a bitmap of the view's base
 rows, the rows the last build or compaction wrote, and a covering: at most 32 row ranges that hold
@@ -366,10 +372,10 @@ bitmaps and coverings hold base rows only. Rows above the base are read from the
 
 A growth or a publication can give an item a second artifact in a level served from a label
 column, which a label column cannot hold. Where the level's form is the server's choice, the level
-is served from a list column from then on, composed from the label column and the new rows, and
-the next compaction records the change. Where the declaration names `"column"`, the server logs a
-warning and serves the level by artifact, or from a list column where it holds no bitmap of each
-artifact's rows. The answers are the same either way.
+is served from a list column from then on, composed again as a list from the rows the server holds
+for it, and the next compaction records the change. Where the declaration names `"column"`, a level
+whose rows the server holds artifact by artifact is served by artifact, with a warning in the log,
+and any other level is served from a list column. The answers are the same either way.
 
 ```mermaid
 flowchart LR
@@ -405,10 +411,10 @@ so it costs no more at request time than an enumerated one.
 
 | Event | What changes for an artifact | What a viewer sees |
 |---|---|---|
-| Flush | A newly published point joins any attribute-predicate or shape artifact it matches, and every enumerated artifact its ingest row or a publication named. Until its flush a buffered point has no row and is in no count | Each such artifact's count, and its hull where one is declared, grow on the next request after the flush |
+| Flush | A newly published point joins any attribute-predicate or shape artifact it matches, and every enumerated artifact its ingest row or a publication named. Until its flush into a view, a point has no row in that view and is in no count there | Each such artifact's count, and its hull where one is declared, grow on the next request after the flush |
 | Merge | Segments are combined and rows renumbered within the merged span. No membership or content changes. Each held row form is rebased onto the new numbering when the merge is published | Nothing, except for a request whose row space was taken before the merge was published and which finds the held form already rebased. That request builds its own row form from the artifact store over its own row space, so its counts include every growth and publication accepted since the held form was last published. The request after it is served the published form again, so a count can fall back by those writes until they are next published. Neither answer counts a membership the store does not hold or a point the viewer cannot see |
 | Deletion of a member | At accept, the member leaves every masked count, for every membership source alike. Content generated from it stops serving at the same moment: its generating set no longer matches every member a viewer can see, so containment fails for everyone | The count falls, and any content generated from the deleted point disappears, on the next request after the deletion is accepted |
-| Compaction | The deleted member's row is dropped, and each level's column, member bitmaps and coverings are written again over the new rows. What happens to content generated from the deleted member follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
+| Compaction | The deleted member's row is dropped, and each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows. What happens to content generated from the deleted member follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
 | An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `tessera_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
 | Deletion of the artifact itself | The artifact stops being served immediately. Its record, and every edge naming it, are removed at the next fold. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |

@@ -8,6 +8,7 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - Category-typed view metadata works at a build and is refused at a running service: the create route resolves no vocabulary key.
 
 - A generating set that holds an ingested member is answered by the exact masked-count route until a fold, because the containment partition is composed from the build's postings and does not read the flushed term tiers. Correct, and slower for those sets. Composing over the tiers means recomposing at every flush; the cost is unmeasured.
+- A `nested`, `dag` or shape level published at a running service is stored by artifact until a compaction chooses its form, where a build may serve it from a column. The answers are the same; the speed differs.
 - No test publishes the same artifacts to a per-view layer through a build and through `PUT /control/layers/{name}/artifacts` and compares what is served. `crates/tessera-build/tests/scoped_layer_keys.rs` and `crates/tessera-server/tests/artifact_views.rs` each cover one path.
 
 - View metadata: a build widens an integer where a float is declared; a running service refuses it.

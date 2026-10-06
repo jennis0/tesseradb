@@ -210,7 +210,8 @@ are computed from the request's visible set in three parts:
   under an index key the session satisfies. Every session with the same grant has the same F.
 - **D**, the base rows the request's visible set leaves out of F: the rows of deleted and
   suppressed items, and of any buffered item whose labels this viewer does not satisfy.
-- **T**, every row of the visible set outside F: rows above the base, and rows the buffer adds.
+- **T**, every row of the visible set outside F: rows above the base, and the flushed rows of items
+  whose labels are still buffered, where the viewer satisfies them.
 
 The visible set is F less D, together with T, and the three never overlap, so an artifact's count
 is its count over F, less its count over D, plus its count over T. The same holds for the number
@@ -245,7 +246,8 @@ read of each level after it walks again.
 
 They are also written to the cache directory, under `figures/` and then the bundle identity, in
 files named by a digest of what they describe and checked against a SHA-256 when they are read, so
-a torn or altered file is read as a miss. A restart reads them back instead of walking. The
+a torn or altered file is read as a miss. A restart reads them back, and walks only a level it
+finds no file for. The
 directory is held under `serve.figures_disk_bytes`, the files least recently written or read
 removed first, and the directory of a bundle identity a compaction has replaced is removed.
 
@@ -253,10 +255,12 @@ D's correction is computed at the request's start from the labels and positions 
 base rows, which the server holds per view and level and writes beside the counts. It is cached per
 deny version, a number per view that moves exactly when the denied rows below the base change: at a
 deny, a lift or a compaction, and never at an ingest or a flush. A request that starts after a
-suppression is accepted therefore reads a new correction. Where more than 4,096 of the view's denied
-base rows have no label held for a level, that request walks its whole visible set instead, and the
-labels are read in the background for the requests after it. T's correction is held per session and
-generation.
+suppression is accepted therefore reads a new correction. The labels are read for every denied base
+row in the view, whatever the grant. Where a request's own D holds a denied row and more than 4,096
+of the view's denied base rows have no label held for the level, that request walks its whole
+visible set instead, and the labels are read in the background for the requests after it.
+[Security](security.md#residual-disclosure) states what that timing can reveal. T's correction is
+held per session and generation.
 
 The box of F less D is F's box unless a row D leaves out lies on one of its edges. For a layer that
 serves a box, each artifact with more than sixteen placed rows keeps its eight most extreme rows on
@@ -266,7 +270,7 @@ bitmap and the visible set.
 
 The walk is the cost a new grant pays. On GBIF's 3,495,729,729 occurrences, with 12 threads, under
 a 24 GB memory cap, starting with the bundle's pages out of memory and with the machine's
-one-minute load between 2 and 7, one fill of a level of its taxonomy layer, which serves a
+one-minute load between 2.1 and 7.4, one fill of a level of its taxonomy layer, which serves a
 centroid and a box, measured:
 
 | viewer sees | rows walked | family | genus | species |
