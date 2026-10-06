@@ -303,5 +303,19 @@ fn a_layer_labelled_with_a_conjunction_is_reached_only_by_a_principal_satisfying
     assert!(engine
         .register_layer(declaration("clusters/bad", Some("a&b|c")))
         .is_err());
+    assert!(
+        engine
+            .register_layer(declaration("clusters/edge", Some("team-y&\"uk \"")))
+            .is_err(),
+        "a quoted term with a space at an end is a term no credential holds"
+    );
+    engine
+        .register_layer(declaration("clusters/spaced", Some(" team-y & ( eu | uk ) ")))
+        .expect("whitespace between tokens means nothing");
+    let spaced = |credential: &[u8]| {
+        reachable(&engine, credential).contains(&"clusters/spaced".to_string())
+    };
+    assert!(spaced(br#"{"terms": ["team-y", "uk"]}"#));
+    assert!(!spaced(br#"{"terms": ["team-y"]}"#));
 }
 

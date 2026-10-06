@@ -574,6 +574,11 @@ fn a_views_own_visibility_is_a_list_of_access_expressions() {
         "a label is stored as its canonical text"
     );
     assert_eq!(
+        gate_of("' legal & ( finance | \"team a\" ) '"),
+        Some(vec!["legal&(finance|\"team a\")".to_string()]),
+        "whitespace outside quotes is not stored"
+    );
+    assert_eq!(
         gate_of("[\"finance\", \"legal\"]"),
         Some(vec!["finance".to_string(), "legal".to_string()]),
         "a list declares one label per element"
@@ -591,6 +596,7 @@ fn a_views_own_visibility_is_a_list_of_access_expressions() {
     refusal("[]");
     refusal("[\"public\", \"finance\"]");
     refusal("\"finance,legal\"");
+    refusal("'\"finance \"'");
 }
 
 /// `public` is the documented default and the current behaviour, so writing it records nothing
@@ -2185,7 +2191,8 @@ fn an_inline_artifact_declaring_both_members_and_excluding_is_refused() {
 
 /// **A default label is an access expression**, stored as its canonical text. A term holding a
 /// comma is written in quotes; written bare, the comma is refused, so a label never means two
-/// terms by accident.
+/// terms by accident. Whitespace outside quotes is not stored, and a quoted term with whitespace
+/// at an end is refused.
 #[test]
 fn a_default_label_is_an_access_expression() {
     let text = ACQUIRED.replace("default = \"public\"", "default = \"ir:legal&ir:analyst\"");
@@ -2207,6 +2214,16 @@ fn a_default_label_is_an_access_expression() {
     );
     let bare = ACQUIRED.replace("default = \"public\"", "default = \"ir:analyst,ir:legal\"");
     bound_err(&bare, &[]);
+    let spaced = ACQUIRED.replace("default = \"public\"", "default = ' ir:legal & \"team a\" '");
+    assert_eq!(
+        bound_ok(&spaced, &[]).views[0]
+            .point_visibility
+            .default
+            .as_deref(),
+        Some("ir:legal&\"team a\""),
+    );
+    let edge = ACQUIRED.replace("default = \"public\"", "default = 'ir:legal&\"team a \"'");
+    bound_err(&edge, &[]);
 }
 
 /// **A point's label comes from a field or from a source, never both** (§1).

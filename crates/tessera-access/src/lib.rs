@@ -2,10 +2,11 @@
 //!
 //! [`Label::parse`] is the one reader of a label, for the build and for a running service alike,
 //! and for an item's label, a view's or a layer's `visibility`, an artifact's own label and a
-//! default. It trims the text, refuses what the grammar refuses, and returns the label normalised:
-//! nested operators of one kind flattened, operands sorted and deduplicated, and absorption
-//! applied, so that `a|(a&b)` is `a`. Equal labels then have equal [`Label::canonical`] text, which
-//! is what is stored. Two equivalent labels that normalise differently stay two labels.
+//! default. It ignores whitespace outside quotes, refuses what the grammar refuses, and returns the
+//! label normalised: nested operators of one kind flattened, operands sorted and deduplicated, and
+//! absorption applied, so that `a|(a&b)` is `a`. Equal labels then have equal
+//! [`Label::canonical`] text, which is what is stored. Two equivalent labels that normalise
+//! differently stay two labels.
 //!
 //! A list of labels, where a declaration or an item carries one, admits a principal who satisfies
 //! any one of them. The expressions have no negation, so a label is monotone in the terms held:
@@ -339,7 +340,11 @@ mod tests {
         assert_eq!(declared_label("k", " red "), Ok("red".to_string()));
         assert_eq!(declared_label("k", " public "), Ok("public".to_string()));
         assert_eq!(declared_label("k", "b&(a)"), Ok("a&b".to_string()));
-        for refused in ["", "   ", "inherited", " Inherited ", "a b", "Public"] {
+        assert_eq!(
+            declared_label("k", " b & ( a | \"team a\" ) "),
+            Ok("b&(a|\"team a\")".to_string())
+        );
+        for refused in ["", "   ", "inherited", " Inherited ", "a b", "Public", "\"a \""] {
             assert!(declared_label("k", refused).is_err(), "{refused:?}");
         }
         assert!(is_inherited(" inherited "));
@@ -385,6 +390,17 @@ mod tests {
         assert!(!admits(&["a&b"], &held));
         assert!(admits(&["public"], &held));
         assert!(!admits::<&str>(&[], &held));
+    }
+
+    #[test]
+    fn a_quoted_term_with_inner_spaces_admits_the_credential_holding_it() {
+        let held = |presented: &'static [&'static str]| {
+            move |t: &str| presented.iter().filter_map(|p| held_term(p)).any(|h| h == t)
+        };
+        let label = declared_label("k", "secret & \"team a\"").unwrap();
+        assert!(admits(&[&label], &held(&["secret", " team a "])));
+        assert!(!admits(&[&label], &held(&["secret", "team  a"])));
+        assert!(!admits(&[&label], &held(&["secret"])));
     }
 
     #[test]

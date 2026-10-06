@@ -1101,6 +1101,20 @@ fn an_inline_row_stating_no_labels_is_refused_at_a_build() {
     assert!(build_config(dir.path(), Spelling::List, false, &built_config("team", false)).is_ok());
 }
 
+/// At a build, an artifact's label holding a quoted term with whitespace at an end is refused, and
+/// the same label with whitespace only between its tokens builds.
+#[test]
+fn an_artifact_label_with_a_spaced_quoted_term_is_refused_at_a_build() {
+    let config = built_config("team", false);
+    assert!(config.contains(r#"access = "red""#));
+    let edge = config.replace(r#"access = "red""#, r#"access = '"red "'"#);
+    let dir = TempDir::new().unwrap();
+    assert!(build_config(dir.path(), Spelling::List, false, &edge).is_err());
+    let spaced = config.replace(r#"access = "red""#, r#"access = ' "red" | blue '"#);
+    let dir = TempDir::new().unwrap();
+    assert!(build_config(dir.path(), Spelling::List, false, &spaced).is_ok());
+}
+
 /// At a build, a key a member file names on an open layer that reads labels, with no row in the
 /// artifact source, would be minted with no labels and is refused; a member file naming only
 /// declared keys builds.
@@ -1210,7 +1224,7 @@ fn check_refuses_an_absent_or_non_text_label_column() {
 
 /// **A label that is not an access expression is refused**, at publication and at a fill, rather
 /// than stored as no label: on an `inherited` layer that would serve the artifact to everyone the
-/// layer admits.
+/// layer admits. A quoted term with whitespace at an end is refused with it.
 #[tokio::test]
 async fn a_label_that_is_not_an_expression_is_refused_rather_than_stored_as_none() {
     let tmp = TempDir::new().unwrap();
@@ -1239,6 +1253,21 @@ async fn a_label_that_is_not_an_expression_is_refused_rather_than_stored_as_none
         .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
 
+    // A quoted term with whitespace at an end is one no credential holds.
+    for access in [json!(["red", "\"team a \""]), json!(["red&\" team a\""])] {
+        let resp = server
+            .client
+            .put(artifacts_url(&server, LAYER))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({ "artifacts": [
+                { "key": "hidden", "members": members(0..40), "access": access }
+            ] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 422, "{access}");
+    }
+
     publish(
         &server,
         LAYER,
@@ -1246,6 +1275,9 @@ async fn a_label_that_is_not_an_expression_is_refused_rather_than_stored_as_none
     )
     .await;
     let (status, _) = patch(&server, LAYER, json!([{ "key": "bare", "access": ["team a"] }])).await;
+    assert_eq!(status, 422);
+    let (status, _) =
+        patch(&server, LAYER, json!([{ "key": "bare", "access": ["\"team a \""] }])).await;
     assert_eq!(status, 422);
     tick(&server).await;
     assert_eq!(
