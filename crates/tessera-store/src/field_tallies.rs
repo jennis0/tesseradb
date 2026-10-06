@@ -180,7 +180,11 @@ pub fn derive(
     let tallied: io::Result<Groups> = pieces
         .into_par_iter()
         .map(|piece| -> io::Result<Groups> {
-            let mut groups: Groups = HashMap::new();
+            // Rows near each other in map order mostly carry the same key list, so the last one's
+            // tallies are taken without a lookup.
+            let mut index: HashMap<Vec<u32>, usize> = HashMap::new();
+            let mut lists: Vec<Vec<FieldTally>> = Vec::new();
+            let mut last: Option<(Vec<u32>, usize)> = None;
             let end = piece
                 .saturating_add(1)
                 .saturating_mul(PIECE_ROWS)
@@ -188,9 +192,18 @@ pub fn derive(
             for row in piece * PIECE_ROWS..end {
                 let entity = entity_of_row(row);
                 let keys = keys_of(entity)?;
-                let tallies = groups
-                    .entry(keys)
-                    .or_insert_with(|| vec![FieldTally::default(); fields.len()]);
+                let at = match &last {
+                    Some((held, at)) if *held == keys => *at,
+                    _ => {
+                        let at = *index.entry(keys.clone()).or_insert_with(|| {
+                            lists.push(vec![FieldTally::default(); fields.len()]);
+                            lists.len() - 1
+                        });
+                        last = Some((keys, at));
+                        at
+                    }
+                };
+                let tallies = &mut lists[at];
                 for (k, field) in fields.iter().enumerate() {
                     let value = match (&field.source, &drawn[k]) {
                         (TallySource::Held(value_of), _) => value_of(entity),
@@ -204,7 +217,11 @@ pub fn derive(
                     tallies[k].add(value, row, RESERVE);
                 }
             }
-            Ok(groups)
+            let mut lists: Vec<Option<Vec<FieldTally>>> = lists.into_iter().map(Some).collect();
+            Ok(index
+                .into_iter()
+                .map(|(keys, at)| (keys, lists[at].take().expect("one list per key list")))
+                .collect())
         })
         .try_reduce(Groups::new, |mut a, b| {
             for (keys, tallies) in b {
