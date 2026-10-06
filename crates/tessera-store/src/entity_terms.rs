@@ -331,6 +331,9 @@ impl EntityTermsWriter {
 /// One opened layer.
 pub struct EntityTerms {
     hasrow: Bitmap,
+    /// `hasrow`'s block ranks, filled on the first lookup: a rank per entity is otherwise a sum
+    /// over every container below it.
+    ranks: std::sync::OnceLock<tessera_roaring::BlockRanks>,
     offsets: Mmap,
     terms: Mmap,
     bases: Mmap,
@@ -466,6 +469,7 @@ impl EntityTerms {
         }
         Ok(Self {
             hasrow,
+            ranks: std::sync::OnceLock::new(),
             offsets,
             terms,
             bases,
@@ -501,15 +505,26 @@ impl EntityTerms {
     /// at drill-down cadence, so the explicit decode costs nothing worth the two unstated
     /// premises.
     pub fn terms_of(&self, entity: u32) -> Result<Option<Vec<u32>>> {
-        if !self.hasrow.contains(entity) {
-            return Ok(None);
-        }
-        let rank = (self.hasrow.rank(entity) - 1) as usize;
-        self.terms_at(rank).map(Some)
+        let mut out = Vec::new();
+        Ok(self.terms_into(entity, &mut out)?.then_some(out))
     }
 
-    /// The list at `rank` in this layer's has-row order.
-    fn terms_at(&self, rank: usize) -> Result<Vec<u32>> {
+    /// [`Self::terms_of`] into `out`, which is cleared first: `false` where this layer holds no
+    /// list for `entity`. For a caller asking of every entity, which reuses one buffer.
+    pub fn terms_into(&self, entity: u32, out: &mut Vec<u32>) -> Result<bool> {
+        out.clear();
+        let ranks = self
+            .ranks
+            .get_or_init(|| tessera_roaring::BlockRanks::of(&self.hasrow));
+        let Some(rank) = ranks.rank_of(&self.hasrow, entity) else {
+            return Ok(false);
+        };
+        self.terms_at(rank as usize, out)?;
+        Ok(true)
+    }
+
+    /// The list at `rank` in this layer's has-row order, appended to `out`.
+    fn terms_at(&self, rank: usize, out: &mut Vec<u32>) -> Result<()> {
         let start = self.absolute(rank);
         let end = self.absolute(rank + 1);
         // **The pair is checked here rather than at open** — see [`EntityTerms::open`] for why the
@@ -528,12 +543,14 @@ impl EntityTerms {
             });
         }
         let (start, end) = (start as usize, end as usize);
-        Ok(self.terms[start * 4..end * 4]
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| u32::from_le_bytes(*b))
-            .collect())
+        out.extend(
+            self.terms[start * 4..end * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b)),
+        );
+        Ok(())
     }
 }
 
@@ -590,7 +607,9 @@ fn for_each_list_in(
         if skip.is_some_and(|skip| skip.contains(entity)) {
             continue;
         }
-        f(entity, inputs[index].terms_at(at)?)?;
+        let mut terms = Vec::new();
+        inputs[index].terms_at(at, &mut terms)?;
+        f(entity, terms)?;
     }
 }
 

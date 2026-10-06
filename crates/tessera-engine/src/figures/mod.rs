@@ -71,7 +71,7 @@ use crate::Engine;
 
 pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity};
 pub use cache::{FiguresStats, DEFAULT_DISK_BYTES, DEFAULT_GIVE_WAY_MS};
-pub(crate) use field::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number};
+pub(crate) use field::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number, Sum};
 
 use cache::{
     Counters, DenyKey, FiguresKey, FragmentCounts, FragmentKey, LevelAddress, Tail, TailKey,

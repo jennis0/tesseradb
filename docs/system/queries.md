@@ -613,7 +613,8 @@ extreme rows on each side, or from a walk of F − D where D holds all eight.*
 **Not built yet:** a summary over a filtered set, which would need a walk of the set's values for
 each request; bins of a number or timestamp field within cells; breakdowns of keyword fields and
 of integer fields by value; a grouping of one kind inside another of the same kind, such as cells
-within cells; and counts across views. A caller asks for each such figure through `/v1/items` and computes it.
+within cells; and counts across views. A caller asks for each such figure through `/v1/items`
+and computes it.
 
 The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps
 each aggregate a component registers with `Store.setAggregate` counted over the store's current

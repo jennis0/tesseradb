@@ -7345,7 +7345,7 @@ components:
         masked_count_cache:
           type: object
           additionalProperties: false
-          required: [entries, bytes, hits, misses, evictions, fills, loads, exact, reserve_spent, not_admitted, labels_bytes, labels_bound_bytes, labels_rows_read, disk_bytes, disk_bound_bytes]
+          required: [entries, bytes, hits, misses, evictions, fills, field_fills, field_mismatches, loads, exact, reserve_spent, not_admitted, labels_bytes, labels_bound_bytes, labels_rows_read, disk_bytes, disk_bound_bytes]
           description: The per-artifact counts of levels served from a row column, and the figures of number and timestamp fields, held per grant over the grant's base rows and corrected per request. A field's figures are joined from those the base stores per set of access labels.
           properties:
             entries: { type: integer, minimum: 0 }
@@ -7356,7 +7356,15 @@ components:
             fills:
               type: integer
               minimum: 0
-              description: Walks of a grant's base rows, for a level, or for a field the base stores no figures of. A growth or a publication between folds does not walk again.
+              description: Walks of a grant's base rows for a level. A growth or a publication between folds does not walk again.
+            field_fills:
+              type: integer
+              minimum: 0
+              description: Walks of a grant's base rows for a field, which a field the base stores no figures of takes, and so does one whose stored figures disagree with the grant's base rows.
+            field_mismatches:
+              type: integer
+              minimum: 0
+              description: Field figures joined from the base's stored figures that did not cover the grant's base rows, or a deny that subtracted more than they held, each answered by a walk instead. Above zero, the stored figures and the base disagree.
             loads:
               type: integer
               minimum: 0

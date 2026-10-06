@@ -282,14 +282,12 @@ fn derive_field_tallies(
 ) -> Result<(), MaintenanceFailed> {
     let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
     for segment in segments {
-        let drawn = ctx.scalar_schema.get(&segment.view).map_or(&[][..], Vec::as_slice);
         let path = tessera_store::field_tallies::derive_view(
             &partition_dir,
             &segment.view,
             &segment.seg_id,
             segment.row_count,
-            drawn,
-            &ctx.band_schema,
+            &ctx.declared_scalars,
             &|name| tessera_filter::base_numbers(&partition_dir, name),
         )
         .map_err(failed("pass 4d (field tallies)"))?;

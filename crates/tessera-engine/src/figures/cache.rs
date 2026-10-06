@@ -356,14 +356,20 @@ pub struct FiguresStats {
     pub entries: usize,
     /// Requests waiting at this instant for another request's build of their key.
     pub waiters: u64,
-    /// Walks of a fragment's base rows.
+    /// Walks of a fragment's base rows for a level.
     pub fills: u64,
+    /// Walks of a fragment's base rows for a field, which a field the base stores no tallies of
+    /// takes, and so does one whose composed tallies do not cover the fragment's base rows.
+    pub field_fills: u64,
+    /// Composed field tallies that did not cover the fragment's base rows, or a deny that
+    /// subtracted more than they held: each answered by a walk instead.
+    pub field_mismatches: u64,
     /// Fragments' counts read back from disk rather than walked.
     pub loads: u64,
     /// Walks of a whole composed mask, taken where a level's denied-row labels are not yet held.
     pub exact: u64,
-    /// Boxes worked out from an artifact's rows because a deny reached a side its reserve could
-    /// not answer.
+    /// Boxes worked out from an artifact's rows, or a field's base rows less a deny walked,
+    /// because a deny reached a side its reserve could not answer.
     pub reserve_spent: u64,
     /// Entries, counts or reserves, larger than the whole bound: served to the request that built
     /// them and not kept.
@@ -382,6 +388,8 @@ pub struct FiguresStats {
 #[derive(Debug, Default)]
 pub(crate) struct Counters {
     pub(crate) fills: AtomicU64,
+    pub(crate) field_fills: AtomicU64,
+    pub(crate) field_mismatches: AtomicU64,
     pub(crate) loads: AtomicU64,
     pub(crate) exact: AtomicU64,
     pub(crate) spent: AtomicU64,
@@ -506,8 +514,8 @@ pub struct FiguresCache {
     /// under a bound of the same size as `slots`'.
     pub(super) fields: SingleFlightCache<FiguresKey, Held>,
     /// Per field, the newest tally of the base rows a deny leaves, which a later deny subtracting
-    /// every row that one did may read before it walks.
-    pub(super) field_left: Mutex<FxHashMap<FieldKey, FieldLeft>>,
+    /// every row that one did may read before it walks; under the corrections' bound.
+    pub(super) field_left: SingleFlightCache<FieldKey, FieldLeft>,
     /// The fields' deny corrections, per fragment and deny version.
     pub(super) field_denies: SingleFlightCache<FieldDenyKey, FieldDeny>,
     /// The fields' tails, per session and generation.
@@ -577,7 +585,7 @@ impl FiguresCache {
             denies,
             tails,
             fields,
-            field_left: Mutex::default(),
+            field_left: SingleFlightCache::new(CORRECTIONS_BYTES),
             field_denies,
             field_tails,
             labels: LabelStore {
@@ -637,6 +645,8 @@ impl FiguresCache {
             entries: stats.entries + fields.entries,
             waiters: stats.waiters_now + fields.waiters_now,
             fills: self.counters.fills.load(Ordering::Relaxed),
+            field_fills: self.counters.field_fills.load(Ordering::Relaxed),
+            field_mismatches: self.counters.field_mismatches.load(Ordering::Relaxed),
             loads: self.counters.loads.load(Ordering::Relaxed),
             exact: self.counters.exact.load(Ordering::Relaxed),
             reserve_spent: self.counters.spent.load(Ordering::Relaxed),
@@ -654,6 +664,7 @@ impl FiguresCache {
     /// Remove from the cache directory every bundle identity's entries but `identity`'s: at open,
     /// and whenever a compaction rotates the identity.
     pub(crate) fn sweep(&self, identity: [u8; 32]) {
+        self.field_left.retain_keys(|key| key.identity == identity);
         if let Some(root) = self.dir.clone() {
             self.worker
                 .submit(move || super::persist::sweep_other_identities(&root, &identity));

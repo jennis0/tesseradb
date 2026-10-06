@@ -3501,6 +3501,8 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/masked_count_cache/entries", "integer"),
     ("/masked_count_cache/evictions", "integer"),
     ("/masked_count_cache/exact", "integer"),
+    ("/masked_count_cache/field_fills", "integer"),
+    ("/masked_count_cache/field_mismatches", "integer"),
     ("/masked_count_cache/fills", "integer"),
     ("/masked_count_cache/hits", "integer"),
     ("/masked_count_cache/labels_bound_bytes", "integer"),

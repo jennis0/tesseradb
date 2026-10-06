@@ -2069,8 +2069,7 @@ fn build_bundle(
             &view.view_id,
             SEG_ID,
             rows_in_view,
-            &crate::scalar_schema_of(&args.schema),
-            &crate::band_schema_of(&args.schema),
+            &crate::declared_scalars_of(&args.schema),
             &|name| tessera_filter::base_numbers(&partition_dir, name),
         )?);
 
@@ -2091,7 +2090,7 @@ fn build_bundle(
     // Every view has been through the term images, so the postings mapping is unbusy.
     drop(postings);
 
-    // ---- 10d. the containment partitions, once for the prefix ----------------------------
+    // ---- 10e. the containment partitions, once for the prefix ----------------------------
     //
     // **Outside the view loop**, because a partition is a function of the level's records and the
     // prefix's postings and carries no view. Composing it inside the pass would write one identical

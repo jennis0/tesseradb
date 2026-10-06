@@ -300,8 +300,7 @@ enum Command {
     /// `{"by": {"field": "year", "summary": true}}` one row of a number or timestamp field's count,
     /// smallest, largest and mean over every item the token may see in the view, whatever
     /// `--filters` says; `{"by": {"layer": "clusters", "top": 10}}` the largest artifacts of a
-    /// layer; `{"cells": {"depth":
-    /// 8}}` a density surface. The read is carried across responses, and written, as `tessera
+    /// layer; `{"cells": {"depth": 8}}` a density surface. The read is carried across responses, and written, as `tessera
     /// items` carries and writes one. The table's head, with the set's total, is printed on
     /// stderr at the end.
     ///

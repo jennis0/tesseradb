@@ -27,11 +27,13 @@
 //! this one did reads the same way from those before it walks again.
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 use croaring::Bitmap;
 use tessera_cache::CacheWeight;
-pub(crate) use tessera_store::field_tallies::{keep_extreme, ExactSum, FieldTally, RESERVE};
+pub(crate) use tessera_store::field_tallies::{
+    keep_extreme, ExactSum, FieldTally, Sum, TallyMerge, RESERVE,
+};
 pub(crate) use tessera_types::scalar::Number;
 use tessera_types::TermId;
 
@@ -50,7 +52,11 @@ pub(crate) struct Held(pub(crate) FieldTally);
 
 impl CacheWeight for Held {
     fn cache_weight_bytes(&self) -> u64 {
-        (64 + 8 * ExactSum::WORDS + 32 * (self.0.low.len() + self.0.high.len())) as u64
+        let sum = match &self.0.sum {
+            Sum::Int(_) => 16,
+            Sum::Float(c) => 8 * (c.positive.words.len() + c.negative.words.len()) + 34,
+        };
+        (64 + sum + 24 * (self.0.low.len() + self.0.high.len())) as u64
     }
 }
 
@@ -77,7 +83,16 @@ impl CacheWeight for FieldDeny {
 
 /// The base rows a deny leaves, walked because it subtracted every row a side of F's tally keeps:
 /// the deny, and the tally of the rows it leaves. Held per field, the newest only.
-pub(crate) type FieldLeft = (Arc<FieldDeny>, Arc<Held>);
+pub(crate) struct FieldLeft {
+    deny: Arc<FieldDeny>,
+    walked: Arc<Held>,
+}
+
+impl CacheWeight for FieldLeft {
+    fn cache_weight_bytes(&self) -> u64 {
+        self.deny.cache_weight_bytes() + self.walked.cache_weight_bytes()
+    }
+}
 
 /// A field's figures over one request's visible set in one view.
 #[derive(Debug, Clone, PartialEq)]
@@ -89,7 +104,7 @@ pub(crate) struct FieldFigures {
     /// Those holding a finite value.
     pub(crate) count: u64,
     /// Their exact sum, which a mean is rounded from once.
-    pub(crate) sum: ExactSum,
+    pub(crate) sum: Sum,
     pub(crate) min: Option<Number>,
     pub(crate) max: Option<Number>,
 }
@@ -180,24 +195,53 @@ impl Engine {
 
         let empty = FieldTally::default();
         let base = &base.0;
-        let d = deny.as_ref().map_or(&empty, |(_, d)| &d.tally);
         let t = tail.as_deref().map_or(&empty, |t| &t.0);
-        let left = base.count - d.count;
-        let (low, high) = match (&deny, left) {
-            (_, 0) => (None, None),
-            (None, _) => (
+        // `F − D`: by subtraction, its extremes from F's reserve or a walk once it is spent; or,
+        // where the deny subtracts more than F holds, walked whole.
+        let (left, none, sum, low, high) = match &deny {
+            None => (
+                base.count,
+                base.none,
+                base.sum.clone(),
                 base.low.first().map(|v| v.0),
                 base.high.first().map(|v| v.0),
             ),
-            (Some((deny_key, deny)), _) => {
-                match (kept(&base.low, &deny.rows), kept(&base.high, &deny.rows)) {
-                    (Some(low), Some(high)) => (Some(low), Some(high)),
-                    (low, high) => {
-                        let walked =
-                            self.field_left(served, deny_key, deny, fragment, base_rows, read)?;
+            Some((deny_key, deny)) => {
+                match (
+                    base.count.checked_sub(deny.tally.count),
+                    base.none.checked_sub(deny.tally.none),
+                ) {
+                    (Some(0), Some(none)) => (0, none, Sum::default(), None, None),
+                    (Some(left), Some(none)) => {
+                        let (low, high) =
+                            match (kept(&base.low, &deny.rows), kept(&base.high, &deny.rows)) {
+                                (Some(low), Some(high)) => (Some(low), Some(high)),
+                                (low, high) => {
+                                    let walked = self.field_left(
+                                        served, deny_key, deny, fragment, base_rows, read, true,
+                                    )?;
+                                    (
+                                        low.or_else(|| kept(&walked.0.low, &deny.rows)),
+                                        high.or_else(|| kept(&walked.0.high, &deny.rows)),
+                                    )
+                                }
+                            };
+                        (left, none, base.sum.minus(&deny.tally.sum), low, high)
+                    }
+                    _ => {
+                        self.figures
+                            .counters
+                            .field_mismatches
+                            .fetch_add(1, Ordering::Relaxed);
+                        let walked = self
+                            .field_left(served, deny_key, deny, fragment, base_rows, read, false)?;
+                        let walked = &walked.0;
                         (
-                            low.or_else(|| kept(&walked.0.low, &deny.rows)),
-                            high.or_else(|| kept(&walked.0.high, &deny.rows)),
+                            walked.count,
+                            walked.none,
+                            walked.sum.clone(),
+                            walked.low.first().map(|v| v.0),
+                            walked.high.first().map(|v| v.0),
                         )
                     }
                 }
@@ -207,12 +251,11 @@ impl Engine {
             (Some(a), Some(b)) => Some(if (a < b) == smaller { a } else { b }),
             (a, b) => a.or(b),
         };
-        let count = left + t.count;
         Ok(FieldFigures {
             items: mask.visible_total(),
-            none: base.none - d.none + t.none,
-            count,
-            sum: base.sum.clone().minus(&d.sum).plus(&t.sum),
+            none: none + t.none,
+            count: left + t.count,
+            sum: sum.plus(&t.sum),
             min: pick(low, t.low.first().map(|v| v.0), true),
             max: pick(high, t.high.first().map(|v| v.0), false),
         })
@@ -240,16 +283,28 @@ impl Engine {
                     stored.and_then(|t| t.field(&key.column).map(|field| (t, field)))
                 {
                     let satisfied = served.session.satisfied();
-                    let mut tally = FieldTally::default();
+                    let mut merge = TallyMerge::of(FieldTally::default(), RESERVE);
                     for (keys, per_list) in tallies.lists.iter().zip(&tallies.tallies) {
                         let keys = keys.iter().map(|&k| TermId::new(k));
                         if crate::compose::admits(satisfied, keys) {
-                            tally = tally.merged(&per_list[field], RESERVE);
+                            merge.add(&per_list[field]);
                         }
                     }
-                    return Some(Held(tally));
+                    let tally = merge.finish();
+                    // The lists a grant satisfies hold exactly its base rows, which the fragment's
+                    // projection over the base also is; a disagreement is answered by a walk.
+                    if tally.rows == fragment.range_cardinality(0..base_rows) {
+                        return Some(Held(tally));
+                    }
+                    self.figures
+                        .counters
+                        .field_mismatches
+                        .fetch_add(1, Ordering::Relaxed);
                 }
-                self.figures.counters.fills.fetch_add(1, Ordering::Relaxed);
+                self.figures
+                    .counters
+                    .field_fills
+                    .fetch_add(1, Ordering::Relaxed);
                 walk(fragment, None, base_rows, read, build, &mut failed).map(Held)
             },
         );
@@ -259,9 +314,11 @@ impl Engine {
         }
     }
 
-    /// The tally of the fragment's base rows `deny` leaves: the newest one walked for an earlier
-    /// deny where `deny` subtracts every row that one did and a value it kept on each side
-    /// survives, and otherwise walked, once per deny version.
+    /// The tally of the fragment's base rows `deny` leaves, walked once per deny version. With
+    /// `extremes`, only its extremes are wanted, and the newest tally walked for an earlier deny
+    /// serves where `deny` subtracts every row that one did and a value it kept on each side
+    /// survives.
+    #[allow(clippy::too_many_arguments)]
     fn field_left(
         &self,
         served: &ServedView<'_>,
@@ -270,20 +327,18 @@ impl Engine {
         fragment: &Bitmap,
         base_rows: u32,
         read: &dyn FieldRead,
+        extremes: bool,
     ) -> Result<Arc<Held>> {
-        let earlier = self
-            .figures
-            .field_left
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&deny_key.field)
-            .cloned();
-        if let Some((walked_for, walked)) = earlier {
-            let reusable = walked_for.rows.is_subset(&deny.rows)
-                && kept(&walked.0.low, &deny.rows).is_some()
-                && kept(&walked.0.high, &deny.rows).is_some();
-            if reusable {
-                return Ok(walked);
+        if extremes {
+            if let tessera_cache::Peek::Ready(earlier) =
+                self.figures.field_left.peek(&deny_key.field)
+            {
+                let reusable = earlier.deny.rows.is_subset(&deny.rows)
+                    && kept(&earlier.walked.0.low, &deny.rows).is_some()
+                    && kept(&earlier.walked.0.high, &deny.rows).is_some();
+                if reusable {
+                    return Ok(Arc::clone(&earlier.walked));
+                }
             }
         }
         let mut failed = None;
@@ -309,14 +364,14 @@ impl Engine {
             (_, Some(e)) => return Err(e),
             (held, None) => held.map_err(super::wait_error)?,
         };
-        self.figures
+        self.figures.field_left.evict(&deny_key.field);
+        let _ = self
+            .figures
             .field_left
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                deny_key.field.clone(),
-                (Arc::clone(deny), Arc::clone(&walked)),
-            );
+            .get_or_derive(deny_key.field.clone(), None, |_| FieldLeft {
+                deny: Arc::clone(deny),
+                walked: Arc::clone(&walked),
+            });
         Ok(walked)
     }
 }
@@ -332,7 +387,7 @@ fn walk(
     build: &Build<'_>,
     failed: &mut Option<EngineError>,
 ) -> Option<FieldTally> {
-    let mut tally = FieldTally::default();
+    let mut tally = TallyMerge::of(FieldTally::default(), RESERVE);
     let mut at = 0u32;
     while at < base_rows {
         let end = at.saturating_add(FILL_ROWS).min(base_rows);
@@ -345,7 +400,7 @@ fn walk(
             continue;
         }
         match read.tally(&rows, RESERVE) {
-            Ok(piece) => tally = tally.merged(&piece, RESERVE),
+            Ok(piece) => tally.add(&piece),
             Err(e) => {
                 *failed = Some(e);
                 return None;
@@ -355,5 +410,5 @@ fn walk(
             return None;
         }
     }
-    Some(tally)
+    Some(tally.finish())
 }

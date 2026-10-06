@@ -2049,8 +2049,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &view.view_id,
         SEG_ID,
         n as u32,
-        &scalar_schema,
-        &band_schema,
+        &declared_scalars_of(&args.schema),
         &|name| tessera_filter::base_numbers(&partition_dir, name),
     )?);
 
@@ -2126,7 +2125,7 @@ fn spilled_column_names(
 /// One derivation, shared by both build implementations, so the two cannot come to disagree about
 /// a column's width — which would produce two bundles the byte-equality oracle calls different
 /// for a reason that is not the entity assignment it exists to check.
-pub(crate) fn scalar_schema_of(
+fn scalar_schema_of(
     schema: &crate::config::Schema,
 ) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
     // Render columns only — the segment's tail and the assembly's render lanes must name the same
@@ -2136,6 +2135,25 @@ pub(crate) fn scalar_schema_of(
         .iter()
         .filter(|a| a.render)
         .map(|a| (a.name.clone(), a.ty))
+        .collect()
+}
+
+/// The schema's attributes as `MANIFEST.declared_scalars` records them, in declaration order.
+pub(crate) fn declared_scalars_of(schema: &crate::config::Schema) -> Vec<DeclaredScalar> {
+    schema
+        .attributes
+        .iter()
+        .map(|a| DeclaredScalar {
+            name: a.name.clone(),
+            arrow_type: a.ty,
+            vocabulary: a.vocabulary.clone(),
+            // Resolved at the schema parse, so what a bundle records is the identity the build
+            // actually indexed with rather than the name a schema asked for.
+            analyser: a.analyser.clone(),
+            index: a.index,
+            render: a.render,
+            unique: a.unique,
+        })
         .collect()
 }
 
@@ -2162,9 +2180,7 @@ pub(crate) fn band_copied_columns(
 }
 
 /// The columns the identity bands copy beside the render columns, in declared order.
-pub(crate) fn band_schema_of(
-    schema: &crate::config::Schema,
-) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
     band_copied_columns(schema)
         .map(|(_, a)| (a.name.clone(), a.ty))
         .collect()
@@ -2294,22 +2310,7 @@ fn write_manifests(
         // scalar vector in this order, and flush, merge and the fold all take their writer schema
         // from it. Reordering the schema file therefore reorders every segment built after it,
         // which is why the compilation preserves declaration order rather than sorting by name.
-        declared_scalars: args
-            .schema
-            .attributes
-            .iter()
-            .map(|a| DeclaredScalar {
-                name: a.name.clone(),
-                arrow_type: a.ty,
-                vocabulary: a.vocabulary.clone(),
-                // Resolved at the schema parse, so what a bundle records is the identity the build
-                // actually indexed with rather than the name a schema asked for.
-                analyser: a.analyser.clone(),
-                index: a.index,
-                render: a.render,
-                unique: a.unique,
-            })
-            .collect(),
+        declared_scalars: declared_scalars_of(&args.schema),
         // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
         // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
         // — which are under a digest.

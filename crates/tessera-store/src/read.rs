@@ -1958,6 +1958,27 @@ impl ScalarSlice<'_> {
         })
     }
 
+    /// Row `local`'s slot as a number, where the column holds numbers and the slot exists:
+    /// what a field's figures are tallied from. Presence is the caller's to ask.
+    #[inline]
+    pub fn number_at(&self, local: usize) -> Option<tessera_types::scalar::Number> {
+        use tessera_types::scalar::Number;
+        let int = |x: i128| Some(Number::Int(x));
+        match self {
+            ScalarSlice::U8(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::U16(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::U32(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::U64(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::I8(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::I16(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::I32(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::I64(s) | ScalarSlice::TimestampUs(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::F32(s) => Some(Number::Float(f64::from(*s.get(local)?))),
+            ScalarSlice::F64(s) => Some(Number::Float(*s.get(local)?)),
+            ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => None,
+        }
+    }
+
     /// The stored type's name, for a diagnostic that has to say what it found. Deliberately the
     /// same spelling `ScalarType::arrow_type_name` uses, so a mismatch message names the two sides
     /// in one vocabulary rather than making a reader translate between them.

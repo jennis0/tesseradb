@@ -183,26 +183,62 @@ impl ExactSum {
         Some(if negative { -whole } else { whole })
     }
 
-    /// The words as they are written to disk: the positive magnitude, then the negative.
-    pub fn words(&self) -> impl Iterator<Item = u64> + '_ {
-        self.positive.iter().chain(&self.negative).copied()
+    /// This sum as it is held between additions: each magnitude's words from its first non-zero
+    /// one to its last.
+    pub fn compact(&self) -> CompactSum {
+        let trim = |words: &[u64; LIMBS]| {
+            let first = words.iter().position(|&w| w != 0).unwrap_or(0);
+            let last = words.iter().rposition(|&w| w != 0).map_or(first, |l| l + 1);
+            Trimmed {
+                first: first as u8,
+                words: words[first..last].into(),
+            }
+        };
+        CompactSum {
+            positive: trim(&self.positive),
+            negative: trim(&self.negative),
+        }
+    }
+}
+
+/// One magnitude's non-zero span: its first word's position and the words from it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Trimmed {
+    pub first: u8,
+    pub words: Box<[u64]>,
+}
+
+/// An [`ExactSum`] as it is held between additions and written to disk: a sum of values of one
+/// magnitude spans a few words of the 34 each magnitude has.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompactSum {
+    pub positive: Trimmed,
+    pub negative: Trimmed,
+}
+
+impl CompactSum {
+    /// The sum, to add to or to divide.
+    pub fn expand(&self) -> ExactSum {
+        let mut out = ExactSum::default();
+        for (trimmed, words) in [
+            (&self.positive, &mut out.positive),
+            (&self.negative, &mut out.negative),
+        ] {
+            let first = usize::from(trimmed.first);
+            words[first..first + trimmed.words.len()].copy_from_slice(&trimmed.words);
+        }
+        out
     }
 
-    /// The sum written as [`Self::words`] gives it, where there are as many words.
-    pub fn of_words(words: &[u64]) -> Option<ExactSum> {
-        let (positive, negative) = words.split_at_checked(LIMBS)?;
-        Some(ExactSum {
-            positive: positive.try_into().ok()?,
-            negative: negative.try_into().ok()?,
-        })
+    /// Whether `first` and a span of `len` words fit a magnitude.
+    pub fn fits(first: u8, len: usize) -> bool {
+        usize::from(first) + len <= LIMBS
     }
-
-    /// How many words [`Self::words`] gives.
-    pub const WORDS: usize = 2 * LIMBS;
 }
 
 /// `words · 2^scale`, with `sticky` saying whether something smaller than its lowest bit was left
-/// out, to the nearest `f64` with a tie to even.
+/// out, to the nearest `f64` with a tie to even. `scale` is below −1074, so the lowest bit kept is
+/// above the lowest bit held and a bit below it decides the rounding.
 fn rounded(words: &[u64], sticky: bool, scale: i32) -> f64 {
     let Some(top) = (0..words.len() * 64)
         .rev()
@@ -212,12 +248,7 @@ fn rounded(words: &[u64], sticky: bool, scale: i32) -> f64 {
     };
     let bit = |b: usize| words[b / 64] >> (b % 64) & 1 == 1;
     // The lowest bit kept: 53 bits below the top, and none below 2^-1074.
-    let lowest = (top as i64 - 52).max(-1074 - i64::from(scale));
-    if lowest <= 0 {
-        let kept = (0..=top).fold(0u64, |m, b| m | u64::from(bit(b)) << b);
-        return scaled(kept as f64, scale);
-    }
-    let lowest = lowest as usize;
+    let lowest = (top as i64 - 52).max(-1074 - i64::from(scale)) as usize;
     let mut kept = (lowest..=top).fold(0u64, |m, b| m | u64::from(bit(b)) << (b - lowest));
     let half = bit(lowest - 1);
     let below = sticky || (0..lowest - 1).any(bit);

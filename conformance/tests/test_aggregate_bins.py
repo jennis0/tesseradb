@@ -57,6 +57,9 @@ from oracle.wire import split_aggregate_frames, split_items_frames
 BUILT = list(range(fx.N_BUILT))
 INGESTED = list(range(fx.N_BUILT, fx.N_ITEMS))
 
+#: Items every principal sees.
+PC = [i for i in range(fx.N_ITEMS) if fx.access_of(i) == "pc"][:2]
+
 #: Items only the `everyone` principal sees, which hold every field's extremes.
 PA = [i for i in range(fx.N_ITEMS) if fx.access_of(i) == "pa"][:12]
 
@@ -130,9 +133,16 @@ COLUMNS = [
         lambda i: None if i % 23 == 0 else 2**63 + _h("big", i) % 10**15,
         render=True,
     ),
+    # Two instants before the epoch, held by two items every principal sees, so each one's mean
+    # is the tie -2.5 microseconds.
+    Column(
+        "tie", "timestamp_us", pa.timestamp("us"),
+        lambda i: {PC[0]: -3, PC[1]: -2}.get(i),
+        index=True,
+    ),
 ]
 BY_NAME = {c.name: c for c in COLUMNS}
-TIMESTAMPS = {"seen", "when"}
+TIMESTAMPS = {"seen", "when", "tie"}
 INTEGERS = {"rank", "big"}
 EDGE_TYPES = {
     "score": pa.float64(),
@@ -141,6 +151,7 @@ EDGE_TYPES = {
     "big": pa.uint64(),
     "seen": pa.timestamp("us", tz="UTC"),
     "when": pa.timestamp("us", tz="UTC"),
+    "tie": pa.timestamp("us", tz="UTC"),
 }
 
 FILTERS = {
@@ -399,7 +410,7 @@ def test_default_bins_are_the_oracles_and_hold_still(deployment, principal, colu
             assert held is None or served == held, f"{what}: the edges moved"
             held = served
     # The extremes, held by items this principal cannot see, lie outside its edges.
-    if principal != "everyone" and column != "big":
+    if principal != "everyone" and column not in ("big", "tie"):
         low = PA[{"score": 0, "rank": 2, "weight": 4, "seen": 6, "when": 8}[column]]
         high = PA[PA.index(low) + 1]
         value = BY_NAME[column].value
@@ -729,6 +740,14 @@ def changing(tmp_path):
         yield d
     finally:
         d.stop()
+
+
+def test_a_timestamps_mean_is_its_nearest_microsecond_a_tie_to_even(deployment):
+    """The two instants -3 and -2 microseconds have the mean -2.5, served as -2."""
+    for principal, grants in fx.PRINCIPALS.items():
+        token = deployment.server.authorise(list(grants))["token"]
+        _, row = read_summary(deployment.server, token, "tie")
+        assert (row["min"], row["max"], row["mean"]) == (-3, -2, -2), (principal, row)
 
 
 def test_the_figures_are_the_oracles_through_every_change(changing):

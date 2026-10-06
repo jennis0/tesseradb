@@ -2064,7 +2064,7 @@ fn a_grant_gets_the_figures_of_the_key_lists_it_satisfies() {
             );
         }
     }
-    assert_eq!(fx.engine.figures_stats().fills, 0, "no base row was walked");
+    assert_eq!(fx.engine.figures_stats().field_fills, 0, "no base row was walked");
 }
 
 /// **A summary that cannot be served is refused**: a cell level, a category, a bool and a field
@@ -2291,7 +2291,7 @@ fn the_figures_are_the_oracles_through_every_change() {
     {
         let engine = engine_at(tmp.path(), &root, 3600);
         check(&engine, &items, &fates, "built");
-        assert_eq!(engine.figures_stats().fills, 0, "the build's tallies are composed, not walked");
+        assert_eq!(engine.figures_stats().field_fills, 0, "the build's tallies are composed, not walked");
 
         // Thirty new items, every third visible to the subset viewer, two holding new extremes.
         let mut added = Vec::new();
@@ -2429,7 +2429,7 @@ fn the_figures_are_the_oracles_through_every_change() {
         // More items than a side's reserve holds, from the low end of `rank`, drawn, and the
         // high end of `seen`, indexed alone: those sides are walked again.
         let spent = engine.figures_stats().reserve_spent;
-        let by = |value: &dyn Fn(&Item) -> Option<i128>, low: bool| -> Vec<u64> {
+        let by = |value: &dyn Fn(&Item) -> Option<i128>, low: bool, n: usize| -> Vec<u64> {
             let mut held: Vec<(i128, u64)> = items
                 .iter()
                 .filter(|i| !fates.get(&i.source).is_some_and(|f| f.suppressed))
@@ -2439,12 +2439,23 @@ fn the_figures_are_the_oracles_through_every_change() {
             if !low {
                 held.reverse();
             }
-            held.iter().take(20).map(|&(_, source)| source).collect()
+            held.iter().take(n).map(|&(_, source)| source).collect()
         };
-        let many: Vec<u64> = by(&|i| i.rank.map(i128::from), true)
-            .into_iter()
-            .chain(by(&|i| i.seen.map(i128::from), false))
+        let lowest = by(&|i| i.rank.map(i128::from), true, 28);
+        let many: Vec<u64> = lowest[..20]
+            .iter()
+            .copied()
+            .chain(by(&|i| i.seen.map(i128::from), false, 20))
             .collect();
+        // Three of the eight the broad viewer's walk will keep, which the subset viewer cannot see,
+        // so they leave its figures as they are.
+        let more: Vec<u64> = lowest[20..]
+            .iter()
+            .copied()
+            .filter(|&source| !items.iter().any(|i| i.source == source && i.subset))
+            .take(3)
+            .collect();
+        assert_eq!(more.len(), 3);
         change(&engine, &many, ChangeOp::Suppress);
         for &source in &many {
             fates.entry(source).or_default().suppressed = true;
@@ -2454,6 +2465,23 @@ fn the_figures_are_the_oracles_through_every_change() {
             engine.figures_stats().reserve_spent > spent,
             "a side was walked again"
         );
+        // A deny that subtracts every row that one did and three of the values its walk kept:
+        // the walk is read again rather than taken again, and the answer is still the oracle's.
+        let spent = engine.figures_stats().reserve_spent;
+        change(&engine, &more, ChangeOp::Suppress);
+        for &source in &more {
+            fates.entry(source).or_default().suppressed = true;
+        }
+        check(&engine, &items, &fates, "suppressed further, past the reserve");
+        assert_eq!(
+            engine.figures_stats().reserve_spent,
+            spent,
+            "the walk was read again"
+        );
+        change(&engine, &more, ChangeOp::Unsuppress);
+        for &source in &more {
+            fates.entry(source).or_default().suppressed = false;
+        }
         change(&engine, &many, ChangeOp::Unsuppress);
         for &source in &many {
             fates.entry(source).or_default().suppressed = false;
@@ -2479,9 +2507,10 @@ fn the_figures_are_the_oracles_through_every_change() {
 
         fold(&engine);
         check(&engine, &items, &fates, "compacted");
-        assert_eq!(engine.figures_stats().fills, 0, "the fold's tallies are composed, not walked");
+        assert_eq!(engine.figures_stats().field_fills, 0, "the fold's tallies are composed, not walked");
     }
     let engine = engine_at(tmp.path(), &root, 3600);
     check(&engine, &items, &fates, "restarted");
-    assert_eq!(engine.figures_stats().fills, 0, "nothing was walked after the restart");
+    assert_eq!(engine.figures_stats().field_mismatches, 0);
+    assert_eq!(engine.figures_stats().field_fills, 0, "nothing was walked after the restart");
 }

@@ -59,7 +59,7 @@ use super::values::pieces;
 use super::{AggregateRefused, AggregateTimings};
 use crate::cells::CellSet;
 use crate::error::{EngineError, Result};
-use crate::figures::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number};
+use crate::figures::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number, Sum};
 use crate::filter::Scalar;
 use crate::Generation;
 
@@ -769,7 +769,7 @@ trait Num: Copy + PartialOrd + Send + Sync {
     fn number(self) -> Number;
     fn add_to(sum: &mut Self::Sum, x: Self);
     fn joined(sum: Self::Sum, other: Self::Sum) -> Self::Sum;
-    fn exact(sum: Self::Sum) -> ExactSum;
+    fn exact(sum: Self::Sum) -> Sum;
 
     fn of_record(value: &RecordValue) -> Option<Self> {
         Some(match *value {
@@ -826,10 +826,8 @@ impl Num for i128 {
     fn joined(sum: i128, other: i128) -> i128 {
         sum + other
     }
-    fn exact(sum: i128) -> ExactSum {
-        let mut exact = ExactSum::default();
-        exact.add_int(sum);
-        exact
+    fn exact(sum: i128) -> Sum {
+        Sum::Int(sum)
     }
 }
 
@@ -853,8 +851,8 @@ impl Num for f64 {
     fn joined(sum: ExactSum, other: ExactSum) -> ExactSum {
         sum.plus(&other)
     }
-    fn exact(sum: ExactSum) -> ExactSum {
-        sum
+    fn exact(sum: ExactSum) -> Sum {
+        Sum::Float(sum.compact())
     }
 }
 
@@ -869,6 +867,8 @@ trait Tally<K>: Send {
 /// each with where it was read.
 struct Summary<K: Num> {
     keep: usize,
+    /// Values seen, finite or not.
+    seen: u64,
     count: u64,
     sum: K::Sum,
     low: Vec<(K, u32)>,
@@ -879,6 +879,7 @@ impl<K: Num> Summary<K> {
     fn new(keep: usize) -> Self {
         Summary {
             keep,
+            seen: 0,
             count: 0,
             sum: K::Sum::default(),
             low: Vec::new(),
@@ -889,6 +890,7 @@ impl<K: Num> Summary<K> {
     fn finish(self, none: u64) -> FieldTally {
         let side = |held: Vec<(K, u32)>| held.into_iter().map(|(x, at)| (x.number(), at)).collect();
         FieldTally {
+            rows: self.seen + none,
             none,
             count: self.count,
             sum: K::exact(self.sum),
@@ -901,6 +903,7 @@ impl<K: Num> Summary<K> {
 impl<K: Num> Tally<K> for Summary<K> {
     #[inline]
     fn add(&mut self, x: K, at: u32) {
+        self.seen += 1;
         if !x.finite() {
             return;
         }
@@ -913,6 +916,7 @@ impl<K: Num> Tally<K> for Summary<K> {
     }
 
     fn merge(mut self, other: Self) -> Self {
+        self.seen += other.seen;
         self.count += other.count;
         self.sum = K::joined(self.sum, other.sum);
         for value in other.low {
