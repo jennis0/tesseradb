@@ -291,6 +291,8 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/views/s0/segments/seg-0/bands.bin",
         // The view's term images (`tessera_store::term_images`), one file per view with rows.
         "partitions/default/term-images/term-images-000000-000.timg",
+        // The view's field tallies (`tessera_store::field_tallies`).
+        "partitions/default/views/s0/field-tallies.bin",
     ] {
         assert!(
             bundle.manifest.files.contains_key(rel),
@@ -300,7 +302,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        19,
+        20,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 

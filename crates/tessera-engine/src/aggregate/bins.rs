@@ -4,8 +4,10 @@
 //! edges around the smallest and largest value among the items the viewer may see in the view.
 //! That default is taken over the whole visible set and never over the filtered set, the
 //! reference or a region, so the edges hold still while a filter or the viewport changes. It is
-//! taken inside the visible set, so an item the viewer may not see moves no edge. The edges are
-//! drawn once: a histogram is served in one page, whatever the page's limits.
+//! read from the field's figures ([`crate::figures::FieldFigures`]), which are exact over the
+//! visible set whether or not the counts are sampled, so an item the viewer may not see moves no
+//! edge and no visible value lies outside the bins. The edges are drawn once: a histogram is
+//! served in one page, whatever the page's limits.
 //!
 //! A bin holds the values from its lower edge up to but not including its upper edge, and the
 //! last bin also holds its upper edge. `rest` counts the items whose value lies in no bin: outside
@@ -30,7 +32,7 @@
 //! set's composed size and the sample is drawn from the set's own rows, which are inside the
 //! visible set, so an item the viewer may not see neither enters the sample nor moves `N`. Where
 //! `N <= s` every item is counted and nothing is scaled. The reference is sampled the same way,
-//! at its own cut. Default edges are drawn from the visible set's sample, at its own cut.
+//! at its own cut.
 //!
 //! The items below a cut are band `band_below(cut)` of each segment's identity bands
 //! ([`tessera_store::bands`]) intersected with the set. Each piece of rows is read either from the
@@ -57,20 +59,30 @@ use super::values::pieces;
 use super::{AggregateRefused, AggregateTimings};
 use crate::cells::CellSet;
 use crate::error::{EngineError, Result};
+use crate::figures::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number, Sum};
 use crate::filter::Scalar;
 use crate::Generation;
 
 /// Entity ids one piece of a pass over a field's per-entity values spans.
 const ENTITY_PIECE: u64 = 1 << 20;
 
-/// A number or timestamp field as one request bins it.
-pub(super) struct Bins {
+/// A number or timestamp field resolved in one request's generation, and where its values are
+/// read.
+pub(super) struct Numbers {
     column: String,
     kind: Kind,
     /// The field's per-entity values are held.
     held: bool,
     /// The field is drawn in every view's rows.
     drawn: bool,
+}
+
+/// A number or timestamp field as one request bins it.
+pub(super) struct Bins {
+    field: Numbers,
+    /// How the values are compared with the edges: the field's kind, or float where an integer
+    /// field's range has a fractional bound.
+    kind: Kind,
     bins: u32,
     range: Option<(Scalar, Scalar)>,
     /// The sample size, where one was asked for.
@@ -145,6 +157,65 @@ impl Edges {
     }
 }
 
+impl Numbers {
+    /// The number or timestamp field `column` names, where its values can be read. `summary` says
+    /// which grouping asks, for the refusal.
+    pub(super) fn of(generation: &Generation, column: &str, summary: bool) -> Result<Numbers> {
+        let manifest = &generation.bundle.manifest;
+        let refused = |why: AggregateRefused| EngineError::AggregateRefused(why);
+        let unfit = || match summary {
+            true => refused(AggregateRefused::NotSummarisable(column.to_string())),
+            false => refused(AggregateRefused::NotBinnable(column.to_string())),
+        };
+        // A category is stored as integer codes, which are not its values.
+        let (ty, vocabulary) = match manifest.declared_scalars.iter().find(|s| s.name == column) {
+            Some(scalar) => (scalar.arrow_type, scalar.vocabulary.is_some()),
+            None => {
+                let (name, view) = column.split_once(crate::filter::PIN).ok_or_else(unfit)?;
+                let family = manifest
+                    .scoped_scalars()
+                    .into_iter()
+                    .find(|f| f.name == name && f.views.iter().any(|v| v == view))
+                    .ok_or_else(unfit)?;
+                (family.arrow_type, family.vocabulary.is_some())
+            }
+        };
+        if ty == ScalarType::Bool && !summary {
+            return Err(refused(AggregateRefused::BinsOnBool(column.to_string())));
+        }
+        let kind = Kind::of(ty).filter(|_| !vocabulary).ok_or_else(unfit)?;
+        let held = generation.filter_columns.value_layers(column).is_some();
+        let drawn = manifest
+            .render_scalars()
+            .any(|scalar| scalar.name == column);
+        if !held && !drawn {
+            return Err(unfit());
+        }
+        Ok(Numbers {
+            column: column.to_string(),
+            kind,
+            held,
+            drawn,
+        })
+    }
+
+    pub(super) fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// The field's figures over every item this viewer may see in the view, whatever the
+    /// request's filters and region say.
+    pub(super) fn figures(&self, cx: &Cx<'_>) -> Result<FieldFigures> {
+        cx.engine.field_figures(
+            &cx.open.served,
+            &cx.open.mask,
+            &self.column,
+            self.kind as u8,
+            &Reader { field: self, cx },
+        )
+    }
+}
+
 impl Bins {
     /// The field `column` names, where it can be binned.
     pub(super) fn of(
@@ -154,46 +225,14 @@ impl Bins {
         range: Option<(Scalar, Scalar)>,
         sample: Option<u64>,
     ) -> Result<Bins> {
-        let manifest = &generation.bundle.manifest;
-        let not_binnable =
-            || EngineError::AggregateRefused(AggregateRefused::NotBinnable(column.to_string()));
-        // A category is stored as integer codes, which are not its values.
-        let (ty, vocabulary) = match manifest.declared_scalars.iter().find(|s| s.name == column) {
-            Some(scalar) => (scalar.arrow_type, scalar.vocabulary.is_some()),
-            None => {
-                let (name, view) = column
-                    .split_once(crate::filter::PIN)
-                    .ok_or_else(not_binnable)?;
-                let family = manifest
-                    .scoped_scalars()
-                    .into_iter()
-                    .find(|f| f.name == name && f.views.iter().any(|v| v == view))
-                    .ok_or_else(not_binnable)?;
-                (family.arrow_type, family.vocabulary.is_some())
-            }
-        };
-        if ty == ScalarType::Bool {
-            return Err(EngineError::AggregateRefused(AggregateRefused::BinsOnBool(
-                column.to_string(),
-            )));
-        }
-        let kind = Kind::of(ty)
-            .filter(|_| !vocabulary)
-            .ok_or_else(not_binnable)?;
-        let held = generation.filter_columns.value_layers(column).is_some();
-        let drawn = manifest
-            .render_scalars()
-            .any(|scalar| scalar.name == column);
-        if !held && !drawn {
-            return Err(not_binnable());
-        }
+        let field = Numbers::of(generation, column, false)?;
         let whole = |bound: Scalar| match bound {
             Scalar::Int(i) => Some(Scalar::Int(i)),
             Scalar::Float(f) if f.fract() == 0.0 => Some(Scalar::Int(f as i128)),
             Scalar::Float(_) => None,
         };
-        let (kind, range) = match (kind, range) {
-            (Kind::Float, range) | (_, range @ None) => (kind, range),
+        let (kind, range) = match (field.kind, range) {
+            (Kind::Float, range) | (_, range @ None) => (field.kind, range),
             (kind, Some((lower, upper))) => match (whole(lower), whole(upper)) {
                 (Some(lower), Some(upper)) => (kind, Some((lower, upper))),
                 (_, _) if kind == Kind::Timestamp => {
@@ -206,10 +245,8 @@ impl Bins {
             },
         };
         Ok(Bins {
-            column: column.to_string(),
+            field,
             kind,
-            held,
-            drawn,
             bins,
             range,
             sample,
@@ -228,7 +265,7 @@ impl Bins {
 
     /// Whether counting this field needs a set's rows rather than its entities.
     pub(super) fn wants_rows(&self) -> bool {
-        !self.held
+        !self.field.held
     }
 
     /// The table's groups under `cx`: its bins, then `rest` and `none`, each with its counts in
@@ -236,7 +273,7 @@ impl Bins {
     /// and never carried to another.
     pub(super) fn groups(&self, cx: &Cx<'_>, timings: &mut AggregateTimings) -> Result<Groups> {
         let counting = std::time::Instant::now();
-        let (edges, edges_sampled) = self.edges(cx, timings)?;
+        let edges = self.edges(cx)?;
         let (set, counted) = self.counts(cx, &cx.sets.set, &edges, timings)?;
         let (reference, reference_counted) = match &cx.sets.reference {
             Some(reference) => {
@@ -249,7 +286,6 @@ impl Bins {
             sampled: counted.sampled || reference_counted.is_some_and(|r| r.sampled),
             items: counted.items,
             reference_items: reference_counted.map(|r| r.items),
-            edges_sampled,
         });
         timings.count_ns += counting.elapsed().as_nanos() as u64;
         timings.entities_crossed +=
@@ -277,50 +313,41 @@ impl Bins {
         })
     }
 
-    /// The request's range cut into equal bins, or readable edges around the values of every item
-    /// this viewer may see in the view, and whether those values were a sample.
-    fn edges(&self, cx: &Cx<'_>, timings: &mut AggregateTimings) -> Result<(Edges, bool)> {
+    /// The request's range cut into equal bins, or readable edges around the smallest and largest
+    /// value of every item this viewer may see in the view.
+    fn edges(&self, cx: &Cx<'_>) -> Result<Edges> {
         let n = self.bins;
         if let Some((lower, upper)) = self.range {
-            let edges = match self.kind {
+            return Ok(match self.kind {
                 Kind::Float => Edges::Floats(equal_floats(
                     tessera_filter::as_f64(lower),
                     tessera_filter::as_f64(upper),
                     n,
                 )),
                 kind => Edges::Ints(kind.clamp(equal_ints(int_of(lower), int_of(upper), n))),
-            };
-            return Ok((edges, false));
+            });
         }
-        // The visible set, which no filter or region narrows.
-        let built;
-        let visible = if cx.sets.set.is_whole() {
-            &cx.sets.set
-        } else if let Some(reference) = cx.sets.reference.as_ref().filter(|r| r.is_whole()) {
-            reference
-        } else {
-            built = Set::whole(cx.open);
-            &built
-        };
-        // With a sample size, the visible set's sample, at the visible set's own cut.
-        if self.kind == Kind::Float {
-            let (extremes, _, counted) = self.tally(cx, visible, Extremes::<f64>::default, timings)?;
-            let edges = Edges::Floats(
-                extremes
-                    .span
-                    .map_or_else(Vec::new, |(min, max)| readable_floats(min, max, n)),
-            );
-            return Ok((edges, counted.sampled));
-        }
-        let (extremes, _, counted) = self.tally(cx, visible, Extremes::<i128>::default, timings)?;
-        let edges = Edges::Ints(match extremes.span {
-            None => Vec::new(),
-            Some((min, max)) if self.kind == Kind::Timestamp => {
-                readable_times(min as i64, max as i64, n)
+        let figures = self.field.figures(cx)?;
+        let span = figures.min.zip(figures.max);
+        Ok(match (self.kind, span) {
+            (Kind::Float, None) => Edges::Floats(Vec::new()),
+            (_, None) => Edges::Ints(Vec::new()),
+            (Kind::Float, Some((min, max))) => {
+                Edges::Floats(readable_floats(min.as_f64(), max.as_f64(), n))
             }
-            Some((min, max)) => self.kind.clamp(readable_ints(min, max, n)),
-        });
-        Ok((edges, counted.sampled))
+            (Kind::Timestamp, Some((Number::Int(min), Number::Int(max)))) => {
+                Edges::Ints(readable_times(min as i64, max as i64, n))
+            }
+            (kind, Some((Number::Int(min), Number::Int(max)))) => {
+                Edges::Ints(kind.clamp(readable_ints(min, max, n)))
+            }
+            (_, Some(_)) => {
+                return Err(EngineError::Malformed(format!(
+                    "field '{}' has float figures but integer bins",
+                    self.field.column
+                )))
+            }
+        })
     }
 
     /// How many items of `set` fall in each bin of `edges`, in none, and have no value, scaled to
@@ -389,7 +416,7 @@ impl Bins {
             .cut(set.size())
             .and_then(|cut| SamplePlan::of(cx, &members, cut))
         {
-            let (tally, none, items) = self.pass_sample(cx, &members, &plan, empty)?;
+            let (tally, none, items) = self.field.pass_sample(cx, &members, &plan, empty)?;
             timings.band_entries += plan.entries_read();
             return Ok((
                 tally,
@@ -400,7 +427,7 @@ impl Bins {
                 },
             ));
         }
-        let (tally, none) = self.pass(cx, set, empty)?;
+        let (tally, none) = self.field.pass(cx, set, empty)?;
         Ok((
             tally,
             none,
@@ -410,7 +437,9 @@ impl Bins {
             },
         ))
     }
+}
 
+impl Numbers {
     /// The values of `members`' items whose `tessera_id` is below the plan's cut, in parallel
     /// pieces of the view's rows, each read from the band or by scanning as the plan says.
     fn pass_sample<K: Num, T: Tally<K>>(
@@ -457,7 +486,7 @@ impl Bins {
                             items += 1;
                             match value {
                                 Some(value) => match value.as_ref().and_then(K::of_wal) {
-                                    Some(x) => tally.add(x),
+                                    Some(x) => tally.add(x, view_row),
                                     None => none += 1,
                                 },
                                 None if self.held => through.push(view_row),
@@ -574,10 +603,10 @@ impl Bins {
                         return (tally, valued);
                     }
                     for layer in &layers {
-                        let _ = layer.for_each_record_value_in(&piece, |_, value| {
+                        let _ = layer.for_each_record_value_in(&piece, |entity, value| {
                             valued += 1;
                             if let Some(x) = K::of_record(&value) {
-                                tally.add(x);
+                                tally.add(x, entity);
                             }
                             Ok::<(), ()>(())
                         });
@@ -596,7 +625,7 @@ impl Bins {
                 }
                 valued += 1;
                 if let Some(x) = K::of_wal(value) {
-                    tally.add(x);
+                    tally.add(x, entity);
                 }
             },
         );
@@ -629,7 +658,7 @@ impl Bins {
                                     if present.is_some_and(|p| !p.contains(local as u32)) {
                                         none += 1;
                                     } else {
-                                        tally.add($num(values[local]));
+                                        tally.add($num(values[local]), row);
                                     }
                                 }
                             })
@@ -731,9 +760,16 @@ struct Counts {
 /// A value as a pass compares it: `i128` for an integer or a timestamp, which holds every stored
 /// integer exactly, and `f64` for a float or for an integer binned by a fractional bound.
 trait Num: Copy + PartialOrd + Send + Sync {
+    /// What a sum of these is held in while a pass adds them, exactly.
+    type Sum: Default + Send;
+
     fn int(x: i128) -> Self;
     fn float(x: f64) -> Self;
     fn finite(self) -> bool;
+    fn number(self) -> Number;
+    fn add_to(sum: &mut Self::Sum, x: Self);
+    fn joined(sum: Self::Sum, other: Self::Sum) -> Self::Sum;
+    fn exact(sum: Self::Sum) -> Sum;
 
     fn of_record(value: &RecordValue) -> Option<Self> {
         Some(match *value {
@@ -780,6 +816,19 @@ impl Num for i128 {
     fn finite(self) -> bool {
         true
     }
+    fn number(self) -> Number {
+        Number::Int(self)
+    }
+    type Sum = i128;
+    fn add_to(sum: &mut i128, x: Self) {
+        *sum += x;
+    }
+    fn joined(sum: i128, other: i128) -> i128 {
+        sum + other
+    }
+    fn exact(sum: i128) -> Sum {
+        Sum::Int(sum)
+    }
 }
 
 impl Num for f64 {
@@ -792,43 +841,151 @@ impl Num for f64 {
     fn finite(self) -> bool {
         self.is_finite()
     }
+    fn number(self) -> Number {
+        Number::Float(self)
+    }
+    type Sum = ExactSum;
+    fn add_to(sum: &mut ExactSum, x: Self) {
+        sum.add_float(x);
+    }
+    fn joined(sum: ExactSum, other: ExactSum) -> ExactSum {
+        sum.plus(&other)
+    }
+    fn exact(sum: ExactSum) -> Sum {
+        Sum::Float(sum.compact())
+    }
 }
 
-/// What a pass accumulates, piece by piece, then merged.
+/// What a pass accumulates, piece by piece, then merged. `at` is where the value was read: the
+/// row in a pass over rows, the entity in a pass over entities.
 trait Tally<K>: Send {
-    fn add(&mut self, x: K);
+    fn add(&mut self, x: K, at: u32);
     fn merge(self, other: Self) -> Self;
 }
 
-/// The smallest and largest finite value seen.
-struct Extremes<K> {
-    span: Option<(K, K)>,
+/// The count and exact sum of the finite values seen, and the `keep` smallest and largest of them,
+/// each with where it was read.
+struct Summary<K: Num> {
+    keep: usize,
+    /// Values seen, finite or not.
+    seen: u64,
+    count: u64,
+    sum: K::Sum,
+    low: Vec<(K, u32)>,
+    high: Vec<(K, u32)>,
 }
 
-impl<K> Default for Extremes<K> {
-    fn default() -> Self {
-        Extremes { span: None }
+impl<K: Num> Summary<K> {
+    fn new(keep: usize) -> Self {
+        Summary {
+            keep,
+            seen: 0,
+            count: 0,
+            sum: K::Sum::default(),
+            low: Vec::new(),
+            high: Vec::new(),
+        }
+    }
+
+    fn finish(self, none: u64) -> FieldTally {
+        let side = |held: Vec<(K, u32)>| held.into_iter().map(|(x, at)| (x.number(), at)).collect();
+        FieldTally {
+            rows: self.seen + none,
+            none,
+            count: self.count,
+            sum: K::exact(self.sum),
+            low: side(self.low),
+            high: side(self.high),
+        }
     }
 }
 
-impl<K: Num> Tally<K> for Extremes<K> {
+impl<K: Num> Tally<K> for Summary<K> {
     #[inline]
-    fn add(&mut self, x: K) {
+    fn add(&mut self, x: K, at: u32) {
+        self.seen += 1;
         if !x.finite() {
             return;
         }
-        self.span = Some(match self.span {
-            None => (x, x),
-            Some((lo, hi)) => (if x < lo { x } else { lo }, if x > hi { x } else { hi }),
-        });
+        self.count += 1;
+        K::add_to(&mut self.sum, x);
+        if self.keep > 0 {
+            keep_extreme(&mut self.low, self.keep, (x, at), false);
+            keep_extreme(&mut self.high, self.keep, (x, at), true);
+        }
     }
 
     fn merge(mut self, other: Self) -> Self {
-        if let Some((lo, hi)) = other.span {
-            self.add(lo);
-            self.add(hi);
+        self.seen += other.seen;
+        self.count += other.count;
+        self.sum = K::joined(self.sum, other.sum);
+        for value in other.low {
+            keep_extreme(&mut self.low, self.keep, value, false);
+        }
+        for value in other.high {
+            keep_extreme(&mut self.high, self.keep, value, true);
         }
         self
+    }
+}
+
+/// Reads one field's values for its figures in one request's view: from the drawn column where the
+/// view's rows carry it, and otherwise through each row's entity.
+struct Reader<'a> {
+    field: &'a Numbers,
+    cx: &'a Cx<'a>,
+}
+
+impl FieldRead for Reader<'_> {
+    fn tally(&self, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
+        match self.field.kind == Kind::Float {
+            true => self.read::<f64>(rows, keep),
+            false => self.read::<i128>(rows, keep),
+        }
+    }
+}
+
+impl Reader<'_> {
+    fn read<K: Num>(&self, rows: &croaring::Bitmap, keep: usize) -> Result<FieldTally> {
+        let cx = self.cx;
+        cx.check_cancelled()?;
+        if rows.is_empty() {
+            return Ok(FieldTally::default());
+        }
+        let empty = || Summary::<K>::new(keep);
+        if self.field.drawn {
+            let (summary, none) = cx.engine.pool.install(|| {
+                self.field
+                    .pass_rows(CellSet::Rows(rows), cx.segments(), empty)
+            });
+            return Ok(summary.finish(none));
+        }
+        let entities = super::set::crossing(cx.engine, cx.open, rows)?;
+        let (summary, none) = cx
+            .engine
+            .pool
+            .install(|| self.field.pass_entities(cx, &entities, empty));
+        let mut tally = summary.finish(none);
+        // The kept values were read by entity, and a deny names rows: each is placed again by its
+        // row.
+        let row_space = &cx.open.served.data.row_space;
+        for (high, side) in [(false, &mut tally.low), (true, &mut tally.high)] {
+            let mut placed = Vec::with_capacity(side.len());
+            for mut kept in side.drain(..) {
+                let row = row_space
+                    .row_of(tessera_types::EntityId::new(u64::from(kept.1)))
+                    .ok_or_else(|| {
+                        EngineError::Malformed(format!(
+                            "an entity read from view '{}' has no row there",
+                            cx.open.served.name
+                        ))
+                    })?;
+                kept.1 = row.raw();
+                keep_extreme(&mut placed, keep, kept, high);
+            }
+            *side = placed;
+        }
+        Ok(tally)
     }
 }
 
@@ -854,7 +1011,7 @@ impl<'e, K: Num> Histogram<'e, K> {
 
 impl<K: Num> Tally<K> for Histogram<'_, K> {
     #[inline]
-    fn add(&mut self, x: K) {
+    fn add(&mut self, x: K, _: u32) {
         // A NaN is below no bound and so in no bin.
         let at = self.lowers.partition_point(|&lower| lower <= x);
         match at.checked_sub(1) {
@@ -1454,7 +1611,7 @@ mod tests {
             f64::NAN,
             f64::INFINITY,
         ] {
-            floats.add(x);
+            floats.add(x, 0);
         }
         assert_eq!((floats.bins.clone(), floats.rest), (vec![2, 1, 2], 4));
         // Integers past 2^63 against exact edges.
@@ -1470,7 +1627,7 @@ mod tests {
             big + 100,
             big + 101,
         ] {
-            ints.add(x);
+            ints.add(x, 0);
         }
         assert_eq!((ints.bins.clone(), ints.rest), (vec![3, 1, 0, 1], 2));
     }

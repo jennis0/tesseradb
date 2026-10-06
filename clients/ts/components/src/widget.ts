@@ -28,7 +28,7 @@ import './explorer.js';
  * A page reload makes a new model, which sends `ready` again.
  *
  * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height`,
- * `title_field` and `artifacts_per_tile` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
+ * `title_field`, `artifacts_per_tile`, `budget`, `budget_min` and `budget_max` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
  * `size_max`, `size_scale` and `filters` go both ways;
  * `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
  * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
@@ -479,6 +479,11 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   model.on('change:title_field', () => {
     for (const v of state.views.values()) v.explorer.titleField = titleFieldOf(model);
   });
+  for (const key of ['budget', 'budget_min', 'budget_max']) {
+    model.on(`change:${key}`, () => {
+      for (const v of state.views.values()) applyBudget(v.explorer, model);
+    });
+  }
   model.on('destroy', () => state.dispose());
 
   // What `render` calls, kept on the state so a test can mount through it.
@@ -502,6 +507,14 @@ function titleFieldOf(model: WidgetModel): string {
   return typeof f === 'string' ? f : '';
 }
 
+/** The point budget and the range a control for it offers, as the kernel set them; a value it left unset leaves the explorer's. */
+function applyBudget(explorer: TesseraExplorer, model: WidgetModel): void {
+  const [budget, min, max] = ['budget', 'budget_min', 'budget_max'].map((key) => model.get(key));
+  if (typeof budget === 'number') explorer.budget = budget;
+  if (typeof min === 'number') explorer.budgetMin = min;
+  if (typeof max === 'number') explorer.budgetMax = max;
+}
+
 const mounts = new WeakMap<ModelState, (explorer: TesseraExplorer) => () => void>();
 
 export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement; signal?: AbortSignal}): () => void {
@@ -515,6 +528,7 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
   explorer.layout = (model.get('explorer_layout') as 'docked' | 'overlay') || 'docked';
   explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
   explorer.titleField = titleFieldOf(model);
+  applyBudget(explorer, model);
   el.append(explorer);
   const unmount = mounts.get(state)!(explorer);
   const v = state.views.get(explorer)!;

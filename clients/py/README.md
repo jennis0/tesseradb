@@ -599,6 +599,11 @@ counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.c
 `m.bbox` redraws. Ids are decimal strings (a `tessera_id` is a `u64`). Marimo users: the widget's
 `.value` re-runs a cell at every settle; `m.observe(fn, names="selected")` reacts to a pick alone.
 
+`budget` is how many points the map aims to draw on screen. Its default, `0`, leaves the map's own,
+250,000, and setting `m.budget` in a later cell applies it. `budget_min` and `budget_max`, 1,000 and 2,000,000
+unless you give others, are the fewest and the most a control for it offers; neither changes
+`budget`. `db.map`, `viewer.map` and `selection.map` all take the three and pass them on.
+
 `tesseradb.authorise(session_url, credential, ...)` mints on the session plane: with an API key
 holding `authorise-as`, for a `principal` or an OIDC `access_token`, as an integrator's backend
 does; with the operator credential, for those or for `terms`. Either credential mints a token that
@@ -651,6 +656,7 @@ skipped and `Map(url)` takes no `token`. D4 chooses which arm ships first, condi
 | kernel → page | `{type: "refused", detail}` | the token source raised |
 | page → kernel | `{type: "error", what, detail}` | a `filters` expression the panel cannot hold |
 
-Traitlets: `url`, `view`, `explorer_layout`, `height`, `title_field` down; `bbox`, `layers`, `colour_by`,
+Traitlets: `url`, `view`, `explorer_layout`, `height`, `title_field`, `artifacts_per_tile`,
+`budget`, `budget_min`, `budget_max` down; `bbox`, `layers`, `colour_by`,
 `filters` both ways, synced up at the settle; `selected`, `selected_artifact`, `region` up.
 `last_error` is kernel-side only. The JavaScript half is `clients/ts/components/src/widget.ts`.

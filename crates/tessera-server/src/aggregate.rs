@@ -60,8 +60,8 @@ struct GroupingReq {
     cells: Option<CellsReq>,
 }
 
-/// A grouping's outer level: `field` with `top` or `values`, or with `bins` and optionally
-/// `range`, or `layer` with `top` or `artifacts` and, on a levelled layer, `level`.
+/// A grouping's outer level: `field` with `top` or `values`, with `bins` and optionally `range`,
+/// or with `summary`; or `layer` with `top` or `artifacts` and, on a levelled layer, `level`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ByReq {
@@ -83,6 +83,10 @@ struct ByReq {
     /// With `bins`: count about this many of the set's items and scale the counts to the set.
     #[serde(default)]
     sample: Option<u64>,
+    /// `true`: the count, smallest, largest and mean of the field's values over the whole visible
+    /// set.
+    #[serde(default)]
+    summary: bool,
     /// `tessera_id`s, each a number or its decimal string.
     #[serde(default)]
     artifacts: Option<Vec<Value>>,
@@ -125,7 +129,6 @@ impl AggregateSink for FrameSink {
             json["sample"] = serde_json::json!({
                 "sampled": sample.sampled,
                 "items": sample.items,
-                "edges_sampled": sample.edges_sampled,
             });
             if let Some(items) = sample.reference_items {
                 json["sample"]["reference_items"] = items.into();
@@ -281,8 +284,15 @@ fn by_of(
         (Some(field), None) => {
             if by.artifacts.is_some() || by.level.is_some() {
                 return bad(
-                    "`artifacts` and `level` go with `layer`; a field takes `top`, `values` or \
-                     `bins`",
+                    "`artifacts` and `level` go with `layer`; a field takes `top`, `values`, \
+                     `bins` or `summary`",
+                );
+            }
+            let picked = by.top.is_some() || by.values.is_some() || by.bins.is_some();
+            if by.summary && (picked || by.range.is_some() || by.sample.is_some()) {
+                return bad(
+                    "`summary` stands alone; send `top`, `values` or `bins` in a grouping of \
+                     their own",
                 );
             }
             if by.range.is_some() && by.bins.is_none() {
@@ -292,6 +302,7 @@ fn by_of(
                 return bad("`sample` goes with `bins`; send `bins` beside it, or leave it out");
             }
             let pick = match (by.bins, by.top, &by.values) {
+                _ if by.summary => None,
                 (Some(_), None, None) => None,
                 (Some(_), _, _) => {
                     return bad("`by` carries `bins` beside `top` or `values`; send one")
@@ -302,7 +313,10 @@ fn by_of(
                     return bad("`by` carries both `top` and `values`; send one")
                 }
                 (None, None, None) => {
-                    return bad("`by` carries neither `top` nor `values`; send one")
+                    return bad(
+                        "`by` on a field carries none of `top`, `values`, `bins` and `summary`; \
+                         send one",
+                    )
                 }
             };
             let (column, family, integer) =
@@ -325,6 +339,11 @@ fn by_of(
                     }
                 };
             match (pick, by.bins, family) {
+                (_, _, Family::Numeric) if by.summary => Ok(By::Summary { column }),
+                (_, _, _) if by.summary => Err(ApiError::Contract(format!(
+                    "field '{field}' is not a number or timestamp; name a number or timestamp \
+                     field for a summary"
+                ))),
                 (Some(pick), _, Family::Category) => Ok(By::Field { column, pick }),
                 (Some(_), _, _) => Err(ApiError::Contract(format!(
                     "field '{field}' is not a category; name a category field"
@@ -355,11 +374,15 @@ fn by_of(
             }
         }
         (None, Some(layer)) => {
-            if by.values.is_some() || by.bins.is_some() || by.range.is_some() || by.sample.is_some()
+            if by.values.is_some()
+                || by.bins.is_some()
+                || by.range.is_some()
+                || by.sample.is_some()
+                || by.summary
             {
                 return bad(
-                    "`values`, `bins`, `range` and `sample` go with `field`; a layer takes `top` \
-                     or `artifacts`",
+                    "`values`, `bins`, `range`, `sample` and `summary` go with `field`; a layer \
+                     takes `top` or `artifacts`",
                 );
             }
             let pick = match (by.top, &by.artifacts) {
@@ -397,14 +420,22 @@ fn in_callers_words(e: EngineError, asked: &[GroupingReq], sent: &[Grouping]) ->
         EngineError::AggregateRefused(AggregateRefused::BinsOnBool(column)) => {
             (column, AggregateRefused::BinsOnBool)
         }
+        EngineError::AggregateRefused(AggregateRefused::NotSummarisable(column)) => {
+            (column, AggregateRefused::NotSummarisable)
+        }
         EngineError::AggregateRefused(AggregateRefused::FractionalTime(column)) => {
             (column, AggregateRefused::FractionalTime)
         }
         _ => return e,
     };
     let spelling = asked.iter().zip(sent).find_map(|(asked, sent)| match &sent.by {
-        Some(By::Field { column: resolved, .. }) | Some(By::Bins { column: resolved, .. })
-            if resolved == column =>
+        Some(By::Field {
+            column: resolved, ..
+        })
+        | Some(By::Bins {
+            column: resolved, ..
+        })
+        | Some(By::Summary { column: resolved }) if resolved == column =>
         {
             asked.by.as_ref().and_then(|by| by.field.clone())
         }

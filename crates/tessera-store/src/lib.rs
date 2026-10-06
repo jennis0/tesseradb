@@ -10,6 +10,8 @@ pub mod declaration;
 pub mod derived;
 pub mod entity_terms;
 pub mod error;
+pub mod exact_sum;
+pub mod field_tallies;
 pub mod flush;
 pub mod fold;
 pub mod edited;

@@ -119,6 +119,15 @@ describe('the token protocol', () => {
     expect(explorer.titleField).toBe('');
   });
 
+  it('hands the point budget and its range to every view’s explorer, and follows a change to each', async () => {
+    const {model, el} = setUp({budget: 40_000, budget_min: 500, budget_max: 90_000});
+    const explorer = el.querySelector('tessera-explorer') as unknown as {budget: number; budgetMin: number; budgetMax: number};
+    expect([explorer.budget, explorer.budgetMin, explorer.budgetMax]).toEqual([40_000, 500, 90_000]);
+    model.set('budget', 60_000);
+    model.set('budget_max', 100_000);
+    expect([explorer.budget, explorer.budgetMin, explorer.budgetMax]).toEqual([60_000, 500, 100_000]);
+  });
+
   it('two views of one model: a store each, one supplier, and one ready', async () => {
     const {model, supplier, stores, el} = setUp();
     const el2 = document.createElement('div');

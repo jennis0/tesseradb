@@ -108,6 +108,10 @@ class Map(anywidget.AnyWidget):
       screen touches, or the server's `max_tiles_per_request` where that is fewer; a larger
       screen is asked for at zoom + 1, then coarser, until its tiles fit. So the tiles in view
       times `artifacts_per_tile` bounds the annotations one level draws.
+    - `budget`: how many points the map aims to draw on screen. `0`, the default, leaves the
+      map's own, 250,000.
+    - `budget_min`, `budget_max`: the fewest and the most points a control for `budget` offers.
+      The defaults are 1,000 and 2,000,000. Neither changes `budget`.
 
     Read the widget's attributes in a later cell:
 
@@ -122,7 +126,8 @@ class Map(anywidget.AnyWidget):
     - `filters`, `layers`, `colour_by`, `size_by`, `size_min`, `size_max`, `size_scale`: as the
       map shows them. Setting one redraws the map.
     - `last_error`: why the page last refused something set here, or `None`.
-    - `url`, `height`, `explorer_layout`, `title_field`, `artifacts_per_tile`: as given.
+    - `url`, `height`, `explorer_layout`, `title_field`, `artifacts_per_tile`, `budget`,
+      `budget_min`, `budget_max`: as given. Setting one in a later cell applies it.
     - `tokens_sent`: how many tokens the kernel has sent the page.
 
     `view`, `bbox`, `filters`, `layers`, `colour_by` and the size settings change when the map
@@ -156,6 +161,9 @@ class Map(anywidget.AnyWidget):
     title_field = traitlets.Unicode(None, allow_none=True).tag(sync=True)
     # The store's quota of annotations per level per tile; `None` draws none.
     artifacts_per_tile = traitlets.Int(None, allow_none=True).tag(sync=True)
+    budget = traitlets.Int(0).tag(sync=True)
+    budget_min = traitlets.Int(1_000).tag(sync=True)
+    budget_max = traitlets.Int(2_000_000).tag(sync=True)
     # Both ways, synced up at the settle.
     bbox = traitlets.List(traitlets.Float(), minlen=4, maxlen=4, allow_none=True, default_value=None).tag(sync=True)
     # `None` leaves the explorer's own default; `[]` is none; a list is exactly those (with their
@@ -193,6 +201,9 @@ class Map(anywidget.AnyWidget):
         explorer_layout: str = "docked",
         title_field: Optional[str] = None,
         artifacts_per_tile: Optional[int] = None,
+        budget: int = 0,
+        budget_min: int = 1_000,
+        budget_max: int = 2_000_000,
         **kwargs: Any,
     ) -> None:
         if token is None:
@@ -226,6 +237,9 @@ class Map(anywidget.AnyWidget):
             explorer_layout=explorer_layout,
             title_field=title_field,
             artifacts_per_tile=artifacts_per_tile,
+            budget=budget,
+            budget_min=budget_min,
+            budget_max=budget_max,
             _esm=bundle.read_text(encoding="utf-8"),
             **kwargs,
         )

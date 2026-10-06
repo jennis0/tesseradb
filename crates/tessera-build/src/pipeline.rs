@@ -2059,6 +2059,20 @@ fn build_bundle(
         term_images.push(images);
         timer.end(BuildStage::TermImages, u64::from(kept));
 
+        // ---- 10d. this view's field tallies (`tessera_store::field_tallies`) ---------------
+        //
+        // After every file they read: the segment, the row-to-entity table, the entity terms and
+        // the value columns. The in-memory build calls the same function at the same point.
+        let partition_dir = args.out.join(crate::PREFIX).join("partitions").join(crate::PHASH);
+        view_files.push(tessera_store::field_tallies::derive_view(
+            &partition_dir,
+            &view.view_id,
+            SEG_ID,
+            rows_in_view,
+            &crate::declared_scalars_of(&args.schema),
+            &|name| tessera_filter::base_numbers(&partition_dir, name),
+        )?);
+
         view_files.push(permutation_path);
         view_files.push(row_entity_path);
         view_files.extend(segment_paths);
@@ -2076,7 +2090,7 @@ fn build_bundle(
     // Every view has been through the term images, so the postings mapping is unbusy.
     drop(postings);
 
-    // ---- 10d. the containment partitions, once for the prefix ----------------------------
+    // ---- 10e. the containment partitions, once for the prefix ----------------------------
     //
     // **Outside the view loop**, because a partition is a function of the level's records and the
     // prefix's postings and carries no view. Composing it inside the pass would write one identical

@@ -469,6 +469,7 @@ A grouping has an outer level, an inner level, both or neither:
 | neither | one row: the size of the set, which equals the viewport's matched count over the view |
 | the values of a category field | one row per value, with `rest` and `none` |
 | bins of a number or timestamp field | one row per bin, a histogram, with `rest` and `none` |
+| the summary of a number or timestamp field | one row: how many items, how many hold a finite value, how many hold none, the smallest, the largest and the mean |
 | the artifacts of one level of a layer | one row per artifact, with `rest` and `none` |
 | cells of the view at a depth from 0 to 32 | one row per non-empty cell, a density surface |
 | values or artifacts, then cells | a density surface for each group |
@@ -496,10 +497,10 @@ or 5 times a power of ten for a number, whole numbers for an integer, and whole 
 hours, days, weeks from Monday, months or years in UTC for a timestamp, the finest that needs no
 more bins than were asked for. The filter, the reference and any region play no part in them, so a
 client drawing the same field over the viewport and over the filtered set gets the same edges for
-both, and the edges stay put as the filters change. Finding them costs one more pass over the
-field's values in the visible set before the counts; a client that sends the first answer's outer
-edges back as the range, with the number of bins it returned, gets the same edges without that pass,
-except for a timestamp binned by months or years. An integer's or a timestamp's edges are whole
+both, and the edges stay put as the filters change. The smallest and largest value are the field's
+figures, below, so they are exact and no visible value falls outside the bins. A client that sends
+the first answer's outer edges back as the range, with the number of bins it returned, gets the
+same edges, except for a timestamp binned by months or years. An integer's or a timestamp's edges are whole
 numbers worked out exactly, served as integers, so a value past 2^53 is placed as exactly as a small
 one; a range with a fractional bound has an integer field's bins cut and served as floats. A
 grouping by bins has no cell level.
@@ -510,11 +511,10 @@ of the identity range, about `s` items, and each count is scaled by `N` over the
 the nearest whole number. The cut is the same for the whole set: no tile, cell or group has a floor
 or a cap, so a region dense in items is counted in proportion to its density. Identities are a
 keyed permutation, so the items below a cut are a uniform sample of the set. The reference is
-sampled the same way at its own cut. Without a range, the edges are drawn from the visible set
-counted by the same rule, so they still hold still as the filters change; they can come from the
-visible set's sample where the filtered set is small enough to count whole. The table head says
-whether a count was scaled, how many items of the set and of the reference were counted, and
-whether the edges came from a sample. A set no larger than the sample size is counted exactly.
+sampled the same way at its own cut. Without a range, the edges are the exact ones, from the
+field's figures, whether or not the counts are sampled, so a value outside the sample still falls
+in a bin. The table head says whether a count was scaled and how many items of the set and of the
+reference were counted. A set no larger than the sample size is counted exactly.
 
 The items below a cut are read from the identity bands, which hold each segment's rows with the
 smallest identities, a band about half the size of the one before it. Each segment's band copies the
@@ -560,14 +560,89 @@ under the viewport's admission, and each response is held to a byte budget of it
 default in pages of 4 MiB, so what one request holds is bounded however large its table; a larger
 table continues through the cursor. A request stops its work when the client disconnects.
 
-**Not built yet:** minimum, maximum and mean of number and timestamp fields; bins of a number
-or timestamp field within cells; breakdowns of keyword fields and of integer fields by value; a
-grouping of one kind inside another of the same kind, such as cells within cells; and counts
-across views. A caller asks for each such figure through `/v1/items` and computes it.
+### A field's figures
+
+A summary of a number or timestamp field declared with `index` or `render` is one row: the items
+the viewer may see in the view, how many hold a finite value, how many hold none, and the
+smallest, largest and mean of the finite values. A NaN or an infinity counts among the items and
+in neither of the other two. The summary is taken over the whole visible set in the view, and the
+filter, the reference and any region play no part in it, so it describes what the viewer may see,
+as a card beside a histogram does. Every figure is exact. The sum is kept exactly, as an integer
+count of 2^-1074, the smallest step between two `float64` values, so subtracting the values of
+denied rows leaves exactly the sum of the rest, and the mean is that sum over the count rounded
+once, a tie to even: on a timestamp field to the nearest microsecond, served as a timestamp, and
+on any other to the nearest `float64`.
+
+The figures are computed as a layer's artifact figures are, in three parts. The visible set `S`
+is the session's projection `P` less the rows the request's composition subtracts, `minus`, plus
+the rows it adds, `plus`. Below the bundle's base row count `B`:
+
+- **F**, the grant's base rows, `P ∩ [0, B)`. A build and a compaction store, for each view, a
+  tally of each field for each distinct list of index keys the base rows' items carry: the count
+  of finite values, their sum, the items with no value, and the eight smallest and eight largest
+  values with their rows (`field-tallies.bin`). The items of one key list are in a grant's base
+  rows together or not at all, decided by the rule the authorised set is built by: a list is
+  admitted where the grant satisfies any of its keys. F is the merge of the admitted lists'
+  tallies, and no request walks a base row to find it. A base row's value and its item's keys
+  never change between compactions: an edit gives the item a new entity, whose row is above the
+  base, and a compaction writes the file again. A field declared at a running service has no
+  stored tally, and its base rows are walked once per grant.
+- **D**, the base rows the request subtracts, `minus ∩ [0, B)`, which are the deleted and
+  suppressed rows the grant holds there. Their count, sum and items with no value are read from
+  their values once per deny version and subtracted from F's.
+- **T**, every visible row outside F, held per session and generation, and added.
+
+The count, the sum and the items with no value are `F − D + T` exactly. The smallest value of
+`F − D` is the first of F's eight smallest whose row D does not hold, since any value not kept is
+at least the last one kept, and the largest likewise. Where D holds every row kept on a side, the
+base rows left are walked for that side, once per deny version. A request that starts after a
+suppression is accepted reads the deny version it was accepted under, so the figures, and a
+histogram's default edges, are corrected from that request on.
+
+```mermaid
+flowchart LR
+  F["F: the grant's base rows<br/>merged from the base's tallies<br/>per key list"] --> S
+  D["D: denied base rows<br/>per deny version"] -->|subtracted| S
+  T["T: rows above the base<br/>per session and generation"] -->|added| S
+  S["the figures of the visible set:<br/>count, none, sum, smallest, largest"]
+```
+
+*The three parts of a field's figures. The smallest and largest of F − D come from F's eight most
+extreme rows on each side, or from a walk of F − D where D holds all eight.*
+
+A build and a fold tally the base in entity order, a span of 2^18 entities at a time, so they read
+each entity's key list and held values in the order they are stored and ask one rank a span.
+Measured with `tessera-bench`'s `field_tallies_scale` on a synthetic corpus, a 12-thread machine
+with the files in the page cache, two held fields and 384 key lists, the tally pass took 0.23 s
+over 10 million rows, 1.9 s over 100 million and 18.6 s over a billion, 19 to 23 ns a row. The
+entity terms reader finds an entity's rank from a table of each block's rank below it, which took
+0.9 to 1.4 µs a lookup at all three sizes against croaring's own rank's 1.6 µs, 1.8 µs and 10 µs.
+An item card reads its labels through the same table.
+
+| corpus | key lists × fields tallied | file | open | compose one field |
+|---|---|---|---|---|
+| GBIF ladder, 25.8 million items | 252 × 1 | 93,063 B | in the bundle's open | first summary 0.9 ms, served |
+| Overture, 73.6 million items | 405 × 2 | 296–300 KB | 0.16–0.22 ms | 0.07–0.16 ms |
+| Tree of Life, 233 million items | 474 × 0, 433 × 0 | 3.8 KB, 3.5 KB | 0.03 ms | none |
+
+The key lists are each corpus's distinct access labels, counted from its sources; its views carry
+one label an item. The Overture and Tree of Life rows were measured with `field_tallies_shape` on a
+file of their shape, each tally full, not on a built bundle. A tally takes about 370 bytes on
+disk; 100,000 key lists of two fields measured 74 MB, opened in 220 ms and composed one field in
+44 ms. Building the GBIF ladder took 70 to 79 s with the tallies and 70 to 79 s without,
+the difference within the spread of two runs of each.
+
+**Not built yet:** a summary over a filtered set, which would need a walk of the set's values for
+each request; bins of a number or timestamp field within cells; breakdowns of keyword fields and
+of integer fields by value; a grouping of one kind inside another of the same kind, such as cells
+within cells; and counts across views. A caller asks for each such figure through `/v1/items`
+and computes it.
 
 The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps
 each aggregate a component registers with `Store.setAggregate` counted over the store's current
-filters and selected region, asking again when either changes. The Python client reads one with
+filters and selected region, within the camera's area or over the whole visible set where the
+registration asks, and asks again when its request changes, as [clients](clients.md#what-a-registration-counts-and-when-it-is-asked-again)
+says. The Python client reads one with
 `Viewer.aggregate`, `Database.aggregate` and `Selection.aggregate`, each table a `pyarrow.Table`.
 Both follow the cursor until the result is whole.
 

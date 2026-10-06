@@ -3170,6 +3170,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "misses": masked_counts.misses,
             "evictions": masked_counts.evictions,
             "fills": masked_counts.fills,
+            "field_fills": masked_counts.field_fills,
+            "field_mismatches": masked_counts.field_mismatches,
             "loads": masked_counts.loads,
             "exact": masked_counts.exact,
             "reserve_spent": masked_counts.reserve_spent,

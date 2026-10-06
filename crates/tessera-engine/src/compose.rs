@@ -24,7 +24,7 @@ use tessera_authz::FrozenFragment;
 use tessera_lifecycle::{BufferedItem, IngestBuffer, Overlay};
 use tessera_roaring::for_each_run_in;
 use tessera_store::{Bundle, RowSpace};
-use tessera_types::EntityId;
+use tessera_types::{EntityId, TermId};
 
 use crate::projection::RowProjection;
 use crate::session::SatisfiedKeys;
@@ -520,7 +520,17 @@ pub(crate) fn verdict_of(
     // An entity's postings are written by the flush of its own row, and the buffer holds that row
     // only until then (replay drops a row its view already holds), so an item here is never an
     // entity the fragment covers.
-    item.map(|item| item.terms.iter().any(|t| satisfied.holds_key(*t)))
+    item.map(|item| admits(satisfied, item.terms.iter().copied()))
+}
+
+/// Whether a session satisfying `satisfied` may see an item whose index keys are `keys`: where it
+/// satisfies any of them. The rule a session's authorised set is the union of postings by, asked of
+/// one key list: a buffered item's, or a base key list's figures ([`crate::figures`]).
+pub(crate) fn admits(
+    satisfied: &dyn SatisfiedKeys,
+    keys: impl IntoIterator<Item = TermId>,
+) -> bool {
+    keys.into_iter().any(|key| satisfied.holds_key(key))
 }
 
 /// Derive the row-space deny mask from the authoritative entity-space stores:

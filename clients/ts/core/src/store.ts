@@ -1,4 +1,4 @@
-import {Aggregates, joinedAggregate, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
+import {Aggregates, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
@@ -62,7 +62,7 @@ export {formatCount, formatMasked} from './counts.js';
 export type {TokenSupplier} from './token.js';
 export {CLUSTER_PREFIX, type LegendProjection} from './legend.js';
 export {REGION_HELD_LIMIT, type RegionProjection, type SelectionShape} from './selectedRegion.js';
-export type {AggregateEntry, AggregateSpec, AggregatesProjection} from './aggregates.js';
+export type {AggregateEntry, AggregateSpec, AggregatesProjection, FieldSummary} from './aggregates.js';
 
 /**
  * Where the host's camera looks: a box in the current view's data coordinates, the camera's zoom,
@@ -115,7 +115,7 @@ export type StoreOptions = {
    * `setCurrentView` call made before `/v1/meta` arrives takes its place.
    */
   view?: string;
-  /** How many marks the store aims to draw on screen. Defaults to `500000`; `setBudget` changes it. */
+  /** How many marks the store aims to draw on screen. Defaults to `250000`; `setBudget` changes it. */
   budget?: number;
   /** How artifacts are coloured (see {@link PaletteKind}). Defaults to `positional`; `setPalette` changes it. */
   palette?: PaletteKind;
@@ -610,13 +610,29 @@ export interface Store {
    * `filters`, as {@link withoutClause} empties it, so a filter control's own counts keep showing
    * the values its clause would exclude while every other clause still narrows them. With
    * `spec.withoutMembersOf` naming a layer, that layer's `member_of` clauses in the filter position
-   * are left out in the same way. A `429` or
-   * `503` is sent again as the map's requests are, with the same backoff, and published as
-   * `retrying` meanwhile. The store asks again, aborting the request it replaces, when `setAggregate` is called
-   * for the id again, when the filters, the `member_of` clauses or the selected region change, at a
-   * view switch, at {@link Store.refresh}, and once it has read `/v1/meta` again after forgetting
-   * what the server answered. Waits for `/v1/meta`. Each call sends a new request, so call it when
-   * the component's spec changes, not on every render.
+   * are left out in the same way. `spec.subject` `view` adds the area the counts in view cover, and
+   * `visible` sends no filters at all. A `429` or `503` is sent again as the map's requests are,
+   * with the same backoff, and published as `retrying` meanwhile.
+   *
+   * The store asks again, aborting the request it replaces, when `setAggregate` is called for the
+   * id again; when the filters, the highlight, the `member_of` clauses or the selected region
+   * change and the request they compose differs from the one last sent; for a `view` aggregate,
+   * once the camera has rested 250 ms somewhere new; at a view switch; at {@link Store.refresh};
+   * when a frame observes a new content key; and once it has read `/v1/meta` again after
+   * forgetting what the server answered, composing its request under that meta. A `view`
+   * aggregate registered while the camera moves is sent once it rests. Aggregates asked for
+   * together whose requests differ only in their groupings go as one request, up to
+   * `meta.selection.maxAggregateGroupings` groupings each. Waits for `/v1/meta`. Each call sends a
+   * new request, so call it when the component's spec changes, not on every render.
+   *
+   * @example A field card's histogram of `year`, in view and over everything the filters match,
+   * each leaving out the card's own clause, and the field's figures:
+   * ```ts
+   * const bins = {by: {field: 'year', bins: 24, sample: 100_000}};
+   * store.setAggregate('year:subject', {groupings: [bins], subject: 'view', without: 'year', highlighted: true});
+   * store.setAggregate('year:match', {groupings: [bins], without: 'year'});
+   * store.setAggregate('year:summary', {groupings: [{by: {field: 'year', summary: true}}], subject: 'visible'});
+   * ```
    */
   setAggregate(id: string, spec: AggregateSpec | null): void;
   /**
@@ -682,7 +698,7 @@ export interface Store {
    * current camera. A value that is not a finite number above zero is ignored.
    */
   setBudget(budget: number): void;
-  /** The marks the store aims to draw: `budget` as created, else 500000, until `setBudget` changes it. */
+  /** The marks the store aims to draw: `budget` as created, else 250000, until `setBudget` changes it. */
   readonly budget: number;
   /**
    * Make `id` the view the store answers from. An id `meta.views` does not list is ignored, as is
@@ -803,6 +819,13 @@ function cameraCentre(lo: number, hi: number, half: number): number {
 /** How long the camera rests before the counts in view are asked for. */
 const IN_VIEW_REST_MS = 250;
 
+/**
+ * How many marks a store aims to draw on screen where {@link StoreOptions.budget} names no number.
+ *
+ * @category Store
+ */
+export const DEFAULT_BUDGET = 250_000;
+
 /** How many tiles of artifacts a view keeps where `artifacts.heldTiles` names no number. */
 const DEFAULT_HELD_TILES = 4096;
 
@@ -845,8 +868,10 @@ export function createStore(options: StoreOptions): Store {
   const table = new SessionArtifactTable();
 
   let meta: Meta | null = null;
-  let budget = options.budget ?? 500_000;
+  let budget = options.budget ?? DEFAULT_BUDGET;
   let contentKeyAtFrame = '';
+  /** The content key the registered aggregates were last asked under, by {@link observeCorpus}. */
+  let corpusKey = '';
 
   /** One byte budget across every view's bands, evicted least recently drawn across them. */
   let bandBudget = new BandBudget(options.replica?.cacheBytes ?? DEFAULT_CACHE_BYTES);
@@ -942,22 +967,18 @@ export function createStore(options: StoreOptions): Store {
   );
 
   const aggregates = new Aggregates(
-    async (spec, signal) => {
+    ready,
+    async (_spec, body, signal) => {
       const asked = await viewed();
-      const filters = aggregateFilters(spec);
-      const reference = spec.reference === 'visible' ? {} : spec.reference;
-      const result = await aggregate(
-        asked.token,
-        {view: asked.view, groupings: spec.groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})},
-        signal
-      );
+      const result = await aggregate(asked.token, {view: asked.view, ...body}, signal);
       // A response cancelled before its first page carries no key.
       if (result.identityKey !== '' && !admit(asked.view, result.identityKey, asked.token)) throw identityChanged();
       return {result, view: asked.view};
     },
     (entries) => replaceProjection('aggregates', entries),
     clock,
-    {...RETRY_DEFAULTS, ...options.driver}
+    {...RETRY_DEFAULTS, ...options.driver},
+    aggregateBody
   );
 
   /**
@@ -965,23 +986,29 @@ export function createStore(options: StoreOptions): Store {
    * `highlighted` the set under the highlight as well, registered only while one is set.
    */
   const inView = new Aggregates(
-    async (spec, signal) => {
+    ready,
+    async (_spec, body, signal) => {
       const asked = await viewed();
-      const area = countedArea()!;
-      const box = area.selected ? null : lastView!.input.bbox;
-      const filters = withArea(aggregateFilters(spec), area);
-      const result = await aggregate(asked.token, {view: asked.view, groupings: spec.groupings, filters: filters!, reference: withArea(null, area)!}, signal);
+      const result = await aggregate(asked.token, {view: asked.view, ...body}, signal);
+      const box = boxOf.get(body);
       if (box) boxOf.set(result, box);
       if (result.identityKey !== '' && !admit(asked.view, result.identityKey, asked.token)) throw identityChanged();
       return {result, view: asked.view};
     },
     (entries) => publishInView(entries),
     clock,
-    {...RETRY_DEFAULTS, ...options.driver}
+    {...RETRY_DEFAULTS, ...options.driver},
+    (spec) => {
+      const area = countedArea();
+      if (area === null) return null;
+      const body = {groupings: spec.groupings, filters: withArea(aggregateFilters(spec), area)!, reference: withArea(null, area)!};
+      if (!area.selected) boxOf.set(body, lastView!.input.bbox);
+      return body;
+    }
   );
   /** The pending ask after the camera moved. */
   let inViewTimer: unknown = null;
-  /** The camera's box each count in view was taken over; a selected region's count has none. */
+  /** The camera's box each request and answer in view was taken over; a selected region's has none. */
   const boxOf = new WeakMap<object, [number, number, number, number]>();
   /** The box the counts in view on show were taken over, which the shown count is taken over too. */
   let countedBox: [number, number, number, number] | null = null;
@@ -1369,10 +1396,25 @@ export function createStore(options: StoreOptions): Store {
    */
   function recomputeStale(): void {
     const observed = views.current?.replica.currentContentKey ?? '';
+    observeCorpus(observed);
     const stale = contentKeyAtFrame !== '' && observed !== '' && observed !== contentKeyAtFrame;
     if (stale !== projections.status.stale) {
       replaceProjection('status', {...projections.status, stale, sessionWarm: true});
     }
+  }
+
+  /**
+   * Ask every registered aggregate and the counts in view again, their requests unchanged, once the point path observes a
+   * content key other than the one it observed before: an ingest, a deletion or a suppression
+   * this viewer can see.
+   */
+  function observeCorpus(observed: string): void {
+    if (observed === '') return;
+    const before = corpusKey;
+    corpusKey = observed;
+    if (before === '' || before === observed) return;
+    aggregates.refresh(false);
+    askInView(false);
   }
 
   function onTrace(kind: string, fields: Record<string, number | string>): void {
@@ -1400,6 +1442,7 @@ export function createStore(options: StoreOptions): Store {
     const frame = p.frame;
     // A derive (`p.fetched` set) redrew the marks under the current content key; a fold did not.
     const observed = replica?.currentContentKey ?? '';
+    if (p.fetched) observeCorpus(observed);
     if (p.fetched) contentKeyAtFrame = observed;
     const stale = contentKeyAtFrame !== '' && observed !== '' && observed !== contentKeyAtFrame;
 
@@ -1681,6 +1724,7 @@ export function createStore(options: StoreOptions): Store {
     incoming.presenter.setBudget(budget);
     // The content key, the bands asked for again and the shapes were the outgoing view's.
     contentKeyAtFrame = '';
+    corpusKey = '';
     colourAsked.clear();
     shapes.forget('all');
 
@@ -1831,6 +1875,30 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
+   * The request a registered aggregate sends now, less its view: its filters by its subject, and its
+   * reference. `null` for a `view` aggregate before the camera has been set.
+   */
+  function aggregateBody(spec: AggregateSpec): AggregateBody | null {
+    const subject = spec.subject ?? 'match';
+    let filters: FilterExpr | null = null;
+    let reference: FilterExpr | undefined = spec.reference === 'visible' ? {} : spec.reference;
+    if (subject === 'match') filters = aggregateFilters(spec);
+    if (subject === 'view') {
+      const area = countedArea();
+      if (area === null) return null;
+      filters = withArea(aggregateFilters(spec), area);
+      // Drawn from the same area, as the counts in view's own reference is.
+      if (spec.reference !== undefined) reference = withRegion(spec.reference === 'visible' ? null : spec.reference, area.operand, area.outside)!;
+    }
+    return {groupings: spec.groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})};
+  }
+
+  /** Register an aggregate. One counted in view waits for the camera to rest where it is moving. */
+  function setAggregate(id: string, spec: AggregateSpec | null): void {
+    aggregates.set(id, spec, spec?.subject !== 'view' || inViewTimer === null);
+  }
+
+  /**
    * The area the counts in view are taken over: the selected region, else the camera's box. `null`
    * before the camera has been set. The selected region is already in the filters; the box is not.
    */
@@ -1847,12 +1915,17 @@ export function createStore(options: StoreOptions): Store {
     return withRegion(expr, area.operand, area.outside);
   }
 
-  /** Ask for the counts in view again, now or once the camera has rested. */
-  function askInView(rest: boolean, drop = false): void {
+  /**
+   * Ask for the counts in view again, now or once the camera has rested, and with them each
+   * registered aggregate counted in view whose request has changed. With `changed`, as at a rest,
+   * the counts in view are asked only where their request has changed too.
+   */
+  function askInView(rest: boolean, drop = false, changed = false): void {
     if (inViewTimer !== null) clock.cancel(inViewTimer);
     inViewTimer = null;
     if (countedArea() === null) return;
     if (!rest) {
+      aggregates.refresh(false, {which: (spec) => spec.subject === 'view', changed: true});
       const highlighting = requestHighlight() !== null;
       if (highlighting !== inViewHighlighted) {
         inViewHighlighted = highlighting;
@@ -1863,12 +1936,12 @@ export function createStore(options: StoreOptions): Store {
         inView.set('counts', {groupings: [{}]});
         return;
       }
-      inView.refresh(drop);
+      inView.refresh(drop, {changed});
       return;
     }
     inViewTimer = clock.after(IN_VIEW_REST_MS, () => {
       inViewTimer = null;
-      askInView(false);
+      askInView(false, false, true);
     });
   }
 
@@ -1953,7 +2026,7 @@ export function createStore(options: StoreOptions): Store {
     if (lastView) setView(lastView.input);
     // Each suggestion count is taken under the filter.
     suggestions.refresh();
-    aggregates.refresh(false);
+    aggregates.refresh(false, {changed: true});
     askInView(false);
   }
 
@@ -2117,6 +2190,7 @@ export function createStore(options: StoreOptions): Store {
     records.forget();
     clearSelection();
     contentKeyAtFrame = '';
+    corpusKey = '';
     colourAsked.clear();
     awaitingSwitchFrame = false;
     replaceProjection('view', noFrame(views.id));
@@ -2202,7 +2276,7 @@ export function createStore(options: StoreOptions): Store {
     setView,
     browse,
     requestFilters,
-    setAggregate: (id, spec) => aggregates.set(id, spec),
+    setAggregate,
     setFilters,
     setMembers,
     suggest: (column, q, verb) => suggestions.suggest(column, q, verb),

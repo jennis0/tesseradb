@@ -376,8 +376,12 @@ export class TesseraMap extends TesseraElement {
     converter: {fromAttribute: (v: string | null) => (v ? v.split(/[\s,]+/).filter(Boolean) : []), toAttribute: (v: string[]) => v.join(' ')}
   })
   accessor layers: string[] | null = null;
-  /** How many marks to aim for on screen. `0` leaves the store's budget, which starts at 500000. */
+  /** How many marks to aim for on screen. `0` leaves the store's budget, which starts at 250000. */
   @property({type: Number}) accessor budget = 0;
+  /** The fewest marks a control for `budget` offers. The map sets no budget from it. */
+  @property({type: Number, attribute: 'budget-min'}) accessor budgetMin = 1_000;
+  /** The most marks a control for `budget` offers. The map sets no budget from it. */
+  @property({type: Number, attribute: 'budget-max'}) accessor budgetMax = 2_000_000;
   /**
    * Columns shown beneath a hovered point's title, space- or comma-separated. The map asks the
    * store for them with `setPointColumns`. Only a rendered column's value is in the marks; another

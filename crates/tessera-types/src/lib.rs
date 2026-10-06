@@ -222,9 +222,11 @@ pub struct GenerationStamp {
 // base rows and a covering of at most 32 row ranges. A 32 bundle lacks the files and is refused.
 // 34: a segment's bands copy every indexed number and timestamp column that is not drawn, with the
 // entries that hold a value. A 33 band file lacks the copies and is refused.
+// 35: each view's base carries `field-tallies.bin`, the figures of every number and timestamp field
+// per key list over the base rows. A 34 bundle lacks the file and is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 34;
+pub const BUNDLE_FORMAT: u32 = 35;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

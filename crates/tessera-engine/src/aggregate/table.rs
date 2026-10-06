@@ -19,7 +19,7 @@ use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 
 use super::artifacts::{Layer, Served};
-use super::bins::{Bins, Kind};
+use super::bins::{Bins, Kind, Numbers};
 use super::cursor::Position;
 use super::set::Cx;
 use super::values::Field;
@@ -57,6 +57,7 @@ enum Outer {
     None,
     Field(Field),
     Bins(Bins),
+    Summary(Numbers),
     Layer(Layer),
 }
 
@@ -283,6 +284,7 @@ impl Plan {
                 range,
                 sample,
             }) => Outer::Bins(Bins::of(generation, column, *bins, *range, *sample)?),
+            Some(By::Summary { column }) => Outer::Summary(Numbers::of(generation, column, true)?),
             Some(By::Layer { layer, level, pick }) => Outer::Layer(Layer::of(
                 engine, session, generation, view, layer, *level, pick,
             )?),
@@ -337,7 +339,7 @@ impl Plan {
     pub(super) fn wants_rows(&self) -> bool {
         self.cells.is_some()
             || match &self.outer {
-                Outer::None => false,
+                Outer::None | Outer::Summary(_) => false,
                 Outer::Field(field) => field.wants_rows(),
                 Outer::Bins(bins) => bins.wants_rows(),
                 Outer::Layer(_) => true,
@@ -371,6 +373,9 @@ impl Plan {
             response_bytes_left,
         } = *budget;
         cx.check_cancelled()?;
+        if let Outer::Summary(field) = &self.outer {
+            return self.summary(cx, field, position, timings).map(Some);
+        }
         let (groups, served, spill) = match held.take().filter(|h| h.holds(cx, position)) {
             Some(h) => (h.groups, h.served, h.spill),
             None => {
@@ -380,6 +385,7 @@ impl Plan {
                         (field.groups(cx, position.chosen.as_deref(), timings)?, None)
                     }
                     Outer::Bins(bins) => (bins.groups(cx, timings)?, None),
+                    Outer::Summary(_) => unreachable!("a summary is served above"),
                     Outer::Layer(layer) => {
                         let (groups, served) =
                             layer.groups(cx, position.chosen.as_deref(), timings)?;
@@ -425,6 +431,7 @@ impl Plan {
                         Source::Grouped(field.row_groups(cx, &table, &codes)?)
                     }
                     Outer::Bins(_) => unreachable!("a grouping by bins with cells is refused"),
+                    Outer::Summary(_) => unreachable!("a summary with cells is refused"),
                     Outer::Layer(_) => {
                         let served = served.as_ref().expect("a layer's groups were read");
                         labels = served.label_table();
@@ -550,7 +557,7 @@ impl Plan {
         let mut bytes = 8;
         let mut nullable = 0;
         match self.outer {
-            Outer::None => {}
+            Outer::None | Outer::Summary(_) => {}
             Outer::Bins(_) => {
                 nullable += 2;
                 bytes += 1 + 16;
@@ -642,37 +649,8 @@ impl Plan {
                         _ => None,
                     };
                     for (name, upper) in [("lower", false), ("upper", true)] {
-                        let float = |g| match edge(g, upper) {
-                            Some(Edge::Float(x)) => x,
-                            _ => 0.0,
-                        };
-                        // An integer edge is within its served column's span.
-                        let int = |g| match edge(g, upper) {
-                            Some(Edge::Int(x)) => x,
-                            _ => 0,
-                        };
-                        let valid = on_listed.clone();
-                        let edges: ArrayRef = match bins.kind() {
-                            Kind::Float => {
-                                Arc::new(Float64Array::new(repeated(runs, float).into(), valid))
-                            }
-                            Kind::Signed => Arc::new(Int64Array::new(
-                                repeated(runs, |g| int(g) as i64).into(),
-                                valid,
-                            )),
-                            Kind::Unsigned => Arc::new(UInt64Array::new(
-                                repeated(runs, |g| int(g) as u64).into(),
-                                valid,
-                            )),
-                            Kind::Timestamp => Arc::new(
-                                TimestampMicrosecondArray::new(
-                                    repeated(runs, |g| int(g) as i64).into(),
-                                    valid,
-                                )
-                                .with_timezone("UTC"),
-                            ),
-                        };
-                        push(name, edges, true);
+                        let edges = repeated(runs, |g| edge(g, upper));
+                        push(name, typed(bins.kind(), &edges), true);
                     }
                 }
                 _ => {
@@ -735,6 +713,104 @@ impl Plan {
             push("lift", Arc::new(lifts), true);
         }
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(malformed)
+    }
+}
+
+/// Values of a field of kind `kind` as the column a table serves them in, null where `None`. An
+/// integer value is within the served column's span.
+fn typed(kind: Kind, values: &[Option<Edge>]) -> ArrayRef {
+    let int = |value: &Option<Edge>| match *value {
+        Some(Edge::Int(x)) => Some(x),
+        Some(Edge::Float(x)) => Some(x as i128),
+        None => None,
+    };
+    match kind {
+        Kind::Float => Arc::new(Float64Array::from_iter(values.iter().map(|value| {
+            match *value {
+                Some(Edge::Float(x)) => Some(x),
+                Some(Edge::Int(x)) => Some(x as f64),
+                None => None,
+            }
+        }))),
+        Kind::Signed => Arc::new(Int64Array::from_iter(
+            values.iter().map(|v| int(v).map(|x| x as i64)),
+        )),
+        Kind::Unsigned => Arc::new(UInt64Array::from_iter(
+            values.iter().map(|v| int(v).map(|x| x as u64)),
+        )),
+        Kind::Timestamp => Arc::new(
+            TimestampMicrosecondArray::from_iter(values.iter().map(|v| int(v).map(|x| x as i64)))
+                .with_timezone("UTC"),
+        ),
+    }
+}
+
+impl Plan {
+    /// A summary's one page: its figures over the whole visible set, one row.
+    fn summary(
+        &self,
+        cx: &Cx<'_>,
+        field: &Numbers,
+        position: &Position,
+        timings: &mut AggregateTimings,
+    ) -> Result<Page> {
+        let counting = std::time::Instant::now();
+        let figures = field.figures(cx)?;
+        timings.count_ns += counting.elapsed().as_nanos() as u64;
+        let head = TableHead {
+            grouping: self.grouping,
+            total: cx.sets.set.size(),
+            reference_total: cx.sets.reference.as_ref().map(|r| r.size()),
+            groups: None,
+            resumed: false,
+            sample: None,
+        };
+        let edge = |value: Option<crate::figures::Number>| {
+            value.map(|value| match value {
+                crate::figures::Number::Int(x) => Edge::Int(x),
+                crate::figures::Number::Float(x) => Edge::Float(x),
+            })
+        };
+        // A timestamp's mean is the instant to the nearest microsecond, typed as its smallest and
+        // largest are; any other field's is a float.
+        let mean: ArrayRef = match field.kind() {
+            Kind::Timestamp => typed(
+                Kind::Timestamp,
+                &[figures.sum.mean_whole(figures.count).map(Edge::Int)],
+            ),
+            _ => Arc::new(Float64Array::from(vec![figures.sum.mean(figures.count)])),
+        };
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            ("items", Arc::new(UInt64Array::from(vec![figures.items]))),
+            ("count", Arc::new(UInt64Array::from(vec![figures.count]))),
+            ("none", Arc::new(UInt64Array::from(vec![figures.none]))),
+            ("min", typed(field.kind(), &[edge(figures.min)])),
+            ("max", typed(field.kind(), &[edge(figures.max)])),
+            ("mean", mean),
+        ];
+        let bytes = 6 * 8 + 1;
+        let fields: Vec<ArrowField> = columns
+            .iter()
+            .map(|(name, array)| {
+                ArrowField::new(
+                    *name,
+                    array.data_type().clone(),
+                    matches!(*name, "min" | "max" | "mean"),
+                )
+            })
+            .collect();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .map_err(|e| EngineError::Malformed(format!("an aggregate page did not assemble: {e}")))?;
+        Ok(Page {
+            head,
+            batch,
+            bytes,
+            cut_by_bytes: false,
+            next: position.next_table(),
+        })
     }
 }
 

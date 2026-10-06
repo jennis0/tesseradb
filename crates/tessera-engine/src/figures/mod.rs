@@ -1,7 +1,9 @@
 //! **A level's figures for one request**: per artifact, how many rows of the viewer's visible set
 //! carry its label, and where the layer serves them, the mean position and the box of those rows.
 //! Every verdict and every number served beside an artifact of a level with a row column is read
-//! from here.
+//! from here. A number or timestamp field's figures over the visible set, its count, sum,
+//! smallest and largest value, are taken the same way ([`field`]), and share the cache, the walks
+//! and the cache directory below.
 //!
 //! # The visible set in three parts
 //!
@@ -47,6 +49,7 @@
 mod cache;
 mod counts;
 mod denied;
+mod field;
 mod labels;
 mod persist;
 #[cfg(test)]
@@ -68,6 +71,7 @@ use crate::Engine;
 
 pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity};
 pub use cache::{FiguresStats, DEFAULT_DISK_BYTES, DEFAULT_GIVE_WAY_MS};
+pub(crate) use field::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number, Sum};
 
 use cache::{
     Counters, DenyKey, FiguresKey, FragmentCounts, FragmentKey, LevelAddress, Tail, TailKey,
@@ -624,9 +628,7 @@ impl Engine {
         places: &[Placement<'_>],
     ) -> Result<Option<Arc<DenyCorrection>>> {
         let identity = served.mask_identity;
-        let mut denied = served.denied.clone();
-        denied.remove_range(column.base_rows()..);
-        let failing = !subtracted.is_subset(&denied);
+        let (deny_version, failing) = deny_version(served, served.denied, &subtracted);
         let key = DenyKey {
             terms: identity.terms,
             identity: identity.fragment_identity,
@@ -635,12 +637,14 @@ impl Engine {
             level,
             column: column.identity(),
             level_version,
-            deny_version: served.generation.deny_version(served.name),
-            failing: failing.then_some(identity.overlay_version),
+            deny_version,
+            failing,
         };
         if let tessera_cache::Peek::Ready(held) = self.figures.denies.peek(&key) {
             return Ok(Some(held));
         }
+        let mut denied = served.denied.clone();
+        denied.remove_range(column.base_rows()..);
         let labels = match subtracted.intersect(&denied) {
             false => None,
             true => {
@@ -951,6 +955,30 @@ fn write_labels(
         held.wrote(address, newest.at);
     }
     persist::hold_under(root, bound.load(Ordering::Relaxed));
+}
+
+/// What a correction for `subtracted`, the mask's `minus` below the base, is a function of beside
+/// its fragment: the view's deny version, and the overlay's version where the mask also subtracts
+/// buffered rows the viewer fails below the base, which no deny version follows. `denied` is the
+/// view's denied rows, whole or below the base: `subtracted` lies below it either way.
+fn deny_version(
+    served: &ServedView<'_>,
+    denied: &Bitmap,
+    subtracted: &Bitmap,
+) -> (u64, Option<u64>) {
+    let failing = !subtracted.is_subset(denied);
+    (
+        served.generation.deny_version(served.name),
+        failing.then_some(served.mask_identity.overlay_version),
+    )
+}
+
+/// A wait on a correction's build, or the build's own error.
+fn waited(ended: tessera_cache::WaitingBuildError<EngineError>) -> EngineError {
+    match ended {
+        tessera_cache::WaitingBuildError::Wait(ended) => wait_error(ended),
+        tessera_cache::WaitingBuildError::Build(e) => e,
+    }
 }
 
 fn wait_error(ended: tessera_cache::WaitEnded) -> EngineError {

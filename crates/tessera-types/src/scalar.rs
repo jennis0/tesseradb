@@ -30,6 +30,32 @@ pub enum ScalarValue {
     Null,
 }
 
+/// A number or timestamp field's value as its figures hold it: an integer, or a timestamp's
+/// microseconds, exactly, and a float as itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Number {
+    Int(i128),
+    Float(f64),
+}
+
+impl Number {
+    pub fn as_f64(self) -> f64 {
+        match self {
+            Number::Int(i) => i as f64,
+            Number::Float(f) => f,
+        }
+    }
+}
+
+impl PartialOrd for Number {
+    fn partial_cmp(&self, other: &Number) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Number::Int(a), Number::Int(b)) => a.partial_cmp(b),
+            (a, b) => a.as_f64().partial_cmp(&b.as_f64()),
+        }
+    }
+}
+
 impl ScalarValue {
     /// Whether two values are the same stored value: equal, with a float compared by its bits, so
     /// a NaN is the NaN it was and `-0.0` is not `0.0`.

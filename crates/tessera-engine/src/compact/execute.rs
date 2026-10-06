@@ -151,6 +151,9 @@ pub(crate) fn execute(
     fold_entity_terms(&plan, &ctx, &mut out)?;
     stairs.record("4c entity terms");
 
+    derive_field_tallies(&plan, &ctx, &segments, &mut out)?;
+    stairs.record("4d field tallies");
+
     // No pass 4b: the term dictionary is carried to the new prefix by a hard link at publication.
     let files = digest_and_sync(&out)?;
     stairs.record("5 digests + fsync");
@@ -267,6 +270,38 @@ fn fold_row_spaces(
     }
 
     Ok(segments)
+}
+
+/// Pass 4d: each view's field tallies over its new base rows, read from the files passes 1, 4a and
+/// 4c wrote, through the function a build calls ([`tessera_store::field_tallies::derive_view`]).
+fn derive_field_tallies(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    segments: &[SegmentDescriptor],
+    out: &mut FoldOutput,
+) -> Result<(), MaintenanceFailed> {
+    let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
+    for segment in segments {
+        let path = tessera_store::field_tallies::derive_view(
+            &partition_dir,
+            &segment.view,
+            &segment.seg_id,
+            segment.row_count,
+            &ctx.declared_scalars,
+            &|name| tessera_filter::base_numbers(&partition_dir, name),
+        )
+        .map_err(failed("pass 4d (field tallies)"))?;
+        out.push(
+            format!(
+                "partitions/{}/{}/{}",
+                plan.partition,
+                tessera_store::view_rel(&segment.view),
+                tessera_store::field_tallies::FIELD_TALLIES_FILE
+            ),
+            path,
+        );
+    }
+    Ok(())
 }
 
 /// Pass 2: the new base postings and `pairs.parquet`. Every ordinal below `dict_len` gets a

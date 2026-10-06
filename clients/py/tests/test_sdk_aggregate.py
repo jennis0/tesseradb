@@ -147,16 +147,34 @@ def test_a_number_in_bins(db):
 def test_a_sampled_number_in_bins(db):
     """A sample of 8 of the twenty is more than one item in 64, which no identity band holds, so
     every item is counted, as no sample does, and the head says so; so does a sample of twenty.
-    Without a range, the head says whether the edges came from a sample."""
+    Without a range, the edges are the unsampled table's."""
     grouping = {"field": "n", "bins": 2, "range": [0, 10]}
     (exact,) = db.aggregate("map", [{"by": grouping}])
     assert "sample" not in head(exact)
     for s in (8, 20):
         (counted,) = db.aggregate("map", [{"by": {**grouping, "sample": s}}])
-        assert head(counted)["sample"] == {"sampled": False, "items": 20, "edges_sampled": False}
+        assert head(counted)["sample"] == {"sampled": False, "items": 20}
         assert rows(counted) == rows(exact)
     (drawn,) = db.aggregate("map", [{"by": {"field": "n", "bins": 2, "sample": 8}}])
-    assert head(drawn)["sample"] == {"sampled": False, "items": 20, "edges_sampled": False}
+    assert head(drawn)["sample"] == {"sampled": False, "items": 20}
+    (whole,) = db.aggregate("map", [{"by": {"field": "n", "bins": 2}}])
+    assert [(r["lower"], r["upper"]) for r in rows(drawn)] == [
+        (r["lower"], r["upper"]) for r in rows(whole)
+    ]
+
+
+def test_a_summary_of_a_number(db):
+    """`n` runs from 0 to 19: its summary is every paper's, whatever the filter, and its smallest
+    and largest value are `uint64` as the field's edges are."""
+    (whole,) = db.aggregate("map", [{"by": {"field": "n", "summary": True}}])
+    assert rows(whole) == [{"items": 20, "count": 20, "none": 0, "min": 0, "max": 19, "mean": 9.5}]
+    assert whole.schema.field("min").type == pa.uint64()
+    assert head(whole) == {"grouping": 0, "total": 20}
+    (part,) = db.aggregate(
+        "map", [{"by": {"field": "n", "summary": True}}], filters={"n": {"range": {"lt": 10}}}
+    )
+    assert rows(part) == rows(whole)
+    assert head(part)["total"] == 10
 
 
 def test_a_refusal_says_what_the_server_said(db):

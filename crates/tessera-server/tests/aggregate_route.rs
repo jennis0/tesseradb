@@ -603,8 +603,8 @@ async fn an_artifact_grouping_counts_the_members_the_viewer_sees() {
 
 /// **A sampled histogram's head says how it was counted**: a sample smaller than the set is
 /// scaled to the set's size, one as large as the set, or too large for a band to hold, counts
-/// every item exactly, as an unsampled histogram does, and default edges drawn from the visible
-/// set's sample say so.
+/// every item exactly, as an unsampled histogram does, and default edges are the unsampled
+/// histogram's.
 #[tokio::test]
 async fn a_sampled_histograms_head_says_how_it_was_counted() {
     let f = fixture().await;
@@ -628,7 +628,7 @@ async fn a_sampled_histograms_head_says_how_it_was_counted() {
     let (_, whole) = aggregate_ok(&f.server, &token, &body(Some(n))).await;
     assert_eq!(
         whole.tables[0].0["sample"],
-        json!({ "sampled": false, "items": n, "reference_items": n, "edges_sampled": false })
+        json!({ "sampled": false, "items": n, "reference_items": n })
     );
     assert_eq!(table(&[whole], 0), exact);
 
@@ -640,13 +640,18 @@ async fn a_sampled_histograms_head_says_how_it_was_counted() {
     // The viewer sees a third of the view's rows, so a cut the band holds as few as one row in
     // 128 of them is sampled.
     let (_, drawn) = aggregate_ok(&f.server, &token, &drawn(6)).await;
-    assert_eq!(drawn.tables[0].0["sample"]["edges_sampled"], true);
+    assert_eq!(drawn.tables[0].0["sample"]["sampled"], true);
+    let edges = |decoded: DecodedAggregate| -> Vec<(f64, f64)> {
+        bin_rows(&[decoded], true).0.into_iter().map(|(lower, upper, _, _)| (lower, upper)).collect()
+    };
+    let unsampled = json!({ "view": "s0", "groupings": [{ "by": { "field": "stamp", "bins": 6 } }] });
+    let (_, whole) = aggregate_ok(&f.server, &token, &unsampled).await;
+    assert_eq!(edges(drawn), edges(whole));
 
     let (_, part) = aggregate_ok(&f.server, &token, &body(Some(6))).await;
     let head = &part.tables[0].0;
     assert_eq!(head["total"], n);
     assert_eq!(head["sample"]["sampled"], true);
-    assert_eq!(head["sample"]["edges_sampled"], false);
     let taken = head["sample"]["items"].as_u64().unwrap();
     assert!(taken > 0 && taken < 20, "{head}");
     // Scaled counts sum to the set's size, give or take a rounding a row.
@@ -902,6 +907,14 @@ async fn every_refusal_has_its_status() {
         (by(json!({ "field": "score", "top": 2, "sample": 10 })), None),
         (by(json!({ "field": "score", "sample": 10 })), None),
         (by(json!({ "layer": LAYER, "top": 2, "sample": 10 })), None),
+        (by(json!({ "field": "score", "summary": true, "top": 2 })), None),
+        (by(json!({ "field": "score", "summary": true, "bins": 4 })), None),
+        (by(json!({ "field": "score", "summary": true, "sample": 10 })), None),
+        (by(json!({ "field": "archive", "summary": true })), None),
+        (by(json!({ "field": "pages", "summary": true })), None),
+        (by(json!({ "field": "nope", "summary": true })), None),
+        (by(json!({ "layer": LAYER, "summary": true })), None),
+        (json!({ "view": "s0", "groupings": [{ "by": { "field": "score", "summary": true }, "cells": { "depth": 2 } }] }), None),
         (json!({ "view": "s0", "groupings": [{}], "filters": { "nope": { "eq": 1 } } }), None),
         (json!({ "view": "s0", "groupings": [{}], "reference": { "nope": { "eq": 1 } } }), None),
         (json!({ "view": "s0", "groupings": [{}], "page_rows": 0 }), None),
@@ -1354,4 +1367,105 @@ async fn a_number_or_timestamp_field_is_counted_in_bins() {
     let (bins, _) = bin_rows(&read_all(&f.server, &token, &body).await, true);
     assert_eq!(bins.len(), 2);
     assert_eq!((bins[0].0, bins[1].1), (1_577_836_800_000_000.0, 1_640_995_200_000_000.0));
+}
+
+/// One summary row: `(items, count, none, min, max, mean)`, the smallest and largest as `f64`.
+type Summary = (u64, u64, u64, Option<f64>, Option<f64>, Option<f64>);
+
+fn summary_row(decoded: &DecodedAggregate, grouping: usize) -> Summary {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::{Float64Type, TimestampMicrosecondType, UInt64Type};
+    let pages = &decoded.tables[grouping].1;
+    assert_eq!(pages.len(), 1, "a summary is one page");
+    let batch = &pages[0].0;
+    assert_eq!(batch.num_rows(), 1);
+    let names: Vec<String> = batch.schema().fields().iter().map(|f| f.name().clone()).collect();
+    assert_eq!(names, ["items", "count", "none", "min", "max", "mean"]);
+    let u64_of = |name: &str| batch.column_by_name(name).unwrap().as_primitive::<UInt64Type>().value(0);
+    let number = |name: &str| -> Option<f64> {
+        let column = batch.column_by_name(name).unwrap();
+        if column.is_null(0) {
+            return None;
+        }
+        Some(match column.data_type() {
+            DataType::Float64 => column.as_primitive::<Float64Type>().value(0),
+            DataType::Timestamp(_, _) => column.as_primitive::<TimestampMicrosecondType>().value(0) as f64,
+            other => panic!("a summary value of type {other:?}"),
+        })
+    };
+    (u64_of("items"), u64_of("count"), u64_of("none"), number("min"), number("max"), number("mean"))
+}
+
+/// The summary of `values` over `items`, worked out here.
+fn summary_oracle(items: &[u64], value: impl Fn(u64) -> Option<f64>) -> Summary {
+    let held: Vec<f64> = items.iter().filter_map(|&e| value(e)).collect();
+    let min = held.iter().copied().reduce(f64::min);
+    let max = held.iter().copied().reduce(f64::max);
+    let mean = (!held.is_empty()).then(|| held.iter().sum::<f64>() / held.len() as f64);
+    (items.len() as u64, held.len() as u64, (items.len() - held.len()) as u64, min, max, mean)
+}
+
+fn near(a: Summary, b: Summary) -> bool {
+    let close = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (Some(x), Some(y)) => (x - y).abs() <= 1e-9 * x.abs().max(1.0),
+        (x, y) => x == y,
+    };
+    (a.0, a.1, a.2, a.3, a.4) == (b.0, b.1, b.2, b.3, b.4) && close(a.5, b.5)
+}
+
+/// **A summary is the figures of every item the viewer may see in the view**, whatever the filters
+/// say, for each viewer, and **a suppression applies to it from the next response**.
+#[tokio::test]
+async fn a_summary_covers_the_whole_visible_set() {
+    let f = fixture().await;
+    for terms in [&["0"][..], &["1"][..]] {
+        let token = token_for(&f.server, terms).await;
+        let body = json!({
+            "view": "s0",
+            "filters": left_half(),
+            "groupings": [
+                { "by": { "field": "score", "summary": true } },
+                { "by": { "field": "stamp", "summary": true } },
+            ],
+        });
+        let (_, decoded) = aggregate_ok(&f.server, &token, &body).await;
+        let all = items(terms, |_| true);
+        assert_eq!(decoded.tables[0].0["total"], items(terms, in_left_half).len());
+        assert!(decoded.tables[0].0.get("groups").is_none());
+        let score = summary_row(&decoded, 0);
+        assert!(near(score, summary_oracle(&all, score_of)), "{terms:?}: {score:?}");
+        let stamp = summary_row(&decoded, 1);
+        assert!(
+            near(stamp, summary_oracle(&all, |e| stamp_of(e).map(|t| t as f64))),
+            "{terms:?}: {stamp:?}"
+        );
+    }
+
+    let token = token_for(&f.server, &["0"]).await;
+    let body = json!({ "view": "s0", "groupings": [{ "by": { "field": "score", "summary": true } }] });
+    let all = items(&["0"], |_| true);
+    let top = *all
+        .iter()
+        .max_by(|&&a, &&b| score_of(a).partial_cmp(&score_of(b)).unwrap())
+        .unwrap();
+    let holders: Vec<u64> = all.iter().copied().filter(|&e| score_of(e) == score_of(top)).collect();
+    let changes: Vec<Value> = holders
+        .iter()
+        .map(|&e| json!({ "op": "suppress", "match": { "id": member(e) } }))
+        .collect();
+    let resp = f
+        .server
+        .client
+        .post(f.server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&changes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (_, after) = aggregate_ok(&f.server, &token, &body).await;
+    let left: Vec<u64> = all.iter().copied().filter(|e| !holders.contains(e)).collect();
+    let summary = summary_row(&after, 0);
+    assert!(near(summary, summary_oracle(&left, score_of)), "{summary:?}");
+    assert!(summary.4 < score_of(top), "the largest value moved at once");
 }

@@ -28,7 +28,8 @@
 //! artifact for counts alone and 40 B with a centroid's sums and a box. A layer that serves a box
 //! keeps a reserve beside it as an entry of its own, 4 B an artifact and 128 B more for each
 //! artifact with more than sixteen placed rows, so an entry too large for the bound loses its
-//! reserve and keeps its counts.
+//! reserve and keeps its counts. A field's tally over a fragment's base rows is under a kilobyte,
+//! held in a cache of its own under a bound of the same size.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
@@ -39,6 +40,7 @@ use tessera_cache::{CacheWeight, Cancel, SingleFlightCache, WaitEnded, WaitingBu
 
 use super::counts::{CountsAt, Deltas, Reserves};
 use super::denied::DenyCorrection;
+use super::field::{FieldDeny, FieldLeft, Held};
 use super::labels::{HeldLabels, LabelStore};
 use super::worker::Worker;
 use super::Geometry;
@@ -69,6 +71,48 @@ pub(crate) enum FiguresKey {
     /// A level's counts over one request's whole composed mask: the walk of the whole composed
     /// mask, the answer while a level's denied-row labels are being read.
     Exact(ExactKey),
+    /// A field's tally over one fragment's base rows ([`FieldKey`]).
+    Field(FieldKey),
+    /// A field's tally over a fragment's base rows less one deny's, walked where the deny
+    /// subtracts every extreme value the fragment's tally keeps on a side.
+    FieldLeft(FieldDenyKey),
+}
+
+/// A field's tally over a fragment's base rows: a function of the fragment's base rows and their
+/// values, which nothing changes between folds.
+///
+/// - `terms`, `identity` and `view`: as [`FragmentKey`]'s.
+/// - `column`: the field's column as the request resolved it.
+/// - `kind`: how its values are compared, which a field declared again with another type moves.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FieldKey {
+    pub terms: [u8; 32],
+    pub identity: [u8; 32],
+    pub view: String,
+    pub column: String,
+    pub kind: u8,
+}
+
+/// What a field's deny correction is a function of: its fragment's tally and the denied base
+/// rows, as [`DenyKey`] names them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FieldDenyKey {
+    pub field: FieldKey,
+    pub deny_version: u64,
+    pub failing: Option<u64>,
+}
+
+/// What one session's tail of a field is a function of: its rows above the fragment's base rows,
+/// as [`TailKey`] names them, and their values.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FieldTailKey {
+    pub token_id: u64,
+    pub view: String,
+    pub column: String,
+    pub kind: u8,
+    pub segments_version: u64,
+    pub projection_segments_version: u64,
+    pub overlay_version: u64,
 }
 
 /// The fragment's counts: a function of the fragment's base rows and the column's base labels.
@@ -312,14 +356,20 @@ pub struct FiguresStats {
     pub entries: usize,
     /// Requests waiting at this instant for another request's build of their key.
     pub waiters: u64,
-    /// Walks of a fragment's base rows.
+    /// Walks of a fragment's base rows for a level.
     pub fills: u64,
+    /// Walks of a fragment's base rows for a field, which a field the base stores no tallies of
+    /// takes, and so does one whose composed tallies do not cover the fragment's base rows.
+    pub field_fills: u64,
+    /// Composed field tallies that did not cover the fragment's base rows, or a deny that
+    /// subtracted more than they held: each answered by a walk instead.
+    pub field_mismatches: u64,
     /// Fragments' counts read back from disk rather than walked.
     pub loads: u64,
     /// Walks of a whole composed mask, taken where a level's denied-row labels are not yet held.
     pub exact: u64,
-    /// Boxes worked out from an artifact's rows because a deny reached a side its reserve could
-    /// not answer.
+    /// Boxes worked out from an artifact's rows, or a field's base rows less a deny walked,
+    /// because a deny reached a side its reserve could not answer.
     pub reserve_spent: u64,
     /// Entries, counts or reserves, larger than the whole bound: served to the request that built
     /// them and not kept.
@@ -338,6 +388,8 @@ pub struct FiguresStats {
 #[derive(Debug, Default)]
 pub(crate) struct Counters {
     pub(crate) fills: AtomicU64,
+    pub(crate) field_fills: AtomicU64,
+    pub(crate) field_mismatches: AtomicU64,
     pub(crate) loads: AtomicU64,
     pub(crate) exact: AtomicU64,
     pub(crate) spent: AtomicU64,
@@ -458,6 +510,16 @@ pub struct FiguresCache {
     pub(super) denies: SingleFlightCache<DenyKey, DenyCorrection>,
     /// The tails, per session and generation.
     pub(super) tails: SingleFlightCache<TailKey, Tail>,
+    /// The fields' tallies over each fragment's base rows, and over what a deny leaves of them,
+    /// under a bound of the same size as `slots`'.
+    pub(super) fields: SingleFlightCache<FiguresKey, Held>,
+    /// Per field, the newest tally of the base rows a deny leaves, which a later deny subtracting
+    /// every row that one did may read before it walks; under the corrections' bound.
+    pub(super) field_left: SingleFlightCache<FieldKey, FieldLeft>,
+    /// The fields' deny corrections, per fragment and deny version.
+    pub(super) field_denies: SingleFlightCache<FieldDenyKey, FieldDeny>,
+    /// The fields' tails, per session and generation.
+    pub(super) field_tails: SingleFlightCache<FieldTailKey, Held>,
     /// Per `(view, layer, level)`, the labels of the view's denied base rows.
     pub(super) labels: LabelStore,
     /// Where entries are persisted: one directory per bundle identity beneath it. `None` holds
@@ -511,11 +573,21 @@ impl FiguresCache {
         denies.set_wait_budget_ms(BUILD_WAIT_MS);
         let tails = SingleFlightCache::new(CORRECTIONS_BYTES);
         tails.set_wait_budget_ms(BUILD_WAIT_MS);
+        let fields = SingleFlightCache::new(bound_bytes);
+        fields.set_wait_budget_ms(BUILD_WAIT_MS);
+        let field_denies = SingleFlightCache::new(CORRECTIONS_BYTES);
+        field_denies.set_wait_budget_ms(BUILD_WAIT_MS);
+        let field_tails = SingleFlightCache::new(CORRECTIONS_BYTES);
+        field_tails.set_wait_budget_ms(BUILD_WAIT_MS);
         FiguresCache {
             slots,
             reserves,
             denies,
             tails,
+            fields,
+            field_left: SingleFlightCache::new(CORRECTIONS_BYTES),
+            field_denies,
+            field_tails,
             labels: LabelStore {
                 held: Arc::new(HeldLabels::new(super::labels::DEFAULT_LABELS_BYTES)),
                 dir: dir.clone(),
@@ -542,6 +614,8 @@ impl FiguresCache {
         self.slots.retain_keys(|_| false);
         self.reserves.set_bound_bytes(bound_bytes);
         self.reserves.retain_keys(|_| false);
+        self.fields.set_bound_bytes(bound_bytes);
+        self.fields.retain_keys(|_| false);
     }
 
     /// The bytes of figures the cache directory may hold.
@@ -561,19 +635,24 @@ impl FiguresCache {
 
     pub fn stats(&self) -> FiguresStats {
         let stats = self.slots.stats();
+        let fields = self.fields.stats();
         let labels = self.labels.held.stats();
         FiguresStats {
-            hits: stats.hits,
-            misses: stats.misses,
-            evictions: stats.evictions,
-            resident_bytes: stats.bytes + self.reserves.stats().bytes,
-            entries: stats.entries,
-            waiters: stats.waiters_now,
+            hits: stats.hits + fields.hits,
+            misses: stats.misses + fields.misses,
+            evictions: stats.evictions + fields.evictions,
+            resident_bytes: stats.bytes + self.reserves.stats().bytes + fields.bytes,
+            entries: stats.entries + fields.entries,
+            waiters: stats.waiters_now + fields.waiters_now,
             fills: self.counters.fills.load(Ordering::Relaxed),
+            field_fills: self.counters.field_fills.load(Ordering::Relaxed),
+            field_mismatches: self.counters.field_mismatches.load(Ordering::Relaxed),
             loads: self.counters.loads.load(Ordering::Relaxed),
             exact: self.counters.exact.load(Ordering::Relaxed),
             reserve_spent: self.counters.spent.load(Ordering::Relaxed),
-            not_admitted: stats.oversized_admissions + self.reserves.stats().oversized_admissions,
+            not_admitted: stats.oversized_admissions
+                + self.reserves.stats().oversized_admissions
+                + fields.oversized_admissions,
             labels_bytes: labels.bytes,
             labels_bound_bytes: labels.bound,
             labels_rows_read: labels.rows_read,
@@ -585,6 +664,7 @@ impl FiguresCache {
     /// Remove from the cache directory every bundle identity's entries but `identity`'s: at open,
     /// and whenever a compaction rotates the identity.
     pub(crate) fn sweep(&self, identity: [u8; 32]) {
+        self.field_left.retain_keys(|key| key.identity == identity);
         if let Some(root) = self.dir.clone() {
             self.worker
                 .submit(move || super::persist::sweep_other_identities(&root, &identity));
@@ -639,6 +719,8 @@ impl FiguresCache {
     pub(crate) fn prune_tokens(&self, token_ids: &rustc_hash::FxHashSet<u64>) {
         self.tails
             .retain_keys(|key| !token_ids.contains(&key.token_id));
+        self.field_tails
+            .retain_keys(|key| !token_ids.contains(&key.token_id));
     }
 
     /// This key's counts, building them if nothing is held. A request arriving while another
@@ -653,13 +735,26 @@ impl FiguresCache {
         cancel: Option<&crate::CancelToken>,
         walk: impl FnOnce(&Build<'_>) -> Option<FragmentCounts>,
     ) -> Result<Arc<FragmentCounts>, WaitEnded> {
+        self.get_or_build_in(&self.slots, key, turn, cancel, walk)
+    }
+
+    /// [`Self::get_or_build`] into `slots`, which holds one kind of entry: a level's counts or a
+    /// field's tally. Every kind shares the places to walk, the giving way and the callers' interest.
+    pub(crate) fn get_or_build_in<V: CacheWeight + Send + Sync + 'static>(
+        &self,
+        slots: &SingleFlightCache<FiguresKey, V>,
+        key: FiguresKey,
+        turn: &DrawingTurn,
+        cancel: Option<&crate::CancelToken>,
+        walk: impl FnOnce(&Build<'_>) -> Option<V>,
+    ) -> Result<Arc<V>, WaitEnded> {
         let _waiting = self.turn_guard(turn, |t| t.waiting += 1, |t| t.waiting -= 1);
         let (interest, _caller) = self.register(&key, cancel);
         let polled: &dyn Cancel = match cancel {
             Some(cancel) => cancel,
             None => &tessera_cache::NeverCancelled,
         };
-        self.slots
+        slots
             .get_or_try_build_waiting(key, polled, || {
                 let _permit = self.build_permit(&interest).ok_or(Abandoned)?;
                 walk(&Build {
@@ -826,7 +921,7 @@ impl Drop for FiguresCache {
             };
             let reserve = match &key {
                 FiguresKey::Fragment(key) => self.reserve(key, newest.dense.filled_at),
-                FiguresKey::Exact(_) => None,
+                FiguresKey::Exact(_) | FiguresKey::Field(_) | FiguresKey::FieldLeft(_) => None,
             };
             super::persist::write_counts(&written.dir, &written.stem, &newest, reserve.as_deref());
         }

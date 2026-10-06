@@ -780,8 +780,12 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'title-field'}) accessor titleField = '';
   /** The field the item card shows under its headline. Unset, it shows none. */
   @property({attribute: 'subtitle-field'}) accessor subtitleField = '';
-  /** Passed to the map's `budget`. */
+  /** How many marks to aim for on screen, passed to the map's `budget`. `0`, the default, leaves the store's own, which starts at 250000. */
   @property({type: Number}) accessor budget = 0;
+  /** The fewest marks a control for `budget` offers, passed to the map's `budget-min`. */
+  @property({type: Number, attribute: 'budget-min'}) accessor budgetMin = 1_000;
+  /** The most marks a control for `budget` offers, passed to the map's `budget-max`. */
+  @property({type: Number, attribute: 'budget-max'}) accessor budgetMax = 2_000_000;
   /** Passed to the map's `no-points`; the Points switch in the Layers popover changes it. */
   @property({type: Boolean, attribute: 'no-points'}) accessor noPoints = false;
   /** Passed to the map's `radius`; the Size slider in the Layers popover changes it. */
@@ -1128,6 +1132,8 @@ export class TesseraExplorer extends TesseraElement {
           tooltip-fields=${this.tooltipFields}
           title-field=${this.titleField || nothing}
           budget=${this.budget || nothing}
+          .budgetMin=${this.budgetMin}
+          .budgetMax=${this.budgetMax}
           controls-corner=${compact ? 'bottom-left' : 'top-left'}
           .clusterLevel=${level}
           .noPoints=${this.noPoints}

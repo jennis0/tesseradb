@@ -68,6 +68,9 @@ pub struct ViewData {
     /// `None` costs time and changes no answer: a session whose terms have no image walks its
     /// permutation instead, and arrives at the same rows.
     pub term_images: Option<Arc<crate::term_images::TermImages>>,
+    /// The figures of every number and timestamp field over the base rows, per key list
+    /// ([`crate::field_tallies`]), or `None` for a view with no base.
+    pub field_tallies: Option<Arc<crate::field_tallies::FieldTallies>>,
 }
 
 impl ViewData {
@@ -323,6 +326,7 @@ impl Bundle {
                 // the base permutation applied to a term's base posting, and neither publication
                 // touches either. The rows they add are walked (ruling B, the term-images memo).
                 term_images: view_data.term_images.clone(),
+                field_tallies: view_data.field_tallies.clone(),
             })
         })
     }
@@ -371,6 +375,7 @@ impl Bundle {
                 // the base permutation applied to a term's base posting, and neither publication
                 // touches either. The rows they add are walked (ruling B, the term-images memo).
                 term_images: view_data.term_images.clone(),
+                field_tallies: view_data.field_tallies.clone(),
             })
         })
     }
@@ -400,6 +405,7 @@ impl Bundle {
                 segments: view_data.segments.clone(),
                 incarnation: view_data.incarnation,
                 term_images: view_data.term_images.clone(),
+                field_tallies: view_data.field_tallies.clone(),
             })
         })
     }
@@ -446,6 +452,7 @@ impl Bundle {
                         // A view created while the service runs owns no row space until its first
                         // flush, so there is nothing to have projected.
                         term_images: None,
+                        field_tallies: None,
                     });
             }
         }
@@ -762,6 +769,26 @@ fn open_prefix(
                         None
                     };
 
+                    // `field-tallies.bin` beside it, which a build and a fold write for every base
+                    // (`crate::field_tallies`). **Optional, as `row-entity.u32` is**: a view
+                    // without one has its base rows walked for a field's figures, and arrives at
+                    // the same answer. Where it is named, it is verified like any other file.
+                    let tallies_rel = format!(
+                        "partitions/{}/{}/{}",
+                        partition_desc.phash,
+                        crate::view_rel(&seg_desc.view),
+                        crate::field_tallies::FIELD_TALLIES_FILE
+                    );
+                    let field_tallies = if has_base
+                        && (segments_manifest.files.contains_key(&tallies_rel)
+                            || manifest.files.contains_key(&tallies_rel))
+                    {
+                        let path = view_dir.join(crate::field_tallies::FIELD_TALLIES_FILE);
+                        crate::field_tallies::read(&path)?.map(Arc::new)
+                    } else {
+                        None
+                    };
+
                     // The first segment named for a view is its build segment: `permutation.bin`
                     // addresses that one's row space, and every later segment arrives as an
                     // extent above it.
@@ -785,6 +812,7 @@ fn open_prefix(
                             // permutation's bound have been checked: both are stamped into the
                             // file and the open compares them.
                             term_images: None,
+                            field_tallies,
                         },
                     );
                     views.get_mut(&seg_desc.view).expect("just inserted")
@@ -989,6 +1017,7 @@ fn open_prefix(
                 segments: Vec::new(),
                 incarnation: view.incarnation,
                 term_images: None,
+                field_tallies: None,
             });
         }
 
@@ -1927,6 +1956,27 @@ impl ScalarSlice<'_> {
             ScalarSlice::F64(s) => V::F64(*s.get(local)?),
             ScalarSlice::TimestampUs(s) => V::TimestampUs(*s.get(local)?),
         })
+    }
+
+    /// Row `local`'s slot as a number, where the column holds numbers and the slot exists:
+    /// what a field's figures are tallied from. Presence is the caller's to ask.
+    #[inline]
+    pub fn number_at(&self, local: usize) -> Option<tessera_types::scalar::Number> {
+        use tessera_types::scalar::Number;
+        let int = |x: i128| Some(Number::Int(x));
+        match self {
+            ScalarSlice::U8(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::U16(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::U32(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::U64(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::I8(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::I16(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::I32(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::I64(s) | ScalarSlice::TimestampUs(s) => int(i128::from(*s.get(local)?)),
+            ScalarSlice::F32(s) => Some(Number::Float(f64::from(*s.get(local)?))),
+            ScalarSlice::F64(s) => Some(Number::Float(*s.get(local)?)),
+            ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => None,
+        }
     }
 
     /// The stored type's name, for a diagnostic that has to say what it found. Deliberately the

@@ -6,11 +6,12 @@
  *
  * @module @tesseradb/client
  */
-export {createStore, CLUSTER_PREFIX, REGION_HELD_LIMIT, type Store} from './store.js';
+export {createStore, CLUSTER_PREFIX, DEFAULT_BUDGET, REGION_HELD_LIMIT, type Store} from './store.js';
 export type {
   AggregateEntry,
   AggregateSpec,
   AggregatesProjection,
+  FieldSummary,
   ArtifactsProjection,
   FiltersProjection,
   InViewCounts,

@@ -838,8 +838,9 @@ fn the_format_is_named_or_refused_before_any_request() {
 }
 
 /// `tessera aggregate` writes the one table its grouping asks for, as the same read over HTTP
-/// gives it: a histogram, which is one page however small the pages asked for, and a breakdown,
-/// carried across responses from its cursor; and arguments that are not JSON send nothing.
+/// gives it: a histogram, which is one page however small the pages asked for, a summary, and a
+/// breakdown, carried across responses from its cursor; and arguments that are not JSON send
+/// nothing.
 #[test]
 fn an_aggregate_read_is_the_table_over_http() {
     let served = serve();
@@ -854,6 +855,12 @@ fn an_aggregate_read_is_the_table_over_http() {
             r#"{"by": {"field": "seen_at", "bins": 12, "sample": 5}}"#,
             json!({ "by": { "field": "seen_at", "bins": 12, "sample": 5 } }),
             "sampled.arrows",
+            false,
+        ),
+        (
+            r#"{"by": {"field": "seen_at", "summary": true}}"#,
+            json!({ "by": { "field": "seen_at", "summary": true } }),
+            "summary.arrows",
             false,
         ),
         (

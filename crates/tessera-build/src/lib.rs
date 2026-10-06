@@ -2040,6 +2040,19 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         )?]
     };
 
+    // ---- 8d. the view's field tallies (`tessera_store::field_tallies`) -------------------
+    //
+    // After every file they read: the segment, the row-to-entity table, the entity terms and the
+    // value columns. The streaming build calls the same function at the same point.
+    other_paths.push(tessera_store::field_tallies::derive_view(
+        &partition_dir,
+        &view.view_id,
+        SEG_ID,
+        n as u32,
+        &declared_scalars_of(&args.schema),
+        &|name| tessera_filter::base_numbers(&partition_dir, name),
+    )?);
+
     // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([permutation_path, row_entity_path]);
     other_paths.extend(
@@ -2122,6 +2135,25 @@ fn scalar_schema_of(
         .iter()
         .filter(|a| a.render)
         .map(|a| (a.name.clone(), a.ty))
+        .collect()
+}
+
+/// The schema's attributes as `MANIFEST.declared_scalars` records them, in declaration order.
+pub(crate) fn declared_scalars_of(schema: &crate::config::Schema) -> Vec<DeclaredScalar> {
+    schema
+        .attributes
+        .iter()
+        .map(|a| DeclaredScalar {
+            name: a.name.clone(),
+            arrow_type: a.ty,
+            vocabulary: a.vocabulary.clone(),
+            // Resolved at the schema parse, so what a bundle records is the identity the build
+            // actually indexed with rather than the name a schema asked for.
+            analyser: a.analyser.clone(),
+            index: a.index,
+            render: a.render,
+            unique: a.unique,
+        })
         .collect()
 }
 
@@ -2278,22 +2310,7 @@ fn write_manifests(
         // scalar vector in this order, and flush, merge and the fold all take their writer schema
         // from it. Reordering the schema file therefore reorders every segment built after it,
         // which is why the compilation preserves declaration order rather than sorting by name.
-        declared_scalars: args
-            .schema
-            .attributes
-            .iter()
-            .map(|a| DeclaredScalar {
-                name: a.name.clone(),
-                arrow_type: a.ty,
-                vocabulary: a.vocabulary.clone(),
-                // Resolved at the schema parse, so what a bundle records is the identity the build
-                // actually indexed with rather than the name a schema asked for.
-                analyser: a.analyser.clone(),
-                index: a.index,
-                render: a.render,
-                unique: a.unique,
-            })
-            .collect(),
+        declared_scalars: declared_scalars_of(&args.schema),
         // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
         // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
         // — which are under a digest.

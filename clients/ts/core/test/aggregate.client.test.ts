@@ -168,11 +168,28 @@ describe('TesseraClient.aggregate', () => {
 
   it('sends a histogram\'s sample size and reads how its table was counted', async () => {
     const table = new Table({count: u64([7n])});
-    const head = {grouping: 0, total: 900, reference_total: 1000, groups: 1, resumed: false, sample: {sampled: true, items: 96, reference_items: 101, edges_sampled: true}};
+    const head = {grouping: 0, total: 900, reference_total: 1000, groups: 1, resumed: false, sample: {sampled: true, items: 96, reference_items: 101}};
     const {client, sent} = clientFor({'': () => chunked(responseOf([{head, pages: [{table, next: null}]}], null))});
     const result = await client.aggregate('tok', {view: 's0', reference: {}, groupings: [{by: {field: 'year', bins: 10, sample: 100}}]});
     expect(sent[0]!.body).toMatchObject({groupings: [{by: {field: 'year', bins: 10, sample: 100}}]});
-    expect(result.tables[0]!.sample).toEqual({sampled: true, items: 96, referenceItems: 101, edgesSampled: true});
+    expect(result.tables[0]!.sample).toEqual({sampled: true, items: 96, referenceItems: 101});
+  });
+
+  it('sends a summary and reads its one row of figures', async () => {
+    const table = new Table({
+      items: u64([900n]),
+      count: u64([850n]),
+      none: u64([40n]),
+      min: vectorFromArray([-3.5]),
+      max: vectorFromArray([99.5]),
+      mean: vectorFromArray([41.25])
+    });
+    const head = {grouping: 0, total: 300, resumed: false};
+    const {client, sent} = clientFor({'': () => chunked(responseOf([{head, pages: [{table, next: null}]}], null))});
+    const result = await client.aggregate('tok', {view: 's0', filters: {kind: {eq: 'a'}}, groupings: [{by: {field: 'score', summary: true}}]});
+    expect(sent[0]!.body).toMatchObject({groupings: [{by: {field: 'score', summary: true}}]});
+    expect(result.tables[0]).toMatchObject({total: 300, groups: null, sample: null});
+    expect(rowsOf(result.tables[0]!.rows)).toEqual([{items: 900n, count: 850n, none: 40n, min: -3.5, max: 99.5, mean: 41.25}]);
   });
 
   it('carries the reference columns and a layer key as they arrive', async () => {

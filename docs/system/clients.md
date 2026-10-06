@@ -84,7 +84,11 @@ wrong shows a viewer a wrong or misleading map, not merely a different-looking o
 
 The store takes in where the camera is, which filters, layers and colour are active, the point
 budget, which view is current and what is selected. It publishes the marks to draw, the counts to
-show, the display state, and a legend.
+show, the display state, and a legend. The point budget is 250,000 marks unless the host gives
+another. The explorer element takes it as `budget`, which leaves the store's own unless the host
+sets it, with `budget-min` and `budget-max`, 1,000 and 2,000,000 by default, for the range a
+control for it offers, and passes all three to its map; the notebook widget takes them as
+`budget`, `budget_min` and `budget_max`, and every Python route to a map passes them on.
 
 Told where the camera is, it works out which requests are worth making and issues them. Told a
 filter changed, it recomposes one expression from every active clause and sends it whole. Given a
@@ -222,15 +226,18 @@ the items the selection counts.
 | Client | Call | What it gives back |
 |---|---|---|
 | TypeScript | `client.aggregate(token, request)` | every response read through the cursor, one Arrow table per grouping with its head's figures, whether a page counted a changed corpus, and the region verdict |
-| TypeScript store | `store.setAggregate(id, {groupings, reference, without, highlighted})` | the `aggregates` projection, each entry answered over the store's current filters and selected region and asked again when either, or the view, changes; a request the next one supersedes is aborted |
+| TypeScript store | `store.setAggregate(id, {groupings, subject, reference, without, withoutMembersOf, highlighted})` | the `aggregates` projection, each entry answered over the set its `subject` names and asked again when the request that set composes changes; a request the next one supersedes is aborted |
 | Python | `viewer.aggregate(view, groupings, filters, reference)`, `db.aggregate` and `selection.aggregate` | one `pyarrow` table per grouping, the head's figures in its schema metadata |
 | CLI | `tessera aggregate --view <view> --grouping <json>` | one grouping's table, read through the cursor and written as Arrow IPC or Parquet, its head on stderr |
 
 Every surface sends a grouping as the caller wrote it, a histogram's `bins`, `range` and `sample`
-included, and none adds a default. Each reads a sampled histogram's head as it reads the rest: the
-TypeScript client as the table's `sample`, Python in the `tessera.head` metadata, and the CLI on
-stderr. The store sends a reference only where the component registered one, as a
-filter expression or as the whole visible set. It chooses no grouping. A registration can name one
+and a field's `summary` included, and none adds a default. Each reads a sampled histogram's head as
+it reads the rest: the TypeScript client as the table's `sample`, Python in the `tessera.head`
+metadata, and the CLI on stderr. A summary is a table of one row on every surface, with the
+columns `items`, `count`, `none`, `min`, `max` and `mean`, over the whole visible set in the view;
+the request's filters change its head's `total` and none of its figures. The store sends a
+reference only where the component registered one, as a filter expression or as the whole visible
+set. It chooses no grouping. A registration can name one
 column in `without`, as the filter draft keys its controls, and the store then sends its filters
 less that column's control. A category control uses this to list its own values: with its clause
 set, the values it excludes are still counted, and every other clause, the `member_of` clauses and
@@ -277,6 +284,64 @@ largest count.
 
 There is no command-line command for this route. It is reached over HTTP and through the
 TypeScript and Python clients.
+
+### What a registration counts, and when it is asked again
+
+A registration's `subject` names the set its counts are taken over, and with it when the store
+asks again:
+
+| `subject` | The set | Asked again |
+|---|---|---|
+| `match`, the default | what the store's filters admit, under the selected region | when the filters, the highlight, the `member_of` clauses or the selected region change and the request they compose differs from the one last sent |
+| `view` | the same, within the area the counts in view cover: the camera's box, or the selected region while one is selected | as `match`, at once over the area as it stands; after a pan, only once the camera has rested for 250 ms somewhere new |
+| `visible` | every item this viewer may see in the view; no filters are sent | only at a view switch, at `refresh()`, after a change of viewer and after a change of corpus |
+
+A `view` registration's `reference` is limited to the same area, as the counts in view's own
+reference is, so a lift compares the subject with what is visible in the area.
+
+Every registration is also asked again at a view switch, at `refresh()`, once the store has read
+`/v1/meta` again after forgetting what the server answered, and when a frame the map fetches
+observes a new content key, so an ingest, a deletion or a suppression reaches the counts as it
+reaches the map. Its request is composed once the store has `/v1/meta` for the viewer it asks
+as, so it names only what that meta offers. A change that leaves a
+registration's request as it was sends nothing for it: a category control leaving out its own
+clause is not asked again when only that clause changes, and a `match` registration without
+`highlighted` is not asked again when the highlight does. A `view` registration made while the
+camera moves, or before the store has a camera, shows `loading` and is sent once the camera rests.
+While the next request is out, each entry keeps the answer before it.
+
+The store joins requests asked for together that differ only in their groupings, so the
+registrations answering one rest of the camera go as one request, and those answering one change
+of filter go as another. A request carries one set of filters, so a registration that leaves out
+a clause that is set goes as a request of its own; one leaving out a clause that is not set sends
+the same filters as the rest and joins them. A request holds at most
+`meta.selection.maxAggregateGroupings` groupings, and the registrations past that start the next
+one. A registration whose request is superseded before its answer lands has its share aborted, and
+the joined request is aborted once every share in it has been.
+
+Each entry of the projection holds its status, the last answer and the view it was counted in. A
+histogram asked for with a `sample` carries, in its table's `sample`, whether its counts were
+scaled and how many items were counted, beside the table's `total`, the size of the set. An entry's
+`summaries` holds, for each grouping that is a field's `summary`, its figures read from the table:
+`items`, `count` and `none` as `bigint`s, and `min`, `max` and `mean`; for every other grouping it
+holds `null`. A histogram's default edges are the server's, exact and independent of the filters
+and the region, so a registration over the view and one over everything matched get the same
+edges without sending a range.
+
+A field card registers its counts in view, its counts over everything matched, each leaving out its
+own clause, and its field's figures:
+
+```ts
+const bins = {by: {field: 'year', bins: 24, sample: 100_000}};
+store.setAggregate('year:subject', {groupings: [bins], subject: 'view', without: 'year', highlighted: true});
+store.setAggregate('year:match', {groupings: [bins], without: 'year'});
+store.setAggregate('year:summary', {groupings: [{by: {field: 'year', summary: true}}], subject: 'visible'});
+```
+
+With `highlighted`, the counts in view are the highlighted items' while a highlight is set and the
+matched items' once it is cleared. A change of viewer drops every entry's answer before the store
+asks again, through `clear()` or the identity key, as it drops the rest of what the server
+answered.
 
 ## Not built
 

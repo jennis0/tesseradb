@@ -1358,7 +1358,7 @@ paths:
     post:
       tags: [viewer]
       operationId: aggregate
-      summary: How the items this principal may see in one view are distributed, as one table of counts per grouping, exact unless a histogram asks for a sample.
+      summary: How the items this principal may see in one view are distributed, as one table of counts per grouping, exact unless a histogram asks for a sample, and the figures of a number or timestamp field.
       description: |
         **The body is not JSON.** It is framed as `POST /v1/items` frames its body, with these
         kinds:
@@ -1383,7 +1383,9 @@ paths:
         level, `cells`. With neither, its table is one row: the size of the set. `by` names a
         category `field` or the artifacts of a `layer`, and lists `top` groups by count or the
         groups named in `values` or `artifacts`; or it names a number or timestamp `field` and
-        counts its values in `bins`, a histogram, which takes no `cells`. `cells` divides the set,
+        counts its values in `bins`, a histogram, which takes no `cells`; or it names a number or
+        timestamp `field` with `summary`, whose table is one row of the field's figures over the
+        whole visible set (**Summary**), and which takes no `cells`. `cells` divides the set,
         or each group, into the cells of `view` at `depth`: depths 0 to 16 are the cells of the
         map's tiles at that zoom, and 17 to 32 divide them down to the stored position.
         `cells.area` is a bbox in the form and units the viewport's `bbox` takes, absent for the
@@ -1451,11 +1453,14 @@ paths:
         width, in UTC. The last edge is above the largest value. Where every visible value is the
         same instant, its bin is its day.
 
-        Default edges cost a pass over the values of every item this principal may see in `view`.
-        Sending the first answer's first `lower` and last `upper` back as `range`, with `bins` the
-        number of bins it returned, gives the same edges without that pass, except on a timestamp
-        field binned by months or years, whose bins differ in width, and where an edge was served
-        as its column's smallest or largest value.
+        The smallest and largest value are the field's figures (**Summary**), exact over every item
+        this principal may see in `view`, so no visible value lies outside the bins. A build and a
+        compaction store the figures of the built rows, so default edges cost no pass over the
+        values. Sending the first
+        answer's first `lower` and last `upper` back as `range`, with `bins` the number of bins it
+        returned, gives the same edges, except on a timestamp field binned by months or years,
+        whose bins differ in width, and where an edge was served as its column's smallest or
+        largest value.
 
         **Sampled bins.** With `sample`, a set of `N` items where `N` is more than `sample` is
         counted over its items whose `tessera_id` is below the cut `floor(sample × 2^64 / N)`,
@@ -1467,15 +1472,24 @@ paths:
         and the counts are exact. Every item is also counted, exactly, where the cut is above
         2^58, `sample` being more than about one item in 64 of the set, since no identity band
         holds so wide a cut. Whether a set is sampled depends on `N` and `sample` alone. Without
-        `range`, the edges are drawn as above from the values of the visible set, every item this
-        principal may see in `view` whatever `filters`, `reference` and any region say, counted
-        by the same rule: its items below its own cut where it is sampled, and every item where
-        it is not. They stay put as the filters or the viewport change, and a value outside a
-        sample's span is counted in `rest`. The edges can come from the visible set's sample
-        where the set itself is counted exactly. The sample is drawn from inside the principal's
-        visible set, so an item it may not see is never counted, never moves `N` and never moves
-        an edge. The table head's `sample` says how the table was counted. A larger `sample`
-        gives counts nearer the exact ones, at the cost of reading more items.
+        `range`, the edges are the exact ones above, from every value this principal may see in
+        `view`, whether or not the counts are sampled, so a sampled table's edges are the
+        unsampled table's. The sample is drawn from inside the principal's visible set, so an item
+        it may not see is never counted and never moves `N`. The table head's `sample` says how
+        the table was counted. A larger `sample` gives counts nearer the exact ones, at the cost
+        of reading more items.
+
+        **Summary.** A field with `summary: true` has a table of one row, the field's figures over
+        every item this principal may see in `view`: the visible set, whatever `filters`,
+        `reference` and any region say. Its head's `total` and `reference_total` are still the
+        set's and the reference's, and it has no `groups`. Every figure is exact. A deletion or a
+        suppression applies to it from the next response, and an item this principal may not see,
+        or an item without a row in `view`, moves none of it. A build and a compaction store, for
+        each view, the figures of its built rows for each set of access labels its items carry; a
+        response joins those of the sets this principal satisfies and corrects them for its own
+        deletions, suppressions and rows written since, so it reads only what has changed. A field
+        declared at a running service has no stored figures, and its built rows are read once for
+        each principal's terms.
 
         A histogram's table is always one page, of its bins, `rest` and `none`, whatever
         `page_rows` and `serve.aggregate_page_bytes` say, so its edges and counts are drawn
@@ -1496,6 +1510,16 @@ paths:
         `reference_count` (`uint64`, with `reference`): the same over the reference set. `lift`
         (`float64`, with `reference`): `(count / total) / (reference_count / reference_total)`, null
         where `reference_count` or `total` is 0.
+
+        A summary's columns are its own: `items` (`uint64`), every item this principal may see in
+        `view`; `count` (`uint64`), those holding a finite value; `none` (`uint64`), those holding
+        no value, so an item holding NaN or an infinity is in `items` and neither of the others;
+        `min` and `max`, the smallest and largest finite value, typed as `lower` and `upper` are on
+        a histogram of the field without `range`, null where `count` is 0; and `mean`, the mean of
+        the finite values, null where `count` is 0. The values are summed exactly, whatever their
+        size and order, and the mean is the exact sum over `count` rounded once: on a timestamp
+        field to the nearest whole microsecond, served as `timestamp[us, UTC]`, and on any other to
+        the nearest `float64`, served as one, a tie to even either way.
 
         **Reading a whole result.** A response carries at most `pages` pages and runs within its own
         byte budget, `serve.aggregate_response_bytes` (16 MiB by default), and the bulk reads' time
@@ -1580,6 +1604,7 @@ paths:
             - `by` naming neither or both of `field` and `layer`, or carrying neither or both of `top` and `values` or `artifacts`, or `values` on a layer, or `artifacts` or `level` on a field;
             - `top` of 0 or above `selection.max_aggregate_top`; `values` or `artifacts` empty or longer than `selection.max_aggregate_named`; an `artifacts` entry that is not a `tessera_id`;
             - `bins` beside `top` or `values`, or on a layer; `range` without `bins`; `bins` of 0 or above `selection.max_aggregate_bins`; a `range` whose lower bound is not below its upper, or that is not two numbers; a fractional bound on a timestamp field; `bins` with `cells`; `sample` without `bins`, on a layer, or of 0;
+            - `summary` beside `top`, `values`, `bins`, `range` or `sample`, or on a layer; `summary` with `cells`; `summary` on a field that is not a number or timestamp, and on a number or timestamp field declared with neither `index` nor `render`, with a detail saying to name a number or timestamp field declared with `index` or `render`;
             - `bins` on a field that is not a number or timestamp, each kind with its own detail; on a `bool`, with a detail saying it has no bins; and on a number or timestamp field declared with neither `index` nor `render`, with a detail saying to name a number or timestamp field declared with `index` or `render`;
             - an unknown field, and a field that is not a category, each with its own detail; a category declared with none of `index`, `render` or a `derived` vocabulary, with a detail saying to declare it with `index` or `render`;
             - a layer outside the list `/v1/meta` publishes to this principal; no `level` on a layer with several, a `level` the layer does not hold, or one given on a layer with a single level;
@@ -5544,8 +5569,8 @@ components:
     AggregateBy:
       description: |
         A grouping's outer level. With `top` or `values`, `field` is a category field declared
-        with `index` or `render`, or one with a `derived` vocabulary; with `bins`, it is a number
-        or timestamp field declared with `index` or `render`. A group-scoped field resolves under
+        with `index` or `render`, or one with a `derived` vocabulary; with `bins` or `summary`, it
+        is a number or timestamp field declared with `index` or `render`. A group-scoped field resolves under
         `view` as a filter leaf on it does, or is pinned as `<field>@<key>`. `layer` is one `/v1/meta` publishes to
         this principal, and `level` follows `BrowseRequest.level`: required on a layer with
         several levels and refused on one with a single level.
@@ -5589,6 +5614,15 @@ components:
               type: integer
               minimum: 1
               description: "Count about this many of the set's items and scale each count to the set, where the set holds more; see **Sampled bins**. Absent counts every item."
+        - type: object
+          additionalProperties: false
+          required: [field, summary]
+          properties:
+            field: { type: string }
+            summary:
+              type: boolean
+              enum: [true]
+              description: "One row of the field's figures over every item this principal may see in `view`, whatever `filters` and `reference` say; see **Summary**."
         - type: object
           additionalProperties: false
           required: [layer, top]
@@ -5637,7 +5671,7 @@ components:
         groups:
           type: integer
           minimum: 0
-          description: "Present exactly when the grouping has `by`: the groups with an item in the set before the cut to `top` or the named list, which are the visible distinct values, or the artifacts this principal is served with a member in the set."
+          description: "Present exactly when the grouping has `by` other than `summary`: the groups with an item in the set before the cut to `top` or the named list, which are the visible distinct values, or the artifacts this principal is served with a member in the set."
         resumed:
           type: boolean
           description: Whether the table continues from the request's cursor.
@@ -5645,7 +5679,7 @@ components:
           type: object
           additionalProperties: false
           description: Present exactly when the grouping has `bins` with `sample`.
-          required: [sampled, items, edges_sampled]
+          required: [sampled, items]
           properties:
             sampled:
               type: boolean
@@ -5658,9 +5692,6 @@ components:
               type: integer
               minimum: 0
               description: The items of the reference set counted. Present exactly when the request carries `reference`.
-            edges_sampled:
-              type: boolean
-              description: Whether the default edges were drawn from the visible set's sample. It can be `true` where `sampled` is `false`, the set being counted exactly and the larger visible set sampled; `false` where the grouping gives a `range`.
 
     ItemRequest:
       type: object
@@ -7314,8 +7345,8 @@ components:
         masked_count_cache:
           type: object
           additionalProperties: false
-          required: [entries, bytes, hits, misses, evictions, fills, loads, exact, reserve_spent, not_admitted, labels_bytes, labels_bound_bytes, labels_rows_read, disk_bytes, disk_bound_bytes]
-          description: The per-artifact counts of levels served from a row column, held per grant over the grant's base rows and corrected per request.
+          required: [entries, bytes, hits, misses, evictions, fills, field_fills, field_mismatches, loads, exact, reserve_spent, not_admitted, labels_bytes, labels_bound_bytes, labels_rows_read, disk_bytes, disk_bound_bytes]
+          description: The per-artifact counts of levels served from a row column, and the figures of number and timestamp fields, held per grant over the grant's base rows and corrected per request. A field's figures are joined from those the base stores per set of access labels.
           properties:
             entries: { type: integer, minimum: 0 }
             bytes: { type: integer, minimum: 0 }
@@ -7325,7 +7356,15 @@ components:
             fills:
               type: integer
               minimum: 0
-              description: Walks of a grant's base rows. A growth or a publication between folds does not walk again.
+              description: Walks of a grant's base rows for a level. A growth or a publication between folds does not walk again.
+            field_fills:
+              type: integer
+              minimum: 0
+              description: Walks of a grant's base rows for a field, which a field the base stores no figures of takes, and so does one whose stored figures disagree with the grant's base rows.
+            field_mismatches:
+              type: integer
+              minimum: 0
+              description: Field figures joined from the base's stored figures that did not cover the grant's base rows, or a deny that subtracted more than they held, each answered by a walk instead. Above zero, the stored figures and the base disagree.
             loads:
               type: integer
               minimum: 0
@@ -7337,7 +7376,7 @@ components:
             reserve_spent:
               type: integer
               minimum: 0
-              description: Boxes worked out from an artifact's rows because a deny reached a side of the box its spare edge rows could not answer.
+              description: Boxes worked out from an artifact's rows, or a field's smallest or largest value from the grant's base rows, because a deny reached every spare edge row or value kept on that side.
             not_admitted:
               type: integer
               minimum: 0
