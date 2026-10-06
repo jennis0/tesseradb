@@ -435,6 +435,7 @@ fn each_view_serves_its_own_copy_of_the_key() {
                     filter: None,
                     limit: 16,
                     cursor: None,
+                    palette_size: None,
                 },
             )
             .expect("the layer browses on both views of the group");

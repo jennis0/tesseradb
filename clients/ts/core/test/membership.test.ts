@@ -4,7 +4,6 @@ import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
 import {FRAME_ARTIFACTS, FrameReader} from '../src/frame.js';
 import {bandsOfResult, BandCache, distinctOrdinals} from '../src/bands.js';
 import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
-import {GRID32_CENTRE, artifactColours} from '../src/palette.js';
 import type {Artifact, ViewportResult} from '../src/types.js';
 import {artifact, fixture, result, tile} from './support.js';
 

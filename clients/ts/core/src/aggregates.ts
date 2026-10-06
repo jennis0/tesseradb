@@ -15,7 +15,7 @@ import type {AggregateRequest, AggregateResult, AggregateTable, FilterExpr, Grou
 export type AggregateSpecGrouping = Grouping | DrawnGrouping;
 
 /** A grouping ranking a tree layer's top artifacts at the cut the store's map draws. */
-type DrawnGrouping = Omit<Grouping, 'by'> & {by: {layer: string; top: number; cut: 'drawn'}};
+type DrawnGrouping = Omit<Grouping, 'by'> & {by: {layer: string; top: number; cut: 'drawn'; paletteSize?: number}};
 
 /** Whether `grouping` ranks at the cut the store's map draws. */
 export function isDrawn(grouping: AggregateSpecGrouping): grouping is DrawnGrouping {

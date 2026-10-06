@@ -112,12 +112,14 @@ pub enum By {
     Summary { column: String },
     /// The artifacts of one level of a layer. `level` is required on a layer with several levels
     /// and refused on one with a single level. On a treed layer (`nested`, `dag`), `cut` lists
-    /// only the artifacts the map draws there, and `top` requires it.
+    /// only the artifacts the map draws there, and `top` requires it. With `palette`, each listed
+    /// artifact carries this viewer's slot for a palette of that many colours ([`crate::slots`]).
     Layer {
         layer: String,
         level: Option<u32>,
         pick: Pick<TesseraId>,
         cut: Option<Cut>,
+        palette: Option<u8>,
     },
 }
 

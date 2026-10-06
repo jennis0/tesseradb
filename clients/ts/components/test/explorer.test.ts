@@ -51,7 +51,7 @@ describe('<tessera-explorer> parts', () => {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
     const store = fakeStore({meta: {...META, layers: [mesh]}, status: status({})});
-    store.setBrowse('roots', {artifacts: [{tesseraId: 1n, key: 'k-1', name: 'Neoplasms', maskedCount: 9n, matchedCount: null, rung: 0, parentIds: [], childCount: 0}], parents: [], next: 'more'});
+    store.setBrowse('roots', {artifacts: [{tesseraId: 1n, key: 'k-1', name: 'Neoplasms', maskedCount: 9n, matchedCount: null, rung: 0, parentIds: [], childCount: 0, slot: null}], parents: [], next: 'more'});
     el.store = store;
     await settle(host);
     const shadow = el.shadowRoot!;
@@ -778,6 +778,51 @@ describe('<tessera-explorer> the Colour section', () => {
     await settle(host);
     expect(part('ramp-reverse')!.getAttribute('aria-pressed')).toBe('true');
     expect(changes).toEqual([{palette: 'tableau10', ramp: 'viridis', scale: 'linear', reverse: true}]);
+  });
+});
+
+describe('<tessera-explorer> the Palette menu while the points are coloured by a layer', () => {
+  it('lists each palette as a row of its colours, its name and its size, and sets the one chosen on the store', async () => {
+    const host = await mount('<tessera-explorer></tessera-explorer>');
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; palette: string};
+    const store = fakeStore({meta: META, status: status({})});
+    store.set('legend', {...store.get('legend'), colourBy: 'cluster:clusters'});
+    el.store = store;
+    await settle(host);
+    const shadow = el.shadowRoot!;
+    shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
+    await settle(host);
+    const part = (name: string) => shadow.querySelector<HTMLElement>(`[part~="${name}"]`);
+    expect(part('palette')!.getAttribute('aria-label')).toBe('Palette: Tableau 10');
+    part('palette')!.click();
+    await settle(host);
+    expect(part('palette-menu')!.getAttribute('role')).toBe('menu');
+    const options = [...shadow.querySelectorAll<HTMLButtonElement>('[part~="palette-option"]')];
+    expect(
+      options.map((o) => ({
+        value: o.getAttribute('data-value'),
+        role: o.getAttribute('role'),
+        checked: o.getAttribute('aria-checked'),
+        name: o.querySelector('.t')!.textContent,
+        line: o.querySelector('.line')!.textContent,
+        swatches: o.querySelectorAll('.swatches > span').length
+      }))
+    ).toEqual([
+      {value: 'okabe-ito', role: 'menuitemradio', checked: 'false', name: 'Okabe-Ito', line: '8 colours · colour-blind safe', swatches: 8},
+      {value: 'tableau10', role: 'menuitemradio', checked: 'true', name: 'Tableau 10', line: '10 colours', swatches: 10},
+      {value: 'tableau20', role: 'menuitemradio', checked: 'false', name: 'Tableau 20', line: '20 colours, in light and dark pairs', swatches: 20},
+      {value: 'kelly', role: 'menuitemradio', checked: 'false', name: 'Kelly', line: '22 colours, most distinct', swatches: 22}
+    ]);
+    expect((options[0]!.querySelector('.swatches > span') as HTMLElement).style.background).toBe('#e69f00');
+    const chosen: unknown[] = [];
+    host.addEventListener('tessera-clusterpalettechange', (e) => chosen.push((e as CustomEvent).detail));
+    options[3]!.click();
+    await settle(host);
+    // Set on the store, and again through the map the explorer passes it to; the store ignores the second.
+    expect(new Set(store.calls.filter((c) => c.name === 'setPalette').map((c) => c.args[0]))).toEqual(new Set(['kelly']));
+    expect(chosen).toEqual([{palette: 'kelly'}]);
+    expect(el.palette).toBe('kelly');
+    expect(part('palette-menu')).toBeNull();
   });
 });
 

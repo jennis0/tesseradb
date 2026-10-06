@@ -363,6 +363,48 @@ export const displayStyles = css`
   .size-menu.wide {
     width: 260px;
   }
+  /* The Palette menu: a row per palette, its colours wrapped in a block beside its name and line. */
+  .size-menu.palettes {
+    width: 360px;
+    padding: 6px;
+  }
+  .size-menu.palettes .hd {
+    padding: 6px 10px 4px;
+  }
+  .size-menu.palettes [role='menuitemradio'] {
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 8px 10px;
+    border-radius: 6px;
+  }
+  .swatches {
+    display: flex;
+    flex: none;
+    flex-wrap: wrap;
+    gap: 2px;
+    width: 132px;
+  }
+  .swatches span {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+  }
+  .size-menu .named {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+  }
+  .size-menu .named .t {
+    font-weight: 600;
+  }
+  .size-menu .named .line {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--_tessera-ink-2);
+  }
   .size-menu .lead {
     display: flex;
     align-items: center;

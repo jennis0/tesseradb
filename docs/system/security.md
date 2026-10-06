@@ -200,6 +200,21 @@ a grant's rows and the labels of denied rows are read only inside the server. A 
 an artifact's `tessera_id`, key and content, its count over the viewer's visible set, and the
 centroid and box of the members the viewer can see.
 
+## A cluster's colour is computed from what the viewer is served
+
+A request may name a palette size, and each artifact it serves then carries a slot: a number below
+that size which the client turns into a colour ([annotations](annotations.md#colour-slots)). The
+slots are worked out once for each session and layer, from the artifacts the viewer is served that
+hold a member they can see, the viewer's tree over those artifacts, each one's count of visible
+members and `tessera_id`, and a centre taken over a sample of the viewer's visible items. The
+sample is the visible items whose `tessera_id` falls below a cut set by the size of the visible set
+and a constant, so an item the viewer cannot see is never in it. An artifact the viewer is not
+served is no input, and the viewer's slots are those of a corpus without it: a test compares the
+slots of a viewer from whom an artifact's label withholds it with the slots after that artifact is
+suppressed, and finds them equal. A slot therefore says nothing about an artifact the viewer is not
+served, about a member they cannot see, or about the slots another viewer is given. The slots are
+held per session, and no session is answered from another's.
+
 ## Samples are taken after masking
 
 Where more items are in view than a response carries, the sample MUST be drawn from the viewer's

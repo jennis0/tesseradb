@@ -19,6 +19,7 @@ pytest.importorskip("pyarrow")
 import pyarrow as pa  # noqa: E402
 
 from test_sdk_identity import papers, string_ids  # noqa: E402
+from test_sdk_records import papers as five_clusters  # noqa: E402
 
 
 @pytest.fixture
@@ -51,7 +52,38 @@ def test_the_tiles_asked_for_no_layer_serve_no_artifact(db):
     """A tile is answered whether it holds an artifact or not, with the same columns."""
     served = db.viewport_artifacts("map", 0, per_tile=5, layers=[])
     assert served.num_rows == 0
-    assert served.column_names[-1] == "tile"
+    assert served.column_names[-2:] == ["tile", "slot"]
+
+
+def test_every_route_gives_a_cluster_the_one_slot_below_the_palette_size_asked_for(served, corpus):
+    """Five clusters read by tile, by lineage, by identifier and in an aggregate: each carries
+    one slot below the size sent, the same on every route, and none where no size is sent."""
+    db = served(five_clusters)
+    viewer = db.viewer()
+    plain = db.viewport_artifacts("map", 1, per_tile=5, layers=["clusters"])
+    assert set(plain.column("slot").to_pylist()) == {None}
+    tiles = db.viewport_artifacts("map", 1, per_tile=5, layers=["clusters"], palette_size=8)
+    assert json.loads(tiles.schema.metadata[b"tessera.request"])["palette_size"] == 8
+    slots = {}
+    for row in tiles.to_pylist():
+        assert 0 <= row["slot"] < 8
+        assert slots.setdefault(row["tessera_id"], row["slot"]) == row["slot"]
+    assert len(slots) == 5
+    assert len(set(slots.values())) > 1
+
+    browsed = viewer.browse_artifacts("map", "clusters", palette_size=8)["artifacts"]
+    assert {int(row["tessera_id"]): row["slot"] for row in browsed} == slots
+    assert {row.get("slot") for row in viewer.browse_artifacts("map", "clusters")["artifacts"]} == {None}
+
+    read = db.artifacts("map", "clusters", ["slot"], palette_size=8)
+    assert dict(zip(read.column("tessera_id").to_pylist(), read.column("slot").to_pylist())) == slots
+    assert read.schema.field("slot").type == pa.uint8()
+
+    (top,) = db.aggregate("map", [{"by": {"layer": "clusters", "top": 5, "palette_size": 8}}])
+    assert {row["key"]: row["slot"] for row in top.to_pylist() if row["group"] == "listed"} == slots
+
+    with pytest.raises(Refusal, match="422"):
+        db.viewport_artifacts("map", 1, per_tile=5, layers=["clusters"], palette_size=33)
 
 
 def test_a_sample_tags_its_points_and_the_tags_are_read_by_identifier(db):

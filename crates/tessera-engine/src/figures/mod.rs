@@ -974,7 +974,7 @@ fn deny_version(
 }
 
 /// A wait on a correction's build, or the build's own error.
-fn waited(ended: tessera_cache::WaitingBuildError<EngineError>) -> EngineError {
+pub(crate) fn waited(ended: tessera_cache::WaitingBuildError<EngineError>) -> EngineError {
     match ended {
         tessera_cache::WaitingBuildError::Wait(ended) => wait_error(ended),
         tessera_cache::WaitingBuildError::Build(e) => e,

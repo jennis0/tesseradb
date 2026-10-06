@@ -145,6 +145,7 @@ impl Field {
             always,
             keys,
             titles: Some(titles),
+            slots: None,
             distinct: set.by_code.len() as u64,
             sample: None,
         })

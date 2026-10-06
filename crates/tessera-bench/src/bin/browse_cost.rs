@@ -170,6 +170,7 @@ fn measure_pages(root: &Path, view: &str, layer: Option<&str>, repeat: usize) {
                         filter: filter.clone(),
                         limit: 200,
                         cursor: None,
+                        palette_size: None,
                     },
                 )
                 .expect("a browse answers");
@@ -209,6 +210,7 @@ fn measure_pages(root: &Path, view: &str, layer: Option<&str>, repeat: usize) {
                     filter: None,
                     limit: 200,
                     cursor: None,
+                    palette_size: None,
                 },
             )
             .expect("a browse answers");
@@ -280,6 +282,7 @@ fn measure_scan(rows: u64, repeat: usize) {
                         filter: filter.clone(),
                         limit: 10,
                         cursor: None,
+                        palette_size: None,
                     },
                 )
                 .expect("a browse answers");

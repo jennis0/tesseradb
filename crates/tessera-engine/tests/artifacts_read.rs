@@ -386,6 +386,7 @@ fn request<'a>(layer: &'a str, fields: &'a [String]) -> ArtifactsRequest<'a> {
         keep_unmatched: false,
         count: false,
         fields,
+        palette_size: None,
         page_rows: None,
         pages: None,
         cursor: None,
@@ -1798,6 +1799,7 @@ fn browse_counts_only_served_children_and_none_on_a_layer_without_links() {
                         filter: None,
                         limit: 100,
                         cursor: None,
+                        palette_size: None,
                     },
                 )
                 .unwrap()
@@ -1843,6 +1845,7 @@ fn an_authored_shape_names_no_other_view_on_browse() {
                     filter: None,
                     limit: 10,
                     cursor: None,
+                    palette_size: None,
                 },
             )
             .unwrap()

@@ -87,10 +87,10 @@ export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreEleme
  * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
  * elements inside it emit them and each event bubbles out of it: `onPick`, `onMiss`, `onHover`,
  * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactFit`,
- * `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`, `onDisplayChange`,
- * `onSizeChange`, `onBudgetChange`, `onFold`, `onFilterChange`, `onStateChange`, `onExpired`,
- * `onOpen`, `onClose`, `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for the `tessera-`
- * event of the same name in lower case.
+ * `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`, `onClusterPaletteChange`,
+ * `onDisplayChange`, `onSizeChange`, `onBudgetChange`, `onClusterBudgetChange`, `onFold`,
+ * `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`, `onClauseChange`,
+ * `onViewSwitch` and `onViewFollow`, each for the `tessera-` event of the same name in lower case.
  */
 export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', ExplorerElement, {
   ...mapEvents,
@@ -99,9 +99,11 @@ export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', Expl
   onLevelChange: ev('tessera-levelchange'),
   onValueColour: ev('tessera-valuecolour'),
   onPaletteChange: ev('tessera-palettechange'),
+  onClusterPaletteChange: ev('tessera-clusterpalettechange'),
   onDisplayChange: ev('tessera-displaychange'),
   onSizeChange: ev('tessera-sizechange'),
   onBudgetChange: ev('tessera-budgetchange'),
+  onClusterBudgetChange: ev('tessera-clusterbudgetchange'),
   onFold: ev('tessera-fold'),
   onFilterChange: ev('tessera-filterchange'),
   onStateChange: ev('tessera-statechange'),

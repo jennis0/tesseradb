@@ -57,7 +57,7 @@ const META = {
 /** A layer points can be coloured by: it declares geometry and depends on nothing. */
 const clusters = (name: string) => ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1});
 
-const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, size_by: null, size_min: null, size_max: null, size_scale: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
+const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, palette: null, size_by: null, size_min: null, size_max: null, size_scale: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
 
 /** A model initialised and one view rendered, so there is a store: the store is per view. */
 function setUp(initial: Record<string, unknown> = {}) {
@@ -209,6 +209,7 @@ describe('the up-sync', () => {
     expect(model.saves).toBe(1);
     expect(model.state.layers).toEqual(['clusters/a']);
     expect(model.state.colour_by).toBe('cluster:clusters/a');
+    expect(model.state.palette).toBe('tableau10');
     expect(model.state.filters).toBeNull();
     expect([model.state.size_by, model.state.size_min, model.state.size_max, model.state.size_scale]).toEqual([null, 2, 9, 'linear']);
     // The same composition presented again is not a new settle.
@@ -322,6 +323,18 @@ describe('the down-sync', () => {
     model.set('filters', {any_of: [{year: {range: {gte: 1}}}]});
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
     expect(model.sent.at(-1)?.content).toMatchObject({type: 'error', what: 'filters'});
+  });
+
+  it('applies the palette set in the kernel and follows a change; one chosen in the explorer goes up at once', () => {
+    const {model, store, el} = setUp({palette: 'kelly'});
+    expect(store.calls.filter((c) => c.name === 'setPalette').map((c) => c.args)).toEqual([['kelly']]);
+    model.set('palette', 'okabe-ito');
+    expect(store.calls.filter((c) => c.name === 'setPalette').map((c) => c.args)).toEqual([['kelly'], ['okabe-ito']]);
+    const explorer = el.querySelector('tessera-explorer')!;
+    explorer.dispatchEvent(new CustomEvent('tessera-clusterpalettechange', {detail: {palette: 'tableau20'}, bubbles: true, composed: true}));
+    expect(model.state.palette).toBe('tableau20');
+    // The up-sync does not come back down.
+    expect(store.calls.filter((c) => c.name === 'setPalette')).toHaveLength(2);
   });
 
   it('applies the size settings set in the kernel, the scale before the column, and follows each change', async () => {

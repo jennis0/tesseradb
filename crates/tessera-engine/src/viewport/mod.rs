@@ -348,6 +348,7 @@ impl Engine {
                         budget: req.artifact_budget,
                         rows: ArtifactRows::Identity,
                         cancel: req.cancel.clone(),
+                        palette: None,
                     };
                     Some(self.serve_artifacts(
                         &served,

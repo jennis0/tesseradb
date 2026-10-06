@@ -39,7 +39,7 @@ const projections = {
   tiles: {tiles: []},
   artifacts: {layer: 'clusters/kmeans', layers: ['clusters/kmeans'], served: [], colourServed: [], attached: new Map(), lineage: servedLineage([]), status: 'shown', refusal: null,
               version: 1, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set<number>(), shapes: new Map(), colours: new Map(),
-              palette: 'positional', coverage: {current: 0, stale: 0}},
+              palette: 'tableau10', overrides: new Map(), coverage: {current: 0, stale: 0}},
   selection: {item: null, itemRefusal: null,
               artifact: {id: 111n, detail: {layer: 'mesh/descriptors', key: 'D001943', maskedCount: 288_412n, centroid: null, box: null, shape: null}},
               artifactRefusal: null},

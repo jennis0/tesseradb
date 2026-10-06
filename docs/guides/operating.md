@@ -163,6 +163,16 @@ widest view with the family level took 1.8, 4.0 and 9.1 seconds for the three vi
 first view at zoom 9, which shows genus and species, took 2.7, 6.2 and 24.5 seconds. Most of the 1%
 viewer's 1.8 seconds went on testing which artifacts lie in each tile, not on the walk.
 
+A viewer's first request for a layer's colours, with a `palette_size`, also costs one pass over
+the layer: the server works out a colour slot for every cluster the viewer is served, over the
+whole layer. On a bundle of 25,846,007 GBIF occurrences whose taxonomy layer holds 251,907 taxa in
+three levels, the pass took 0.29 s for the viewer who sees everything, and 0.76 s in a process
+that had not yet drawn the layer, since it then also walks the three levels' counts as drawing
+does. On 1,000,000 Tree of Life images with 69,872 taxa in seven levels it took 0.10 s, and
+0.27 s with the walk. The bundles' files were in the page cache. The slots are then held for that
+viewer, layer and palette size, read back in under a millisecond, and worked out again after an
+ingest, a deletion or a suppression. *One run each, with `tessera-bench`'s `slot_cost`.*
+
 A deployment whose viewers fall into a few groups pays the walk a few times for each level. A
 deployment in which every user holds labels of their own, such as a label per document, pays it for
 each user and each level they open.

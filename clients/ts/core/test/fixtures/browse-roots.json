@@ -1,38 +1,42 @@
 {
   "artifacts": [
     {
-      "tessera_id": "12564222489397170063",
+      "tessera_id": "1411992542627935951",
       "key": "km-000016",
       "masked_count": 779,
       "rung": 0,
       "parent_ids": [],
-      "child_count": 0
+      "child_count": 0,
+      "slot": 8
     },
     {
-      "tessera_id": "12418628236849852771",
+      "tessera_id": "1142530805619044861",
       "key": "km-000015",
       "masked_count": 747,
       "rung": 0,
       "parent_ids": [],
-      "child_count": 0
+      "child_count": 0,
+      "slot": 7
     },
     {
-      "tessera_id": "1672904540219644905",
+      "tessera_id": "4380754068165536986",
       "key": "km-000026",
       "masked_count": 635,
       "rung": 0,
       "parent_ids": [],
-      "child_count": 0
+      "child_count": 0,
+      "slot": 4
     },
     {
-      "tessera_id": "13932457998919850382",
+      "tessera_id": "2521422233448566155",
       "key": "km-000012",
       "masked_count": 618,
       "rung": 0,
       "parent_ids": [],
-      "child_count": 0
+      "child_count": 0,
+      "slot": 6
     }
   ],
   "parents": [],
-  "next": "618:13932457998919850382"
+  "next": "618:2521422233448566155"
 }

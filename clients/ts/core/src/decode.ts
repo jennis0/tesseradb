@@ -406,7 +406,8 @@ const ARTIFACT_COLUMNS = [
   'matched',
   'highlighted',
   'target',
-  'tile'
+  'tile',
+  'slot'
 ] as const;
 
 /**
@@ -416,7 +417,7 @@ const ARTIFACT_COLUMNS = [
 export type ArtifactsFramePart = {tile: bigint | null; artifacts: Artifact[]};
 
 /**
- * Decodes one kind-5 frame. Its seventeen columns are checked by name and position first: a
+ * Decodes one kind-5 frame. Its eighteen columns are checked by name and position first: a
  * column read from the wrong place would draw as data.
  */
 export function decodeArtifactsFrame(payload: Uint8Array): ArtifactsFramePart {
@@ -451,6 +452,8 @@ export function decodeArtifactsFrame(payload: Uint8Array): ArtifactsFramePart {
   const highlighted = column('highlighted');
   const target = column('target');
   const tile = column('tile');
+  // Null where the request carried no `palette_size`.
+  const slot = column('slot');
   const artifacts: Artifact[] = [];
   let frameTile: bigint | null = null;
   for (let i = 0; i < tesseraId.length; i++) {
@@ -475,7 +478,8 @@ export function decodeArtifactsFrame(payload: Uint8Array): ArtifactsFramePart {
       matched: matched.get(i) === null ? null : Boolean(matched.get(i)),
       highlighted: highlighted.get(i) === null ? null : Boolean(highlighted.get(i)),
       // Null is attached to nothing. A dependent whose target the response withheld is absent.
-      target: target.get(i) === null ? null : BigInt(target.get(i) as bigint)
+      target: target.get(i) === null ? null : BigInt(target.get(i) as bigint),
+      slot: slot.get(i) === null ? null : Number(slot.get(i))
     });
   }
   return {tile: frameTile, artifacts};

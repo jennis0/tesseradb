@@ -18,7 +18,8 @@ forward the widget's requests from the notebook's own origin.
 Only controls and selection cross the kernel boundary, never data. `url` goes down. `view`,
 `bbox`, `layers`, `colour_by`, the four size settings and `filters` go both ways, and up only
 when the map settles, once it has finished fetching for a view, so the kernel is never asked on
-every frame. `budget` goes both ways, and up when the map's Most points slider is let go.
+every frame. `budget` goes both ways, and up when the map's Most points slider is let go;
+`palette` goes both ways, and up when one is chosen in the map's Colour section.
 `selected` and `selected_artifact` go up on a pick, and `region` when a region's
 counts arrive. Ids are decimal strings, because a `tessera_id` is a `u64`, which is not a
 JavaScript number, and a `BigInt` does not serialise.
@@ -86,6 +87,12 @@ class Map(anywidget.AnyWidget):
       refused.
     - `colour_by`: the column to colour points by, or `"cluster:<layer>"` to colour them by the
       annotations of that layer.
+    - `palette`: the palette annotations are coloured from under `"cluster:<layer>"`:
+      `"okabe-ito"` (8 colours, colour-blind safe), `"tableau10"` (10), `"tableau20"` (20, in
+      light and dark pairs) or `"kelly"` (22, most distinct). The server gives each annotation a
+      slot below the palette's size, chosen so that annotations drawn beside each other differ,
+      and the map draws it in the palette's colour at that slot. `None`, the default, leaves the
+      map's choice, Tableau 10 until one is made.
     - `size_by`: a number column to size points by. `None`, the default, draws every point at
       one size.
     - `size_min`, `size_max`: the radius in pixels of the smallest and the largest value under
@@ -130,8 +137,8 @@ class Map(anywidget.AnyWidget):
       exact for the shape or over the grid cells covering it, and `refusal` where the server
       refused it. It changes when the region's counts arrive, and is `None` when it is cleared.
     - `view`, `bbox`: the view shown and where the camera settled.
-    - `filters`, `layers`, `colour_by`, `size_by`, `size_min`, `size_max`, `size_scale`: as the
-      map shows them. Setting one redraws the map.
+    - `filters`, `layers`, `colour_by`, `palette`, `size_by`, `size_min`, `size_max`,
+      `size_scale`: as the map shows them. Setting one redraws the map.
     - `last_error`: why the page last refused something set here, or `None`.
     - `budget`: as the map draws it; it changes when the Most points slider is let go. Setting
       it in a later cell applies it.
@@ -184,6 +191,7 @@ class Map(anywidget.AnyWidget):
     # dependency closure, which the store adds).
     layers = traitlets.List(traitlets.Unicode(), allow_none=True, default_value=None).tag(sync=True)
     colour_by = traitlets.Unicode(None, allow_none=True).tag(sync=True)
+    palette = traitlets.Enum(["okabe-ito", "tableau10", "tableau20", "kelly"], default_value=None, allow_none=True).tag(sync=True)
     size_by = traitlets.Unicode(None, allow_none=True).tag(sync=True)
     size_min = traitlets.Float(None, allow_none=True).tag(sync=True)
     size_max = traitlets.Float(None, allow_none=True).tag(sync=True)
@@ -205,6 +213,7 @@ class Map(anywidget.AnyWidget):
         view: Optional[str] = None,
         layers: Optional[Sequence[str]] = None,
         colour_by: Optional[str] = None,
+        palette: Optional[str] = None,
         size_by: Optional[str] = None,
         size_min: Optional[float] = None,
         size_max: Optional[float] = None,
@@ -244,6 +253,7 @@ class Map(anywidget.AnyWidget):
             view=view,
             layers=None if layers is None else list(layers),
             colour_by=colour_by,
+            palette=palette,
             size_by=size_by,
             size_min=size_min,
             size_max=size_max,

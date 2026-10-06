@@ -300,6 +300,9 @@ pub struct ArtifactRow<'a> {
     /// The tile, as its Morton prefix at the request's depth, whose visible members put this
     /// artifact in the frame. `None` in the frame of treed layers, which has no tile.
     pub tile: Option<u32>,
+    /// The palette slot this viewer's colouring gives the artifact. `None` when the request named
+    /// no palette size.
+    pub slot: Option<u8>,
 }
 
 /// The `layer` column, dictionary-encoded with `u16` keys in order of first appearance.
@@ -324,8 +327,8 @@ fn layer_column(rows: &[ArtifactRow<'_>]) -> (Field, ArrayRef) {
     (required("layer", &column), column)
 }
 
-/// The artifacts frame: seventeen columns at fixed positions, `layer` to `target` and then
-/// `tile`. A null in a nullable column says the layer declares no such property, or the request
+/// The artifacts frame: eighteen columns at fixed positions, `layer` to `target`, then `tile`
+/// and `slot`. A null in a nullable column says the layer declares no such property, or the request
 /// asked no such question; an artifact that cannot be served is absent whole.
 pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     fn optional<A, T>(name: &str, values: impl Iterator<Item = Option<T>>) -> (Field, ArrayRef)
@@ -379,6 +382,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         optional::<BooleanArray, _>("highlighted", rows.iter().map(|r| r.highlighted)),
         optional::<UInt64Array, _>("target", rows.iter().map(|r| r.target)),
         optional::<UInt32Array, _>("tile", rows.iter().map(|r| r.tile)),
+        optional::<UInt8Array, _>("slot", rows.iter().map(|r| r.slot)),
     ];
     arrow_frame(FRAME_ARTIFACTS, columns)
 }

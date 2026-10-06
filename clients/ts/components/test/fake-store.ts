@@ -65,7 +65,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0, inView: null},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], colourServed: [], attached: new Map(), lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], colourServed: [], attached: new Map(), lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: 'tableau10', overrides: new Map(), coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {filter: {}, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
@@ -156,7 +156,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     },
     needShape: spy('needShape'),
     clearSelection: spy('clearSelection'),
-    setScheme: spy('setScheme'),
+    setArtifactColours: spy('setArtifactColours'),
     select: spy('select'),
     extentOf: () => null,
     dataXY: (x, y) => [x, y],
@@ -229,7 +229,7 @@ export function deepText(el: Element | null): string {
 }
 
 /** One row of an aggregate table as a test writes it; `group` defaults to `listed`. */
-export type AggregateRow = {group?: 'listed' | 'rest' | 'none'; key?: string | bigint | null; title?: string | null; cell?: bigint; lower?: number | bigint; upper?: number | bigint; count: number};
+export type AggregateRow = {group?: 'listed' | 'rest' | 'none'; key?: string | bigint | null; title?: string | null; slot?: number | null; cell?: bigint; lower?: number | bigint; upper?: number | bigint; count: number};
 
 /** A table of an answer as a test writes it: its rows, and its head's figures where they matter. */
 export type AggregateTableSpec = {rows: AggregateRow[]; groups?: number | null; total?: number; sample?: {sampled: boolean; items: number} | null};
@@ -247,6 +247,7 @@ export function aggregateEntry(tables: AggregateTableSpec[], view = 's0', summar
       title: column((r) => r.title ?? null),
       count: column((r) => BigInt(r.count))
     };
+    if (rows.some((r) => r.slot !== undefined)) columns.slot = column((r) => r.slot ?? null);
     if (rows.some((r) => r.cell !== undefined)) columns.cell = column((r) => r.cell);
     if (rows.some((r) => r.lower !== undefined)) {
       columns.lower = column((r) => r.lower ?? null);

@@ -1,9 +1,22 @@
 import {describe, expect, it} from 'vitest';
 import {type Artifact, type Band, type ScalarColumn} from '@tesseradb/client';
-import {NEUTRAL, SessionArtifactTable, artifactColours, positionalEntry} from '@tesseradb/client/internal';
+import {NEUTRAL, SessionArtifactTable, artifactColours, slottedColour} from '@tesseradb/client/internal';
 import {LookupTexture, LUT_WIDTH, buildLut, dimmed} from '../src/lut.js';
 import {MarkSlab} from '../src/slab.js';
 import {fakeDevice} from './fake-device.js';
+
+/** Each artifact's slot in a palette of ten, as a served frame names it. */
+const slot = (n: number) => ({slot: n % 10, paletteSize: 10});
+
+/** The colours of every artifact the table holds, under Tableau 10, as the store builds them. */
+const coloursOf = (table: SessionArtifactTable, palette: 'tableau10' | 'kelly' = 'tableau10') =>
+  artifactColours(
+    table.liveEntries().map(({ordinal, entry}) => ({ordinal, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: entry.paletteSize})),
+    palette
+  );
+
+/** One entry's colour, as the store extends its map for an ordinal named. */
+const colourOf = (table: SessionArtifactTable, ordinal: number) => slottedColour(table.entry(ordinal)!, 'tableau10', new Map());
 
 const artifact = (id: bigint, x: number, parent: bigint | null = null): Artifact => ({
   layer: 'l',
@@ -17,7 +30,8 @@ const artifact = (id: bigint, x: number, parent: bigint | null = null): Artifact
   rung: 0,
   matched: null,
   highlighted: null,
-  target: null
+  target: null,
+  slot: null
 });
 
 function band(tag: number, ordinals: number[], layer = 'l'): Band {
@@ -52,19 +66,18 @@ function served() {
   const table = new SessionArtifactTable();
   // The two children are served at rung 1, which the level walk below resolves against.
   const [root, a, b] = table.take([
-    {tesseraId: 1n, layer: 'l', parentIds: [], rung: 0},
-    {tesseraId: 2n, layer: 'l', parentIds: [1n], rung: 1},
-    {tesseraId: 3n, layer: 'l', parentIds: [1n], rung: 1}
+    {tesseraId: 1n, layer: 'l', parentIds: [], rung: 0, slot: slot(1)},
+    {tesseraId: 2n, layer: 'l', parentIds: [1n], rung: 1, slot: slot(2)},
+    {tesseraId: 3n, layer: 'l', parentIds: [1n], rung: 1, slot: slot(3)}
   ]);
   const arts = [artifact(1n, 2 ** 31 + 100), artifact(2n, 2 ** 31 + 1e9, 1n), artifact(3n, 2 ** 31 - 1e9, 1n)];
-  const named = [root!, a!, b!].map((ordinal, i) => ({ordinal, centroid: arts[i]!.centroid}));
-  return {table, root: root!, a: a!, b: b!, arts, named};
+  return {table, root: root!, a: a!, b: b!, arts};
 }
 
 describe('buildLut', () => {
   it('colours each ordinal by what it resolves to, neutral for 0 and for a freed slot', () => {
-    const {table, root, a, named} = served();
-    const colours = artifactColours(named, 'positional');
+    const {table, root, a} = served();
+    const colours = coloursOf(table);
     const lut = buildLut({artifacts: {table, colours}});
     expect(lut.rows).toBe(1);
     expect(lut.data.length).toBe(LUT_WIDTH * 4);
@@ -81,10 +94,10 @@ describe('buildLut', () => {
   it('colours an ordinal the current view was not served, and walks up to one it has a colour for', () => {
     // On a zoom in the cut moves finer, and bands held under the coarser cut name artifacts no
     // longer served. A walk cannot go down, so they must be coloured from the whole table.
-    const {table, root, a, named} = served();
+    const {table, root, a} = served();
     // The colour map is the whole table's, so the child is coloured though only the root is in
     // the view's served set.
-    const whole = artifactColours(named, 'positional');
+    const whole = coloursOf(table);
     expect([...buildLut({artifacts: {table, colours: whole}}).data.subarray(a * 4, a * 4 + 4)]).toEqual([...whole.get(a)!]);
 
     // Where no colour is known for the ordinal (an artifact evicted from the colour map), the walk
@@ -97,12 +110,11 @@ describe('buildLut', () => {
   it('colours a node with two parents through the first of them — the wire’s lowest id (decision 0117)', () => {
     const table = new SessionArtifactTable();
     const [a, b, child] = table.take([
-      {tesseraId: 1n, layer: 'l', parentIds: [], rung: 0},
-      {tesseraId: 2n, layer: 'l', parentIds: [], rung: 0},
-      {tesseraId: 3n, layer: 'l', parentIds: [1n, 2n], rung: 1}
+      {tesseraId: 1n, layer: 'l', parentIds: [], rung: 0, slot: slot(1)},
+      {tesseraId: 2n, layer: 'l', parentIds: [], rung: 0, slot: slot(2)},
+      {tesseraId: 3n, layer: 'l', parentIds: [1n, 2n], rung: 1, slot: slot(3)}
     ]);
-    const arts = [artifact(1n, 2 ** 31 + 1e9), artifact(2n, 2 ** 31 - 1e9), {...artifact(3n, 2 ** 31), parentIds: [1n, 2n]}];
-    const colours = artifactColours([a!, b!, child!].map((ordinal, i) => ({ordinal, centroid: arts[i]!.centroid})), 'positional');
+    const colours = coloursOf(table);
     expect([...colours.get(a!)!]).not.toEqual([...colours.get(b!)!]);
     // At its own rung the child wears its own colour; coarsened to rung 0 it wears the first
     // parent's, and the second parent's colour is never what the walk lands on.
@@ -111,8 +123,8 @@ describe('buildLut', () => {
   });
 
   it('highlights the opened artifact and dims the rest', () => {
-    const {table, a, b, named} = served();
-    const colours = artifactColours(named, 'positional');
+    const {table, a, b} = served();
+    const colours = coloursOf(table);
     const lut = buildLut({artifacts: {table, colours}, highlight: a});
     expect([...lut.data.subarray(a * 4, a * 4 + 4)]).toEqual([...colours.get(a)!]);
     expect([...lut.data.subarray(b * 4, b * 4 + 4)]).toEqual([...dimmed(colours.get(b)!)]);
@@ -141,19 +153,16 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     lut.attach(device);
     const table = new SessionArtifactTable();
     // A table wide enough to span rows: the ordinals named next land at the top of the range.
-    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
-    const colours = artifactColours(
-      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
-      'positional'
-    );
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], slot: slot(i)})));
+    const colours = coloursOf(table);
     lut.update({artifacts: {table, colours}}, 'k');
     expect(device.textureWrites).toBe(1);
     expect(device.textureRegions).toEqual([{y: 0, height: 2}]);
     const settled = texel(lut, 7);
 
     // One artifact named, its colour added to the map the store extends in place.
-    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [], centroid: [2 ** 31 - 5e8, 2 ** 31 + 5e8]}]);
-    colours.set(fresh!, positionalEntry(table.entry(fresh!)!.centroid));
+    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [], slot: slot(4)}]);
+    colours.set(fresh!, colourOf(table, fresh!));
     expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
     expect(device.textureWrites).toBe(2);
     // Row 1 alone, where the new ordinal falls, not both rows the texture holds.
@@ -172,13 +181,10 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     lut.attach(device);
     // Two rows of entries, so a whole rebuild and a patch are told apart by the region written.
     const table = new SessionArtifactTable();
-    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], slot: slot(i)})));
     const parent = table.ordinalOf('l', 1n);
-    const [child] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [1n], rung: 1, centroid: [2 ** 31, 2 ** 31 + 1e9]}]);
-    const colours = artifactColours(
-      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
-      'positional'
-    );
+    const [child] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [1n], rung: 1, slot: slot(5)}]);
+    const colours = coloursOf(table);
     lut.update({artifacts: {table, colours}, level: 0}, 'k');
     expect(device.textureRegions).toEqual([{y: 0, height: 2}]);
     // Coloured at level 0, the child wears the parent's colour.
@@ -200,12 +206,9 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     const lut = new LookupTexture();
     lut.attach(device);
     const table = new SessionArtifactTable();
-    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], slot: slot(i)})));
     const parent = table.ordinalOf('l', 1n);
-    const colours = artifactColours(
-      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
-      'positional'
-    );
+    const colours = coloursOf(table);
     lut.update({artifacts: {table, colours}}, 'k');
 
     // Named by the point frame alone, with no colour of its own, under a parent already held.
@@ -223,11 +226,11 @@ describe('an ordinal named before its colour exists', () => {
     const lut = new LookupTexture();
     lut.attach(device);
     const table = new SessionArtifactTable();
-    table.take(Array.from({length: 50}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
-    const colours = artifactColours(table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})), 'positional');
+    table.take(Array.from({length: 50}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentIds: [], slot: slot(i)})));
+    const colours = coloursOf(table);
     lut.update({artifacts: {table, colours}}, 'k');
     // A points frame names an ordinal and the layer draws before the store has coloured it.
-    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [], centroid: [2 ** 31 - 5e8, 2 ** 31 + 5e8]}]);
+    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [], slot: slot(4)}]);
     lut.update({artifacts: {table, colours}}, 'k');
     expect([...lut.colourOf(fresh!)]).toEqual([...NEUTRAL]);
     const writes = device.textureWrites;
@@ -235,7 +238,7 @@ describe('an ordinal named before its colour exists', () => {
     expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(false);
     expect(device.textureWrites).toBe(writes);
     // The store extends the same map in place; the next draw colours the ordinal, one row written.
-    colours.set(fresh!, positionalEntry(table.entry(fresh!)!.centroid));
+    colours.set(fresh!, colourOf(table, fresh!));
     expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
     expect(device.textureWrites).toBe(writes + 1);
     expect([...lut.colourOf(fresh!)]).toEqual([...colours.get(fresh!)!]);
@@ -246,7 +249,7 @@ describe('an ordinal named before its colour exists', () => {
 
 describe('every colouring interaction is a texture rewrite, never an attribute upload (decision 0100)', () => {
   it('palette, level, highlight and the switch write the texture and not the buffers', () => {
-    const {table, a, b, root, named} = served();
+    const {table, a, b, root} = served();
     const device = fakeDevice();
     const slab = new MarkSlab();
     slab.attach(device);
@@ -260,29 +263,29 @@ describe('every colouring interaction is a texture rewrite, never an attribute u
     expect(uploadsAfterBands).toBeGreaterThan(0);
     // The colour map is held per palette, as the store holds it: `update` compares it by
     // identity, so a fresh map of the same colours is a recolour and rewrites (see below).
-    const maps = {positional: artifactColours(named, 'positional'), spread: artifactColours(named, 'spread')};
-    const inputs = (palette: 'positional' | 'spread', level?: number, highlight?: number) => ({
+    const maps = {tableau10: coloursOf(table), kelly: coloursOf(table, 'kelly')};
+    const inputs = (palette: 'tableau10' | 'kelly', level?: number, highlight?: number) => ({
       artifacts: {table, colours: maps[palette]},
       level,
       highlight
     });
-    expect(lut.update(inputs('positional'), 'v1|positional||')).toBe(true);
+    expect(lut.update(inputs('tableau10'), 'v1|tableau10||')).toBe(true);
     expect(device.textureWrites).toBe(1);
 
     // A palette change.
-    expect(lut.update(inputs('spread'), 'v1|spread||')).toBe(true);
+    expect(lut.update(inputs('kelly'), 'v1|kelly||')).toBe(true);
     // A level choice.
-    expect(lut.update(inputs('spread', 0), 'v1|spread|0|')).toBe(true);
+    expect(lut.update(inputs('kelly', 0), 'v1|kelly|0|')).toBe(true);
     // Highlight the opened artifact, dim the rest.
-    expect(lut.update(inputs('spread', 0, a), `v1|spread|0|${a}`)).toBe(true);
+    expect(lut.update(inputs('kelly', 0, a), `v1|kelly|0|${a}`)).toBe(true);
     expect(device.textureWrites).toBe(4);
     // The same inputs again: nothing is written.
-    expect(lut.update(inputs('spread', 0, a), `v1|spread|0|${a}`)).toBe(false);
+    expect(lut.update(inputs('kelly', 0, a), `v1|kelly|0|${a}`)).toBe(false);
     expect(device.textureWrites).toBe(4);
     // A new colour map object under the same key rewrites the texture even if its contents match:
     // the store extends a map in place while the palette holds, so a new object means every
     // colour may have changed.
-    expect(lut.update({artifacts: {table, colours: artifactColours(named, 'spread')}, level: 0, highlight: a}, `v1|spread|0|${a}`)).toBe(true);
+    expect(lut.update({artifacts: {table, colours: coloursOf(table, 'kelly')}, level: 0, highlight: a}, `v1|kelly|0|${a}`)).toBe(true);
     expect(device.textureWrites).toBe(5);
 
     // The switch between cluster and column colour is a uniform: the slab is asked for the same

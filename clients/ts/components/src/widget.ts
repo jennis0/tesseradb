@@ -8,6 +8,7 @@ import {
   type FilterDraft,
   type FilterExpr,
   type FilterOperandSet,
+  type PaletteName,
   type Store,
   type TokenSupplier
 } from '@tesseradb/client';
@@ -28,9 +29,9 @@ import './explorer.js';
  * A page reload makes a new model, which sends `ready` again.
  *
  * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height`,
- * `title_field`, `artifacts_per_tile`, `budget_min`, `budget_max`, `cluster_budget_min` and `cluster_budget_max` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
+ * `title_field`, `artifacts_per_tile`, `budget_min`, `budget_max`, `cluster_budget_min` and `cluster_budget_max` come down; `view`, `bbox`, `layers`, `colour_by`, `palette`, `size_by`, `size_min`,
  * `size_max`, `size_scale` and `filters` go both ways, and so do `budget`, sent up when Most points is let go,
- * and `cluster_budget`, sent up when Most clusters is let go;
+ * `cluster_budget`, sent up when Most clusters is let go, and `palette`, sent up when one is chosen;
  * `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
  * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
  * `tessera_id` is a `u64`.
@@ -325,6 +326,12 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     store.setSizeBy(typeof sizeBy === 'string' && sizeBy ? sizeBy : null, {rank: sizingOf(store).scale === 'rank'});
   };
 
+  /** The cluster palette the kernel holds; `null` leaves the store's. */
+  const applyPalette = (store: Store) => {
+    const palette = model.get('palette');
+    if (typeof palette === 'string' && palette) store.setPalette(palette as PaletteName);
+  };
+
   // Down-sync: what the kernel holds, applied to one store (a new one, or one whose meta arrived).
   const applyControls = (store: Store) => {
     // `null` leaves the explorer's default; `[]` is none.
@@ -332,6 +339,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     if (Array.isArray(layers)) store.setLayers(layers.map(String));
     const colourBy = model.get('colour_by');
     if (typeof colourBy === 'string' && colourBy) store.setColourBy(colourBy);
+    applyPalette(store);
     applySizing(store);
     const sizeBy = model.get('size_by');
     if (typeof sizeBy === 'string' && sizeBy) applySizeBy(store);
@@ -372,6 +380,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
         patch.view = view.id;
         patch.layers = store.get('artifacts').layers;
         patch.colour_by = store.get('legend').colourBy;
+        patch.palette = store.get('artifacts').palette;
         const sizing = sizingOf(store);
         patch.size_by = store.get('legend').sizeBy;
         patch.size_min = sizing.min;
@@ -453,6 +462,10 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       checkColour(v.store, c);
     }
   });
+  model.on('change:palette', () => {
+    if (state.syncingUp) return;
+    for (const v of state.views.values()) if (v.store) applyPalette(v.store);
+  });
   model.on('change:size_by', () => {
     if (state.syncingUp) return;
     for (const v of state.views.values()) if (v.store) applySizeBy(v.store);
@@ -509,9 +522,13 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       syncUp({cluster_budget: budget});
     };
     explorer.addEventListener('tessera-clusterbudgetchange', onClusterBudget);
+    // A palette chosen in the Colour section reaches the kernel at once.
+    const onPalette = (e: Event) => syncUp({palette: (e as CustomEvent<{palette: PaletteName}>).detail.palette});
+    explorer.addEventListener('tessera-clusterpalettechange', onPalette);
     return () => {
       explorer.removeEventListener('tessera-budgetchange', onBudget);
       explorer.removeEventListener('tessera-clusterbudgetchange', onClusterBudget);
+      explorer.removeEventListener('tessera-clusterpalettechange', onPalette);
       state.views.delete(explorer);
       teardown(v);
       if (state.active === v) state.active = [...state.views.values()].at(-1) ?? null;

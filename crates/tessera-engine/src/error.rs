@@ -113,6 +113,8 @@ pub enum EngineError {
     /// A `POST /v1/aggregate` request the caller can correct. Every arm names only what the
     /// caller sent and published schema.
     AggregateRefused(crate::aggregate::AggregateRefused),
+    /// A `palette_size` outside [`crate::PALETTE_SIZES`].
+    PaletteRefused(u32),
 }
 
 impl std::fmt::Display for EngineError {
@@ -165,6 +167,12 @@ impl std::fmt::Display for EngineError {
             ),
             EngineError::UnderlayRefused(detail) => write!(f, "underlay refused: {detail}"),
             EngineError::PointRowsRefused(detail) => write!(f, "{detail}"),
+            EngineError::PaletteRefused(size) => write!(
+                f,
+                "`palette_size` is {size}; name a palette of {} to {} colours",
+                crate::PALETTE_SIZES.start(),
+                crate::PALETTE_SIZES.end()
+            ),
             EngineError::ProjectionBuilding => write!(
                 f,
                 "this session's row projection is being built by a concurrent request; retry \

@@ -94,6 +94,9 @@ struct ByReq {
     /// On a treed layer: list the artifacts the map draws at this zoom, bbox and budget.
     #[serde(default)]
     cut: Option<CutReq>,
+    /// With `layer`: each listed artifact carries this viewer's `slot` in a palette this size.
+    #[serde(default)]
+    palette_size: Option<u32>,
 }
 
 /// As `POST /v1/artifacts/viewport` names them.
@@ -399,6 +402,11 @@ fn by_of(
                      takes `top` or `artifacts`",
                 );
             }
+            let palette = by
+                .palette_size
+                .map(tessera_engine::check_palette_size)
+                .transpose()
+                .map_err(crate::error::map_engine_error)?;
             let pick = match (by.top, &by.artifacts) {
                 (Some(top), None) => Pick::Top(top),
                 (None, Some(ids)) => Pick::Named(
@@ -430,6 +438,7 @@ fn by_of(
                 level: by.level,
                 pick,
                 cut,
+                palette,
             })
         }
         (Some(_), Some(_)) => bad("`by` names both `field` and `layer`; name one"),

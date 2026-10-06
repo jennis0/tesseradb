@@ -321,7 +321,7 @@ describe('<tessera-field-card> on a date', () => {
 });
 
 describe('<tessera-field-card> on a layer', () => {
-  const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 1, parentIds, childCount: 0});
+  const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 1, parentIds, childCount: 0, slot: null});
 
   it('ranks the clusters the map draws by their counts in view, leaving out its own clauses, and names each as its table does, with its path from browse pages', async () => {
     const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
@@ -333,7 +333,8 @@ describe('<tessera-field-card> on a layer', () => {
     store.setBrowse('p:8', {artifacts: [], parents: [], next: null});
     card.store = store;
     await settle(host);
-    const ranked = (top: number) => ({by: {layer: 'topics', top, cut: 'drawn'}});
+    // Each asks for the clusters' slots in the store's palette, Tableau 10, which the swatches read.
+    const ranked = (top: number) => ({by: {layer: 'topics', top, cut: 'drawn', paletteSize: 10}});
     expect(spec(store, 'field-subject')).toEqual({groupings: [ranked(5)], subject: 'view', highlighted: true, withoutMembersOf: 'topics'});
     // The whole match counts how many clusters are drawn, which the search box names.
     expect(spec(store, 'field-match')).toEqual({groupings: [ranked(1)], withoutMembersOf: 'topics'});
@@ -342,7 +343,7 @@ describe('<tessera-field-card> on a layer', () => {
     await new Promise((r) => setTimeout(r, 0));
     await settle(host);
     // And then the clusters the subject lists, by name, so each row has both counts.
-    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 8n]}}, ranked(1)], withoutMembersOf: 'topics'});
+    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 8n], paletteSize: 10}}, ranked(1)], withoutMembersOf: 'topics'});
     answerAggregate(store, 'field-match', aggregateEntry([{rows: [{key: 8n, count: 50}, {key: 7n, count: 90}], total: 140}, {rows: [{key: 7n, count: 90}], groups: 12}]));
     await settle(host);
     expect(deep(host, 'tessera-cluster-filter')!.getAttribute('placeholder')).toBe('Search 12 clusters');
@@ -366,6 +367,39 @@ describe('<tessera-field-card> on a layer', () => {
     expect(clauses).toEqual([{id: '8', layer: 'topics', outside: false, verb: 'highlight', on: true}]);
   });
 
+  it('colours each cluster’s swatch from the slot its row carries, a chosen colour over it, in the store’s palette', async () => {
+    const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
+    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const store = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
+    store.set('view', {...store.get('view'), id: 's0'});
+    store.set('legend', {...store.get('legend'), colourBy: 'cluster:topics'});
+    card.store = store;
+    await settle(host);
+    const answerBoth = async () => {
+      answerAggregate(store, 'field-subject', aggregateEntry([{rows: [{key: 7n, count: 9, title: 'optics', slot: 2}, {key: 8n, count: 5, title: 'lasers', slot: null}], total: 14}]));
+      answerAggregate(store, 'field-match', aggregateEntry([{rows: [{key: 7n, count: 9, slot: 2}, {key: 8n, count: 5, slot: null}]}, {rows: [{key: 7n, count: 9, slot: 2}], groups: 2}]));
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await settle(host);
+      }
+    };
+    await answerBoth();
+    const swatches = () => rows(host).map((r) => /--c:([^;]+)/.exec(r.querySelector('[part="swatch"]')!.getAttribute('style')!)![1]);
+    // Slot 2 of Tableau 10 is #e15759; a cluster served with no slot is grey.
+    expect(swatches()).toEqual(['rgb(225, 87, 89)', 'rgb(118, 126, 140)']);
+    // A colour the host chose for a cluster is drawn in place of its slot's.
+    store.set('artifacts', {...store.get('artifacts'), overrides: new Map([[8n, [1, 2, 3, 255] as const]])});
+    await settle(host);
+    expect(swatches()).toEqual(['rgb(225, 87, 89)', 'rgb(1, 2, 3)']);
+    // Under Okabe-Ito the card asks again with its size, and slot 2 is #009e73.
+    store.set('artifacts', {...store.get('artifacts'), palette: 'okabe-ito', overrides: new Map()});
+    await settle(host);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(spec(store, 'field-subject')).toMatchObject({groupings: [{by: {layer: 'topics', paletteSize: 8}}]});
+    await answerBoth();
+    expect(swatches()[0]).toBe('rgb(0, 158, 115)');
+  });
+
   it('ranks a flat layer’s clusters with no cut', async () => {
     const flat = {...topicsLayer, name: 'groups', hierarchy: {kind: 'flat', pruneChildren: false}} as Meta['layers'][number];
     const host = await mount('<tessera-field-card field="cluster:groups"></tessera-field-card>');
@@ -380,7 +414,7 @@ describe('<tessera-field-card> on a layer', () => {
 
 describe('<tessera-field-card> across a change of viewer', () => {
   it('drops a browse page still loading for the viewer before, so nothing it met names a cluster to the next', async () => {
-    const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 0, parentIds, childCount: 0});
+    const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 0, parentIds, childCount: 0, slot: null});
     const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
     const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
     const before = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});

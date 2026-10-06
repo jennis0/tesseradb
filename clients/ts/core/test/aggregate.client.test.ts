@@ -1,4 +1,4 @@
-import {Dictionary, Int8, Int32, Table, tableToIPC, TimestampMicrosecond, Uint64, Utf8, vectorFromArray} from 'apache-arrow';
+import {Dictionary, Int8, Int32, Table, tableToIPC, TimestampMicrosecond, Uint64, Uint8, Utf8, vectorFromArray} from 'apache-arrow';
 import {describe, expect, it} from 'vitest';
 import {PartialAggregate} from '../src/aggregate.js';
 import {TesseraClient, TesseraError} from '../src/client.js';
@@ -190,6 +190,19 @@ describe('TesseraClient.aggregate', () => {
     expect(sent[0]!.body).toMatchObject({groupings: [{by: {field: 'score', summary: true}}]});
     expect(result.tables[0]).toMatchObject({total: 300, groups: null, sample: null});
     expect(rowsOf(result.tables[0]!.rows)).toEqual([{items: 900n, count: 850n, none: 40n, min: -3.5, max: 99.5, mean: 41.25}]);
+  });
+
+  it('sends a layer grouping’s palette size under its wire name, and reads its slot column', async () => {
+    const table = new Table({
+      group: vectorFromArray(['listed', 'listed', 'rest'], new Dictionary(new Utf8(), new Int8())),
+      key: vectorFromArray([5n, 6n, null], new Uint64()),
+      slot: vectorFromArray([4, 1, null], new Uint8()),
+      count: u64([3n, 2n, 1n])
+    });
+    const {client, sent} = clientFor({'': () => chunked(responseOf([{head: {grouping: 0, total: 6, groups: 3, resumed: false}, pages: [{table, next: null}]}], null))});
+    const result = await client.aggregate('tok', {view: 's0', groupings: [{by: {layer: 'l', top: 2, paletteSize: 20}}, {by: {field: 'f', top: 1}}]});
+    expect(sent[0]!.body).toMatchObject({groupings: [{by: {layer: 'l', top: 2, palette_size: 20}}, {by: {field: 'f', top: 1}}]});
+    expect(rowsOf(result.tables[0]!.rows).map((r) => r.slot)).toEqual([4, 1, null]);
   });
 
   it('carries the reference columns and a layer key as they arrive', async () => {

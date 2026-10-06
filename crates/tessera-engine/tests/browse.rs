@@ -312,6 +312,7 @@ fn browse(
                 filter,
                 limit,
                 cursor: None,
+                palette_size: None,
             },
         )
         .expect("a browse answers")
@@ -663,6 +664,7 @@ fn a_dag_child_counts_once_under_each_served_parent() {
                         filter: None,
                         limit: 100,
                         cursor: None,
+                        palette_size: None,
                     },
                 )
                 .unwrap()
@@ -721,6 +723,7 @@ fn a_cursor_over_tied_counts_neither_duplicates_nor_drops() {
                     filter: None,
                     limit: 1,
                     cursor,
+                    palette_size: None,
                 },
             )
             .unwrap();
@@ -854,6 +857,7 @@ fn the_refusals_are_about_schema_and_an_artifact_is_an_empty_page() {
                 filter: None,
                 limit,
                 cursor: None,
+                palette_size: None,
             },
         )
     };
@@ -927,6 +931,7 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
                     filter: Some(xx.clone()),
                     limit: 100,
                     cursor: None,
+                    palette_size: None,
                 },
             )
             .expect("a filtered browse answers");
@@ -1058,6 +1063,7 @@ impl Labelled {
                     filter,
                     limit: 100,
                     cursor: None,
+                    palette_size: None,
                 },
             )
             .expect("a browse answers")

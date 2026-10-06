@@ -860,6 +860,11 @@ export type ViewportArtifactsRequest = {
    * descendants. It applies to the `nested` and `dag` layers named; unbounded when omitted.
    */
   budget?: number;
+  /**
+   * How many colours the client's palette holds, from 2 to 32: each artifact then carries this
+   * viewer's {@link Artifact.slot} below it. Outside that range the request is a `422`.
+   */
+  paletteSize?: number;
 };
 
 /**
@@ -999,6 +1004,12 @@ export type Artifact = {
    * target's where it declares none, and is not the number to show beside a label.
    */
   target: bigint | null;
+  /**
+   * The artifact's palette slot for this viewer, below the request's `paletteSize`: the index of
+   * its colour, chosen so that artifacts drawn beside each other differ, and the same at any zoom,
+   * box, budget or filter. `null` where the request carried no `paletteSize`.
+   */
+  slot: number | null;
 };
 
 /**
@@ -1412,6 +1423,8 @@ export type BrowseRequest = {
   limit?: number;
   /** A previous page's {@link BrowsePage.next}, unchanged. */
   cursor?: string;
+  /** As {@link ViewportArtifactsRequest.paletteSize}: each row then carries its {@link BrowseRow.slot}. */
+  paletteSize?: number;
 };
 
 /**
@@ -1447,6 +1460,8 @@ export type BrowseRow = {
    * `flat` or `stacked` layer.
    */
   childCount: number;
+  /** As {@link Artifact.slot}: `null` where the request carried no `paletteSize`. */
+  slot: number | null;
 };
 
 /**
@@ -1542,10 +1557,11 @@ export type ArtifactsRequest = {
   /**
    * Properties, each once, in the order their columns come back. `centroid` is the columns
    * `centroid_x` and `centroid_y`, and `box` the columns `box_x_min`, `box_y_min`, `box_x_max` and
-   * `box_y_max`, in the view's coordinates. `shape` is a WKB `MultiPolygon`. A repeated property is
-   * a `422`.
+   * `box_y_max`, in the view's coordinates. `shape` is a WKB `MultiPolygon`. `slot` is the
+   * artifact's palette slot under {@link ArtifactsRequest.paletteSize}. A repeated property is a
+   * `422`.
    */
-  fields: ('key' | 'level' | 'parents' | 'target' | 'masked_count' | 'content' | 'centroid' | 'box' | 'shape')[];
+  fields: ('key' | 'level' | 'parents' | 'target' | 'masked_count' | 'content' | 'centroid' | 'box' | 'shape' | 'slot')[];
   /** Only the artifacts at this level. A `422` on a layer with one level, and past the levels the layer holds. */
   level?: number;
   /** Only the artifacts naming this one among their parents. A `422` together with `q`. */
@@ -1575,6 +1591,11 @@ export type ArtifactsRequest = {
   cursor?: string;
   /** As {@link ItemsRequest.compression}. */
   compression?: 'zstd';
+  /**
+   * As {@link ViewportArtifactsRequest.paletteSize}, for the `slot` field: a `uint8` column, null
+   * where this is not sent.
+   */
+  paletteSize?: number;
 };
 
 /**
@@ -1698,7 +1719,8 @@ export type Grouping = {
  * A group-scoped field resolves under the request's view as a filter leaf on it does, or is pinned
  * as `<field>@<key>`. A `layer` is one `/v1/meta` publishes to this principal, and `level` is
  * required on a layer with several levels and refused on one with a single level. A named value or
- * artifact this principal would not be listed gets no row.
+ * artifact this principal would not be listed gets no row. With `layer`, `paletteSize` (2 to 32)
+ * gives each listed artifact this viewer's slot, as {@link Artifact.slot} does.
  *
  * On a `nested` or `dag` layer, `top` takes a `cut`, and is refused without one: the artifacts
  * listed are those the treed frame of {@link TesseraClient.viewportArtifacts} serves for the same
@@ -1738,8 +1760,8 @@ export type AggregateBy =
   | {field: string; values: string[]}
   | {field: string; bins: number; range?: [number | bigint, number | bigint]; sample?: number}
   | {field: string; summary: true}
-  | {layer: string; level?: number; top: number; cut?: AggregateCut}
-  | {layer: string; level?: number; artifacts: bigint[]};
+  | {layer: string; level?: number; top: number; cut?: AggregateCut; paletteSize?: number}
+  | {layer: string; level?: number; artifacts: bigint[]; paletteSize?: number};
 
 /**
  * Where and how finely a `nested` or `dag` layer is drawn, as {@link ViewportArtifactsRequest}
@@ -1781,7 +1803,9 @@ export type AggregateCells = {
  * The columns are, in this order and each only where stated: `group` (`listed`, `rest` or `none`,
  * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null
  * on `rest` and `none`); `title` (a value's title, or an artifact's name as
- * {@link TesseraClient.browse} gives it, with `by`; null where there is none); in place of `key` and
+ * {@link TesseraClient.browse} gives it, with `by`; null where there is none); `slot` (a layer's
+ * artifact's palette slot, as {@link Artifact.slot} is, with `by` on a `layer` and null without its
+ * `paletteSize` and on `rest` and `none`); in place of `key` and
  * `title` with `bins`, `lower` and `upper` (a bin's edges: a `bigint` on an integer field, a number
  * on one whose range has a fractional bound, a number on a float field, and a timestamp in
  * milliseconds since the Unix epoch, as Arrow reads one, on a timestamp field; null on `rest` and

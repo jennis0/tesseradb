@@ -221,6 +221,37 @@ describe('TesseraClient against a live server', () => {
     expect(opened.maskedCount).toBe(rows[0]!.count);
   });
 
+  it('gives each artifact one slot below the palette size asked for, the same on every route, and none without one', async (ctx) => {
+    live(ctx);
+    const {zoom, bbox, view} = whole();
+    const asked = {view, zoom, bbox, layers: ['clusters/kmeans'], perTile: 50};
+    const plain = await client.viewportArtifacts(session.token, asked);
+    expect(plain.frames.flatMap((f) => f.artifacts).every((a) => a.slot === null)).toBe(true);
+    const response = await client.viewportArtifacts(session.token, {...asked, paletteSize: 8});
+    const slots = new Map<bigint, number | null>();
+    for (const a of response.frames.flatMap((f) => f.artifacts)) {
+      expect(a.slot).toBeTypeOf('number');
+      expect(a.slot!).toBeLessThan(8);
+      expect(slots.get(a.tesseraId) ?? a.slot).toBe(a.slot);
+      slots.set(a.tesseraId, a.slot);
+    }
+    expect(slots.size).toBeGreaterThan(1);
+    const roots = await client.browse(session.token, {view: 's0', layer: 'clusters/kmeans', paletteSize: 8});
+    for (const row of roots.artifacts) if (slots.has(row.tesseraId)) expect(row.slot).toBe(slots.get(row.tesseraId));
+    const read = await client.artifacts(session.token, {view: 's0', layer: 'clusters/kmeans', ids: [...slots.keys()], fields: ['slot'], paletteSize: 8});
+    for await (const page of read) {
+      for (let i = 0; i < page.numRows; i++) expect(page.getChild('slot')!.get(i)).toBe(slots.get(BigInt(page.getChild('tessera_id')!.get(i))));
+    }
+    const {tables} = await client.aggregate(session.token, {view: 's0', groupings: [{by: {layer: 'clusters/kmeans', top: 5, paletteSize: 8}}]});
+    const rows = tables[0]!.rows;
+    for (let i = 0; i < rows.numRows; i++) {
+      if (rows.getChild('group')!.get(i) !== 'listed') continue;
+      const id = BigInt(rows.getChild('key')!.get(i));
+      if (slots.has(id)) expect(rows.getChild('slot')!.get(i)).toBe(slots.get(id));
+    }
+    await expect(client.viewportArtifacts(session.token, {...asked, paletteSize: 1})).rejects.toMatchObject({status: 422});
+  });
+
   it('browses a tiered layer from its roots to one root’s children', async (ctx) => {
     live(ctx);
     const roots = await client.browse(session.token, {view: 's0', layer: 'taxonomy/arxiv', level: 0});

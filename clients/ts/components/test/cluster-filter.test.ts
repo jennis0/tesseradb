@@ -17,7 +17,7 @@ afterEach(() => {
 const layer = (name: string, over: Partial<Meta['layers'][number]> = {}) =>
   ({name, title: 'Topics', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'nested', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1, ...over}) as Meta['layers'][number];
 
-const row = (id: bigint, name: string | null, parentIds: bigint[] = [], rung = 0): BrowseRow => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung, parentIds, childCount: 0});
+const row = (id: bigint, name: string | null, parentIds: bigint[] = [], rung = 0): BrowseRow => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung, parentIds, childCount: 0, slot: null});
 
 async function mountField(over: {layers?: Meta['layers']; verb?: 'filter' | 'highlight'; members?: unknown[]} = {}) {
   const host = await mount(`<tessera-cluster-filter layer="topics" verb="${over.verb ?? 'filter'}"></tessera-cluster-filter>`);

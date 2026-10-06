@@ -627,6 +627,7 @@ impl Engine {
             // No filter or highlight on this route to answer about, and no viewport to scope it to.
             matched: None,
             highlighted: None,
+            slot: None,
         }))
     }
 
@@ -989,7 +990,7 @@ impl Engine {
 
         let mut walked = Walked::default();
         for name in names {
-            let Some(layer) = self.layer_pass(&pass, name) else {
+            let Some(layer) = self.layer_pass(&pass, name)? else {
                 continue;
             };
             if lineage_kind(layer.registered.declaration.hierarchy.kind).is_some() {
@@ -1050,11 +1051,11 @@ impl Engine {
         &self,
         pass: &'a ArtifactPass<'a>,
         name: String,
-    ) -> Option<LayerPass<'a>> {
+    ) -> Result<Option<LayerPass<'a>>> {
         let generation = pass.served.generation;
         let Some(registered) = self.write.live().registered_layer(&name) else {
             // Dropped between the resolution and here — the same answer as a gate failure.
-            return None;
+            return Ok(None);
         };
         // A layer not declaring this view has no membership here to project.
         if !registered
@@ -1063,13 +1064,13 @@ impl Engine {
             .iter()
             .any(|s| s == pass.served.name)
         {
-            return None;
+            return Ok(None);
         }
         // Asked per request: reachability may be cached but a suppression verdict may not.
         if generation.overlay.is_deleted(registered.entity)
             || generation.overlay.is_suppressed(registered.entity)
         {
-            return None;
+            return Ok(None);
         }
 
         // Parsed once per layer, an unparseable name dropped rather than erroring the response,
@@ -1084,13 +1085,24 @@ impl Engine {
             .collect();
 
         let vocabulary = predicate_vocabulary(generation, &registered.declaration);
-        Some(LayerPass {
+        let slots = match pass.ask.palette {
+            Some(palette) => Some(self.cluster_slots(
+                pass.served,
+                pass.mask,
+                &registered,
+                palette,
+                pass.dependency_served,
+            )?),
+            None => None,
+        };
+        Ok(Some(LayerPass {
             pass,
             name,
             registered,
             declared_derived,
             vocabulary,
-        })
+            slots,
+        }))
     }
 
     /// One level's row form in this request's view and the version it is of, from one call so
@@ -1232,9 +1244,10 @@ impl Engine {
             budget,
             rows: ArtifactRows::Full,
             cancel: cancel.clone(),
+            palette: None,
         };
         let pass = ArtifactPass::new(served, &ask, mask, dependency_served);
-        let Some(layer) = self.layer_pass(&pass, layer.to_string()) else {
+        let Some(layer) = self.layer_pass(&pass, layer.to_string())? else {
             return Ok(None);
         };
         let Some(runs) = layer.registered.runs.first() else {
@@ -1305,30 +1318,12 @@ impl Engine {
         passing: &[Passing],
     ) -> (Arc<crate::cut::Lineage>, Vec<u32>) {
         let layer = level.layer;
-        let number = level.level;
-        // Read from every artifact's parent list, not only the passing ones, since one lineage
-        // serves every viewer; the cut itself is taken over the passing nodes alone, so a
-        // withheld ancestor never appears in this viewer's tree. Within-level edges only: a
-        // tiered layer's cross-level edges are containment information, not a ladder to coarsen
-        // along, so such a layer's lineage is empty here. Held per generation (rebuilding per
-        // request would cost ~96ms at ten million against ~3ms for the cut).
-        let lineage = self
-            .lineages
-            .get_or_build(&layer.name, number, level.lineage_version, || {
-                let records = level.rows.records();
-                let edges = (0..records.len() as u32).map(|ordinal| {
-                    let within = records
-                        .parents(ordinal)
-                        .iter()
-                        .filter(move |parent| parent.level == number)
-                        .map(|parent| parent.ordinal);
-                    (ordinal, within)
-                });
-                match lineage_kind(layer.registered.declaration.hierarchy.kind) {
-                    Some(true) => crate::cut::Lineage::dag(edges),
-                    _ => crate::cut::Lineage::new(edges),
-                }
-            });
+        let lineage = self.level_lineage(
+            &layer.registered,
+            level.level,
+            level.lineage_version,
+            &level.rows,
+        );
         let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
         // Ascending and deduplicated, so the assembly's membership test is a binary search.
         // `prune_children` is a rendering choice, not a disclosure one: every artifact in either
@@ -1340,6 +1335,39 @@ impl Engine {
             layer.registered.declaration.hierarchy.prune_children,
         );
         (lineage, served)
+    }
+
+    /// One level's lineage at `lineage_version`, held per generation: rebuilding it per request
+    /// would cost ~96ms at ten million against ~3ms for the cut.
+    ///
+    /// Read from every artifact's parent list, not only the passing ones, since one lineage
+    /// serves every viewer; a cut is taken over the passing nodes alone, so a withheld ancestor
+    /// never appears in a viewer's tree. Within-level edges only: a tiered layer's cross-level
+    /// edges are containment information, not a ladder to coarsen along, so such a layer's
+    /// lineage is empty here.
+    pub(crate) fn level_lineage(
+        &self,
+        layer: &tessera_types::layer::RegisteredLayer,
+        number: u32,
+        lineage_version: u64,
+        rows: &crate::artifacts::ArtifactRows,
+    ) -> Arc<crate::cut::Lineage> {
+        self.lineages
+            .get_or_build(&layer.declaration.name, number, lineage_version, || {
+                let records = rows.records();
+                let edges = (0..records.len() as u32).map(|ordinal| {
+                    let within = records
+                        .parents(ordinal)
+                        .iter()
+                        .filter(move |parent| parent.level == number)
+                        .map(|parent| parent.ordinal);
+                    (ordinal, within)
+                });
+                match lineage_kind(layer.declaration.hierarchy.kind) {
+                    Some(true) => crate::cut::Lineage::dag(edges),
+                    _ => crate::cut::Lineage::new(edges),
+                }
+            })
     }
 
     /// **Stage four: the row every survivor is served as** — its content, its derived shape, its
@@ -1530,6 +1558,10 @@ impl Engine {
             target: None,
             matched,
             highlighted,
+            slot: layer
+                .slots
+                .as_ref()
+                .and_then(|slots| slots.get(number, ordinal)),
         });
         Ok(())
     }
@@ -1568,6 +1600,8 @@ pub(crate) struct ArtifactAsk<'a> {
     pub(crate) budget: Option<u32>,
     pub(crate) rows: ArtifactRows,
     pub(crate) cancel: Option<CancelToken>,
+    /// The palette size each served artifact's slot is chosen for, where one was named.
+    pub(crate) palette: Option<u8>,
 }
 
 /// **The artifacts pass of one request**: what every layer and every level of it is answered
@@ -1615,6 +1649,8 @@ pub(super) struct LayerPass<'a> {
     /// The predicate's inputs, resolved per level: per-level for a spatial layer, nothing for a
     /// stored-membership one.
     vocabulary: Option<&'a tessera_store::vocabulary::VocabularyMinter>,
+    /// This viewer's slots over the layer, where the request named a palette size.
+    slots: Option<Arc<crate::slots::LayerSlots>>,
 }
 
 /// One level of one layer, as [`Engine::level_pass`] settles it: the values the gate, the cut and

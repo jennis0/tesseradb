@@ -247,10 +247,10 @@ async function captureNotebook() {
     const full = [q.x_min, q.y_min, q.x_max, q.y_max];
 
     // The k-means layer declares centroid and box, over clusters in different parts of the map. The
-    // artifacts body is one frame per tile and a trailer; the points, named with the layer, carry
-    // its membership column.
+    // artifacts body is one frame per tile and a trailer, each cluster with its slot in a palette of
+    // ten; the points, named with the layer, carry its membership column.
     const clusters = {view: 's0', zoom: 2, bbox: full, layers: ['clusters/kmeans']};
-    const channel = await reader.artifacts({...clusters, per_tile: 50});
+    const channel = await reader.artifacts({...clusters, per_tile: 50, palette_size: 10});
     const membership = await reader.viewport({...clusters, k: 50});
     const kinds = frames(channel).map((f) => f.kind);
     check(kinds.at(-1) === 4 && kinds.slice(0, -1).every((k) => k === 5) && kinds.length === 17, 'the artifacts capture is not sixteen artifacts frames and a trailer');
@@ -260,6 +260,8 @@ async function captureNotebook() {
     const distinct = new Map(rows.map((r) => [r.id, `${r.x},${r.y}`]));
     check(distinct.size >= 3 && new Set(distinct.values()).size === distinct.size, 'the clusters do not have distinct centroids');
     check(rows.length > distinct.size, 'no cluster is served in two tiles');
+    const slots = tileFrames.flatMap((t) => column(t, 'slot'));
+    check(slots.every((slot) => slot !== null && slot < 10) && new Set(slots).size > 1, 'the clusters do not each have a slot below ten, or all have one');
     check(frames(membership).map((f) => f.kind).join() === '1,3,4', 'the membership capture is not tiles, points and trailer');
     const members = tables(membership, 3).flatMap((t) => column(t, 'membership:clusters/kmeans'));
     check(members.some((m) => m !== null), 'no served point is named a member');
@@ -286,8 +288,9 @@ async function captureNotebook() {
 
     // The browse pages. The roots page is paged; the children are a root's, under a filter that
     // admits nothing of at least one; the search is paged and carries no filter.
-    const roots = await reader.browse({view: 's0', layer: 'clusters/kmeans', limit: 4});
+    const roots = await reader.browse({view: 's0', layer: 'clusters/kmeans', limit: 4, palette_size: 10});
     check(typeof roots.next === 'string', 'the roots page has no next page');
+    check(roots.artifacts.every((a) => typeof a.slot === 'number' && a.slot < 10), 'a root has no slot below ten');
     const [root] = (await reader.browse({view: 's0', layer: 'clusters/hdbscan', limit: 1})).artifacts;
     const children = await reader.browse({view: 's0', layer: 'clusters/hdbscan', parent: root.tessera_id, filters: {archive: {in: ['q-fin']}}});
     check(children.artifacts.every((a) => a.parent_ids.includes(root.tessera_id)), 'a child does not name the root it was asked under');

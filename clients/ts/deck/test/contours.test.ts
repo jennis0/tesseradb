@@ -22,7 +22,8 @@ const artifact = (id: bigint, parent: bigint | null, count = 10n): Shaped => ({
   rung: 0,
   matched: null,
   highlighted: null,
-  target: null
+  target: null,
+  slot: null
 });
 
 /**
@@ -57,7 +58,7 @@ function projection(input: Shaped[]): ArtifactsProjection {
   const shapes = new Map(input.filter((a) => a.shape !== null).map((a) => [a.tesseraId, a.shape!]));
   const table = new SessionArtifactTable();
   const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
-  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], attached: new Map(), lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes, colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
+  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], attached: new Map(), lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes, colours: new Map(), palette: 'tableau10', overrides: new Map(), coverage: {current: 0, stale: 0}};
 }
 
 /** The unsigned area of a closed ring, by the shoelace formula. */

@@ -73,6 +73,9 @@ pub struct ViewportArtifactsRequest<'a> {
     pub computed: ComputedSelection<'a>,
     /// The budget a treed layer's walk is cut to.
     pub budget: Option<u32>,
+    /// The palette size each artifact's slot is chosen for ([`crate::slots`]); `None` serves no
+    /// slot.
+    pub palette_size: Option<u8>,
     /// The most artifacts one level serves in one tile.
     pub per_tile: usize,
 }
@@ -94,6 +97,7 @@ impl<'a> ViewportArtifactsRequest<'a> {
             levels: LevelSelection::Declared,
             computed: ComputedSelection::Declared,
             budget: None,
+            palette_size: None,
             per_tile,
         }
     }
@@ -135,6 +139,11 @@ impl<'a> ViewportArtifactsRequest<'a> {
 
     pub fn computed(mut self, computed: ComputedSelection<'a>) -> Self {
         self.computed = computed;
+        self
+    }
+
+    pub fn palette_size(mut self, palette_size: Option<u8>) -> Self {
+        self.palette_size = palette_size;
         self
     }
 
@@ -389,6 +398,7 @@ impl Engine {
             budget: req.budget,
             rows: ArtifactRows::Full,
             cancel: req.cancel.clone(),
+            palette: req.palette_size,
         };
         let reachable = self.reachable_layers(session);
         let names = requested_layers(req.layers, &reachable);
@@ -421,12 +431,11 @@ impl Engine {
         let outside = treed_frame.served_at;
 
         let pass = ArtifactPass::new(&served, &ask, &mask, &dependency_served);
-        let layers = targets_first(
-            tiled
-                .into_iter()
-                .filter_map(|name| self.layer_pass(&pass, name))
-                .collect(),
-        );
+        let mut passes: Vec<LayerPass<'_>> = Vec::new();
+        for name in tiled {
+            passes.extend(self.layer_pass(&pass, name)?);
+        }
+        let layers = targets_first(passes);
         let mut levels: Vec<LevelPass<'_>> = Vec::new();
         for layer in &layers {
             for (number, runs) in layer.registered.runs.iter().enumerate() {

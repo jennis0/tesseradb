@@ -451,6 +451,7 @@ async fn the_body_and_its_columns_are_the_contracts() {
             ("group".into(), dictionary(DataType::Int8)),
             ("key".into(), DataType::UInt64),
             ("title".into(), dictionary(DataType::Int32)),
+            ("slot".into(), DataType::UInt8),
             ("count".into(), DataType::UInt64),
             ("reference_count".into(), DataType::UInt64),
             ("lift".into(), DataType::Float64),
@@ -1680,5 +1681,170 @@ async fn a_layer_rows_title_is_the_name_browse_gives() {
         }
         let titles: Vec<Option<&str>> = titled.iter().map(|(_, t)| t.as_deref()).collect();
         assert_eq!(titles, expected, "terms {terms:?}");
+    }
+}
+
+/// **A cluster carries one slot wherever it is served**: the artifacts frames at any zoom and
+/// budget, the aggregate's layer rows, browse rows and `/v1/artifacts` rows give each cluster
+/// the same slot for one palette size, and none where no palette size was named. A palette size
+/// outside 2 to 32 is a 422 on each route.
+#[tokio::test]
+async fn a_cluster_carries_one_slot_wherever_it_is_served() {
+    const TREE: &str = "groups/coloured";
+    let f = fixture().await;
+    let mut tree = flat_layer(TREE);
+    tree["hierarchy"] = json!({ "kind": "nested", "prune_children": true });
+    register(&f.server, tree).await;
+    let mut artifacts = vec![json!({ "key": "root", "members": members(0..N) })];
+    for b in 0..4u64 {
+        artifacts.push(json!({
+            "key": format!("b{b}"),
+            "members": members(b * 750..(b + 1) * 750),
+            "parent": ["root"],
+        }));
+        for l in 0..5u64 {
+            let start = b * 750 + l * 150;
+            artifacts.push(json!({
+                "key": format!("b{b}-{l}"),
+                "members": members(start..start + 150),
+                "parent": [format!("b{b}")],
+            }));
+        }
+    }
+    publish(&f.server, TREE, json!(artifacts)).await;
+    tick(&f.server).await;
+    let token = token_for(&f.server, &["0"]).await;
+
+    let mut slots: BTreeMap<u64, u8> = BTreeMap::new();
+    fn agree(slots: &mut BTreeMap<u64, u8>, id: u64, slot: Option<u8>, what: &str) {
+        let slot = slot.unwrap_or_else(|| panic!("{what}: {id} has no slot"));
+        assert!(slot < 10, "{what}");
+        assert_eq!(*slots.entry(id).or_insert(slot), slot, "{what}: {id}");
+    }
+    for (zoom, budget) in [(0u8, json!(1)), (0, json!(4)), (2, json!(null))] {
+        let resp = post(
+            &f.server,
+            "/v1/artifacts/viewport",
+            &token,
+            &json!({ "view": "s0", "zoom": zoom, "bbox": [0.0, 0.0, 1000.0, 1000.0],
+                     "per_tile": 10, "layers": [TREE], "budget": budget, "palette_size": 10 }),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let decoded = decode_artifact_frames(&resp.bytes().await.unwrap());
+        for row in decoded.frames.iter().flat_map(|(_, rows)| rows) {
+            agree(&mut slots, row.tessera_id, row.slot, "viewport");
+        }
+    }
+    assert_eq!(slots.len(), 25, "every node was drawn at some budget");
+
+    let (_, decoded) = aggregate_ok(
+        &f.server,
+        &token,
+        &json!({ "view": "s0", "groupings": [{ "by": { "layer": TREE, "top": 50,
+                 "cut": { "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "budget": 4 },
+                 "palette_size": 10 } }] }),
+    )
+    .await;
+    let listed: Vec<AggregateRow> = table(&[decoded], 0)
+        .into_iter()
+        .filter(|row| row.group.as_deref() == Some("listed"))
+        .collect();
+    assert_eq!(listed.len(), 4);
+    for row in listed {
+        let Some(AggregateKey::Id(id)) = row.key else {
+            panic!("a listed artifact's key is its id");
+        };
+        agree(&mut slots, id, row.slot, "aggregate");
+    }
+
+    let resp = post(
+        &f.server,
+        "/v1/artifacts/browse",
+        &token,
+        &json!({ "view": "s0", "layer": TREE, "q": "b", "limit": 50, "palette_size": 10 }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["artifacts"].as_array().unwrap();
+    assert_eq!(rows.len(), 24);
+    for row in rows {
+        let id = row["tessera_id"].as_str().unwrap().parse().unwrap();
+        agree(&mut slots, id, row["slot"].as_u64().map(|s| s as u8), "browse");
+    }
+
+    let resp = post(
+        &f.server,
+        "/v1/artifacts",
+        &token,
+        &json!({ "view": "s0", "layer": TREE, "fields": ["slot"], "palette_size": 10 }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let mut read = 0;
+    for (batch, _) in decode_records(&resp.bytes().await.unwrap()).pages {
+        let ids = batch
+            .column_by_name("tessera_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap()
+            .clone();
+        let column = batch.column_by_name("slot").unwrap();
+        assert_eq!(column.data_type(), &DataType::UInt8);
+        let column = column
+            .as_any()
+            .downcast_ref::<arrow::array::UInt8Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            agree(&mut slots, ids.value(i), arrow::array::Array::is_valid(column, i).then(|| column.value(i)), "artifacts");
+            read += 1;
+        }
+    }
+    assert_eq!(read, 25);
+
+    let resp = post(
+        &f.server,
+        "/v1/artifacts/browse",
+        &token,
+        &json!({ "view": "s0", "layer": TREE, "limit": 50 }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["slot"].is_null()));
+
+    for size in [1, 33] {
+        for (route, body) in [
+            (
+                "/v1/artifacts/viewport",
+                json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0],
+                        "per_tile": 1, "layers": [TREE], "palette_size": size }),
+            ),
+            (
+                "/v1/aggregate",
+                json!({ "view": "s0", "groupings": [{ "by": { "layer": TREE,
+                        "top": 3, "palette_size": size } }] }),
+            ),
+            (
+                "/v1/artifacts/browse",
+                json!({ "view": "s0", "layer": TREE, "palette_size": size }),
+            ),
+            (
+                "/v1/artifacts",
+                json!({ "view": "s0", "layer": TREE, "fields": ["slot"], "palette_size": size }),
+            ),
+        ] {
+            let resp = post(&f.server, route, &token, &body).await;
+            assert_eq!(resp.status().as_u16(), 422, "{route} at {size}");
+            let body: Value = resp.json().await.unwrap();
+            assert_eq!(body["error"], "contract", "{route} at {size}");
+            let detail = body["detail"].as_str().unwrap_or_default();
+            assert!(detail.contains("palette_size"), "{route} at {size}: {detail}");
+        }
     }
 }

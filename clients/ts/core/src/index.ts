@@ -38,7 +38,7 @@ export type {PresentedStatus, Refusal} from './presented.js';
 export {subtreeOf, type ServedLineage} from './artifactChannel.js';
 export {NO_ORDINAL, type ArtifactEntry, type ArtifactTable, type ArtifactTableChange} from './artifactTable.js';
 export type {Domain, Ranks, ValueSample} from './encoding.js';
-export type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
+export {DEFAULT_PALETTE, NEUTRAL, PALETTES, artifactColour, paletteSize, type Palette, type PaletteName, type Rgba} from './palette.js';
 
 export {formatCount, formatMasked, NO_COUNT, NO_MASKED, type Count, type FormatOptions, type Masked} from './counts.js';
 
