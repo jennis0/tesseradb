@@ -1,0 +1,420 @@
+{
+ "binary": "/home/joe/code/tessera/.claude/worktrees/stage5-bench/target/release/tessera",
+ "bundle": "/home/joe/code/tessera/data/ladder/gbif-64p/bundle-stage5b",
+ "per_tile": 50,
+ "rows": [
+  {
+   "principal": "1%",
+   "zoom": 0,
+   "depth": 2,
+   "levels": [
+    0
+   ],
+   "tiles": 16,
+   "bytes": 99995,
+   "first_ms": 29.4,
+   "warm_p50_ms": 8.0,
+   "warm_max_ms": 8.8
+  },
+  {
+   "principal": "1%",
+   "zoom": 0,
+   "depth": 4,
+   "levels": [
+    0
+   ],
+   "tiles": 256,
+   "bytes": 1000782,
+   "first_ms": 28.2,
+   "warm_p50_ms": 28.6,
+   "warm_max_ms": 29.3
+  },
+  {
+   "principal": "1%",
+   "zoom": 3,
+   "depth": 5,
+   "levels": [
+    0
+   ],
+   "tiles": 40,
+   "bytes": 191059,
+   "first_ms": 7.5,
+   "warm_p50_ms": 7.5,
+   "warm_max_ms": 7.7
+  },
+  {
+   "principal": "1%",
+   "zoom": 3,
+   "depth": 7,
+   "levels": [
+    0
+   ],
+   "tiles": 493,
+   "bytes": 1703704,
+   "first_ms": 48.8,
+   "warm_p50_ms": 49.4,
+   "warm_max_ms": 50.7
+  },
+  {
+   "principal": "1%",
+   "zoom": 6,
+   "depth": 8,
+   "levels": [
+    1
+   ],
+   "tiles": 45,
+   "bytes": 227926,
+   "first_ms": 128.9,
+   "warm_p50_ms": 6.8,
+   "warm_max_ms": 7.5
+  },
+  {
+   "principal": "1%",
+   "zoom": 6,
+   "depth": 10,
+   "levels": [
+    1
+   ],
+   "tiles": 510,
+   "bytes": 2042485,
+   "first_ms": 46.1,
+   "warm_p50_ms": 47.5,
+   "warm_max_ms": 48.2
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1,
+    2
+   ],
+   "tiles": 40,
+   "bytes": 309846,
+   "first_ms": 393.3,
+   "warm_p50_ms": 7.0,
+   "warm_max_ms": 7.4
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1,
+    2
+   ],
+   "tiles": 510,
+   "bytes": 2125365,
+   "first_ms": 47.7,
+   "warm_p50_ms": 47.8,
+   "warm_max_ms": 50.1
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "tiles": 40,
+   "bytes": 108111,
+   "first_ms": 1.7,
+   "warm_p50_ms": 1.4,
+   "warm_max_ms": 1.7
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "tiles": 510,
+   "bytes": 1377584,
+   "first_ms": 10.5,
+   "warm_p50_ms": 10.1,
+   "warm_max_ms": 11.2
+  },
+  {
+   "principal": "25%",
+   "zoom": 0,
+   "depth": 2,
+   "levels": [
+    0
+   ],
+   "tiles": 16,
+   "bytes": 99355,
+   "first_ms": 33.4,
+   "warm_p50_ms": 8.9,
+   "warm_max_ms": 9.0
+  },
+  {
+   "principal": "25%",
+   "zoom": 0,
+   "depth": 4,
+   "levels": [
+    0
+   ],
+   "tiles": 256,
+   "bytes": 971726,
+   "first_ms": 30.8,
+   "warm_p50_ms": 30.9,
+   "warm_max_ms": 32.1
+  },
+  {
+   "principal": "25%",
+   "zoom": 3,
+   "depth": 5,
+   "levels": [
+    0
+   ],
+   "tiles": 40,
+   "bytes": 157267,
+   "first_ms": 8.1,
+   "warm_p50_ms": 8.0,
+   "warm_max_ms": 8.0
+  },
+  {
+   "principal": "25%",
+   "zoom": 3,
+   "depth": 7,
+   "levels": [
+    0
+   ],
+   "tiles": 493,
+   "bytes": 1595864,
+   "first_ms": 52.6,
+   "warm_p50_ms": 54.5,
+   "warm_max_ms": 54.7
+  },
+  {
+   "principal": "25%",
+   "zoom": 6,
+   "depth": 8,
+   "levels": [
+    1
+   ],
+   "tiles": 45,
+   "bytes": 299223,
+   "first_ms": 104.5,
+   "warm_p50_ms": 12.8,
+   "warm_max_ms": 13.1
+  },
+  {
+   "principal": "25%",
+   "zoom": 6,
+   "depth": 10,
+   "levels": [
+    1
+   ],
+   "tiles": 510,
+   "bytes": 2970806,
+   "first_ms": 89.7,
+   "warm_p50_ms": 89.3,
+   "warm_max_ms": 90.4
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1,
+    2
+   ],
+   "tiles": 40,
+   "bytes": 621654,
+   "first_ms": 345.6,
+   "warm_p50_ms": 15.0,
+   "warm_max_ms": 15.3
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1,
+    2
+   ],
+   "tiles": 510,
+   "bytes": 5491127,
+   "first_ms": 181.5,
+   "warm_p50_ms": 181.7,
+   "warm_max_ms": 184.2
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "tiles": 40,
+   "bytes": 279187,
+   "first_ms": 8.9,
+   "warm_p50_ms": 8.5,
+   "warm_max_ms": 8.6
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "tiles": 510,
+   "bytes": 1685108,
+   "first_ms": 29.2,
+   "warm_p50_ms": 29.5,
+   "warm_max_ms": 29.8
+  },
+  {
+   "principal": "100%",
+   "zoom": 0,
+   "depth": 2,
+   "levels": [
+    0
+   ],
+   "tiles": 16,
+   "bytes": 146331,
+   "first_ms": 53.6,
+   "warm_p50_ms": 7.2,
+   "warm_max_ms": 7.5
+  },
+  {
+   "principal": "100%",
+   "zoom": 0,
+   "depth": 4,
+   "levels": [
+    0
+   ],
+   "tiles": 256,
+   "bytes": 1663374,
+   "first_ms": 36.1,
+   "warm_p50_ms": 36.4,
+   "warm_max_ms": 37.7
+  },
+  {
+   "principal": "100%",
+   "zoom": 3,
+   "depth": 5,
+   "levels": [
+    0
+   ],
+   "tiles": 40,
+   "bytes": 337364,
+   "first_ms": 8.8,
+   "warm_p50_ms": 8.5,
+   "warm_max_ms": 8.7
+  },
+  {
+   "principal": "100%",
+   "zoom": 3,
+   "depth": 7,
+   "levels": [
+    0
+   ],
+   "tiles": 493,
+   "bytes": 3608985,
+   "first_ms": 67.8,
+   "warm_p50_ms": 68.9,
+   "warm_max_ms": 70.3
+  },
+  {
+   "principal": "100%",
+   "zoom": 6,
+   "depth": 8,
+   "levels": [
+    1
+   ],
+   "tiles": 45,
+   "bytes": 416406,
+   "first_ms": 98.7,
+   "warm_p50_ms": 12.2,
+   "warm_max_ms": 12.6
+  },
+  {
+   "principal": "100%",
+   "zoom": 6,
+   "depth": 10,
+   "levels": [
+    1
+   ],
+   "tiles": 510,
+   "bytes": 4193783,
+   "first_ms": 104.1,
+   "warm_p50_ms": 104.5,
+   "warm_max_ms": 105.2
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1,
+    2
+   ],
+   "tiles": 40,
+   "bytes": 619862,
+   "first_ms": 407.5,
+   "warm_p50_ms": 18.3,
+   "warm_max_ms": 18.8
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1,
+    2
+   ],
+   "tiles": 510,
+   "bytes": 7503991,
+   "first_ms": 220.8,
+   "warm_p50_ms": 220.4,
+   "warm_max_ms": 221.1
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "tiles": 40,
+   "bytes": 231443,
+   "first_ms": 10.1,
+   "warm_p50_ms": 9.5,
+   "warm_max_ms": 9.7
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "tiles": 510,
+   "bytes": 1516659,
+   "first_ms": 20.3,
+   "warm_p50_ms": 21.5,
+   "warm_max_ms": 21.8
+  }
+ ],
+ "status": {
+  "bytes": 44500748,
+  "disk_bound_bytes": 8589934592,
+  "disk_bytes": 44501549,
+  "entries": 9,
+  "evictions": 0,
+  "exact": 0,
+  "fills": 9,
+  "hits": 207,
+  "labels_bound_bytes": 268435456,
+  "labels_bytes": 0,
+  "labels_rows_read": 0,
+  "loads": 0,
+  "misses": 9,
+  "not_admitted": 0,
+  "reserve_spent": 0
+ }
+}

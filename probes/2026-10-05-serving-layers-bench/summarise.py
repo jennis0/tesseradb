@@ -1,6 +1,7 @@
 """Tables of old against new from the bench runs in `runs/`, as Markdown on stdout.
 
-    python3 probes/2026-10-05-serving-layers-bench/summarise.py old-1 old-2 -- new-1 new-2 [--busy-from EPOCH_S]
+    python3 probes/2026-10-05-serving-layers-bench/summarise.py old-1 old-2 -- new-1 new-2 \
+        [--busy-from EPOCH_S] [--labels old,new]
 
 Each cell is the median and the largest value over every repeat (runs times regions). With
 `--busy-from`, a step that started at or after that time is counted apart and listed.
@@ -73,9 +74,14 @@ def main() -> int:
         i = argv.index("--busy-from")
         busy = float(argv[i + 1]) * 1000
         argv = argv[:i] + argv[i + 2 :]
+    names = ("old", "new")
+    if "--labels" in argv:
+        i = argv.index("--labels")
+        names = tuple(argv[i + 1].split(","))
+        argv = argv[:i] + argv[i + 2 :]
     cut = argv.index("--")
     old, new = load(argv[:cut]), load(argv[cut + 1 :])
-    lo, ln = "old p50 / max ms", "new p50 / max ms"
+    lo, ln = (f"{n} p50 / max ms" for n in names)
 
     def open_rows(which: str) -> list:
         rows = []
