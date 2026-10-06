@@ -17,8 +17,8 @@ With `--reopen` it restarts the server over the kept cache and sends the same st
 
 ```bash
 cd data/ladder/gbif && set -a && . ./.env && set +a && cd -
-python3 probes/2026-10-06-first-open-fills/first_open.py <tessera> \
-  data/ladder/gbif/bench-runs-2026-10-06/gbif-new-off-1.json <out.json> --reopen
+python3 probes/2026-10-06-first-open-fills/first_open.py --deployment data/ladder/gbif --binary <tessera> \
+  --run data/ladder/gbif/bench-runs-2026-10-06/gbif-new-off-1.json --out <out.json> --reopen
 ```
 
 `runs/gbif-before.json` is main at bc546c08, `runs/gbif-after.json` is this branch at 8d8ad7b0. Both ran back to back with the one-minute load between 1.7 and 8.1 (before) and 2.1 and 7.4 (after). Each figure is one run.
@@ -122,7 +122,7 @@ A layer registered at a running service recorded every level served from a colum
 
 A later publication or growth that gives an item a second artifact leaves the record to the next fold, and the level is served from a list column meanwhile: a label column the memberships no longer fit is composed again in the list form, at the form's build and when a held form is amended, wherever the layout is the automatic pick. Under a pin the level is served artifact-major, as before. Checking every record against the level's existing artifacts instead would cost one intersection per artifact of the level per record, under the locks reads take, since the artifact store has no lookup from an item to the artifacts holding it; a union of each label level's members would hold about 0.4 GB a level at full GBIF.
 
-`runtime_layer.py` is the serving-layers bench's probe pointed at a bundle built at this branch (`data/ladder/gbif-64p/bundle-first-open-fills`, format 35, 2.1 GB, built in 74 s), since the bench's own gbif-64p bundle is format 34. It registers `genus-flat`, the genus level declared again as a flat layer, publishes its 56,893 artifacts and 25,088,942 members in 9 requests, and reads it.
+`probes/2026-10-05-serving-layers-bench/runtime_layer.py` is the serving-layers bench's probe, run against a bundle built at this branch (`data/ladder/gbif-64p/bundle-first-open-fills`, format 35, 2.1 GB, built in 74 s), since the bench's own gbif-64p bundle is format 34. It registers `genus-flat`, the genus level declared again as a flat layer, publishes its 56,893 artifacts and 25,088,942 members in 9 requests, and reads it.
 
 | read | main bc546c08 | this branch |
 |---|---:|---:|
@@ -133,8 +133,8 @@ A later publication or growth that gives an item a second artifact leaves the re
 A run with timers split the branch's first read: 1,011 ms building the level's row form from its members, 1,324 ms composing the label column (`project_row_column`), and 859 ms writing the column's member bitmaps. The list column it replaces took 3,034 ms to compose on the earlier run. Most of the first read is still the composition, so the saving at full GBIF would be about a quarter of that cost, not all of it.
 
 ```bash
-python3 probes/2026-10-06-first-open-fills/runtime_layer.py <tessera> \
-  .claude/worktrees/stage5-bench/probes/2026-10-05-serving-layers-bench/runs/new-1.json <out.json>
+python3 probes/2026-10-05-serving-layers-bench/runtime_layer.py --deployment data/ladder/gbif-64p/first-open-fills \
+  --binary <tessera> --run data/ladder/gbif-64p/bench-stage5/runs/new-1.json --out <out.json>
 ```
 
 `runs/runtime-layer-before.json` and `runs/runtime-layer-after.json` are the two runs, at a load of 2.1 to 3.1.

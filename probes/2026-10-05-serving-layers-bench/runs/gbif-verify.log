@@ -1,0 +1,29 @@
+ 08:10:13 up 1 day,  8:53,  1 user,  load average: 0.83, 2.73, 2.11
+Running scope as unit: run-rf0c9d217ca7944bfb3c1fb1e68cb3880.scope
+OK bundle (v00000): 1 partition(s), 1 view(s), 1 segment(s), 3495729729 rows, entity_id_high_water 3495729729
+attribute 'specieskey': 1,398,425 distinct key(s) over 3,221,136,771 row(s) with a value, of 3,495,729,729 row(s); the index is 13.48 GB
+	Command being timed: "systemd-run --user --scope --collect -p MemoryMax=24G -p MemorySwapMax=2G -- /tmp/claude-1000/-home-joe-code-tessera/047cca2f-36eb-4e53-8db7-c14e31d59060/scratchpad/bin/tessera-818122e3 verify bundle"
+	User time (seconds): 338.52
+	System time (seconds): 122.35
+	Percent of CPU this job got: 124%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 6:09.96
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 27592636
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1330
+	Minor (reclaiming a frame) page faults: 11189864
+	Voluntary context switches: 36155
+	Involuntary context switches: 4298
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+exit 0
+ 08:16:23 up 1 day,  8:59,  1 user,  load average: 1.30, 2.55, 2.38

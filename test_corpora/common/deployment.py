@@ -111,6 +111,55 @@ class Deployment:
         self.toml = self.scratch / "tessera.toml"
         self._write_toml()
 
+    @classmethod
+    def of(
+        cls,
+        directory: Path,
+        binary: Path,
+        scratch: Path,
+        cap_bytes: int | None = None,
+        swap_bytes: int = 0,
+        bundle: Path | None = None,
+    ) -> Deployment:
+        """A server over the bundle a deployment directory's `tessera.toml` names, or over
+        `bundle`, on the ports it names."""
+        directory = Path(directory)
+        settings = tomllib.loads((directory / "tessera.toml").read_text())
+        ports = tuple(
+            int(settings["serve"][k].rsplit(":", 1)[1]) for k in ("viewer", "session", "control")
+        )
+        return cls(
+            directory,
+            Path(bundle) if bundle else (directory / settings["bundle"]["path"]).resolve(),
+            scratch,
+            ports,
+            binary,
+            cap_bytes=cap_bytes,
+            swap_bytes=swap_bytes,
+        )
+
+    def control_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.operator_credential()}"}
+
+    def viewer_session(self, terms: list[str]) -> requests.Session:
+        """A viewer's HTTP session, authorised for `terms` with the operator credential."""
+        r = requests.post(
+            f"{self.session}/session/authorise",
+            json={"terms": terms},
+            headers=self.control_headers(),
+            timeout=120,
+        )
+        r.raise_for_status()
+        http = requests.Session()
+        http.headers["Authorization"] = f"Bearer {r.json()['token']}"
+        return http
+
+    def figures_status(self) -> dict:
+        """`/control/status`'s `masked_count_cache`."""
+        r = requests.get(f"{self.control}/control/status", headers=self.control_headers(), timeout=60)
+        r.raise_for_status()
+        return r.json()["masked_count_cache"]
+
     @property
     def viewer(self) -> str:
         return f"http://127.0.0.1:{self.ports[0]}"

@@ -3,11 +3,16 @@
 A performance benchmark, not a correctness test. It sends a fixed list of requests and writes
 figures that compare between runs:
 
-* **Session.** For principals seeing about 1%, 7%, 85% and 100% of the corpus: authorise, then
-  the time from the token to the whole extent's first counts, first points and last byte of
-  points, and to the last byte of anything the store asked for while still (`settled`, the
-  artifact channel's idle fetches included), twice: once for a principal new to the server and
-  once more for the same principal.
+* **Session.** For principals seeing about 1%, 7%, 85% and 100% of the corpus (`--targets`):
+  authorise, then the time from the token to the whole extent's first counts, first points, last
+  byte of points, last byte of the view's artifacts (`layers`), the last byte of a points request
+  that ran beside an artifacts request (`points_beside_layers`), and the last byte of everything
+  the view asked for (`settled`), twice: once for a principal new to the server and once more for
+  the same principal. An older core's idle promotion of a whole level is not in `settled`. Each
+  artifacts request asking for a whole level (a promotion, or every tile of a depth more than two
+  below the map zoom) is counted in `whole_level_requests`.
+* **Reopen** (`--reopen`, with `--start`). The server restarted over the same cache, with the
+  bundle's pages evicted again, and each principal opening once more.
 * **Map.** For each principal, a fixed camera script from the whole extent the session opened on:
   into its own two densest regions down to zoom 14, with pans, and back out after each.
 * **Lookups.** For the narrowest and the broadest principal: an item card by `tessera_id`, and a
@@ -18,18 +23,31 @@ The session and map sections run the TypeScript core's own store, driver and rep
 place of a person. Each request is timed on the wire in a worker thread, so the bench's own
 decoding is not in the waits. Each step waits for the store to go quiet before the next move, so
 the requests a step sends depend on the data and not on timing. For the same reason the viewer's
-background prefetch is off (its `?prefetch=0`), since a move cancels it part-way, and revalidation
-never falls due, since it runs on a sixty-second clock.
+background prefetch is off (its `?prefetch=0`, and in a newer core the artifact channel's prefetch
+of neighbouring and parent tiles with it) unless `--prefetch` is given, since a move cancels it
+part-way, and revalidation never falls due, since it runs on a sixty-second clock.
+
+With `--prefetch`, `--reference` names a run of the same script with prefetch off. A request
+beyond what that run sent at the same step is the prefetch's work (`extra`): it is kept out of
+the step's points and layers, timed as `extra`, and counted, and `settled` still includes it.
+
+The core is `clients/ts/core` of this checkout unless `--core` names another build of it, so an
+older server is measured with the client of its own commit. A newer core draws layers only with a
+number of artifacts per tile (`--per-tile`). The run reads `/control/status` after each phase and
+keeps its `masked_count_cache` figures, and keeps the server's memory and the bytes its cache
+directory holds at each start and after each phase.
 
 Every run sends the same requests: the principals' term sets are fixed, the 100% principal holds
 every term, and the camera script is fixed per principal. `--compare` diffs two runs' request logs
 as well as their figures. A principal is new to the server only on a server this run started
-(`--start`), which begins with an empty cache; attached to a running server, the first opening is
-whatever the server has already seen, and the result says which.
+(`--start`), which begins with an empty cache and the bundle's pages evicted; attached to a running
+server, the first opening is whatever the server has already seen, and the result says which.
 
     python3 -m test_corpora.common.interactive_bench \\
-        --deployment /home/joe/code/tessera/data/ladder/gbif --out run.json [--compare old.json] \\
-        [--start --binary /path/to/tessera [--keep-serving]]
+        --deployment data/ladder/gbif --out run.json [--compare old.json] \\
+        [--start --binary /path/to/tessera [--keep-serving] [--reopen]] \\
+        [--core /path/to/clients/ts/core/dist/index.js] [--targets 0.01,0.25,1] [--per-tile 50] \\
+        [--prefetch [--reference prefetch-off-run.json]]
 
 Build the TypeScript core first: `npm --prefix clients/ts run build -w @tesseradb/client`.
 """
@@ -55,7 +73,7 @@ import requests
 from pyarrow import ipc
 
 from .deployment import Deployment, read_env_file, tomllib
-from .serve_battery import compose_ladder, frames
+from .serve_battery import Evictor, compose_ladder, frames
 
 REPO = Path(__file__).resolve().parents[2]
 NODE_SCRIPT = Path(__file__).with_suffix(".mjs")
@@ -113,27 +131,62 @@ def stats(values: Sequence[float]) -> dict:
 # ---------------------------------------------------------------------------------------------
 
 
-def principals(ranks: list[dict]) -> list[dict]:
-    """The four principals: the 100% principal holds every term, the others a fixed greedy set."""
+def principals(ranks: list[dict], targets: Sequence[float] = TARGETS) -> list[dict]:
+    """The principals: the 100% principal holds every term, the others a fixed greedy set."""
     total = sum(r["pairs"] for r in ranks)
     out = []
-    for entry in compose_ladder(ranks, total, TARGETS):
+    for entry in compose_ladder(ranks, total, targets):
         label = f"{round(entry['target'] * 100)}%"
         out.append(
             {
                 "label": label,
                 "terms": sorted(entry["terms"]),
                 "map": True,
-                "ids": entry["target"] in (TARGETS[0], TARGETS[-1]),
+                "ids": entry["target"] in (targets[0], targets[-1]),
             }
         )
     return out
 
 
-def write_plan(path: Path, args, people: list[dict]) -> None:
+def box_at(q: dict, centre: Sequence[float], z: float, screen: tuple[int, int] = SCREEN) -> list[float]:
+    """The data-space box a screen shows at map zoom `z` around `centre`, as the Node side's
+    `boxAt`: zoom 0 fits the extent's height. `q` is a view's `quantisation` from `/v1/meta`."""
+    w, h = screen
+    sy = (q["y_max"] - q["y_min"]) / 2**z
+    sx = (q["x_max"] - q["x_min"]) / 2**z * (w / h)
+    return [centre[0] - sx / 2, centre[1] - sy / 2, centre[0] + sx / 2, centre[1] + sy / 2]
+
+
+def size_bytes(text: str) -> int:
+    """`24G` or `512M` as bytes, as `systemd-run`'s memory properties take them."""
+    unit = {"G": 2**30, "M": 2**20}
+    if not text or text[-1] not in unit or not text[:-1].isdigit():
+        raise ValueError(f"{text!r} is not a size; write a whole number of G or M, such as 24G")
+    return int(text[:-1]) * unit[text[-1]]
+
+
+def evict(*roots: Path) -> None:
+    """Drop the pages of every file under `roots`, so the next reads come from disk."""
+    Evictor(list(roots), None, None).evict()
+
+
+def reference_keys(path: str | None) -> list | None:
+    """A reference run's requests, counted by what they sent, for the Node side to match."""
+    if not path:
+        return None
+    counts: dict[str, int] = {}
+    for r in json.loads(Path(path).read_text()).get("requests", []):
+        key = json.dumps(list(sent(r)), separators=(",", ":"), ensure_ascii=False)
+        counts[key] = counts.get(key, 0) + 1
+    return sorted(counts.items())
+
+
+def write_plan(path: Path, args, people: list[dict], phase: str = "run") -> None:
+    core = Path(args.core).resolve()
     plan = {
-        "core": CORE.as_uri(),
-        "arrow": ARROW.as_uri(),
+        "core": core.as_uri(),
+        # Beside the core's own workspace: `clients/ts/core/dist/index.js` → `clients/ts/node_modules`.
+        "arrow": (core.parents[2] / ARROW.relative_to(ARROW.parents[2])).as_uri(),
         "viewer": args.viewer,
         "session": args.session,
         "screen": SCREEN,
@@ -146,6 +199,10 @@ def write_plan(path: Path, args, people: list[dict]) -> None:
         "quiet_ms": QUIET_MS,
         "step_timeout_ms": STEP_TIMEOUT_MS,
         "lookups": LOOKUPS,
+        "per_tile": args.per_tile,
+        "prefetch": args.prefetch,
+        "phase": phase,
+        "reference": reference_keys(args.reference),
     }
     path.write_text(json.dumps(plan))
 
@@ -171,9 +228,9 @@ class Figures:
                 f"  {key:<46} n={m['n']:<4} median {m['median']:>9.1f} ms  p95 {m['p95']:>9.1f}  max {m['max']:>9.1f}"
             )
 
-    def session(self, entry: dict) -> None:
+    def session(self, entry: dict, opens: Sequence[str] = ("first", "again")) -> None:
         label = entry["label"]
-        for which in ("first", "again"):
+        for which in opens:
             o = entry[which]
             bad = {"shed": o["shed"], "errors": o["errors"] + int(o["timed_out"])}
             self.put(f"session.{label}.authorise.{which}", [o["authorise_ms"]])
@@ -183,6 +240,12 @@ class Figures:
             )
             self.put(f"session.{label}.last_byte.{which}", [o["last_byte_ms"]], **bad)
             self.put(f"session.{label}.settled.{which}", [o["settled_ms"]], **bad)
+            self.put(f"session.{label}.layers.{which}", [o.get("layers_ms")], **bad)
+            self.put(
+                f"session.{label}.points_beside_layers.{which}",
+                [o.get("points_beside_layers_ms")],
+            )
+            self.put(f"session.{label}.extra.{which}", [o.get("extra_ms")])
 
     def map(self, entry: dict) -> None:
         label = entry["label"]
@@ -199,19 +262,29 @@ class Figures:
                     "errors": sum(s["errors"] + int(s["timed_out"]) for s in chosen),
                 }
                 name = kind.replace("-", "_")
-                for field in ("counts_ms", "first_points_ms", "last_byte_ms"):
+                for field in (
+                    "counts_ms",
+                    "first_points_ms",
+                    "last_byte_ms",
+                    "layers_ms",
+                    "points_beside_layers_ms",
+                ):
                     self.put(
                         f"map.{label}.{band}.{name}.{field.removesuffix('_ms')}",
-                        [s[field] for s in chosen],
+                        [s.get(field) for s in chosen],
                         **bad,
                     )
 
 
+#: The routes whose requests are timed by kind: the points viewport and the artifacts viewport.
+TIMED_ROUTES = ("/v1/viewport", "/v1/artifacts/viewport")
+
+
 def request_figures(figures: Figures, log_: list[dict]) -> None:
     """Per request kind over the whole run: the wire time to the last byte."""
-    kinds = sorted({r["kind"] for r in log_ if r["path"] == "/v1/viewport"})
-    for kind in kinds:
-        chosen = [r for r in log_ if r["kind"] == kind and r["path"] == "/v1/viewport"]
+    timed = [r for r in log_ if r["path"] in TIMED_ROUTES]
+    for kind in sorted({r["kind"] for r in timed}):
+        chosen = [r for r in timed if r["kind"] == kind]
         figures.put(
             f"requests.{kind}.last_byte",
             [r["last_byte_ms"] for r in chosen],
@@ -281,6 +354,59 @@ def lookups(
     }
 
 
+def volumes(node: dict, phase: str) -> dict:
+    """Bytes received, per open and per map band and move, and the prefetch's and whole-level
+    requests by kind."""
+    out: dict = {}
+    for e in node["principals"]:
+        for which in ("first", "again", "reopen"):
+            if which in e:
+                out[f"session.{e['label']}.{which}"] = e[which].get("bytes", 0)
+        for lo, hi, band in BANDS:
+            for kind in ("zoom-in", "pan", "zoom-out"):
+                chosen = [
+                    s
+                    for s in e.get("map", [])
+                    if lo <= s["zoom"] <= hi and s["kind"] == kind and s["requests"]
+                ]
+                if chosen:
+                    out[f"map.{e['label']}.{band}.{kind.replace('-', '_')}"] = sum(
+                        s.get("bytes", 0) for s in chosen
+                    )
+    requests_ = node["requests"]
+    return {
+        "phase": phase,
+        "bytes": out,
+        "bytes_by_kind": {
+            k: sum(r.get("bytes", 0) for r in requests_ if r["kind"] == k)
+            for k in sorted({r["kind"] for r in requests_})
+        },
+        "requests_by_kind": {
+            k: sum(1 for r in requests_ if r["kind"] == k)
+            for k in sorted({r["kind"] for r in requests_})
+        },
+        "extra_requests_by_kind": {
+            k: sum(1 for r in requests_ if r["kind"] == k and r.get("extra"))
+            for k in sorted({r["kind"] for r in requests_ if r.get("extra")})
+        },
+        "whole_level_requests": sum(1 for r in requests_ if r.get("whole_level")),
+    }
+
+
+def control_status(control: str, credential: str) -> dict:
+    """`/control/status`'s figures counters (`masked_count_cache`), or the failure."""
+    try:
+        r = requests.get(
+            f"{control}/control/status",
+            headers={"Authorization": f"Bearer {credential}"},
+            timeout=60,
+        )
+        r.raise_for_status()
+        return r.json().get("masked_count_cache", {})
+    except requests.RequestException as e:
+        return {"error": str(e)}
+
+
 def check_unique_field(viewer: str, token: str, field: str) -> str:
     """The view to look items up in, after checking `field` is a declared unique column."""
     r = requests.get(
@@ -341,6 +467,13 @@ def process_memory(pid: int | None) -> dict:
     except OSError:
         pass
     return out
+
+
+def directory_bytes(path: Path | None) -> int | None:
+    """The bytes of the files under `path`: what a started server has written to its cache."""
+    if path is None or not path.is_dir():
+        return None
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
 def binary_identity(path: str | None) -> dict:
@@ -493,16 +626,50 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--keep-serving", action="store_true", help="with --start, leave the server up"
     )
+    ap.add_argument(
+        "--reopen",
+        action="store_true",
+        help="with --start, then restart the server over the same cache and open each principal again",
+    )
+    ap.add_argument(
+        "--core",
+        default=str(CORE),
+        help="the TypeScript core's built index.js, for a server of another commit",
+    )
+    ap.add_argument(
+        "--targets",
+        default=",".join(str(t) for t in TARGETS),
+        help="the principals' shares of the corpus, comma-separated, ascending, the last 1",
+    )
+    ap.add_argument(
+        "--per-tile",
+        type=int,
+        default=50,
+        help="the store's artifacts per level per tile (createStore's artifacts.perTile)",
+    )
+    ap.add_argument(
+        "--prefetch",
+        action="store_true",
+        help="leave the store's idle prefetch on, as the demo viewer does without ?prefetch=0",
+    )
+    ap.add_argument(
+        "--reference",
+        help="with --prefetch, a run of the same script with prefetch off: what this run sent "
+        "beyond it is the prefetch's work, kept out of points and layers",
+    )
     ap.add_argument("--out", required=True)
     ap.add_argument(
         "--compare", help="an earlier run's JSON to compare figures and requests with"
     )
     args = ap.parse_args(argv)
 
-    if not CORE.is_file():
+    if not Path(args.core).is_file():
         ap.error(
-            f"{CORE} is missing; build it with `npm --prefix clients/ts run build -w @tesseradb/client`"
+            f"{args.core} is missing; build it with `npm --prefix clients/ts run build -w @tesseradb/client`"
         )
+    if args.reopen and not args.start:
+        ap.error("--reopen needs --start, since it restarts the server")
+    targets = tuple(float(t) for t in args.targets.split(","))
     started = time.time()
     directory = Path(args.deployment).resolve()
     settings = tomllib.loads((directory / "tessera.toml").read_text())
@@ -511,6 +678,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     cred = env[serve["operator_credential_env"]]
     args.viewer = args.viewer or f"http://{serve['viewer']}"
     args.session = args.session or f"http://{serve['session']}"
+    control = f"http://{serve['control']}"
     if not args.ranks:
         found = sorted(directory.glob("*-ranks.json"))
         if not found:
@@ -531,20 +699,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             ap.error(
                 f"ports {busy} are in use; stop what holds them or attach without --start"
             )
-        unit = {"G": 2**30, "M": 2**20}
         served = Deployment(
             directory,
             bundle,
             Path(args.scratch) if args.scratch else directory / "interactive-bench",
             ports,
             Path(args.binary),
-            cap_bytes=int(args.cap[:-1]) * unit[args.cap[-1]],
-            swap_bytes=int(args.swap[:-1]) * unit[args.swap[-1]],
+            cap_bytes=size_bytes(args.cap),
+            swap_bytes=size_bytes(args.swap),
         )
         served.clear_scratch()
     figures = Figures()
     try:
         if served is not None:
+            evict(bundle)
             t0 = time.time()
             served.start()
             result["server"] = {
@@ -553,6 +721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "open_s": round(time.time() - t0, 1),
                 "pid": served.pid,
                 "memory_at_ready": process_memory(served.pid),
+                "cache_bytes_at_ready": directory_bytes(served.cache),
             }
             log(f"served pid={served.pid}, open {result['server']['open_s']} s")
             pid = served.pid
@@ -580,10 +749,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "pans": PANS,
                 "regions": REGIONS,
                 "quiet_ms": QUIET_MS,
+                "per_tile": args.per_tile,
+                "prefetch": args.prefetch,
+                "core": str(Path(args.core).resolve()),
             },
         )
 
-        people = principals(json.loads(Path(args.ranks).read_text()))
+        people = principals(json.loads(Path(args.ranks).read_text()), targets)
         work = Path(args.out).with_suffix(".work")
         work.mkdir(exist_ok=True)
         write_plan(work / "plan.json", args, people)
@@ -605,6 +777,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for entry in node["principals"]:
             figures.map(entry)
         request_figures(figures, node["requests"])
+        result["volumes"] = [volumes(node, "run")]
+        result["status"] = {"run": control_status(control, cred)}
         result["pins_served"] = sorted(
             {r["pin"] for r in node["requests"] if r.get("pin")}
         )
@@ -635,6 +809,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         result["requests"] = node["requests"]
         result["server"]["memory_after"] = process_memory(pid)
+        result["server"]["cache_bytes_after"] = directory_bytes(served.cache if served else None)
+
+        if args.reopen:
+            served.stop()
+            evict(bundle)
+            t0 = time.time()
+            served.start()
+            result["server"]["reopen_s"] = round(time.time() - t0, 1)
+            result["server"]["memory_at_reopen"] = process_memory(served.pid)
+            result["server"]["cache_bytes_at_reopen"] = directory_bytes(served.cache)
+            log(f"restarted pid={served.pid}, open {result['server']['reopen_s']} s")
+            write_plan(work / "reopen.json", args, people, phase="reopen")
+            subprocess.run(
+                ["node", str(NODE_SCRIPT), str(work / "reopen.json"), str(work / "reopen-node.json")],
+                env=node_env,
+                check=True,
+            )
+            again = json.loads((work / "reopen-node.json").read_text())
+            for entry in again["principals"]:
+                figures.session(entry, opens=("reopen",))
+                result["detail"][entry["label"]]["reopen"] = entry["reopen"]
+            result["volumes"].append(volumes(again, "reopen"))
+            result["status"]["reopen"] = control_status(control, cred)
+            result["requests"] += [{**r, "phase": "reopen"} for r in again["requests"]]
+            result["server"]["memory_after_reopen"] = process_memory(served.pid)
+            result["server"]["cache_bytes_after_reopen"] = directory_bytes(served.cache)
     finally:
         if served is not None and not args.keep_serving:
             served.stop()

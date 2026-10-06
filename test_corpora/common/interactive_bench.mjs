@@ -4,9 +4,12 @@
 //   TESSERA_BENCH_SESSION_CRED=… node test_corpora/common/interactive_bench.mjs <plan.json> <out.json>
 //
 // The plan names the core's dist, the server, the screen, the principals and the script; the
-// Python side writes it. Requests go through a fetch that runs in a worker thread, so the times
-// it records (counts frame, first points frame, last byte) are when the bytes arrived, not when
-// this thread, busy decoding, got round to reading them.
+// Python side writes it. The core may be any build of `clients/ts/core`, so one script measures a
+// server and the client of its own commit: an older core asks for artifacts on `/v1/viewport`, a
+// newer one on `/v1/artifacts/viewport`, and both are recorded under the same kinds. Requests go
+// through a fetch that runs in a worker thread, so the times it records (counts frame, first
+// points frame, last byte) are when the bytes arrived, not when this thread, busy decoding, got
+// round to reading them.
 import {readFileSync, writeFileSync} from 'node:fs';
 import {Worker} from 'node:worker_threads';
 
@@ -145,9 +148,13 @@ wire.on('message', (m) => {
 function wireFetch(url, init = {}) {
   const id = nextId++;
   const body = typeof init.body === 'string' ? init.body : init.body ? new TextDecoder().decode(init.body) : null;
-  const record = {id, step: step?.id ?? null, path: new URL(url).pathname, method: init.method ?? 'GET', body, t0: now()};
+  const t0 = now();
+  const record = {id, step: step?.id ?? null, path: new URL(url).pathname, method: init.method ?? 'GET', body, t0};
+  record.start_ms = step?.t0 === undefined ? null : Math.round((t0 - step.t0) * 10) / 10;
   record.kind = kindOf(record);
-  record.framed = record.path === '/v1/viewport' || record.path === '/v1/items';
+  record.whole_level = wholeLevel(record, step?.zoom ?? 0);
+  record.extra = beyondReference(record);
+  record.framed = FRAMED.has(record.path);
   log.push(record);
   inFlight += 1;
   lastActivity = now();
@@ -159,13 +166,51 @@ function wireFetch(url, init = {}) {
   });
 }
 
+const FRAMED = new Set(['/v1/viewport', '/v1/items', '/v1/artifacts/viewport']);
+
+/**
+ * What a request is for. `artifacts` is a request for artifacts, whichever route the core asks
+ * on; `promotion` is an older core's idle fetch of one whole level, which `settled` leaves out.
+ * `artifacts-by-id` reads the tags a newer core's held tiles do not name.
+ */
 function kindOf(record) {
+  if (record.path === '/v1/artifacts/viewport') return 'artifacts';
+  if (record.path === '/v1/artifacts' && record.method === 'POST') return 'artifacts-by-id';
   if (record.path !== '/v1/viewport') return record.path.replace(/^\/v1\//, '');
   const b = JSON.parse(record.body);
   if (b.k !== 0) return 'marks';
   if (!b.computed) return 'counts';
-  // The artifact channel's idle fetch of one whole scope carries no artifact budget.
+  // An older core's idle fetch of one whole scope carries no artifact budget.
   return b.artifact_budget === undefined ? 'promotion' : 'artifacts';
+}
+
+/**
+ * Whether an artifact request asks for a whole level: an older core's promotion, or every tile of a
+ * depth more than two below the map zoom, which no view at that zoom needs. A view of the world
+ * asks for every tile of its own depth and is not counted.
+ */
+function wholeLevel(record, mapZoom) {
+  if (record.kind === 'promotion') return true;
+  if (record.kind !== 'artifacts' || record.path !== '/v1/artifacts/viewport') return false;
+  const b = JSON.parse(record.body);
+  return b.zoom > Math.floor(mapZoom) + 2 && (b.tiles?.length ?? 0) >= 4 ** b.zoom;
+}
+
+/**
+ * The requests a reference run (the same script with the store's prefetch off) sent, counted by
+ * what they sent, as `interactive_bench.py`'s `sent` keys them. A request beyond those is the
+ * prefetch's work, and is kept out of a step's points and layers.
+ */
+const reference = new Map(plan.reference ?? []);
+
+function beyondReference(record) {
+  if (!plan.reference) return false;
+  const body = record.path === '/session/authorise' && record.body ? '<body>' : record.body;
+  const key = JSON.stringify([record.step, record.method, record.path, body]);
+  const left = reference.get(key) ?? 0;
+  if (left === 0) return true;
+  reference.set(key, left - 1);
+  return false;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -202,12 +247,23 @@ async function show(store, q, s) {
   const ok = await settled(t0);
   const requests = log.filter((r) => r.step === s.id);
   const rel = (r, field) => (r[field] === null || r[field] === undefined ? null : r.t0 - t0 + r[field]);
+  // The view's own requests: without a prefetch's work beyond the reference run.
+  const viewed = requests.filter((r) => !r.extra);
   const firstOf = (field) => {
-    const v = requests.filter((r) => r.kind === 'marks' || r.kind === 'counts').map((r) => rel(r, field)).filter((x) => x !== null);
+    const v = viewed.filter((r) => r.kind === 'marks' || r.kind === 'counts').map((r) => rel(r, field)).filter((x) => x !== null);
     return v.length ? Math.min(...v) : null;
   };
-  const lastByte = requests.filter((r) => r.kind === 'marks').map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
-  const settledAt = requests.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
+  const lastByte = viewed.filter((r) => r.kind === 'marks').map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
+  // Everything the store asked for but an older core's promotion, the prefetch's work included.
+  const settledAt = requests.filter((r) => r.kind !== 'promotion').map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
+  const extra = requests.filter((r) => r.extra);
+  const extraAt = extra.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
+  const layers = viewed.filter((r) => r.kind === 'artifacts');
+  const layersAt = layers.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
+  // The points requests in flight at some moment an artifacts request of the view was.
+  const span = (r) => [r.t0, r.t0 + (r.last_byte_ms ?? 0)];
+  const beside = viewed.filter((r) => r.kind === 'marks' && layers.some((a) => span(a)[0] < span(r)[1] && span(r)[0] < span(a)[1]));
+  const besideAt = beside.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
   const result = {
     ...s,
     t0,
@@ -217,6 +273,12 @@ async function show(store, q, s) {
     first_points_ms: firstOf('points_ms'),
     last_byte_ms: lastByte.length ? Math.max(...lastByte) : null,
     settled_ms: settledAt.length ? Math.max(...settledAt) : null,
+    layers_ms: layersAt.length ? Math.max(...layersAt) : null,
+    points_beside_layers_ms: besideAt.length ? Math.max(...besideAt) : null,
+    extra_ms: extraAt.length ? Math.max(...extraAt) : null,
+    extra_requests: extra.length,
+    whole_level: requests.filter((r) => r.whole_level).length,
+    bytes: requests.reduce((n, r) => n + (r.bytes ?? 0), 0),
     kinds: Object.fromEntries([...new Set(requests.map((r) => r.kind))].map((k) => [k, requests.filter((r) => r.kind === k).length])),
     shed: requests.filter((r) => r.shed).length,
     errors: requests.filter((r) => r.error || (r.status && r.status >= 400)).length
@@ -260,7 +322,9 @@ async function open(principal, label, keepIds) {
     meta,
     budget: plan.budget,
     view: view.id,
-    prefetch: false,
+    prefetch: plan.prefetch,
+    // A newer core draws a layer's artifacts only with a number per tile; an older one ignores it.
+    artifacts: {perTile: plan.per_tile},
     replica: {revalidateAfterMs: 1e12}
   });
   // As the demo viewer: colour by the first layer's clusters with that layer on, else by a column.
@@ -284,6 +348,12 @@ async function open(principal, label, keepIds) {
       first_points_ms: rel(opened.first_points_ms),
       last_byte_ms: rel(opened.last_byte_ms),
       settled_ms: rel(opened.settled_ms),
+      layers_ms: rel(opened.layers_ms),
+      points_beside_layers_ms: rel(opened.points_beside_layers_ms),
+      extra_ms: rel(opened.extra_ms),
+      extra_requests: opened.extra_requests,
+      whole_level: opened.whole_level,
+      bytes: opened.bytes,
       kinds: opened.kinds,
       requests: opened.requests,
       shed: opened.shed,
@@ -360,6 +430,19 @@ function script(principal, regions, q) {
 }
 
 const out = {principals: []};
+// After a restart over the same cache: each principal opens once more, as the first viewer of a
+// server that has kept what the last one computed.
+if (plan.phase === 'reopen') {
+  for (const principal of plan.principals) {
+    console.error(`${principal.label}: reopening`);
+    const reopen = await open(principal, 'reopen', false);
+    reopen.store.dispose();
+    out.principals.push({label: principal.label, reopen: reopen.result});
+  }
+  out.requests = log.map(({t0, ...r}) => r);
+  writeFileSync(outPath, JSON.stringify(out));
+  process.exit(0);
+}
 for (const principal of plan.principals) {
   console.error(`${principal.label}: opening`);
   const first = await open(principal, 'first', false);
