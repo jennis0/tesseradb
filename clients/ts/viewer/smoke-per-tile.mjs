@@ -46,21 +46,37 @@ async function askedFor(perTile, from, limitMs = 60_000) {
   return false;
 }
 
-/** The control's value, the address's `per-tile` and the layers the explorer's store draws. */
+/** The control's value, the address's `per-tile`, and the layers and colour the explorer's store draws. */
 const reading = async () => ({
   control: Number(await page.locator('#per-tile').inputValue()),
   address: Number(new URL(page.url()).searchParams.get('per-tile')),
-  layers: await page.evaluate(() => {
-    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {layers: string[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
-    return explorer?.activeStore?.get('artifacts').layers ?? [];
-  })
+  ...(await page.evaluate(() => {
+    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {layers: string[]}; get(name: 'legend'): {colourBy: string | null}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const store = explorer?.activeStore;
+    return {layers: store?.get('artifacts').layers ?? [], colourBy: store?.get('legend').colourBy ?? null};
+  }))
 });
+
+/** Draw only the last layer the explorer's Layers popover offers, so it is not the one the viewer opens on. */
+async function drawLastLayer() {
+  const toggle = page.locator('[part="layers-toggle"]').first();
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  const entries = page.locator('tessera-layer-picker [part="entry"]');
+  await entries.first().waitFor({timeout: 60_000});
+  const count = await entries.count();
+  for (let i = 0; i < count; i++) {
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+    const box = entries.nth(i).locator('input');
+    if ((await box.isChecked()) !== (i === count - 1)) await box.click();
+  }
+  await toggle.click();
+}
 
 const failures = [];
 /** Check that the control, the address and the requests from `from` on all name `perTile`. */
 function expectInUse(stage, perTile, r, from) {
   const sent = [...new Set(asked.slice(from))];
-  console.log(`  ${stage.padEnd(34)} control=${r.control} address=${r.address} requests=${sent.join(',') || 'none'} layers=${r.layers.join(',') || 'none'}`);
+  console.log(`  ${stage.padEnd(34)} control=${r.control} address=${r.address} requests=${sent.join(',') || 'none'} layers=${r.layers.join(',') || 'none'} colour=${r.colourBy}`);
   if (r.control !== perTile) failures.push(`${stage}: the control shows ${r.control}, not ${perTile}`);
   if (r.address !== perTile) failures.push(`${stage}: the address names ${r.address}, not ${perTile}`);
   if (sent.length !== 1 || sent[0] !== perTile) failures.push(`${stage}: artifact requests asked for ${sent.join(',') || 'nothing'}, not ${perTile}`);
@@ -80,6 +96,9 @@ if (!opened) {
 expectInUse('opened without ?per-tile=', 50, opened, 0);
 
 // Moving the control asks for the layers again at the new number, and keeps them drawn.
+await drawLastLayer();
+await page.waitForTimeout(1500);
+const chosen = await reading();
 const before = asked.length;
 await page.locator('#per-tile').fill('7');
 if (!(await askedFor(7, before))) failures.push('moving the control to 7 sent no artifact request for 7');
@@ -87,7 +106,9 @@ await page.waitForTimeout(1500);
 const firstMoved = asked.indexOf(7, before);
 const moved = await reading();
 expectInUse('after the control moved to 7', 7, moved, firstMoved < 0 ? asked.length : firstMoved);
-if (moved.layers.join(',') !== opened.layers.join(',')) failures.push(`moving the control changed the layers drawn from ${opened.layers.join(',')} to ${moved.layers.join(',')}`);
+if (chosen.layers.join(',') === opened.layers.join(',')) failures.push(`choosing the last layer left the layers drawn at ${opened.layers.join(',')}`);
+if (moved.layers.join(',') !== chosen.layers.join(',')) failures.push(`moving the control changed the layers drawn from ${chosen.layers.join(',')} to ${moved.layers.join(',')}`);
+if (moved.colourBy !== chosen.colourBy) failures.push(`moving the control changed the colour from ${chosen.colourBy} to ${moved.colourBy}`);
 const shot = join(shots, 'per-tile-7.png');
 await page.screenshot({path: shot, timeout: 60_000});
 
