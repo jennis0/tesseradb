@@ -255,7 +255,8 @@ export type TesseraClientOptions = {
   onDecode?: (ms: number, bytes: number, points: number, workerMs: number | null) => void;
   /**
    * Where responses are decoded. Defaults to a worker where one can be made, and this thread
-   * otherwise, made at the first `viewport` call.
+   * otherwise, made at the first `viewport` call. A decoder passed here belongs to the host, which
+   * closes it; {@link TesseraClient.close} closes only a decoder the client built.
    */
   decoder?: Decoder;
   /** Used for every request in place of the global `fetch`. */
@@ -299,9 +300,12 @@ export class TesseraClient {
     return (this.opts.fetch ?? fetch)(url, {...init, headers});
   }
 
-  /** Closes the decoder, terminating its workers if it has any. */
+  /**
+   * Closes the decoder the client built, terminating its workers if it has any. A decoder passed
+   * as `decoder` is left open for the host to close.
+   */
   close(): void {
-    this.decoder?.close();
+    if (!this.opts.decoder) this.decoder?.close();
     this.decoder = null;
   }
 
@@ -594,7 +598,7 @@ export class TesseraClient {
     });
     if (!response.ok) await fail(response);
     const coordinates = coordinatesOf(response);
-    this.decoder ??= this.opts.decoder ?? createDecoder();
+    const decoder = (this.decoder ??= this.opts.decoder ?? createDecoder());
     // A counts-only response (`k = 0`) has no points and decodes in milliseconds, so it decodes on
     // this thread rather than queueing behind a point decode in a worker lane. It has no points
     // frames to hand a part sink.
@@ -605,8 +609,8 @@ export class TesseraClient {
     const underlay = Boolean(req.underlayOffset);
     const decoded =
       onPart && !counts
-        ? await this.streamed(response, {...keys, columnsAsked, layersAsked}, onPart, background, underlay, onCounts)
-        : await this.whole(response, counts, background, onCounts && countsWatch(onCounts, underlay, keys));
+        ? await this.streamed(decoder, response, {...keys, columnsAsked, layersAsked}, onPart, background, underlay, onCounts)
+        : await this.whole(decoder, response, counts, background, onCounts && countsWatch(onCounts, underlay, keys));
     this.opts.onDecode?.(decoded.ms, decoded.bytes, decoded.points, decoded.workerMs);
     return {
       result: decoded.result,
@@ -623,6 +627,7 @@ export class TesseraClient {
    * given, sees the frames as they arrive.
    */
   private async whole(
+    decoder: Decoder,
     response: Response,
     counts: boolean,
     background: boolean,
@@ -634,13 +639,13 @@ export class TesseraClient {
     // `byteLength` at 0.
     const size = bytes.byteLength;
     const stageNs = stageNsOfBody(bytes);
-    const result = counts ? decodeViewport(bytes) : await this.decoder!.decode(bytes, background);
+    const result = counts ? decodeViewport(bytes) : await decoder.decode(bytes, background);
     return {
       result,
       bytes: size,
       points: result.ids.length,
       ms: performance.now() - started,
-      workerMs: counts ? null : this.decoder!.lastWorkerMs,
+      workerMs: counts ? null : decoder.lastWorkerMs,
       stageNs
     };
   }
@@ -658,6 +663,7 @@ export class TesseraClient {
    * set. The request does not resolve, so nothing marks the region covered.
    */
   private async streamed(
+    decoder: Decoder,
     response: Response,
     coordinates: {identityKey: string; contentKey: string; columnsAsked: readonly string[] | null; layersAsked: readonly string[] | 'all'},
     onPart: PartSink,
@@ -669,7 +675,7 @@ export class TesseraClient {
     if (!response.body) {
       // A `fetch` that gives no stream, such as a polyfill or a mock. The sink gets the whole
       // result as one part.
-      const whole = await this.whole(response, false, background, onCounts && countsWatch(onCounts, underlay, coordinates));
+      const whole = await this.whole(decoder, response, false, background, onCounts && countsWatch(onCounts, underlay, coordinates));
       await onPart({result: whole.result, ...coordinates});
       return {...whole, result: headOnly(whole.result)};
     }
@@ -704,7 +710,7 @@ export class TesseraClient {
       delivering = delivering.then(async () => {
         const part = await decoding;
         // Read here: the decoder reports the last reply's time.
-        const frameMs = this.decoder!.lastWorkerMs;
+        const frameMs = decoder.lastWorkerMs;
         if (abandoned) return;
         if (frameMs !== null) workerMs = (workerMs ?? 0) + frameMs;
         const rows = part.ids.length;
@@ -739,7 +745,7 @@ export class TesseraClient {
           switch (frame.kind) {
             case FRAME_POINTS:
               flushes += 1;
-              deliver(this.decoder!.decodePoints(frame.payload, background));
+              deliver(decoder.decodePoints(frame.payload, background));
               break;
             case FRAME_TRAILER:
               trailerBytes = frame.payload;
@@ -823,8 +829,7 @@ export class TesseraClient {
       signal
     });
     if (!response.ok) await fail(response);
-    this.decoder ??= this.opts.decoder ?? createDecoder();
-    const decoder = this.decoder;
+    const decoder = (this.decoder ??= this.opts.decoder ?? createDecoder());
     const coordinates = coordinatesOf(response);
     const keys = {identityKey: coordinates.identityKey, contentKey: coordinates.contentKey};
     // A frame of no rows names no tile, so a tile frame is matched to the request's tiles by

@@ -1,11 +1,10 @@
-import {readFileSync} from 'node:fs';
-import {join} from 'node:path';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import {TesseraClient} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {setWorkerFactory, workerDecoder} from '../src/decoder.js';
-import {FakeWorker} from './support.js';
+import {FakeWorker, fixture, settle} from './support.js';
 
-const body = () => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-plain.bin')));
+const body = () => fixture('viewport-plain.bin');
 
 let workers: FakeWorker[];
 
@@ -61,5 +60,23 @@ describe('workerDecoder', () => {
     expect(later.ids).toEqual(decodeViewport(body()).ids);
     expect(workers.reduce((n, w) => n + w.received, 0)).toBe(received);
     expect(workers.every((w) => w.terminated)).toBe(true);
+  });
+});
+
+describe('a decoder passed to a client', () => {
+  const fetch = (async () => new Response(body(), {headers: {etag: '"ck"', 'x-tessera-identity-key': 'ik'}})) as typeof globalThis.fetch;
+
+  it('stays open when a client sharing it is closed, and the decodes in flight on it finish', async () => {
+    const decoder = workerDecoder()!;
+    const one = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch, decoder});
+    const two = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch, decoder});
+    const ask = (client: TesseraClient) => client.viewport('tok', {view: 's0', zoom: 0, k: 100});
+    const asked = [ask(one), ask(two)];
+    await settle();
+    one.close();
+    for (const w of workers) w.load();
+    const ids = decodeViewport(body()).ids;
+    for (const answer of await Promise.all(asked)) expect(answer.result.ids).toEqual(ids);
+    expect((await ask(two)).result.ids).toEqual(ids);
   });
 });

@@ -1,11 +1,9 @@
-import {readFileSync} from 'node:fs';
-import {join} from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import type {TileSink} from '../src/client.js';
 import {FRAME_TRAILER, FrameReader} from '../src/frame.js';
 import {inlineDecoder, type Decoder} from '../src/decoder.js';
-import {framed, rejectsAsRefused, result} from './support.js';
+import {fixture, framed, rejectsAsRefused, result} from './support.js';
 
 /** An artifacts trailer for `frames` frames of `rows` rows. */
 const trailer = (frames: number, rows: number) => new TextEncoder().encode(JSON.stringify({stream_us: 0, arrow_serialise_ns: 0, rows, frames}));
@@ -271,7 +269,6 @@ describe('/v1/meta', () => {
  * `s0`, captured by `scripts/capture-golden.mjs`.
  */
 describe('the artifacts viewport, read from a captured response', () => {
-  const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
   const read = async (name: string, onTile?: TileSink) => {
     stubFetch(() => new Response(fixture(name), {status: 200, headers: {'x-tessera-identity-key': 'ik', etag: '"ck"'}}));
     return new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()}).viewportArtifacts('tok', {view: 's0', zoom: 2, bbox: [0, 0, 1, 1], perTile: 50}, {onTile});

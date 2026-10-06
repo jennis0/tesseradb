@@ -1,13 +1,11 @@
-import {readFileSync} from 'node:fs';
-import {join} from 'node:path';
 import {tableFromIPC} from 'apache-arrow';
 import {describe, expect, it} from 'vitest';
 import {decodeViewport} from '../src/decode.js';
 import {CELL_GRID} from '../src/coords.js';
 import {splitFramedStreams} from '../src/frame.js';
+import {fixture} from './support.js';
 
-const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
-const meta = JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures', 'meta.json'), 'utf8'));
+const meta = JSON.parse(new TextDecoder().decode(fixture('meta.json')));
 
 describe('decodeViewport', () => {
   it('returns one counts row per non-empty tile, with served and matched inside visible', () => {

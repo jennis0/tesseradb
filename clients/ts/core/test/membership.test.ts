@@ -1,5 +1,3 @@
-import {readFileSync} from 'node:fs';
-import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import {makeData, makeVector, tableToIPC, Table, Uint64, vectorFromArray} from 'apache-arrow';
 import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
@@ -8,7 +6,7 @@ import {bandsOfResult, BandCache, distinctOrdinals} from '../src/bands.js';
 import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
 import {GRID32_CENTRE, artifactColours} from '../src/palette.js';
 import type {Artifact, ViewportResult} from '../src/types.js';
-import {artifact, result, tile} from './support.js';
+import {artifact, fixture, result, tile} from './support.js';
 
 /**
  * The per-point membership column: a nullable `u64` named `membership:<layer>` after the render
@@ -211,7 +209,6 @@ describe('the cache releases what a band held', () => {
 
 describe('the membership golden (the notebook corpus’s k-means layer, named with points)', () => {
   it('names members the artifacts golden serves, several of them', () => {
-    const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
     const r = decodeViewport(fixture('viewport-membership.bin'));
     const layers = Object.keys(r.membership);
     expect(layers).toEqual(['clusters/kmeans']);

@@ -1,12 +1,10 @@
-import {readFileSync} from 'node:fs';
-import {join} from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {tableToIPC, Table} from 'apache-arrow';
 import {TesseraClient} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {inlineDecoder} from '../src/decoder.js';
 import type {ViewportCounts, ViewportPart} from '../src/types.js';
-import {chunked, framed, manual, rejectsAsRefused, settle, u64} from './support.js';
+import {chunked, fixture, framed, manual, rejectsAsRefused, settle, u64} from './support.js';
 
 /**
  * The streamed viewport: a response read frame by frame as it arrives. The server flushes whole
@@ -109,7 +107,7 @@ describe('a streamed viewport response', () => {
   });
 
   it('hands over a captured body naming a layer whole, its membership column on the points', async () => {
-    const body = new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin')));
+    const body = fixture('viewport-membership.bin');
     const whole = decodeViewport(body);
     expect(Object.keys(whole.membership)).toEqual(['clusters/kmeans']);
     vi.stubGlobal('fetch', async () => chunked(body, 97, {headers: HEADERS}));
