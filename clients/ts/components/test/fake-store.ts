@@ -88,7 +88,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const store: FakeStore = {
     projections,
     calls,
-    budget: 500_000,
+    budget: 250_000,
     get: (name) => projections[name],
     set(name, value) {
       projections[name] = value;
@@ -249,6 +249,7 @@ export function aggregateEntry(tables: {rows: AggregateRow[]; groups?: number | 
     status: 'shown',
     view,
     refusal: null,
+    summaries: tables.map(() => null),
     result: {
       tables: tables.map((t, grouping) => ({grouping, total: t.total ?? t.rows.reduce((n, r) => n + r.count, 0), referenceTotal: null, groups: t.groups ?? null, sample: null, rows: table(t.rows)})),
       region: null,

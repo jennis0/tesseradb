@@ -689,3 +689,23 @@ describe('<tessera-explorer> layouts', () => {
     expect(toggle().hasAttribute('data-on')).toBe(true);
   });
 });
+
+describe('<tessera-explorer> the point budget', () => {
+  const budgets = (store: FakeStore) => store.calls.filter((c) => c.name === 'setBudget').map((c) => c.args[0]);
+  const mapOf = (shadow: ShadowRoot) => shadow.querySelector('tessera-map') as unknown as {budget: number; budgetMin: number; budgetMax: number};
+
+  it('aims for 250,000 marks, offering 1,000 to 2,000,000, unless the host says otherwise', async () => {
+    const {store, shadow} = await explorer();
+    expect(budgets(store)).toEqual([250_000]);
+    expect(mapOf(shadow)).toMatchObject({budget: 250_000, budgetMin: 1_000, budgetMax: 2_000_000});
+  });
+
+  it('passes the host’s budget and range to the map and the budget to the store, and a change of budget too', async () => {
+    const {host, el, store, shadow} = await explorer('<tessera-explorer budget="40000" budget-min="500" budget-max="90000"></tessera-explorer>');
+    expect(budgets(store)).toEqual([40_000]);
+    expect(mapOf(shadow)).toMatchObject({budget: 40_000, budgetMin: 500, budgetMax: 90_000});
+    (el as unknown as {budget: number}).budget = 60_000;
+    await settle(host);
+    expect(budgets(store)).toEqual([40_000, 60_000]);
+  });
+});

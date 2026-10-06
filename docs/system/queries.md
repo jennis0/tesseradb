@@ -640,7 +640,9 @@ and computes it.
 
 The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps
 each aggregate a component registers with `Store.setAggregate` counted over the store's current
-filters and selected region, asking again when either changes. The Python client reads one with
+filters and selected region, within the camera's area or over the whole visible set where the
+registration asks, and asks again when its request changes, as [clients](clients.md#what-a-registration-counts-and-when-it-is-asked-again)
+says. The Python client reads one with
 `Viewer.aggregate`, `Database.aggregate` and `Selection.aggregate`, each table a `pyarrow.Table`.
 Both follow the cursor until the result is whole.
 
