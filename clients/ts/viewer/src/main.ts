@@ -35,6 +35,15 @@ let datasets: Dataset[] = [];
 /** The active dataset's presets; term ids are per bundle. */
 let presets: Dataset['presets'] = [];
 
+type Session = Awaited<ReturnType<TesseraClient['authorise']>>;
+type Meta = Awaited<ReturnType<TesseraClient['meta']>>;
+
+/**
+ * The principal `dataStore` was opened on and the session its supplier last returned, or null
+ * while no store is open. A store that has been replaced no longer writes here.
+ */
+let opened: {preset: Dataset['presets'][number]; session: Session | null} | null = null;
+
 /** The column preferred for colour where a dataset has no artifact layer. */
 const DEFAULT_COLOUR_BY = 'archive';
 
@@ -275,7 +284,7 @@ function renderReadouts(): string {
  */
 function controlsSignature(): string {
   const s = store.state;
-  return [s.datasetId, s.switching ? '1' : '0', s.termsLabel, s.terms.length, s.budget, s.artifactsPerTile].join('|');
+  return [s.datasetId, s.switching ? '1' : '0', s.termsLabel, s.terms.length, s.budget, s.artifactsPerTile, s.meta?.selection.maxArtifactsPerTile ?? 0].join('|');
 }
 
 // Under 1000 px the instruments open over the explorer from a button; see `style.css`.
@@ -338,31 +347,39 @@ function bindControls() {
 
   const perTileInput = document.getElementById('per-tile') as HTMLInputElement | null;
   perTileInput?.addEventListener('change', () => {
-    const perTile = Number(perTileInput.value);
-    trace.event('per-tile', {n: perTile});
-    store.update((s) => {
-      s.artifactsPerTile = perTile;
-    });
-    writeToUrl('per-tile', String(perTile));
-    reopenSession();
+    // A held arrow key fires a change per step; the store is opened again once the value rests.
+    if (perTileTimer !== null) clearTimeout(perTileTimer);
+    perTileTimer = setTimeout(() => {
+      perTileTimer = null;
+      setArtifactsPerTile(Number(perTileInput.value));
+    }, PER_TILE_SETTLE_MS);
   });
 }
 
+/** How long the per-tile control must rest before the store is opened again at its value. */
+const PER_TILE_SETTLE_MS = 200;
+let perTileTimer: ReturnType<typeof setTimeout> | null = null;
+
 /**
- * Open the store again on the same principal and session, keeping the drawn layers and the colour,
- * for a setting the store takes only when it opens. Filters and the selection start empty, as they
- * do for a new principal.
+ * Ask for `perTile` artifacts per tile from now on. The store takes the number only when it opens,
+ * so the current one is opened again on the same principal and session, keeping the drawn layers
+ * and the colour. Filters and the selection start empty, as they do for a new principal. With no
+ * store open, the next one opens at it.
  */
-function reopenSession(): void {
-  const preset = presets.find((p) => p.label === store.state.termsLabel);
+function setArtifactsPerTile(perTile: number): void {
+  trace.event('per-tile', {n: perTile});
+  store.update((s) => {
+    s.artifactsPerTile = perTile;
+  });
+  writeToUrl('per-tile', String(perTile));
   const previous = dataStore;
-  if (!preset || !previous) return;
-  const layers = previous.get('artifacts').layers;
-  const colourBy = previous.get('legend').colourBy;
-  const {session, meta} = store.state;
-  openSession(preset, session && meta ? {session, meta} : undefined);
-  dataStore?.setColourBy(colourBy);
-  dataStore?.setLayers(layers);
+  const current = opened;
+  if (!previous || !current) return;
+  const meta = previous.get('meta');
+  openSession(current.preset, current.session && meta ? {session: current.session, meta} : undefined, {
+    layers: previous.get('artifacts').layers,
+    colourBy: previous.get('legend').colourBy
+  });
 }
 
 installTrace(explorer);
@@ -403,13 +420,15 @@ function mirror(): void {
 /**
  * Open a store on one principal of the active dataset; the only writer of `dataStore`.
  *
- * `held` is the session and meta {@link activate} fetched, passed on so a cold page authorises
- * once: each authorisation materialises the principal's visible set on the server. The store gets
- * a supplier that returns this token once and then mints new ones.
+ * `held` is a session and meta already read for this principal, passed on so it is not authorised
+ * again: each authorisation materialises the principal's visible set on the server. The store gets
+ * a supplier that returns this token once and then mints new ones. `carried` is the layers and
+ * colour to open on; without it the store opens on the dataset's first layer and colour.
  */
 function openSession(
   preset: Dataset['presets'][number],
-  held?: {session: Awaited<ReturnType<TesseraClient['authorise']>>; meta: Awaited<ReturnType<TesseraClient['meta']>>}
+  held?: {session: Session; meta: Meta},
+  carried?: {layers: string[]; colourBy: string | null}
 ): void {
   if (!client) return;
   const active = client;
@@ -417,6 +436,8 @@ function openSession(
   dataStore?.dispose();
   /** Returned once, then dropped, so a renewal mints a new token. */
   let heldSession = held?.session;
+  const mine = {preset, session: held?.session ?? null};
+  opened = mine;
 
   store.update((s) => {
     s.terms = preset.terms;
@@ -434,9 +455,13 @@ function openSession(
     authorise: async () => {
       const session = heldSession ?? (await active.authorise({principal: preset.principal}));
       heldSession = undefined;
-      store.update((s) => {
-        s.session = session;
-      });
+      // A replaced store's late answer is not the current principal's session.
+      if (opened === mine) {
+        mine.session = session;
+        store.update((s) => {
+          s.session = session;
+        });
+      }
       return {token: session.token, expiresAt: session.expiresAt};
     },
     // The meta `activate` read under this token.
@@ -489,9 +514,9 @@ function openSession(
       }
     }
   });
-  dataStore.setColourBy(store.state.colourBy);
+  dataStore.setColourBy(carried ? carried.colourBy : store.state.colourBy);
   // The viewer opens with the first layer on.
-  dataStore.setLayers(store.state.artifactLayer ? [store.state.artifactLayer] : []);
+  dataStore.setLayers(carried ? carried.layers : store.state.artifactLayer ? [store.state.artifactLayer] : []);
   unsubscribe = dataStore.subscribe(() => mirror());
   // The explorer takes the store by property; its map pushes the first view once meta lands.
   explorer.store = dataStore;
@@ -511,6 +536,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
   unsubscribe = null;
   dataStore?.dispose();
   dataStore = null;
+  opened = null;
   client?.close();
   presets = dataset.presets;
 
@@ -558,8 +584,8 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
 
   // Choose the colour and layer from meta before opening the store, so it opens on them.
   if (first) {
-    let session: Awaited<ReturnType<TesseraClient['authorise']>>;
-    let meta: Awaited<ReturnType<TesseraClient['meta']>>;
+    let session: Session;
+    let meta: Meta;
     try {
       session = await client.authorise({principal: first.principal});
       meta = await client.meta(session.token);
@@ -630,6 +656,12 @@ async function start() {
   writeToUrl('per-tile', String(store.state.artifactsPerTile));
   // `?view=` applies to the first activation only, since a view id belongs to a bundle.
   await activate(chosen, params.get('view'));
+  // After the activation, which empties the failures panel.
+  if (config.refused.length > 0) {
+    store.update((s) => {
+      s.failures = [...s.failures, ...config.refused.map((f) => ({...f, at: Date.now()}))].slice(-20);
+    });
+  }
 }
 
 start().catch((error) => {
