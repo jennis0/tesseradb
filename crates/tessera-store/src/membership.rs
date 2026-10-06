@@ -1582,6 +1582,11 @@ impl LabelColumnPack {
     pub fn as_bytes(&self) -> &[u8] {
         self.bytes.as_slice()
     }
+
+    /// The labels without the header, [`Self::width`] bytes a row from row 0.
+    pub fn labels(&self) -> &[u8] {
+        &self.bytes.as_slice()[LABEL_HEADER_LEN..]
+    }
 }
 
 /// One `(view, layer, level)`'s list column, framed and checked once at open. The label column's

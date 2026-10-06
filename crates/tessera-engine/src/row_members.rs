@@ -136,6 +136,12 @@ impl LevelMembers {
         }
     }
 
+    /// The artifact's members as one owned bitmap, its whole bitmap asked for first.
+    pub fn bitmap(&self, ordinal: u32) -> Bitmap {
+        self.pack.will_need(ordinal);
+        self.members(ordinal).to_bitmap()
+    }
+
     /// The artifact's covering, ascending. Empty for an artifact with no members.
     pub fn covering(&self, ordinal: u32) -> Vec<(u32, u32)> {
         match self.added.as_ref().and_then(|a| a.coverings.get(&ordinal)) {
@@ -190,6 +196,7 @@ impl LevelMembers {
         Some(
             (0..ordinals as u32)
                 .map(|ordinal| {
+                    self.pack.will_need(ordinal);
                     self.pack
                         .members(ordinal)
                         .map_or_else(Bitmap::new, |view| view.to_bitmap())

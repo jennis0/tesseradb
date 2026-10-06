@@ -23,6 +23,11 @@ impl<'a> Placement<'a> {
         }
     }
 
+    /// The two position columns, from `row_base`.
+    pub fn columns(&self) -> (&'a [u32], &'a [u32]) {
+        (self.morton, self.residual)
+    }
+
     /// One past the last row this places.
     pub fn end(&self) -> u64 {
         u64::from(self.row_base) + self.morton.len() as u64

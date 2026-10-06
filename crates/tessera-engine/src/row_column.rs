@@ -142,6 +142,11 @@ fn for_each_row_in(rows: &Bitmap, lo: u32, end: u64, mut visit: impl FnMut(u32))
 /// bunched into a few stretches.
 const CHUNK_ROWS: u32 = 1 << 20;
 
+/// A chunk's visible rows are scattered, and their pages asked for before it is walked, where they
+/// lie at least this many rows apart on average. Closer, read-ahead serves them, and the calls
+/// cost more than they save.
+const SCATTERED_ROWS_APART: u64 = 64;
+
 /// How many artifacts of a level to each row scanned, past which a scan lists its hits rather
 /// than marking a byte per artifact.
 const SPARSE_MARKS: u64 = 64;
@@ -343,8 +348,31 @@ pub fn reserve_offer(side: &mut [u64; RESERVE], key: u64) {
     side[at] = key;
 }
 
+/// Keep the [`RESERVE`] most extreme of `held` and `offered`, two sides each holding its keys most
+/// extreme first: what [`reserve_offer`] of each of `offered`'s keys keeps, in one pass. A key is
+/// never in both, since a row is walked once.
+#[inline]
+fn reserve_merge(held: &mut [u64; RESERVE], offered: &[u64; RESERVE]) {
+    if offered[0] >= held[RESERVE - 1] {
+        return;
+    }
+    let mut out = [RESERVE_EMPTY; RESERVE];
+    let (mut i, mut j) = (0, 0);
+    for slot in &mut out {
+        if held[i] <= offered[j] {
+            *slot = held[i];
+            i += 1;
+        } else {
+            *slot = offered[j];
+            j += 1;
+        }
+    }
+    *held = out;
+}
+
 /// What one pass over a viewer's visible rows folded up, per ordinal: see
 /// [`RowColumn::accumulate`].
+#[derive(Debug, Default)]
 pub struct LevelAccumulation {
     /// Every visible row carrying the ordinal's label, placed or not. This is the masked count.
     pub counts: Vec<u32>,
@@ -358,20 +386,163 @@ pub struct LevelAccumulation {
     pub sums: Vec<[u64; 2]>,
     /// `[x_min, y_min, x_max, y_max]` over the placed rows.
     pub boxes: Vec<[u32; 4]>,
-    /// Per ordinal, the placed rows at the extremes of its box, where the pass was asked for them.
-    pub reserves: Vec<Reserve>,
+    /// The placed rows at the extremes of each ordinal's box, by ordinal, ascending, for every
+    /// ordinal with a placed row. `None` where the pass was not asked for them.
+    pub reserves: Option<Vec<(u32, Reserve)>>,
 }
 
 impl LevelAccumulation {
     fn empty(ordinals: usize, geometry: bool, reserve: bool) -> Self {
         let placed = if geometry { ordinals } else { 0 };
-        let reserved = if geometry && reserve { ordinals } else { 0 };
         LevelAccumulation {
             counts: vec![0; ordinals],
             placed: vec![0; placed],
             sums: vec![[0; 2]; placed],
             boxes: vec![[u32::MAX, u32::MAX, 0, 0]; placed],
-            reserves: vec![[[RESERVE_EMPTY; RESERVE]; 4]; reserved],
+            reserves: (geometry && reserve).then(Vec::new),
+        }
+    }
+
+    /// The figures `workers` folded up between them, each ordinal's merged on its own, so the
+    /// ordinals are shared out over the pool and no worker's figures are copied whole.
+    fn merged(workers: &[Tallies], ordinals: usize, geometry: bool, reserve: bool) -> Self {
+        use rayon::prelude::*;
+        if !geometry {
+            let mut counts = vec![0u32; ordinals];
+            counts
+                .par_chunks_mut(MERGE_ORDINALS)
+                .enumerate()
+                .for_each(|(at, counts)| {
+                    let from = at * MERGE_ORDINALS;
+                    for worker in workers {
+                        let theirs = &worker.counts[from..from + counts.len()];
+                        for (a, b) in counts.iter_mut().zip(theirs) {
+                            *a += b;
+                        }
+                    }
+                });
+            return LevelAccumulation {
+                counts,
+                ..LevelAccumulation::default()
+            };
+        }
+        type Merged = (Vec<Tally>, Vec<(u32, Reserve)>);
+        let merged: Vec<Merged> = (0..ordinals.div_ceil(MERGE_ORDINALS))
+            .into_par_iter()
+            .map(|at| {
+                let from = at * MERGE_ORDINALS;
+                let to = (from + MERGE_ORDINALS).min(ordinals);
+                let mut tallies = vec![Tally::default(); to - from];
+                let mut reserves: Vec<(u32, Reserve)> = Vec::new();
+                for (i, t) in tallies.iter_mut().enumerate() {
+                    let ordinal = from + i;
+                    let mut reserve: Option<Reserve> = None;
+                    for worker in workers {
+                        let theirs = &worker.tallies[ordinal];
+                        if theirs.count == 0 {
+                            continue;
+                        }
+                        t.merge(theirs);
+                        if theirs.reserve != 0 {
+                            let offered = &worker.reserves[theirs.reserve as usize - 1];
+                            match &mut reserve {
+                                None => reserve = Some(*offered),
+                                Some(held) => {
+                                    for (held, offered) in held.iter_mut().zip(offered) {
+                                        reserve_merge(held, offered);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(reserve) = reserve {
+                        reserves.push((ordinal as u32, reserve));
+                    }
+                }
+                (tallies, reserves)
+            })
+            .collect();
+        let mut out = LevelAccumulation {
+            counts: Vec::with_capacity(ordinals),
+            placed: Vec::with_capacity(ordinals),
+            sums: Vec::with_capacity(ordinals),
+            boxes: Vec::with_capacity(ordinals),
+            reserves: reserve.then(Vec::new),
+        };
+        for (tallies, reserves) in merged {
+            for t in &tallies {
+                out.counts.push(t.count);
+                out.placed.push(t.placed);
+                out.sums.push(t.sums);
+                out.boxes.push([!t.low[0], !t.low[1], t.high[0], t.high[1]]);
+            }
+            if let Some(out) = &mut out.reserves {
+                out.extend(reserves);
+            }
+        }
+        out
+    }
+}
+
+/// How many ordinals one task of a merge takes.
+const MERGE_ORDINALS: usize = 1 << 14;
+
+/// One ordinal's running figures in one worker's walk with positions, in one cache line. Every
+/// field is zero before the ordinal's first row, so a worker's figures are allocated zeroed and a
+/// page of them is written only where an ordinal on it is met: a viewer who sees few rows writes
+/// few pages.
+#[derive(Debug, Default, Clone, Copy)]
+#[repr(C, align(64))]
+struct Tally {
+    count: u32,
+    placed: u32,
+    sums: [u64; 2],
+    /// `!x_min` and `!y_min`, so that zero is the empty box.
+    low: [u32; 2],
+    high: [u32; 2],
+    /// Per side, `!` of the furthest coordinate a row may lie at and still enter that side's
+    /// reserve: the coordinate of its last key once it is full. Zero, which admits every row,
+    /// while it has room.
+    bar: [u32; 4],
+    /// One more than where the ordinal's reserve is in [`Tallies::reserves`], or zero for none.
+    reserve: u32,
+}
+
+impl Tally {
+    fn merge(&mut self, other: &Tally) {
+        self.count += other.count;
+        self.placed += other.placed;
+        self.sums[0] += other.sums[0];
+        self.sums[1] += other.sums[1];
+        self.low[0] = self.low[0].max(other.low[0]);
+        self.low[1] = self.low[1].max(other.low[1]);
+        self.high[0] = self.high[0].max(other.high[0]);
+        self.high[1] = self.high[1].max(other.high[1]);
+    }
+}
+
+/// One worker's figures over the rows it has walked: the counts alone, or a [`Tally`] an ordinal
+/// and a reserve for each ordinal it has offered a row to.
+struct Tallies {
+    counts: Vec<u32>,
+    tallies: Box<[Tally]>,
+    /// Whether the walk keeps reserves.
+    reserve: bool,
+    reserves: Vec<Reserve>,
+}
+
+impl Tallies {
+    fn new(ordinals: usize, geometry: bool, reserve: bool) -> Self {
+        let tallies = match geometry {
+            // SAFETY: every field of a `Tally` is an integer, for which zero bits are a value.
+            true => unsafe { Box::<[Tally]>::new_zeroed_slice(ordinals).assume_init() },
+            false => Box::default(),
+        };
+        Tallies {
+            counts: if geometry { Vec::new() } else { vec![0; ordinals] },
+            tallies,
+            reserve: geometry && reserve,
+            reserves: Vec::new(),
         }
     }
 
@@ -380,55 +551,44 @@ impl LevelAccumulation {
     #[inline]
     fn add(&mut self, row: u32, ordinal: u32, position: Option<(u32, u32)>) {
         let i = ordinal as usize;
-        let Some(count) = self.counts.get_mut(i) else {
+        if self.tallies.is_empty() {
+            if let Some(count) = self.counts.get_mut(i) {
+                *count += 1;
+            }
+            return;
+        }
+        let Some(t) = self.tallies.get_mut(i) else {
             return;
         };
-        *count += 1;
+        t.count += 1;
         let Some((x, y)) = position else {
             return;
         };
-        if let Some(placed) = self.placed.get_mut(i) {
-            *placed += 1;
-            self.sums[i][0] += u64::from(x);
-            self.sums[i][1] += u64::from(y);
-            let b = &mut self.boxes[i];
-            b[0] = b[0].min(x);
-            b[1] = b[1].min(y);
-            b[2] = b[2].max(x);
-            b[3] = b[3].max(y);
-            if let Some(reserve) = self.reserves.get_mut(i) {
-                for (side, held) in reserve.iter_mut().enumerate() {
-                    reserve_offer(held, reserve_key(side, row, (x, y)));
-                }
+        t.placed += 1;
+        t.sums[0] += u64::from(x);
+        t.sums[1] += u64::from(y);
+        t.low[0] = t.low[0].max(!x);
+        t.low[1] = t.low[1].max(!y);
+        t.high[0] = t.high[0].max(x);
+        t.high[1] = t.high[1].max(y);
+        if !self.reserve {
+            return;
+        }
+        let along = [x, y, u32::MAX - x, u32::MAX - y];
+        for (side, &along) in along.iter().enumerate() {
+            if along > !t.bar[side] {
+                continue;
+            }
+            if t.reserve == 0 {
+                self.reserves.push([[RESERVE_EMPTY; RESERVE]; 4]);
+                t.reserve = self.reserves.len() as u32;
+            }
+            let held = &mut self.reserves[t.reserve as usize - 1][side];
+            reserve_offer(held, reserve_key(side, row, (x, y)));
+            if held[RESERVE - 1] != RESERVE_EMPTY {
+                t.bar[side] = !((held[RESERVE - 1] >> 32) as u32);
             }
         }
-    }
-
-    fn merge(mut self, other: Self) -> Self {
-        for (a, b) in self.counts.iter_mut().zip(&other.counts) {
-            *a += b;
-        }
-        for (a, b) in self.placed.iter_mut().zip(&other.placed) {
-            *a += b;
-        }
-        for (a, b) in self.sums.iter_mut().zip(&other.sums) {
-            a[0] += b[0];
-            a[1] += b[1];
-        }
-        for (a, b) in self.boxes.iter_mut().zip(&other.boxes) {
-            a[0] = a[0].min(b[0]);
-            a[1] = a[1].min(b[1]);
-            a[2] = a[2].max(b[2]);
-            a[3] = a[3].max(b[3]);
-        }
-        for (a, b) in self.reserves.iter_mut().zip(&other.reserves) {
-            for (held, offered) in a.iter_mut().zip(b) {
-                for &key in offered.iter().take_while(|&&key| key != RESERVE_EMPTY) {
-                    reserve_offer(held, key);
-                }
-            }
-        }
-        self
     }
 }
 
@@ -1168,6 +1328,9 @@ impl RowColumn {
     pub fn candidates(&self, here: &Bitmap) -> Bitmap {
         let mut seen = Marks::new(self.len(), self.marks_sparsely(here.cardinality()));
         let base_rows = self.base_rows();
+        if let (Some(first), Some(last)) = (here.minimum(), here.maximum()) {
+            self.will_need_scattered(here, first, u64::from(last) + 1, &[]);
+        }
         match &*self.pack {
             Pack::Label(pack) => {
                 for_each_row(here, |row| {
@@ -1309,8 +1472,10 @@ impl RowColumn {
     /// its labels and positions as slices. Every row lands in one chunk and the merge adds and
     /// takes minima and maxima, so the answer does not depend on how the pool schedules them.
     ///
-    /// Each worker holds one accumulator for the whole pass: 4 B an ordinal for the counts and
-    /// 40 B with the geometry, so a pass holds at most the pool's width of them.
+    /// Each worker holds one accumulator for the whole pass: 4 B an ordinal for the counts, or
+    /// 64 B with the geometry, allocated zeroed so that only the pages of the ordinals it meets
+    /// are written, and a reserve for each ordinal it offers a row to. A pass holds at most the
+    /// pool's width of them, and merges them an ordinal at a time over the pool.
     ///
     /// `before_chunk` is called before each chunk is walked, and may block. Once it returns
     /// `false` no further chunk is walked and the pass answers `None`.
@@ -1350,19 +1515,19 @@ impl RowColumn {
         use std::sync::{Mutex, PoisonError};
 
         let ordinals = self.len();
-        let empty = || LevelAccumulation::empty(ordinals, places.is_some(), reserve);
+        let geometry = places.is_some();
         let last = match below.checked_sub(1) {
             Some(ceiling) => visible.maximum().map(|last| last.min(ceiling)),
             None => None,
         };
         let (Some(first), Some(last)) = (visible.minimum().filter(|&f| f < below), last) else {
-            return Some(empty());
+            return Some(LevelAccumulation::empty(ordinals, geometry, reserve));
         };
         let places = places.unwrap_or(&[]);
         // The amendment's visible rows, intersected once rather than asked of every row.
         let added = self.added.as_ref().map(|added| (added, added.rows.and(visible)));
         let chunk = u64::from(chunk_rows.max(1));
-        let held: Mutex<Vec<LevelAccumulation>> = Mutex::new(Vec::new());
+        let held: Mutex<Vec<Tallies>> = Mutex::new(Vec::new());
         let stopped = std::sync::atomic::AtomicBool::new(false);
         (u64::from(first) / chunk..u64::from(last) / chunk + 1)
             .into_par_iter()
@@ -1377,7 +1542,8 @@ impl RowColumn {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .pop()
-                    .unwrap_or_else(empty);
+                    .unwrap_or_else(|| Tallies::new(ordinals, geometry, reserve));
+                self.will_need_scattered(visible, lo, end, places);
                 self.walk_chunk(visible, lo, end, places, &mut acc);
                 if let Some((added, rows)) = &added {
                     for_each_row_in(rows, lo, end, |row| {
@@ -1392,13 +1558,43 @@ impl RowColumn {
         if stopped.into_inner() {
             return None;
         }
-        Some(
-            held.into_inner()
-                .unwrap_or_else(PoisonError::into_inner)
-                .into_par_iter()
-                .reduce_with(LevelAccumulation::merge)
-                .unwrap_or_else(empty),
-        )
+        let workers = held.into_inner().unwrap_or_else(PoisonError::into_inner);
+        Some(LevelAccumulation::merged(&workers, ordinals, geometry, geometry && reserve))
+    }
+
+    /// Ask for the pages of a label column and of `places`' positions under the rows of `visible`
+    /// in `[lo, end)`, where those rows are scattered, before they are read. Read-ahead around
+    /// each fault is sized for a sequential reader, and over scattered rows it reads many times
+    /// the pages they are on.
+    fn will_need_scattered(&self, visible: &Bitmap, lo: u32, end: u64, places: &[Placement<'_>]) {
+        let hi = u32::try_from(end).unwrap_or(u32::MAX);
+        let rows = visible.range_cardinality(lo..hi);
+        if rows == 0 || rows * SCATTERED_ROWS_APART > end - u64::from(lo) {
+            return;
+        }
+        let labels = match &*self.pack {
+            Pack::Label(pack) => Some((pack.labels(), usize::from(pack.width()), pack.rows())),
+            Pack::List(_) => None,
+        };
+        let mut pages = Vec::new();
+        let mut at = 0usize;
+        for_each_row_in(visible, lo, end, |row| {
+            if let Some((labels, width, held)) = labels {
+                if row < held {
+                    pages.push(labels.as_ptr() as usize + row as usize * width);
+                }
+            }
+            while places.get(at).is_some_and(|p| p.end() <= u64::from(row)) {
+                at += 1;
+            }
+            if let Some(p) = places.get(at).filter(|p| p.row_base <= row) {
+                let (morton, residual) = p.columns();
+                let local = (row - p.row_base) as usize;
+                pages.push(tessera_store::bands::element(morton, local));
+                pages.push(tessera_store::bands::element(residual, local));
+            }
+        });
+        tessera_store::bands::will_need(&mut pages);
     }
 
     /// The pack's and the tail's labels over the visible rows of `[lo, end)`, a run at a time.
@@ -1408,7 +1604,7 @@ impl RowColumn {
         lo: u32,
         end: u64,
         places: &[Placement<'_>],
-        acc: &mut LevelAccumulation,
+        acc: &mut Tallies,
     ) {
         let mut it = visible.iter();
         it.reset_at_or_after(lo);
@@ -2347,30 +2543,45 @@ mod tests {
                 for below in [u32::MAX, column.row_count() / 2] {
                     let mut expected = LevelAccumulation::empty(ordinals, true, true);
                     // Each artifact's placed rows by side, every one of them, to read the reserve
-                    // against.
+                    // off.
                     let mut sides: Vec<[Vec<u64>; 4]> = vec![Default::default(); ordinals];
                     for row in mask.iter().take_while(|&row| row < below) {
                         let position = reference_position(row);
                         column.for_each_label(row, |ordinal| {
-                            expected.add(row, ordinal, position);
-                            if let (Some(at), Some(sides)) = (position, sides.get_mut(ordinal as usize)) {
-                                for (side, keys) in sides.iter_mut().enumerate() {
-                                    keys.push(reserve_key(side, row, at));
-                                }
+                            let i = ordinal as usize;
+                            let Some(count) = expected.counts.get_mut(i) else {
+                                return;
+                            };
+                            *count += 1;
+                            let Some((x, y)) = position else {
+                                return;
+                            };
+                            expected.placed[i] += 1;
+                            expected.sums[i][0] += u64::from(x);
+                            expected.sums[i][1] += u64::from(y);
+                            let b = &mut expected.boxes[i];
+                            *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+                            for (side, keys) in sides[i].iter_mut().enumerate() {
+                                keys.push(reserve_key(side, row, (x, y)));
                             }
                         });
                     }
-                    for (ordinal, sides) in sides.iter_mut().enumerate() {
-                        for (side, keys) in sides.iter_mut().enumerate() {
-                            keys.sort_unstable();
-                            let held: Vec<u64> = expected.reserves[ordinal][side]
-                                .iter()
-                                .copied()
-                                .take_while(|&key| key != RESERVE_EMPTY)
-                                .collect();
-                            assert_eq!(held, keys[..keys.len().min(RESERVE)], "ordinal {ordinal}");
-                        }
-                    }
+                    let reserves: Vec<(u32, Reserve)> = sides
+                        .iter_mut()
+                        .enumerate()
+                        .filter(|(_, sides)| !sides[0].is_empty())
+                        .map(|(ordinal, sides)| {
+                            let mut reserve = [[RESERVE_EMPTY; RESERVE]; 4];
+                            for (held, keys) in reserve.iter_mut().zip(sides.iter_mut()) {
+                                keys.sort_unstable();
+                                for (slot, key) in held.iter_mut().zip(keys.iter()) {
+                                    *slot = *key;
+                                }
+                            }
+                            (ordinal as u32, reserve)
+                        })
+                        .collect();
+                    expected.reserves = Some(reserves);
                     for chunk in [1u32, 7, 64, 333, CHUNK_ROWS] {
                         let what = format!("{:?} seed={seed} chunk={chunk} below={below}", column.layout());
                         let got = column

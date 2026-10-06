@@ -111,6 +111,36 @@ pub fn page_size() -> usize {
     *PAGE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize)
 }
 
+/// The address of `slice[i]`, which need not be read to be named.
+pub fn element<T>(slice: &[T], i: usize) -> usize {
+    slice.as_ptr() as usize + std::mem::size_of::<T>() * i
+}
+
+/// `MADV_WILLNEED` over the page of every address in `pages`, one call per run of adjacent pages.
+/// The pages are read in the background, so the faults of the reads that follow find them in the
+/// page cache, and the kernel's read-ahead around a fault, sized for a sequential reader, is not
+/// triggered.
+pub fn will_need(pages: &mut [usize]) {
+    let page = page_size();
+    for at in pages.iter_mut() {
+        *at &= !(page - 1);
+    }
+    pages.sort_unstable();
+    let mut i = 0;
+    while i < pages.len() {
+        let start = pages[i];
+        let mut end = start + page;
+        i += 1;
+        while i < pages.len() && pages[i] <= end {
+            end = end.max(pages[i] + page);
+            i += 1;
+        }
+        // SAFETY: advice only; `MADV_WILLNEED` changes no mapping and no byte. Every page named
+        // holds a column the caller is about to read.
+        unsafe { libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_WILLNEED) };
+    }
+}
+
 /// The band a row falls in at most: its identity's leading zero bits.
 pub fn band_of(tessera_id: u64) -> u32 {
     tessera_id.leading_zeros()
