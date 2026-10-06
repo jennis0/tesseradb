@@ -217,8 +217,9 @@ struct Served {
     supplied: Supplied,
 }
 
-/// The layer an attached layer's artifacts hang from, every level of it read under the page's
-/// mask, for naming a target only where it is served.
+/// The layer an attached layer's artifacts hang from, read under the page's mask at the levels the
+/// page's artifacts hang from and `None` at the others, for naming a target only where it is
+/// served.
 struct TargetLayer<'a> {
     layer: &'a RegisteredLayer,
     levels: &'a [Option<ReadLevel>],

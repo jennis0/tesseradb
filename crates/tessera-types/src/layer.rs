@@ -969,9 +969,12 @@ pub struct RegisteredLayer {
     /// The serving layout **per level**, parallel to [`RegisteredLayer::runs`].
     ///
     /// Set at registration by [`RegisteredLayer::initial_layouts`], and kept when a replay applies
-    /// the registration again over a manifest that recorded it. **Re-evaluated inside every fold's
-    /// artifact pass**, before the registry snapshot the manifest is written from, so the record
-    /// and the files the same fold wrote cannot disagree.
+    /// the registration again over a manifest that recorded it. A level's first publication
+    /// chooses again over the memberships it carries, and a publication or a growth that gives an
+    /// item a second artifact in a label level moves it to the list column; the live path and
+    /// replay do both at the same record. **Re-evaluated inside every fold's artifact pass**,
+    /// before the registry snapshot the manifest is written from, so the record and the files the
+    /// same fold wrote cannot disagree.
     ///
     /// **A flip does not bump [`RegisteredLayer::version`].** That version gates reachability and
     /// is a fail-closed guard against a reader holding a stale idea of a layer; a layout is not a

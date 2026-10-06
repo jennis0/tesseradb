@@ -1576,12 +1576,21 @@ impl RowColumn {
             Pack::Label(pack) => Some((pack.labels(), usize::from(pack.width()), pack.rows())),
             Pack::List(_) => None,
         };
+        let page = !(tessera_store::bands::page_size() - 1);
         let mut pages = Vec::new();
+        // The last page asked for in each of the three columns, so each page is listed once.
+        let mut last = [usize::MAX; 3];
+        let mut ask = |column: usize, address: usize| {
+            if last[column] != address & page {
+                last[column] = address & page;
+                pages.push(address);
+            }
+        };
         let mut at = 0usize;
         for_each_row_in(visible, lo, end, |row| {
             if let Some((labels, width, held)) = labels {
                 if row < held {
-                    pages.push(labels.as_ptr() as usize + row as usize * width);
+                    ask(0, labels.as_ptr() as usize + row as usize * width);
                 }
             }
             while places.get(at).is_some_and(|p| p.end() <= u64::from(row)) {
@@ -1590,8 +1599,8 @@ impl RowColumn {
             if let Some(p) = places.get(at).filter(|p| p.row_base <= row) {
                 let (morton, residual) = p.columns();
                 let local = (row - p.row_base) as usize;
-                pages.push(tessera_store::bands::element(morton, local));
-                pages.push(tessera_store::bands::element(residual, local));
+                ask(1, tessera_store::bands::element(morton, local));
+                ask(2, tessera_store::bands::element(residual, local));
             }
         });
         tessera_store::bands::will_need(&mut pages);
@@ -2534,10 +2543,15 @@ mod tests {
 
         for column in &columns {
             let ordinals = column.len();
-            for (seed, num, den) in [(21u64, 1u32, 1u32), (22, 1, 2), (23, 1, 13)] {
+            // Seed 0 is one row in a hundred, further apart than `SCATTERED_ROWS_APART`, so the
+            // larger chunks ask for their rows' pages before they are walked.
+            for (seed, num, den) in [(21u64, 1u32, 1u32), (22, 1, 2), (23, 1, 13), (0, 1, 100)] {
                 // Past the column's rows too: a mask may hold rows the column has not yet
                 // addressed, which carry no label.
-                let mask = sampled_mask(seed, column.row_count() + 70, num, den);
+                let mask = match seed {
+                    0 => (0..column.row_count() + 70).step_by(100).collect(),
+                    _ => sampled_mask(seed, column.row_count() + 70, num, den),
+                };
                 assert!(mask.maximum().is_some_and(|last| last >= column.row_count()) || num < den);
                 // Every row, and the rows below a bound inside the column.
                 for below in [u32::MAX, column.row_count() / 2] {

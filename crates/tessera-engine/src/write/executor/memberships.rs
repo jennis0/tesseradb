@@ -744,8 +744,7 @@ impl Executor {
                 })
                 .sum::<usize>()
         });
-        // A form held in the layout the level had before its first publication is never asked
-        // for again.
+        // A form held in the layout a level had before is never asked for again.
         for (layer, level) in &settled {
             self.deps.artifact_projections.forget_level(layer, *level);
         }

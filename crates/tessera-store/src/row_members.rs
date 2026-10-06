@@ -412,14 +412,19 @@ impl RowMembersPack {
         }
         let from = self.payload_at + offset;
         // A frozen bitmap ends with its containers' keys, counts and kinds, 5 bytes a container,
-        // then a word whose high bits count the containers: the part a view reads whole.
+        // then a word whose high bits count the containers: the part a view reads whole. Reading
+        // the word faults its page in, so the rest is asked for only where it starts on an earlier
+        // page.
         let to = from + len;
         if len >= 4 {
             let containers = (le_u32(&self.map, to - 4) >> 15) as usize;
             let tail = (containers * 5 + 4).min(len);
-            let _ = self
-                .map
-                .advise_range(memmap2::Advice::WillNeed, to - tail, tail);
+            let page = crate::bands::page_size();
+            if (to - tail) / page != (to - 1) / page {
+                let _ = self
+                    .map
+                    .advise_range(memmap2::Advice::WillNeed, to - tail, tail);
+            }
         }
         // SAFETY: the open proved the range aligned and inside the payload, and the payload is what
         // the writer serialised there (module doc).

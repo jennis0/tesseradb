@@ -1359,3 +1359,123 @@ fn a_fold_with_a_batchs_memberships_pending_produces_a_correct_bundle() {
         "both batches' points, from the prefix alone"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The layout follows the memberships
+// ---------------------------------------------------------------------------------------------
+
+/// **A level whose items come to belong to two artifacts is recorded as a list column, and stays
+/// served from a column.** One layer is published an artifact a call: two disjoint calls record the
+/// label column, and a third whose members overlap the second's records the list column. Another
+/// is published disjoint, then a point is ingested naming two of its artifacts. Every count is the
+/// members each artifact holds, no level falls back to the artifact-major route, and all of it holds
+/// after a restart that replays the log.
+#[test]
+fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
+    use tessera_types::layer::ServingLayout;
+    const CALLS: &str = "clusters/calls";
+    const TAGGED: &str = "clusters/tagged";
+    let fx = fixture();
+    let engine = fx.open();
+    let counts = |engine: &Engine, layer: &str| -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
+            .into_iter()
+            .filter(|a| a.layer == layer)
+            .map(|a| (a.key.clone().unwrap(), a.masked_count))
+            .collect();
+        out.sort();
+        out
+    };
+    let held = |pairs: &[(&str, u64)]| -> Vec<(String, u64)> {
+        pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+    };
+
+    engine.register_layer(declaration(CALLS)).unwrap();
+    let mut expected = Vec::new();
+    for (key, sources, layout) in [
+        ("a", 0..40, ServingLayout::RowMajorLabel),
+        ("b", 40..80, ServingLayout::RowMajorLabel),
+        ("c", 70..90, ServingLayout::RowMajorList),
+    ] {
+        let n = sources.end - sources.start;
+        engine
+            .publish_artifacts(
+                CALLS.into(),
+                0,
+                vec![IncomingArtifact::from_entities(Some(key.into()), fx.members(sources))],
+            )
+            .unwrap();
+        tick(&engine);
+        assert_eq!(engine.recorded_layout(CALLS, 0), Some(layout), "after {key}");
+        expected.push((key, n));
+        assert_eq!(counts(&engine, CALLS), held(&expected), "after {key}");
+    }
+
+    engine.register_layer(declaration(TAGGED)).unwrap();
+    engine
+        .publish_artifacts(
+            TAGGED.into(),
+            0,
+            vec![
+                IncomingArtifact::from_entities(Some("x".into()), fx.members(0..30)),
+                IncomingArtifact::from_entities(Some("y".into()), fx.members(30..60)),
+            ],
+        )
+        .unwrap();
+    tick(&engine);
+    assert_eq!(engine.recorded_layout(TAGGED, 0), Some(ServingLayout::RowMajorLabel));
+    assert_eq!(counts(&engine, TAGGED), held(&[("x", 30), ("y", 30)]));
+    let descriptors = vec![b"0".to_vec()];
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
+    };
+    let memberships = ["x", "y"]
+        .into_iter()
+        .map(|key| tessera_lifecycle::BatchMembership {
+            layer: TAGGED.to_string(),
+            level: 0,
+            view: None,
+            key: key.to_string(),
+            rows: vec![0],
+        })
+        .collect();
+    engine
+        .ingest_rows_joining(
+            vec![row],
+            "tagged twice".to_string(),
+            [7u8; 32],
+            tessera_lifecycle::BatchArtifacts {
+                memberships,
+                edges: Vec::new(),
+            },
+        )
+        .expect("a point naming two artifacts is an ordinary write");
+    publish_buffered(&engine);
+    tick(&engine);
+    let check = |engine: &Engine, when: &str| {
+        assert_eq!(
+            engine.recorded_layout(CALLS, 0),
+            Some(ServingLayout::RowMajorList),
+            "{when}"
+        );
+        assert_eq!(
+            engine.recorded_layout(TAGGED, 0),
+            Some(ServingLayout::RowMajorList),
+            "{when}: the point is in x and in y"
+        );
+        assert_eq!(counts(engine, CALLS), held(&expected), "{when}");
+        assert_eq!(counts(engine, TAGGED), held(&[("x", 31), ("y", 31)]), "{when}");
+        assert_eq!(engine.layout_fallbacks(), 0, "{when}: every level kept a column");
+    };
+    check(&engine, "published");
+    drop(engine);
+    let reopened = fx.open();
+    check(&reopened, "after a restart");
+}

@@ -592,6 +592,42 @@ fn a_levelled_layer_reads_by_level_then_publication() {
     assert_eq!(keys(&read_all(engine, &session, &base)), want[4..].to_vec());
 }
 
+const TAXA: &str = "taxa/tiered";
+
+/// `taxa/tiered`: three levels served from label columns, with a centroid. Three families of 300
+/// members, each of three genera, each of two species.
+fn plant_taxa(fx: &Fx) {
+    let engine = fx.engine();
+    let mut taxa = base_declaration(TAXA, HierarchyKind::Tiered);
+    taxa.layout = Some(tessera_types::layer::ServingLayout::RowMajorLabel);
+    taxa.content.computed = vec!["centroid".into()];
+    taxa.levels = (0..3)
+        .map(|level| LevelDeclaration {
+            level,
+            title: None,
+            zoom: None,
+        })
+        .collect();
+    engine.register_layer(taxa).unwrap();
+    for level in 0..3u32 {
+        let width = [300, 100, 50][level as usize];
+        let artifacts = (0..N / width)
+            .map(|t| {
+                let mut a = IncomingArtifact::from_entities(
+                    Some(format!("t{level}-{t}")),
+                    fx.entities(t * width..(t + 1) * width),
+                );
+                if level > 0 {
+                    a.parent_keys = vec![format!("t{}-{}", level - 1, t / if level == 1 { 3 } else { 2 })];
+                }
+                a
+            })
+            .collect();
+        engine.publish_artifacts(TAXA.into(), level, artifacts).unwrap();
+    }
+    tick(engine);
+}
+
 /// One row of a read, by the properties [`a_read_by_identifier_reads_only_the_levels_it_names`]
 /// asks for: identifier, key, level, parents, count and centroid.
 type TaxonRow = (u64, String, u32, Vec<u64>, u64, Option<(f64, f64)>);
@@ -629,38 +665,9 @@ fn taxon_rows(pages: &[RecordBatch]) -> Vec<TaxonRow> {
 /// viewer below holds a grant of its own, so each level's figures are filled once per viewer.
 #[test]
 fn a_read_by_identifier_reads_only_the_levels_it_names() {
-    const TAXA: &str = "taxa/tiered";
     let fx = fixture();
     let engine = fx.engine();
-    let mut taxa = base_declaration(TAXA, HierarchyKind::Tiered);
-    taxa.layout = Some(tessera_types::layer::ServingLayout::RowMajorLabel);
-    taxa.content.computed = vec!["centroid".into()];
-    taxa.levels = (0..3)
-        .map(|level| LevelDeclaration {
-            level,
-            title: None,
-            zoom: None,
-        })
-        .collect();
-    engine.register_layer(taxa).unwrap();
-    // Three families of 300 members, each of three genera, each of two species.
-    for level in 0..3u32 {
-        let width = [300, 100, 50][level as usize];
-        let artifacts = (0..N / width)
-            .map(|t| {
-                let mut a = IncomingArtifact::from_entities(
-                    Some(format!("t{level}-{t}")),
-                    fx.entities(t * width..(t + 1) * width),
-                );
-                if level > 0 {
-                    a.parent_keys = vec![format!("t{}-{}", level - 1, t / if level == 1 { 3 } else { 2 })];
-                }
-                a
-            })
-            .collect();
-        engine.publish_artifacts(TAXA.into(), level, artifacts).unwrap();
-    }
-    tick(engine);
+    plant_taxa(&fx);
 
     let fields = names(&["key", "level", "parents", "masked_count", "centroid"]);
     let fills = || engine.figures_stats().fills;
@@ -706,6 +713,90 @@ fn a_read_by_identifier_reads_only_the_levels_it_names() {
     assert_eq!(want.len(), species.len());
     assert!(want.iter().all(|row| row.3.len() == 1), "every species names its genus");
     assert_eq!(by_ids, want);
+}
+
+/// **A read by identifier of an attached layer fills the levels of its target that the named
+/// artifacts hang from, and no other**, whether it names the target or filters, and answers as the
+/// read of the whole layer does. Each viewer below holds a grant of its own, so each level's
+/// figures are filled once per viewer.
+#[test]
+fn a_read_by_identifier_reads_only_the_target_levels_its_artifacts_hang_from() {
+    const SPECIES_NAMES: &str = "taxa/species-names";
+    let fx = fixture();
+    let engine = fx.engine();
+    plant_taxa(&fx);
+    let mut declared = base_declaration(SPECIES_NAMES, HierarchyKind::Flat);
+    declared.depends_on = vec![TAXA.into()];
+    engine.register_layer(declared).unwrap();
+    let attached: Vec<IncomingArtifact> = (0..N / 50)
+        .map(|t| {
+            let mut name = IncomingArtifact::from_entities(
+                Some(format!("name-{t}")),
+                fx.entities(t * 50..(t + 1) * 50),
+            );
+            name.attached_to = Some(IncomingAttachment {
+                layer: TAXA.into(),
+                level: 2,
+                key: format!("t2-{t}"),
+            });
+            name
+        })
+        .collect();
+    engine.publish_artifacts(SPECIES_NAMES.into(), 0, attached).unwrap();
+    tick(engine);
+
+    let fills = || engine.figures_stats().fills;
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let key_only = names(&["key"]);
+    let every = ids(&read_all(engine, &full, &request(SPECIES_NAMES, &key_only)));
+    let some: Vec<TesseraId> = every.iter().step_by(2).map(|&id| TesseraId::new(id)).collect();
+    let (filter, _) = middle();
+    let with_target = names(&["key", "target"]);
+    for (session, fields, filter) in [
+        (engine.authorise(&subset_credential()).unwrap(), &with_target, None),
+        (engine.authorise_all().unwrap(), &key_only, Some(filter)),
+    ] {
+        let read = |ids: Option<&[TesseraId]>| {
+            let mut req = request(SPECIES_NAMES, fields);
+            req.ids = ids;
+            req.filter = filter.clone();
+            req.keep_unmatched = true;
+            read_all(engine, &session, &req)
+        };
+        let before = fills();
+        let by_ids = read(Some(&some));
+        assert_eq!(
+            fills(),
+            before + 2,
+            "the layer's own level and the species level it hangs from, filter {}",
+            filter.is_some()
+        );
+        let whole = read(None);
+        assert_eq!(fills(), before + 2, "the whole layer hangs from the same level");
+        let named: HashSet<u64> = some.iter().map(|id| id.raw()).collect();
+        let keep = |pages: &[RecordBatch]| -> Vec<(u64, String)> {
+            ids(pages).into_iter().zip(keys(pages)).collect()
+        };
+        let want: Vec<(u64, String)> =
+            keep(&whole).into_iter().filter(|(id, _)| named.contains(id)).collect();
+        assert!(!want.is_empty());
+        assert_eq!(keep(&by_ids), want);
+        if fields.len() == 2 {
+            let targets = |pages: &[RecordBatch]| -> Vec<(u64, u64)> {
+                ids(pages).into_iter().zip(u64s(pages, "target")).collect()
+            };
+            let want: Vec<(u64, u64)> =
+                targets(&whole).into_iter().filter(|(id, _)| named.contains(id)).collect();
+            assert_eq!(targets(&by_ids), want);
+        } else {
+            let matched = |pages: &[RecordBatch]| -> Vec<(u64, u64)> {
+                ids(pages).into_iter().zip(u64s(pages, "matched_count")).collect()
+            };
+            let want: Vec<(u64, u64)> =
+                matched(&whole).into_iter().filter(|(id, _)| named.contains(id)).collect();
+            assert_eq!(matched(&by_ids), want);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

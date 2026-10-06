@@ -216,13 +216,21 @@ impl ArtifactProjections {
         // A row-major column this prefix holds is transposed, not projected twice: an attribute
         // predicate's column is not a stored membership and is not a candidate for this. A column
         // written before the level last moved is taken only by a form served from its column,
-        // which completes it ([`Self::brought_over`]); transposed, it would hold rows short.
+        // which completes it ([`Self::brought_over`]); transposed, it would hold rows short. Such
+        // a form also takes a label column for a level recorded as a list column since: completing
+        // it recomposes it as a list column, which costs less than composing one from the rows.
         let claimed = match attribute {
             Some(_) => None,
             _ if !layout.is_row_major() => None,
             _ => self
                 .claim_column(at)
-                .filter(|(claimed, behind)| claimed.layout() == layout && (column_only || !behind))
+                .filter(|(claimed, behind)| {
+                    let listed_since = column_only
+                        && *behind
+                        && claimed.layout() == ServingLayout::RowMajorLabel
+                        && layout == ServingLayout::RowMajorList;
+                    (claimed.layout() == layout || listed_since) && (column_only || !behind)
+                })
                 .map(|(claimed, behind)| (Arc::new(claimed), behind)),
         };
         let transposed = claimed.as_ref().and_then(|(column, _)| {
