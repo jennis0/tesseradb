@@ -103,13 +103,15 @@ area just outside what is on screen once the view has settled and nothing else i
 for. None of this is visible from outside the store: a host tells it where the camera is and
 reads what it publishes.
 
-Annotation layers are requested on their own, naming the layers drawn and the layer the points
-are coloured by, rather than read off cached point geometry. Artifacts are clusters, boundaries,
-hierarchy nodes and their labels, as [annotations](annotations.md#what-an-artifact-is) defines
-them. A cache holds geometry it has already fetched and does not ask again for a tile it already
-holds, and such a tile carries no artifacts, so a client reading them off the point path would
-watch clusters disappear from a view that had not moved, for no reason a person could see. Asking
-on its own avoids that at the cost of one extra request once a view has settled.
+The artifacts of the layers drawn are requested on their own, tile by tile
+([queries](queries.md#how-a-client-asks-for-a-layer)), rather than read off cached point geometry.
+The layer the points are coloured by is named on the point requests, so each point carries its
+artifact's `tessera_id`. Artifacts are clusters, boundaries, hierarchy nodes and their labels, as
+[annotations](annotations.md#what-an-artifact-is) defines them. A cache holds geometry it has
+already fetched and does not ask again for a tile it already holds, and such a tile carries no
+artifacts, so a client reading them off the point path would watch clusters disappear from a view
+that had not moved, for no reason a person could see. Asking on its own avoids that at the cost of
+one extra request once a view has settled.
 
 ```mermaid
 flowchart LR
@@ -132,8 +134,9 @@ below are what closes that gap: each is something a client must do on its own, a
 specific way of misleading a viewer if it is skipped.
 
 A [viewport response](queries.md#the-viewport) carries the marks it drew, each a point with a
-coordinate and an identifier; a served, a visible and a matched count; the artifacts for
-whichever layers are on; and a content key. The rules below govern what a client does with that
+coordinate, an identifier and its artifact in each layer named; a served, a visible and a matched
+count; and a content key. The artifacts of the layers that are on arrive tile by tile from a
+request of their own, with the same keys. The rules below govern what a client does with that
 response once it has it.
 
 ```mermaid

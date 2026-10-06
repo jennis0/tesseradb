@@ -14,7 +14,8 @@ every slot is taken is refused immediately, with no wait. A request that clears 
 needs a compute permit, a share of running capacity, and waits up to a configured timeout,
 `serve.admission_timeout_ms`, for one to open. A request that gets no compute permit within that
 time is refused as well. A bulk read of items or artifacts is admitted under a limit of its own,
-described under [bulk reads](#bulk-reads).
+described under [bulk reads](#bulk-reads), and so is a request for the artifacts of each tile,
+described under [the artifacts of each tile](#the-artifacts-of-each-tile).
 
 Both refusals answer with the same 429 status, carrying a fixed one-second interval to wait before
 retrying. Two further cases carry the same status and the same interval, for reasons closer to a
@@ -53,6 +54,9 @@ it reaches each one. Only a session the pass has not yet reached pays the cost i
 ordinary cache miss, on its own next request. After a compaction fold the cached pair is invalid
 outright for every session, and the same background pass rebuilds each one in turn.
 
+Each annotation level's figures are kept as well, per grant, in memory and on disc, as [a level's
+figures](#a-levels-figures) describes.
+
 The rows and positions a request reads live in files the server maps into memory rather than loads
 into its own structures. A value a recent request read is more likely to still be in the operating
 system's own page cache the next time. Nothing in the server manages that layer directly.
@@ -65,16 +69,17 @@ on every request.
 ## How a response is delivered
 
 A viewport response arrives as a sequence of frames rather than as one block: counts first, then
-artifacts and points as they are found, then a trailer. A client can start drawing from the counts
-and the first points before the rest of the answer has been computed.
+points as they are found, then a trailer. A client can start drawing from the counts and the first
+points before the rest of the answer has been computed.
 
 | Frame | Carries | How many |
 |---|---|---|
 | counts | visible, matched, served and highlighted counts for each tile that has anything visible; a tile the request named with nothing visible carries no row | exactly one, sent first |
 | density | a count for each of a tile's [finer cells](queries.md#the-viewport), where a request asked for them | one, only when asked for |
-| artifacts | one row per served artifact of the layers the request named | one, only when layers are named |
-| points | a chunk of the matched points from one or more tiles | zero or more |
+| points | a chunk of the matched points from one or more tiles; where the request names layers, each point carries the `tessera_id` of its artifact in each, or a null | zero or more |
 | trailer | how many points were served in total, marking the response complete | exactly one, sent last |
+
+A viewport response carries no artifacts. They have a route of their own, below.
 
 Within one tile, points are sent in ascending identifier order. Across tiles, points are sent in
 the order the request named its tiles, or, where a request named a bounding box instead of a list,
@@ -165,9 +170,122 @@ flowchart TD
 
 *How a bulk-read response ends. The permit is released on every path.*
 
+## The artifacts of each tile
+
+`POST /v1/artifacts/viewport` answers which artifacts lie in each tile
+([queries](queries.md#the-artifacts-in-each-tile)), framed as a viewport response is. A frame for
+the `nested` and `dag` layers the request names comes first, where it holds a row. Then comes
+exactly one frame for each tile, in the order the request named its tiles or the order the server
+derives from a bounding box, and then a trailer giving how many rows and frames were sent. A tile
+with nothing to show still has its frame, of no rows. Each frame is whole, so a client can keep a
+tile's artifacts as soon as its frame arrives. A response without its trailer is incomplete.
+
+The route has its own admission limit, `serve.artifact_admission`, one request for each compute
+thread by default. As many more may wait, each for at most `serve.admission_timeout_ms`. A request
+past both is refused at once with the 429 and one-second interval above, and its detail names the
+artifact-viewport limit. A limit of 0 refuses every such request. The route takes no slot from the
+viewport, item and session routes, and they take none from it. An admitted request computes until
+its last tile, so it holds its permit and a blocking thread until its response ends. It is
+streamed under `serve.stream_write_stall_ms` and `serve.stream_deadline_ms`, as a viewport is, and
+stops between tiles when its client goes away. `/control/status` reports the limit under
+`artifacts`, with the requests in flight and waiting and how many have been refused.
+
+Before its first frame, a request reads the figures of every level it names: each artifact's
+count, centroid and box over the viewer's visible set, described in the next section. After that
+a tile costs the candidates it tests. For a level served from a column, the candidates are the
+artifacts whose coverings overlap the tile's rows, with those labelling a visible row of the tile
+above the base. They are taken in order of count, and each is tested for a member the viewer can
+see in the tile by probing its member bitmap. Once the probes have cost what one scan of the
+tile's visible rows would, the rest of the tile is answered from that scan. A level stored by
+artifact asks the tile index for its candidates and probes each one.
+
+## A level's figures
+
+Every count served beside an artifact of a level served from a column, on any route, is read
+from that level's figures for the request. So are its centroid and box, except on a layer that
+serves a hull, whose rows the server holds artifact by artifact and reads them from. The figures
+are computed from the request's visible set in three parts:
+
+- **F**, the grant's base rows: the rows, below the bundle's base row count, of every item listed
+  under an index key the session satisfies. Every session with the same grant has the same F.
+- **D**, the base rows the request's visible set leaves out of F: the rows of deleted and
+  suppressed items, and of any buffered item whose labels this viewer does not satisfy.
+- **T**, every row of the visible set outside F: rows above the base, and rows the buffer adds.
+
+The visible set is F less D, together with T, and the three never overlap, so an artifact's count
+is its count over F, less its count over D, plus its count over T. The same holds for the number
+of its rows with a position and for the sums of their positions, which give the centroid.
+
+```mermaid
+flowchart LR
+  F["F: the grant's base rows<br/>walked once per grant and level,<br/>shared, kept on disc"] --> S
+  D["D: base rows the request leaves out<br/>per deny version"] -->|subtracted| S
+  T["T: rows above the base<br/>per session and generation"] -->|added| S
+  S["each artifact's count,<br/>centroid and box"]
+```
+
+*The three parts of a level's figures. Only F is shared between sessions, and it is never served
+without the other two.*
+
+F's figures are the expensive part: a walk of the grant's base rows that reads each row's label and,
+where the layer serves a centroid or a box, its position. They are filled the first time any route
+reads the level under that grant, on a pool of as many threads as `serve.compute_threads`. A request
+that needs a level while its walk runs waits for that walk, for as long as its client stays
+connected and at most ten minutes, and at most two walks run at once. A walk pauses between chunks
+while a viewport is drawing points, so that the viewport's reads do not queue behind it, for at most
+`serve.masked_count_give_way_ms` from its first pause.
+
+Once filled, F's figures are shared by every session with the same grant: the same set of
+satisfied index keys, or every key for a session that reads every item. They are held in memory
+under `serve.masked_count_cache_bytes`, the least recently used leaving first. An eviction costs a
+refill and never changes an answer. A growth or a publication between compactions adds its rows to
+them in place. A flush adds none, since its rows are above the base, so an ingest window never
+refills them. A compaction rotates the bundle identity, which is part of their key, so the first
+read of each level after it walks again.
+
+They are also written to the cache directory, under `figures/` and then the bundle identity, in
+files named by a digest of what they describe and checked against a SHA-256 when they are read, so
+a torn or altered file is read as a miss. A restart reads them back instead of walking. The
+directory is held under `serve.figures_disk_bytes`, the files least recently written or read
+removed first, and the directory of a bundle identity a compaction has replaced is removed.
+
+D's correction is computed at the request's start from the labels and positions of the view's denied
+base rows, which the server holds per view and level and writes beside the counts. It is cached per
+deny version, a number per view that moves exactly when the denied rows below the base change: at a
+deny, a lift or a compaction, and never at an ingest or a flush. A request that starts after a
+suppression is accepted therefore reads a new correction. Where more than 4,096 of the view's denied
+base rows have no label held for a level, that request walks its whole visible set instead, and the
+labels are read in the background for the requests after it. T's correction is held per session and
+generation.
+
+The box of F less D is F's box unless a row D leaves out lies on one of its edges. For a layer that
+serves a box, each artifact with more than sixteen placed rows keeps its eight most extreme rows on
+each side, and the first of them D does not hold becomes the edge. Where D holds all eight on a
+side, or the artifact has no more than sixteen placed rows, its box is worked out from its member
+bitmap and the visible set.
+
+The walk is the cost a new grant pays. On GBIF's 3,495,729,729 occurrences, with 12 threads, under
+a 24 GB memory cap, starting with the bundle's pages out of memory and with the machine's
+one-minute load between 2 and 7, one fill of a level of its taxonomy layer, which serves a
+centroid and a box, measured:
+
+| viewer sees | rows walked | family | genus | species |
+|---|---:|---:|---:|---:|
+| 1% | 34,956,939 | 0.29 s | 0.24 s | 1.1 s |
+| 25% | 873,932,430 | 3.6 s | 2.2 s | 3.2 s |
+| all | 3,495,729,729 | 8.8 s | 10.7 s | 12.5 s |
+
+*One run each, from `probes/2026-10-06-first-open-fills/`. After a restart over the kept cache, the
+same requests filled nothing.*
+
+A grant pays the walk once per level, the first time it reads that level, and keeps the result
+across restarts until a compaction, or until the bound on the cache directory removes it. A
+deployment in which every user holds a grant of their own pays it once per user.
+
 ## What a client may already hold
 
-A response carries two keys and a generation name a client can compare against what it already holds.
+A response carries two keys and a generation name a client can compare against what it already
+holds.
 
 Whether a held answer may still be shown at all depends on the identity key, carried as
 `x-tessera-identity-key`. It is derived from the session's authorisation data, its visible set
@@ -251,7 +369,11 @@ kept authorised set and row arrangement, the background pass that keeps them cur
 wait-rather-than-refuse behaviour for a request racing a build already in progress live in
 `tessera-engine`'s `cache` and `refresh` modules and in the `tessera-cache` crate. Admission, the
 streaming transport and its deadlines, and the health and readiness routes live in
-`tessera-server`, in its `state`, `stream`, `viewer` and `health` modules. A bulk read's pages,
+`tessera-server`, in its `state`, `stream`, `viewer` and `health` modules. The artifacts of each
+tile are walked in `tessera-engine`'s `viewport::tiled` module and streamed by `tessera-server`'s
+`artifact_tiles` module. A level's figures, their cache and the files they are written to live in
+`tessera-engine`'s `figures` module, and the member bitmaps and coverings in `tessera-store`'s
+`row_members` module. A bulk read's pages,
 stretches and cursors live in `tessera-engine`'s `records` module, and its admission and streaming
 in `tessera-server`'s `records` module.
 
@@ -266,5 +388,7 @@ decisions 0058, 0059, 0060, 0061; `docs/system/write-path.md`; `docs/system/quer
 `docs/system/access-control.md`; `crates/tessera-server/src/health.rs`;
 `crates/tessera-server/src/viewer.rs`; `crates/tessera-server/src/state.rs`;
 `crates/tessera-server/src/error.rs`; `crates/tessera-engine/src/cache.rs`;
-`crates/tessera-engine/src/refresh.rs`; `crates/tessera-engine/src/single_flight.rs`;
-`crates/tessera-engine/src/viewport.rs`; `crates/tessera-wire/src/payload.rs`.
+`crates/tessera-engine/src/refresh.rs`; `crates/tessera-cache/`;
+`crates/tessera-engine/src/viewport/`; `crates/tessera-engine/src/figures/`;
+`crates/tessera-server/src/artifact_tiles.rs`; `crates/tessera-wire/src/payload.rs`;
+`probes/2026-10-06-first-open-fills/README.md`.

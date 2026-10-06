@@ -15,46 +15,52 @@ control plane's answers built with `json!`, and the Arrow-facing structs carry a
 every closed DTO is declared `additionalProperties: false`, and a field added to a response and
 not to the file fails the test rather than surfacing on a stranger's screen.
 
-What it can say only in prose: the `/v1/viewport` body is not JSON and is declared as
-`application/octet-stream` with the framing described beside it; and a `membership` or
+What it can say only in prose: the bodies of `/v1/viewport`, `/v1/artifacts/viewport`,
+`/v1/items`, `/v1/artifacts` and `/v1/aggregate` are not JSON, and are declared as
+`application/octet-stream` with the framing described beside them; and a `membership` or
 `arrow_type` value is engine-derived, so the description names its type and says the set is not
 enumerated there.
 
-A viewport request's `layers` omitted or `[]` means no layers, the string `"all"` means every
-layer the principal reaches, and an array means the named layers the principal reaches.
+`layers` omitted or `[]` means no layers, the string `"all"` means every layer the principal
+reaches, and an array means the named layers the principal reaches. On `/v1/viewport` the layers
+named tag the points; on `/v1/artifacts/viewport` they are the layers whose artifacts are served.
 
 ## The framing
 
 A `POST /v1/viewport` body is a sequence of frames, each `u8 kind`, `u32` little-endian payload
-length, payload. Every Arrow payload is a **complete IPC stream** — `pyarrow.ipc.open_stream`,
-Arrow JS's `tableFromIPC` and arrow-rs's `StreamReader` each consume one whole — and the trailer
-is JSON. A reader dispatches on `kind` without parsing any Arrow metadata.
+length, payload. Every Arrow payload is a **complete IPC stream**: `pyarrow.ipc.open_stream`,
+Arrow JS's `tableFromIPC` and arrow-rs's `StreamReader` each consume one whole. The trailer is
+JSON. A reader dispatches on `kind` without parsing any Arrow metadata.
 
 ```
-kind 1  tiles      exactly one, first        (tile: u64, visible: u64, matched: u64, served: u64)
+kind 1  tiles      exactly one, first        (tile: u64, visible: u64, matched: u64, served: u64, highlighted: u64)
 kind 2  sub-cells  exactly one iff requested (cell: u64, count: u64)
 kind 3  points     zero or more, whole tiles per frame; the frames concatenate
 kind 4  trailer    exactly one, last; JSON with exactly {stream_us, arrow_serialise_ns, points, flushes}
 ```
 
-Three rules a decoder must keep: **the trailer is the completeness signal** — a body without a
-trailing kind-4 frame is incomplete whatever the transport said, though every prefix is sound to
-draw, since the counts are exact from the first frame; **an unknown kind is an error, never
-skipped**; and **an artifacts frame of no rows carries no reason** — no layer reached, none in the
-tile, none clearing its criterion are one outcome by design.
-
-A `POST /v1/artifacts/viewport` body has the same framing: kind-5 artifacts frames, one for the
-nested and `dag` layers first where it holds a row and then exactly one per tile in the request's
-order, each with seventeen columns ending in `tile`, and a trailer of exactly `{stream_us,
-arrow_serialise_ns, rows, frames}`.
+A decoder keeps two rules. **The trailer is the completeness signal**: a body without a trailing
+kind-4 frame is incomplete whatever the transport said, though every prefix is sound to draw,
+since the counts are exact from the first frame. **An unknown kind is an error**, never skipped.
 
 The points batch is `(tessera_id: u64, code: u64, …render columns)`, the render columns in
 `/v1/meta`'s `declared_scalars` order, each named by its column. A render column is nullable: a
 point whose item has no value in it is null, and a zero is a value. A category is the exception:
 it has no nulls, and its code 0 means no value. `code` is the position: 32 bits
 per axis, Morton-interleaved; deinterleave and scale against `/v1/meta`'s `quantisation` to
-recover coordinates. `served` on the tiles batch is how many points each tile contributed, in
-order, which is how a reader splits the flat concatenation back into tiles.
+recover coordinates. A request with a `highlight` adds a `highlighted` bool after the render
+columns. Each layer the request names that serves an artifact holding a served point then adds a
+`membership:<layer>` column of `uint64`: the `tessera_id` of the deepest artifact of that layer the
+point belongs to and the principal is served, or null. `served` on the tiles batch is how many
+points each tile contributed, in order, which is how a reader splits the flat concatenation back
+into tiles.
+
+A `POST /v1/artifacts/viewport` body has the same framing, with kind-5 artifacts frames: one for
+the nested and `dag` layers first, where it holds a row, and then exactly one for each tile, in the
+request's order with repeats removed. Each has seventeen columns ending in `tile`, which is null in
+the first. The trailer is exactly `{stream_us, arrow_serialise_ns, rows, frames}`. **A frame of no
+rows carries no reason**: no layer reached, none in the tile and none clearing its criterion are
+one outcome by design.
 
 ## The worked decodes
 
@@ -62,18 +68,17 @@ Two runnable examples, each importing nothing of Tessera's, each printing the fr
 and the first rows of every batch, and each tested over the same fixtures to the same answer
 (`clients/ts/wire-example/test/expected.json` is the shared answer sheet).
 
-**Python, with `pyarrow`** — `reference/examples/decode_viewport.py`:
+**Python, with `pyarrow`**: `reference/examples/decode_viewport.py`, here over a viewport body
+whose request named a layer:
 
 ```
-$ python3 reference/examples/decode_viewport.py clients/ts/core/test/fixtures/viewport-underlay.bin
-clients/ts/core/test/fixtures/viewport-underlay.bin: 9840 bytes, 4 frames
-  kind 1 tiles: 1160 B, 5 rows, columns ['tile', 'visible', 'matched', 'served']
-  kind 2 sub-cells: 776 B, 12 rows, columns ['cell', 'count']
-  kind 3 points: 7816 B, 48 rows, columns ['tessera_id', 'code', 'archive', ...]
-  kind 4 trailer: 68 B  {"arrow_serialise_ns":50857,"flushes":1,"points":48,"stream_us":319}
-first tiles rows: [{'tile': 1, 'visible': 1, 'matched': 1, 'served': 1}, ...]
-first sub-cells rows: [{'cell': 30, 'count': 1}, ...]
-first points rows: [{'tessera_id': 8549480826753018745, 'code': 2175375494116598736, ...}]
+$ python3 reference/examples/decode_viewport.py clients/ts/core/test/fixtures/viewport-membership.bin
+clients/ts/core/test/fixtures/viewport-membership.bin: 12068 bytes, 3 frames
+  kind 1 tiles: 1736 B, 15 rows, columns ['tile', 'visible', 'matched', 'served', 'highlighted']
+  kind 3 points: 10248 B, 255 rows, columns ['tessera_id', 'code', 'archive', 'primary_category', 'submitted_at', 'membership:clusters/kmeans']
+  kind 4 trailer: 69 B  {"arrow_serialise_ns":26507,"flushes":1,"points":255,"stream_us":758}
+first tiles rows: [{'tile': 0, 'visible': 86, 'matched': 86, 'served': 2, 'highlighted': 86}, {'tile': 1, 'visible': 2985, 'matched': 2985, 'served': 27, 'highlighted': 2985}, {'tile': 4, 'visible': 649, 'matched': 649, 'served': 7, 'highlighted': 649}]
+...
 ```
 
 The whole decoder is `split_frames` (the framing, no Arrow) and `decode_viewport` (one
@@ -81,27 +86,37 @@ The whole decoder is `split_frames` (the framing, no Arrow) and `decode_viewport
 `reference/tests/test_wire_example.py`; run `python3 -m pytest reference/tests/test_wire_example.py`.
 It skips, saying so, if `pyarrow` is not importable.
 
-**JavaScript, with `apache-arrow`** — `clients/ts/wire-example/src/decode-viewport.mjs`, its own
-workspace under `clients/ts` with no dependency on the client packages:
+**JavaScript, with `apache-arrow`**: `clients/ts/wire-example/src/decode-viewport.mjs`, its own
+workspace under `clients/ts` with no dependency on the client packages, here over a
+`POST /v1/artifacts/viewport` body:
 
 ```
 $ cd clients/ts/wire-example && node src/decode-viewport.mjs ../core/test/fixtures/viewport-artifacts.bin
-../core/test/fixtures/viewport-artifacts.bin: 4140 bytes, 3 frames
-  kind 1 tiles: 1416 B, 16 rows, columns [tile, visible, matched, served]
-  kind 5 artifacts: 2640 B, 4 rows, columns [layer, tessera_id, key, masked_count, centroid_x, ...]
-  kind 4 trailer: 69 B  {"arrow_serialise_ns":551286,"flushes":0,"points":0,"stream_us":9864}
-first tiles rows: [ { tile: '0', visible: '640', matched: '640', served: '0' }, ... ]
-first artifacts rows: [ { layer: 'clusters/kmeans-v2', tessera_id: '11158655851902647723', key: 'c-0000', masked_count: '2480', ... } ]
+../core/test/fixtures/viewport-artifacts.bin: 81754 bytes, 17 frames
+  kind 5 artifacts: 4936 B, 2 rows, columns [layer, tessera_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
+  kind 5 artifacts: 5320 B, 10 rows, columns [layer, tessera_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
+...
+  kind 5 artifacts: 2696 B, 0 rows, columns [layer, tessera_id, key, masked_count, centroid_x, centroid_y, box_min_x, box_min_y, box_max_x, box_max_y, content, parent_ids, rung, matched, highlighted, target, tile]
+...
+  kind 4 trailer: 69 B  {"arrow_serialise_ns":522516,"frames":16,"rows":114,"stream_us":2120}
+first tiles rows: []
+first artifacts rows: [
+  {
+    layer: 'clusters/kmeans',
+    tessera_id: '9805232920100346745',
+    key: 'km-000014',
+    masked_count: '571',
+...
 ```
 
-That fixture is a `k = 0` body: a tiles frame with `served = 0` everywhere, an artifacts frame,
-and no points frame. The `u64` columns come off
-Arrow JS as `BigInt` and are printed as decimal strings; a decoder that narrows a `tessera_id` to
-a JS `number` has already lost bits on this fixture's first id. Its test is
-`clients/ts/wire-example/test/decode.test.ts`, run by `bash scripts/check-clients.sh` with the rest of the client gate.
+That fixture answers a request for one layer of clusters at zoom 2 with a `per_tile` of 50. It holds one
+frame for each of the sixteen tiles, one of them empty, and no frame for nested or `dag` layers. The `u64` columns come off Arrow JS as `BigInt` and are printed as
+decimal strings; a decoder that narrows a `tessera_id` to a JS `number` has already lost bits on
+this fixture's first id. Its test is `clients/ts/wire-example/test/decode.test.ts`, run by
+`bash scripts/check-clients.sh` with the rest of the client gate.
 
-Both decoders are strict on purpose — a truncated body, a missing trailer and an unknown kind
-each raise — and both tests prove it on the fixtures.
+Both decoders are strict on purpose: a truncated body, a missing trailer and an unknown kind each
+raise, and both tests prove it on the fixtures.
 
 ## The items read
 
