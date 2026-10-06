@@ -751,10 +751,9 @@ pub fn containment(
 /// The pass's own report, printed where `report_attribute_coverage` prints — so both entry points
 /// into the build show it and neither has to reconstruct it.
 ///
-/// **Both figures, and only one of them decides.** The `everywhere` fraction is the trigger
-/// (`tessera_store::derived::ROW_MAJOR_EVERYWHERE_FRACTION`); blocks per artifact is decision
-/// 0092's (c) and is reported beside it, because it is what says how much *work* a membership is
-/// even now that it no longer says how far that work is spread.
+/// The `everywhere` fraction decides a treed or spatial level's layout
+/// (`tessera_store::derived::ROW_MAJOR_EVERYWHERE_FRACTION`), and blocks per artifact says how much
+/// work a membership is; both are reported for every level.
 pub fn report(pass: &ArtifactPass) {
     if pass.levels.is_empty() {
         return;

@@ -791,7 +791,12 @@ struct LayerBlock {
     levels: Vec<LevelBlock>,
     /// How the layer is stored for serving. `"rows"`: a set of rows per artifact. `"column"`: one
     /// artifact per row, for a level whose artifacts do not overlap. `"list"`: a list of
-    /// artifacts per row. Refused on an attribute membership.
+    /// artifacts per row. A layer declared `"column"` whose artifacts overlap is served as
+    /// `"rows"`. Without this key, a `flat`, `stacked` or `tiered` layer with an `enumerated`
+    /// membership is stored as `"column"` where a level's artifacts do not overlap and `"list"`
+    /// where they do; any other layer is stored as `"rows"`, unless a level holds at least 1,000
+    /// artifacts and a quarter of them are spread too widely for the map's index, when it takes
+    /// `"column"` or `"list"` the same way. Refused on an attribute membership.
     ///
     /// Default: chosen by the server, again at each compaction.
     #[serde(default)]

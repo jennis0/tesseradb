@@ -234,7 +234,8 @@ async function settled(since) {
 async function show(store, q, s) {
   const t0 = now();
   step = {id: s.id, ...s, t0};
-  store.setView({bbox: boxAt(q, s.centre, s.zoom), width: W, height: H});
+  // Map zoom 0 fits the extent's height, 512 world units, in H pixels.
+  store.setView({bbox: boxAt(q, s.centre, s.zoom), zoom: s.zoom + Math.log2(H / 512), width: W, height: H});
   const ok = await settled(t0);
   const requests = log.filter((r) => r.step === s.id);
   const rel = (r, field) => (r[field] === null || r[field] === undefined ? null : r.t0 - t0 + r[field]);

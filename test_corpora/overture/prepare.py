@@ -59,6 +59,13 @@ from ..common.timing import Steps
 RUNG = "overture"
 VINTAGE = "2026-08-19.0"
 
+#: Each place's country as an access label of one quoted term, trimmed as a credential's terms are,
+#: and null where the country is empty or blank. A few publisher-written countries hold spaces,
+#: quotes or `&` ("Navi Mumbai", "9 &10"), which an access expression reads as syntax; quoted, each
+#: is one term taken exactly as written.
+ACCESS_LABEL = r"""'"' || replace(replace(
+    NULLIF(regexp_replace(country, '^\s+|\s+$', '', 'g'), ''), '\', '\\'), '"', '\"') || '"'"""
+
 #: The subtypes whose division id is lifted out of the lineage into an indexed column, so that the
 #: same boundary can be asked for as an attribute membership as well as through the nested layer —
 #: which of the two the surface prefers is what the campaign plan wants measured at this rung.
@@ -403,6 +410,7 @@ def main() -> None:
         con.execute(
             f"""COPY (
                 SELECT entity_id, lon, lat, category_root, category, basic_category, country,
+                       {ACCESS_LABEL} AS access,
                        source_dataset, operating_status, confidence, update_time, name,
                        {", ".join(f"division_{s}" for s in COLUMN_SUBTYPES)}
                 FROM points ORDER BY entity_id

@@ -66,10 +66,13 @@ up is intra-file uniformity, over a file spanning a very narrow taxonomic range.
 
 ## The compartment is real, and every row carries a term
 
-`publisher` — the institution that published the occurrence record. **Owner ruling, 2026-09-03:** a
-row with no publisher carries `unpublished`, a key of the same closed vocabulary, rather than no
-term and the view's `public` default. So the access column is never empty, `point_visibility`'s
-`default` never fires, and **a principal holding no term sees nothing**. Written this way because
+`access` — the institution that published the occurrence record, its name trimmed and quoted as one
+term. The quotes are there because a name holds spaces and commas, which an access expression reads
+as syntax; a credential holds the bare name. `publisher` carries the same name unquoted, for the
+vocabulary, the attribute and the `publishers/source` layer. **Owner ruling, 2026-09-03:** a row
+with no publisher, or a blank one, carries `unpublished`, a key of the same closed vocabulary,
+rather than no term and the view's `public` default. So the access column is never empty,
+`point_visibility`'s `default` never fires, and **a principal holding no term sees nothing**. Written this way because
 the campaign's principal ladder starts at 1% of the corpus and cannot be composed under a floor
 every principal holds for free. Rung 4's `unlicensed` and rung 3's `unindexed` have the same shape
 and exist for the same reason.

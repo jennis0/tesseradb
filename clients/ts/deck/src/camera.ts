@@ -12,7 +12,7 @@ export type OrthographicCamera = {
 /**
  * Converts a deck.gl `OrthographicView` camera over the 512-unit world into the input
  * `store.setView` takes: the box the canvas covers, clamped to the world and converted to data
- * coordinates through the store's frame, and the canvas size.
+ * coordinates through the store's frame, the camera's zoom, and the canvas size.
  *
  * @param store - The store whose frame converts world units to data coordinates.
  * @param camera - The view state's `target` and `zoom`.
@@ -25,5 +25,5 @@ export function viewInputOf(store: Pick<Store, 'frame' | 'dataXY'>, camera: Orth
   const wb = worldBbox({target: [camera.target[0] ?? 0, camera.target[1] ?? 0], zoom: camera.zoom, width, height}, 1);
   const [x0, y0] = store.dataXY(wb[0], wb[1]);
   const [x1, y1] = store.dataXY(wb[2], wb[3]);
-  return {bbox: [x0, y0, x1, y1], width, height};
+  return {bbox: [x0, y0, x1, y1], zoom: camera.zoom, width, height};
 }

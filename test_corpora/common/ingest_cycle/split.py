@@ -190,6 +190,12 @@ def derive_ranks(rung: Path, out: Path) -> dict:
         else:
             labels = labels.cast(pa.string())
             unlabelled = entities.filter(pc.is_null(labels))
+        # A label of one quoted term counts under the bare term a credential holds.
+        quoted = pc.match_substring_regex(labels, r'^"([^"\\]|\\.)*"$')
+        bare = pc.replace_substring_regex(
+            pc.utf8_slice_codeunits(labels, 1, -1), r"\\(.)", r"\1"
+        )
+        labels = pc.if_else(quoted, bare, labels)
         pairs.append(pa.table({"entity": entities, "term": labels}).filter(pc.is_valid(labels)))
         if isinstance(default, str) and len(unlabelled):
             filled = pa.array([default] * len(unlabelled), pa.string())
