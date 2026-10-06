@@ -2907,12 +2907,21 @@ impl LayerRegistry {
         {
             return None;
         }
+        // A publication replayed over a manifest that already holds it puts each artifact back in
+        // its own slot, and an artifact does not overlap the one it replaces.
+        let replaced: BTreeSet<u32> = match record {
+            WalRecord::ArtifactPublish { artifacts, .. } => {
+                artifacts.iter().map(|a| a.ordinal).collect()
+            }
+            _ => BTreeSet::new(),
+        };
         let claimed = Claimed::of(store, layer, level, sets);
         let overlaps = !claimed.disjoint
             || (!claimed.members.is_empty()
-                && store
-                    .level(layer, level)
-                    .any(|(_, record)| store.members_of(record).intersect(&claimed.members)));
+                && store.level(layer, level).any(|(ordinal, record)| {
+                    !replaced.contains(&ordinal)
+                        && store.members_of(record).intersect(&claimed.members)
+                }));
         (overlaps && self.set_layout(layer, level, ServingLayout::RowMajorList))
             .then(|| (layer.clone(), level))
     }
