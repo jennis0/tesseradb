@@ -1,11 +1,14 @@
-import {describe, expect, it, vi} from 'vitest';
+import {tableFromIPC, tableToIPC} from 'apache-arrow';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
-import {createStore, type Store, type ViewInput} from '../src/store.js';
+import {createStore, type Store, type StoreOptions, type ViewInput} from '../src/store.js';
+import {setWorkerFactory} from '../src/decoder.js';
+import {FRAME_POINTS, FRAME_TRAILER, FrameReader} from '../src/frame.js';
 import type {FilterDraft} from '../src/filters.js';
 import {withMember} from '../src/members.js';
 import {artifactName} from '../src/names.js';
 import type {Artifact, Layer, MembershipColumn, Meta, ViewportArtifactsRequest, ViewportPart, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, tileAnswers, view, scalar, camera} from './support.js';
+import {FakeWorker, artifact, fakeClock, fixture, fakeScheduler, framed, layer, meta, response as responseOf, servedResult, tile, tileAnswers, view, scalar, camera, settle} from './support.js';
 import {dataToWorldXY, mortonOfTile, tileXY} from '../src/coords.js';
 import {worldBbox} from '../src/prefetch.js';
 import {tileRectOfBbox} from '../src/budget.js';
@@ -2588,5 +2591,120 @@ describe('a point request names the render columns the store reads', () => {
     const bands = store.get('marks').bands;
     expect(bands.length).toBeGreaterThan(0);
     for (const band of bands) expect('score' in band.scalars).toBe(true);
+  });
+});
+
+describe('a store closes only the client it built', () => {
+  const WIRE_META = fixture('meta.json');
+
+  /**
+   * `viewport-plain.bin` with its points sent in three frames of whole tiles, as the server flushes
+   * a large answer, so a failed decode leaves later frames' decodes still in flight.
+   */
+  const VIEWPORT = (() => {
+    const [tiles, points, trailer] = new FrameReader().push(fixture('viewport-plain.bin'));
+    const served = [...tableFromIPC(tiles!.payload).getChild('served')!].map(Number);
+    const rows = tableFromIPC(points!.payload);
+    const cuts = [0];
+    let at = 0;
+    for (const n of served) {
+      at += n;
+      if (at >= (rows.numRows * cuts.length) / 3 && cuts.length < 3) cuts.push(at);
+    }
+    cuts.push(rows.numRows);
+    const parts = cuts.slice(1).map((end, i) => ({kind: FRAME_POINTS, payload: tableToIPC(rows.slice(cuts[i], end), 'stream')}));
+    const totals = {...JSON.parse(new TextDecoder().decode(trailer!.payload)), flushes: parts.length};
+    return framed([tiles!, ...parts, {kind: FRAME_TRAILER, payload: new TextEncoder().encode(JSON.stringify(totals))}]);
+  })();
+
+  /** Answers `/v1/meta` and `/v1/viewport`, and refuses every other route. */
+  const fetch = (async (url: string) => {
+    if (url.endsWith('/v1/meta')) return new Response(WIRE_META, {headers: {'content-type': 'application/json'}});
+    if (url.endsWith('/v1/viewport')) return new Response(VIEWPORT.slice(), {headers: {etag: '"ck"', 'x-tessera-identity-key': 'ik'}});
+    return new Response('{}', {status: 404});
+  }) as typeof globalThis.fetch;
+
+  let workers: FakeWorker[];
+  let unhandled: unknown[];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+
+  beforeEach(() => {
+    workers = [];
+    unhandled = [];
+    vi.stubGlobal('Worker', FakeWorker);
+    // Workers that never load until the test says, so every decode is held in flight.
+    setWorkerFactory(() => {
+      const w = new FakeWorker();
+      workers.push(w);
+      return w as unknown as Worker;
+    });
+    process.on('unhandledRejection', onUnhandled);
+  });
+
+  afterEach(() => {
+    process.off('unhandledRejection', onUnhandled);
+    setWorkerFactory(null);
+    vi.unstubAllGlobals();
+  });
+
+  /** A store drawing the whole view, with its first decode held in a worker that has not loaded. */
+  async function drawing(options: Pick<StoreOptions, 'client' | 'clientOptions'>) {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', ...options, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    store.setView(camera({xMin: 0, xMax: 1000, yMin: 0, yMax: 1000}, [0, 0, 1000, 1000], 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    return {store, clock, scheduler};
+  }
+
+  const points = (store: Store) => store.get('marks').bands.reduce((n, band) => n + band.ids.length, 0);
+
+  it('leaves a shared client open when one of its stores is replaced mid-decode, and the other store draws', async () => {
+    const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch});
+    const other = await drawing({client});
+    const replaced = await drawing({client});
+    expect(workers.length).toBeGreaterThan(0);
+    expect(points(other.store)).toBe(0);
+
+    replaced.store.dispose();
+    const replacement = await drawing({client});
+    for (const w of workers) w.load();
+    await other.clock.advance(1_000);
+    other.scheduler.flush();
+    await replacement.clock.advance(1_000);
+    replacement.scheduler.flush();
+
+    expect(unhandled).toEqual([]);
+    expect(points(other.store)).toBeGreaterThan(0);
+    expect(points(replacement.store)).toBeGreaterThan(0);
+    expect(points(replaced.store)).toBe(0);
+    expect(workers.some((w) => w.terminated)).toBe(false);
+    other.store.dispose();
+    replacement.store.dispose();
+  });
+
+  it('closes the client it built, with a decode in flight, and leaves no unhandled rejection', async () => {
+    const {store, clock} = await drawing({clientOptions: {sessionUrl: '', fetch}});
+    expect(workers.length).toBeGreaterThan(0);
+    store.dispose();
+    await clock.advance(1_000);
+    expect(workers.every((w) => w.terminated)).toBe(true);
+    expect(points(store)).toBe(0);
+    expect(unhandled).toEqual([]);
+  });
+
+  it('leaves a passed client usable once the store that used it is disposed', async () => {
+    const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch});
+    const {store} = await drawing({client});
+    store.dispose();
+    const asked = client.viewport('tok', {view: 's0', zoom: 0, k: 100});
+    await settle();
+    for (const w of workers) w.load();
+    const answer = await asked;
+    expect(answer.result.ids.length).toBeGreaterThan(0);
+    expect(workers.some((w) => w.terminated)).toBe(false);
+    expect(unhandled).toEqual([]);
   });
 });

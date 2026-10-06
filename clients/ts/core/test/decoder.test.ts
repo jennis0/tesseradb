@@ -3,33 +3,9 @@ import {join} from 'node:path';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {decodeViewport} from '../src/decode.js';
 import {setWorkerFactory, workerDecoder} from '../src/decoder.js';
+import {FakeWorker} from './support.js';
 
 const body = () => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-plain.bin')));
-
-/**
- * A worker that answers like the real one: `ready` when told to load, then each request decoded
- * in-process. `fail()` fires the worker's error event.
- */
-class FakeWorker {
-  onmessage: ((event: {data: unknown}) => void) | null = null;
-  onerror: ((event: unknown) => void) | null = null;
-  received = 0;
-  terminated = false;
-  load(): void {
-    this.onmessage?.({data: {ready: true}});
-  }
-  fail(): void {
-    this.onerror?.({message: undefined});
-  }
-  postMessage(message: {id: number; bytes: ArrayBuffer}): void {
-    this.received++;
-    const result = decodeViewport(new Uint8Array(message.bytes));
-    queueMicrotask(() => this.onmessage?.({data: {id: message.id, result, ms: 1}}));
-  }
-  terminate(): void {
-    this.terminated = true;
-  }
-}
 
 let workers: FakeWorker[];
 

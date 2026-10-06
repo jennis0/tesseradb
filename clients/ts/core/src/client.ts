@@ -699,6 +699,8 @@ export class TesseraClient {
     let abandoned = false;
 
     const deliver = (decoding: Promise<PointsPart>) => {
+      // Awaited only when the chain reaches it, which is never once an earlier frame has failed.
+      decoding.catch(() => {});
       delivering = delivering.then(async () => {
         const part = await decoding;
         // Read here: the decoder reports the last reply's time.
@@ -840,6 +842,8 @@ export class TesseraClient {
     // Frames are decoded in the lanes in turn and handed over in wire order by awaiting each in turn.
     let delivering: Promise<void> = Promise.resolve();
     const deliver = (decoding: Promise<ArtifactsFramePart>, first: boolean) => {
+      // Awaited only when the chain reaches it, which is never once an earlier frame has failed.
+      decoding.catch(() => {});
       delivering = delivering.then(async () => {
         const part = await decoding;
         const frameMs = decoder.lastWorkerMs;

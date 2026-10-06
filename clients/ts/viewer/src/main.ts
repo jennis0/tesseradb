@@ -537,6 +537,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
   dataStore?.dispose();
   dataStore = null;
   opened = null;
+  // The stores opened on this client leave it open; it is closed here, once none is left.
   client?.close();
   presets = dataset.presets;
 
