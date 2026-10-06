@@ -1786,6 +1786,172 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
     assert!(engine.columns_composed() >= 1);
 }
 
+/// **Over the whole visible set a column level's counts are its figures, and over a filter that
+/// admits every item they are counted from the rows**: the two serve the oracle's table, its listed
+/// artifacts, the rest, none and the whole visible set as the reference, for the label and the
+/// list column, top and named, read whole and a row a page, with built items suppressed,
+/// an artifact whose members are all suppressed, and artifacts holding items ingested and flushed
+/// since the build.
+#[test]
+fn a_column_level_counts_the_whole_set_as_it_counts_the_same_set_filtered() {
+    use tessera_types::layer::ServingLayout;
+    let mut fx = fixture();
+    fx.engine.set_background_refresh_for_test(true);
+    let session = fx.session(true);
+    ingest_items(&mut fx, 60, "joined");
+    flush_and_show(&mut fx, &session);
+    let map = source_to_new_map(&fx.root, "v00000");
+    let mut ingested: Vec<(u64, u64)> = fx
+        .ingested
+        .iter()
+        .map(|(&entity, &at)| (fx.items[at].source, entity))
+        .collect();
+    ingested.sort_unstable();
+    let entity_of = |source: u64| match map.get(&source) {
+        Some(&entity) => entity,
+        None => ingested[ingested.binary_search_by_key(&source, |p| p.0).unwrap()].1,
+    };
+    let joined: Vec<u64> = ingested.iter().map(|&(source, _)| source).collect();
+    let disjoint: Vec<(&str, Vec<u64>)> = vec![
+        ("a", (0..800).chain(joined[..30].iter().copied()).collect()),
+        ("b", (800..1600).collect()),
+        ("c", (1600..2000).chain(joined[30..].iter().copied()).collect()),
+        ("e", vec![2500, 2501]),
+    ];
+    let mut overlapping = disjoint.clone();
+    overlapping.push(("d", (700..900).chain(joined[20..40].iter().copied()).collect()));
+    let suppressed = [3u64, 5, 801, 1650, 1999, 2500, 2501];
+    for s in suppressed {
+        let entity = item_of_id(&fx.engine, s).unwrap().expect("a built item");
+        fx.engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+    }
+    for (name, layout, planted) in [
+        ("topics/label", ServingLayout::RowMajorLabel, &disjoint),
+        ("topics/list", ServingLayout::RowMajorList, &overlapping),
+    ] {
+        fx.engine.register_layer(declaration(name, layout)).unwrap();
+        let artifacts = planted
+            .iter()
+            .map(|(key, members)| {
+                let mut artifact = tessera_lifecycle::IncomingArtifact::from_entities(
+                    Some(key.to_string()),
+                    members
+                        .iter()
+                        .map(|&s| tessera_types::EntityId::new(entity_of(s)))
+                        .collect::<Vec<_>>(),
+                );
+                artifact.access = Some(Vec::new());
+                artifact
+            })
+            .collect();
+        let ids = fx
+            .engine
+            .publish_artifacts(name.into(), 0, artifacts)
+            .unwrap();
+        tick(&fx.engine);
+        assert_eq!(fx.engine.recorded_layout(name, 0), Some(layout));
+        let visible: std::collections::HashSet<u64> = fx
+            .visible(true, &|i| !suppressed.contains(&i.source))
+            .map(|i| i.source)
+            .collect();
+        let in_any = |s: &u64, keys: &[&str]| {
+            planted
+                .iter()
+                .any(|(key, members)| keys.contains(key) && members.contains(s))
+        };
+        let mut ranked: Vec<(u64, String, &str)> = planted
+            .iter()
+            .zip(&ids)
+            .map(|((key, members), id)| {
+                let count = members.iter().filter(|s| visible.contains(s)).count() as u64;
+                (count, id.raw().to_string(), *key)
+            })
+            .filter(|(count, _, _)| *count > 0)
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let groups = ranked.len() as u64;
+        let all: Vec<&str> = planted.iter().map(|(key, _)| *key).collect();
+        let top: Vec<&str> = ranked.iter().take(2).map(|(_, _, key)| *key).collect();
+        let rest = visible
+            .iter()
+            .filter(|s| in_any(s, &all) && !in_any(s, &top))
+            .count() as u64;
+        let none = visible.iter().filter(|s| !in_any(s, &all)).count() as u64;
+        let mut want: Vec<(String, Option<String>, u64, Option<u64>)> = ranked
+            .iter()
+            .take(2)
+            .map(|(count, id, _)| ("listed".to_string(), Some(id.clone()), *count, Some(*count)))
+            .collect();
+        for (group, count) in [("rest", rest), ("none", none)] {
+            if count > 0 {
+                want.push((group.to_string(), None, count, Some(count)));
+            }
+        }
+        let groupings = [layer(name, Pick::Top(2))];
+        let served = |filter: Option<FilterExpr>| {
+            let mut req = request(&groupings);
+            req.filter = filter.clone();
+            req.reference = Some(Reference::Visible);
+            let (head, rows) = table(&fx.engine, &session, req);
+            let rows: Vec<(String, Option<String>, u64, Option<u64>)> = rows
+                .into_iter()
+                .map(|r| (r.group.unwrap(), r.key, r.count, r.reference))
+                .collect();
+            (head.groups, rows)
+        };
+        let expected = (Some(groups), want);
+        assert_eq!(served(None), expected, "{name}: the whole set");
+        assert_eq!(
+            served(Some(FilterExpr::AllOf(Vec::new()))),
+            expected,
+            "{name}: a filter admitting every item"
+        );
+
+        // Named artifacts, among them the one whose members are all suppressed, and each table
+        // read a row a page through its cursor: the two paths agree, and a named artifact's count
+        // is the oracle's.
+        let at = |key: &str| planted.iter().position(|(k, _)| *k == key).unwrap();
+        let named = [layer(name, Pick::Named(vec![ids[at("e")], ids[at("c")], ids[at("a")]]))];
+        let read = |groupings: &[Grouping], filter: Option<FilterExpr>, paged: bool| {
+            let mut req = request(groupings);
+            req.filter = filter;
+            req.reference = Some(Reference::Visible);
+            if paged {
+                req.page_rows = Some(1);
+                req.pages = Some(1);
+            }
+            read_all(&fx.engine, &session, req)[&0]
+                .1
+                .iter()
+                .map(|r| (r.group.clone().unwrap(), r.key.clone(), r.count, r.reference))
+                .collect::<Vec<_>>()
+        };
+        for (what, groupings) in [("named", &named[..]), ("top", &groupings[..])] {
+            let whole = read(groupings, None, false);
+            for (filter, paged) in [
+                (None, true),
+                (Some(FilterExpr::AllOf(Vec::new())), false),
+                (Some(FilterExpr::AllOf(Vec::new())), true),
+            ] {
+                assert_eq!(
+                    read(groupings, filter.clone(), paged),
+                    whole,
+                    "{name}, {what}: filtered {}, paged {paged}",
+                    filter.is_some()
+                );
+            }
+        }
+        for (_, key, count, _) in read(&named, None, false) {
+            if let Some(key) = key {
+                let (_, members) = &planted[ids.iter().position(|id| id.raw().to_string() == key).unwrap()];
+                let want = members.iter().filter(|s| visible.contains(s)).count() as u64;
+                assert_eq!(count, want, "{name}: named {key}");
+            }
+        }
+    }
+    assert_eq!(fx.engine.layout_fallbacks(), 0, "both levels kept their column");
+}
+
 /// **A `member_of` filter's set is what the viewport and items count**, and a layer this viewer
 /// does not reach is refused as an unknown layer.
 #[test]

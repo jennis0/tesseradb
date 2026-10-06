@@ -78,8 +78,7 @@ pub enum MembershipSource {
     Attribute(String),
 }
 
-/// How a level's membership is **stored and scanned** at serving time
-/// ([decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+/// How a level's membership is **stored and scanned** at serving time.
 ///
 /// **Not a contract, and nothing on the wire names one.** Both forms answer identically — the same
 /// served set, the same counts, the same ranks and parents — so no request field selects one, no
@@ -108,8 +107,8 @@ pub enum ServingLayout {
     /// index's walk, then the extent test, then the composed probe at the viewport's edge; the
     /// count is `|membership ∩ M_auth|` per served artifact.
     ///
-    /// **The default, and deliberately so.** It is the form every derived structure already exists
-    /// for, and the automatic pick is conservative in its direction (`tessera_engine::layout`).
+    /// The default: what a treed or spatial level is served in until its observed shape says
+    /// otherwise (`tessera_store::derived::choose`).
     #[default]
     ArtifactMajor,
     /// One artifact label per **row**, for a level whose memberships partition the corpus.
@@ -678,19 +677,14 @@ pub struct LayerDeclaration {
     /// Empty for a treed or flat layer.
     #[serde(default)]
     pub levels: Vec<LevelDeclaration>,
-    /// **The layout pin**: serve every level of this layer in the named form, at the build and at
-    /// every fold after it. `None` — the automatic pick, which is the normal state.
+    /// The layout pin: serve every level of this layer in the named form, at the build and at
+    /// every fold after it. `None` is the automatic pick: a column for a layer with stored
+    /// memberships answered tile by tile ([`LayerDeclaration::served_from_a_column`]), and for any
+    /// other layer the form its observed spread chooses (`tessera_store::derived::choose`).
     ///
-    /// **`#[serde(default)]`, and that is not the register's exception being taken lightly.** The
-    /// two fields with no default are disclosure controls whose absent value would be a grant (C27,
-    /// C28). A layout is neither: both forms compute the same quantities from inside `M_auth`, no
-    /// request field names one and no response reports one, so a declaration that omits this is a
-    /// declaration that has no opinion about storage — which is a complete statement rather than an
-    /// unfilled one.
-    ///
-    /// **An override a fold could overturn is not an override** (decision 0094). A pinned layer is
-    /// rebuilt in its declared form at every fold, and the observations the automatic pick *would*
-    /// have read are recorded beside it so an operator can see what they were.
+    /// Defaults to `None`: both forms compute the same quantities from inside the viewer's visible
+    /// set and no request or response names one, so a declaration that omits it says nothing about
+    /// access. A fold never overturns a pin; it records the observations beside it.
     #[serde(default)]
     pub layout: Option<ServingLayout>,
     /// **What kind of shape a `membership = "spatial"` layer's artifacts carry.**
@@ -972,19 +966,17 @@ pub struct RegisteredLayer {
     /// Bumped by any edit that changes who may reach this layer, so a session's cached resolution
     /// is invalidated rather than outliving the gate it was computed from.
     pub version: u64,
-    /// The serving layout **per level**, parallel to [`RegisteredLayer::runs`] — decision 0094's
-    /// record.
+    /// The serving layout **per level**, parallel to [`RegisteredLayer::runs`].
     ///
-    /// Set at registration from the pin, or [`ServingLayout::ArtifactMajor`] where there is none: a
-    /// level with no artifacts has no shape to observe, and the conservative pick is the form every
-    /// derived structure already exists for. **Re-evaluated inside every fold's artifact pass**,
-    /// before the registry snapshot the manifest is written from, so the record and the files the
-    /// same fold wrote cannot disagree.
+    /// Set at registration by [`RegisteredLayer::initial_layouts`], and kept when a replay applies
+    /// the registration again over a manifest that recorded it. **Re-evaluated inside every fold's
+    /// artifact pass**, before the registry snapshot the manifest is written from, so the record
+    /// and the files the same fold wrote cannot disagree.
     ///
-    /// **A flip does not bump [`RegisteredLayer::version`]** (selection memo §5). That version gates
-    /// reachability and is a fail-closed guard against a reader holding a stale idea of a layer;
-    /// a layout is not a client-visible fact, so bumping it would make every session re-resolve a
-    /// layer for a change none of them can observe.
+    /// **A flip does not bump [`RegisteredLayer::version`].** That version gates reachability and
+    /// is a fail-closed guard against a reader holding a stale idea of a layer; a layout is not a
+    /// client-visible fact, so bumping it would make every session re-resolve a layer for a change
+    /// none of them can observe.
     ///
     /// Shorter than `runs` is read as [`ServingLayout::ArtifactMajor`] for the levels past its end
     /// — see [`RegisteredLayer::layout_of`] — which is the fail-safe direction: the worst outcome
@@ -1002,23 +994,18 @@ impl RegisteredLayer {
             .unwrap_or_default()
     }
 
-    /// The record every level of a freshly registered layer starts at: the form the membership
-    /// forces where it forces one, the pin where there is one, and artifact-major otherwise.
-    ///
-    /// **An attribute layer's form is not a pick and not a pin**: its membership *is* the column,
-    /// so there is no alternative to be chosen between — which is why `validate` refuses a pin on
-    /// it and why the fold's re-evaluation leaves it alone. A spatial layer's membership is
-    /// resolved into a per-row source at every publication of a segment, so it is picked and
-    /// pinned exactly as an enumerated layer's is.
+    /// The record every level of a freshly registered layer starts at, before any membership has
+    /// been observed: the declaration's own layout where it fixes one
+    /// ([`LayerDeclaration::fixed_layout`]), the list column for a layer served from a column
+    /// ([`LayerDeclaration::served_from_a_column`]), and artifact-major otherwise. The list form
+    /// holds any membership, so nothing published before the next fold can be refused it; that fold
+    /// observes whether the memberships are disjoint and records the label form where they are.
     pub fn initial_layouts(declaration: &LayerDeclaration) -> Vec<ServingLayout> {
-        let forced = match declaration.membership {
-            // **The membership is the column** (`design/artifact-serving-at-scale.md` §5.1): a
-            // single-valued attribute partitions the corpus, so one label per row is the only form
-            // its membership has — there is no per-artifact bitmap to fall back to.
-            MembershipSource::Attribute(_) => Some(ServingLayout::RowMajorLabel),
-            MembershipSource::Spatial | MembershipSource::Enumerated => None,
+        let automatic = match declaration.served_from_a_column() {
+            true => ServingLayout::RowMajorList,
+            false => ServingLayout::ArtifactMajor,
         };
-        vec![forced.or(declaration.layout).unwrap_or_default(); declaration.run_count()]
+        vec![declaration.fixed_layout().unwrap_or(automatic); declaration.run_count()]
     }
 }
 
@@ -1441,6 +1428,29 @@ impl LayerDeclaration {
     /// somewhere is level 0.
     pub fn run_count(&self) -> usize {
         self.levels.len().max(1)
+    }
+
+    /// The layout this declaration settles whatever the memberships look like: the label column
+    /// for an attribute membership, which is one label per row and has no other form, and
+    /// otherwise the pin, if there is one.
+    pub fn fixed_layout(&self) -> Option<ServingLayout> {
+        match self.membership {
+            MembershipSource::Attribute(_) => Some(ServingLayout::RowMajorLabel),
+            MembershipSource::Spatial | MembershipSource::Enumerated => self.layout,
+        }
+    }
+
+    /// Whether every level of this layer is served from a column unless a pin says otherwise: a
+    /// stored membership on a layer whose levels are answered tile by tile (`flat`, `stacked`,
+    /// `tiered`). The column's member bitmaps and coverings are what propose a tile's candidates;
+    /// without them each tile probes every artifact the tile index cannot place. The label form
+    /// where the memberships are disjoint, the list form where they overlap.
+    pub fn served_from_a_column(&self) -> bool {
+        matches!(self.membership, MembershipSource::Enumerated)
+            && matches!(
+                self.hierarchy.kind,
+                HierarchyKind::Flat | HierarchyKind::Stacked | HierarchyKind::Tiered
+            )
     }
 
     /// What a **list** of keys naming this layer's artifacts means, position by position
@@ -2054,14 +2064,32 @@ mod tests {
         }
     }
 
-    /// A layer with no pin records artifact-major for every level it declares — one entry per
-    /// level, and one for a layer that declares none.
+    /// A layer with no pin records one entry per level it declares, and one for a layer that
+    /// declares none: the list column for a stored membership answered tile by tile, and
+    /// artifact-major for a treed one.
     #[test]
     fn the_initial_record_is_one_entry_per_level() {
         let flat = decl(HierarchyKind::Flat, vec![]);
         assert_eq!(
             RegisteredLayer::initial_layouts(&flat),
+            vec![ServingLayout::RowMajorList]
+        );
+        let tiered = decl(HierarchyKind::Tiered, vec![0, 1]);
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&tiered),
+            vec![ServingLayout::RowMajorList; 2]
+        );
+        let nested = decl(HierarchyKind::Nested, vec![]);
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&nested),
             vec![ServingLayout::ArtifactMajor]
+        );
+        let mut pinned = decl(HierarchyKind::Flat, vec![]);
+        pinned.layout = Some(ServingLayout::ArtifactMajor);
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&pinned),
+            vec![ServingLayout::ArtifactMajor],
+            "a pin to rows holds"
         );
         let mut stacked = decl(HierarchyKind::Stacked, vec![0, 1, 2]);
         stacked.layout = Some(ServingLayout::RowMajorList);

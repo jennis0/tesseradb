@@ -1,0 +1,3286 @@
+{
+ "binary": "/home/joe/code/tessera/.claude/worktrees/species-tiles/target/release/tessera",
+ "per_tile": 50,
+ "rows": [
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 0,
+   "ms": 130.8,
+   "bytes": 219413,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 3211,
+     "ns_overlap": 23205276,
+     "n_cand": 12588,
+     "ns_heap": 185849,
+     "n_heap": 12525,
+     "ns_admitted": 420660,
+     "n_admitted_calls": 7848,
+     "n_popped": 7848,
+     "ns_presence": 589557,
+     "n_probes": 170,
+     "n_probe_hits": 158,
+     "n_scans": 21,
+     "ns_scan": 115530,
+     "ns_bits": 6071,
+     "ns_assemble": 436197,
+     "n_chosen": 736,
+     "n_tile_levels": 21,
+     "n_overlap_raw": 12589,
+     "n_window": 17394,
+     "ns_level_pass": 100296872,
+     "n_scan_rows": 7918,
+     "n_admit_new": 655
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 48393,
+     "ns_pre": 102553136,
+     "ns_settle": 206583,
+     "ns_frame": 1681900,
+     "ns_total": 129992033,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 1,
+   "ms": 5.6,
+   "bytes": 219411,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 3003,
+     "ns_overlap": 590059,
+     "n_cand": 12588,
+     "ns_heap": 180879,
+     "n_heap": 12525,
+     "ns_admitted": 404163,
+     "n_admitted_calls": 7848,
+     "n_popped": 7848,
+     "ns_presence": 451794,
+     "n_probes": 170,
+     "n_probe_hits": 158,
+     "n_scans": 21,
+     "ns_scan": 115525,
+     "ns_bits": 5322,
+     "ns_assemble": 379819,
+     "n_chosen": 736,
+     "n_tile_levels": 21,
+     "n_overlap_raw": 12589,
+     "n_window": 17394,
+     "ns_level_pass": 17756,
+     "n_scan_rows": 7918,
+     "n_admit_new": 655
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 38610,
+     "ns_pre": 56488,
+     "ns_settle": 191787,
+     "ns_frame": 1599932,
+     "ns_total": 4531754,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 2,
+   "ms": 5.0,
+   "bytes": 219411,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 2885,
+     "ns_overlap": 581170,
+     "n_cand": 12588,
+     "ns_heap": 160307,
+     "n_heap": 12525,
+     "ns_admitted": 403357,
+     "n_admitted_calls": 7848,
+     "n_popped": 7848,
+     "ns_presence": 444381,
+     "n_probes": 170,
+     "n_probe_hits": 158,
+     "n_scans": 21,
+     "ns_scan": 114183,
+     "ns_bits": 5445,
+     "ns_assemble": 350141,
+     "n_chosen": 736,
+     "n_tile_levels": 21,
+     "n_overlap_raw": 12589,
+     "n_window": 17394,
+     "ns_level_pass": 13938,
+     "n_scan_rows": 7918,
+     "n_admit_new": 655
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 36815,
+     "ns_pre": 56012,
+     "ns_settle": 187576,
+     "ns_frame": 1461511,
+     "ns_total": 4321169,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 3,
+   "ms": 5.0,
+   "bytes": 219411,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 2864,
+     "ns_overlap": 608215,
+     "n_cand": 12588,
+     "ns_heap": 163479,
+     "n_heap": 12525,
+     "ns_admitted": 383387,
+     "n_admitted_calls": 7848,
+     "n_popped": 7848,
+     "ns_presence": 423339,
+     "n_probes": 170,
+     "n_probe_hits": 158,
+     "n_scans": 21,
+     "ns_scan": 109744,
+     "ns_bits": 5369,
+     "ns_assemble": 340141,
+     "n_chosen": 736,
+     "n_tile_levels": 21,
+     "n_overlap_raw": 12589,
+     "n_window": 17394,
+     "ns_level_pass": 10941,
+     "n_scan_rows": 7918,
+     "n_admit_new": 655
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 37302,
+     "ns_pre": 36184,
+     "ns_settle": 186311,
+     "ns_frame": 1497160,
+     "ns_total": 4312823,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 392.4,
+   "bytes": 231957,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 2871,
+     "ns_overlap": 64542603,
+     "n_cand": 10234,
+     "ns_heap": 187069,
+     "n_heap": 10192,
+     "ns_admitted": 430867,
+     "n_admitted_calls": 6311,
+     "n_popped": 6311,
+     "ns_presence": 404085,
+     "n_probes": 114,
+     "n_probe_hits": 96,
+     "n_scans": 21,
+     "ns_scan": 109327,
+     "ns_bits": 6254,
+     "ns_assemble": 463049,
+     "n_chosen": 737,
+     "n_tile_levels": 21,
+     "n_overlap_raw": 10242,
+     "n_window": 14142,
+     "ns_level_pass": 323175272,
+     "n_scan_rows": 7918,
+     "n_admit_new": 553
+    },
+    "s3": {
+     "ns_tile_sets": 47134,
+     "ns_pre": 323200384,
+     "ns_settle": 201576,
+     "ns_frame": 1574606,
+     "ns_total": 391607096,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 4.9,
+   "bytes": 231955,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 2961,
+     "ns_overlap": 475504,
+     "n_cand": 10234,
+     "ns_heap": 159644,
+     "n_heap": 10192,
+     "ns_admitted": 400809,
+     "n_admitted_calls": 6311,
+     "n_popped": 6311,
+     "ns_presence": 337976,
+     "n_probes": 114,
+     "n_probe_hits": 96,
+     "n_scans": 21,
+     "ns_scan": 111781,
+     "ns_bits": 5267,
+     "ns_assemble": 374933,
+     "n_chosen": 737,
+     "n_tile_levels": 21,
+     "n_overlap_raw": 10242,
+     "n_window": 14142,
+     "ns_level_pass": 15310,
+     "n_scan_rows": 7918,
+     "n_admit_new": 553
+    },
+    "s3": {
+     "ns_tile_sets": 37648,
+     "ns_pre": 59410,
+     "ns_settle": 188808,
+     "ns_frame": 1490312,
+     "ns_total": 4070263,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 4.7,
+   "bytes": 231955,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 2722,
+     "ns_overlap": 464115,
+     "n_cand": 10234,
+     "ns_heap": 156703,
+     "n_heap": 10192,
+     "ns_admitted": 377136,
+     "n_admitted_calls": 6311,
+     "n_popped": 6311,
+     "ns_presence": 335089,
+     "n_probes": 114,
+     "n_probe_hits": 96,
+     "n_scans": 21,
+     "ns_scan": 109101,
+     "ns_bits": 5348,
+     "ns_assemble": 353938,
+     "n_chosen": 737,
+     "n_tile_levels": 21,
+     "n_overlap_raw": 10242,
+     "n_window": 14142,
+     "ns_level_pass": 12986,
+     "n_scan_rows": 7918,
+     "n_admit_new": 553
+    },
+    "s3": {
+     "ns_tile_sets": 37493,
+     "ns_pre": 52305,
+     "ns_settle": 187509,
+     "ns_frame": 1529471,
+     "ns_total": 4060256,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 5.2,
+   "bytes": 231955,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 3023,
+     "ns_overlap": 559183,
+     "n_cand": 10234,
+     "ns_heap": 186784,
+     "n_heap": 10192,
+     "ns_admitted": 435646,
+     "n_admitted_calls": 6311,
+     "n_popped": 6311,
+     "ns_presence": 371394,
+     "n_probes": 114,
+     "n_probe_hits": 96,
+     "n_scans": 21,
+     "ns_scan": 126285,
+     "ns_bits": 7273,
+     "ns_assemble": 432375,
+     "n_chosen": 737,
+     "n_tile_levels": 21,
+     "n_overlap_raw": 10242,
+     "n_window": 14142,
+     "ns_level_pass": 12071,
+     "n_scan_rows": 7918,
+     "n_admit_new": 553
+    },
+    "s3": {
+     "ns_tile_sets": 41726,
+     "ns_pre": 50075,
+     "ns_settle": 202951,
+     "ns_frame": 1585287,
+     "ns_total": 4465316,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 0,
+   "ms": 37.5,
+   "bytes": 1883253,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 23769,
+     "ns_overlap": 4290331,
+     "n_cand": 101258,
+     "ns_heap": 1270670,
+     "n_heap": 100745,
+     "ns_admitted": 3179788,
+     "n_admitted_calls": 95721,
+     "n_popped": 95721,
+     "ns_presence": 2904773,
+     "n_probes": 48,
+     "n_probe_hits": 25,
+     "n_scans": 171,
+     "ns_scan": 237254,
+     "ns_bits": 36621,
+     "ns_assemble": 1226533,
+     "n_chosen": 1962,
+     "n_tile_levels": 171,
+     "n_overlap_raw": 101258,
+     "n_window": 140014,
+     "ns_level_pass": 14610,
+     "n_scan_rows": 6975,
+     "n_admit_new": 704
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 315395,
+     "ns_pre": 80937,
+     "ns_settle": 715362,
+     "ns_frame": 14698379,
+     "ns_total": 35743202,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 1,
+   "ms": 37.3,
+   "bytes": 1883253,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 24118,
+     "ns_overlap": 4254639,
+     "n_cand": 101258,
+     "ns_heap": 1285748,
+     "n_heap": 100745,
+     "ns_admitted": 3205765,
+     "n_admitted_calls": 95721,
+     "n_popped": 95721,
+     "ns_presence": 2694634,
+     "n_probes": 48,
+     "n_probe_hits": 25,
+     "n_scans": 171,
+     "ns_scan": 233951,
+     "ns_bits": 36384,
+     "ns_assemble": 1257107,
+     "n_chosen": 1962,
+     "n_tile_levels": 171,
+     "n_overlap_raw": 101258,
+     "n_window": 140014,
+     "ns_level_pass": 14414,
+     "n_scan_rows": 6975,
+     "n_admit_new": 704
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 327957,
+     "ns_pre": 84410,
+     "ns_settle": 710504,
+     "ns_frame": 14864793,
+     "ns_total": 35594435,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 2,
+   "ms": 37.1,
+   "bytes": 1883253,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 23658,
+     "ns_overlap": 4307646,
+     "n_cand": 101258,
+     "ns_heap": 1240632,
+     "n_heap": 100745,
+     "ns_admitted": 3253573,
+     "n_admitted_calls": 95721,
+     "n_popped": 95721,
+     "ns_presence": 2782676,
+     "n_probes": 48,
+     "n_probe_hits": 25,
+     "n_scans": 171,
+     "ns_scan": 250906,
+     "ns_bits": 38892,
+     "ns_assemble": 1322237,
+     "n_chosen": 1962,
+     "n_tile_levels": 171,
+     "n_overlap_raw": 101258,
+     "n_window": 140014,
+     "ns_level_pass": 15011,
+     "n_scan_rows": 6975,
+     "n_admit_new": 704
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 313514,
+     "ns_pre": 90412,
+     "ns_settle": 713748,
+     "ns_frame": 14970520,
+     "ns_total": 36140036,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 3,
+   "ms": 40.5,
+   "bytes": 1883253,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 26764,
+     "ns_overlap": 4691932,
+     "n_cand": 101258,
+     "ns_heap": 1409369,
+     "n_heap": 100745,
+     "ns_admitted": 3600961,
+     "n_admitted_calls": 95721,
+     "n_popped": 95721,
+     "ns_presence": 2870182,
+     "n_probes": 48,
+     "n_probe_hits": 25,
+     "n_scans": 171,
+     "ns_scan": 273088,
+     "ns_bits": 40517,
+     "ns_assemble": 1357745,
+     "n_chosen": 1962,
+     "n_tile_levels": 171,
+     "n_overlap_raw": 101258,
+     "n_window": 140014,
+     "ns_level_pass": 14694,
+     "n_scan_rows": 6975,
+     "n_admit_new": 704
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 352742,
+     "ns_pre": 97862,
+     "ns_settle": 825456,
+     "ns_frame": 16479824,
+     "ns_total": 39324223,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 34.9,
+   "bytes": 1922101,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 23345,
+     "ns_overlap": 3309382,
+     "n_cand": 81465,
+     "ns_heap": 1160848,
+     "n_heap": 81123,
+     "ns_admitted": 3140275,
+     "n_admitted_calls": 76881,
+     "n_popped": 76881,
+     "ns_presence": 2265835,
+     "n_probes": 48,
+     "n_probe_hits": 24,
+     "n_scans": 171,
+     "ns_scan": 263157,
+     "ns_bits": 35805,
+     "ns_assemble": 1416595,
+     "n_chosen": 2005,
+     "n_tile_levels": 171,
+     "n_overlap_raw": 81468,
+     "n_window": 112835,
+     "ns_level_pass": 16803,
+     "n_scan_rows": 6975,
+     "n_admit_new": 656
+    },
+    "s3": {
+     "ns_tile_sets": 322258,
+     "ns_pre": 94147,
+     "ns_settle": 717019,
+     "ns_frame": 14322254,
+     "ns_total": 32857226,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 34.7,
+   "bytes": 1922101,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 23035,
+     "ns_overlap": 3436420,
+     "n_cand": 81465,
+     "ns_heap": 1205144,
+     "n_heap": 81123,
+     "ns_admitted": 3207851,
+     "n_admitted_calls": 76881,
+     "n_popped": 76881,
+     "ns_presence": 2291309,
+     "n_probes": 48,
+     "n_probe_hits": 24,
+     "n_scans": 171,
+     "ns_scan": 270330,
+     "ns_bits": 38309,
+     "ns_assemble": 1423812,
+     "n_chosen": 2005,
+     "n_tile_levels": 171,
+     "n_overlap_raw": 81468,
+     "n_window": 112835,
+     "ns_level_pass": 15030,
+     "n_scan_rows": 6975,
+     "n_admit_new": 656
+    },
+    "s3": {
+     "ns_tile_sets": 320029,
+     "ns_pre": 79453,
+     "ns_settle": 722771,
+     "ns_frame": 14836576,
+     "ns_total": 33469819,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 39.9,
+   "bytes": 1922101,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 28111,
+     "ns_overlap": 4100270,
+     "n_cand": 81465,
+     "ns_heap": 1359761,
+     "n_heap": 81123,
+     "ns_admitted": 3883646,
+     "n_admitted_calls": 76881,
+     "n_popped": 76881,
+     "ns_presence": 2527808,
+     "n_probes": 48,
+     "n_probe_hits": 24,
+     "n_scans": 171,
+     "ns_scan": 333089,
+     "ns_bits": 55354,
+     "ns_assemble": 1962876,
+     "n_chosen": 2005,
+     "n_tile_levels": 171,
+     "n_overlap_raw": 81468,
+     "n_window": 112835,
+     "ns_level_pass": 17886,
+     "n_scan_rows": 6975,
+     "n_admit_new": 656
+    },
+    "s3": {
+     "ns_tile_sets": 366413,
+     "ns_pre": 107169,
+     "ns_settle": 893358,
+     "ns_frame": 17046355,
+     "ns_total": 38802469,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 35.9,
+   "bytes": 1922101,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 24112,
+     "ns_overlap": 3710018,
+     "n_cand": 81465,
+     "ns_heap": 1243231,
+     "n_heap": 81123,
+     "ns_admitted": 3470709,
+     "n_admitted_calls": 76881,
+     "n_popped": 76881,
+     "ns_presence": 2343979,
+     "n_probes": 48,
+     "n_probe_hits": 24,
+     "n_scans": 171,
+     "ns_scan": 296083,
+     "ns_bits": 39547,
+     "ns_assemble": 1422761,
+     "n_chosen": 2005,
+     "n_tile_levels": 171,
+     "n_overlap_raw": 81468,
+     "n_window": 112835,
+     "ns_level_pass": 18782,
+     "n_scan_rows": 6975,
+     "n_admit_new": 656
+    },
+    "s3": {
+     "ns_tile_sets": 325089,
+     "ns_pre": 100691,
+     "ns_settle": 756130,
+     "ns_frame": 15282760,
+     "ns_total": 34779937,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 1.8,
+   "bytes": 108112,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_level_pass": 15207
+    },
+    "s3": {
+     "ns_pre": 54939,
+     "ns_settle": 7334,
+     "ns_frame": 948428,
+     "ns_total": 1022993,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 1.6,
+   "bytes": 108112,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_level_pass": 8402
+    },
+    "s3": {
+     "ns_pre": 23590,
+     "ns_settle": 10137,
+     "ns_frame": 932949,
+     "ns_total": 981048,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 1.7,
+   "bytes": 108112,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_level_pass": 14451
+    },
+    "s3": {
+     "ns_pre": 50905,
+     "ns_settle": 8303,
+     "ns_frame": 902585,
+     "ns_total": 975074,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 1.5,
+   "bytes": 108111,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_level_pass": 10493
+    },
+    "s3": {
+     "ns_pre": 28426,
+     "ns_settle": 7282,
+     "ns_frame": 804250,
+     "ns_total": 851101,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 10.2,
+   "bytes": 1377584,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_level_pass": 8486
+    },
+    "s3": {
+     "ns_pre": 39208,
+     "ns_settle": 89003,
+     "ns_frame": 9215227,
+     "ns_total": 9460214,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 10.3,
+   "bytes": 1377584,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_level_pass": 14927
+    },
+    "s3": {
+     "ns_pre": 59839,
+     "ns_settle": 66858,
+     "ns_frame": 9262669,
+     "ns_total": 9505921,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 12.0,
+   "bytes": 1377585,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_level_pass": 14777
+    },
+    "s3": {
+     "ns_pre": 62313,
+     "ns_settle": 82798,
+     "ns_frame": 10758528,
+     "ns_total": 11043671,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "1%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 10.0,
+   "bytes": 1377584,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_level_pass": 16608
+    },
+    "s3": {
+     "ns_pre": 65002,
+     "ns_settle": 68578,
+     "ns_frame": 8886279,
+     "ns_total": 9133805,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 0,
+   "ms": 105.0,
+   "bytes": 382166,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 6028,
+     "ns_overlap": 1517539,
+     "n_cand": 33243,
+     "ns_heap": 428289,
+     "n_heap": 33243,
+     "ns_admitted": 195720,
+     "n_admitted_calls": 2515,
+     "n_popped": 2515,
+     "ns_presence": 1961992,
+     "n_probes": 2141,
+     "n_probe_hits": 1784,
+     "n_scans": 14,
+     "ns_scan": 299067,
+     "ns_bits": 12472,
+     "ns_assemble": 889897,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 33307,
+     "n_window": 47200,
+     "ns_level_pass": 95928252,
+     "n_scan_rows": 24597,
+     "n_admit_new": 93
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 75934,
+     "ns_pre": 96242273,
+     "ns_settle": 469435,
+     "ns_frame": 2114976,
+     "ns_total": 104320730,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 1,
+   "ms": 8.4,
+   "bytes": 382164,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 5303,
+     "ns_overlap": 1507383,
+     "n_cand": 33243,
+     "ns_heap": 385889,
+     "n_heap": 33243,
+     "ns_admitted": 176393,
+     "n_admitted_calls": 2515,
+     "n_popped": 2515,
+     "ns_presence": 1660061,
+     "n_probes": 2141,
+     "n_probe_hits": 1784,
+     "n_scans": 14,
+     "ns_scan": 294157,
+     "ns_bits": 11928,
+     "ns_assemble": 795526,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 33307,
+     "n_window": 47200,
+     "ns_level_pass": 15011,
+     "n_scan_rows": 24597,
+     "n_admit_new": 93
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 71021,
+     "ns_pre": 61323,
+     "ns_settle": 460511,
+     "ns_frame": 2056946,
+     "ns_total": 7587111,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 2,
+   "ms": 8.3,
+   "bytes": 382164,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 5463,
+     "ns_overlap": 1530349,
+     "n_cand": 33243,
+     "ns_heap": 380885,
+     "n_heap": 33243,
+     "ns_admitted": 174117,
+     "n_admitted_calls": 2515,
+     "n_popped": 2515,
+     "ns_presence": 1684417,
+     "n_probes": 2141,
+     "n_probe_hits": 1784,
+     "n_scans": 14,
+     "ns_scan": 318810,
+     "ns_bits": 11546,
+     "ns_assemble": 804227,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 33307,
+     "n_window": 47200,
+     "ns_level_pass": 13919,
+     "n_scan_rows": 24597,
+     "n_admit_new": 93
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 70376,
+     "ns_pre": 53930,
+     "ns_settle": 457547,
+     "ns_frame": 1999285,
+     "ns_total": 7580511,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 3,
+   "ms": 9.3,
+   "bytes": 382164,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 5331,
+     "ns_overlap": 1658066,
+     "n_cand": 33243,
+     "ns_heap": 464253,
+     "n_heap": 33243,
+     "ns_admitted": 226227,
+     "n_admitted_calls": 2515,
+     "n_popped": 2515,
+     "ns_presence": 1882935,
+     "n_probes": 2141,
+     "n_probe_hits": 1784,
+     "n_scans": 14,
+     "ns_scan": 310065,
+     "ns_bits": 12874,
+     "ns_assemble": 956970,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 33307,
+     "n_window": 47200,
+     "ns_level_pass": 21629,
+     "n_scan_rows": 24597,
+     "n_admit_new": 93
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 75798,
+     "ns_pre": 101792,
+     "ns_settle": 481815,
+     "ns_frame": 2075783,
+     "ns_total": 8368742,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 356.0,
+   "bytes": 416406,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5490,
+     "ns_overlap": 1991099,
+     "n_cand": 40223,
+     "ns_heap": 603409,
+     "n_heap": 40223,
+     "ns_admitted": 220666,
+     "n_admitted_calls": 2293,
+     "n_popped": 2293,
+     "ns_presence": 1556323,
+     "n_probes": 1691,
+     "n_probe_hits": 1525,
+     "n_scans": 18,
+     "ns_scan": 359717,
+     "ns_bits": 12852,
+     "ns_assemble": 957908,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 40336,
+     "n_window": 64641,
+     "ns_level_pass": 346659822,
+     "n_scan_rows": 30182,
+     "n_admit_new": 93
+    },
+    "s3": {
+     "ns_tile_sets": 77682,
+     "ns_pre": 346701533,
+     "ns_settle": 498914,
+     "ns_frame": 2150822,
+     "ns_total": 355186309,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 8.6,
+   "bytes": 416404,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5670,
+     "ns_overlap": 1805124,
+     "n_cand": 40223,
+     "ns_heap": 543176,
+     "n_heap": 40223,
+     "ns_admitted": 173098,
+     "n_admitted_calls": 2293,
+     "n_popped": 2293,
+     "ns_presence": 1312503,
+     "n_probes": 1691,
+     "n_probe_hits": 1525,
+     "n_scans": 18,
+     "ns_scan": 347257,
+     "ns_bits": 12153,
+     "ns_assemble": 806541,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 40336,
+     "n_window": 64641,
+     "ns_level_pass": 14386,
+     "n_scan_rows": 30182,
+     "n_admit_new": 93
+    },
+    "s3": {
+     "ns_tile_sets": 71299,
+     "ns_pre": 57608,
+     "ns_settle": 458813,
+     "ns_frame": 2132131,
+     "ns_total": 7770353,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 9.3,
+   "bytes": 416404,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5908,
+     "ns_overlap": 1948529,
+     "n_cand": 40223,
+     "ns_heap": 661184,
+     "n_heap": 40223,
+     "ns_admitted": 200179,
+     "n_admitted_calls": 2293,
+     "n_popped": 2293,
+     "ns_presence": 1417778,
+     "n_probes": 1691,
+     "n_probe_hits": 1525,
+     "n_scans": 18,
+     "ns_scan": 373712,
+     "ns_bits": 12698,
+     "ns_assemble": 1002385,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 40336,
+     "n_window": 64641,
+     "ns_level_pass": 17447,
+     "n_scan_rows": 30182,
+     "n_admit_new": 93
+    },
+    "s3": {
+     "ns_tile_sets": 86174,
+     "ns_pre": 90412,
+     "ns_settle": 533739,
+     "ns_frame": 2196405,
+     "ns_total": 8580598,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 8.2,
+   "bytes": 416404,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5454,
+     "ns_overlap": 1788480,
+     "n_cand": 40223,
+     "ns_heap": 513474,
+     "n_heap": 40223,
+     "ns_admitted": 177799,
+     "n_admitted_calls": 2293,
+     "n_popped": 2293,
+     "ns_presence": 1219832,
+     "n_probes": 1691,
+     "n_probe_hits": 1525,
+     "n_scans": 18,
+     "ns_scan": 336259,
+     "ns_bits": 11949,
+     "ns_assemble": 774557,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 40336,
+     "n_window": 64641,
+     "ns_level_pass": 14133,
+     "n_scan_rows": 30182,
+     "n_admit_new": 93
+    },
+    "s3": {
+     "ns_tile_sets": 69560,
+     "ns_pre": 54901,
+     "ns_settle": 490517,
+     "ns_frame": 2007684,
+     "ns_total": 7498304,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 0,
+   "ms": 115.0,
+   "bytes": 3674423,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 66706,
+     "ns_overlap": 16950251,
+     "n_cand": 400717,
+     "ns_heap": 4506354,
+     "n_heap": 400717,
+     "ns_admitted": 15300059,
+     "n_admitted_calls": 304580,
+     "n_popped": 304580,
+     "ns_presence": 12072485,
+     "n_probes": 2612,
+     "n_probe_hits": 1453,
+     "n_scans": 489,
+     "ns_scan": 1913782,
+     "ns_bits": 133655,
+     "ns_assemble": 7652547,
+     "n_chosen": 14334,
+     "n_tile_levels": 491,
+     "n_overlap_raw": 400733,
+     "n_window": 570264,
+     "ns_level_pass": 14656,
+     "n_scan_rows": 115366,
+     "n_admit_new": 1378
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 868694,
+     "ns_pre": 83645,
+     "ns_settle": 3813351,
+     "ns_frame": 24497757,
+     "ns_total": 113763676,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 1,
+   "ms": 116.8,
+   "bytes": 3674423,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 66660,
+     "ns_overlap": 17011091,
+     "n_cand": 400717,
+     "ns_heap": 4524708,
+     "n_heap": 400717,
+     "ns_admitted": 15306851,
+     "n_admitted_calls": 304580,
+     "n_popped": 304580,
+     "ns_presence": 12125878,
+     "n_probes": 2612,
+     "n_probe_hits": 1453,
+     "n_scans": 489,
+     "ns_scan": 1934562,
+     "ns_bits": 123808,
+     "ns_assemble": 7494819,
+     "n_chosen": 14334,
+     "n_tile_levels": 491,
+     "n_overlap_raw": 400733,
+     "n_window": 570264,
+     "ns_level_pass": 15450,
+     "n_scan_rows": 115366,
+     "n_admit_new": 1378
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 885795,
+     "ns_pre": 107160,
+     "ns_settle": 3852539,
+     "ns_frame": 24698838,
+     "ns_total": 114084109,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 2,
+   "ms": 115.7,
+   "bytes": 3674423,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 65572,
+     "ns_overlap": 17038124,
+     "n_cand": 400717,
+     "ns_heap": 4599266,
+     "n_heap": 400717,
+     "ns_admitted": 15858343,
+     "n_admitted_calls": 304580,
+     "n_popped": 304580,
+     "ns_presence": 12059828,
+     "n_probes": 2612,
+     "n_probe_hits": 1453,
+     "n_scans": 489,
+     "ns_scan": 1887313,
+     "ns_bits": 125517,
+     "ns_assemble": 7691291,
+     "n_chosen": 14334,
+     "n_tile_levels": 491,
+     "n_overlap_raw": 400733,
+     "n_window": 570264,
+     "ns_level_pass": 16832,
+     "n_scan_rows": 115366,
+     "n_admit_new": 1378
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 889575,
+     "ns_pre": 117979,
+     "ns_settle": 3703277,
+     "ns_frame": 24597012,
+     "ns_total": 114543940,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 3,
+   "ms": 114.9,
+   "bytes": 3674423,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 64183,
+     "ns_overlap": 16887387,
+     "n_cand": 400717,
+     "ns_heap": 4487171,
+     "n_heap": 400717,
+     "ns_admitted": 15280485,
+     "n_admitted_calls": 304580,
+     "n_popped": 304580,
+     "ns_presence": 12084921,
+     "n_probes": 2612,
+     "n_probe_hits": 1453,
+     "n_scans": 489,
+     "ns_scan": 1893017,
+     "ns_bits": 122746,
+     "ns_assemble": 7514313,
+     "n_chosen": 14334,
+     "n_tile_levels": 491,
+     "n_overlap_raw": 400733,
+     "n_window": 570264,
+     "ns_level_pass": 18727,
+     "n_scan_rows": 115366,
+     "n_admit_new": 1378
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 870278,
+     "ns_pre": 121938,
+     "ns_settle": 3707837,
+     "ns_frame": 24427278,
+     "ns_total": 113583689,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 131.9,
+   "bytes": 3982839,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 65072,
+     "ns_overlap": 20137123,
+     "n_cand": 477207,
+     "ns_heap": 6322610,
+     "n_heap": 477207,
+     "ns_admitted": 19354707,
+     "n_admitted_calls": 353256,
+     "n_popped": 353256,
+     "ns_presence": 12782291,
+     "n_probes": 1925,
+     "n_probe_hits": 1196,
+     "n_scans": 489,
+     "ns_scan": 1896377,
+     "ns_bits": 129360,
+     "ns_assemble": 8376733,
+     "n_chosen": 14732,
+     "n_tile_levels": 491,
+     "n_overlap_raw": 477242,
+     "n_window": 773396,
+     "ns_level_pass": 16271,
+     "n_scan_rows": 115366,
+     "n_admit_new": 1935
+    },
+    "s3": {
+     "ns_tile_sets": 886618,
+     "ns_pre": 103818,
+     "ns_settle": 3798863,
+     "ns_frame": 24998823,
+     "ns_total": 129176611,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 131.0,
+   "bytes": 3982839,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 67790,
+     "ns_overlap": 20031115,
+     "n_cand": 477207,
+     "ns_heap": 6198737,
+     "n_heap": 477207,
+     "ns_admitted": 19531771,
+     "n_admitted_calls": 353256,
+     "n_popped": 353256,
+     "ns_presence": 12809714,
+     "n_probes": 1925,
+     "n_probe_hits": 1196,
+     "n_scans": 489,
+     "ns_scan": 1884557,
+     "ns_bits": 127988,
+     "ns_assemble": 8533143,
+     "n_chosen": 14732,
+     "n_tile_levels": 491,
+     "n_overlap_raw": 477242,
+     "n_window": 773396,
+     "ns_level_pass": 15655,
+     "n_scan_rows": 115366,
+     "n_admit_new": 1935
+    },
+    "s3": {
+     "ns_tile_sets": 903043,
+     "ns_pre": 105442,
+     "ns_settle": 3913878,
+     "ns_frame": 25095278,
+     "ns_total": 129712680,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 127.7,
+   "bytes": 3982839,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 66906,
+     "ns_overlap": 19888096,
+     "n_cand": 477207,
+     "ns_heap": 6051181,
+     "n_heap": 477207,
+     "ns_admitted": 18854337,
+     "n_admitted_calls": 353256,
+     "n_popped": 353256,
+     "ns_presence": 12524685,
+     "n_probes": 1925,
+     "n_probe_hits": 1196,
+     "n_scans": 489,
+     "ns_scan": 1872706,
+     "ns_bits": 122623,
+     "ns_assemble": 7687219,
+     "n_chosen": 14732,
+     "n_tile_levels": 491,
+     "n_overlap_raw": 477242,
+     "n_window": 773396,
+     "ns_level_pass": 16916,
+     "n_scan_rows": 115366,
+     "n_admit_new": 1935
+    },
+    "s3": {
+     "ns_tile_sets": 866489,
+     "ns_pre": 107253,
+     "ns_settle": 3812840,
+     "ns_frame": 24570068,
+     "ns_total": 126475528,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 129.8,
+   "bytes": 3982839,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 67116,
+     "ns_overlap": 20087739,
+     "n_cand": 477207,
+     "ns_heap": 6193922,
+     "n_heap": 477207,
+     "ns_admitted": 19270181,
+     "n_admitted_calls": 353256,
+     "n_popped": 353256,
+     "ns_presence": 12676690,
+     "n_probes": 1925,
+     "n_probe_hits": 1196,
+     "n_scans": 489,
+     "ns_scan": 1913349,
+     "ns_bits": 127785,
+     "ns_assemble": 8073795,
+     "n_chosen": 14732,
+     "n_tile_levels": 491,
+     "n_overlap_raw": 477242,
+     "n_window": 773396,
+     "ns_level_pass": 15553,
+     "n_scan_rows": 115366,
+     "n_admit_new": 1935
+    },
+    "s3": {
+     "ns_tile_sets": 870357,
+     "ns_pre": 110754,
+     "ns_settle": 3839033,
+     "ns_frame": 25016883,
+     "ns_total": 128490904,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 11.2,
+   "bytes": 279188,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 4788,
+     "ns_overlap": 1477399,
+     "n_cand": 34346,
+     "ns_heap": 453388,
+     "n_heap": 34346,
+     "ns_admitted": 1880931,
+     "n_admitted_calls": 30386,
+     "n_popped": 30386,
+     "ns_presence": 924118,
+     "n_probes": 38,
+     "n_probe_hits": 16,
+     "n_scans": 35,
+     "ns_scan": 86409,
+     "ns_bits": 9149,
+     "ns_assemble": 586610,
+     "n_chosen": 929,
+     "n_tile_levels": 35,
+     "n_overlap_raw": 34346,
+     "n_window": 55244,
+     "ns_level_pass": 15188,
+     "n_scan_rows": 3200,
+     "n_admit_new": 1612
+    },
+    "s3": {
+     "ns_tile_sets": 60952,
+     "ns_pre": 71854,
+     "ns_settle": 255092,
+     "ns_frame": 1905487,
+     "ns_total": 10361903,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 11.2,
+   "bytes": 279188,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 4855,
+     "ns_overlap": 1478434,
+     "n_cand": 34346,
+     "ns_heap": 453835,
+     "n_heap": 34346,
+     "ns_admitted": 1924494,
+     "n_admitted_calls": 30386,
+     "n_popped": 30386,
+     "ns_presence": 914134,
+     "n_probes": 38,
+     "n_probe_hits": 16,
+     "n_scans": 35,
+     "ns_scan": 87988,
+     "ns_bits": 9242,
+     "ns_assemble": 530904,
+     "n_chosen": 929,
+     "n_tile_levels": 35,
+     "n_overlap_raw": 34346,
+     "n_window": 55244,
+     "ns_level_pass": 12770,
+     "n_scan_rows": 3200,
+     "n_admit_new": 1612
+    },
+    "s3": {
+     "ns_tile_sets": 62220,
+     "ns_pre": 45687,
+     "ns_settle": 260938,
+     "ns_frame": 1917113,
+     "ns_total": 10370688,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 11.7,
+   "bytes": 279188,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5242,
+     "ns_overlap": 1516051,
+     "n_cand": 34346,
+     "ns_heap": 500693,
+     "n_heap": 34346,
+     "ns_admitted": 2063001,
+     "n_admitted_calls": 30386,
+     "n_popped": 30386,
+     "ns_presence": 905379,
+     "n_probes": 38,
+     "n_probe_hits": 16,
+     "n_scans": 35,
+     "ns_scan": 90403,
+     "ns_bits": 10449,
+     "ns_assemble": 589602,
+     "n_chosen": 929,
+     "n_tile_levels": 35,
+     "n_overlap_raw": 34346,
+     "n_window": 55244,
+     "ns_level_pass": 17242,
+     "n_scan_rows": 3200,
+     "n_admit_new": 1612
+    },
+    "s3": {
+     "ns_tile_sets": 65908,
+     "ns_pre": 131292,
+     "ns_settle": 268612,
+     "ns_frame": 1995804,
+     "ns_total": 10776690,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 11.6,
+   "bytes": 279188,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 4811,
+     "ns_overlap": 1479629,
+     "n_cand": 34346,
+     "ns_heap": 465292,
+     "n_heap": 34346,
+     "ns_admitted": 1972016,
+     "n_admitted_calls": 30386,
+     "n_popped": 30386,
+     "ns_presence": 925927,
+     "n_probes": 38,
+     "n_probe_hits": 16,
+     "n_scans": 35,
+     "ns_scan": 100215,
+     "ns_bits": 9664,
+     "ns_assemble": 630461,
+     "n_chosen": 929,
+     "n_tile_levels": 35,
+     "n_overlap_raw": 34346,
+     "n_window": 55244,
+     "ns_level_pass": 14834,
+     "n_scan_rows": 3200,
+     "n_admit_new": 1612
+    },
+    "s3": {
+     "ns_tile_sets": 62072,
+     "ns_pre": 70314,
+     "ns_settle": 261063,
+     "ns_frame": 1990782,
+     "ns_total": 10620922,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 39.3,
+   "bytes": 1685108,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 15241,
+     "ns_overlap": 4476416,
+     "n_cand": 101250,
+     "ns_heap": 1381911,
+     "n_heap": 101250,
+     "ns_admitted": 5642061,
+     "n_admitted_calls": 99091,
+     "n_popped": 99091,
+     "ns_presence": 2616004,
+     "n_probes": 23,
+     "n_probe_hits": 12,
+     "n_scans": 104,
+     "ns_scan": 141611,
+     "ns_bits": 23724,
+     "ns_assemble": 888730,
+     "n_chosen": 928,
+     "n_tile_levels": 104,
+     "n_overlap_raw": 101250,
+     "n_window": 163975,
+     "ns_level_pass": 28575,
+     "n_scan_rows": 2547,
+     "n_admit_new": 1613
+    },
+    "s3": {
+     "ns_tile_sets": 178978,
+     "ns_pre": 128332,
+     "ns_settle": 452703,
+     "ns_frame": 13458325,
+     "ns_total": 38184098,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 39.1,
+   "bytes": 1685108,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 14832,
+     "ns_overlap": 4503712,
+     "n_cand": 101250,
+     "ns_heap": 1393881,
+     "n_heap": 101250,
+     "ns_admitted": 5623289,
+     "n_admitted_calls": 99091,
+     "n_popped": 99091,
+     "ns_presence": 2648804,
+     "n_probes": 23,
+     "n_probe_hits": 12,
+     "n_scans": 104,
+     "ns_scan": 142360,
+     "ns_bits": 24574,
+     "ns_assemble": 804674,
+     "n_chosen": 928,
+     "n_tile_levels": 104,
+     "n_overlap_raw": 101250,
+     "n_window": 163975,
+     "ns_level_pass": 14656,
+     "n_scan_rows": 2547,
+     "n_admit_new": 1613
+    },
+    "s3": {
+     "ns_tile_sets": 204359,
+     "ns_pre": 77418,
+     "ns_settle": 440878,
+     "ns_frame": 13375795,
+     "ns_total": 38095816,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 37.5,
+   "bytes": 1685108,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 14184,
+     "ns_overlap": 4257357,
+     "n_cand": 101250,
+     "ns_heap": 1305791,
+     "n_heap": 101250,
+     "ns_admitted": 5283950,
+     "n_admitted_calls": 99091,
+     "n_popped": 99091,
+     "ns_presence": 2603221,
+     "n_probes": 23,
+     "n_probe_hits": 12,
+     "n_scans": 104,
+     "ns_scan": 133187,
+     "ns_bits": 21484,
+     "ns_assemble": 811724,
+     "n_chosen": 928,
+     "n_tile_levels": 104,
+     "n_overlap_raw": 101250,
+     "n_window": 163975,
+     "ns_level_pass": 14535,
+     "n_scan_rows": 2547,
+     "n_admit_new": 1613
+    },
+    "s3": {
+     "ns_tile_sets": 166693,
+     "ns_pre": 74123,
+     "ns_settle": 420337,
+     "ns_frame": 12683265,
+     "ns_total": 36422094,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "25%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 37.8,
+   "bytes": 1685108,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 14321,
+     "ns_overlap": 4249193,
+     "n_cand": 101250,
+     "ns_heap": 1299310,
+     "n_heap": 101250,
+     "ns_admitted": 5299476,
+     "n_admitted_calls": 99091,
+     "n_popped": 99091,
+     "ns_presence": 2613360,
+     "n_probes": 23,
+     "n_probe_hits": 12,
+     "n_scans": 104,
+     "ns_scan": 137500,
+     "ns_bits": 22576,
+     "ns_assemble": 819736,
+     "n_chosen": 928,
+     "n_tile_levels": 104,
+     "n_overlap_raw": 101250,
+     "n_window": 163975,
+     "ns_level_pass": 15058,
+     "n_scan_rows": 2547,
+     "n_admit_new": 1613
+    },
+    "s3": {
+     "ns_tile_sets": 170342,
+     "ns_pre": 75869,
+     "ns_settle": 421525,
+     "ns_frame": 12951962,
+     "ns_total": 36800389,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 0,
+   "ms": 109.5,
+   "bytes": 381846,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 5557,
+     "ns_overlap": 2736924,
+     "n_cand": 55438,
+     "ns_heap": 640730,
+     "n_heap": 55438,
+     "ns_admitted": 195310,
+     "n_admitted_calls": 2378,
+     "n_popped": 2378,
+     "ns_presence": 1877405,
+     "n_probes": 2283,
+     "n_probe_hits": 1948,
+     "n_scans": 6,
+     "ns_scan": 164191,
+     "ns_bits": 11890,
+     "ns_assemble": 847937,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 55856,
+     "n_window": 74192,
+     "ns_level_pass": 99132768,
+     "n_scan_rows": 12036,
+     "n_admit_new": 92
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 78080,
+     "ns_pre": 99298265,
+     "ns_settle": 501707,
+     "ns_frame": 2108262,
+     "ns_total": 108704056,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 1,
+   "ms": 10.1,
+   "bytes": 381844,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 5240,
+     "ns_overlap": 2482718,
+     "n_cand": 55438,
+     "ns_heap": 682637,
+     "n_heap": 55438,
+     "ns_admitted": 173287,
+     "n_admitted_calls": 2378,
+     "n_popped": 2378,
+     "ns_presence": 1849726,
+     "n_probes": 2283,
+     "n_probe_hits": 1948,
+     "n_scans": 6,
+     "ns_scan": 157740,
+     "ns_bits": 11676,
+     "ns_assemble": 858468,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 55856,
+     "n_window": 74192,
+     "ns_level_pass": 15319,
+     "n_scan_rows": 12036,
+     "n_admit_new": 92
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 74524,
+     "ns_pre": 78277,
+     "ns_settle": 461586,
+     "ns_frame": 2095341,
+     "ns_total": 9179781,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 2,
+   "ms": 11.0,
+   "bytes": 381845,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 6157,
+     "ns_overlap": 2582507,
+     "n_cand": 55438,
+     "ns_heap": 695526,
+     "n_heap": 55438,
+     "ns_admitted": 196324,
+     "n_admitted_calls": 2378,
+     "n_popped": 2378,
+     "ns_presence": 2134876,
+     "n_probes": 2283,
+     "n_probe_hits": 1948,
+     "n_scans": 6,
+     "ns_scan": 205538,
+     "ns_bits": 13749,
+     "ns_assemble": 954416,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 55856,
+     "n_window": 74192,
+     "ns_level_pass": 14582,
+     "n_scan_rows": 12036,
+     "n_admit_new": 92
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 81059,
+     "ns_pre": 55872,
+     "ns_settle": 515197,
+     "ns_frame": 2490398,
+     "ns_total": 10184907,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    1
+   ],
+   "rep": 3,
+   "ms": 9.7,
+   "bytes": 381844,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 5313,
+     "ns_overlap": 2434512,
+     "n_cand": 55438,
+     "ns_heap": 639961,
+     "n_heap": 55438,
+     "ns_admitted": 170709,
+     "n_admitted_calls": 2378,
+     "n_popped": 2378,
+     "ns_presence": 1737488,
+     "n_probes": 2283,
+     "n_probe_hits": 1948,
+     "n_scans": 6,
+     "ns_scan": 155947,
+     "ns_bits": 11598,
+     "ns_assemble": 831880,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 55856,
+     "n_window": 74192,
+     "ns_level_pass": 13630,
+     "n_scan_rows": 12036,
+     "n_admit_new": 92
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 73513,
+     "ns_pre": 54005,
+     "ns_settle": 461922,
+     "ns_frame": 2082377,
+     "ns_total": 8916209,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 426.4,
+   "bytes": 414870,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5702,
+     "ns_overlap": 3226618,
+     "n_cand": 68521,
+     "ns_heap": 1048366,
+     "n_heap": 68521,
+     "ns_admitted": 246266,
+     "n_admitted_calls": 2480,
+     "n_popped": 2480,
+     "ns_presence": 1881024,
+     "n_probes": 2149,
+     "n_probe_hits": 1791,
+     "n_scans": 9,
+     "ns_scan": 268427,
+     "ns_bits": 14696,
+     "ns_assemble": 1116297,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 69564,
+     "n_window": 87304,
+     "ns_level_pass": 414712164,
+     "n_scan_rows": 19488,
+     "n_admit_new": 112
+    },
+    "s3": {
+     "ns_tile_sets": 82247,
+     "ns_pre": 414755461,
+     "ns_settle": 494525,
+     "ns_frame": 2289668,
+     "ns_total": 425636016,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 10.7,
+   "bytes": 414868,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5351,
+     "ns_overlap": 3075826,
+     "n_cand": 68521,
+     "ns_heap": 950280,
+     "n_heap": 68521,
+     "ns_admitted": 198744,
+     "n_admitted_calls": 2480,
+     "n_popped": 2480,
+     "ns_presence": 1550637,
+     "n_probes": 2149,
+     "n_probe_hits": 1791,
+     "n_scans": 9,
+     "ns_scan": 253640,
+     "ns_bits": 11983,
+     "ns_assemble": 884172,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 69564,
+     "n_window": 87304,
+     "ns_level_pass": 14572,
+     "n_scan_rows": 19488,
+     "n_admit_new": 112
+    },
+    "s3": {
+     "ns_tile_sets": 72378,
+     "ns_pre": 59223,
+     "ns_settle": 469770,
+     "ns_frame": 2169148,
+     "ns_total": 9897881,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 10.8,
+   "bytes": 414868,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5379,
+     "ns_overlap": 2968136,
+     "n_cand": 68521,
+     "ns_heap": 916756,
+     "n_heap": 68521,
+     "ns_admitted": 185308,
+     "n_admitted_calls": 2480,
+     "n_popped": 2480,
+     "ns_presence": 1497363,
+     "n_probes": 2149,
+     "n_probe_hits": 1791,
+     "n_scans": 9,
+     "ns_scan": 255106,
+     "ns_bits": 11380,
+     "ns_assemble": 864511,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 69564,
+     "n_window": 87304,
+     "ns_level_pass": 16701,
+     "n_scan_rows": 19488,
+     "n_admit_new": 112
+    },
+    "s3": {
+     "ns_tile_sets": 71573,
+     "ns_pre": 65926,
+     "ns_settle": 464370,
+     "ns_frame": 2093753,
+     "ns_total": 9567524,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 11,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 11.8,
+   "bytes": 414869,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 6462,
+     "ns_overlap": 3230479,
+     "n_cand": 68521,
+     "ns_heap": 1110642,
+     "n_heap": 68521,
+     "ns_admitted": 246514,
+     "n_admitted_calls": 2480,
+     "n_popped": 2480,
+     "ns_presence": 1824384,
+     "n_probes": 2149,
+     "n_probe_hits": 1791,
+     "n_scans": 9,
+     "ns_scan": 257468,
+     "ns_bits": 14030,
+     "ns_assemble": 1033537,
+     "n_chosen": 2000,
+     "n_tile_levels": 40,
+     "n_overlap_raw": 69564,
+     "n_window": 87304,
+     "ns_level_pass": 15114,
+     "n_scan_rows": 19488,
+     "n_admit_new": 112
+    },
+    "s3": {
+     "ns_tile_sets": 85878,
+     "ns_pre": 59942,
+     "ns_settle": 540272,
+     "ns_frame": 2363267,
+     "ns_total": 10989329,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 0,
+   "ms": 123.8,
+   "bytes": 4648951,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 68111,
+     "ns_overlap": 27998005,
+     "n_cand": 658672,
+     "ns_heap": 7681794,
+     "n_heap": 658672,
+     "ns_admitted": 12109761,
+     "n_admitted_calls": 194876,
+     "n_popped": 194876,
+     "ns_presence": 11724025,
+     "n_probes": 3598,
+     "n_probe_hits": 2141,
+     "n_scans": 500,
+     "ns_scan": 3118356,
+     "ns_bits": 142363,
+     "ns_assemble": 10806039,
+     "n_chosen": 23594,
+     "n_tile_levels": 502,
+     "n_overlap_raw": 658845,
+     "n_window": 897370,
+     "ns_level_pass": 14572,
+     "n_scan_rows": 175264,
+     "n_admit_new": 2133
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 894885,
+     "ns_pre": 89628,
+     "ns_settle": 5665579,
+     "ns_frame": 25303616,
+     "ns_total": 122414107,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 1,
+   "ms": 125.6,
+   "bytes": 4648951,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 68184,
+     "ns_overlap": 28296698,
+     "n_cand": 658672,
+     "ns_heap": 8074077,
+     "n_heap": 658672,
+     "ns_admitted": 12058470,
+     "n_admitted_calls": 194876,
+     "n_popped": 194876,
+     "ns_presence": 11853042,
+     "n_probes": 3598,
+     "n_probe_hits": 2141,
+     "n_scans": 500,
+     "ns_scan": 3153367,
+     "ns_bits": 143163,
+     "ns_assemble": 10798772,
+     "n_chosen": 23594,
+     "n_tile_levels": 502,
+     "n_overlap_raw": 658845,
+     "n_window": 897370,
+     "ns_level_pass": 15627,
+     "n_scan_rows": 175264,
+     "n_admit_new": 2133
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 902679,
+     "ns_pre": 106880,
+     "ns_settle": 5745381,
+     "ns_frame": 25796564,
+     "ns_total": 124158706,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 2,
+   "ms": 127.9,
+   "bytes": 4648951,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 71381,
+     "ns_overlap": 28703067,
+     "n_cand": 658672,
+     "ns_heap": 7845304,
+     "n_heap": 658672,
+     "ns_admitted": 12565804,
+     "n_admitted_calls": 194876,
+     "n_popped": 194876,
+     "ns_presence": 11959573,
+     "n_probes": 3598,
+     "n_probe_hits": 2141,
+     "n_scans": 500,
+     "ns_scan": 3197628,
+     "ns_bits": 157854,
+     "ns_assemble": 11146610,
+     "n_chosen": 23594,
+     "n_tile_levels": 502,
+     "n_overlap_raw": 658845,
+     "n_window": 897370,
+     "ns_level_pass": 20787,
+     "n_scan_rows": 175264,
+     "n_admit_new": 2133
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 944117,
+     "ns_pre": 159379,
+     "ns_settle": 5840964,
+     "ns_frame": 26543691,
+     "ns_total": 126364584,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    1
+   ],
+   "rep": 3,
+   "ms": 128.8,
+   "bytes": 4648951,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {
+     "ns_setup": 70421,
+     "ns_overlap": 28709766,
+     "n_cand": 658672,
+     "ns_heap": 7999588,
+     "n_heap": 658672,
+     "ns_admitted": 12567589,
+     "n_admitted_calls": 194876,
+     "n_popped": 194876,
+     "ns_presence": 11981071,
+     "n_probes": 3598,
+     "n_probe_hits": 2141,
+     "n_scans": 500,
+     "ns_scan": 3199025,
+     "ns_bits": 149889,
+     "ns_assemble": 10990945,
+     "n_chosen": 23594,
+     "n_tile_levels": 502,
+     "n_overlap_raw": 658845,
+     "n_window": 897370,
+     "ns_level_pass": 18239,
+     "n_scan_rows": 175264,
+     "n_admit_new": 2133
+    },
+    "s2": {},
+    "s3": {
+     "ns_tile_sets": 953174,
+     "ns_pre": 113300,
+     "ns_settle": 5859038,
+     "ns_frame": 26686266,
+     "ns_total": 126882153,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 154.1,
+   "bytes": 5073143,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 70376,
+     "ns_overlap": 34772664,
+     "n_cand": 783902,
+     "ns_heap": 11104309,
+     "n_heap": 783902,
+     "ns_admitted": 18374356,
+     "n_admitted_calls": 228720,
+     "n_popped": 228720,
+     "ns_presence": 13217110,
+     "n_probes": 2748,
+     "n_probe_hits": 1282,
+     "n_scans": 500,
+     "ns_scan": 3505718,
+     "ns_bits": 159788,
+     "ns_assemble": 13975402,
+     "n_chosen": 23762,
+     "n_tile_levels": 502,
+     "n_overlap_raw": 784322,
+     "n_window": 1011736,
+     "ns_level_pass": 17629,
+     "n_scan_rows": 174585,
+     "n_admit_new": 2659
+    },
+    "s3": {
+     "ns_tile_sets": 992933,
+     "ns_pre": 123904,
+     "ns_settle": 6067197,
+     "ns_frame": 27501938,
+     "ns_total": 150789998,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 148.1,
+   "bytes": 5073143,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 68528,
+     "ns_overlap": 34435892,
+     "n_cand": 783902,
+     "ns_heap": 10630649,
+     "n_heap": 783902,
+     "ns_admitted": 16990632,
+     "n_admitted_calls": 228720,
+     "n_popped": 228720,
+     "ns_presence": 12910132,
+     "n_probes": 2748,
+     "n_probe_hits": 1282,
+     "n_scans": 500,
+     "ns_scan": 3538869,
+     "ns_bits": 153240,
+     "ns_assemble": 13367505,
+     "n_chosen": 23762,
+     "n_tile_levels": 502,
+     "n_overlap_raw": 784322,
+     "n_window": 1011736,
+     "ns_level_pass": 17037,
+     "n_scan_rows": 174585,
+     "n_admit_new": 2659
+    },
+    "s3": {
+     "ns_tile_sets": 964775,
+     "ns_pre": 117108,
+     "ns_settle": 5882753,
+     "ns_frame": 26993722,
+     "ns_total": 146666245,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 147.9,
+   "bytes": 5073143,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 68624,
+     "ns_overlap": 34438251,
+     "n_cand": 783902,
+     "ns_heap": 10670621,
+     "n_heap": 783902,
+     "ns_admitted": 16976438,
+     "n_admitted_calls": 228720,
+     "n_popped": 228720,
+     "ns_presence": 12818981,
+     "n_probes": 2748,
+     "n_probe_hits": 1282,
+     "n_scans": 500,
+     "ns_scan": 3449384,
+     "ns_bits": 150867,
+     "ns_assemble": 13334916,
+     "n_chosen": 23762,
+     "n_tile_levels": 502,
+     "n_overlap_raw": 784322,
+     "n_window": 1011736,
+     "ns_level_pass": 15624,
+     "n_scan_rows": 174585,
+     "n_admit_new": 2659
+    },
+    "s3": {
+     "ns_tile_sets": 961628,
+     "ns_pre": 96502,
+     "ns_settle": 5855609,
+     "ns_frame": 27052643,
+     "ns_total": 146457607,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 9,
+   "depth": 13,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 147.5,
+   "bytes": 5073143,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 69198,
+     "ns_overlap": 34461425,
+     "n_cand": 783902,
+     "ns_heap": 10607814,
+     "n_heap": 783902,
+     "ns_admitted": 16373454,
+     "n_admitted_calls": 228720,
+     "n_popped": 228720,
+     "ns_presence": 13002690,
+     "n_probes": 2748,
+     "n_probe_hits": 1282,
+     "n_scans": 500,
+     "ns_scan": 3565085,
+     "ns_bits": 153004,
+     "ns_assemble": 12950839,
+     "n_chosen": 23762,
+     "n_tile_levels": 502,
+     "n_overlap_raw": 784322,
+     "n_window": 1011736,
+     "ns_level_pass": 15672,
+     "n_scan_rows": 174585,
+     "n_admit_new": 2659
+    },
+    "s3": {
+     "ns_tile_sets": 975601,
+     "ns_pre": 95518,
+     "ns_settle": 5867340,
+     "ns_frame": 27140583,
+     "ns_total": 145819987,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 13.7,
+   "bytes": 231444,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 4077,
+     "ns_overlap": 1951969,
+     "n_cand": 45081,
+     "ns_heap": 654568,
+     "n_heap": 45081,
+     "ns_admitted": 2735080,
+     "n_admitted_calls": 38426,
+     "n_popped": 38426,
+     "ns_presence": 1101068,
+     "n_probes": 11,
+     "n_probe_hits": 5,
+     "n_scans": 29,
+     "ns_scan": 57756,
+     "ns_bits": 9256,
+     "ns_assemble": 503913,
+     "n_chosen": 611,
+     "n_tile_levels": 29,
+     "n_overlap_raw": 45081,
+     "n_window": 57973,
+     "ns_level_pass": 25549,
+     "n_scan_rows": 1184,
+     "n_admit_new": 2066
+    },
+    "s3": {
+     "ns_tile_sets": 54641,
+     "ns_pre": 100110,
+     "ns_settle": 189064,
+     "ns_frame": 1781963,
+     "ns_total": 12651723,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 13.3,
+   "bytes": 231444,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 4020,
+     "ns_overlap": 1968829,
+     "n_cand": 45081,
+     "ns_heap": 622504,
+     "n_heap": 45081,
+     "ns_admitted": 2631528,
+     "n_admitted_calls": 38426,
+     "n_popped": 38426,
+     "ns_presence": 1107965,
+     "n_probes": 11,
+     "n_probe_hits": 5,
+     "n_scans": 29,
+     "ns_scan": 58306,
+     "ns_bits": 8430,
+     "ns_assemble": 494380,
+     "n_chosen": 611,
+     "n_tile_levels": 29,
+     "n_overlap_raw": 45081,
+     "n_window": 57973,
+     "ns_level_pass": 14994,
+     "n_scan_rows": 1184,
+     "n_admit_new": 2066
+    },
+    "s3": {
+     "ns_tile_sets": 52390,
+     "ns_pre": 53018,
+     "ns_settle": 182525,
+     "ns_frame": 1779263,
+     "ns_total": 12477570,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 13.2,
+   "bytes": 231444,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 4004,
+     "ns_overlap": 1936077,
+     "n_cand": 45081,
+     "ns_heap": 610916,
+     "n_heap": 45081,
+     "ns_admitted": 2587497,
+     "n_admitted_calls": 38426,
+     "n_popped": 38426,
+     "ns_presence": 1111929,
+     "n_probes": 11,
+     "n_probe_hits": 5,
+     "n_scans": 29,
+     "ns_scan": 56576,
+     "ns_bits": 8176,
+     "ns_assemble": 459752,
+     "n_chosen": 611,
+     "n_tile_levels": 29,
+     "n_overlap_raw": 45081,
+     "n_window": 57973,
+     "ns_level_pass": 14478,
+     "n_scan_rows": 1184,
+     "n_admit_new": 2066
+    },
+    "s3": {
+     "ns_tile_sets": 52002,
+     "ns_pre": 52579,
+     "ns_settle": 180918,
+     "ns_frame": 1784955,
+     "ns_total": 12349343,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 14,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 13.4,
+   "bytes": 231444,
+   "tiles": 40,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 4039,
+     "ns_overlap": 1951690,
+     "n_cand": 45081,
+     "ns_heap": 636694,
+     "n_heap": 45081,
+     "ns_admitted": 2639560,
+     "n_admitted_calls": 38426,
+     "n_popped": 38426,
+     "ns_presence": 1091776,
+     "n_probes": 11,
+     "n_probe_hits": 5,
+     "n_scans": 29,
+     "ns_scan": 58343,
+     "ns_bits": 8260,
+     "ns_assemble": 496006,
+     "n_chosen": 611,
+     "n_tile_levels": 29,
+     "n_overlap_raw": 45081,
+     "n_window": 57973,
+     "ns_level_pass": 16492,
+     "n_scan_rows": 1184,
+     "n_admit_new": 2066
+    },
+    "s3": {
+     "ns_tile_sets": 53589,
+     "ns_pre": 55204,
+     "ns_settle": 182862,
+     "ns_frame": 1772076,
+     "ns_total": 12466891,
+     "n_tiles": 40
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 0,
+   "ms": 27.4,
+   "bytes": 1516660,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5421,
+     "ns_overlap": 2533492,
+     "n_cand": 54919,
+     "ns_heap": 937508,
+     "n_heap": 54919,
+     "ns_admitted": 3864079,
+     "n_admitted_calls": 50639,
+     "n_popped": 50639,
+     "ns_presence": 1480038,
+     "n_probes": 9,
+     "n_probe_hits": 5,
+     "n_scans": 35,
+     "ns_scan": 80819,
+     "ns_bits": 11686,
+     "ns_assemble": 599426,
+     "n_chosen": 667,
+     "n_tile_levels": 35,
+     "n_overlap_raw": 54919,
+     "n_window": 71340,
+     "ns_level_pass": 14803,
+     "n_scan_rows": 1123,
+     "n_admit_new": 2067
+    },
+    "s3": {
+     "ns_tile_sets": 67429,
+     "ns_pre": 69968,
+     "ns_settle": 303385,
+     "ns_frame": 11665408,
+     "ns_total": 26355705,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 1,
+   "ms": 27.6,
+   "bytes": 1516660,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5634,
+     "ns_overlap": 2503515,
+     "n_cand": 54919,
+     "ns_heap": 812871,
+     "n_heap": 54919,
+     "ns_admitted": 3560238,
+     "n_admitted_calls": 50639,
+     "n_popped": 50639,
+     "ns_presence": 1537588,
+     "n_probes": 9,
+     "n_probe_hits": 5,
+     "n_scans": 35,
+     "ns_scan": 69609,
+     "ns_bits": 11434,
+     "ns_assemble": 629785,
+     "n_chosen": 667,
+     "n_tile_levels": 35,
+     "n_overlap_raw": 54919,
+     "n_window": 71340,
+     "ns_level_pass": 16502,
+     "n_scan_rows": 1123,
+     "n_admit_new": 2067
+    },
+    "s3": {
+     "ns_tile_sets": 84503,
+     "ns_pre": 72135,
+     "ns_settle": 320663,
+     "ns_frame": 11954654,
+     "ns_total": 26567454,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 2,
+   "ms": 25.7,
+   "bytes": 1516659,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 5137,
+     "ns_overlap": 2432562,
+     "n_cand": 54919,
+     "ns_heap": 785049,
+     "n_heap": 54919,
+     "ns_admitted": 3372421,
+     "n_admitted_calls": 50639,
+     "n_popped": 50639,
+     "ns_presence": 1422585,
+     "n_probes": 9,
+     "n_probe_hits": 5,
+     "n_scans": 35,
+     "ns_scan": 66238,
+     "ns_bits": 10209,
+     "ns_assemble": 665114,
+     "n_chosen": 667,
+     "n_tile_levels": 35,
+     "n_overlap_raw": 54919,
+     "n_window": 71340,
+     "ns_level_pass": 14793,
+     "n_scan_rows": 1123,
+     "n_admit_new": 2067
+    },
+    "s3": {
+     "ns_tile_sets": 62849,
+     "ns_pre": 70054,
+     "ns_settle": 286939,
+     "ns_frame": 10735998,
+     "ns_total": 24613141,
+     "n_tiles": 510
+    }
+   }
+  },
+  {
+   "principal": "100%",
+   "zoom": 12,
+   "depth": 16,
+   "levels": [
+    2
+   ],
+   "rep": 3,
+   "ms": 25.6,
+   "bytes": 1516659,
+   "tiles": 510,
+   "prof": {
+    "s0": {},
+    "s1": {},
+    "s2": {
+     "ns_setup": 4926,
+     "ns_overlap": 2461878,
+     "n_cand": 54919,
+     "ns_heap": 775687,
+     "n_heap": 54919,
+     "ns_admitted": 3320833,
+     "n_admitted_calls": 50639,
+     "n_popped": 50639,
+     "ns_presence": 1434755,
+     "n_probes": 9,
+     "n_probe_hits": 5,
+     "n_scans": 35,
+     "ns_scan": 67112,
+     "ns_bits": 9868,
+     "ns_assemble": 591840,
+     "n_chosen": 667,
+     "n_tile_levels": 35,
+     "n_overlap_raw": 54919,
+     "n_window": 71340,
+     "ns_level_pass": 16606,
+     "n_scan_rows": 1123,
+     "n_admit_new": 2067
+    },
+    "s3": {
+     "ns_tile_sets": 87410,
+     "ns_pre": 77585,
+     "ns_settle": 291676,
+     "ns_frame": 10683400,
+     "ns_total": 24531767,
+     "n_tiles": 510
+    }
+   }
+  }
+ ]
+}

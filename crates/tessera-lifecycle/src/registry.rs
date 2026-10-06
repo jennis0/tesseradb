@@ -2750,19 +2750,14 @@ impl LayerRegistry {
         self.tombstones.extend(tombstones.iter().cloned());
     }
 
-    /// Record one level's serving layout — the fold's re-evaluation, and the only thing that ever
-    /// changes it after a registration
-    /// ([decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+    /// Record one level's serving layout: the fold's re-evaluation, and the only thing that changes
+    /// it after a registration.
     ///
-    /// **Not a WAL record and not a version bump.** A layout is a latency choice that puts nothing
-    /// on the wire: both forms answer identically, so bumping [`RegisteredLayer::version`] would
-    /// make every session re-resolve a layer for a change none of them can observe, and a WAL
-    /// record would make a replay able to change one. Its durable home is the manifest the same
-    /// fold writes — which is why this must be called **before** [`LayerRegistry::snapshot`], and
-    /// why a replay that re-applies a `LayerCreate` over a seeded registry returns the level to its
-    /// declared pin or to artifact-major. That costs the fold's column its adoption and nothing
-    /// else: both routes answer identically, and the membership extents a row form is built from
-    /// are written whatever the layout.
+    /// Not a WAL record and not a version bump. A layout puts nothing on the wire, since both forms
+    /// answer identically, so bumping [`RegisteredLayer::version`] would make every session
+    /// re-resolve a layer for a change none of them can observe. Its durable home is the manifest
+    /// the same fold writes, which is why this must be called before [`LayerRegistry::snapshot`].
+    /// A replay of the layer's `LayerCreate` over that manifest keeps what it recorded.
     ///
     /// Returns whether the record **moved**, which is what tells the caller a flip happened: a
     /// flipped level's cached forms in the old layout are never asked for again, so something has
@@ -2815,23 +2810,18 @@ impl LayerRegistry {
                 // nothing.
                 let version = *version;
                 self.version = self.version.max(version);
+                // A replay over a seed holding this registration keeps the layouts a fold recorded
+                // for it, so the files that fold wrote are adopted rather than composed again. A
+                // new registration starts from what its declaration says before anything is
+                // observed.
+                let layouts = match self.layers.get(&declaration.name) {
+                    Some(seeded) if seeded.version == version => seeded.layouts.clone(),
+                    _ => RegisteredLayer::initial_layouts(declaration),
+                };
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
-                        // **The registration's own record of the serving layout**: the declared pin
-                        // where there is one, artifact-major where there is not. A level with no
-                        // artifacts has no shape to observe — blocks per artifact and the artifact
-                        // count are both properties of where the data landed — so the automatic
-                        // pick has nothing to read here and takes the conservative answer, which is
-                        // the form every derived structure already exists for (decision 0094).
-                        //
-                        // **A fold re-evaluates it and writes the result into the manifest.** A
-                        // replay that re-applies this record over a seeded registry therefore
-                        // returns the level to artifact-major, which costs the fold's column its
-                        // adoption and nothing else: the membership extents are what a row form is
-                        // built from, they are written whatever the layout, and the two routes
-                        // answer identically.
-                        layouts: RegisteredLayer::initial_layouts(declaration),
+                        layouts,
                         declaration: (**declaration).clone(),
                         entity: *layer_entity,
                         runs: runs.clone(),
