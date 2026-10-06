@@ -769,29 +769,24 @@ fn open_prefix(
                         None
                     };
 
-                    // `field-tallies.bin` beside it, which every base carries.
-                    let field_tallies = match has_base {
-                        false => None,
-                        true => {
-                            let rel = format!(
-                                "partitions/{}/{}/{}",
-                                partition_desc.phash,
-                                crate::view_rel(&seg_desc.view),
-                                crate::field_tallies::FIELD_TALLIES_FILE
-                            );
-                            let path = view_dir.join(crate::field_tallies::FIELD_TALLIES_FILE);
-                            ensure_verified(&rel, &segments_manifest, &manifest.files, &path)?;
-                            let tallies = crate::field_tallies::read(&path)?.ok_or_else(|| {
-                                StoreError::MalformedBundle {
-                                    detail: format!(
-                                        "view '{}' has a base and no {}; rebuild the bundle",
-                                        seg_desc.view,
-                                        crate::field_tallies::FIELD_TALLIES_FILE
-                                    ),
-                                }
-                            })?;
-                            Some(Arc::new(tallies))
-                        }
+                    // `field-tallies.bin` beside it, which a build and a fold write for every base
+                    // (`crate::field_tallies`). **Optional, as `row-entity.u32` is**: a view
+                    // without one has its base rows walked for a field's figures, and arrives at
+                    // the same answer. Where it is named, it is verified like any other file.
+                    let tallies_rel = format!(
+                        "partitions/{}/{}/{}",
+                        partition_desc.phash,
+                        crate::view_rel(&seg_desc.view),
+                        crate::field_tallies::FIELD_TALLIES_FILE
+                    );
+                    let field_tallies = if has_base
+                        && (segments_manifest.files.contains_key(&tallies_rel)
+                            || manifest.files.contains_key(&tallies_rel))
+                    {
+                        let path = view_dir.join(crate::field_tallies::FIELD_TALLIES_FILE);
+                        crate::field_tallies::read(&path)?.map(Arc::new)
+                    } else {
+                        None
                     };
 
                     // The first segment named for a view is its build segment: `permutation.bin`
