@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient} from '../src/client.js';
 import {createStore} from '../src/store.js';
 import type {ViewportPart, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, settle, tile, tileAnswers, view, scalar} from './support.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, settle, tile, tileAnswers, view, scalar, camera} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -140,7 +140,7 @@ async function shown(
   clock: ReturnType<typeof fakeClock>,
   scheduler: ReturnType<typeof fakeScheduler>
 ): Promise<void> {
-  store.setView({bbox: [0, 0, 50, 50], width: 800, height: 400});
+  store.setView(camera(store.frame(), [0, 0, 50, 50], 800, 400));
   await clock.advance(600);
   scheduler.flush();
 }
@@ -255,7 +255,7 @@ describe('a switch across frames publishes no camera and drops the selection', (
     scheduler.flush();
     expect(asked('far')).toHaveLength(0);
 
-    store.setView({bbox: [-1000, -500, 1000, 500], width: 800, height: 400});
+    store.setView(camera(store.frame(), [-1000, -500, 1000, 500], 800, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(asked('far').length).toBeGreaterThan(0);
@@ -279,7 +279,7 @@ describe('a switch across frames publishes no camera and drops the selection', (
     const stop = store.subscribe(() => {
       if (refitted || store.frame() !== OTHER_FRAME) return;
       refitted = true;
-      store.setView({bbox: [-1000, -500, 1000, 500], width: 800, height: 400});
+      store.setView(camera(store.frame(), [-1000, -500, 1000, 500], 800, 400));
     });
     store.setCurrentView('far');
     await clock.advance(600);
@@ -385,7 +385,7 @@ describe('a view that is not current asks for nothing: the paths that reach the 
 
     // A pan re-arms the idle timer that buys the ring; 100 ms is inside its window. The camera is
     // small against the frame, so the ring reaches ground the render rect did not cover.
-    store.setView({bbox: [40, 90, 45, 95], width: 800, height: 400});
+    store.setView(camera(store.frame(), [40, 90, 45, 95], 800, 400));
     await clock.advance(100);
     const before = asked('v0').length;
     store.setCurrentView('v1');
@@ -401,7 +401,7 @@ describe('a view that is not current asks for nothing: the paths that reach the 
     const alone = open({view: 'v0', clock: clock2, scheduler: scheduler2, prefetch: true});
     await clock2.advance(1);
     await shown(alone.store, clock2, scheduler2);
-    alone.store.setView({bbox: [40, 90, 45, 95], width: 800, height: 400});
+    alone.store.setView(camera(alone.store.frame(), [40, 90, 45, 95], 800, 400));
     await clock2.advance(100);
     const stillHere = alone.asked('v0').length;
     await clock2.advance(4000);
@@ -475,7 +475,7 @@ describe('the projections follow the view being entered', () => {
     expect(store.get('artifacts').status).toBe('idle');
 
     // Warm: the view returned to carries its own held set, published at the switch.
-    store.setView({bbox: [-1000, -500, 1000, 500], width: 800, height: 400});
+    store.setView(camera(store.frame(), [-1000, -500, 1000, 500], 800, 400));
     await clock.advance(600);
     scheduler.flush();
     const inFar = store.get('artifacts').served;
@@ -497,7 +497,7 @@ describe('the projections follow the view being entered', () => {
     store.setCurrentView('far');
     expect(store.get('status').status).toBe('loading');
 
-    store.setView({bbox: [-1000, -500, 1000, 500], width: 800, height: 400});
+    store.setView(camera(store.frame(), [-1000, -500, 1000, 500], 800, 400));
     await clock.advance(600);
     scheduler.flush();
 
@@ -576,7 +576,7 @@ describe('what a filter change, a switch and a clear leave behind', () => {
 
     // The point path asks at once; the channel's request waits for the view to be still, and the
     // switch comes first.
-    store.setView({bbox: [10, 10, 60, 60], width: 800, height: 400});
+    store.setView(camera(store.frame(), [10, 10, 60, 60], 800, 400));
     await settle();
     const askedV0 = asked('v0').length;
     store.setCurrentView('far');
@@ -597,7 +597,7 @@ describe('what a filter change, a switch and a clear leave behind', () => {
     await clock.advance(1000);
     scheduler.flush();
     // Held still, so a new view is the channel's alone to ask about.
-    store.setView({bbox: [0, 0, 50, 50], width: 800, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 50, 50], 800, 400));
     scheduler.flush();
     await clock.advance(10);
     const askedV0 = asked('v0').length;
