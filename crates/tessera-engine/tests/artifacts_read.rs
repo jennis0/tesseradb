@@ -592,6 +592,122 @@ fn a_levelled_layer_reads_by_level_then_publication() {
     assert_eq!(keys(&read_all(engine, &session, &base)), want[4..].to_vec());
 }
 
+/// One row of a read, by the properties [`a_read_by_identifier_reads_only_the_levels_it_names`]
+/// asks for: identifier, key, level, parents, count and centroid.
+type TaxonRow = (u64, String, u32, Vec<u64>, u64, Option<(f64, f64)>);
+
+fn taxon_rows(pages: &[RecordBatch]) -> Vec<TaxonRow> {
+    let mut out = Vec::new();
+    for batch in pages {
+        let ids = column::<UInt64Array>(batch, "tessera_id");
+        let keys = column::<StringArray>(batch, "key");
+        let levels = column::<UInt32Array>(batch, "level");
+        let parents = column::<ListArray>(batch, "parents");
+        let counts = column::<UInt64Array>(batch, "masked_count");
+        let (x, y) = (
+            column::<Float64Array>(batch, "centroid_x"),
+            column::<Float64Array>(batch, "centroid_y"),
+        );
+        for i in 0..batch.num_rows() {
+            let list = parents.value(i);
+            let list = list.as_any().downcast_ref::<UInt64Array>().unwrap();
+            out.push((
+                ids.value(i),
+                keys.value(i).to_string(),
+                levels.value(i),
+                list.values().to_vec(),
+                counts.value(i),
+                (!x.is_null(i)).then(|| (x.value(i), y.value(i))),
+            ));
+        }
+    }
+    out
+}
+
+/// **A read by identifier fills the figures of the levels its identifiers name and the levels
+/// their parents sit at, and no other**, and answers as the read of every level does. Each
+/// viewer below holds a grant of its own, so each level's figures are filled once per viewer.
+#[test]
+fn a_read_by_identifier_reads_only_the_levels_it_names() {
+    const TAXA: &str = "taxa/tiered";
+    let fx = fixture();
+    let engine = fx.engine();
+    let mut taxa = base_declaration(TAXA, HierarchyKind::Tiered);
+    taxa.layout = Some(tessera_types::layer::ServingLayout::RowMajorLabel);
+    taxa.content.computed = vec!["centroid".into()];
+    taxa.levels = (0..3)
+        .map(|level| LevelDeclaration {
+            level,
+            title: None,
+            zoom: None,
+        })
+        .collect();
+    engine.register_layer(taxa).unwrap();
+    // Three families of 300 members, each of three genera, each of two species.
+    for level in 0..3u32 {
+        let width = [300, 100, 50][level as usize];
+        let artifacts = (0..N / width)
+            .map(|t| {
+                let mut a = IncomingArtifact::from_entities(
+                    Some(format!("t{level}-{t}")),
+                    fx.entities(t * width..(t + 1) * width),
+                );
+                if level > 0 {
+                    a.parent_keys = vec![format!("t{}-{}", level - 1, t / if level == 1 { 3 } else { 2 })];
+                }
+                a
+            })
+            .collect();
+        engine.publish_artifacts(TAXA.into(), level, artifacts).unwrap();
+    }
+    tick(engine);
+
+    let fields = names(&["key", "level", "parents", "masked_count", "centroid"]);
+    let fills = || engine.figures_stats().fills;
+    let read_by_ids = |session: &Session, ids: &[TesseraId]| {
+        let mut req = request(TAXA, &fields);
+        req.ids = Some(ids);
+        taxon_rows(&read_all(engine, session, &req))
+    };
+    let every_level = |session: &Session| taxon_rows(&read_all(engine, session, &request(TAXA, &fields)));
+
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let at_level = |level: u32| -> Vec<TesseraId> {
+        every_level(&full)
+            .into_iter()
+            .filter(|row| row.2 == level)
+            .map(|row| TesseraId::new(row.0))
+            .collect()
+    };
+    let (families, species) = (at_level(0), at_level(2));
+    assert!(!families.is_empty() && !species.is_empty());
+
+    // Families name no parents: the families' level alone.
+    let subset = engine.authorise(&subset_credential()).unwrap();
+    let before = fills();
+    let by_ids = read_by_ids(&subset, &families);
+    assert_eq!(fills(), before + 1, "a read of families fills the families' level alone");
+    let whole = every_level(&subset);
+    assert_eq!(fills(), before + 3, "the read of every level fills the other two");
+    let named: HashSet<u64> = families.iter().map(|id| id.raw()).collect();
+    let want: Vec<TaxonRow> = whole.into_iter().filter(|row| named.contains(&row.0)).collect();
+    assert!(!want.is_empty(), "the subset viewer is served some family");
+    assert_eq!(by_ids, want);
+
+    // Species name their genera: the genera's level and the species', and not the families'.
+    let all = engine.authorise_all().unwrap();
+    let before = fills();
+    let by_ids = read_by_ids(&all, &species);
+    assert_eq!(fills(), before + 2, "a read of species with parents fills species and genera");
+    let whole = every_level(&all);
+    assert_eq!(fills(), before + 3, "the read of every level fills the families");
+    let named: HashSet<u64> = species.iter().map(|id| id.raw()).collect();
+    let want: Vec<TaxonRow> = whole.into_iter().filter(|row| named.contains(&row.0)).collect();
+    assert_eq!(want.len(), species.len());
+    assert!(want.iter().all(|row| row.3.len() == 1), "every species names its genus");
+    assert_eq!(by_ids, want);
+}
+
 // ---------------------------------------------------------------------------------------------
 // What is served
 // ---------------------------------------------------------------------------------------------

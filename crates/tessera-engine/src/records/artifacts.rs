@@ -221,19 +221,19 @@ struct Served {
 /// mask, for naming a target only where it is served.
 struct TargetLayer<'a> {
     layer: &'a RegisteredLayer,
-    levels: &'a [ReadLevel],
-    views: Vec<crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask>>,
+    levels: &'a [Option<ReadLevel>],
+    views: Vec<Option<crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask>>>,
 }
 
-/// One page's view of the layer: every level read under the page's mask, and what a candidate
-/// is tested against.
+/// One page's view of the layer: the levels the page asks about, read under the page's mask, and
+/// what a candidate is tested against. A level the page never asks about is `None`.
 struct Scope<'a> {
     engine: &'a Engine,
     open: &'a OpenView<'a>,
     generation: &'a Generation,
     layer: &'a RegisteredLayer,
-    levels: &'a [ReadLevel],
-    views: &'a [crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask>],
+    levels: &'a [Option<ReadLevel>],
+    views: &'a [Option<crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask>>],
     targets: &'a [TargetLayer<'a>],
     filter_rows: Option<&'a Bitmap>,
     /// Under `parent`: the parent's position where this viewer is served it, and `None` where no
@@ -245,12 +245,12 @@ struct Scope<'a> {
 impl Scope<'_> {
     /// The artifact at `(level, ordinal)` where this viewer is served it.
     fn served(&self, level: u32, ordinal: u32) -> Option<Served> {
-        let read = self.levels.get(level as usize)?;
+        let read = self.levels.get(level as usize)?.as_ref()?;
         let entity = self.layer.runs[level as usize]
             .entity_of(u64::from(ordinal))
             .map(EntityId::new)?;
         let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-            self.views[level as usize].verdict(entity, ordinal)
+            self.views[level as usize].as_ref()?.verdict(entity, ordinal)
         else {
             return None;
         };
@@ -263,6 +263,13 @@ impl Scope<'_> {
             masked_count,
             supplied,
         })
+    }
+
+    /// A level this page asks about.
+    fn level(&self, level: u32) -> &ReadLevel {
+        self.levels[level as usize]
+            .as_ref()
+            .expect("a level asked about is read")
     }
 
     fn tessera_id(&self, entity: EntityId) -> Option<u64> {
@@ -287,11 +294,13 @@ impl Scope<'_> {
         let crate::artifacts::ArtifactVerdict::Serve { rank, .. } = target
             .views
             .get(level)?
+            .as_ref()?
             .verdict(attachment.entity, attachment.ordinal)
         else {
             return None;
         };
-        target.levels[level].content(
+        let read = target.levels[level].as_ref()?;
+        read.content(
             self.engine,
             self.generation,
             target.layer,
@@ -299,7 +308,7 @@ impl Scope<'_> {
             attachment.entity,
             rank,
         )?;
-        Some(&target.levels[level])
+        Some(read)
     }
 
     /// The identifier of the artifact `attachment` names, where it is served.
@@ -315,7 +324,8 @@ impl Scope<'_> {
             let Some((p_level, p_ordinal)) = parent else {
                 return false;
             };
-            let names_it = self.levels[level as usize]
+            let names_it = self
+                .level(level)
                 .rows
                 .parents(ordinal)
                 .iter()
@@ -352,7 +362,7 @@ impl Scope<'_> {
     /// matched bit: a label's own membership says nothing about what matched.
     fn matched(&self, level: u32, ordinal: u32) -> Option<u64> {
         let filter_rows = self.filter_rows?;
-        let read = &self.levels[level as usize];
+        let read = self.level(level);
         let Some(attachment) = read.rows.attachment(ordinal) else {
             return Some(read.matched_count(ordinal, &self.open.mask, filter_rows));
         };
@@ -552,50 +562,95 @@ impl ArtifactsPager<'_> {
             .properties
             .iter()
             .any(|p| matches!(p, Property::Centroid | Property::Box));
-        let mut levels: Vec<ReadLevel> = (0..layer.runs.len() as u32)
-            .map(|level| engine.read_level(served, &open.mask, &layer, level, geometry))
-            .collect::<Result<_>>()?;
-        if let Some(held) = &mut self.filter {
-            for level in &mut levels {
-                held.count(engine, &open.mask, &layer.declaration.name, level);
+        // Only the levels this page can ask about are read: the ones it walks, the ones their
+        // parents sit at where parents are named, and the requested parent's.
+        let mut levels: Vec<Option<ReadLevel>> = layer.runs.iter().map(|_| None).collect();
+        let read = |filter: &mut Option<HeldFilter>,
+                    layer: &RegisteredLayer,
+                    levels: &mut [Option<ReadLevel>],
+                    level: u32,
+                    geometry: bool|
+         -> Result<()> {
+            let Some(slot) = levels.get_mut(level as usize).filter(|slot| slot.is_none()) else {
+                return Ok(());
+            };
+            let mut read = engine.read_level(served, &open.mask, layer, level, geometry)?;
+            if let Some(held) = filter {
+                held.count(engine, &open.mask, &layer.declaration.name, &mut read);
+            }
+            *slot = Some(read);
+            Ok(())
+        };
+        let walked: Vec<u32> = match &self.named {
+            Some(named) => {
+                let mut at: Vec<u32> = named.iter().map(|&(level, ..)| level).collect();
+                at.dedup();
+                at
+            }
+            None => self.levels(&layer).collect(),
+        };
+        for &level in &walked {
+            read(&mut self.filter, &layer, &mut levels, level, geometry)?;
+        }
+        if self.properties.contains(&Property::Parents) {
+            let mut above: Vec<u32> = Vec::new();
+            for (level, ordinal) in walked_positions(self.named.as_deref(), &walked, &levels) {
+                if let Some(read) = &levels[level as usize] {
+                    above.extend(read.rows.parents(ordinal).iter().map(|p| p.level));
+                }
+            }
+            above.sort_unstable();
+            above.dedup();
+            for level in above {
+                read(&mut self.filter, &layer, &mut levels, level, geometry)?;
             }
         }
+        let parent = self
+            .req
+            .parent
+            .and_then(|parent| locate_in(engine, generation, &layer, parent));
+        if let Some((level, _, _)) = parent {
+            read(&mut self.filter, &layer, &mut levels, level, geometry)?;
+        }
         // The layers this one hangs from, read where a target is named or a filter counts an
-        // attached artifact by its target.
-        let target_layers: Vec<(RegisteredLayer, Vec<ReadLevel>)> =
-            if self.properties.contains(&Property::Target) || self.req.filter.is_some() {
-                layer
-                    .declaration
-                    .depends_on
-                    .iter()
-                    .filter_map(|name| engine.write.live().registered_layer(name))
-                    .map(|target| {
-                        let levels = (0..target.runs.len() as u32)
-                            .map(|level| {
-                                let mut level =
-                                    engine.read_level(served, &open.mask, &target, level, false)?;
-                                if let Some(held) = &mut self.filter {
-                                    let name = &target.declaration.name;
-                                    held.count(engine, &open.mask, name, &mut level);
-                                }
-                                Ok(level)
-                            })
-                            .collect::<Result<_>>()?;
-                        Ok((target, levels))
-                    })
-                    .collect::<Result<_>>()?
-            } else {
-                Vec::new()
-            };
+        // attached artifact by its target, and only at the levels the walked artifacts hang from.
+        let mut target_layers: Vec<(RegisteredLayer, Vec<Option<ReadLevel>>)> = Vec::new();
+        if self.properties.contains(&Property::Target) || self.req.filter.is_some() {
+            let mut wanted: Vec<(String, u32)> = Vec::new();
+            for (level, ordinal) in walked_positions(self.named.as_deref(), &walked, &levels) {
+                if let Some(a) = levels[level as usize]
+                    .as_ref()
+                    .and_then(|read| read.rows.attachment(ordinal))
+                {
+                    if !wanted.iter().any(|(name, at)| *name == a.layer && *at == a.level) {
+                        wanted.push((a.layer.clone(), a.level));
+                    }
+                }
+            }
+            for name in &layer.declaration.depends_on {
+                let Some(target) = engine.write.live().registered_layer(name) else {
+                    continue;
+                };
+                let mut target_levels: Vec<Option<ReadLevel>> =
+                    target.runs.iter().map(|_| None).collect();
+                for (_, level) in wanted.iter().filter(|(at, _)| at == name) {
+                    read(&mut self.filter, &target, &mut target_levels, *level, false)?;
+                }
+                target_layers.push((target, target_levels));
+            }
+        }
         let filter_rows = self.filter.as_ref().map(|held| &held.rows);
         let reachable = engine.reachable_layers(served.session);
         let ctx = DependencyContext::new(served, &open.mask, &reachable);
         let dependency_served = engine.dependency_gate(&ctx);
         let views: Vec<_> = levels
             .iter()
-            .map(|level| level.view(engine, served, &open.mask, &layer, &dependency_served))
+            .map(|level| {
+                level
+                    .as_ref()
+                    .map(|level| level.view(engine, served, &open.mask, &layer, &dependency_served))
+            })
             .collect();
-        // The layers this one hangs from, read only where a target is to be named.
         let targets: Vec<TargetLayer<'_>> = target_layers
             .iter()
             .map(|(target, levels)| TargetLayer {
@@ -604,7 +659,9 @@ impl ArtifactsPager<'_> {
                 views: levels
                     .iter()
                     .map(|level| {
-                        level.view(engine, served, &open.mask, target, &dependency_served)
+                        level.as_ref().map(|level| {
+                            level.view(engine, served, &open.mask, target, &dependency_served)
+                        })
                     })
                     .collect(),
             })
@@ -621,8 +678,11 @@ impl ArtifactsPager<'_> {
             parent: None,
             shard: generation.bundle.manifest.identity.shard_id,
         };
-        if let Some(parent) = self.req.parent {
-            scope.parent = Some(parent_position(&scope, parent));
+        if self.req.parent.is_some() {
+            scope.parent = Some(parent.and_then(|(level, ordinal, entity)| {
+                let served = scope.served(level, ordinal)?;
+                (served.entity == entity).then_some((level, ordinal))
+            }));
         }
         let out = f(self, &scope)?;
         ctx.finish()?;
@@ -653,7 +713,7 @@ impl ArtifactsPager<'_> {
                     .map(|&(level, ordinal, entity)| (level, ordinal, Some(entity))),
             ),
             None => Box::new(self.levels(scope.layer).flat_map(move |level| {
-                let len = scope.levels[level as usize].rows.len() as u32;
+                let len = scope.level(level).rows.len() as u32;
                 (0..len)
                     .filter(move |&ordinal| past((level, ordinal)))
                     .map(move |ordinal| (level, ordinal, None))
@@ -663,7 +723,7 @@ impl ArtifactsPager<'_> {
 
     /// Build the row for a served artifact that the request selects, with the properties named.
     fn row(&self, scope: &Scope<'_>, level: u32, ordinal: u32, served: Served) -> Result<Row> {
-        let read = &scope.levels[level as usize];
+        let read = scope.level(level);
         let mut row = Row {
             tessera_id: served.tessera_id,
             level,
@@ -861,19 +921,38 @@ impl ArtifactsPager<'_> {
     }
 }
 
-/// Where the requested parent sits, where this viewer is served it; `None` otherwise, which
-/// selects nothing, as a parent with no children does.
-fn parent_position(scope: &Scope<'_>, parent: TesseraId) -> Option<(u32, u32)> {
-    let (shard, entity) = scope.engine.identity_key.invert(parent);
-    if shard != scope.shard {
+/// Where the artifact `id` names sits in `layer`, with its entity; `None` where it names nothing
+/// there.
+fn locate_in(
+    engine: &Engine,
+    generation: &Generation,
+    layer: &RegisteredLayer,
+    id: TesseraId,
+) -> Option<(u32, u32, EntityId)> {
+    let (shard, entity) = engine.identity_key.invert(id);
+    if shard != generation.bundle.manifest.identity.shard_id {
         return None;
     }
-    let (name, level, ordinal) = scope.engine.write.live().locate_artifact(entity)?;
-    if name != scope.layer.declaration.name {
-        return None;
+    let (name, level, ordinal) = engine.write.live().locate_artifact(entity)?;
+    (name == layer.declaration.name).then_some((level, ordinal, entity))
+}
+
+/// The positions a page walks whatever its cursor: under `ids` the ones named, and otherwise
+/// every ordinal of the `walked` levels.
+fn walked_positions<'s>(
+    named: Option<&'s [(u32, u32, EntityId)]>,
+    walked: &'s [u32],
+    levels: &'s [Option<ReadLevel>],
+) -> Box<dyn Iterator<Item = (u32, u32)> + 's> {
+    match named {
+        Some(named) => Box::new(named.iter().map(|&(level, ordinal, _)| (level, ordinal))),
+        None => Box::new(walked.iter().flat_map(move |&level| {
+            let len = levels[level as usize]
+                .as_ref()
+                .map_or(0, |read| read.rows.len() as u32);
+            (0..len).map(move |ordinal| (level, ordinal))
+        })),
     }
-    let served = scope.served(level, ordinal)?;
-    (served.entity == entity).then_some((level, ordinal))
 }
 
 /// The `wanted` centroid and box over the members this viewer can see, in grid units: read off
