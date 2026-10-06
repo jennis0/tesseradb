@@ -376,7 +376,9 @@ fn every_partitioning_level_has_a_label_column_and_a_band_copy_that_follow_the_f
     engine
         .register_layer(flat(SERVED, Some(ServingLayout::RowMajorLabel)))
         .unwrap();
-    engine.register_layer(flat(WALKED, None)).unwrap();
+    engine
+        .register_layer(flat(WALKED, Some(ServingLayout::ArtifactMajor)))
+        .unwrap();
     engine.register_layer(flat(OVERLAPPING, None)).unwrap();
 
     // Ten artifacts over every item; five over the first half; two that overlap.
@@ -408,7 +410,7 @@ fn every_partitioning_level_has_a_label_column_and_a_band_copy_that_follow_the_f
     assert_eq!(
         engine.recorded_layout(WALKED, 0),
         Some(ServingLayout::ArtifactMajor),
-        "a level of five artifacts is served artifact-major"
+        "a level pinned to rows is served artifact-major"
     );
     assert!(
         extents_of(&engine, OVERLAPPING).iter().all(|e| !matches!(
@@ -524,7 +526,9 @@ fn deep_verification_refuses_a_damaged_copy_and_a_missing_one() {
     build_scored(&root);
     let map = source_to_new_map(&root, "v00000");
     let engine = open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal"));
-    engine.register_layer(flat(WALKED, None)).unwrap();
+    engine
+        .register_layer(flat(WALKED, Some(ServingLayout::ArtifactMajor)))
+        .unwrap();
     let batch = (0..5)
         .map(|a| {
             IncomingArtifact::from_entities(

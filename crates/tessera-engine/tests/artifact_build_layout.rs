@@ -14,7 +14,9 @@
 //!
 //! The shape is the campaign's, at a scale a test can hold: an enumerated layer of more than a
 //! thousand artifacts whose memberships **span the corpus**, so no node of the tile index holds one
-//! and the `everywhere` fraction — the layout trigger — is 1.0.
+//! and the `everywhere` fraction is 1.0. Beside it, a flat layer of clumped memberships, which is
+//! served from a column whatever its shape, and a treed layer over the same memberships, which the
+//! count tiebreak keeps artifact-major.
 //!
 //! **What this asserts is not "it is fast".** A wall-clock bound over a small fixture proves
 //! nothing about a large one. What it asserts is *the thing that was slow does not happen*: the
@@ -39,10 +41,11 @@ use tessera_types::layer::ServingLayout;
 
 const SPREAD: &str = "clusters/spread";
 const CLUMPED: &str = "clusters/clumped";
+const TREED: &str = "clusters/treed";
 const N: u64 = 12_000;
 /// Above `ROW_MAJOR_MIN_ARTIFACTS`, which is the count tiebreak the spread has to clear.
 const SPREAD_ARTIFACTS: u64 = 1_200;
-/// Well under it, so the clumped layer's own case is about the tiebreak and not about the spread.
+/// Well under it, so the treed layer's case is about the tiebreak and not about the spread.
 const CLUMPED_ARTIFACTS: u64 = 60;
 
 const CONFIG_TOML: &str = r#"
@@ -86,6 +89,20 @@ visibility = "public"
 artifact_visibility = { default = "inherited" }
 require_member_visibility = "none"
 hierarchy = { kind = "flat" }
+
+  [layer.members]
+  source = "clumped_members"
+  fields = { id = "entity" }
+
+[[layer]]
+name = "clusters/treed"
+views = ["s0"]
+source = "clumped"
+membership = "enumerated"
+visibility = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = "none"
+hierarchy = { kind = "nested" }
 
   [layer.members]
   source = "clumped_members"
@@ -211,7 +228,7 @@ fn fixture() -> Fixture {
         band_rows: None,
         schema: config.schema,
     };
-    tessera_build::build(&args).expect("a build carrying two enumerated layers");
+    tessera_build::build(&args).expect("a build carrying three enumerated layers");
     Fixture {
         root,
         cache: tmp.path().join("cache"),
@@ -233,9 +250,9 @@ fn manifest(fx: &Fixture) -> tessera_store::manifest::SegmentsManifest {
         .clone()
 }
 
-/// **Finding 1's fix.** The build's own pass chooses each level's layout from the bundle's row
-/// space and records it — so a level the walk cannot place is `RowMajorLabel` in the manifest a
-/// build wrote, with no fold anywhere.
+/// **Finding 1's fix.** The build's own pass chooses each level's layout and records it, with no
+/// fold anywhere: a flat level is a label column whether or not the walk could place it, and a
+/// treed level under the count tiebreak is artifact-major.
 #[test]
 fn the_build_records_the_layout_its_own_row_space_chooses() {
     let fx = fixture();
@@ -261,23 +278,33 @@ fn the_build_records_the_layout_its_own_row_space_chooses() {
          the build is what says so"
     );
 
-    // The tiebreak, in the same bundle: the same evidence under a thousand artifacts changes
-    // nothing, which is what makes the flip above about the level and not about the pass running.
     let clumped = layers
         .iter()
         .find(|l| l.declaration.name == CLUMPED)
         .expect("the clumped layer is registered");
     assert_eq!(
         clumped.layout_of(0),
+        ServingLayout::RowMajorLabel,
+        "a flat level is served from a column however few and clumped its artifacts"
+    );
+
+    // The tiebreak, in the same bundle: a treed level over the same memberships, under a thousand
+    // artifacts, stays artifact-major whatever their spread.
+    let treed = layers
+        .iter()
+        .find(|l| l.declaration.name == TREED)
+        .expect("the treed layer is registered");
+    assert_eq!(
+        treed.layout_of(0),
         ServingLayout::ArtifactMajor,
-        "{CLUMPED_ARTIFACTS} artifacts is below the count tiebreak whatever their spread"
+        "{CLUMPED_ARTIFACTS} artifacts of a treed layer is below the count tiebreak"
     );
 }
 
 /// The manifest names the files the pass wrote, on coordinates a reader can adopt: a column for
-/// the level that flipped, an index for the level that did not, and neither for the other.
+/// each flat level, an index for the treed level, and neither for the other.
 #[test]
-fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
+fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_one() {
     let fx = fixture();
     let manifest = manifest(&fx);
 
@@ -287,9 +314,9 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
         .derived_extents
         .iter()
         .filter(is_column)
-        .filter(|e| e.layer == SPREAD)
+        .filter(|e| e.layer == SPREAD || e.layer == CLUMPED)
         .collect();
-    assert_eq!(columns.len(), 1, "one column per (view, layer, level)");
+    assert_eq!(columns.len(), 2, "one column per (view, layer, level)");
     assert_eq!(columns[0].view.as_deref(), Some("s0"));
     assert_eq!(
         columns[0].form,
@@ -302,7 +329,7 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
             .derived_extents
             .iter()
             .filter(is_column)
-            .all(|e| e.layer != CLUMPED),
+            .all(|e| e.layer != TREED),
         "an artifact-major level has no column"
     );
 
@@ -310,7 +337,7 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
         .derived_extents
         .iter()
         .filter(is_index)
-        .filter(|e| e.layer == CLUMPED)
+        .filter(|e| e.layer == TREED)
         .collect();
     assert_eq!(indexes.len(), 1, "one index per (view, layer, level)");
     assert!(
@@ -318,7 +345,7 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
             .derived_extents
             .iter()
             .filter(is_index)
-            .all(|e| e.layer != SPREAD),
+            .all(|e| e.layer != SPREAD && e.layer != CLUMPED),
         "a row-major level has nothing to index — its candidacy is a scan of the viewport"
     );
 
@@ -357,7 +384,7 @@ fn the_first_request_over_a_fresh_bundle_adopts_and_composes_nothing() {
         .viewport_artifacts(
             &session,
             tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
-                .layers(LayerSelection::Named(&[SPREAD, CLUMPED])),
+                .layers(LayerSelection::Named(&[SPREAD, CLUMPED, TREED])),
         )
         .expect("the first viewport over a freshly built bundle")
         .artifacts();
@@ -383,7 +410,7 @@ fn the_first_request_over_a_fresh_bundle_adopts_and_composes_nothing() {
     );
     assert!(
         engine.artifact_tile_indexes_adopted() > 0,
-        "the clumped level's index was written by the build and should be claimed, not derived"
+        "the treed level's index was written by the build and should be claimed, not derived"
     );
     // Two orders inside the deadline the campaign's request died on. A bound, not a benchmark.
     assert!(
@@ -414,7 +441,7 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
     let artifact_major = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::Named(&[CLUMPED])),
+            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::Named(&[TREED])),
         )
         .expect("a viewport over the artifact-major level")
         .artifacts();

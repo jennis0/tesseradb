@@ -1,31 +1,14 @@
 //! **Which form a level is served in** — the automatic pick, the pin that overrides it, and the
-//! observations both are recorded beside ([decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+//! observations both are recorded beside.
 //!
-//! Neither input the pick reads is in the declaration. **How far a membership is spread across row
-//! space** is a property of where the data actually landed, and **the artifact count** moves as the
-//! corpus grows, as artifacts are published and as a fold retires them. So the layout cannot be a
-//! one-off decision taken from a config file, and it cannot be left to the author either: the
-//! crossover is a measurement, and it is not something someone writing a layer block should have to
-//! hold.
+//! A level with stored memberships whose layer is answered tile by tile (`flat`, `stacked`,
+//! `tiered`) is served from a column: its member bitmaps and coverings propose each tile's
+//! candidates. Any other level is served from a column only where it is populous and too scattered
+//! for the tile index to place, which is a property of where the data landed and moves as the
+//! corpus grows, so a fold re-evaluates it.
 //!
-//! # The rule itself lives one crate down
-//!
-//! [`choose`] and the shape it reads are [`tessera_store::membership`]'s, beside the durable forms
-//! they pick between, because **the build chooses too**. A pick that only the fold could reach is
-//! what left every freshly built bundle serving its enumerated layers in the wrong form until its
-//! first fold — the 10–11× the 2026-08-22 campaign measured. This module is the engine's name for
-//! it, so every call site here reads as it did.
-//!
-//! # What the pick is conservative about
-//!
-//! The direction of the mistake is asymmetric. Picking artifact-major where row-major would have
-//! been cheaper costs latency on a route that is measured, built and correct at every size the
-//! campaign reached (`design/artifact-serving-at-scale.md` §5: *there is no serving-speed wall on
-//! the corrected structures*). Picking row-major where the level does not suit it costs a whole-map
-//! scan of `viewport ∩ M_auth` — 319 ms against 20.1 on the measured partition arm — on exactly the
-//! request an artifact-major level answers without scanning anything. So the threshold sits well
-//! above the band where artifact-major was measured *improving*, rather than inside it — the
-//! argument is at [`ROW_MAJOR_EVERYWHERE_FRACTION`].
+//! [`choose`] and the shape it reads are [`tessera_store::derived`]'s, beside the durable forms
+//! they pick between, because the build chooses too. This module is the engine's name for them.
 
 pub use tessera_store::derived::{
     choose, LevelShape, ROW_MAJOR_EVERYWHERE_FRACTION, ROW_MAJOR_MIN_ARTIFACTS,
@@ -51,6 +34,14 @@ mod tests {
     }
 
     fn declaration(membership: MembershipSource, pin: Option<ServingLayout>) -> LayerDeclaration {
+        of_kind(HierarchyKind::Flat, membership, pin)
+    }
+
+    fn of_kind(
+        kind: HierarchyKind,
+        membership: MembershipSource,
+        pin: Option<ServingLayout>,
+    ) -> LayerDeclaration {
         LayerDeclaration {
             scope: Default::default(),
             name: "clusters/x".into(),
@@ -62,7 +53,7 @@ mod tests {
             artifact_visibility: ArtifactVisibility::inherited(),
             require_member_visibility: None,
             hierarchy: Hierarchy {
-                kind: HierarchyKind::Flat,
+                kind,
                 prune_children: false,
             },
             content: ContentDeclaration::default(),
@@ -73,73 +64,67 @@ mod tests {
         }
     }
 
-    /// **The pick is conservative in the direction of what is built today**, and the band the
-    /// bracket measured artifact-major *improving* through — 1.6% to 3.6% of a level too wide for
-    /// any node — stays artifact-major at every population, as does everything under the
-    /// threshold.
+    /// **A stored membership answered tile by tile is served from a column at every shape**: the
+    /// label form where the memberships are disjoint, the list form where they overlap, whatever
+    /// the spread, the container count or the population, including an empty level.
     #[test]
-    fn a_level_the_walk_can_place_stays_artifact_major() {
-        let enumerated = declaration(MembershipSource::Enumerated, None);
-        for everywhere in [0.0, 0.016, 0.023, 0.029, 0.036, 0.1, 0.249] {
-            for artifacts in [10, 1_000, 10_000_000] {
-                assert_eq!(
-                    choose(&enumerated, shape(artifacts, everywhere, true)),
-                    ServingLayout::ArtifactMajor,
-                    "{everywhere} everywhere over {artifacts} artifacts"
-                );
+    fn a_tiled_level_with_stored_memberships_is_served_from_a_column() {
+        for kind in [
+            HierarchyKind::Flat,
+            HierarchyKind::Stacked,
+            HierarchyKind::Tiered,
+        ] {
+            let enumerated = of_kind(kind, MembershipSource::Enumerated, None);
+            for everywhere in [0.0, 0.016, 0.164, 0.249, 1.0] {
+                for artifacts in [10, 1_000, 10_000_000] {
+                    assert_eq!(
+                        choose(&enumerated, shape(artifacts, everywhere, true)),
+                        ServingLayout::RowMajorLabel,
+                        "{kind:?}: {everywhere} everywhere over {artifacts} artifacts"
+                    );
+                    assert_eq!(
+                        choose(&enumerated, shape(artifacts, everywhere, false)),
+                        ServingLayout::RowMajorList,
+                        "{kind:?}: {everywhere} everywhere over {artifacts} overlapping artifacts"
+                    );
+                }
             }
+            assert_eq!(
+                choose(&enumerated, LevelShape::empty()),
+                ServingLayout::RowMajorLabel
+            );
         }
     }
 
-    /// A level the node walk cannot place at a population worth the column flips, and the
-    /// label/list split follows from whether the memberships are disjoint rather than from any
-    /// number.
+    /// **A treed level is served from a column only where the tile index cannot place it**: at
+    /// a quarter of its artifacts too wide for any node and a thousand artifacts, and not below
+    /// either. The label/list split follows the membership.
     #[test]
-    fn a_spread_level_flips_and_the_split_follows_the_membership() {
-        let enumerated = declaration(MembershipSource::Enumerated, None);
-        assert_eq!(
-            choose(&enumerated, shape(10_000, 1.0, true)),
-            ServingLayout::RowMajorLabel
-        );
-        assert_eq!(
-            choose(&enumerated, shape(10_000, 1.0, false)),
-            ServingLayout::RowMajorList
-        );
-        // And exactly at the threshold, which is where a `>=` and a `>` differ.
-        assert_eq!(
-            choose(
-                &enumerated,
-                shape(10_000, ROW_MAJOR_EVERYWHERE_FRACTION, true)
-            ),
-            ServingLayout::RowMajorLabel
-        );
-        // The count tiebreak: the same spread under a thousand artifacts buys nothing measurable.
-        assert_eq!(
-            choose(&enumerated, shape(999, 1.0, true)),
-            ServingLayout::ArtifactMajor
-        );
-    }
-
-    /// **Blocks per artifact no longer decides anything.** The bracket moved it 6 → 12 with the
-    /// cost *falling*, so a level held at one spread answers the same whatever its container count
-    /// — which is the whole content of the 2026-08-23 change of axis.
-    #[test]
-    fn blocks_per_artifact_is_reported_and_does_not_decide() {
-        let enumerated = declaration(MembershipSource::Enumerated, None);
-        for blocks in [1.0, 6.0, 10.0, 12.0, 108.0, 178.9] {
-            let mut clumped = shape(10_000, 0.0, true);
-            clumped.blocks_per_artifact = blocks;
+    fn a_treed_level_flips_only_where_it_is_scattered_and_populous() {
+        for kind in [HierarchyKind::Nested, HierarchyKind::Dag] {
+            let treed = of_kind(kind, MembershipSource::Enumerated, None);
+            for everywhere in [0.0, 0.016, 0.1, 0.249] {
+                assert_eq!(
+                    choose(&treed, shape(10_000_000, everywhere, true)),
+                    ServingLayout::ArtifactMajor,
+                    "{kind:?}: {everywhere} everywhere"
+                );
+            }
             assert_eq!(
-                choose(&enumerated, clumped),
-                ServingLayout::ArtifactMajor,
-                "{blocks} blocks per artifact over a level the walk places"
+                choose(&treed, shape(10_000, ROW_MAJOR_EVERYWHERE_FRACTION, true)),
+                ServingLayout::RowMajorLabel
             );
-            let mut spread = shape(10_000, 1.0, true);
-            spread.blocks_per_artifact = blocks;
             assert_eq!(
-                choose(&enumerated, spread),
-                ServingLayout::RowMajorLabel,
-                "{blocks} blocks per artifact over a level the walk cannot place"
+                choose(&treed, shape(10_000, 1.0, false)),
+                ServingLayout::RowMajorList
+            );
+            assert_eq!(
+                choose(&treed, shape(999, 1.0, true)),
+                ServingLayout::ArtifactMajor
+            );
+            assert_eq!(
+                choose(&treed, LevelShape::empty()),
+                ServingLayout::ArtifactMajor
             );
         }
     }
@@ -207,19 +192,6 @@ mod tests {
         let spatial = declaration(MembershipSource::Spatial, None);
         assert_eq!(
             choose(&spatial, LevelShape::empty()),
-            ServingLayout::ArtifactMajor
-        );
-    }
-
-    /// A level with nothing in it is artifact-major, which is what a registration records: there is
-    /// no spread to observe before an artifact lands.
-    #[test]
-    fn an_empty_level_is_artifact_major() {
-        assert_eq!(
-            choose(
-                &declaration(MembershipSource::Enumerated, None),
-                LevelShape::empty()
-            ),
             ServingLayout::ArtifactMajor
         );
     }

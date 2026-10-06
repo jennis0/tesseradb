@@ -4,8 +4,9 @@
 //! The oracle reads the visible points tile by tile from an uncapped viewport, and for each tile
 //! names the artifacts with a visible member there, ordered by whole visible count and then by
 //! `tessera_id`, the first `per_tile` of them. The engine's frames must say exactly that, for a
-//! level stored by row with its members and coverings and for an overlapping level stored by
-//! artifact, at several depths, for viewers who see everything, a third, and nothing.
+//! level stored by row with its members and coverings, for an overlapping level pinned to be stored
+//! by artifact, and for an overlapping level of a dozen artifacts with no pin, which is stored by
+//! row in the list form, at several depths, for viewers who see everything, a third, and nothing.
 
 mod common;
 
@@ -29,8 +30,10 @@ use tessera_types::{EntityId, TesseraId};
 const ROWS: &str = "clusters/rows";
 /// Overlapping residue classes, stored by artifact.
 const OVERLAP: &str = "clusters/overlap";
+/// Overlapping residue classes with no pin.
+const AUTO: &str = "clusters/auto";
 
-fn declaration(name: &str, layout: ServingLayout) -> LayerDeclaration {
+fn declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclaration {
     LayerDeclaration {
         scope: Default::default(),
         name: name.into(),
@@ -51,7 +54,7 @@ fn declaration(name: &str, layout: ServingLayout) -> LayerDeclaration {
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
-        layout: Some(layout),
+        layout,
         shape: None,
     }
 }
@@ -111,10 +114,18 @@ fn fixture() -> Fixture {
             (0..N_ITEMS).filter(|e| e % 11 == q).collect(),
         );
     }
-    let layers = BTreeMap::from([(ROWS, rows), (OVERLAP, overlap)]);
+    let mut auto = Memberships::new();
+    for r in 0..13u64 {
+        auto.insert(
+            format!("m13-{r}"),
+            (0..N_ITEMS).filter(|e| e % 13 == r || e % 29 == r).collect(),
+        );
+    }
+    let layers = BTreeMap::from([(ROWS, rows), (OVERLAP, overlap), (AUTO, auto)]);
     for (name, layout) in [
-        (ROWS, ServingLayout::RowMajorLabel),
-        (OVERLAP, ServingLayout::ArtifactMajor),
+        (ROWS, Some(ServingLayout::RowMajorLabel)),
+        (OVERLAP, Some(ServingLayout::ArtifactMajor)),
+        (AUTO, None),
     ] {
         engine.register_layer(declaration(name, layout)).unwrap();
         let artifacts = layers[name]
@@ -132,6 +143,10 @@ fn fixture() -> Fixture {
     assert_eq!(
         engine.recorded_layout(ROWS, 0),
         Some(ServingLayout::RowMajorLabel)
+    );
+    assert_eq!(
+        engine.recorded_layout(AUTO, 0),
+        Some(ServingLayout::RowMajorList)
     );
     Fixture {
         _tmp: tmp,
@@ -283,7 +298,7 @@ fn each_tile_serves_what_the_oracle_names_in_its_order() {
     ] {
         for zoom in [0u8, 1, 2, 3] {
             let visible = visible_by_tile(&fx, &credential, zoom);
-            for layer in [ROWS, OVERLAP] {
+            for layer in [ROWS, OVERLAP, AUTO] {
                 let whole = ask(&fx, &credential, layer, zoom, usize::MAX);
                 let ids: BTreeMap<String, u64> = whole
                     .artifacts()
@@ -329,7 +344,7 @@ fn each_tile_serves_what_the_oracle_names_in_its_order() {
 fn a_denied_member_removes_its_artifact_from_its_tile_on_the_next_request() {
     let fx = fixture();
     let credential = full_coverage_credential();
-    for layer in [ROWS, OVERLAP] {
+    for layer in [ROWS, OVERLAP, AUTO] {
         let zoom = 2;
         let visible = visible_by_tile(&fx, &credential, zoom);
         let before = ask(&fx, &credential, layer, zoom, usize::MAX);
@@ -442,10 +457,10 @@ fn a_cancelled_request_stops_between_tiles() {
 fn a_dependent_whose_target_the_frame_lacks_takes_no_place_in_the_quota() {
     let fx = fixture();
     let (clusters, labels) = ("deps/clusters", "deps/labels");
-    let mut target = declaration(clusters, ServingLayout::ArtifactMajor);
+    let mut target = declaration(clusters, Some(ServingLayout::ArtifactMajor));
     target.content.computed = Vec::new();
     fx.engine.register_layer(target).unwrap();
-    let mut dependent = declaration(labels, ServingLayout::ArtifactMajor);
+    let mut dependent = declaration(labels, Some(ServingLayout::ArtifactMajor));
     dependent.content.computed = Vec::new();
     dependent.depends_on = vec![clusters.into()];
     fx.engine.register_layer(dependent).unwrap();

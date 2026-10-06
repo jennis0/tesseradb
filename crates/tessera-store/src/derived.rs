@@ -55,7 +55,7 @@ use tessera_spatial::shape::{
     Space,
 };
 use tessera_spatial::{unsplit32, Bounds, Projection, Tile};
-use tessera_types::layer::{LayerDeclaration, MembershipSource, ServingLayout, ShapeKind};
+use tessera_types::layer::{LayerDeclaration, ServingLayout, ShapeKind};
 use tessera_types::MortonCode;
 
 use crate::read::{tile_ranges_all, SegmentData};
@@ -152,51 +152,20 @@ pub fn coarsest_shift(row_count: u32) -> u32 {
 // The shape a level is observed to have, and the pick that reads it
 // ---------------------------------------------------------------------------------------------
 
-/// ⊘ **Provisional: the fraction of a level's artifacts too wide for any index node at or above
-/// which the level is served row-major.**
+/// The fraction of a treed or spatial level's artifacts too wide for any index node at or above
+/// which the level is served from a column. A level with stored memberships answered tile by tile
+/// is served from a column whatever its shape ([`LayerDeclaration::served_from_a_column`]), so
+/// this decides only for the levels the whole-viewport walk answers.
 ///
-/// **This axis replaced blocks per artifact on 2026-08-23**, on the campaign's own evidence
-/// (`docs/evidence/memos/2026-08-22-artifact-scale-campaign.md`, "The bracket re-run"). Four
-/// controlled points with every other fixture statistic held exactly — 0.960 members per row, 32
-/// distinct containment expressions, a 2.0 MB tile index — moved blocks per artifact through 6, 8,
-/// 10 and 12 and the whole-map cell **fell**, 104.1 → 42.8 → 44.3 → 36.2 ms, with the worst cell
-/// falling monotonically 122.3 → 81.7 → 67.4 → 68.1. The one quantity that tracked the cost was the
-/// `everywhere` set, rising **1.6% → 2.3% → 2.9% → 3.6%** as it fell. A threshold in blocks per
-/// artifact therefore flips *away from a layout that is improving*, which is what the old constant
-/// of 10.0 did; blocks per artifact conflates container count with spread, and eight containers
-/// clumped settle where eight corner-to-corner do not.
-///
-/// So this is **0.25**, and every part of that number is an argument rather than a measurement:
-///
-/// - It is seven times the top of the measured-improving band, so all four bracket points — and
-///   the whole region between them — stay artifact-major. A threshold inside 1.6–3.6% would flip
-///   in territory where the layout being flipped away from is measurably getting better.
-/// - It is far below where the layers that *win* by flipping sit. Every artifact of a scattered
-///   layer lands in `everywhere` at every size the campaign measured (§5, and the engine's
-///   `tile_index` module doc says the same), so the two 10⁷ enumerated layers whose fold-time flip
-///   bought **11× and 10.5×** are at or near 1.0 on this axis and flip on any threshold below it.
-/// - Everything between 3.6% and that band is unmeasured, and the direction of the mistake decides
-///   where in it to sit. Picking artifact-major where row-major would have been cheaper costs
-///   latency on a route measured, built and correct at every size reached; picking row-major where
-///   the level does not suit it costs a whole-map scan of `viewport ∩ M_auth` on exactly the
-///   request an artifact-major level answers without scanning anything. A quarter is a *quarter of
-///   the level* unplaceable — a level that scattered is not one the node walk is doing work for.
-///
-/// ⊘ **Provisional pending a sweep along this axis.** The campaign's bracket varied blocks per
-/// artifact and read the fraction off it; nothing has yet varied the fraction through 0.1–0.9 and
-/// measured the crossover, which is what would replace this argument with a number.
+/// Provisional. Below it the tile index places most of the level and the walk pays for the
+/// viewport's perimeter; above it a quarter of the level is returned for every viewport whatever
+/// its size, and one scan of the viewport's visible rows costs less. Nothing has varied the
+/// fraction through 0.1 to 0.9 to measure the crossover.
 pub const ROW_MAJOR_EVERYWHERE_FRACTION: f64 = 0.25;
 
-/// ⊘ **Provisional: the artifact count below which the pick stays artifact-major whatever the
-/// spread.**
-///
-/// A thousand. Below it the whole-map cell is milliseconds on either route — the measured cells run
-/// in single-digit milliseconds at 10³ artifacts — so a flip buys nothing measurable and costs a
-/// column, a manifest entry and a per-session histogram. Above it the row-major scan's `O(visible
-/// rows)` starts to be paid against a per-candidate cost that is climbing with the population.
-///
-/// It is a **tiebreak and not a bound**: a level under it that is *pinned* row-major is served
-/// row-major, because a pin is an operator saying they know something the observations do not.
+/// The artifact count below which a treed or spatial level stays artifact-major whatever its
+/// spread: under a thousand artifacts either form answers a whole map in milliseconds. Provisional,
+/// and a tiebreak rather than a bound: a pin overrides it.
 pub const ROW_MAJOR_MIN_ARTIFACTS: u64 = 1_000;
 
 /// What one level looks like, as a build or a fold observes it — **after** any retirements the
@@ -206,15 +175,13 @@ pub struct LevelShape {
     /// How many live artifacts the level holds. Holes are not counted: a retired slot is not an
     /// artifact, and counting it would keep a level that has been emptied looking populous.
     pub artifacts: u64,
-    /// **Reported, and no longer the trigger** (decision 0092's (c)). The mean number of Roaring
-    /// containers a membership touches — the measured cost model is that bitmap operations cost
-    /// O(containers touched) rather than O(cardinality), so this says how much *work* a membership
-    /// is. What it does not say is how far that work is spread, which is what the walk pays for;
-    /// see [`Self::everywhere_fraction`] and [`ROW_MAJOR_EVERYWHERE_FRACTION`].
+    /// Reported and never read by the pick: the mean number of Roaring containers a membership
+    /// touches, which says how much work a membership is and not how far it is spread.
     pub blocks_per_artifact: f64,
-    /// **The trigger.** The fraction of live artifacts whose extent is too wide for every node of
-    /// the tile index — the set the walk cannot place and returns on every request whatever the
-    /// viewport. Zero for a level with no artifacts.
+    /// The fraction of live artifacts whose extent is too wide for every node of the tile index:
+    /// the set the walk cannot place and returns for every viewport. What decides a treed or
+    /// spatial level's layout ([`ROW_MAJOR_EVERYWHERE_FRACTION`]). Zero for a level with no
+    /// artifacts.
     pub everywhere_fraction: f64,
     /// Whether the memberships are disjoint — which decides the **label/list** split and is not a
     /// choice. Observed rather than declared: single-valuedness is a property of the data.
@@ -278,45 +245,28 @@ pub fn observe_shape(row_count: u32, each: LevelWalk<'_>) -> LevelShape {
     }
 }
 
-/// **The one rule.** `pin` is the layer's declared override, which is read and never re-derived.
+/// **The one rule**, read by the build, by every fold and, through
+/// [`tessera_types::layer::RegisteredLayer::initial_layouts`], by a registration.
 ///
-/// `source` decides representability before anything else: a shape has no per-row source, and
-/// inverting its ranges into a column would materialise the membership the ranges exist to avoid.
-/// **A pin never flips**, at the build or at any fold after it. That is the whole point of pinning:
-/// a layer whose measured shape says one thing and whose operator knows another — a level about to
-/// be grown, a benchmark, a bug being cornered. A nightly fold that silently reverted it would make
-/// the key a suggestion.
+/// What the declaration fixes comes first ([`LayerDeclaration::fixed_layout`]): an attribute
+/// membership's label column, or the pin, which no fold re-derives. A level with stored memberships
+/// answered tile by tile is then served from a column whatever its shape; any other level is served
+/// from a column where it is populous and too scattered for the tile index
+/// ([`ROW_MAJOR_EVERYWHERE_FRACTION`]). The label form where the memberships are disjoint, the list
+/// form where they overlap.
 ///
-/// **A pinned `column` on a level that does not partition is not corrected here.** Whether the
-/// memberships are disjoint is checked where the column is built, and a double claim declines the
-/// column and leaves the level artifact-major with a loud trace — so the fallback is one decision at
-/// one place rather than a rule this function and the builder would each have to hold.
+/// A pinned `column` on a level whose memberships overlap is not corrected here: the column is
+/// declined where it is built, and the level is served artifact-major with a warning.
 pub fn choose(declaration: &LayerDeclaration, shape: LevelShape) -> ServingLayout {
-    // **An attribute's form follows from its membership and is never re-derived.** A single-valued
-    // attribute's members *are* the column, one label per row, so there is no second form to be
-    // chosen between — which is why `LayerDeclaration::validate` refuses a pin on it and why the
-    // fold's re-evaluation reaches here and leaves it alone.
-    //
-    // **A spatial level is picked exactly as an enumerated one is.** Its membership is resolved
-    // into a per-row source at every segment's publication (`polygon-membership.md` §6.3), so the
-    // observation the pick reads is over those resolved rows and the three forms are all
-    // available to it: `rows` for a level of few, large shapes; `column` where the shapes
-    // partition the corpus, which a boundary level almost always does and which is the form that
-    // scales; `list` where they overlap.
-    if matches!(declaration.membership, MembershipSource::Attribute(_)) {
-        return ServingLayout::RowMajorLabel;
+    if let Some(fixed) = declaration.fixed_layout() {
+        return fixed;
     }
-    if let Some(pinned) = declaration.layout {
-        return pinned;
-    }
-    let row_major = shape.artifacts >= ROW_MAJOR_MIN_ARTIFACTS
-        && shape.everywhere_fraction >= ROW_MAJOR_EVERYWHERE_FRACTION;
-    if !row_major {
+    let column = declaration.served_from_a_column()
+        || (shape.artifacts >= ROW_MAJOR_MIN_ARTIFACTS
+            && shape.everywhere_fraction >= ROW_MAJOR_EVERYWHERE_FRACTION);
+    if !column {
         return ServingLayout::ArtifactMajor;
     }
-    // **The label/list split follows from the membership, never from the numbers.** A level whose
-    // memberships are disjoint has exactly one label per row; one whose memberships overlap needs a
-    // list, and pays the larger constant for it.
     if shape.partitions {
         ServingLayout::RowMajorLabel
     } else {

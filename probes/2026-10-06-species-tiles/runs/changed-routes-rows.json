@@ -1,0 +1,126 @@
+{
+ "binary": "/tmp/claude-1000/-home-joe-code-tessera/047cca2f-36eb-4e53-8db7-c14e31d59060/scratchpad/tessera-new",
+ "bundle": "/home/joe/code/tessera/data/ladder/gbif-64p/bundle-stage5",
+ "rows": [
+  {
+   "principal": "1%",
+   "route": "aggregate by species",
+   "cold_ms": 31.1,
+   "warm_p50_ms": 32.5,
+   "warm_max_ms": 34.7,
+   "bytes": 2297
+  },
+  {
+   "principal": "1%",
+   "route": "aggregate by species, filtered",
+   "cold_ms": 38.9,
+   "warm_p50_ms": 37.5,
+   "warm_max_ms": 44.6,
+   "bytes": 2297
+  },
+  {
+   "principal": "1%",
+   "route": "artifact by id x20",
+   "cold_ms": 18.7,
+   "warm_p50_ms": 13.3,
+   "warm_max_ms": 14.0,
+   "bytes": 201
+  },
+  {
+   "principal": "1%",
+   "route": "tiles z9 depth 11",
+   "cold_ms": 215.7,
+   "warm_p50_ms": 203.9,
+   "warm_max_ms": 212.9,
+   "bytes": 231957
+  },
+  {
+   "principal": "1%",
+   "route": "tiles z9 depth 13",
+   "cold_ms": 1599.1,
+   "warm_p50_ms": 1949.4,
+   "warm_max_ms": 2114.4,
+   "bytes": 1922039
+  },
+  {
+   "principal": "25%",
+   "route": "aggregate by species",
+   "cold_ms": 87.7,
+   "warm_p50_ms": 76.2,
+   "warm_max_ms": 81.1,
+   "bytes": 2299
+  },
+  {
+   "principal": "25%",
+   "route": "aggregate by species, filtered",
+   "cold_ms": 64.0,
+   "warm_p50_ms": 66.6,
+   "warm_max_ms": 70.6,
+   "bytes": 2299
+  },
+  {
+   "principal": "25%",
+   "route": "artifact by id x20",
+   "cold_ms": 33.0,
+   "warm_p50_ms": 13.7,
+   "warm_max_ms": 14.6,
+   "bytes": 205
+  },
+  {
+   "principal": "25%",
+   "route": "tiles z9 depth 11",
+   "cold_ms": 449.7,
+   "warm_p50_ms": 361.5,
+   "warm_max_ms": 390.3,
+   "bytes": 416406
+  },
+  {
+   "principal": "25%",
+   "route": "tiles z9 depth 13",
+   "cold_ms": 4127.6,
+   "warm_p50_ms": 4030.9,
+   "warm_max_ms": 4247.2,
+   "bytes": 3982840
+  },
+  {
+   "principal": "100%",
+   "route": "aggregate by species",
+   "cold_ms": 199.4,
+   "warm_p50_ms": 174.2,
+   "warm_max_ms": 175.9,
+   "bytes": 2302
+  },
+  {
+   "principal": "100%",
+   "route": "aggregate by species, filtered",
+   "cold_ms": 102.5,
+   "warm_p50_ms": 95.5,
+   "warm_max_ms": 99.8,
+   "bytes": 2300
+  },
+  {
+   "principal": "100%",
+   "route": "artifact by id x20",
+   "cold_ms": 127.4,
+   "warm_p50_ms": 11.8,
+   "warm_max_ms": 13.5,
+   "bytes": 195
+  },
+  {
+   "principal": "100%",
+   "route": "tiles z9 depth 11",
+   "cold_ms": 546.3,
+   "warm_p50_ms": 416.5,
+   "warm_max_ms": 451.0,
+   "bytes": 414870
+  },
+  {
+   "principal": "100%",
+   "route": "tiles z9 depth 13",
+   "cold_ms": 6334.4,
+   "warm_p50_ms": 4796.2,
+   "warm_max_ms": 4907.8,
+   "bytes": 5073144
+  }
+ ]
+}
