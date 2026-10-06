@@ -1,7 +1,7 @@
 import type {TesseraClient} from './client.js';
 import {rectArea, type TileRect} from './rects.js';
 import {tileRectOfBbox} from './budget.js';
-import {WORLD_SIZE, mortonOfTile} from './coords.js';
+import {MAX_DEPTH, WORLD_SIZE, mortonOfTile} from './coords.js';
 import {gridOfData} from './projection.js';
 import {worldBbox, type Viewport} from './prefetch.js';
 import type {ViewState} from './driver.js';
@@ -12,12 +12,13 @@ import {refusalOf} from './presented.js';
 /**
  * The annotation channel: which artifacts the current view is served, and each one's masked count.
  *
- * It is a store of tiles. `POST /v1/artifacts/viewport` answers one frame per tile, and the frame
- * of a flat or levelled layer's tile depends only on the tile, the layer, the level, the filter
- * and the response's keys: an artifact's figures are over its whole visible membership, the same
- * in every tile. So a tile is held once fetched, keyed by (layer, level, depth, tile) under the
- * identity and content keys, and a settled view asks only for the tiles it does not hold, the
- * centre first. What the view shows is the union of its tiles' artifacts.
+ * It is a store of tiles, asked at the depth {@link artifactDepth} gives for the camera's zoom and
+ * at most {@link ARTIFACT_TILES_PER_REQUEST} at once. `POST /v1/artifacts/viewport` answers one
+ * frame per tile, and the frame of a flat or levelled layer's tile depends only on the tile, the
+ * layer, the level, the filter and the response's keys: an artifact's figures are over its whole
+ * visible membership, the same in every tile. So a tile is held once fetched, keyed by (layer,
+ * level, depth, tile) under the identity and content keys, and a settled view asks only for the
+ * tiles it does not hold, the centre first. What the view shows is the union of its tiles' artifacts.
  *
  * A treed layer (`nested`, `dag`) is cut over every requested tile together, so its frame answers
  * one view and is not held by tile: a view naming one asks for every tile it covers.
@@ -90,6 +91,17 @@ export function scopeKindOf(layer: Pick<Layer, 'hierarchy' | 'levels'>): 'levell
 }
 
 /**
+ * The whole map zoom a camera at `zoom` is read as: rounded down, after a zoom within a millionth of
+ * a whole number is taken as that number, since a camera framed at a whole zoom comes back from the
+ * data-to-world round trip a little either side of it.
+ *
+ * @internal
+ */
+export function wholeZoom(zoom: number): number {
+  return Math.floor(zoom + 1e-6);
+}
+
+/**
  * The levels the server answers a request naming no `levels` at, for one layer at one zoom,
  * mirroring the server's default. Where no level declares a zoom range every level answers;
  * otherwise a level answers where its range covers the zoom, inclusive, and a level with no range
@@ -98,7 +110,8 @@ export function scopeKindOf(layer: Pick<Layer, 'hierarchy' | 'levels'>): 'levell
  * @internal
  */
 export function declaredLevelsAt(layer: Pick<Layer, 'levels'>, zoom: number): number[] {
-  zoom = Math.floor(zoom);
+  // A camera zoomed out past 0 shows what zoom 0 declares.
+  zoom = Math.max(0, wholeZoom(zoom));
   const declared = layer.levels;
   if (declared.length === 0) return [];
   if (!declared.some((d) => d.zoom !== null)) return declared.map((d) => d.level);
@@ -109,10 +122,9 @@ export function declaredLevelsAt(layer: Pick<Layer, 'levels'>, zoom: number): nu
  * The `levels` a request over `layers` names: the union of each levelled layer's declared levels
  * at the camera zoom, or `undefined` where no named layer declares levels.
  *
- * The server's default keys on the request's `zoom`, which is the tile depth the mark budget chose
- * and can be several levels deeper than the camera. On a sparse corpus that selects only the
- * deepest level. The server applies one list to every named layer and ignores a level a layer does
- * not declare, so the union is safe.
+ * The server's default keys on the request's `zoom`, which is the tile depth, up to two deeper than
+ * the camera, so it would select levels declared for a closer zoom. The server applies one list to
+ * every named layer and ignores a level a layer does not declare, so the union is safe.
  *
  * @internal
  */
@@ -163,6 +175,33 @@ type Want = {
   levels: number[] | undefined;
 };
 
+/**
+ * The most tiles one artifacts request names. A tile at {@link artifactDepth}'s depth is at least
+ * 128 CSS pixels across, 128 at a whole-number zoom, and a 3840 × 2160 viewport, the largest screen
+ * in common use drawn at one device pixel per CSS pixel, touches at most 31 × 18 = 558 of them. So
+ * any common screen is asked for at map zoom + 2, and only a larger one steps to a coarser depth.
+ *
+ * @internal
+ */
+export const ARTIFACT_TILES_PER_REQUEST = 558;
+
+/**
+ * The tile depth artifacts are asked at for a camera at `zoom` over `bbox`: map zoom + 2, the zoom
+ * read by {@link wholeZoom} as the levels' zoom ranges are, within 0 to {@link MAX_DEPTH}. Where
+ * `bbox` touches more than `cap` tiles at that depth it is asked at the next coarser depth, until it
+ * fits. It does not depend on the depth the points are drawn at.
+ *
+ * Each level of a layer shows at most `perTile` artifacts in a tile, so the tiles asked for times
+ * `perTile` bounds the artifacts a level draws.
+ *
+ * @internal
+ */
+export function artifactDepth(bbox: [number, number, number, number], zoom: number, cap = ARTIFACT_TILES_PER_REQUEST): number {
+  let depth = Math.max(0, Math.min(MAX_DEPTH, wholeZoom(zoom) + 2));
+  while (depth > 0 && rectArea(tileRectOfBbox(bbox, depth)) > cap) depth -= 1;
+  return depth;
+}
+
 /** The noted view: the visible box in world space, the depth to ask at and the camera. */
 type NotedView = {bbox: [number, number, number, number]; depth: number; zoom: number; target: [number, number]};
 
@@ -173,11 +212,9 @@ export type ArtifactChannelOptions = {
   projection?: MapProjection;
   /** The token to ask with; a rejection is the ask's refusal. */
   token(): Promise<string>;
-  /** The depth the map is drawn at, or undefined before the first frame. */
-  depth(): number | undefined;
   /**
-   * The deployment's `max_tiles_per_request`. The ask's depth is lowered until its tile rectangle
-   * fits, since the drawn depth can pair with a wider view than it was drawn for.
+   * The deployment's `max_tiles_per_request`. Where it is below {@link ARTIFACT_TILES_PER_REQUEST}
+   * it is the cap instead.
    */
   maxTiles?: number;
   /**
@@ -261,11 +298,6 @@ export class ArtifactChannel {
     return this.state;
   }
 
-  /** Whether a view has been noted; false until a frame has been drawn. */
-  get hasView(): boolean {
-    return this.view !== null;
-  }
-
   /** How many tiles are held. */
   get heldTiles(): number {
     return this.tiles.size;
@@ -297,7 +329,7 @@ export class ArtifactChannel {
    */
   schedule(view: ViewState, width: number, height: number): void {
     this.cancelPrefetch();
-    if (!this.noteView(view, width, height)) return;
+    this.noteView(view, width, height);
     if (this.timer) this.clock.cancel(this.timer);
     this.timer = this.clock.after(this.settleMs, () => {
       this.timer = null;
@@ -306,31 +338,26 @@ export class ArtifactChannel {
   }
 
   /**
-   * Asks now, for this view, as a layer toggle needs. It takes the view because the noted one is
-   * absent until a frame has been drawn.
+   * Asks now, for this view, as a layer toggle needs.
    */
   refresh(view: ViewState, width: number, height: number): void {
     this.cancelPrefetch();
     if (this.timer) this.clock.cancel(this.timer);
     this.timer = null;
-    if (!this.noteView(view, width, height)) return;
+    this.noteView(view, width, height);
     void this.request();
   }
 
-  /** What to ask for: the visible box, at the depth the map is drawn at. False when there is none. */
-  private noteView(view: ViewState, width: number, height: number): boolean {
-    // The depth the map is drawn at, so the tiles asked for are the ones the marks are drawn in.
-    const depth = this.opts.depth();
-    if (depth === undefined) return false;
-    // The visible box, with no margin: the ring is fetched at idle.
+  /** The most tiles one request names. */
+  private get cap(): number {
+    return Math.min(ARTIFACT_TILES_PER_REQUEST, this.opts.maxTiles ?? Infinity);
+  }
+
+  /** What to ask for: the visible box, with no margin since the ring is fetched at idle. */
+  private noteView(view: ViewState, width: number, height: number): void {
     const viewport: Viewport = {target: [view.target[0], view.target[1]], zoom: view.zoom, width, height};
     const bbox = worldBbox(viewport, 1);
-    let asked = depth;
-    if (this.opts.maxTiles !== undefined) {
-      while (asked > 0 && rectArea(tileRectOfBbox(bbox, asked)) > this.opts.maxTiles) asked -= 1;
-    }
-    this.view = {bbox, depth: asked, zoom: view.zoom, target: [view.target[0], view.target[1]]};
-    return true;
+    this.view = {bbox, depth: artifactDepth(bbox, view.zoom, this.cap), zoom: view.zoom, target: [view.target[0], view.target[1]]};
   }
 
   /**
@@ -690,7 +717,7 @@ export class ArtifactChannel {
     const edge = 2 ** view.depth - 1;
     const ring: TileRect = {x0: Math.max(0, rect.x0 - 1), y0: Math.max(0, rect.y0 - 1), x1: Math.min(edge, rect.x1 + 1), y1: Math.min(edge, rect.y1 + 1)};
     const around = this.missing({...here, tiles: this.centreFirst(ring, view.depth, view.target)});
-    const limit = this.opts.maxTiles ?? Infinity;
+    const limit = this.cap;
     if (around.length > 0) return {want: here, tiles: around.slice(0, limit)};
     if (view.depth === 0) return null;
     const parent = this.want(view, view.depth - 1, Math.max(0, view.zoom - 1));

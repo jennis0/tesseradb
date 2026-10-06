@@ -2,10 +2,10 @@ import {makeData, makeVector, Uint64} from 'apache-arrow';
 import {expect} from 'vitest';
 import type {ArtifactChannelClock} from '../src/artifactChannel.js';
 import type {Band} from '../src/bands.js';
-import {tileXY} from '../src/coords.js';
+import {dataToWorldXY, tileXY} from '../src/coords.js';
 import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
-import type {Artifact, DeclaredScalar, Layer, Meta, TileCounts, ViewInfo, ViewportArtifactsFrame, ViewportArtifactsRequest, ViewportArtifactsResponse, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Artifact, DeclaredScalar, Layer, Meta, Quantisation, TileCounts, ViewInfo, ViewportArtifactsFrame, ViewportArtifactsRequest, ViewportArtifactsResponse, ViewportResponse, ViewportResult} from '../src/types.js';
 import type {TileSink} from '../src/client.js';
 
 /** The fixtures the core tests share, the fake clocks, and `settle`. */
@@ -455,4 +455,15 @@ export function manual(
     },
     close: () => controller.close()
   };
+}
+
+/**
+ * A camera that fits `bbox` to the tighter of the canvas's axes, as `store.setView` takes it: the
+ * box, and the zoom over the 512-unit world at which frame `q` shows it so.
+ */
+export function camera(q: Quantisation | null, bbox: [number, number, number, number], width: number, height: number): {bbox: [number, number, number, number]; zoom: number; width: number; height: number} {
+  if (!q) throw new Error('camera needs the frame the box is in: pass the view\'s quantisation before meta has landed');
+  const [x0, y0] = dataToWorldXY(bbox[0], bbox[1], q);
+  const [x1, y1] = dataToWorldXY(bbox[2], bbox[3], q);
+  return {bbox, zoom: Math.log2(Math.min(width / (Math.abs(x1 - x0) || 1), height / (Math.abs(y1 - y0) || 1))), width, height};
 }

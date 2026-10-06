@@ -3,7 +3,7 @@ import {TesseraClient} from '../src/client.js';
 import {GRID32, gridToWorld, WORLD_SIZE} from '../src/coords.js';
 import {outlineOf} from '../../deck/src/layer.js';
 import {createStore} from '../src/store.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, tileAnswers, view} from './support.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, tileAnswers, view, camera} from './support.js';
 
 /**
  * `extentOf` reads the served `box` in wire units, 32 bits per axis as `code`, and the outlines
@@ -43,7 +43,7 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 12}});
     store.setLayers(['clusters/a']);
     await clock.advance(1);
-    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    store.setView(camera(store.frame(), [0, 0, 100, 200], 800, 800));
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
