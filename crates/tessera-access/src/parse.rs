@@ -2,12 +2,14 @@
 //!
 //! A term is bare when it is made of ASCII letters, digits and `_ - . : /`, and is otherwise
 //! double-quoted, with `\"` and `\\` as the only escapes. `&` and `|` join operands, and mixing
-//! them in one bracket is refused. Whitespace before and after the whole label is skipped, and
-//! whitespace between tokens is refused. A quoted term is the text between its quotes, spaces
-//! included, with its escapes applied. A term holding a control character, or equal to `public` or
-//! `inherited` ignoring ASCII case, is refused. `public` is valid only as a
-//! whole label, which [`super::Label::parse`] handles before this parser runs. `inherited` is never
-//! a label.
+//! them in one bracket is refused. Whitespace outside quotes separates tokens and is otherwise
+//! ignored, so two operands with only whitespace between them are refused for want of an operator.
+//! A quoted term is the text between its quotes, inner spaces included, with its escapes applied.
+//! A credential's terms are trimmed ([`super::held_term`]), so a quoted term with whitespace at
+//! either end is refused: nobody could hold it. A term holding a control character, or equal to
+//! `public` or `inherited` ignoring ASCII case, is refused. `public` is valid only as a whole
+//! label, which [`super::Label::parse`] handles before this parser runs. `inherited` is never a
+//! label.
 
 use super::{Expr, LabelError};
 
@@ -28,8 +30,8 @@ const UNCLOSED_QUOTE: &str = "a quoted term is not closed; add `\"`";
 const BAD_ESCAPE: &str =
     "only `\\\"` and `\\\\` are escapes in a quoted term; write other characters as they are";
 const EMPTY_TERM: &str = "a quoted term is empty; write at least one character between the quotes";
-const SPACE: &str = "whitespace between tokens is refused; remove it, or quote a term that \
-     holds a space, as in `\"team a\"`";
+const EDGE_SPACE: &str = "a quoted term starts or ends with whitespace, which no credential \
+     can hold; remove the whitespace from the ends of the quoted term";
 const CONTROL: &str = "a term holds a control character; remove it";
 const PUBLIC_TERM: &str = "`public` is reserved and valid only as the whole label; write \
      `public` alone, or use another term";
@@ -40,14 +42,9 @@ const TOO_DEEP: &str = "brackets nest more than 256 deep; write the expression w
 /// Parses `text` into an expression, without normalising it. `text` is not `public`, and is not
 /// empty once trimmed.
 pub(super) fn parse(text: &str) -> Result<Expr, LabelError> {
-    let start = text.len() - text.trim_start().len();
-    let end = text.trim_end().len();
-    let mut parser = Parser {
-        s: &text[..end],
-        i: start,
-    };
+    let mut parser = Parser { s: text, i: 0 };
     let expr = parser.expr(0)?;
-    if parser.i < end {
+    if parser.i < text.len() {
         return Err(parser.err(STRAY_CLOSE));
     }
     Ok(expr)
@@ -67,7 +64,16 @@ impl Parser<'_> {
         LabelError::Invalid { at: self.i, reason }
     }
 
-    fn peek(&self) -> Option<char> {
+    /// The next character that is not whitespace, after moving past any whitespace before it.
+    fn peek(&mut self) -> Option<char> {
+        let rest = &self.s[self.i..];
+        let token = rest.trim_start();
+        self.i += rest.len() - token.len();
+        token.chars().next()
+    }
+
+    /// The next character, whitespace included.
+    fn peek_raw(&self) -> Option<char> {
         self.s[self.i..].chars().next()
     }
 
@@ -81,7 +87,6 @@ impl Parser<'_> {
             let c = match self.peek() {
                 None | Some(')') => break,
                 Some(c @ ('&' | '|')) => c,
-                Some(c) if c.is_whitespace() => return Err(self.err(SPACE)),
                 Some(_) => return Err(self.err(NO_OPERATOR)),
             };
             if op.is_some_and(|o| o != c) {
@@ -99,10 +104,10 @@ impl Parser<'_> {
     }
 
     fn operand(&mut self, depth: usize) -> Result<Expr, LabelError> {
+        let next = self.peek();
         let start = self.i;
-        let term = match self.peek() {
+        let term = match next {
             None => return Err(self.err(ENDS)),
-            Some(c) if c.is_whitespace() => return Err(self.err(SPACE)),
             Some('(') => return self.bracketed(depth),
             Some('"') => self.quoted()?,
             Some(c) if is_bare(c) => self.bare(),
@@ -134,7 +139,7 @@ impl Parser<'_> {
         self.i += 1;
         let mut term = String::new();
         loop {
-            let c = self.peek().ok_or_else(|| self.err(UNCLOSED_QUOTE))?;
+            let c = self.peek_raw().ok_or_else(|| self.err(UNCLOSED_QUOTE))?;
             self.i += c.len_utf8();
             match c {
                 '"' => break,
@@ -152,7 +157,7 @@ impl Parser<'_> {
     }
 
     fn escaped(&mut self) -> Result<char, LabelError> {
-        match self.peek() {
+        match self.peek_raw() {
             Some(c @ ('"' | '\\')) => {
                 self.i += 1;
                 Ok(c)
@@ -166,6 +171,9 @@ impl Parser<'_> {
 fn check_term(term: &str) -> Result<(), &'static str> {
     if term.chars().any(char::is_control) {
         return Err(CONTROL);
+    }
+    if term.trim() != term {
+        return Err(EDGE_SPACE);
     }
     if term.eq_ignore_ascii_case(super::PUBLIC) {
         return Err(PUBLIC_TERM);
@@ -188,11 +196,25 @@ mod tests {
     fn terms_bare_and_quoted() {
         assert_eq!(parse("user:a/b-c.d_E9"), Ok(term("user:a/b-c.d_E9")));
         assert_eq!(parse(r#""a\"b\\c""#), Ok(term(r#"a"b\c"#)));
-        assert_eq!(parse("\" team a \""), Ok(term(" team a ")));
-        assert_eq!(parse("\"  \""), Ok(term("  ")));
+        assert_eq!(parse("\"team  a\""), Ok(term("team  a")));
         assert_eq!(parse("\"é&|()\""), Ok(term("é&|()")));
         assert_eq!(parse(" \t(a) "), Ok(term("a")));
-        assert_ne!(parse("\"a \""), parse("a"));
+    }
+
+    #[test]
+    fn whitespace_outside_quotes_means_nothing() {
+        for (spaced, compact) in [
+            (" pharma_a & ( gb | fr ) ", "pharma_a&(gb|fr)"),
+            ("a\t&\nb", "a&b"),
+            ("( a|b)", "(a|b)"),
+            ("(a|b )", "(a|b)"),
+            ("a&( b)", "a&(b)"),
+            ("\"team a\" &b", "\"team a\"&b"),
+            ("a\u{3000}|\u{a0}b", "a|b"),
+        ] {
+            assert_eq!(parse(spaced), parse(compact), "{spaced:?}");
+            assert!(parse(compact).is_ok(), "{compact:?}");
+        }
     }
 
     #[test]
@@ -211,16 +233,19 @@ mod tests {
             "a&",
             "&a",
             "a b",
+            "a\tb",
+            "(a) (b)",
+            "\"a\" \"b\"",
+            "\" a\"",
+            "\"a \"",
+            "\" team a \"",
+            "\"  \"",
+            "\"a\u{a0}\"",
+            "x&\"\u{3000}y\"",
             "(a",
             "a)",
             "()",
             "\"\"",
-            "a & b",
-            "a |b",
-            "( a|b)",
-            "(a|b )",
-            "a&( b)",
-            "\"a\" &b",
             "\"a",
             "\"a\\n\"",
             "!a",
@@ -262,8 +287,12 @@ mod tests {
             Err(LabelError::Invalid { at: 2, .. })
         ));
         assert!(matches!(
-            parse("  a &b"),
-            Err(LabelError::Invalid { at: 3, .. })
+            parse("  a  b"),
+            Err(LabelError::Invalid { at: 5, .. })
+        ));
+        assert!(matches!(
+            parse("a | \" b\""),
+            Err(LabelError::Invalid { at: 4, .. })
         ));
     }
 }

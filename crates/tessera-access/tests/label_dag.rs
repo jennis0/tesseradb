@@ -1,5 +1,6 @@
-//! Random labels over eight terms, written with random brackets, evaluated through the DAG and
-//! against the tree they were written from. Some terms differ only by a space inside their quotes.
+//! Random labels over eight terms, written with random brackets and random whitespace between
+//! tokens, evaluated through the DAG and against the tree they were written from. Some terms differ
+//! only by a space inside their quotes.
 //! The tree is evaluated by direct recursion here, without parsing or normalising, so agreement
 //! checks the parser, normalisation, hash-consing, the bottom-up pass, top-down evaluation and the
 //! witness together.
@@ -9,7 +10,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use tessera_access::{Label, LabelId, Labels, Scratch, DEFAULT_MAX_NODES};
 
-const TERMS: [&str; 8] = ["a", "b.c", "d e", "f", "g:h", "\"i\\", "a ", " f"];
+const TERMS: [&str; 8] = ["a", "b.c", "d e", "f", "g:h", "\"i\\", "d  e", "de"];
 
 enum Tree {
     Term(usize),
@@ -55,7 +56,9 @@ fn text(tree: &Tree, rng: &mut StdRng) -> (String, Option<char>) {
     let mut top = (v.len() > 1).then_some(op);
     for (i, operand) in v.iter().enumerate() {
         if i > 0 {
+            out.push_str(space(rng));
             out.push(op);
+            out.push_str(space(rng));
         }
         let (inner, inner_top) = text(operand, rng);
         let may_be_bare = v.len() == 1 || inner_top.is_none_or(|t| t == op);
@@ -63,7 +66,7 @@ fn text(tree: &Tree, rng: &mut StdRng) -> (String, Option<char>) {
             out.push_str(&inner);
             top = top.or(inner_top);
         } else {
-            out.push_str(&format!("({inner})"));
+            out.push_str(&format!("({}{inner}{})", space(rng), space(rng)));
         }
     }
     (out, top)
@@ -174,14 +177,15 @@ fn equal_normal_forms_share_a_label_id_and_the_canonical_text_round_trips() {
 #[test]
 fn a_space_inside_quotes_makes_another_term() {
     let mut labels = Labels::new();
-    let quoted = Label::parse("\"a \"", DEFAULT_MAX_NODES).unwrap();
-    let bare = Label::parse(" a ", DEFAULT_MAX_NODES).unwrap();
-    assert_ne!(quoted, bare);
-    let (quoted, bare) = (
-        labels.intern(quoted.expr().unwrap()),
+    let spaced = Label::parse("\"d e\"", DEFAULT_MAX_NODES).unwrap();
+    let bare = Label::parse(" de ", DEFAULT_MAX_NODES).unwrap();
+    assert_ne!(spaced, bare);
+    let (spaced, bare) = (
+        labels.intern(spaced.expr().unwrap()),
         labels.intern(bare.expr().unwrap()),
     );
-    assert_ne!(quoted, bare);
-    assert!(labels.satisfied(bare, &|t| t == "a"));
-    assert!(!labels.satisfied(quoted, &|t| t == "a"));
+    assert_ne!(spaced, bare);
+    assert!(labels.satisfied(bare, &|t| t == "de"));
+    assert!(!labels.satisfied(spaced, &|t| t == "de"));
+    assert!(labels.satisfied(spaced, &|t| t == "d e"));
 }

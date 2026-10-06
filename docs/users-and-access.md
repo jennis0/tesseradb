@@ -222,14 +222,18 @@ flowchart LR
 ## Access expressions
 
 An access label is an Accumulo visibility expression over terms: `secret&(team_a|team_b)`. The
-grammar is the one the `accumulo-access` project specifies.
+grammar is the one the `accumulo-access` project specifies, except that whitespace outside quotes
+is allowed.
 
-- A term is written bare when it consists of letters, digits and `_ - . : /`. Any other term is
-  written in double quotes, with `\"` and `\\` as escapes.
-- The label as a whole is trimmed. Whitespace inside it is refused between tokens, as Accumulo
-  refuses it, and a quoted term is taken exactly as written: `"a "` and `a` are different terms. A
-  grant or claim value is trimmed, so a term with leading or trailing whitespace can appear in a
-  label and cannot be granted, and an item carrying only such a term is visible to nobody.
+- A term is written bare when it consists of letters, digits and `_ - . : /`, and is
+  case-sensitive. Any other term is written in double quotes, with `\"` and `\\` as the only
+  escapes.
+- Unicode whitespace outside quotes is ignored, round the whole label and between any two tokens:
+  `pharma_a & ( gb | fr )` is the same label as `pharma_a&(gb|fr)`. Two operands with only
+  whitespace between them are refused, since they need `&` or `|`.
+- A quoted term is taken exactly as written, so `"team a"` is one term holding a space. A grant or
+  claim value is trimmed, so a quoted term with whitespace at its start or end could never be
+  granted. Such a term is refused where the label is written; remove the whitespace from its ends.
 - `&` is conjunction and `|` is disjunction. Mixing the two needs brackets: `a&b|c` is refused and
   `(a&b)|c` is accepted.
 - There is no negation. A label is therefore monotone: a principal holding more terms sees a
