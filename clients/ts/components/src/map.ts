@@ -456,23 +456,25 @@ export class TesseraMap extends TesseraElement {
   @property({attribute: 'density-scale'}) accessor densityScale: DensityScale = DEFAULT_DENSITY_SCALE;
   /**
    * The palette a category column's values are coloured from: `tableau10`, `okabe-ito`, `set2` or
-   * `dark2`. Unset, the choice made in `<tessera-legend>` stands, Tableau 10 until one is made.
+   * `dark2`. Unset, the choice made in the explorer's Colour section stands, Tableau 10 until one
+   * is made.
    */
   @property({attribute: 'category-palette'}) accessor categoryPalette: CategoryPaletteName | '' = '';
   /**
    * The ramp a number column's values are coloured on: `viridis`, `cividis`, `magma`, `greys` or
-   * `red-blue`. Unset, the choice made in `<tessera-legend>` stands, Viridis until one is made.
+   * `red-blue`. Unset, the choice made in the explorer's Colour section stands, Viridis until one
+   * is made.
    */
   @property() accessor ramp: RampName | '' = '';
-  /** How numbers are placed on the ramp, `linear` or `log`. Unset, the legend's choice stands. */
+  /** How numbers are placed on the ramp, `linear` or `log`. Unset, the Colour section's choice stands. */
   @property({attribute: 'ramp-scale'}) accessor rampScale: RampScale | '' = '';
   /** Runs the ramp from its high end to its low end. */
   @property({type: Boolean, attribute: 'ramp-reverse'}) accessor rampReverse = false;
   /**
    * Colours for single category values, per column, per category key, as `#rrggbb`, such as
    * `{field: {'cs.CV': '#f28e2b'}}`. Setting it replaces every value colour chosen before,
-   * including those chosen in the legend; a host restores a viewer's saved choices this way, having
-   * kept them from `tessera-valuecolour`. Unset, the legend's choices stand.
+   * including those chosen on a field card; a host restores a viewer's saved choices this way,
+   * having kept them from `tessera-valuecolour`. Unset, the choices made on the cards stand.
    */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /**

@@ -20,20 +20,13 @@ const PATHS = {
   plus: {box: 24, body: svg`<path d="M12 5v14M5 12h14"/>`},
   search: {box: 24, body: svg`<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>`},
   chev: {box: 24, body: svg`<path d="M6 9l6 6 6-6"/>`},
+  chevup: {box: 24, body: svg`<path d="M6 15l6-6 6 6"/>`},
+  check: {box: 24, body: svg`<path d="M5 12.5l4.5 4.5L19 7.5"/>`},
+  /** A drop of paint, for colouring the map by a field. */
+  drop: {box: 24, body: svg`<path d="M12 3.5c3 3.6 6 7 6 10.2a6 6 0 0 1-12 0C6 10.5 9 7.1 12 3.5z"/>`},
   chevr: {box: 24, body: svg`<path d="M9 6l6 6-6 6"/>`},
   info: {box: 16, body: svg`<circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 5v.5"/>`},
   open: {box: 16, body: svg`<path d="M9 3h4v4M13 3l-6 6M7 3H3v10h10V9"/>`},
-  list: {box: 16, body: svg`<path d="M5 4h9M5 8h9M5 12h9M2 4h.5M2 8h.5M2 12h.5"/>`},
-  /** Density drawn not at all: an empty frame struck through. */
-  'density-none': {box: 16, body: svg`<rect x="2.5" y="3.5" width="11" height="9" rx="1"/><path d="M3.5 12l9-8"/>`},
-  /** Density as a soft wash: rings fading outwards. */
-  'density-smooth': {box: 16, body: svg`<circle cx="8" cy="8" r="5.5" stroke-opacity="0.3"/><circle cx="8" cy="8" r="3" stroke-opacity="0.65"/><circle cx="8" cy="8" r="0.8" fill="currentColor"/>`},
-  /** Density in hexagons. */
-  'density-hex': {box: 16, body: svg`<path d="M5 2.8h6L14 8l-3 5.2H5L2 8z"/>`},
-  /** Density in square cells. */
-  'density-grid': {box: 16, body: svg`<rect x="2.5" y="2.5" width="11" height="11" rx="1"/><path d="M8 2.5v11M2.5 8h11"/>`},
-  /** Density as contour lines. */
-  'density-lines': {box: 16, body: svg`<ellipse cx="8" cy="8" rx="6" ry="4.6"/><ellipse cx="8.6" cy="8.2" rx="3" ry="2.1"/>`},
   /** A marker pen over a ruled line, for the highlight verb. */
   highlight: {box: 16, body: svg`<path d="M4.5 10.5l5.5-5.5 2.5 2.5-5.5 5.5H4.5v-2.5z"/><path d="M2.5 14.5h11"/>`}
 };

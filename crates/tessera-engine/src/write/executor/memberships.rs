@@ -731,6 +731,7 @@ impl Executor {
                 .collect()
         });
         let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+        let mut settled: Vec<(String, u32)> = Vec::new();
         let undecodable = self.live.with_publication_state(|registry, store, _| {
             records
                 .iter()
@@ -738,10 +739,15 @@ impl Executor {
                 .zip(refused_per_record.iter_mut())
                 .map(|((record, position), refused)| {
                     registry.apply(record);
+                    settled.extend(registry.settle_layout(store, record));
                     store.apply_reporting(record, *position, refused)
                 })
                 .sum::<usize>()
         });
+        // A form held in the layout a level had before is never asked for again.
+        for (layer, level) in &settled {
+            self.deps.artifact_projections.forget_level(layer, *level);
+        }
         if undecodable > 0 {
             tracing::error!(
                 count = undecodable,

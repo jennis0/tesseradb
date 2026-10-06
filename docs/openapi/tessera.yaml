@@ -1664,10 +1664,13 @@ paths:
         `access` holds the row's access labels: in JSON a string or a list of strings, in Arrow a
         column of strings, lists of strings or a dictionary of strings. Each label is an access
         expression, such as `secret&(team_a|team_b)`, and a list admits a viewer who satisfies any
-        one of them; a label that is not an expression is `422`. Left out or null, it keeps
-        the item's label, and a new item takes the view's `point_visibility.default`. An empty
-        list, and a label empty once trimmed, is the view's default; a new item with no label on a
-        view with no default is `422`. `tessera_id` is a string of decimal digits and names an
+        one of them; a label that is not an expression is `422`. Unicode whitespace outside quotes
+        is ignored, and a quoted term such as `"team a"` is taken exactly as written; a quoted term
+        with whitespace at either end is `422`, since a credential's terms are trimmed and none
+        could hold it. The same grammar applies to every label this API takes. Left out or null,
+        it keeps the item's label, and a new item takes the view's `point_visibility.default`. An
+        empty list, and a label empty once trimmed, is the view's default; a new item with no label
+        on a view with no default is `422`. `tessera_id` is a string of decimal digits and names an
         item; a row whose `tessera_id` names no live or suppressed item is refused, since a new
         item is given its `tessera_id` when it is created. `node_id` is accepted and not stored. Every other column is a declared
         attribute, a group-scoped attribute of the view's group, or an enumerated layer; any other

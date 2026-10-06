@@ -505,9 +505,11 @@ impl ArtifactProjections {
     }
 
     /// What a level does when its memberships no longer partition, `amendment` naming the
-    /// amendment that reached it. A form holding its own bitmaps goes back to the artifact-major
-    /// route; one holding no bitmaps takes the list form instead, since its column is its
-    /// membership. `false` where that recomposition failed and the form is dropped.
+    /// amendment that reached it. A level whose layout is the automatic pick takes the list
+    /// column: composed from the form's bitmaps where it holds them, and otherwise recomposed from
+    /// its column, which is its membership. Under a pin a form holding its own bitmaps goes back to
+    /// the artifact-major route, and one holding none takes the list form too. `false` where that
+    /// composition failed and the form is dropped.
     pub(super) fn kept_without_a_column(
         &self,
         address: &LevelAddress,
@@ -516,34 +518,43 @@ impl ArtifactProjections {
         amendment: &str,
     ) -> bool {
         let (view, layer, level) = address;
-        self.fallbacks
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if rows.membership().rows_held() {
-            tracing::warn!(
-                layer = %layer,
-                level,
-                view = %view,
-                "this level's {amendment} memberships no longer partition, so it is served \
-                 artifact-major. Every answer is unchanged; the layout is not"
-            );
-            return true;
-        }
         let started = std::time::Instant::now();
         let scratch = self.scratch().to_path_buf();
-        if !rows.recompose_as_list(added, &scratch) {
+        let listed = match (rows.membership().rows_held(), rows.lists_on_overlap) {
+            (true, false) => {
+                self.fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    "this level's {amendment} memberships no longer partition under its pin, so \
+                     it is served artifact-major. Every answer is unchanged; the layout is not"
+                );
+                return true;
+            }
+            (true, true) => rows.compose_as_list(&scratch),
+            (false, lists) => {
+                if !lists {
+                    self.fallbacks
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                rows.recompose_as_list(added, &scratch)
+            }
+        };
+        if !listed {
             self.drop_lost_column(address, view);
             return false;
         }
         self.columns_composed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::warn!(
+        tracing::info!(
             layer = %layer,
             level,
             view = %view,
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "this level's {amendment} memberships no longer partition and it is served from \
-             its column alone, so the column is recomposed in the list form. Every answer \
-             is unchanged; the layout is not"
+            "this level's {amendment} memberships no longer partition, so its column is \
+             recomposed in the list form. Every answer is unchanged"
         );
         true
     }

@@ -1,18 +1,17 @@
 #!/usr/bin/env node
-// Drive the value-suggestion category control in a headless browser, against a live server.
+// Drive a category field card's search box in a headless browser, against a live server.
 //
 //   node clients/ts/viewer/smoke-suggest.mjs [--url http://localhost:5187] [--shot-dir DIR]
 //     [--headed] [--executable /path/to/chrome]
 //
 // Requires a running `tessera serve` over the GeoNames bundle and a running `vite dev`, with a
-// dataset document (`?datasets=` or `VITE_TESSERA_DATASETS`) naming two presets: a broad one
-// (every country) and a narrow one holding `FR` alone. `feature_class` is `public` with 9 values
-// and `country` is `derived` with 254 (`test_corpora/geonames/corpus.toml`), which exercises both
-// shapes: a checklist where the empty-`q` page says `more: false`, a lookahead where it says `true`.
+// dataset document (`?datasets=` or `VITE_TESSERA_DATASETS`). `country` is `derived` with 254
+// values (`test_corpora/geonames/corpus.toml`).
 //
-// It checks against a real server what the component tests with a fake store cannot: that the
-// empty-`q` page decides the shape, that keystrokes reach `/v1/categories/country/suggest`, and
-// that a chosen value narrows the viewport.
+// It checks against a real server what the component tests with a fake store cannot: that
+// keystrokes in the country card's search box reach `/v1/categories/country/suggest` a bounded
+// number of times, that the server's match span is marked, and that a chosen value narrows the
+// viewport.
 import {flags, isSupersededAbort, launchBrowser} from './smoke-browser.mjs';
 
 const args = flags();
@@ -100,10 +99,10 @@ await page.selectOption('#principal', String(broadIndex));
 await settled();
 await shot('01-broad-opened');
 
-// Open the filter panel: at a narrow width it is behind the `Filters` tab.
+// Open the field column: at a narrow width it is behind the `Fields` tab.
 const filterPanel = page.locator('tessera-filter-panel').first();
 if ((await filterPanel.count()) === 0 || !(await filterPanel.isVisible().catch(() => false))) {
-  const tab = page.locator('[part="tabs"] button', {hasText: 'Filters'}).first();
+  const tab = page.locator('[part="tabs"] button', {hasText: 'Fields'}).first();
   if (await tab.count()) {
     await tab.click();
     await page.waitForTimeout(300);
@@ -111,31 +110,18 @@ if ((await filterPanel.count()) === 0 || !(await filterPanel.isVisible().catch((
 }
 check('the filter panel is reachable', (await filterPanel.count()) > 0);
 
-// feature_class: public, 9 values, the checklist shape.
-const featureClass = page.locator('tessera-filter[column="feature_class"]').first();
-await featureClass.waitFor({state: 'attached', timeout: 10_000}).catch(() => {});
-await page.waitForTimeout(500); // the empty-q page's one round trip
-await shot('02-feature-class-checklist');
-
-const fcEntry = featureClass.locator('[part="entry"]');
-const fcBoxes = featureClass.locator('[part="tick"] input[type="checkbox"]');
-check('feature_class renders no search box (checklist)', (await fcEntry.count()) === 0);
-const fcCount = await fcBoxes.count();
-check('feature_class checklist carries 9 values', fcCount === 9, `saw ${fcCount}`);
-check('feature_class carries no match span', (await featureClass.locator('[part="tick"] mark').count()) === 0);
-
-// country: derived, 254 values, the lookahead shape.
+// The country card, listed for this run.
+await page.evaluate(() => {
+  const explorer = /** @type {HTMLElement & {pinnedFilters: string} | null} */ (document.querySelector('tessera-explorer'));
+  if (explorer) explorer.pinnedFilters = 'country';
+});
 const country = page.locator('tessera-filter[column="country"]').first();
 await country.waitFor({state: 'attached', timeout: 10_000}).catch(() => {});
 await page.waitForTimeout(500);
-await shot('03-country-lookahead-initial');
+await shot('03-country-card');
 
 const countryEntry = country.locator('[part="entry"]');
-check('country renders a search box (lookahead)', (await countryEntry.count()) > 0);
-const initialTicks = await country.locator('[part="tick"]').count();
-check('country’s initial list is 20', initialTicks === 20, `saw ${initialTicks}`);
-const moreNote = await country.locator('[part="more"]').textContent().catch(() => null);
-check('country says "type more to narrow"', (moreNote ?? '').includes('type more to narrow'), `saw "${moreNote}"`);
+check('country’s card has a search box', (await countryEntry.count()) > 0);
 
 // Type "fr" one keystroke at a time, and count the requests.
 const before = suggestRequests.filter((r) => r.column === 'country').length;
@@ -155,38 +141,16 @@ check('typing "fr" narrows the list', narrowedTicks > 0 && narrowedTicks <= 20, 
 const markText = await country.locator('[part="tick"] mark').first().textContent().catch(() => null);
 check('a match span is highlighted', !!markText && /fr/i.test(markText), `mark="${markText}"`);
 
-// Choose the first suggestion: a chip appears, and the viewport refetches under the filter.
+// Choose the first suggestion: the viewport refetches under the filter.
 const vpBefore = viewportRequests;
 const firstTick = country.locator('[part="tick"]').first();
 const pickedLabel = (await firstTick.textContent())?.trim() ?? '';
 await firstTick.click();
 await page.waitForTimeout(400);
 await settled(8000);
-await shot('05-country-chip-chosen');
-const chipCount = await country.locator('[part="value-chip"]').count();
-check('choosing a value adds a chip', chipCount > 0, `label was "${pickedLabel}"`);
+await shot('05-country-chosen');
+console.log(`  chose "${pickedLabel}"`);
 check('the viewport refetches under the chosen filter', viewportRequests > vpBefore, `${vpBefore} -> ${viewportRequests}`);
-
-// The narrow principal (FR only) sees country as a checklist.
-const narrowIndex = await page.evaluate(() => {
-  const select = /** @type {HTMLSelectElement | null} */ (document.getElementById('principal'));
-  for (const o of select?.options ?? []) if (/\bFR\b|France/i.test(o.textContent ?? '')) return o.index;
-  return -1;
-});
-if (narrowIndex === -1) {
-  check('a narrow (FR-only) principal is offered', false, 'no matching #principal option');
-} else {
-  await page.selectOption('#principal', String(narrowIndex));
-  await settled();
-  await page.waitForTimeout(500);
-  await shot('06-narrow-country-checklist');
-  const narrowCountry = page.locator('tessera-filter[column="country"]').first();
-  const narrowEntry = narrowCountry.locator('[part="entry"]');
-  const narrowBoxes = narrowCountry.locator('[part="tick"] input[type="checkbox"]');
-  check('the narrow principal renders country as a checklist', (await narrowEntry.count()) === 0);
-  const narrowBoxCount = await narrowBoxes.count();
-  check('the narrow principal’s checklist carries one value', narrowBoxCount === 1, `saw ${narrowBoxCount}`);
-}
 
 await browser.close();
 

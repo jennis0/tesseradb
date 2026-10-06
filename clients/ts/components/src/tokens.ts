@@ -23,16 +23,20 @@ import {css} from 'lit';
  * @cssprop --tessera-ink-2 - The colour of labels, section headings and secondary text.
  * @cssprop --tessera-ink-3 - The colour of faint text: placeholders, hints and disabled controls,
  *   and of the dot in the loading states.
- * @cssprop --tessera-line - The colour of borders around panels, cards, inputs, buttons, chips and
+ * @cssprop --tessera-line - The colour of borders around panels, cards, buttons, chips and
  *   the map toolbar.
  * @cssprop --tessera-line-2 - The colour of the rules between sections and between the status
  *   strip's cells.
- * @cssprop --tessera-line-control - The colour of borders around inputs and chips.
+ * @cssprop --tessera-line-control - The colour of borders around inputs and of a slider's unfilled
+ *   track, at 3:1 against the surface.
  * @cssprop --tessera-accent - The colour of the active map tool, primary buttons, badges, checked
  *   boxes and focus rings.
  * @cssprop --tessera-accent-ink - The text colour on an accent background.
  * @cssprop --tessera-highlight - The colour of a highlight chip, a highlighted row's text and its ×.
  * @cssprop --tessera-highlight-soft - The background of a highlight chip and a highlighted row.
+ * @cssprop --tessera-bar - The colour of a field card's bars for the items in view.
+ * @cssprop --tessera-bar-highlight - The colour of a field card's bars for the highlighted items.
+ * @cssprop --tessera-bar-match - The colour of a field card's pale bars, for everything matching.
  * @cssprop --tessera-warn - The colour of the dot in the data updated and reconnecting states.
  * @cssprop --tessera-refuse - The colour of the refused and expired states and their dot.
  * @cssprop --tessera-ok - The colour of the status dot when the view is up to date.
@@ -59,14 +63,19 @@ export const tokens = css`
     --_tessera-surface-3: var(--tessera-surface-3, light-dark(#efefeb, #2a2e35));
     --_tessera-ink: var(--tessera-ink, light-dark(#1b1d21, #eceef1));
     --_tessera-ink-2: var(--tessera-ink-2, light-dark(#565c64, #a7adb6));
-    --_tessera-ink-3: var(--tessera-ink-3, light-dark(#737981, #80868f));
+    --_tessera-ink-3: var(--tessera-ink-3, light-dark(#6a6f76, #8b919a));
     --_tessera-line: var(--tessera-line, light-dark(#e5e5e1, #2b2f36));
     --_tessera-line-2: var(--tessera-line-2, light-dark(#efefeb, #24272d));
-    --_tessera-line-control: var(--tessera-line-control, light-dark(#deded9, #33373e));
+    --_tessera-line-control: var(--tessera-line-control, light-dark(#8a8f96, #6b7079));
     --_tessera-accent: var(--tessera-accent, light-dark(#1b1d21, #eceef1));
     --_tessera-accent-ink: var(--tessera-accent-ink, light-dark(#ffffff, #111317));
-    --_tessera-highlight: var(--tessera-highlight, light-dark(#6b3fa0, #c3a6ee));
-    --_tessera-highlight-soft: var(--tessera-highlight-soft, light-dark(#efe6fa, #2c2340));
+    --_tessera-highlight: var(--tessera-highlight, light-dark(#5b3fc4, #c3a6ee));
+    --_tessera-highlight-soft: var(--tessera-highlight-soft, light-dark(#f1edfb, #2c2340));
+    /* Each bar stands 3:1 against the surface and a hovered row, and a solid bar 3:1 against the
+       pale one beneath. */
+    --_tessera-bar: var(--tessera-bar, light-dark(#3a3e45, #d5d9df));
+    --_tessera-bar-highlight: var(--tessera-bar-highlight, light-dark(#42269a, #d7c4f7));
+    --_tessera-bar-match: var(--tessera-bar-match, light-dark(#868b92, #6b7079));
     --_tessera-warn: var(--tessera-warn, light-dark(#c98a0a, #e0a940));
     --_tessera-refuse: var(--tessera-refuse, light-dark(#b42318, #f0857a));
     --_tessera-ok: var(--tessera-ok, light-dark(#1f7a4d, #5cc98a));
@@ -422,7 +431,7 @@ export const chrome = css`
     min-height: 24px;
     max-width: 100%;
     padding: 3px 5px 3px 8px;
-    border: 1px solid var(--_tessera-line-control);
+    border: 1px solid var(--_tessera-line);
     border-radius: var(--_tessera-radius-control);
     background: var(--_tessera-surface-2);
     color: var(--_tessera-ink);

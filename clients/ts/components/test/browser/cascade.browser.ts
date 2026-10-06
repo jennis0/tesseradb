@@ -135,9 +135,11 @@ describe('a list that opens over what sits below it', () => {
         status: {status: 'shown', sessionWarm: true, refusal: null, stale: false, expired: false, retrying: false},
         view: {id: 's0'},
         filters: {draft: {filter: {}, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
+        legend: {colourBy: null},
+        artifacts: {served: [], colours: new Map()},
         aggregates: new Map()
       };
-      const store = {get: (name: string) => projections[name], subscribe: () => () => {}};
+      const store = {get: (name: string) => projections[name], subscribe: () => () => {}, setAggregate: () => {}};
       const panel = document.querySelector('tessera-filter-panel') as HTMLElement & {store: unknown; updateComplete: Promise<unknown>};
       panel.store = store;
       await panel.updateComplete;
@@ -168,5 +170,70 @@ describe('the map’s toolbar in a bottom corner', () => {
       {bottom: true, left: true, right: false},
       {bottom: true, left: false, right: true}
     ]);
+  });
+});
+
+describe('the field column', () => {
+  it('renders a card’s rows from the counts registered, and Tab from its search box reaches a row’s Highlight and shows it', async () => {
+    const p = await page('<div style="width: 340px"><tessera-filter-panel pinned="archive"></tessera-filter-panel></div>');
+    const seen = await p.evaluate(async () => {
+      const rows = [
+        {key: 'cs', count: 30},
+        {key: 'math', count: 20}
+      ];
+      const columns: Record<string, {get(i: number): unknown}> = {
+        group: {get: () => 'listed'},
+        key: {get: (i: number) => rows[i]!.key},
+        title: {get: () => null},
+        count: {get: (i: number) => BigInt(rows[i]!.count)}
+      };
+      const table = {numRows: rows.length, getChild: (name: string) => columns[name] ?? null};
+      const answer = {status: 'shown', view: 's0', refusal: null, summaries: [null], result: {tables: [{grouping: 0, total: 50, referenceTotal: null, groups: 2, sample: null, rows: table}], region: null, recomposed: false, identityKey: 'ik', next: null}};
+      const listeners = new Set<() => void>();
+      let aggregates = new Map<string, unknown>();
+      const projections: Record<string, unknown> = {
+        meta: {declaredScalars: [{name: 'archive', arrowType: 'u16', category: {}, render: false}], layers: [], views: [], filterOperands: [{column: 'archive', family: 'category', operands: ['in']}], selection: {maxAggregateTop: 1000}},
+        status: {status: 'shown', sessionWarm: true, refusal: null, stale: false, expired: false, retrying: false},
+        view: {id: 's0', inView: null},
+        filters: {draft: {filter: {}, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
+        legend: {colourBy: null, categories: {}, ranks: {}},
+        artifacts: {served: [], colours: new Map()}
+      };
+      const store = {
+        get: (name: string) => (name === 'aggregates' ? aggregates : projections[name]),
+        subscribe: (fn: () => void) => {
+          listeners.add(fn);
+          return () => listeners.delete(fn);
+        },
+        setAggregate: (id: string, spec: unknown) => {
+          aggregates = new Map(aggregates);
+          if (spec === null) aggregates.delete(id);
+          else aggregates.set(id, answer);
+          queueMicrotask(() => listeners.forEach((fn) => fn()));
+        },
+        suggest: () => {},
+        forgetSuggestions: () => {}
+      };
+      const panel = document.querySelector('tessera-filter-panel') as HTMLElement & {store: unknown; updateComplete: Promise<unknown>};
+      panel.store = store;
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+        await panel.updateComplete;
+      }
+      const card = panel.shadowRoot!.querySelector('tessera-field-card')!;
+      await (card as unknown as {updateComplete: Promise<unknown>}).updateComplete;
+      const names = [...card.shadowRoot!.querySelectorAll('[part="name"]')].map((n) => n.textContent);
+      card.shadowRoot!.querySelector('tessera-filter')!.shadowRoot!.querySelector<HTMLInputElement>('[part="entry"]')!.focus();
+      return {names};
+    });
+    expect(seen.names).toEqual(['cs', 'math']);
+    await p.keyboard.press('Tab');
+    const focused = await p.evaluate(() => {
+      let at: Element | null = document.activeElement;
+      while (at?.shadowRoot?.activeElement) at = at.shadowRoot.activeElement;
+      const verbs = at?.closest('[part="verbs"]');
+      return {part: at?.getAttribute('part') ?? null, row: at?.closest('[part~="row"]')?.getAttribute('data-key') ?? null, shown: verbs ? getComputedStyle(verbs).opacity : null};
+    });
+    expect(focused).toEqual({part: 'highlight', row: 'cs', shown: '1'});
   });
 });

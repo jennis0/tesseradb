@@ -11,16 +11,15 @@ The `tessera-*` custom elements, in the `@tesseradb/components` package, built w
 | [`<tessera-store>`](components/tessera-store.md) | Provides one store to the elements inside it. |
 | [`<tessera-status>`](components/tessera-status.md) | The state and the counts of the view, on one line. |
 | [`<tessera-count>`](components/tessera-count.md) | A sample count or a masked count, formatted. |
-| [`<tessera-legend>`](components/tessera-legend.md) | What the map's colours mean, and the colour controls. |
 | [`<tessera-layer-picker>`](components/tessera-layer-picker.md) | Which annotation layers the map draws. |
 | [`<tessera-view-picker>`](components/tessera-view-picker.md) | Chooses the view. |
 | [`<tessera-key-picker>`](components/tessera-key-picker.md) | Chooses the view within the current group. |
-| [`<tessera-filter-panel>`](components/tessera-filter-panel.md) | The filter controls, and the applied clauses as chips. |
-| [`<tessera-filter>`](components/tessera-filter.md) | One filter control, drawn by the column's type. |
-| [`<tessera-cluster-filter>`](components/tessera-cluster-filter.md) | One layer's clusters as a filter field. |
+| [`<tessera-filter-panel>`](components/tessera-filter-panel.md) | The field cards, what they count, and the clauses applied. |
+| [`<tessera-field-card>`](components/tessera-field-card.md) | One field's counts in view and overall, with its filter and highlight. |
+| [`<tessera-filter>`](components/tessera-filter.md) | A field card's search box. |
+| [`<tessera-cluster-filter>`](components/tessera-cluster-filter.md) | A layer's field card's search box. |
 | [`<tessera-selection>`](components/tessera-selection.md) | The selected region's counts, marks and actions. |
 | [`<tessera-item-card>`](components/tessera-item-card.md) | The selected item's fields, with Open and Copy id. |
-| [`<tessera-artifact-list>`](components/tessera-artifact-list.md) | The clusters on screen at the level drawn, with their counts. |
 | [`<tessera-artifact-card>`](components/tessera-artifact-card.md) | The opened artifact, with its lineage and its filter buttons. |
 | [`<tessera-hierarchy>`](components/tessera-hierarchy.md) | A layer's hierarchy, browsed apart from the viewport. |
 
@@ -28,7 +27,7 @@ The `tessera-*` custom elements, in the `@tesseradb/components` package, built w
 
 ## Loading the elements
 
-`import '@tesseradb/components'` defines every element. Each element also has its own entry, such as `import '@tesseradb/components/map'`, which defines that element and the elements it renders. The map, the explorer, the legend, the artifact list and the artifact card import `@tesseradb/deck`, which depends on deck.gl; the other elements do not. `@deck.gl/aggregation-layers` is a peer dependency as well, which `@tesseradb/deck` imports only when a map first draws density as hexagons or contours. A host's bundler puts it in a chunk of its own, which a page that never draws those does not load.
+`import '@tesseradb/components'` defines every element. Each element also has its own entry, such as `import '@tesseradb/components/map'`, which defines that element and the elements it renders. The map, the explorer, the field card, the field column and the artifact card import `@tesseradb/deck`, which depends on deck.gl; the other elements do not. `@deck.gl/aggregation-layers` is a peer dependency as well, which `@tesseradb/deck` imports only when a map first draws density as hexagons or contours. A host's bundler puts it in a chunk of its own, which a page that never draws those does not load.
 
 A page with no build step loads the single-file bundle, `tessera-components.js`, which holds Lit, deck.gl, its aggregation layers and the decode worker. `npm run bundle -w @tesseradb/components` in `clients/ts` writes it to `components/dist/` with its subresource-integrity hash in `tessera-components.js.sri`:
 

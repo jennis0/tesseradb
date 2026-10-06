@@ -86,9 +86,10 @@ The store takes in where the camera is, which filters, layers and colour are act
 budget, which view is current and what is selected. It publishes the marks to draw, the counts to
 show, the display state, and a legend. The point budget is 250,000 marks unless the host gives
 another. The explorer element takes it as `budget`, which leaves the store's own unless the host
-sets it, with `budget-min` and `budget-max`, 1,000 and 2,000,000 by default, for the range a
-control for it offers, and passes all three to its map; the notebook widget takes them as
-`budget`, `budget_min` and `budget_max`, and every Python route to a map passes them on.
+sets it, with `budget-min` and `budget-max`, 1,000 and 2,000,000 by default, for the range its
+Most points slider offers, and passes all three to its map. The slider sets the store's budget
+when it is let go. The notebook widget takes them as `budget`, `budget_min` and `budget_max`, and
+every Python route to a map passes them on.
 
 Told where the camera is, it works out which requests are worth making and issues them. Told a
 filter changed, it recomposes one expression from every active clause and sends it whole. Given a

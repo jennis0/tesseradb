@@ -348,7 +348,7 @@ describe('<tessera-explorer>', () => {
     return {host, el, store, looks, follow};
   }
 
-  it('puts both pickers in the toolbar slot and the legend in the colour slot', async () => {
+  it('puts both pickers in the toolbar slot', async () => {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as unknown as {store: unknown};
     const store = fakeStore({meta: deployment(), status: status({})});
@@ -358,8 +358,6 @@ describe('<tessera-explorer>', () => {
     const toolbar = (host.querySelector('tessera-explorer') as HTMLElement).shadowRoot!.querySelector('slot[name="toolbar"]')!;
     const tags = [...toolbar.children].map((c) => c.tagName.toLowerCase());
     expect(tags).toEqual(['tessera-view-picker', 'tessera-key-picker']);
-    const colour = (host.querySelector('tessera-explorer') as HTMLElement).shadowRoot!.querySelector('slot[name="colour"]')!;
-    expect([...colour.children].map((c) => c.tagName.toLowerCase())).toEqual(['tessera-legend']);
     expect(deep(host, '[part="view-chip"]')).toBeNull();
   });
 

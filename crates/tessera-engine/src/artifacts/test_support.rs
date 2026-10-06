@@ -50,6 +50,7 @@ pub(super) fn assembled(records: ArtifactRecords, membership: MembershipRows) ->
         base_rows: u32::MAX,
         covered: Vec::new(),
         inherited: Vec::new(),
+        lists_on_overlap: false,
     }
 }
 

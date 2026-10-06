@@ -1,10 +1,8 @@
 import {afterEach, describe, expect, it} from 'vitest';
 import type {Meta, RegionProjection} from '@tesseradb/client';
 import '../src/explorer.js';
-import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
+import {deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
 
-/** The folded sections of the right card, with their hints. */
-const folds = (shadow: ShadowRoot) => [...shadow.querySelectorAll('[part="info"] [part="fold"][aria-expanded="false"]')].map((f) => [f.getAttribute('data-section'), f.querySelector('[part="fold-hint"]')!.textContent]);
 /** Where a callout was placed: its offset from the map's top-left corner. */
 const placedAt = (el: HTMLElement): [number, number] => {
   const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(el.style.transform);
@@ -88,19 +86,27 @@ describe('<tessera-explorer> parts', () => {
     for (const part of ['item-card-headline', 'artifact-card-headline', 'selection-items', 'status-refusal', 'map-refusal', 'status-refresh', 'status-reauthorise']) expect(seen, part).toContain(part);
   });
 
-  it('forwards the filter controls’ parts through the filter panel', async () => {
+  it('forwards the field cards’ parts, and their search boxes’, through the field column', async () => {
     const {host, shadow, store} = await explorer();
     store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}, author: {family: 'keyword', needle: 'Ada', op: 'eq'}}, highlight: {}}});
     await settle(host);
     const panel = shadow.querySelector('tessera-filter-panel')!;
     const outer = forwardedBy(panel);
-    const filters = [...panel.shadowRoot!.querySelectorAll('tessera-filter')];
-    expect(filters.length).toBe(2);
-    for (const f of filters) {
-      const map = forwardedBy(f);
-      for (const part of partsIn(f.shadowRoot!)) {
-        expect(map.get(part)).toBe(`filter-${part}`);
-        expect(outer.get(`filter-${part}`)).toBe(`filter-${part}`);
+    const cards = [...panel.shadowRoot!.querySelectorAll('tessera-field-card')];
+    expect(cards.length).toBe(2);
+    for (const card of cards) {
+      const byCard = forwardedBy(card);
+      for (const part of partsIn(card.shadowRoot!)) {
+        expect(byCard.get(part)).toBe(`field-card-${part}`);
+        expect(outer.get(`field-card-${part}`)).toBe(`field-card-${part}`);
+      }
+      for (const f of card.shadowRoot!.querySelectorAll('tessera-filter')) {
+        const map = forwardedBy(f);
+        for (const part of partsIn(f.shadowRoot!)) {
+          expect(map.get(part)).toBe(`filter-${part}`);
+          expect(byCard.get(`filter-${part}`)).toBe(`filter-${part}`);
+          expect(outer.get(`filter-${part}`)).toBe(`filter-${part}`);
+        }
       }
     }
   });
@@ -119,15 +125,27 @@ describe('<tessera-explorer title-field>', () => {
 
 describe('<tessera-explorer> narrow layout', () => {
   it('draws none of the cards over the map, so nothing hidden asks for counts; a sheet asks for its own', async () => {
-    const {host, el, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
-    store.set('legend', {...store.get('legend'), colourBy: 'archive', categories: {archive: [{code: 1, key: 'cs', title: null}]}});
+    const {host, el, shadow, store} = await explorer('<tessera-explorer layout="overlay" pinned-filters="archive"></tessera-explorer>');
     (el as unknown as {narrow: boolean}).narrow = true;
     await settle(host);
-    expect(shadow.querySelector('[part="panel"], [part="sidebar"], [part="info"], tessera-legend, tessera-filter-panel')).toBeNull();
+    expect(shadow.querySelector('[part="panel"], [part="sidebar"], tessera-filter-panel')).toBeNull();
     expect([...registered(store).keys()]).toEqual([]);
+    shadow.querySelector<HTMLButtonElement>('[role="tab"][data-sheet="filters"]')!.click();
+    await settle(host);
+    // The sheet's field column folds its cards to a line, so they ask for their counts in view alone.
+    expect([...registered(store).keys()].map((id) => id.split('#')[0]).sort()).toEqual(['field-subject', 'fields-match']);
+  });
+
+  it('gives the Layers sheet the Points, Colour and Density sections over the layer picker', async () => {
+    const {host, el, shadow} = await explorer();
+    (el as unknown as {narrow: boolean}).narrow = true;
+    await settle(host);
     shadow.querySelector<HTMLButtonElement>('[role="tab"][data-sheet="layers"]')!.click();
     await settle(host);
-    expect([...registered(store).keys()].map((id) => id.split('#')[0])).toEqual(['legend']);
+    const sheet = shadow.querySelector('[part="sheet"]')!;
+    expect([...sheet.querySelectorAll('.sec > .hd, .sec .sec-head .hd')].map((h) => h.textContent)).toEqual(['Points', 'Colour', 'Density']);
+    expect(sheet.querySelector('[part="most-points"]')).not.toBeNull();
+    expect(sheet.querySelector('tessera-layer-picker')).not.toBeNull();
   });
 
   const tabs = (shadow: ShadowRoot) => [...shadow.querySelectorAll<HTMLButtonElement>('[part="tabs"] [role="tab"]')];
@@ -136,22 +154,23 @@ describe('<tessera-explorer> narrow layout', () => {
   it('moves between tabs with the arrow keys, Home and End, keeping one tab in the tab order', async () => {
     const {host, shadow} = await explorer();
     const all = tabs(shadow);
-    expect(all.map((t) => t.tabIndex)).toEqual([0, -1, -1, -1]);
+    expect(all.map((t) => t.textContent!.trim())).toEqual(['Fields', 'Layers', 'Item']);
+    expect(all.map((t) => t.tabIndex)).toEqual([0, -1, -1]);
     all[0]!.focus();
     key(all[0]!, 'ArrowRight');
     await settle(host);
     expect(shadow.activeElement).toBe(tabs(shadow)[1]);
-    expect(tabs(shadow).map((t) => t.tabIndex)).toEqual([-1, 0, -1, -1]);
+    expect(tabs(shadow).map((t) => t.tabIndex)).toEqual([-1, 0, -1]);
     key(tabs(shadow)[1]!, 'ArrowLeft');
     key(tabs(shadow)[0]!, 'ArrowLeft');
     await settle(host);
-    expect(shadow.activeElement).toBe(tabs(shadow)[3]);
-    key(tabs(shadow)[3]!, 'Home');
+    expect(shadow.activeElement).toBe(tabs(shadow)[2]);
+    key(tabs(shadow)[2]!, 'Home');
     await settle(host);
     expect(shadow.activeElement).toBe(tabs(shadow)[0]);
     key(tabs(shadow)[0]!, 'End');
     await settle(host);
-    expect(shadow.activeElement).toBe(tabs(shadow)[3]);
+    expect(shadow.activeElement).toBe(tabs(shadow)[2]);
   });
 
   it('moves focus into a sheet as it opens, closes it on Escape, and returns focus to its tab', async () => {
@@ -362,44 +381,40 @@ describe('<tessera-explorer> the item card beside its point', () => {
     expect(callouts(shadow)).toEqual([]);
   });
 
-  it('goes first in the right column, folding Colour and In view, where the map holds no position for the selection', async () => {
+  it('stands in the top-right corner where the map holds no position for the selection', async () => {
     const {host, shadow, store, map} = await picked([256, 256]);
     map.pickedAt = null;
     store.set('selection', item(5n));
     await settle(host);
     expect(callouts(shadow)).toHaveLength(0);
     const corner = shadow.querySelector('.right')!;
-    expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['detail', 'info']);
-    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
+    expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['detail']);
   });
 });
 
 describe('<tessera-explorer> layouts', () => {
-  it('puts the filters on the left, docked in a sidebar or in a card over the map, and Colour and In view in a card on the right in both', async () => {
+  it('puts the field column on the left, docked in a sidebar or in a card over the map, and nothing on the right', async () => {
     const docked = await explorer('<tessera-explorer layout="docked"></tessera-explorer>');
     expect(docked.shadow.querySelector('[part="sidebar"] tessera-filter-panel')).not.toBeNull();
     expect(docked.shadow.querySelector('[part="panel"]')).toBeNull();
-    expect(docked.shadow.querySelector('.right [part="info"] tessera-legend')).not.toBeNull();
-    expect(docked.shadow.querySelector('.right [part="info"] tessera-artifact-list')).not.toBeNull();
+    expect([...docked.shadow.querySelector('.right')!.children].filter((c) => c.tagName !== 'SLOT')).toEqual([]);
     document.body.innerHTML = '';
     const overlay = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
     expect(overlay.shadow.querySelector('[part="sidebar"]')).toBeNull();
     expect(overlay.shadow.querySelector('[part="panel"] tessera-filter-panel')).not.toBeNull();
-    expect(overlay.shadow.querySelector('[part="panel"] tessera-legend')).toBeNull();
-    expect(overlay.shadow.querySelector('.right [part="info"] tessera-legend')).not.toBeNull();
-    // No hierarchy panel.
+    // No hierarchy panel, and no legend or In view list.
     expect(deep(overlay.host, 'tessera-hierarchy')).toBeNull();
+    expect(deep(overlay.host, 'tessera-legend, tessera-artifact-list')).toBeNull();
   });
 
-  it('shows the filter controls inline in the left card, with the clauses in each position counted on the switch', async () => {
+  it('shows a card per field holding a clause in the left card, the clauses as chips, and no Filter / Highlight switch', async () => {
     const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
     store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {archive: {family: 'category', keys: ['cs']}}}});
     await settle(host);
     const card = shadow.querySelector('[part="panel"]')!;
-    expect(deepAll(card, 'tessera-filter')).toHaveLength(1);
-    expect(deepAll(card, '[part="mode"] [part="mode-count"]').map((c) => c.textContent)).toEqual(['1', '1']);
-    expect(shadow.querySelector('[part="filters-popover"]')).toBeNull();
-    expect(shadow.querySelector('[part="filters-toggle"]')).toBeNull();
+    expect(deepAll(card, 'tessera-field-card')).toHaveLength(1);
+    expect(deepAll(card, '[part="chip"]').map((c) => c.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
+    expect(deep(card, '[part="mode"]')).toBeNull();
   });
 
   it('heads the card with the dataset title over the view’s name, or the view’s name alone', async () => {
@@ -410,6 +425,12 @@ describe('<tessera-explorer> layouts', () => {
     const plain = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
     expect(plain.shadow.querySelector('[part="dataset-title"]')).toBeNull();
     expect(plain.shadow.querySelector('[part="view-name"]')?.textContent).toBe('default');
+    // A name that is only the view's id says nothing, and is left out.
+    plain.store.set('meta', {...META, views: [{...META.views[0]!, displayName: 's0'}]});
+    await settle(plain.host);
+    expect(plain.shadow.querySelector('[part="view-name"]')).toBeNull();
+    plain.store.set('meta', META);
+    await settle(plain.host);
     // With several views the name is the view choice.
     plain.store.set('meta', {...META, views: [...META.views, {...META.views[0]!, id: 's1', displayName: 'other'}]});
     await settle(plain.host);
@@ -419,52 +440,21 @@ describe('<tessera-explorer> layouts', () => {
 
   const REGION: RegionProjection = {shape: {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]}, status: 'shown' as const, refusal: null, visible: {value: 3, exact: true}, matched: {value: 3, exact: true}, served: {shown: 1, total: 3, exact: true}, verdict: {exact: true, depth: null}, held: {ids: BigUint64Array.of(5n), positions: new Float32Array(2), count: 1}};
 
-  it('puts a selected region first in the right column and folds Colour and In view to their headings, each opening again, until the region is cleared', async () => {
+  it('puts a selected region in the right column', async () => {
     const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
-    store.set('legend', {...store.get('legend'), colourBy: 'archive', categories: {archive: [{code: 1, key: 'cs', title: null}, {code: 2, key: 'math', title: null}]}});
-    await settle(host);
-    expect(folds(shadow)).toEqual([]);
     store.set('region', REGION);
     await settle(host);
     const corner = shadow.querySelector('.right')!;
-    expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['selection-card', 'info']);
-    // The number of values is the aggregate's, and is left out until it answers.
-    expect(folds(shadow)).toEqual([
-      ['colour', 'Archive'],
-      ['in-view', '0 clusters']
-    ]);
-    expect([...registered(store).entries()].filter(([id]) => id.startsWith('colour-hint')).map(([, spec]) => spec)).toEqual([{groupings: [{by: {field: 'archive', top: 1}}]}]);
-    answerAggregate(store, 'colour-hint', aggregateEntry([{rows: [{key: 'cs', count: 3}], groups: 7}]));
-    await settle(host);
-    expect(folds(shadow)[0]).toEqual(['colour', 'Archive · 7 values']);
-    expect(shadow.querySelector('[part="info"] tessera-legend')).toBeNull();
-    shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"]')!.click();
-    await settle(host);
-    expect(shadow.querySelector('[part="info"] tessera-legend')).not.toBeNull();
-    expect(folds(shadow).map(([s]) => s)).toEqual(['in-view']);
-    // The opened section folds again from its chevron, and its count is no longer asked for.
-    expect(registered(store).size).toBeGreaterThan(0);
-    expect([...registered(store).keys()].some((id) => id.startsWith('colour-hint'))).toBe(false);
-    const refold = shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"][aria-expanded="true"]')!;
-    refold.click();
-    await settle(host);
-    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
-    shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"]')!.click();
-    await settle(host);
-    store.set('region', null);
-    await settle(host);
-    expect(folds(shadow)).toEqual([]);
-    // A second region folds them again.
-    store.set('region', REGION);
-    await settle(host);
-    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
+    expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['selection-card']);
   });
 
-  it('folds the right card to its headings by default in the compact form', async () => {
-    const {host, el, shadow} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+  it('folds every field card to one line in the compact form, the column 264 px wide', async () => {
+    const {host, el, shadow} = await explorer('<tessera-explorer layout="overlay" pinned-filters="archive author"></tessera-explorer>');
     (el as unknown as {compact: boolean}).compact = true;
     await settle(host);
-    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
+    const panel = shadow.querySelector('tessera-filter-panel') as HTMLElement & {compact: boolean};
+    expect(panel.compact).toBe(true);
+    expect(deepAll(panel.shadowRoot!, 'tessera-field-card').map((c) => c.hasAttribute('folded'))).toEqual([true, true]);
   });
 
   it('opens the layer picker from the Layers button, passes its change on, and closes on Escape', async () => {
@@ -648,7 +638,7 @@ describe('<tessera-explorer> layouts', () => {
       const {map, part} = await popover('<tessera-explorer radius="5"></tessera-explorer>');
       expect(map.radius).toBe(5);
       expect(part<HTMLInputElement>('point-size')!.value).toBe('5');
-      expect(part('point-size')!.nextElementSibling!.textContent).toBe('5 px');
+      expect(part('point-size')!.getAttribute('aria-valuetext')).toBe('5 px');
       document.body.innerHTML = '';
       const hidden = await popover('<tessera-explorer radius="5" hide-size></tessera-explorer>');
       expect(hidden.part('point-size')).toBeNull();
@@ -700,6 +690,32 @@ describe('<tessera-explorer> the point budget', () => {
     expect(mapOf(shadow)).toMatchObject({budget: 0, budgetMin: 1_000, budgetMax: 2_000_000});
   });
 
+  it('offers Most points on a log scale from budget-min to budget-max, and sets the store’s budget only when it is let go', async () => {
+    const {host, shadow, store} = await explorer('<tessera-explorer budget-min="1000" budget-max="2000000"></tessera-explorer>');
+    const seen: unknown[] = [];
+    host.addEventListener('tessera-budgetchange', (e) => seen.push((e as CustomEvent).detail));
+    shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
+    await settle(host);
+    const slider = shadow.querySelector<HTMLInputElement>('[part="most-points"]')!;
+    const value = () => shadow.querySelector('[part="most-points-value"]')!.textContent;
+    expect(value()).toBe('250K');
+    expect([...shadow.querySelectorAll('.ticks span')].map((t) => t.textContent)).toEqual(['1K', '10K', '100K', '2M']);
+    // Dragging moves the number shown and asks nothing of the store.
+    slider.value = '1000';
+    slider.dispatchEvent(new Event('input'));
+    await settle(host);
+    expect(value()).toBe('2M');
+    slider.value = '500';
+    slider.dispatchEvent(new Event('input'));
+    await settle(host);
+    expect(budgets(store)).toEqual([]);
+    // Letting go sets it, on a round number.
+    slider.dispatchEvent(new Event('change'));
+    await settle(host);
+    expect(budgets(store)).toEqual([45_000]);
+    expect(seen).toEqual([{budget: 45_000}]);
+  });
+
   it('passes the host’s budget and range to the map and the budget to the store, and a change of budget too', async () => {
     const {host, el, store, shadow} = await explorer('<tessera-explorer budget="40000" budget-min="500" budget-max="90000"></tessera-explorer>');
     expect(budgets(store)).toEqual([40_000]);
@@ -707,5 +723,60 @@ describe('<tessera-explorer> the point budget', () => {
     (el as unknown as {budget: number}).budget = 60_000;
     await settle(host);
     expect(budgets(store)).toEqual([40_000, 60_000]);
+  });
+});
+
+describe('<tessera-explorer> the Colour section', () => {
+  const NUMBERED = meta({
+    declaredScalars: [...META.declaredScalars, scalar('year', 'u16', {render: true, homes: ['rendered']})],
+    filterOperands: META.filterOperands
+  });
+
+  async function colour() {
+    const host = await mount('<tessera-explorer></tessera-explorer>');
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    const store = fakeStore({meta: NUMBERED, status: status({})});
+    el.store = store;
+    await settle(host);
+    const shadow = el.shadowRoot!;
+    shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
+    await settle(host);
+    return {host, store, shadow, part: (name: string) => shadow.querySelector<HTMLElement>(`[part~="${name}"]`)};
+  }
+
+  it('lists None and the rendered columns in Colour by, and colours by the one chosen', async () => {
+    const {host, store, shadow, part} = await colour();
+    const seen: unknown[] = [];
+    host.addEventListener('tessera-colourchange', (e) => seen.push((e as CustomEvent).detail));
+    expect(part('colour-by')!.textContent!.trim()).toBe('None');
+    part('colour-by')!.click();
+    await settle(host);
+    const options = [...shadow.querySelectorAll<HTMLButtonElement>('[part~="colour-option"]')];
+    expect(options.map((o) => [o.getAttribute('data-value'), o.getAttribute('aria-checked')])).toEqual([
+      ['', 'true'],
+      ['archive', 'false'],
+      ['year', 'false']
+    ]);
+    options[1]!.click();
+    expect(store.calls.filter((c) => c.name === 'setColourBy').map((c) => c.args)).toEqual([['archive']]);
+    expect(seen).toEqual([{colourBy: 'archive'}]);
+  });
+
+  it('offers the palette for a category, and the ramp, its scale and Reverse for a number', async () => {
+    const {host, store, part} = await colour();
+    const changes: unknown[] = [];
+    host.addEventListener('tessera-palettechange', (e) => changes.push((e as CustomEvent).detail));
+    store.set('legend', {...store.get('legend'), colourBy: 'archive'});
+    await settle(host);
+    expect(part('palette')!.textContent).toContain('Tableau 10');
+    expect(part('ramp')).toBeNull();
+    store.set('legend', {...store.get('legend'), colourBy: 'year'});
+    await settle(host);
+    expect(part('palette')).toBeNull();
+    expect(part('ramp')!.textContent).toContain('Viridis');
+    part('ramp-reverse')!.click();
+    await settle(host);
+    expect(part('ramp-reverse')!.getAttribute('aria-pressed')).toBe('true');
+    expect(changes).toEqual([{palette: 'tableau10', ramp: 'viridis', scale: 'linear', reverse: true}]);
   });
 });

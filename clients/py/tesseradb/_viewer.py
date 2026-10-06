@@ -730,8 +730,8 @@ class Selection:
           map draws no annotation, colouring by a layer has no colours, and the map says so.
         - `budget`: how many points the map aims to draw on screen. `0`, the default, leaves the
           map's own, 250,000.
-        - `budget_min`, `budget_max`: the fewest and the most points a control for `budget`
-          offers. Neither changes `budget`.
+        - `budget_min`, `budget_max`: the ends of the Most points slider in the map's Layers
+          popover. Neither changes `budget`.
 
         Items outside the box are still drawn when they are in frame.
 

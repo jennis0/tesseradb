@@ -408,6 +408,9 @@ impl WritePath {
                     .seed_value(key, *code)
                     .map_err(|e| EngineError::Malformed(e.to_string()))?;
             }
+            // Before the record lands, as on the live path: a publication into a level holding no
+            // artifact chooses the level's layout.
+            registry.settle_layout(&artifacts, &record);
             undecodable += artifacts.apply(&record, position);
             // A row whose (entity, view) already has geometry was given it by a flush; buffering it
             // would have the next flush write it twice. The test is per (entity, view), not a

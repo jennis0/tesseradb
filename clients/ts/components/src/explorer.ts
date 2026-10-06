@@ -2,17 +2,15 @@ import {ContextProvider} from '@lit/context';
 import {css, html, nothing, svg, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
+import type {ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, cellDepth, nearestStop} from '@tesseradb/deck';
-import {WORLD_SIZE, activeCount, artifactName, emptyDraft} from '@tesseradb/client';
+import {CATEGORY_PALETTES, DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, RAMPS, cellDepth, nearestStop} from '@tesseradb/deck';
+import {CLUSTER_PREFIX, WORLD_SIZE, activeCount, artifactName, colourLayers, emptyDraft} from '@tesseradb/client';
 import {hasOneLayout, sizesPoints} from '@tesseradb/client/internal';
-import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
-import {listedAt} from './artifact-list.js';
-import {HeldAggregate} from './aggregate.js';
-import {TesseraElement, columnCaption, emit} from './base.js';
+import {DENSITY_COLOUR_TITLES, colourOfFraction, css as rgb, hexOf} from '@tesseradb/deck/internal';
+import {TesseraElement, columnCaption, emit, shortCount} from './base.js';
 import {placeCallout, type Rect, type Side} from './callout.js';
-import {sizingOf, watchChoices} from './colouring.js';
+import {colouringOf, setColouring, sizingOf, watchChoices} from './colouring.js';
 import {densityGradient, displayStyles, radioKeys, type DisplaySettings} from './display.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -29,9 +27,7 @@ import './selection.js';
 import './layer-picker.js';
 import './view-picker.js';
 import './key-picker.js';
-import './artifact-list.js';
 import './artifact-card.js';
-import './legend.js';
 
 /** Every part of every element the explorer renders, forwarded. */
 const FORWARD = {
@@ -39,20 +35,29 @@ const FORWARD = {
   status: exportparts('status'),
   'view-picker': exportparts('view-picker'),
   'key-picker': exportparts('key-picker'),
-  legend: exportparts('legend'),
   'layer-picker': exportparts('layer-picker'),
-  'filter-panel': exportparts('filter-panel', [...forwarded('filter'), ...forwarded('cluster-filter')]),
-  'artifact-list': exportparts('artifact-list'),
+  'filter-panel': exportparts('filter-panel', [...forwarded('field-card'), ...forwarded('filter'), ...forwarded('cluster-filter')]),
   selection: exportparts('selection'),
   'item-card': exportparts('item-card'),
   'artifact-card': exportparts('artifact-card')
 };
 
-const ALL_PANELS = ['toolbar', 'legend', 'filters', 'artifacts', 'selection', 'detail'] as const;
+const ALL_PANELS = ['toolbar', 'legend', 'filters', 'selection', 'detail'] as const;
 /** The container widths, in pixels, between which the explorer takes its compact form. */
 const COMPACT_BETWEEN = [720, 1000] as const;
 type Panel = (typeof ALL_PANELS)[number];
-type Sheet = 'filters' | 'layers' | 'artifacts' | 'detail';
+type Sheet = 'filters' | 'layers' | 'detail';
+/** The menus the Layers popover opens beside itself, each from the button of the same name. */
+type Menu = 'size' | 'colour' | 'palette' | 'ramp';
+/** The button each menu opens from. */
+const MENU_BUTTON: Record<Menu, string> = {size: 'size-by', colour: 'colour-by', palette: 'palette', ramp: 'ramp'};
+/** A number of points as Most points says it: `250K`, `2M`. */
+const pointsText = shortCount;
+/** `n` to two significant figures, so the slider stops on round numbers. */
+const roundPoints = (n: number) => {
+  const unit = 10 ** Math.max(0, Math.floor(Math.log10(n)) - 1);
+  return Math.round(n / unit) * unit;
+};
 /** The Scale choices under Size by, in order. */
 const SIZE_SCALES: readonly {scale: SizeScale; label: string}[] = [
   {scale: 'linear', label: 'Linear'},
@@ -68,14 +73,18 @@ const DENSITY_SCALES: readonly {scale: DensityScale; label: string}[] = [
 const SIZE_RANGE = {min: 1, max: 12, step: 0.5} as const;
 /** A radius as the popover shows it. */
 const px = (n: number) => n.toLocaleString('en-GB', {maximumFractionDigits: 1});
+/** How far along its track a slider's value is, for its filled part. */
+const fill = (v: number, min: number, max: number) => `--fill:${(Math.min(1, Math.max(0, (v - min) / (max - min))) * 100).toFixed(1)}%`;
+/** A ramp as a CSS gradient, low to high. */
+const rampGradient = (ramp: RampName, reverse: boolean) => `linear-gradient(to right, ${Array.from({length: 8}, (_, k) => rgb(colourOfFraction(k / 7, ramp, reverse))).join(', ')})`;
 
 /** The Density choices in the Layers popover, in order. */
-const DENSITY_MODES: readonly {mode: DensityMode; label: string; icon: IconName}[] = [
-  {mode: 'none', label: 'None', icon: 'density-none'},
-  {mode: 'smooth', label: 'Smooth', icon: 'density-smooth'},
-  {mode: 'hex', label: 'Hex', icon: 'density-hex'},
-  {mode: 'grid', label: 'Grid', icon: 'density-grid'},
-  {mode: 'contours', label: 'Lines', icon: 'density-lines'}
+const DENSITY_MODES: readonly {mode: DensityMode; label: string}[] = [
+  {mode: 'none', label: 'None'},
+  {mode: 'smooth', label: 'Smooth'},
+  {mode: 'hex', label: 'Hex'},
+  {mode: 'grid', label: 'Grid'},
+  {mode: 'contours', label: 'Lines'}
 ];
 /** A card kept open by Pin: what it shows, and where on the map it points, in the view it was pinned in. */
 type Pinned = {key: string; world: [number, number]; view: string} & (
@@ -91,63 +100,61 @@ const CALLOUT_MIN_HEIGHT = 180;
 
 /** The narrow layout's tabs, each opening a sheet, drawn where its panel is. */
 const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}[] = [
-  {sheet: 'filters', icon: 'filter', label: 'Filters', panel: 'filters'},
+  {sheet: 'filters', icon: 'filter', label: 'Fields', panel: 'filters'},
   {sheet: 'layers', icon: 'layers', label: 'Layers', panel: 'legend'},
-  {sheet: 'artifacts', icon: 'list', label: 'In view', panel: 'artifacts'},
   {sheet: 'detail', icon: 'info', label: 'Item', panel: 'detail'}
 ];
 
 /**
- * The map with its status strip, toolbar, layers, filters, colour legend, In view list, selection
- * and item card, laid out together: the controls on the left and what the map shows on the right.
- * It builds its own store from `viewer-url` and `token` or an `authorise` property, or takes a
- * `store` property, and provides it by context to everything inside it, including elements a host
- * puts in its slots.
+ * The map with its status strip, toolbar, field cards, display settings, layers, selection and item
+ * card, laid out together. It builds its own store from `viewer-url` and `token` or an `authorise`
+ * property, or takes a `store` property, and provides it by context to everything inside it,
+ * including elements a host puts in its slots.
  *
  * The heading names what is shown: `dataset-title` where the host sets one, with the view's name
- * under it, else the view's name alone. With several views the view's name is the view choice.
+ * under it, else the view's name alone. A view's name that is only its id is left out. With
+ * several views the view's name is the view choice.
  *
- * The left holds the heading and the filter panel: the Filters heading with Clear all, the Filter /
- * Highlight switch with the number of clauses in each, the fields, and Add filter, which offers the
- * columns and the layers whose clusters can be filtered by. `layout="docked"` puts them in a
- * sidebar left of the map; `layout="overlay"` puts them in a card over the map's top-left, which
- * scrolls inside itself when tall. The map's tools sit at the top-left of the map, right of the
- * card in the overlay layout, with a Layers button beneath them.
- *
- * The right holds, over the map in both layouts, a card with Colour (the legend, with the Colour by
- * choice in its heading and exact counts beside the colours, then Size where the points are sized
- * by a column) and In view (the clusters on screen at the level the map draws, each fitting the map
- * to it when pressed). While a region is selected its card goes first, and Colour and In view fold
- * to one-line headings with a hint of what they hold; pressing one opens it, the chevron beside an
- * opened one folds it again, and clearing the region unfolds them. The hint names the colouring and
- * how many values the current set holds, counted by the aggregate route once it answers, or how
- * many clusters are in view. The status strip sits in the map's bottom-right.
+ * The left holds the heading and the field column (`<tessera-filter-panel>`): what the cards count,
+ * In view or Highlighted beside All matching, the clauses applied as chips with Clear all, one
+ * `<tessera-field-card>` per field, and Add field. `layout="docked"` puts them in a sidebar left of
+ * the map; `layout="overlay"` puts them in a card over the map's top-left, which scrolls inside
+ * itself when tall. The map's tools sit at the top-left of the map, right of the card in the
+ * overlay layout, with a Layers button beneath them. The status strip sits in the map's
+ * bottom-right.
  *
  * Picking a point opens its item card beside the point, joined to it by a short leader: on the side
- * with most room, clear of the left and right cards, following the point as the map pans and zooms,
+ * with most room, clear of the cards over the map, following the point as the map pans and zooms,
  * hidden while the point is off the map, and clear of the other cards beside points. The card shows
  * the headline, the `subtitle-field` field, three fields and "Show all N fields". Picking another
  * point replaces it unless Pin was pressed, which keeps it open; Close or Escape closes it and drops
  * the selection, and a click on the map that finds nothing does the same for the card that is not
  * pinned. Tab from the map goes to the card, which is named by its item's title and gives focus back
- * to the map as it closes. A picked cluster's card behaves the
- * same way. Where the map holds no position for the selection, as after following an item into
- * another view, the card goes first in the right column, as a region's does.
+ * to the map as it closes. A picked cluster's card behaves the same way. While a region is selected
+ * its card stands in the map's top-right corner, and where the map holds no position for the
+ * selection, as after following an item into another view, the item's card goes there too.
  *
- * The Layers button opens a popover with a Display section (whether the points are drawn, what sizes
- * them, their opacity, and how density is drawn, at what resolution, in which colours and how
- * strongly) over the layer picker. Size by lists None and the number columns the points arrive with. Under None one Size
- * slider sets every point's radius, which `hide-size` leaves out; under a column two sliders set the
- * radii of its smallest and largest value, and a Linear, Log or Rank choice places values between
- * them. The display settings are the explorer's properties of the same names, passed to its map.
- * `pinned-filters` names the columns whose controls are listed before they hold a clause.
+ * The Layers button opens a popover in four sections. Points: whether the points are drawn; Most
+ * points, a slider from `budget-min` to `budget-max` on a log scale that sets the store's budget
+ * when it is let go (`Store.setBudget`); what sizes the points; and their opacity. Size by lists
+ * None and the number columns the points arrive with. Under None one Size slider sets every
+ * point's radius, which `hide-size` leaves out; under a column two sliders set the radii of its
+ * smallest and largest value, and a Linear, Log or Rank choice places values between them. Colour:
+ * Colour by, which lists None, every layer that can colour (a levelled layer once per level) and
+ * the rendered category and number columns; then for a category the palette, and for a number the
+ * ramp, Linear or Log and Reverse, unless `hide-palettes` is set. A field card's paint button
+ * chooses Colour by too. Density: how density is drawn, at what resolution, in which colours and
+ * how strongly. Layers: the layer picker. The display settings are the explorer's properties of
+ * the same names, passed to its map. `pinned-filters` names the columns whose cards are listed
+ * before they hold a clause.
  *
- * In a container narrower than 1000 px, either layout takes the overlay's form with both cards
- * narrower: the left 300 px, the right 272 px with Colour and In view folded until opened, and a
- * legend naming four values with the rest under "N more"; the tools move to the bottom-left and the
- * strip shortens its figures. In a container 720 px wide or narrower, the status strip runs full
- * width above a tab bar (Filters, Layers, In view, Item), and each tab opens its panel as a sheet;
- * the item card is the Item sheet there, and the cards over the map are not drawn.
+ * In a container narrower than 1000 px, either layout takes the overlay's form with a narrower card
+ * of 264 px, every field card folded to one line until one is opened, and opening one folds the
+ * one open before; the tools move to the bottom-left and the strip shortens its figures. In a
+ * container 720 px wide or narrower, the status strip runs full width above a tab bar (Fields,
+ * Layers, Item), and each tab opens its panel as a sheet: the field column, folded as in the
+ * compact form; the Layers popover's sections; and the item card. The cards over the map are not
+ * drawn there.
  *
  * Every event its elements fire bubbles out of it, since each is composed.
  *
@@ -155,15 +162,13 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @tagname tessera-explorer
  * @category Elements
  * @slot toolbar - Replaces the view picker and the key picker.
- * @slot colour - Replaces the legend.
  * @slot layers - Replaces the layer picker, in the Layers popover.
- * @slot filters - Replaces the filter panel.
- * @slot artifacts - Replaces the In view list.
+ * @slot filters - Replaces the field column.
  * @slot selection - Replaces the selection panel, shown while a region is selected.
  * @slot detail - Replaces the item and artifact cards, in the card beside the point.
  * @slot status - Replaces the status strip drawn on the map.
  * @slot tooltip - Replaces the map's hover tooltip.
- * @slot top-right - Content in the map's top-right corner, above the right-hand cards.
+ * @slot top-right - Content in the map's top-right corner, above the selection's card.
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The map's camera moved.
  * @fires {CustomEvent<TesseraEventDetails['tessera-pick']>} tessera-pick - A point was clicked, and again with its record.
  * @fires {CustomEvent<TesseraEventDetails['tessera-miss']>} tessera-miss - A click on the map found nothing; the explorer closes the card that is not pinned and drops the selection.
@@ -171,17 +176,19 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An artifact was opened and its drill-down arrived.
  * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - A selection was drawn, changed or cleared, or its counts arrived.
  * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The layers chosen changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The Colour by choice changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level choice changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-displaychange']>} tessera-displaychange - A setting in the Display section changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-sizechange']>} tessera-sizechange - Size by, the size range or the scale changed in the Display section.
- * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A colour was chosen or reset for one value in the legend.
- * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette or ramp was chosen in the legend.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - Colour by changed, in the Layers popover or by a card's paint button.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The level a layer is coloured and labelled at changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-displaychange']>} tessera-displaychange - A setting in the Points or Density section changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-sizechange']>} tessera-sizechange - Size by, the size range or the scale changed in the Points section.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-budgetchange']>} tessera-budgetchange - Most points was let go at a new number.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-fold']>} tessera-fold - A field card was folded to one line or opened.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A colour was chosen or reset for one value on a field card.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette, the ramp, its scale or its direction was chosen in the Colour section.
  * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - The session expired.
- * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A filter control or chip changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A field card or chip changed a clause.
  * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A `member_of` clause was put on or taken off.
- * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit was pressed on the artifact card, or a row of In view; the explorer fits its map to the artifact.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit was pressed on the artifact card; the explorer fits its map to the artifact.
  * @fires {CustomEvent<TesseraEventDetails['tessera-open']>} tessera-open - Open was pressed on the item card.
  * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - A card's close button was pressed; the explorer closes the card and drops the selection it shows.
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view changed through the view or key picker.
@@ -191,23 +198,22 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart panel - The card over the map's top-left, in the overlay layout and in a container
  *   narrower than 1000 px.
  * @csspart dataset-title - The heading's dataset title, where `dataset-title` is set.
- * @csspart view-name - The view's name in the heading, where there is one view to show.
+ * @csspart view-name - The view's name in the heading, where there is one view to show and its name
+ *   is not its id.
  * @csspart selection-card - The card in the map's top-right corner holding the selection, while a
  *   region is selected.
- * @csspart info - The card in the map's top-right corner holding Colour and In view.
- * @csspart fold - A folded section's one-line heading in that card, with `data-section` (`colour`
- *   or `in-view`) and `aria-expanded`; pressing it opens the section.
- * @csspart fold-hint - What a folded section holds, in its heading.
  * @csspart callout - A card beside a point on the map, with `data-side` (`right`, `left`, `below`
  *   or `above`) and `data-pinned` while pinned.
  * @csspart pin - A callout's Pin button, with `aria-pressed`.
  * @csspart leaders - The lines joining each callout to its point.
  * @csspart layers-toggle - The Layers button under the map's tools, with `data-on` while any layer
  *   is drawn.
- * @csspart layers-popover - The popover holding the Display section and the layer picker, while it
+ * @csspart layers-popover - The popover holding the display sections and the layer picker, while it
  *   is open.
- * @csspart display - The Display section at the top of the Layers popover.
+ * @csspart display - The Points, Colour and Density sections, at the top of the Layers popover.
  * @csspart points-toggle - The Points switch, with `aria-checked`.
+ * @csspart most-points - The Most points slider.
+ * @csspart most-points-value - The number of points it stands at, such as "250K".
  * @csspart size-by - The Size by button, naming the column the points are sized by or None, with
  *   `aria-expanded` while its menu is open.
  * @csspart size-menu - The Size by menu, while it is open.
@@ -220,6 +226,20 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart size-range - The two radii as text, such as "2 – 9 px".
  * @csspart size-scale - The Linear, Log and Rank choice, each with `data-scale` and `aria-checked`.
  * @csspart point-opacity - The Opacity slider.
+ * @csspart colour-by - The Colour by button, naming what the points are coloured by, with
+ *   `aria-expanded` while its menu is open.
+ * @csspart colour-menu - The Colour by menu, while it is open.
+ * @csspart colour-option - An entry in the Colour by menu, with `data-value` (empty for None,
+ *   `cluster:<layer>@<level>` for one level of a levelled layer) and `aria-checked`.
+ * @csspart palette - The Palette button, while the points are coloured by a category.
+ * @csspart palette-menu - The Palette menu, while it is open.
+ * @csspart palette-option - A palette in that menu, with `data-value` and `aria-checked`.
+ * @csspart ramp - The Ramp button, while the points are coloured by a number or a date.
+ * @csspart ramp-menu - The Ramp menu, while it is open.
+ * @csspart ramp-option - A ramp in that menu, with `data-value` and `aria-checked`.
+ * @csspart ramp-scale - The Linear and Log choice of the ramp's scale, each with `data-scale` and
+ *   `aria-checked`.
+ * @csspart ramp-reverse - The Reverse button, with `aria-pressed`.
  * @csspart density-mode - The Density choice: None, Smooth, Hex, Grid and Lines, each with
  *   `data-mode` and `aria-checked`.
  * @csspart density-resolution - The Resolution slider, while density is drawn: the cell size on
@@ -239,12 +259,11 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart status-<part> - A part of an inner `<tessera-status>`.
  * @csspart view-picker-<part> - A part of the inner `<tessera-view-picker>`.
  * @csspart key-picker-<part> - A part of the inner `<tessera-key-picker>`.
- * @csspart legend-<part> - A part of the inner `<tessera-legend>`.
  * @csspart layer-picker-<part> - A part of the inner `<tessera-layer-picker>`.
  * @csspart filter-panel-<part> - A part of the inner `<tessera-filter-panel>`.
- * @csspart filter-<part> - A part of a `<tessera-filter>` inside the filter panel.
- * @csspart cluster-filter-<part> - A part of a `<tessera-cluster-filter>` inside the filter panel.
- * @csspart artifact-list-<part> - A part of the inner `<tessera-artifact-list>`.
+ * @csspart field-card-<part> - A part of a `<tessera-field-card>` in the field column.
+ * @csspart filter-<part> - A part of a `<tessera-filter>` search box on a card.
+ * @csspart cluster-filter-<part> - A part of a `<tessera-cluster-filter>` search box on a card.
  * @csspart selection-<part> - A part of the inner `<tessera-selection>`.
  * @csspart item-card-<part> - A part of the inner `<tessera-item-card>`, such as `item-card-title`.
  * @csspart artifact-card-<part> - A part of the inner `<tessera-artifact-card>`.
@@ -283,7 +302,7 @@ export class TesseraExplorer extends TesseraElement {
         grid-template-columns: var(--_panel-width) minmax(0, 1fr);
       }
       [part='frame'].compact {
-        --_panel-width: min(var(--tessera-sidebar-width, 340px), 300px);
+        --_panel-width: min(var(--tessera-sidebar-width, 340px), 264px);
         --_right-width: 272px;
         --_tessera-tool-size: 30px;
       }
@@ -337,6 +356,9 @@ export class TesseraExplorer extends TesseraElement {
       .compact [part='panel'] {
         --_tessera-panel-padding: 10px 12px;
       }
+      .compact [part='panel'] tessera-filter-panel {
+        --_tessera-panel-inline: 12px;
+      }
       /* Room beneath for the tools and the Layers button in the bottom-left corner. */
       .compact [part='panel'] {
         max-height: calc(100% - 2 * var(--_tessera-space) - 200px);
@@ -365,19 +387,19 @@ export class TesseraExplorer extends TesseraElement {
       .pickers[hidden] {
         display: none;
       }
+      /* The field column's subject row draws the rule under the heading. */
       .head {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 10px;
-        padding: 16px;
-        border-bottom: 1px solid var(--_tessera-line-2);
+        padding: 14px 16px 10px;
       }
       [part='panel'] .head {
-        padding: 12px 14px;
+        padding: 12px 14px 10px;
       }
       .compact [part='panel'] .head {
-        padding: 4px 4px 4px 12px;
+        padding: 10px 12px 8px;
       }
       .names {
         display: flex;
@@ -398,7 +420,7 @@ export class TesseraExplorer extends TesseraElement {
         white-space: nowrap;
       }
       .compact .title {
-        font-size: 13px;
+        font-size: 14px;
       }
       .sub {
         font-size: 12px;
@@ -458,100 +480,31 @@ export class TesseraExplorer extends TesseraElement {
         position: absolute;
         top: 0;
         left: calc(100% + 8px);
-        width: 316px;
+        width: 320px;
         max-height: min(560px, calc(100cqh - 2 * var(--_tessera-space)));
         overflow-y: auto;
         box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
       }
-      [part='layers-popover'] tessera-layer-picker {
+      [part='layers-popover'] tessera-layer-picker,
+      [part='sheet'] tessera-layer-picker {
         display: block;
         border-top: 1px solid var(--_tessera-line-2);
+        --_tessera-panel-padding: 12px 14px 14px;
       }
       .compact [part='layers-popover'] {
         top: auto;
         bottom: 0;
       }
       [part='detail'],
-      [part='selection-card'],
-      [part='info'] {
+      [part='selection-card'] {
         --_tessera-panel-padding: 12px 14px;
         width: var(--_right-width);
         max-width: 100%;
         min-height: 0;
         overflow-y: auto;
       }
-      [part='detail'],
-      [part='info'] {
+      [part='detail'] {
         flex: 0 1 auto;
-      }
-      [part='info'] tessera-legend,
-      [part='info'] tessera-artifact-list {
-        display: block;
-      }
-      [part='info'] tessera-artifact-list {
-        --_tessera-panel-padding: 12px 8px 10px;
-      }
-      [part='info'] tessera-artifact-list::part(title) {
-        padding: 0 6px;
-      }
-      [part='info'] > :last-child {
-        --_tessera-panel-rule: transparent;
-      }
-      [part='fold'] {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        width: 100%;
-        padding: 10px 14px;
-        text-align: left;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.02em;
-        text-transform: uppercase;
-        color: var(--_tessera-ink-2);
-      }
-      [part='fold'] + [part='fold'] {
-        border-top: 1px solid var(--_tessera-line-2);
-      }
-      [part='fold']:hover {
-        background: var(--_tessera-surface-2);
-      }
-      /* An opened section keeps a chevron in its heading's gutter that folds it again. */
-      .section {
-        position: relative;
-      }
-      .section + .section,
-      [part='fold'] + .section,
-      .section + [part='fold'] {
-        border-top: 1px solid var(--_tessera-line-2);
-      }
-      .section > .refold {
-        position: absolute;
-        z-index: 1;
-        top: 11px;
-        left: 6px;
-        width: 16px;
-        height: 16px;
-        padding: 0;
-        display: grid;
-        place-items: center;
-        border-radius: 4px;
-      }
-      .section tessera-legend::part(title),
-      .section tessera-artifact-list::part(title) {
-        padding-left: 12px;
-      }
-      [part='fold-hint'] {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        text-transform: none;
-        letter-spacing: 0;
-        font-size: 12px;
-        font-weight: 400;
-        color: var(--_tessera-ink-3);
       }
       /* The cards beside points on the map, and the lines joining them to their points. */
       .callouts {
@@ -721,14 +674,6 @@ export class TesseraExplorer extends TesseraElement {
         .sheet-footer .btn.primary {
           flex: 2;
         }
-        /* Every heading and row in a sheet starts 16 px in: the In view rows' fill reaches past
-           their content, so the list is drawn out by it. */
-        [part='sheet'] tessera-artifact-list::part(items) {
-          margin: 0 -6px;
-        }
-        [part='sheet'] tessera-artifact-list::part(more) {
-          margin-left: 0;
-        }
         [part='sheet']::before {
           content: '';
           display: block;
@@ -764,10 +709,10 @@ export class TesseraExplorer extends TesseraElement {
    */
   @property({reflect: true}) accessor layout: 'docked' | 'overlay' = 'docked';
   /**
-   * Which regions appear, space- or comma-separated, from `toolbar` (the heading and the
-   * legend), `legend` (the Layers button and its layer picker), `filters`, `artifacts` (In view),
-   * `selection` and `detail` (the item and artifact cards). Defaults to all six. Any other name,
-   * such as `hierarchy`, shows nothing.
+   * Which regions appear, space- or comma-separated, from `toolbar` (the heading), `legend` (the
+   * Layers button and its popover), `filters` (the field column), `selection` and `detail` (the
+   * item and artifact cards). Defaults to all five. Any other name, such as `hierarchy`, shows
+   * nothing.
    */
   @property() accessor panels: string = ALL_PANELS.join(' ');
   /** Passed to the map's `colour-by`. */
@@ -780,11 +725,15 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'title-field'}) accessor titleField = '';
   /** The field the item card shows under its headline. Unset, it shows none. */
   @property({attribute: 'subtitle-field'}) accessor subtitleField = '';
-  /** How many marks to aim for on screen, passed to the map's `budget`. `0`, the default, leaves the store's own, which starts at 250000. */
+  /**
+   * How many marks to aim for on screen, passed to the map's `budget`. `0`, the default, leaves the
+   * store's own, which starts at 250000. Most points in the Layers popover sets the store's budget
+   * itself.
+   */
   @property({type: Number}) accessor budget = 0;
-  /** The fewest marks a control for `budget` offers, passed to the map's `budget-min`. */
+  /** The fewest marks Most points offers, passed to the map's `budget-min`. */
   @property({type: Number, attribute: 'budget-min'}) accessor budgetMin = 1_000;
-  /** The most marks a control for `budget` offers, passed to the map's `budget-max`. */
+  /** The most marks Most points offers, passed to the map's `budget-max`. */
   @property({type: Number, attribute: 'budget-max'}) accessor budgetMax = 2_000_000;
   /** Passed to the map's `no-points`; the Points switch in the Layers popover changes it. */
   @property({type: Boolean, attribute: 'no-points'}) accessor noPoints = false;
@@ -827,26 +776,24 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /** The dataset's title, which heads the explorer above the view's name. Unset, the view's name is the heading. */
   @property({attribute: 'dataset-title'}) accessor datasetTitle = '';
-  /** Passed to the filter panel's `pinned`: the columns whose controls are listed before they hold a clause. */
+  /** Passed to the field column's `pinned`: the columns whose cards are listed before they hold a clause. */
   @property({attribute: 'pinned-filters'}) accessor pinnedFilters = '';
-  /** Passed to the legend's `hide-palettes`: the palette and ramp choices are left out of Colour by. */
+  /** Leaves the palette and ramp choices out of the Colour section, for a host that sets them. */
   @property({type: Boolean, attribute: 'hide-palettes'}) accessor hidePalettes = false;
-  /** Whether the Size by menu in the Layers popover is open. @internal */
-  @state() accessor sizeMenuOpen = false;
+  /** The menu open beside the Layers popover. @internal */
+  @state() accessor menu: Menu | null = null;
+  /** Where Most points is being dragged, before it is let go. @internal */
+  @state() accessor pointsDragged: number | null = null;
   /** Whether the list of density colours in the Layers popover is open. @internal */
   @state() accessor densityColoursOpen = false;
   /** @internal */
   @state() accessor sheet: Sheet | null = null;
   /** The narrow layout's tab focused last, which keeps the tab list's one place in the tab order. */
   @state() private accessor tabFocus: Sheet | null = null;
-  /** The level chosen through the legend's select; the map colours and labels at it. @internal */
+  /** The level a layer is coloured and labelled at, chosen on its card or in Colour by. @internal */
   @state() accessor level: number | null = null;
   /** The cards kept open by Pin, oldest first. @internal */
   @state() accessor pinned: Pinned[] = [];
-  /** The sections of the right card opened while they fold by default. */
-  private unfolded = new Set<'colour' | 'in-view'>();
-  /** Whether the right card's sections folded by default at the last render, `null` before it. */
-  private foldedWas: boolean | null = null;
   /** Each callout's size as last measured, by its key. */
   private calloutSizes = new Map<string, {width: number; height: number}>();
   /** The cards a callout keeps clear of, in the map's pixels, as last measured. */
@@ -870,10 +817,6 @@ export class TesseraExplorer extends TesseraElement {
   private placements = new Map<string, {side: Side; offset: number; world: [number, number]}>();
   /** Set while the camera moves, and cleared {@link CALLOUT_REST_MS} after it stops. */
   private moving: ReturnType<typeof setTimeout> | null = null;
-  /** The count of values behind the folded Colour heading. */
-  private readonly hintCount = new HeldAggregate('colour-hint');
-  /** The folded In view heading, kept while nothing it counts has changed. */
-  private inViewHeld: {key: string; hint: string} | null = null;
 
   /** Whether the host put anything in the toolbar slot. */
   @state() private accessor toolbarFilled = false;
@@ -946,7 +889,6 @@ export class TesseraExplorer extends TesseraElement {
     this.placing = null;
     if (this.moving !== null) clearTimeout(this.moving);
     this.moving = null;
-    this.hintCount.set(null, null);
     this.closeLayers();
     super.disconnectedCallback();
   }
@@ -980,7 +922,7 @@ export class TesseraExplorer extends TesseraElement {
 
   private closeLayers(): void {
     this.layersOpen = false;
-    this.sizeMenuOpen = false;
+    this.menu = null;
     document.removeEventListener('pointerdown', this.onOutside, true);
   }
 
@@ -996,7 +938,6 @@ export class TesseraExplorer extends TesseraElement {
     const narrow = this.narrow;
     // Short of room, the docked layout takes the overlay's form.
     const floating = this.layout === 'overlay' || compact;
-    // The level drawn: the one chosen through the legend, else the deepest served.
     const level = this.level;
     // A click that found nothing shows no card; a broken pick shows its fault.
     const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick?.kind === 'broken');
@@ -1010,57 +951,24 @@ export class TesseraExplorer extends TesseraElement {
     // The heading names what is shown: the dataset's title over the view's name, or the view's
     // name alone. With one view the name is text; with several it is the view choice.
     const shown = meta?.views.find((v) => v.id === s?.get('view').id) ?? (meta?.views.length === 1 ? meta.views[0] : undefined);
-    const viewName = shown?.displayName ?? '';
+    // A name that is only the view's id says nothing to a reader.
+    const viewName = shown && shown.displayName !== shown.id ? shown.displayName : '';
     const viewText = (cls: string) => (pickersShown || !viewName ? nothing : html`<span part="view-name" class=${cls}>${viewName}</span>`);
     const names = this.datasetTitle
       ? html`<div class="names"><span part="dataset-title" class="title">${this.datasetTitle}</span><div class="sub">${pickers}${viewText('')}</div></div>`
       : html`<div class="names">${pickers}${viewText('title')}</div>`;
     const named = pickersShown || viewName !== '' || this.datasetTitle !== '';
-    const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout ?hide-palettes=${this.hidePalettes} .limit=${compact ? 4 : 0} .level=${this.level} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
-    const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>`;
-    const list = html`<slot name="artifacts"><tessera-artifact-list exportparts=${FORWARD['artifact-list']} .level=${level} .rows=${8}></tessera-artifact-list></slot>`;
+    const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing} ?compact=${compact || narrow} .clusterLevel=${level}></tessera-filter-panel></slot>`;
     const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><tessera-selection exportparts=${FORWARD.selection}></tessera-selection></slot>` : nothing;
     const selectionCard = selectionPanel === nothing ? nothing : html`<div part="selection-card" class="card">${selectionPanel}</div>`;
     const head = html`<div class="head" ?hidden=${!named}>${names}</div>`;
 
     // The card beside the point, where the map holds a position for what is selected; else the
-    // card goes first in the right column.
+    // card stands in the top-right corner.
     const anchor = this.liveAnchor(showArtifact);
     const detailInColumn = this.has('detail') && hasDetail && anchor === null;
-
-    // The right card: Colour, then In view. They fold to one line each while a region or a card
-    // takes the column's top, and in the compact form, until opened.
-    const foldedByDefault = compact || selectionCard !== nothing || detailInColumn;
-    if (foldedByDefault !== this.foldedWas) {
-      this.foldedWas = foldedByDefault;
-      this.unfolded = new Set();
-    }
-    const folded = (section: 'colour' | 'in-view') => foldedByDefault && !this.unfolded.has(section);
-    const fold = (section: 'colour' | 'in-view', title: string, hint: string) =>
-      html`<button part="fold" type="button" data-section=${section} aria-expanded="false"
-        @click=${() => {
-          this.unfolded = new Set([...this.unfolded, section]);
-          this.requestUpdate();
-        }}><span>${title}</span><span part="fold-hint">${hint}</span></button>`;
-    // An opened section, while the sections fold by default, keeps a chevron that folds it again.
-    const opened = (section: 'colour' | 'in-view', title: string, body: unknown) =>
-      foldedByDefault
-        ? html`<div class="section" data-section=${section}><button part="fold" class="refold" type="button" data-section=${section} aria-expanded="true" aria-label=${`Fold ${title}`}
-            @click=${() => {
-              const next = new Set(this.unfolded);
-              next.delete(section);
-              this.unfolded = next;
-              this.requestUpdate();
-            }}>${icon('chev', 12, 1.4)}</button>${body}</div>`
-        : body;
-    const sections = [
-      this.has('toolbar') ? (folded('colour') ? fold('colour', 'Colour', this.colourHint()) : opened('colour', 'Colour', colour)) : nothing,
-      this.has('artifacts') ? (folded('in-view') ? fold('in-view', 'In view', this.inViewHint(level)) : opened('in-view', 'In view', list)) : nothing
-    ];
-    this.hintCount.set(s, this.isConnected && !narrow && this.has('toolbar') && folded('colour') ? this.hintSpec() : null);
-    const info = this.has('toolbar') || this.has('artifacts') ? html`<div part="info" class="card">${sections}</div>` : nothing;
-    const right = html`<div slot="top-right" class="right"><slot name="top-right"></slot>${selectionCard}${detailInColumn ? html`<div part="detail" class="card">${detail}</div>` : nothing}${info}</div>`;
+    const right = html`<div slot="top-right" class="right"><slot name="top-right"></slot>${selectionCard}${detailInColumn ? html`<div part="detail" class="card">${detail}</div>` : nothing}</div>`;
 
     const docked = html`<aside part="sidebar" aria-label="Explorer panels">
       ${this.has('toolbar') ? head : nothing}
@@ -1076,7 +984,7 @@ export class TesseraExplorer extends TesseraElement {
           <div class="group"><button part="layers-toggle" type="button" aria-label=${`Layers and display, ${layersOn} layers on`} aria-expanded=${this.layersOpen ? 'true' : 'false'}
             aria-controls="layers-popover" ?data-on=${layersOn > 0} @click=${() => (this.layersOpen ? this.closeLayers() : this.openLayers())}>${icon('layers', 16, 1.2)}${layersOn > 0 ? html`<span class="on"></span>` : nothing}</button></div>
           ${this.layersOpen
-            ? html`<div part="layers-popover" id="layers-popover" class="card" role="dialog" aria-label="Layers and display" @pointerdown=${this.onPopoverPress}>${this.displaySection()}${layersPanel}</div>${this.sizeMenu()}`
+            ? html`<div part="layers-popover" id="layers-popover" class="card" role="dialog" aria-label="Layers and display" @pointerdown=${this.onPopoverPress}>${this.displaySection()}${layersPanel}</div>${this.choiceMenu()}`
             : nothing}
         </div>`
       : nothing;
@@ -1109,16 +1017,15 @@ export class TesseraExplorer extends TesseraElement {
       this.sheet === 'filters'
         ? html`${filters}${sheetFooter}`
         : this.sheet === 'layers'
-          ? html`${colour}${layersPanel}`
-          : this.sheet === 'artifacts'
-            ? html`${selectionPanel}${list}`
-            : this.sheet === 'detail'
-              ? detail
-              : nothing;
+          ? html`${this.displaySection()}${layersPanel}${this.choiceMenu()}`
+          : this.sheet === 'detail'
+            ? html`${selectionPanel}${detail}`
+            : nothing;
 
     // The tooltip slot is forwarded only when the host supplied one: a slot assigned another slot
     // counts as filled even when that slot is empty, which would hide the map's own tooltip.
     return html`<div part="frame" class=${`${floating ? 'floating' : 'docked'}${compact ? ' compact' : ''}`}
+      @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}
       @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}
       @tessera-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)}
       @tessera-close=${(e: Event) => this.closeDetail(e)}>
@@ -1425,54 +1332,6 @@ export class TesseraExplorer extends TesseraElement {
     else this.map?.focus();
   };
 
-  /**
-   * The aggregate behind the folded Colour heading under a category colouring: how many values the
-   * current set holds. `null` under any other colouring.
-   */
-  private hintSpec(): AggregateSpec | null {
-    const s = this.resolvedStore;
-    const colourBy = s?.get('legend').colourBy ?? null;
-    const meta = s?.get('meta');
-    if (!colourBy || !meta?.declaredScalars.some((c) => c.name === colourBy && c.category && c.render)) return null;
-    return {groupings: [{by: {field: colourBy, top: 1}}]};
-  }
-
-  /**
-   * What the folded Colour heading says: what the points are coloured by, then how many values the
-   * current set holds once the aggregate answers, or how many of the layer's clusters are in view.
-   */
-  private colourHint(): string {
-    const s = this.resolvedStore;
-    const meta = s?.get('meta');
-    const legend = s?.get('legend');
-    const colourBy = legend?.colourBy ?? null;
-    if (!s || !meta || !legend || colourBy === null) return 'None';
-    const layer = clusterLayerOf(colourBy);
-    if (layer) {
-      const n = s.get('artifacts').colourServed.filter((a) => a.layer === layer).length;
-      const decl = meta.layers.find((l) => l.name === layer);
-      return `${decl?.title || layer} · ${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`;
-    }
-    const n = this.hintCount.entry()?.result?.tables[0]?.groups ?? null;
-    return n === null ? columnCaption(colourBy) : `${columnCaption(colourBy)} · ${n.toLocaleString('en-GB')} value${n === 1 ? '' : 's'}`;
-  }
-
-  /** What the folded In view heading says: how many clusters are on screen at the level drawn. */
-  private inViewHint(level: number | null): string {
-    const s = this.resolvedStore;
-    const a = s?.get('artifacts');
-    if (!s || !a) return '';
-    const colourBy = s.get('legend').colourBy;
-    const key = `${a.version}|${level}|${colourBy}`;
-    if (this.inViewHeld?.key === key) return this.inViewHeld.hint;
-    const colourLayer = clusterLayerOf(colourBy);
-    const source = colourLayer ? a.colourServed.filter((x) => x.layer === colourLayer) : a.served;
-    const n = listedAt(source, level, s.get('meta'), colourLayer === null).length;
-    const hint = `${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`;
-    this.inViewHeld = {key, hint};
-    return hint;
-  }
-
   /** The display settings as they stand. */
   private get display(): DisplaySettings {
     return {
@@ -1488,8 +1347,9 @@ export class TesseraExplorer extends TesseraElement {
   }
 
   /**
-   * The Display section of the Layers popover, over the layer picker. The Size and Opacity sliders
-   * show what the map drew last while the setting is unset, and moving one fixes it.
+   * The Points, Colour and Density sections of the Layers popover, over the layer picker. The Size
+   * and Opacity sliders show what the map drew last while the setting is unset, and moving one
+   * fixes it.
    */
   private displaySection(): TemplateResult {
     const s = this.display;
@@ -1514,7 +1374,7 @@ export class TesseraExplorer extends TesseraElement {
       : nothing;
     const densityControls =
       s.density === 'none'
-        ? html`<div class="gap"></div>`
+        ? nothing
         : html`<div class="sliders">
             ${this.resolutionControl(change)}
             ${this.densityScaleControl(s.densityScale, change)}
@@ -1525,33 +1385,167 @@ export class TesseraExplorer extends TesseraElement {
                   ${colourList}`
               : nothing}
             <label for="density-strength">Strength</label>
-            <div class="with-readout"><input id="density-strength" part="density-strength" type="range" min="0.1" max="1" step="0.05" .value=${String(s.densityStrength)}
-              @input=${(e: Event) => change({densityStrength: number(e)})} /><span class="readout">${Math.round(s.densityStrength * 100)}%</span></div>
+            <div class="with-readout"><input id="density-strength" part="density-strength" class="slider" type="range" min="0.1" max="1" step="0.05" .value=${String(s.densityStrength)}
+              style=${fill(s.densityStrength, 0.1, 1)} @input=${(e: Event) => change({densityStrength: number(e)})} /><span class="readout">${Math.round(s.densityStrength * 100)}%</span></div>
           </div>`;
     return html`<div part="display" class="display">
-      <div class="hd">Display</div>
-      <div class="line">
-        <span class="lead" id="points-label">Points</span>
-        <button part="points-toggle" class="switch" type="button" role="switch" aria-checked=${s.points ? 'true' : 'false'} aria-labelledby="points-label"
-          @click=${() => change({points: !s.points})}><span class="knob"></span></button>
-      </div>
-      <div class="sliders">
-        ${this.sizeControls(radius, !s.points)}
-        <label for="point-opacity">Opacity</label>
-        <div class="with-readout"><input id="point-opacity" part="point-opacity" type="range" min="0.1" max="1" step="0.05" .value=${String(opacity)} ?disabled=${!s.points}
-          @input=${(e: Event) => change({pointOpacity: number(e)})} /><span class="readout">${Math.round(opacity * 100)}%</span></div>
-      </div>
-      <div class="rule"></div>
-      <div class="lead" id="density-label">Density</div>
-      <div part="density-mode" class="modes" role="radiogroup" aria-labelledby="density-label">
-        ${DENSITY_MODES.map(
-          (m, i) => html`<button type="button" role="radio" data-mode=${m.mode} aria-checked=${m.mode === s.density ? 'true' : 'false'} tabindex=${i === modeAt ? '0' : '-1'}
-            @click=${() => change({density: m.mode})}
-            @keydown=${(e: KeyboardEvent) => radioKeys(e, DENSITY_MODES.length, i, (j) => change({density: DENSITY_MODES[j]!.mode}))}>${icon(m.icon, 16, 1.3)}<span>${m.label}</span></button>`
-        )}
-      </div>
-      ${densityControls}
+      <section class="sec">
+        <div class="sec-head">
+          <span class="hd" id="points-label">Points</span>
+          <button part="points-toggle" class="switch small" type="button" role="switch" aria-checked=${s.points ? 'true' : 'false'} aria-label="Show points"
+            @click=${() => change({points: !s.points})}><span class="knob"></span></button>
+        </div>
+        ${this.mostPoints(!s.points)}
+        <div class="sliders">
+          ${this.sizeControls(radius, !s.points)}
+          <label for="point-opacity">Opacity</label>
+          <input id="point-opacity" part="point-opacity" class="slider" type="range" min="0.1" max="1" step="0.05" .value=${String(opacity)} ?disabled=${!s.points}
+            style=${fill(opacity, 0.1, 1)} aria-valuetext=${`${Math.round(opacity * 100)}%`} @input=${(e: Event) => change({pointOpacity: number(e)})} />
+        </div>
+      </section>
+      ${this.colourSection()}
+      <section class="sec">
+        <div class="hd" id="density-label">Density</div>
+        <div part="density-mode" class="modes" role="radiogroup" aria-labelledby="density-label">
+          ${DENSITY_MODES.map(
+            (m, i) => html`<button type="button" role="radio" data-mode=${m.mode} aria-checked=${m.mode === s.density ? 'true' : 'false'} tabindex=${i === modeAt ? '0' : '-1'}
+              @click=${() => change({density: m.mode})}
+              @keydown=${(e: KeyboardEvent) => radioKeys(e, DENSITY_MODES.length, i, (j) => change({density: DENSITY_MODES[j]!.mode}))}>${m.label}</button>`
+          )}
+        </div>
+        ${densityControls}
+      </section>
     </div>`;
+  }
+
+  /**
+   * Most points: a slider from `budget-min` to `budget-max` on a log scale, on round numbers, with
+   * the number it stands at. Dragging moves only the number; letting go sets the store's budget.
+   */
+  private mostPoints(disabled: boolean): TemplateResult {
+    const s = this.resolvedStore;
+    const min = Math.max(1, this.budgetMin);
+    const max = Math.max(min * 10, this.budgetMax);
+    const span = Math.log(max / min);
+    const at = (n: number) => Math.min(1, Math.max(0, Math.log(n / min) / span));
+    const of = (t: number) => Math.min(max, Math.max(min, roundPoints(min * Math.exp(t * span))));
+    const shown = this.pointsDragged ?? s?.budget ?? 250_000;
+    const t = at(shown);
+    // A tick at each power of ten between the ends, where it leaves room for the last end's label.
+    const ticks: number[] = [];
+    for (let p = 10 ** Math.ceil(Math.log10(min) + 1e-9); p < max; p *= 10) if (at(p) > 0.08 && at(p) < 0.85) ticks.push(p);
+    const read = (e: Event) => of(Number((e.target as HTMLInputElement).value) / 1000);
+    return html`<div class="most">
+      <div class="most-top"><label for="most-points">Most points</label><span part="most-points-value" class="most-value">${pointsText(shown)}</span></div>
+      <input id="most-points" part="most-points" class="slider" type="range" min="0" max="1000" step="1" .value=${String(Math.round(t * 1000))} ?disabled=${disabled || !s}
+        style=${`--fill:${(t * 100).toFixed(1)}%`} aria-valuetext=${`${pointsText(shown)} points`}
+        @input=${(e: Event) => (this.pointsDragged = read(e))}
+        @change=${(e: Event) => this.setBudget(read(e))} />
+      <div class="ticks" aria-hidden="true">
+        <span style="left:0">${pointsText(min)}</span>
+        ${ticks.map((p) => html`<span class="mid" style=${`left:${(at(p) * 100).toFixed(1)}%`}>${pointsText(p)}</span>`)}
+        <span style="right:0">${pointsText(max)}</span>
+      </div>
+    </div>`;
+  }
+
+  /** Set the store's budget from Most points, and report it. */
+  private setBudget(budget: number): void {
+    this.pointsDragged = null;
+    const s = this.resolvedStore;
+    if (!s || budget === s.budget) return;
+    s.setBudget(budget);
+    emit(this, 'tessera-budgetchange', {budget});
+    this.requestUpdate();
+  }
+
+  /**
+   * The Colour section: Colour by, then the palette for a category, or the ramp, its scale and
+   * Reverse for a number or a date, unless `hide-palettes` is set.
+   */
+  private colourSection(): TemplateResult {
+    const s = this.resolvedStore;
+    const meta = s?.get('meta') ?? null;
+    const colourBy = s?.get('legend').colourBy ?? null;
+    const colouring = colouringOf(s);
+    const current = this.colourOptions().find((o) => o.checked);
+    const column = meta?.declaredScalars.find((c) => c.name === colourBy && c.render) ?? null;
+    const scales: RampScale[] = ['linear', 'log'];
+    const scaleAt = scales.indexOf(colouring.scale);
+    const palette = CATEGORY_PALETTES[colouring.palette];
+    const choice = (menu: Menu, label: string, body: TemplateResult, stretch = false) =>
+      html`<button part=${({size: 'size-by', colour: 'colour-by', palette: 'palette', ramp: 'ramp'} as const)[menu]} class=${`ramp-choice${stretch ? ' stretch' : ''}`} type="button" aria-haspopup="menu" aria-expanded=${this.menu === menu ? 'true' : 'false'}
+        aria-label=${label} ?disabled=${!meta} @click=${() => (this.menu = this.menu === menu ? null : menu)} @keydown=${this.onMenuButtonKey(menu)}>${body}${icon('chev', 12, 1.4)}</button>`;
+    const byName = current?.title ?? 'None';
+    const palettes =
+      column?.category && !this.hidePalettes
+        ? html`<span>Palette</span>${choice('palette', `Palette: ${palette.title}`, html`<span class="strip">${palette.colours.map((c) => html`<span style=${`background:${hexOf(c)}`}></span>`)}</span><span class="t">${palette.title}</span>`, true)}`
+        : nothing;
+    const ramps =
+      column && !column.category && !this.hidePalettes
+        ? html`<span>Ramp</span>${choice('ramp', `Ramp: ${RAMPS[colouring.ramp].title}`, html`<span class="bar wide" style=${`background:${rampGradient(colouring.ramp, colouring.reverse)}`}></span><span class="t">${RAMPS[colouring.ramp].title}</span>`, true)}
+            <span id="ramp-scale-label">Scale</span>
+            <div class="scale-row">
+              <div part="ramp-scale" class="seg" role="radiogroup" aria-labelledby="ramp-scale-label">
+                ${scales.map(
+                  (x, i) => html`<button type="button" role="radio" data-scale=${x} aria-checked=${x === colouring.scale ? 'true' : 'false'} tabindex=${i === Math.max(0, scaleAt) ? '0' : '-1'}
+                    @click=${() => this.choosePalette({scale: x})}
+                    @keydown=${(e: KeyboardEvent) => radioKeys(e, scales.length, i, (j) => this.choosePalette({scale: scales[j]!}))}>${x === 'linear' ? 'Linear' : 'Log'}</button>`
+                )}
+              </div>
+              <button part="ramp-reverse" class="toggle" type="button" aria-pressed=${colouring.reverse ? 'true' : 'false'} @click=${() => this.choosePalette({reverse: !colouring.reverse})}>Reverse</button>
+            </div>`
+        : nothing;
+    return html`<section class="sec">
+      <div class="hd">Colour</div>
+      <div class="sliders">
+        <span>Colour by</span>${choice('colour', `Colour by: ${byName}`, html`<span class="t">${byName}</span>`)}
+        ${palettes}${ramps}
+      </div>
+    </section>`;
+  }
+
+  /**
+   * What Colour by offers: None, every layer that can colour (a levelled layer once per level, by
+   * its levels' titles), and the rendered category and number columns.
+   */
+  private colourOptions(): {value: string; title: string; kind: string; checked: boolean}[] {
+    const s = this.resolvedStore;
+    const meta = s?.get('meta');
+    const colourBy = s?.get('legend').colourBy ?? null;
+    if (!meta) return [{value: '', title: 'None', kind: '', checked: true}];
+    const layers = colourLayers(meta.layers).flatMap((decl) => {
+      const value = `${CLUSTER_PREFIX}${decl.name}`;
+      if (decl.levels.length <= 1) return [{value, title: decl.title || decl.name, kind: 'Clusters', checked: colourBy === value}];
+      const drawn = this.level ?? decl.levels.at(-1)!.level;
+      return decl.levels.map((lv) => ({value: `${value}@${lv.level}`, title: lv.title || `${decl.title || decl.name}, level ${lv.level}`, kind: 'Clusters', checked: colourBy === value && drawn === lv.level}));
+    });
+    const columns = meta.declaredScalars.filter((c) => c.render).map((c) => ({value: c.name, title: columnCaption(c.name), kind: c.category ? 'Category' : c.arrowType === 'timestamp_us' ? 'Date' : 'Number', checked: colourBy === c.name}));
+    return [{value: '', title: 'None', kind: '', checked: colourBy === null}, ...layers, ...columns];
+  }
+
+  /** Colour by `value`: a column, `cluster:<layer>`, or `cluster:<layer>@<level>` for one level of a layer. */
+  private chooseColour(value: string): void {
+    const s = this.resolvedStore;
+    if (!s) return;
+    const at = value.lastIndexOf('@');
+    const colourBy = value === '' ? null : at > 0 ? value.slice(0, at) : value;
+    s.setColourBy(colourBy);
+    emit(this, 'tessera-colourchange', {colourBy});
+    if (at > 0) {
+      this.level = Number(value.slice(at + 1));
+      emit(this, 'tessera-levelchange', {level: this.level});
+    }
+  }
+
+  /** Change the palette, the ramp, its scale or its direction, and report all four. */
+  private choosePalette(patch: Partial<Pick<Colouring, 'palette' | 'ramp' | 'scale' | 'reverse'>>): void {
+    const s = this.resolvedStore;
+    if (!s) return;
+    setColouring(s, patch);
+    const {palette, ramp, scale, reverse} = colouringOf(s);
+    emit(this, 'tessera-palettechange', {palette, ramp, scale, reverse});
+    this.requestUpdate();
   }
 
   /**
@@ -1636,24 +1630,24 @@ export class TesseraExplorer extends TesseraElement {
     const number = (e: Event) => Number((e.target as HTMLInputElement).value);
     const {min, max, step} = SIZE_RANGE;
     const choice = html`<span id="size-by-label">Size by</span>
-      <button part="size-by" class="ramp-choice" type="button" aria-haspopup="menu" aria-expanded=${this.sizeMenuOpen ? 'true' : 'false'} aria-label=${`Size by: ${sizeBy === null ? 'None' : columnCaption(sizeBy)}`}
+      <button part="size-by" class="ramp-choice" type="button" aria-haspopup="menu" aria-expanded=${this.menu === 'size' ? 'true' : 'false'} aria-label=${`Size by: ${sizeBy === null ? 'None' : columnCaption(sizeBy)}`}
         ?disabled=${disabled || (sizeBy === null && this.sizeColumns.length === 0)} title=${this.sizeColumns.length === 0 ? 'No number column to size by' : nothing}
-        @click=${() => (this.sizeMenuOpen = !this.sizeMenuOpen)} @keydown=${this.onSizeByKey}><span class="t">${sizeBy === null ? 'None' : columnCaption(sizeBy)}</span>${icon('chev', 12, 1.4)}</button>`;
+        @click=${() => (this.menu = this.menu === 'size' ? null : 'size')} @keydown=${this.onMenuButtonKey('size')}><span class="t">${sizeBy === null ? 'None' : columnCaption(sizeBy)}</span>${icon('chev', 12, 1.4)}</button>`;
     if (sizeBy === null) {
       if (this.hideSize) return choice;
       return html`${choice}<label for="point-size">Size</label>
-        <div class="with-readout"><input id="point-size" part="point-size" type="range" min=${min} max=${max} step=${step} .value=${String(radius)} ?disabled=${disabled}
-          @input=${(e: Event) => this.changeDisplay({radius: number(e)})} /><span class="readout">${px(radius)} px</span></div>`;
+        <input id="point-size" part="point-size" class="slider" type="range" min=${min} max=${max} step=${step} .value=${String(radius)} ?disabled=${disabled}
+          style=${fill(radius, min, max)} aria-valuetext=${`${px(radius)} px`} @input=${(e: Event) => this.changeDisplay({radius: number(e)})} />`;
     }
     const at = SIZE_SCALES.findIndex((x) => x.scale === sizing.scale);
     // Moving one end past the other takes the other with it.
     return html`${choice}<span id="size-range-label">Range</span>
       <div class="range" role="group" aria-labelledby="size-range-label">
-        <input part="size-min" type="range" min=${min} max=${max} step=${step} aria-label="Smallest size" .value=${String(sizing.min)} ?disabled=${disabled}
-          @input=${(e: Event) => this.changeSize({min: number(e), max: Math.max(number(e), sizing.max)})} />
+        <input part="size-min" class="slider" type="range" min=${min} max=${max} step=${step} aria-label="Smallest size" .value=${String(sizing.min)} ?disabled=${disabled}
+          style=${fill(sizing.min, min, max)} @input=${(e: Event) => this.changeSize({min: number(e), max: Math.max(number(e), sizing.max)})} />
         <span part="size-range" class="readout">${px(sizing.min)} – ${px(sizing.max)} px</span>
-        <input part="size-max" type="range" min=${min} max=${max} step=${step} aria-label="Largest size" .value=${String(sizing.max)} ?disabled=${disabled}
-          @input=${(e: Event) => this.changeSize({max: number(e), min: Math.min(number(e), sizing.min)})} />
+        <input part="size-max" class="slider" type="range" min=${min} max=${max} step=${step} aria-label="Largest size" .value=${String(sizing.max)} ?disabled=${disabled}
+          style=${fill(sizing.max, min, max)} @input=${(e: Event) => this.changeSize({max: number(e), min: Math.min(number(e), sizing.min)})} />
       </div>
       <span id="size-scale-label">Scale</span>
       <div part="size-scale" class="seg" role="radiogroup" aria-labelledby="size-scale-label">
@@ -1665,23 +1659,62 @@ export class TesseraExplorer extends TesseraElement {
       </div>`;
   }
 
-  /** The Size by menu, beside the Layers popover while it is open: None and the number columns. */
-  private sizeMenu(): TemplateResult | typeof nothing {
-    if (!this.sizeMenuOpen) return nothing;
-    const sizeBy = this.sizedBy;
-    const options = [{value: '', title: 'None', kind: ''}, ...this.sizeColumns.map((c) => ({value: c, title: columnCaption(c), kind: 'Number'}))];
-    const choose = (value: string) => {
-      this.sizeMenuOpen = false;
-      this.changeSize({sizeBy: value === '' ? null : value});
-      void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="size-by"]')?.focus());
+  /** The entries of `menu`, each with what it shows beside its title, and the one chosen. */
+  private menuEntries(menu: Menu): {title: string; entries: {value: string; title: string; kind: string; swatch?: TemplateResult}[]; checked: string; choose: (value: string) => void} {
+    const colouring = colouringOf(this.resolvedStore);
+    switch (menu) {
+      case 'size':
+        return {
+          title: 'Size by',
+          entries: [{value: '', title: 'None', kind: ''}, ...this.sizeColumns.map((c) => ({value: c, title: columnCaption(c), kind: 'Number'}))],
+          checked: this.sizedBy ?? '',
+          choose: (value) => this.changeSize({sizeBy: value === '' ? null : value})
+        };
+      case 'colour': {
+        const options = this.colourOptions();
+        return {
+          title: 'Colour by',
+          entries: options,
+          checked: options.find((o) => o.checked)?.value ?? '',
+          choose: (value) => this.chooseColour(value)
+        };
+      }
+      case 'palette':
+        return {
+          title: 'Palette',
+          entries: (Object.keys(CATEGORY_PALETTES) as CategoryPaletteName[]).map((name) => {
+            const p = CATEGORY_PALETTES[name];
+            return {value: name, title: p.title, kind: p.colourBlindSafe ? 'Colour-blind safe' : '', swatch: html`<span class="strip">${p.colours.map((c) => html`<span style=${`background:${hexOf(c)}`}></span>`)}</span>`};
+          }),
+          checked: colouring.palette,
+          choose: (value) => this.choosePalette({palette: value as CategoryPaletteName})
+        };
+      case 'ramp':
+        return {
+          title: 'Ramp',
+          entries: (Object.keys(RAMPS) as RampName[]).map((name) => ({value: name, title: RAMPS[name].title, kind: '', swatch: html`<span class="bar" style=${`background:${rampGradient(name, colouring.reverse)}`}></span>`})),
+          checked: colouring.ramp,
+          choose: (value) => this.choosePalette({ramp: value as RampName})
+        };
+    }
+  }
+
+  /** The menu open beside the Layers popover, in the top layer: Size by, Colour by, Palette or Ramp. */
+  private choiceMenu(): TemplateResult | typeof nothing {
+    const menu = this.menu;
+    if (!menu) return nothing;
+    const {title, entries, checked, choose} = this.menuEntries(menu);
+    const pick = (value: string) => {
+      this.closeMenu(true);
+      choose(value);
     };
     // One entry is in the tab order, the one focused last, as in a radio group.
     const keys = (e: KeyboardEvent, i: number) => {
-      const items = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="size-option"]'));
+      const items = Array.from(this.renderRoot.querySelectorAll<HTMLElement>(`[part~="${menu}-option"]`));
       const next = {ArrowDown: (i + 1) % items.length, ArrowUp: (i - 1 + items.length) % items.length, Home: 0, End: items.length - 1}[e.key];
       if (e.key === 'Escape') {
         e.stopPropagation();
-        this.closeSizeMenu(true);
+        this.closeMenu(true);
         return;
       }
       if (next === undefined) return;
@@ -1689,41 +1722,44 @@ export class TesseraExplorer extends TesseraElement {
       items.forEach((item, j) => (item.tabIndex = j === next ? 0 : -1));
       items[next]?.focus();
     };
-    const checked = Math.max(0, options.findIndex((o) => (o.value || null) === sizeBy));
-    return html`<div part="size-menu" class="size-menu" popover="manual" role="menu" aria-labelledby="size-menu-label" @focusout=${this.onSizeMenuFocusOut}>
-      <div class="hd" id="size-menu-label">Size by</div>
-      ${options.map(
-        (o, i) => html`<button part="size-option" type="button" role="menuitemradio" data-value=${o.value} aria-checked=${(o.value || null) === sizeBy ? 'true' : 'false'}
-          tabindex=${i === checked ? '0' : '-1'} @click=${() => choose(o.value)} @keydown=${(e: KeyboardEvent) => keys(e, i)}><span>${o.title}</span><span class="kind">${o.kind}</span></button>`
+    const at = Math.max(0, entries.findIndex((o) => o.value === checked));
+    return html`<div part=${({size: 'size-menu', colour: 'colour-menu', palette: 'palette-menu', ramp: 'ramp-menu'} as const)[menu]} class=${`size-menu${menu === 'palette' || menu === 'ramp' ? ' wide' : ''}`} popover="manual" role="menu" aria-labelledby="menu-label" @focusout=${this.onMenuFocusOut}>
+      <div class="hd" id="menu-label">${title}</div>
+      ${entries.map(
+        (o, i) => html`<button part=${({size: 'size-option', colour: 'colour-option', palette: 'palette-option', ramp: 'ramp-option'} as const)[menu]} type="button" role="menuitemradio" data-value=${o.value} aria-checked=${o.value === checked ? 'true' : 'false'}
+          tabindex=${i === at ? '0' : '-1'} @click=${() => pick(o.value)} @keydown=${(e: KeyboardEvent) => keys(e, i)}><span class="lead">${o.swatch ?? nothing}<span>${o.title}</span></span><span class="kind">${o.kind}</span></button>`
       )}
     </div>`;
   }
 
-  /** Close the Size by menu, putting focus back on its button with `refocus`. */
-  private closeSizeMenu(refocus: boolean): void {
-    this.sizeMenuOpen = false;
-    if (refocus) void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="size-by"]')?.focus());
+  /** Close the open menu, putting focus back on its button with `refocus`. */
+  private closeMenu(refocus: boolean): void {
+    const menu = this.menu;
+    this.menu = null;
+    if (refocus && menu) void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>(`[part="${MENU_BUTTON[menu]}"]`)?.focus());
   }
 
-  /** The arrow keys on the Size by button open its menu, as a menu button's do. */
-  private onSizeByKey = (e: KeyboardEvent): void => {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    e.preventDefault();
-    this.sizeMenuOpen = true;
-  };
+  /** The arrow keys on a menu's button open the menu, as a menu button's do. */
+  private onMenuButtonKey(menu: Menu): (e: KeyboardEvent) => void {
+    return (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      e.preventDefault();
+      this.menu = menu;
+    };
+  }
 
-  /** Focus leaving the Size by menu, by Tab or otherwise, closes it; Tab goes on from where focus went. */
-  private onSizeMenuFocusOut = (e: FocusEvent): void => {
+  /** Focus leaving the open menu, by Tab or otherwise, closes it; Tab goes on from where focus went. */
+  private onMenuFocusOut = (e: FocusEvent): void => {
     const to = e.relatedTarget as Node | null;
     if (to && (e.currentTarget as HTMLElement).contains(to)) return;
-    this.closeSizeMenu(false);
+    this.closeMenu(false);
   };
 
-  /** A press in the Layers popover outside the Size by button closes the Size by menu. */
+  /** A press in the Layers popover outside the open menu's button closes the menu. */
   private onPopoverPress = (e: PointerEvent): void => {
-    if (!this.sizeMenuOpen) return;
-    const button = this.renderRoot.querySelector('[part="size-by"]');
-    if (button && !e.composedPath().includes(button)) this.sizeMenuOpen = false;
+    if (!this.menu) return;
+    const button = this.renderRoot.querySelector(`[part="${MENU_BUTTON[this.menu]}"]`);
+    if (button && !e.composedPath().includes(button)) this.menu = null;
   };
 
   /**
@@ -1792,7 +1828,7 @@ export class TesseraExplorer extends TesseraElement {
   /** Focus goes into a sheet as it opens, and back to its tab as it closes. */
   protected override updated(changed: PropertyValues<this>): void {
     this.toggleAttribute('data-compact', this.compact);
-    this.placeSizeMenu(changed.has('sizeMenuOpen'));
+    this.placeMenu(changed.has('menu') && this.menu !== null);
     this.followLayout();
     if (!changed.has('sheet')) return;
     const before = changed.get('sheet');
@@ -1801,14 +1837,14 @@ export class TesseraExplorer extends TesseraElement {
   }
 
   /**
-   * Show the Size by menu in the top layer, so the popover's scrolling does not clip it, beside the
-   * popover and level with its button; focus goes to the entry chosen as it opens.
+   * Show the open menu in the top layer, so the popover's scrolling does not clip it, beside the
+   * popover or the sheet and level with its button; focus goes to the entry chosen as it opens.
    */
-  private placeSizeMenu(opened: boolean): void {
-    const menu = this.renderRoot.querySelector<HTMLElement>('[part="size-menu"]');
-    const button = this.renderRoot.querySelector<HTMLElement>('[part="size-by"]');
-    const popover = this.renderRoot.querySelector<HTMLElement>('[part="layers-popover"]');
-    if (!menu || !button || !popover) return;
+  private placeMenu(opened: boolean): void {
+    const menu = this.menu ? this.renderRoot.querySelector<HTMLElement>(`[part="${this.menu}-menu"]`) : null;
+    const button = this.menu ? this.renderRoot.querySelector<HTMLElement>(`[part="${MENU_BUTTON[this.menu]}"]`) : null;
+    const beside = this.renderRoot.querySelector<HTMLElement>('[part="layers-popover"], [part="sheet"]');
+    if (!menu || !button || !beside) return;
     if (typeof menu.showPopover === 'function' && !menu.matches(':popover-open')) {
       try {
         menu.showPopover();
@@ -1817,15 +1853,17 @@ export class TesseraExplorer extends TesseraElement {
       }
     }
     const b = button.getBoundingClientRect();
-    const p = popover.getBoundingClientRect();
+    const p = beside.getBoundingClientRect();
     const width = menu.offsetWidth || 220;
     const height = menu.offsetHeight || 0;
     const vw = typeof innerWidth === 'number' ? innerWidth : 1024;
     const vh = typeof innerHeight === 'number' ? innerHeight : 768;
     const right = p.right + 16;
-    const left = right + width <= vw - 8 ? right : Math.max(8, p.left - width - 16);
+    // Where there is no room either side, as in a sheet, the menu opens under its button.
+    const left = right + width <= vw - 8 ? right : p.left - width - 16 >= 8 ? p.left - width - 16 : Math.max(8, Math.min(b.left, vw - width - 8));
+    const under = right + width > vw - 8 && p.left - width - 16 < 8;
     menu.style.left = `${Math.round(left)}px`;
-    menu.style.top = `${Math.round(Math.max(8, Math.min(b.top - 32, vh - height - 8)))}px`;
+    menu.style.top = `${Math.round(Math.max(8, Math.min(under ? b.bottom + 4 : b.top - 32, vh - height - 8)))}px`;
     if (opened) (menu.querySelector<HTMLElement>('[aria-checked="true"]') ?? menu.querySelector<HTMLElement>('button'))?.focus();
   }
 

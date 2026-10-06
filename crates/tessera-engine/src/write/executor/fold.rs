@@ -1922,7 +1922,7 @@ impl Executor {
                             ));
                         }
                     }
-                    observed.unwrap_or_else(tessera_store::derived::LevelShape::empty)
+                    observed.unwrap_or_else(crate::layout::LevelShape::empty)
                 } else {
                     // A borrowing level's filed column is true when written and not read
                     // afterwards: the borrowed set moves with the target's version, so the engine
@@ -2492,6 +2492,9 @@ impl Executor {
                     {
                         continue;
                     }
+                    let Some(registered) = registered.as_ref() else {
+                        continue;
+                    };
                     let segments = if spatial {
                         crate::viewport::segments_with_row_bases(view, view_data).ok()
                     } else {
@@ -2525,9 +2528,7 @@ impl Executor {
                             layout,
                             predicate.as_ref(),
                             generation.segments_version,
-                            self.live.registered_layer(layer).is_some_and(|r| {
-                                crate::artifacts::serves_column_only(&r.declaration)
-                            }),
+                            &registered.declaration,
                         )
                     });
                 }

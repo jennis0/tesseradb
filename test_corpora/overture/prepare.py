@@ -64,7 +64,8 @@ VINTAGE = "2026-08-19.0"
 #: quotes or `&` ("Navi Mumbai", "9 &10"), which an access expression reads as syntax; quoted, each
 #: is one term taken exactly as written.
 ACCESS_LABEL = r"""'"' || replace(replace(
-    NULLIF(regexp_replace(country, '^\s+|\s+$', '', 'g'), ''), '\', '\\'), '"', '\"') || '"'"""
+    NULLIF(regexp_replace(country, '^[\s\p{Z}]+|[\s\p{Z}]+$', '', 'g'), ''), '\', '\\'), '"', '\"')
+    || '"'"""
 
 #: The subtypes whose division id is lifted out of the lineage into an indexed column, so that the
 #: same boundary can be asked for as an attribute membership as well as through the nested layer —

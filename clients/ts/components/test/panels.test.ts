@@ -6,6 +6,7 @@ import '../src/filter-panel.js';
 import type {TesseraItemCard} from '../src/item-card.js';
 import type {TesseraFilter} from '../src/filter.js';
 import type {TesseraFilterPanel} from '../src/filter-panel.js';
+import type {TesseraFieldCard} from '../src/field-card.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar} from './fake-store.js';
 import {UNNAMED, dateRangeText, parseDateText} from '../src/base.js';
 
@@ -200,8 +201,6 @@ describe('<tessera-filter> on a category', () => {
     await settle(host);
     expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250', '0']);
     expect(deepAll(host, '[part="bar"]').map((b) => (b as HTMLElement).style.width)).toEqual(['50.0%', '0.0%']);
-    // In the filter position a value counted 0 can still be chosen.
-    expect(deepAll(host, '[part~="tick"]').map((t) => t.getAttribute('aria-disabled'))).toEqual(['false', 'false']);
   });
 
   it('draws no bar where the page carries no total', async () => {
@@ -211,55 +210,6 @@ describe('<tessera-filter> on a category', () => {
     await settle(host);
     expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250']);
     expect(deepAll(host, '[part="bar"]')).toHaveLength(0);
-  });
-
-  it('asks from its own position, asks again when the position changes, and shows only its own position’s page', async () => {
-    const {host, store, el} = await mountFilter('archive', empty());
-    await type(host, 'c');
-    el.verb = 'highlight';
-    await settle(host);
-    expect(store.calls.filter((c) => c.name === 'suggest').map((c) => c.args)).toEqual([
-      ['archive', 'c', 'filter'],
-      ['archive', 'c', 'highlight']
-    ]);
-    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'filter', values: [value(1, 'cs', 'CS', 250)], more: false, total: 500}}});
-    await settle(host);
-    expect(deepAll(host, '[part~="tick"]')).toHaveLength(0);
-    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'highlight', values: [value(1, 'cs', 'CS', 250)], more: false, total: 500}}});
-    await settle(host);
-    expect(deepAll(host, '[part~="tick"]')).toHaveLength(1);
-  });
-
-  it('in the highlight, greys a value the server counts 0 under the filter and does not choose it', async () => {
-    const filtered = filtersOf({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}, {expr: {archive: {in: ['cs']}}});
-    const {host, store} = await mountFilter('archive', filtered, 'verb="highlight"');
-    await type(host, 'c');
-    // `chem` is outside the filter's keys, and the server's count is what decides.
-    store.set('filters', {
-      ...store.get('filters'),
-      suggestions: {archive: {q: 'c', verb: 'highlight', values: [value(1, 'cs', 'CS', 250), value(2, 'cond', null, 0), value(3, 'chem', null, 5)], more: false, total: 255}}
-    });
-    await settle(host);
-    const ticks = deepAll(host, '[part~="tick"]') as HTMLElement[];
-    expect(ticks.map((t) => t.getAttribute('aria-disabled'))).toEqual(['false', 'true', 'false']);
-    expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250', '0', '5']);
-    expect(deep(host, '[part~="tick"][aria-disabled="true"] .out')?.textContent).toBe('none match');
-    ticks[1]!.click();
-    expect(drafts(store)).toHaveLength(0);
-    ticks[0]!.click();
-    expect(drafts(store)[0]!.highlight['archive']).toEqual({family: 'category', keys: ['cs']});
-    expect(drafts(store)[0]!.filter['archive']).toEqual({family: 'category', keys: ['cs']});
-  });
-
-  it('in the highlight, lets a chosen value the server now counts 0 be taken out from the list', async () => {
-    const {host, store} = await mountFilter('archive', filtersOf({filter: {}, highlight: {archive: {family: 'category', keys: ['cond']}}}), 'verb="highlight"');
-    await type(host, 'c');
-    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'highlight', values: [value(2, 'cond', null, 0)], more: false, total: 10}}});
-    await settle(host);
-    const tick = deep(host, '[part~="tick"]') as HTMLElement;
-    expect(tick.getAttribute('aria-disabled')).toBe('false');
-    tick.click();
-    expect(drafts(store)[0]!.highlight['archive']).toEqual({family: 'category', keys: []});
   });
 
   it('has the store forget the column when the box is emptied and when the control goes away', async () => {
@@ -272,14 +222,6 @@ describe('<tessera-filter> on a category', () => {
     await type(host, 'ma');
     host.querySelector('tessera-filter')!.remove();
     expect(forgot()).toEqual([['archive'], ['archive']]);
-  });
-
-  it('shows the values chosen as chips under the box, each removable', async () => {
-    const {host, store} = await mountFilter('archive', filtersOf({filter: {archive: {family: 'category', keys: ['cs', 'math']}}, highlight: {}}));
-    const chips = deepAll(host, '[part="chosen"]');
-    expect(chips).toHaveLength(2);
-    (chips[0]!.querySelector('button') as HTMLButtonElement).click();
-    expect(drafts(store)[0]!.filter['archive']).toEqual({family: 'category', keys: ['math']});
   });
 
   it('shows a refusal beside the box, with its code, and keeps the box', async () => {
@@ -317,52 +259,10 @@ describe('<tessera-filter> on a category, its suggestions', () => {
   });
 });
 
-describe('<tessera-filter> on a category, before anything is typed', () => {
-  const empty = () => filtersOf({filter: {archive: {family: 'category', keys: []}}, highlight: {}});
-  const TOP = aggregateEntry([{rows: [{key: 'cs', title: 'Computer science', count: 600}, {key: 'math', count: 300}, {key: 'stat', count: 100}], groups: 38, total: 1000}]);
-
-  it('counts its five commonest values without its own clause in the filter position, and under the whole filter in the highlight position', async () => {
-    const {host, store, el} = await mountFilter('archive', empty());
-    expect([...registered(store).values()]).toEqual([{groupings: [{by: {field: 'archive', top: 5}}], without: 'archive'}]);
-    el.verb = 'highlight';
-    await settle(host);
-    expect([...registered(store).values()]).toEqual([{groupings: [{by: {field: 'archive', top: 5}}]}]);
-    el.remove();
-    await settle(host);
-    expect(registered(store).size).toBe(0);
-  });
-
-  it('lists them with their counts and bars as a share of the set, says how many values the set holds, and a checkbox chooses one', async () => {
-    const {host, store} = await mountFilter('archive', empty());
-    expect(deep(host, '[part="top"]')).toBeNull();
-    answerAggregate(store, 'filter', TOP);
-    await settle(host);
-    const rows = deepAll(host, '[part~="top-value"]');
-    expect(rows.map((r) => r.getAttribute('data-key'))).toEqual(['cs', 'math', 'stat']);
-    expect(rows.map((r) => r.querySelector('[part="value-count"]')!.textContent)).toEqual(['600', '300', '100']);
-    expect((rows[0]!.querySelector('[part="bar"]') as HTMLElement).style.width).toBe('60.0%');
-    expect(rows[0]!.textContent).toContain('Computer science');
-    expect(deep(host, '[part="aside"]')!.textContent).toBe('38 values');
-    const box = rows[1]!.querySelector('input') as HTMLInputElement;
-    box.click();
-    await settle(host);
-    expect(drafts(store).at(-1)!.filter['archive']).toEqual({family: 'category', keys: ['math']});
-  });
-
-  it('shows a chosen value as a chip only where it is not among the five', async () => {
-    const {host, store} = await mountFilter('archive', filtersOf({filter: {archive: {family: 'category', keys: ['cs', 'hep']}}, highlight: {}}));
-    answerAggregate(store, 'filter', TOP);
-    await settle(host);
-    expect((deep(host, '[part~="top-value"][data-key="cs"] input') as HTMLInputElement).checked).toBe(true);
-    expect(deepAll(host, '[part="chosen"]').map((c) => c.textContent!.trim())).toEqual(['hep']);
-  });
-});
-
 describe('<tessera-filter> on text', () => {
   it('sends one box’s words, phrases and alternatives after the typing pause', async () => {
     vi.useFakeTimers();
     const {host, store} = await mountFilter('title', filtersOf({filter: {title: {family: 'text', query: '', phrase: true}}, highlight: {}}));
-    expect(deep(host, '[part="hint"]')).not.toBeNull();
     const changes: unknown[] = [];
     host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
     await type(host, '"graph neural" OR lattice');
@@ -372,58 +272,14 @@ describe('<tessera-filter> on text', () => {
     expect(changes).toEqual([{column: 'title', verb: 'filter', expr: {any_of: [{title: {phrase: 'graph neural'}}, {title: {match: 'lattice'}}]}}]);
   });
 
-  it('shows a clause set from outside that no query writes read-only, and Clear empties it', async () => {
+  it('shows a clause set from outside that no query writes read-only', async () => {
     const expr = {title: {match: 'salt OR pepper'}};
-    const {host, store} = await mountFilter('title', filtersOf({filter: {title: {family: 'text', query: '', phrase: true, expr}}, highlight: {}}));
-    expect((deep(host, '[part="entry"]') as HTMLInputElement).readOnly).toBe(true);
-    (deep(host, '[part="aside"]') as HTMLButtonElement).click();
-    expect(drafts(store)[0]!.filter['title']).toEqual({family: 'text', query: '', phrase: true});
+    const {host} = await mountFilter('title', filtersOf({filter: {title: {family: 'text', query: '', phrase: true, expr}}, highlight: {}}));
+    const entry = deep(host, '[part="entry"]') as HTMLInputElement;
+    expect(entry.readOnly).toBe(true);
+    expect(entry.value).toBe(JSON.stringify(expr));
   });
 
-  it('sends typing still waiting when its position changes, to the position it was typed in', async () => {
-    vi.useFakeTimers();
-    const filter = {title: {family: 'text' as const, query: 'graph', phrase: true}};
-    const {host, el, store} = await mountFilter('title', filtersOf({filter, highlight: {}}));
-    el.verb = 'highlight';
-    await settle(host);
-    const entry = await type(host, 'guidance');
-    expect(entry.value).toBe('guidance');
-    el.verb = 'filter';
-    await settle(host);
-    expect(drafts(store)).toEqual([{filter, highlight: {title: {family: 'text', query: 'guidance', phrase: true}}}]);
-    expect((deep(host, '[part="entry"]') as HTMLInputElement).value).toBe('graph');
-    await vi.runAllTimersAsync();
-    expect(drafts(store)).toHaveLength(1);
-  });
-});
-
-describe('<tessera-filter> on a date', () => {
-  const empty = () => filtersOf({filter: {submitted_at: {family: 'numeric', gte: null, lte: null}}, highlight: {}});
-  const commit = (input: HTMLInputElement, text: string) => {
-    input.value = text;
-    input.dispatchEvent(new Event('change'));
-  };
-
-  it('reads a typed day as its first instant below and a typed year as its last above', async () => {
-    const {host, store} = await mountFilter('submitted_at', empty(), 'verb="highlight"');
-    commit(deepAll(host, '[part="entry"]')[0] as HTMLInputElement, '1 Jan 2019');
-    expect(drafts(store).at(-1)!.highlight['submitted_at']).toEqual({family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: null});
-    await settle(host);
-    commit(deepAll(host, '[part="entry"]')[1] as HTMLInputElement, '2024');
-    expect(drafts(store).at(-1)!.highlight['submitted_at']).toEqual({family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1});
-    // The filter is left alone.
-    expect(drafts(store).at(-1)!.filter).toEqual(empty().draft.filter);
-  });
-
-  it('shows the bounds back as dates, and sends nothing for text that is not one', async () => {
-    const {host, store} = await mountFilter('submitted_at', filtersOf({filter: {submitted_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}}, highlight: {}}));
-    const [from, to] = deepAll(host, '[part="entry"]') as HTMLInputElement[];
-    expect([from!.value, to!.value]).toEqual(['1 Jan 2019', '31 Dec 2024']);
-    commit(from!, 'the spring');
-    await settle(host);
-    expect(drafts(store)).toHaveLength(0);
-    expect((deepAll(host, '[part="entry"]')[0] as HTMLInputElement).getAttribute('aria-invalid')).toBe('true');
-  });
 });
 
 describe('<tessera-filter> on a keyword column', () => {
@@ -471,13 +327,13 @@ describe('<tessera-filter-panel>', () => {
     panel.store = store;
     await settle(host);
     const sent = () => store.calls.filter((c) => c.name === 'setFilters').at(-1)!.args[0] as FilterDraft;
-    const controls = () => deepAll(host, 'tessera-filter') as TesseraFilter[];
-    const fields = () => deepAll(host, '[part~="field"]').map((f) => [f.getAttribute('data-column'), f.hasAttribute('data-open')]);
-    return {host, panel, store, sent, controls, fields};
+    const cards = () => deepAll(host, 'tessera-field-card') as TesseraFieldCard[];
+    const fields = () => cards().map((c) => [c.field, !c.folded]);
+    return {host, panel, store, sent, cards, fields};
   }
   const none = (): FilterDraft => ({filter: {archive: {family: 'category', keys: []}, title: {family: 'text', query: '', phrase: true}, submitted_at: {family: 'numeric', gte: null, lte: null}}, highlight: {}});
 
-  it('lists no field until one is pinned, holds a clause or is added', async () => {
+  it('lists no card until one is pinned, holds a clause or is added', async () => {
     const {host, fields} = await mountPanel(none());
     expect(fields()).toEqual([]);
     (deep(host, '[part="add"]') as HTMLButtonElement).click();
@@ -491,9 +347,10 @@ describe('<tessera-filter-panel>', () => {
     await settle(host);
     expect(fields()).toEqual([['submitted_at', true]]);
     expect(deep(host, '[part="add-list"]')).toBeNull();
+    expect(deep(host, '[part="add-note"]')!.textContent).toBe('2 more fields');
   });
 
-  it('adds a field at the end of the list, so the fields shown do not move, and marks it Shown in Add filter', async () => {
+  it('adds a card at the end of the list, so the cards shown do not move, and marks it Shown in Add field', async () => {
     const {host, fields} = await mountPanel(none());
     const add = async (column: string) => {
       (deep(host, '[part="add"]') as HTMLButtonElement).click();
@@ -514,7 +371,7 @@ describe('<tessera-filter-panel>', () => {
     ]);
   });
 
-  it('checks the listed fields in Add filter, and choosing one takes it off with its clause in both positions', async () => {
+  it('checks the listed fields in Add field, and choosing one takes its card off with its clause in both positions', async () => {
     const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {archive: {family: 'category', keys: ['math']}}};
     const {host, store, sent, fields} = await mountPanel(draft);
     const changes: unknown[] = [];
@@ -555,7 +412,7 @@ describe('<tessera-filter-panel>', () => {
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(writes);
   });
 
-  it('adds the first unlisted match on Enter in the Add filter search, and never takes a field off', async () => {
+  it('adds the first unlisted match on Enter in the Add field search, and never takes a card off', async () => {
     const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {}};
     const {host, store, fields} = await mountPanel(draft);
     const enter = async (text: string) => {
@@ -600,7 +457,7 @@ describe('<tessera-filter-panel>', () => {
     expect(tabbable()).toEqual(['title']);
   });
 
-  it('keeps a pinned field listed when it is chosen in Add filter', async () => {
+  it('keeps a pinned card listed when it is chosen in Add field', async () => {
     const {host, store, fields} = await mountPanel(none(), 'pinned="title"');
     (deep(host, '[part="add"]') as HTMLButtonElement).click();
     await settle(host);
@@ -609,11 +466,11 @@ describe('<tessera-filter-panel>', () => {
     expect(option.getAttribute('aria-disabled')).toBe('true');
     option.click();
     await settle(host);
-    expect(fields()).toEqual([['title', false]]);
+    expect(fields()).toEqual([['title', true]]);
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(0);
   });
 
-  it('moves through Add filter with the arrow keys, Home and End, and closes on Escape', async () => {
+  it('moves through Add field with the arrow keys, Home and End, and closes on Escape', async () => {
     const {host, panel} = await mountPanel(none());
     (deep(host, '[part="add"]') as HTMLButtonElement).click();
     await settle(host);
@@ -636,27 +493,26 @@ describe('<tessera-filter-panel>', () => {
     expect(focused()).toBe('add');
   });
 
-  it('keeps a field open while its clause is emptied under the user', async () => {
+  it('keeps a card listed while its clause is emptied under the user', async () => {
     vi.useFakeTimers();
     const draft: FilterDraft = {filter: {...none().filter, title: {family: 'text', query: 'graph', phrase: true}}, highlight: {}};
     const {host, store, fields} = await mountPanel(draft);
     expect(fields()).toEqual([['title', true]]);
     await type(host, '');
     await vi.runAllTimersAsync();
-    // The store publishes the emptied clause; the field the user is editing stays open.
+    // The store publishes the emptied clause; the card the user is editing stays.
     store.set('filters', filtersOf(drafts(store).at(-1)!));
     await settle(host);
     expect(fields()).toEqual([['title', true]]);
   });
 
-  it('lists the pinned fields closed, as Any, and opens one when pressed', async () => {
+  it('lists the pinned cards in meta’s order, and folds one to a line from its own button', async () => {
     const {host, fields} = await mountPanel(none(), 'pinned="title archive"');
-    // In meta's order, whatever order they were pinned in.
     expect(fields()).toEqual([
-      ['archive', false],
-      ['title', false]
+      ['archive', true],
+      ['title', true]
     ]);
-    (deep(host, '[part~="field"][data-column="title"] [part="any"]') as HTMLButtonElement).click();
+    (deep(host, 'tessera-field-card[data-field="archive"]')!.shadowRoot!.querySelector('[part="fold"]') as HTMLButtonElement).click();
     await settle(host);
     expect(fields()).toEqual([
       ['archive', false],
@@ -664,22 +520,75 @@ describe('<tessera-filter-panel>', () => {
     ]);
   });
 
-  it('edits the position the switch names in every control, and opens the fields holding a clause there', async () => {
-    const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {title: {family: 'text', query: 'graph', phrase: true}}};
-    const {host, panel, controls, fields} = await mountPanel(draft);
-    expect(fields()).toEqual([
-      ['archive', true],
-      ['title', false]
-    ]);
-    expect(controls().map((c) => c.verb)).toEqual(['filter']);
-    (deep(host, '[part="mode"] [data-verb="highlight"]') as HTMLButtonElement).click();
+  it('lists the card of the field the map is coloured by, which says what its colours mean', async () => {
+    const {host, store, fields} = await mountPanel(none());
+    store.set('legend', {...store.get('legend'), colourBy: 'submitted_at'});
     await settle(host);
-    expect(panel.mode).toBe('highlight');
+    expect(fields()).toEqual([['submitted_at', true]]);
+  });
+
+  it('has no Filter / Highlight switch: a card’s row sets either clause', async () => {
+    const {host} = await mountPanel(none(), 'pinned="archive"');
+    expect(deep(host, '[part="mode"]')).toBeNull();
+    expect(deepAll(host, '[role="radiogroup"]')).toHaveLength(0);
+  });
+
+  it('folds every card but one in the compact layout, and opening one folds the one open before', async () => {
+    const {host, panel, fields} = await mountPanel(none(), 'pinned="title archive submitted_at" compact');
     expect(fields()).toEqual([
       ['archive', false],
-      ['title', true]
+      ['title', false],
+      ['submitted_at', false]
     ]);
-    expect(controls().map((c) => [c.column, c.verb])).toEqual([['title', 'highlight']]);
+    const fold = (field: string) => deep(host, `tessera-field-card[data-field="${field}"]`)!.shadowRoot!.querySelector('[part="fold"]') as HTMLButtonElement;
+    expect(fold('archive').getAttribute('aria-expanded')).toBe('false');
+    fold('title').click();
+    await settle(host);
+    expect(fields()).toEqual([
+      ['archive', false],
+      ['title', true],
+      ['submitted_at', false]
+    ]);
+    fold('archive').click();
+    await settle(host);
+    expect(fields()).toEqual([
+      ['archive', true],
+      ['title', false],
+      ['submitted_at', false]
+    ]);
+    panel.compact = false;
+    await settle(host);
+    expect(fields().every(([, open]) => open)).toBe(true);
+  });
+
+  describe('the subject row', () => {
+    it('reads In view and the matching count in view, beside All matching from its own aggregate', async () => {
+      const {host, store} = await mountPanel(none());
+      expect(registered(store).get([...registered(store).keys()].find((k) => k.startsWith('fields-match'))!)).toEqual({groupings: [{}]});
+      store.set('view', {...store.get('view'), inView: {status: 'shown', visible: {value: 900, exact: true}, matched: {value: 206, exact: true}, highlighted: {value: 206, exact: true}, shown: 206}});
+      answerAggregate(store, 'fields-match', aggregateEntry([{rows: [], total: 50_000}]));
+      await settle(host);
+      expect(deep(host, '[part="subject-name"]')!.textContent).toBe('In view');
+      expect(deep(host, '[part="subject-count"]')!.textContent).toBe('206');
+      expect(deep(host, '[part="all-count"]')!.textContent).toBe('50,000');
+      expect(deep(host, '[part="clear-highlight"]')).toBeNull();
+    });
+
+    it('reads Highlighted while a highlight is set, and its × clears every highlight clause', async () => {
+      const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {submitted_at: {family: 'numeric', gte: 1, lte: 2}}};
+      const {host, store, sent} = await mountPanel(draft, '', {members: [{layer: 'topics', artifact: 3n, outside: false, verb: 'highlight'}]});
+      store.set('view', {...store.get('view'), inView: {status: 'shown', visible: {value: 900, exact: true}, matched: {value: 500, exact: true}, highlighted: {value: 43, exact: true}, shown: 43}});
+      await settle(host);
+      expect(deep(host, '[part="subject-name"]')!.textContent).toBe('Highlighted');
+      expect(deep(host, '[part="subject-count"]')!.textContent).toBe('43');
+      const changes: unknown[] = [];
+      host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
+      (deep(host, '[part="clear-highlight"]') as HTMLButtonElement).click();
+      expect(activeCount(sent(), 'highlight')).toBe(0);
+      expect(activeCount(sent(), 'filter')).toBe(1);
+      expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([]);
+      expect(changes).toEqual([{column: null, verb: 'highlight', expr: null}]);
+    });
   });
 
   describe('a column both filtered and highlighted', () => {
@@ -689,8 +598,8 @@ describe('<tessera-filter-panel>', () => {
     };
     const chip = (host: HTMLElement, verb: string) => deep(host, `[part="chip"][data-column="archive"][data-verb="${verb}"]`)!;
 
-    it('shows two chips under chips-only, and removing one leaves the other', async () => {
-      const {host, sent} = await mountPanel(both, 'chips-only');
+    it('shows a chip per clause in one line, filter first, and × removes one and leaves the other', async () => {
+      const {host, sent} = await mountPanel(both);
       expect(deepAll(host, '[part="chip"]').map((c) => c.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
       (chip(host, 'highlight').querySelector(':scope > button:last-child') as HTMLButtonElement).click();
       expect(sent()).toEqual({filter: both.filter, highlight: {archive: {family: 'category', keys: []}}});
@@ -698,28 +607,28 @@ describe('<tessera-filter-panel>', () => {
       expect(sent()).toEqual({filter: {...both.filter, archive: {family: 'category', keys: []}}, highlight: both.highlight});
     });
 
-    it('shows a field in a position on show(), and focuses its control', async () => {
-      const {host, panel, controls} = await mountPanel(both);
-      panel.show('archive', 'highlight');
+    it('opens and focuses a card on show()', async () => {
+      const {host, panel, cards} = await mountPanel({...both, highlight: {}}, 'pinned="title"');
+      (cards()[0]!.shadowRoot!.querySelector('[part="fold"]') as HTMLButtonElement).click();
       await settle(host);
-      await controls()[0]!.updateComplete;
-      expect(panel.mode).toBe('highlight');
-      expect(controls()[0]!.verb).toBe('highlight');
-      expect(panel.shadowRoot!.activeElement).toBe(controls()[0]);
+      panel.show('title');
+      await settle(host);
+      const card = cards().find((c) => c.field === 'title')!;
+      expect(card.folded).toBe(false);
+      expect(panel.shadowRoot!.activeElement).toBe(card);
     });
 
-    it('asks for the controls under chips-only, and show() opens the chip’s control', async () => {
+    it('asks for the cards under chips-only, and show() lists the chip’s card', async () => {
       const {host, panel} = await mountPanel(both, 'chips-only');
-      expect(deepAll(host, 'tessera-filter')).toHaveLength(0);
+      expect(deepAll(host, 'tessera-field-card')).toHaveLength(0);
       const asked: unknown[] = [];
       host.addEventListener('tessera-chipopen', (e) => asked.push((e as CustomEvent).detail));
       (chip(host, 'highlight').querySelector('[part="edit"]') as HTMLButtonElement).click();
       expect(asked).toEqual([{column: 'archive', verb: 'highlight'}]);
       panel.chipsOnly = false;
-      panel.show('archive', 'highlight');
+      panel.show('archive');
       await settle(host);
-      const control = deepAll(host, 'tessera-filter').find((f) => f.getAttribute('column') === 'archive') as TesseraFilter;
-      expect(control.verb).toBe('highlight');
+      expect(deepAll(host, 'tessera-field-card').map((c) => (c as TesseraFieldCard).field)).toContain('archive');
     });
 
     it('empties both positions on Clear all', async () => {
@@ -730,24 +639,24 @@ describe('<tessera-filter-panel>', () => {
     });
   });
 
-  it('leaves the chips out under controls-only, and the controls out under chips-only', async () => {
+  it('leaves the subject row and the chips out under controls-only, and the cards out under chips-only', async () => {
     const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {}};
     const controls = await mountPanel(draft, 'controls-only');
     expect(deepAll(controls.host, '[part="chip"]')).toHaveLength(0);
-    expect(deepAll(controls.host, 'tessera-filter')).toHaveLength(1);
+    expect(deep(controls.host, '[part="subject"]')).toBeNull();
+    expect(deepAll(controls.host, 'tessera-field-card')).toHaveLength(1);
     document.body.innerHTML = '';
     const chips = await mountPanel(draft, 'chips-only');
     expect(deepAll(chips.host, '[part="chip"]')).toHaveLength(1);
-    expect(deepAll(chips.host, 'tessera-filter')).toHaveLength(0);
-    expect(deep(chips.host, '[part="mode"]')).toBeNull();
+    expect(deepAll(chips.host, 'tessera-field-card')).toHaveLength(0);
   });
 
-  it('does not rebuild a control under the user on a store tick', async () => {
-    const {store, controls, host} = await mountPanel({...none(), filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}});
-    const before = controls()[0];
+  it('does not rebuild a card under the user on a store tick', async () => {
+    const {store, cards, host} = await mountPanel({...none(), filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}});
+    const before = cards()[0];
     store.set('status', status({status: 'loading'}));
     await settle(host);
-    expect(controls()[0]).toBe(before);
+    expect(cards()[0]).toBe(before);
   });
 
   it('marks a member_of chip with no label and no served name as unnamed, never by its key', async () => {
@@ -761,13 +670,12 @@ describe('<tessera-filter-panel>', () => {
     const clause = {layer: 'mesh/descriptors', artifact: 546_790n, outside: false};
     const {host, store} = await mountPanel({filter: {}, highlight: {}}, 'chips-only', {
       members: [
-        {...clause, verb: 'filter'},
-        {...clause, verb: 'highlight'}
+        {...clause, verb: 'highlight'},
+        {...clause, verb: 'filter'}
       ]
     });
     const chips = deepAll(host, '[part="chip"][data-artifact="546790"]');
     expect(chips.map((c) => c.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
-    expect(chips[1]!.querySelector('[part="verb"]')).not.toBeNull();
     (chips[0]!.querySelector('button') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([{...clause, verb: 'highlight'}]);
   });
@@ -789,7 +697,7 @@ describe('<tessera-filter-panel> cluster fields', () => {
     return {host, panel, store};
   }
 
-  it('offers each layer of the view that attaches to no other in Add filter, after the columns', async () => {
+  it('offers each layer of the view that attaches to no other in Add field, after the columns', async () => {
     const {host} = await mountLayered();
     (deep(host, '[part="add"]') as HTMLButtonElement).click();
     await settle(host);
@@ -798,27 +706,28 @@ describe('<tessera-filter-panel> cluster fields', () => {
     expect(options.at(-1)!.textContent).toContain('topics title');
     (options.at(-1) as HTMLButtonElement).click();
     await settle(host);
-    expect(deep(host, '[part~="field"][data-layer="topics"] tessera-cluster-filter')).not.toBeNull();
+    expect(deep(host, 'tessera-field-card[data-field="cluster:topics"]')).not.toBeNull();
   });
 
-  it('lists a layer holding a clause, counts each position’s clauses in the switch, and shows the clauses of the position shown as chips', async () => {
-    const {host, panel} = await mountLayered([topic(7n, 'filter', 'Neural networks'), topic(8n, 'highlight', 'Optics'), topic(9n, 'filter')]);
-    const counts = () => deepAll(host, '[part="mode"] button').map((b) => b.querySelector('[part="mode-count"]')?.textContent ?? '');
-    expect(counts()).toEqual(['2', '1']);
-    const chips = () => deepAll(host, '[part="chosen"]').map((c) => c.textContent!.trim());
-    expect(chips()).toEqual(['Neural networks', UNNAMED]);
-    panel.mode = 'highlight';
-    await settle(host);
-    expect(chips()).toEqual(['Optics']);
+  it('lists a layer holding a clause, and shows its clauses as chips, the filter’s first', async () => {
+    const {host} = await mountLayered([topic(8n, 'highlight', 'Optics'), topic(7n, 'filter', 'Neural networks'), topic(9n, 'filter')]);
+    expect(deep(host, 'tessera-field-card[data-field="cluster:topics"]')).not.toBeNull();
+    const chips = deepAll(host, '[part="chip"]').map((c) => [c.getAttribute('data-verb'), c.textContent!.trim()]);
+    expect(chips).toEqual([
+      ['filter', 'Neural networks'],
+      ['filter', UNNAMED],
+      ['highlight', 'Optics']
+    ]);
   });
 
-  it('shows a clause on a layer with no field here, in either position, as a chip that takes it off', async () => {
+  it('shows a clause on a layer with no card, in either position, as a chip that takes it off', async () => {
     const lit = {layer: 'labels', artifact: 3n, outside: false, verb: 'highlight' as const, label: 'diffusion, guidance'};
     const elsewhere = {layer: 'elsewhere', artifact: 4n, outside: true, verb: 'filter' as const, label: 'North'};
     const {host, store} = await mountLayered([topic(7n, 'filter', 'Neural networks'), lit as never, elsewhere as never]);
-    const others = () => deepAll(host, '[part="others"] [part="chip"]');
-    expect(others().map((c) => c.textContent!.trim())).toEqual(['diffusion, guidance', 'Outside North']);
-    (others()[0]!.querySelector('button') as HTMLButtonElement).click();
+    const chip = (artifact: string) => deep(host, `[part="chip"][data-artifact="${artifact}"]`)!;
+    expect(chip('3').textContent!.trim()).toBe('diffusion, guidance');
+    expect(chip('4').textContent!.trim()).toBe('Outside North');
+    (chip('3').querySelector('button') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([topic(7n, 'filter', 'Neural networks'), elsewhere]);
   });
 

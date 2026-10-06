@@ -128,8 +128,10 @@ a density cell, a cluster's shape or a label taken over the whole corpus and the
 that set before display is a defect, not a filtered view.
 
 An item carries access labels, each an expression over terms such as `secret&(team_a|team_b)`,
-and a token holds the terms its credential names. An item is in the authorised set when the token's
-terms satisfy one of its labels, and the authorised set is built once per session, at
+and a token holds the terms its credential names. A token's terms are trimmed and compared with a
+label's terms byte for byte, so a label whose quoted term starts or ends with whitespace is refused
+where it is written. An item is in the authorised set when the token's terms satisfy one of its
+labels, and the authorised set is built once per session, at
 authorisation ([access control](access-control.md#how-labels-are-indexed)). The expressions have no
 negation, so holding more terms never admits fewer items. The visible set is the authorised set minus the overlay, the record
 of every item currently hidden by a deletion or a suppression, composed at the start of every

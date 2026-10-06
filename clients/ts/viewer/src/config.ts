@@ -39,8 +39,10 @@ export type ViewerConfig = {
    * lands on decoded ground. Each costs up to about four times the viewport's bytes over new ground.
    */
   prefetchLayers: number;
-  /** The most artifacts one level shows in one tile (`?per-tile=`, default 50). */
+  /** The most artifacts one level shows in one tile at opening (`?per-tile=`, default 50); the Source panel changes it. */
   artifactsPerTile: number;
+  /** Address parameters the viewer could not use, for the failures panel. */
+  refused: {code: string; detail: string}[];
 };
 
 /**
@@ -51,10 +53,17 @@ export type ViewerConfig = {
  */
 export function readConfig(): ViewerConfig {
   const query = typeof location === 'undefined' ? null : new URLSearchParams(location.search);
+  const refused: ViewerConfig['refused'] = [];
+  const perTile = query?.get('per-tile') ?? null;
+  const wholePerTile = perTile !== null && /^\d+$/.test(perTile);
+  if (perTile !== null && !wholePerTile) {
+    refused.push({code: 'per-tile', detail: `?per-tile=${perTile} is not a whole number, so the viewer asks for 50; write a whole number such as ?per-tile=50`});
+  }
   return {
     ringBytes: (Number(query?.get('ring') ?? '') || 8) * 1_000_000,
     prefetchLayers: query?.has('layers') ? Math.max(0, Number(query.get('layers')) || 0) : 1,
-    artifactsPerTile: query?.has('per-tile') ? Math.max(0, Number(query.get('per-tile')) || 0) : 50,
+    artifactsPerTile: wholePerTile ? Number(perTile) : 50,
+    refused,
     datasets: []
   };
 }

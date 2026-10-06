@@ -30,10 +30,11 @@ def holding(*names):
     [
         ("user:a/b-c.d_E9", Term("user:a/b-c.d_E9")),
         ('"a\\"b\\\\c"', Term('a"b\\c')),
-        ('" team a "', Term(" team a ")),
-        ('"  "', Term("  ")),
-        ('"a "', Term("a ")),
+        ('"team  a"', Term("team  a")),
         (" \t(a) ", Term("a")),
+        (" pharma_a & ( gb | fr ) ", And((Term("pharma_a"), Or((Term("gb"), Term("fr")))))),
+        ('"team a" &b', And((Term("team a"), Term("b")))),
+        ("a\u3000|\xa0b", Or((Term("a"), Term("b")))),
         ("a&(b|c)", And((Term("a"), Or((Term("b"), Term("c")))))),
         (" public ", Public()),
         ("publicly", Term("publicly")),
@@ -50,8 +51,8 @@ def test_what_a_label_reads_as(text, tree):
         "", "  ", "a&b|c", "a|b&c", "a&", "&a", "a b", "(a", "a)", "()", '""', '"a',
         '"a\\n"', "!a", "a&!b", "é", "a,b", '"a\tb"', '"\x07"', "a\x1c", "public&a", "PUBLIC",
         '"public"', "(public)", "a|Public", "inherited", " Inherited ", "INHERITED",
-        '"inherited"', "(inherited)", "a&inherited", "a|(b&InHeRiTeD)", "a & b", "a |b",
-        "( a|b)", "(a|b )", "a&( b)", '"a" &b',
+        '"inherited"', "(inherited)", "a&inherited", "a|(b&InHeRiTeD)", "a\tb", "(a) (b)",
+        '"a" "b"', '" a"', '"a "', '" team a "', '"  "', '"a\xa0"', 'x&"\u3000y"',
     ],
 )
 def test_what_is_refused(text):
@@ -154,5 +155,6 @@ def test_implication_between_operands():
 
 
 def test_a_space_inside_quotes_makes_another_term():
-    assert parse('"a "') != parse("a")
-    assert not satisfies(parse('"a "'), holding("a"))
+    assert parse('"d e"') != parse("de")
+    assert not satisfies(parse('"d e"'), holding("de"))
+    assert satisfies(parse('"d e"'), holding(held_term(" d e ")))

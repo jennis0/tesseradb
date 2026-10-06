@@ -59,12 +59,13 @@ impl Dense {
             boxes,
             reserves,
         } = accumulation;
-        let kept = (!reserves.is_empty()).then(|| {
+        let kept = reserves.map(|reserves| {
             let mut out = Reserves {
-                index: vec![u32::MAX; reserves.len()],
+                index: vec![u32::MAX; counts.len()],
                 rows: Vec::new(),
             };
-            for (ordinal, reserve) in reserves.iter().enumerate() {
+            for (ordinal, reserve) in reserves {
+                let ordinal = ordinal as usize;
                 if placed.get(ordinal).copied().unwrap_or(0) <= RESERVE_MIN_PLACED {
                     continue;
                 }

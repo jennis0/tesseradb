@@ -184,19 +184,24 @@ def derive_ranks(rung: Path, out: Path) -> dict:
         labels = table.column(field).combine_chunks()
         entities = table.column("entity_id").combine_chunks()
         if pa.types.is_list(labels.type) or pa.types.is_large_list(labels.type):
-            unlabelled = entities.filter(pc.equal(pc.fill_null(pc.list_value_length(labels), 0), 0))
-            entities = pc.take(entities, pc.list_parent_indices(labels))
+            rows = pc.take(entities, pc.list_parent_indices(labels))
             labels = pc.list_flatten(labels).cast(pa.string())
         else:
+            rows = entities
             labels = labels.cast(pa.string())
-            unlabelled = entities.filter(pc.is_null(labels))
+        # A label read from data is trimmed, and one empty once trimmed is no label, so its row
+        # counts under the default.
+        labels = pc.utf8_trim_whitespace(labels)
+        labels = pc.if_else(pc.equal(labels, ""), pa.scalar(None, pa.string()), labels)
+        labelled = pc.unique(rows.filter(pc.is_valid(labels)))
+        unlabelled = entities.filter(pc.invert(pc.is_in(entities, value_set=labelled)))
         # A label of one quoted term counts under the bare term a credential holds.
         quoted = pc.match_substring_regex(labels, r'^"([^"\\]|\\.)*"$')
         bare = pc.replace_substring_regex(
             pc.utf8_slice_codeunits(labels, 1, -1), r"\\(.)", r"\1"
         )
         labels = pc.if_else(quoted, bare, labels)
-        pairs.append(pa.table({"entity": entities, "term": labels}).filter(pc.is_valid(labels)))
+        pairs.append(pa.table({"entity": rows, "term": labels}).filter(pc.is_valid(labels)))
         if isinstance(default, str) and len(unlabelled):
             filled = pa.array([default] * len(unlabelled), pa.string())
             pairs.append(pa.table({"entity": unlabelled, "term": filled}))

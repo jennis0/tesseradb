@@ -18,7 +18,8 @@ forward the widget's requests from the notebook's own origin.
 Only controls and selection cross the kernel boundary, never data. `url` goes down. `view`,
 `bbox`, `layers`, `colour_by`, the four size settings and `filters` go both ways, and up only
 when the map settles, once it has finished fetching for a view, so the kernel is never asked on
-every frame. `selected` and `selected_artifact` go up on a pick, and `region` when a region's
+every frame. `budget` goes both ways, and up when the map's Most points slider is let go.
+`selected` and `selected_artifact` go up on a pick, and `region` when a region's
 counts arrive. Ids are decimal strings, because a `tessera_id` is a `u64`, which is not a
 JavaScript number, and a `BigInt` does not serialise.
 """
@@ -110,8 +111,8 @@ class Map(anywidget.AnyWidget):
       times `artifacts_per_tile` bounds the annotations one level draws.
     - `budget`: how many points the map aims to draw on screen. `0`, the default, leaves the
       map's own, 250,000.
-    - `budget_min`, `budget_max`: the fewest and the most points a control for `budget` offers.
-      The defaults are 1,000 and 2,000,000. Neither changes `budget`.
+    - `budget_min`, `budget_max`: the ends of the Most points slider in the map's Layers
+      popover. The defaults are 1,000 and 2,000,000. Neither changes `budget`.
 
     Read the widget's attributes in a later cell:
 
@@ -126,8 +127,10 @@ class Map(anywidget.AnyWidget):
     - `filters`, `layers`, `colour_by`, `size_by`, `size_min`, `size_max`, `size_scale`: as the
       map shows them. Setting one redraws the map.
     - `last_error`: why the page last refused something set here, or `None`.
-    - `url`, `height`, `explorer_layout`, `title_field`, `artifacts_per_tile`, `budget`,
-      `budget_min`, `budget_max`: as given. Setting one in a later cell applies it.
+    - `budget`: as the map draws it; it changes when the Most points slider is let go. Setting
+      it in a later cell applies it.
+    - `url`, `height`, `explorer_layout`, `title_field`, `artifacts_per_tile`, `budget_min`,
+      `budget_max`: as given. Setting one in a later cell applies it.
     - `tokens_sent`: how many tokens the kernel has sent the page.
 
     `view`, `bbox`, `filters`, `layers`, `colour_by` and the size settings change when the map

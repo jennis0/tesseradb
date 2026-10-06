@@ -128,6 +128,19 @@ describe('the token protocol', () => {
     expect([explorer.budget, explorer.budgetMin, explorer.budgetMax]).toEqual([60_000, 500, 100_000]);
   });
 
+  it('sends the budget up when Most points is let go, and takes the old one back from the kernel', async () => {
+    const {model, el} = setUp({budget: 40_000});
+    const explorer = el.querySelector('tessera-explorer') as unknown as HTMLElement & {budget: number};
+    const saves = model.saves;
+    explorer.dispatchEvent(new CustomEvent('tessera-budgetchange', {detail: {budget: 120_000}, bubbles: true, composed: true}));
+    expect(model.get('budget')).toBe(120_000);
+    expect(model.saves).toBe(saves + 1);
+    expect(explorer.budget).toBe(120_000);
+    // The kernel setting the old budget back reaches the explorer.
+    model.set('budget', 40_000);
+    expect(explorer.budget).toBe(40_000);
+  });
+
   it('two views of one model: a store each, one supplier, and one ready', async () => {
     const {model, supplier, stores, el} = setUp();
     const el2 = document.createElement('div');
