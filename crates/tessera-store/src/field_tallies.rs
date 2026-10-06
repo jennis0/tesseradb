@@ -216,12 +216,20 @@ impl TallyMerge {
     }
 }
 
+/// A field's values over a set of entities: each entity of the set holding one, ascending, with
+/// its value.
+pub type NumbersOver<'a> = dyn Fn(&croaring::Bitmap, &mut dyn FnMut(u32, Number)) + Sync + 'a;
+
+/// Every key list held for an entity of a span, ascending.
+pub type ListsOver<'a> =
+    dyn Fn(Range<u32>, &mut dyn FnMut(u32, &[u32])) -> io::Result<()> + Sync + 'a;
+
 /// One field's values over the base rows, for [`derive`].
 pub enum TallySource<'a> {
     /// A drawn column of the base segment's `columns.arrow`, read by row.
     Drawn,
     /// Values held per entity, visited over a set of entities: each one holding a value, with it.
-    Held(&'a (dyn Fn(&croaring::Bitmap, &mut dyn FnMut(u32, Number)) + Sync)),
+    Held(&'a NumbersOver<'a>),
 }
 
 /// One field [`derive`] tallies.
@@ -329,7 +337,7 @@ pub fn derive(
     bound: u64,
     columns: Option<&ColumnsRef>,
     row_of: &(dyn Fn(u32) -> Option<u32> + Sync),
-    lists: &(dyn Fn(Range<u32>, &mut dyn FnMut(u32, &[u32])) -> io::Result<()> + Sync),
+    lists: &ListsOver<'_>,
     fields: &[TallyField<'_>],
     path: &Path,
 ) -> io::Result<FieldTallies> {

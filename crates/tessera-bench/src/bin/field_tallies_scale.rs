@@ -27,7 +27,7 @@ fn terms_of(entity: u32, out: &mut Vec<u32>) {
     out.clear();
     let a = entity.wrapping_mul(2_654_435_761) % 64;
     out.push(a);
-    if entity % 3 == 0 {
+    if entity.is_multiple_of(3) {
         let b = (a + 1 + entity % 5) % 64;
         if b > a {
             out.push(b);
