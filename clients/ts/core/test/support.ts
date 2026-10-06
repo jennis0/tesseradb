@@ -1,8 +1,11 @@
+import {readFileSync} from 'node:fs';
+import {join} from 'node:path';
 import {makeData, makeVector, Uint64} from 'apache-arrow';
 import {expect} from 'vitest';
 import type {ArtifactChannelClock} from '../src/artifactChannel.js';
 import type {Band} from '../src/bands.js';
 import {dataToWorldXY, tileXY} from '../src/coords.js';
+import {decodeArtifactsFrame, decodePoints, decodeViewport} from '../src/decode.js';
 import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
 import type {Artifact, DeclaredScalar, Layer, Meta, Quantisation, TileCounts, ViewInfo, ViewportArtifactsFrame, ViewportArtifactsRequest, ViewportArtifactsResponse, ViewportResponse, ViewportResult} from '../src/types.js';
@@ -466,4 +469,36 @@ export function camera(q: Quantisation | null, bbox: [number, number, number, nu
   const [x0, y0] = dataToWorldXY(bbox[0], bbox[1], q);
   const [x1, y1] = dataToWorldXY(bbox[2], bbox[3], q);
   return {bbox, zoom: Math.log2(Math.min(width / (Math.abs(x1 - x0) || 1), height / (Math.abs(y1 - y0) || 1))), width, height};
+}
+
+/** The bytes of a file in `fixtures/`. */
+export function fixture(name: string): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
+}
+
+/**
+ * A worker that answers like the real one: `ready` when told to load, then each request decoded
+ * in-process. `fail()` fires the worker's error event.
+ */
+export class FakeWorker {
+  onmessage: ((event: {data: unknown}) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  received = 0;
+  terminated = false;
+  load(): void {
+    this.onmessage?.({data: {ready: true}});
+  }
+  fail(): void {
+    this.onerror?.({message: undefined});
+  }
+  postMessage(message: {id: number; kind?: 'points' | 'artifacts'; bytes: ArrayBuffer}): void {
+    this.received++;
+    const bytes = new Uint8Array(message.bytes);
+    const result =
+      message.kind === 'points' ? decodePoints([bytes]) : message.kind === 'artifacts' ? decodeArtifactsFrame(bytes) : decodeViewport(bytes);
+    queueMicrotask(() => this.onmessage?.({data: {id: message.id, result, ms: 1}}));
+  }
+  terminate(): void {
+    this.terminated = true;
+  }
 }

@@ -1,9 +1,8 @@
-import {readFileSync} from 'node:fs';
-import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
 import {FRAME_ARTIFACTS, FrameReader} from '../src/frame.js';
 import type {BrowsePage} from '../src/types.js';
+import {fixture} from './support.js';
 
 /**
  * The highlight's three columns and the browse verb, against captured bytes.
@@ -18,8 +17,7 @@ import type {BrowsePage} from '../src/types.js';
  * zoom 1, from `POST /v1/artifacts/viewport`.
  */
 
-const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
-const page = (name: string) => JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures', name), 'utf8')) as Record<string, unknown>;
+const page = (name: string) => JSON.parse(new TextDecoder().decode(fixture(name))) as Record<string, unknown>;
 const sum = (tiles: readonly {visible: bigint; matched: bigint; highlighted: bigint; served: bigint}[], f: 'visible' | 'matched' | 'highlighted' | 'served') =>
   tiles.reduce((n, t) => n + Number(t[f]), 0);
 

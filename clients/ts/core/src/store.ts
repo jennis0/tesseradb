@@ -169,8 +169,9 @@ export type StoreOptions = {
    */
   meta?: Meta;
   /**
-   * A {@link TesseraClient} to send requests through, such as a test's fake. Defaults to one built
-   * from `viewerUrl` and `clientOptions`. {@link Store.dispose} closes it.
+   * A {@link TesseraClient} to send requests through, such as one the host shares across stores.
+   * Defaults to one built from `viewerUrl` and `clientOptions`. A client passed here belongs to the
+   * host, which closes it; {@link Store.dispose} closes only a client the store built.
    */
   client?: TesseraClient;
   /**
@@ -793,8 +794,8 @@ export interface Store {
    */
   refresh(): void;
   /**
-   * Stop every timer and request, and close the client, including one passed as `client`. An answer
-   * that lands afterwards publishes nothing.
+   * Stop every timer and request, and close the client if the store built it. A client passed as
+   * `client` is left open for the host to close. An answer that lands afterwards publishes nothing.
    */
   dispose(): void;
 }
@@ -861,6 +862,7 @@ export function createStore(options: StoreOptions): Store {
       cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
     } as Clock);
 
+  const ownsClient = !options.client;
   const client =
     options.client ??
     new TesseraClient({viewerUrl: options.viewerUrl, sessionUrl: '', ...options.clientOptions});
@@ -2251,7 +2253,7 @@ export function createStore(options: StoreOptions): Store {
       held.channel.cancel();
     }
     views.cancelSettle();
-    client.close();
+    if (ownsClient) client.close();
   }
 
   const store: Store = {

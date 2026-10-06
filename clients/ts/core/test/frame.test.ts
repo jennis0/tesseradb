@@ -1,5 +1,3 @@
-import {readFileSync} from 'node:fs';
-import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import {
   FRAME_ARTIFACTS,
@@ -9,10 +7,8 @@ import {
   FrameReader,
   splitFramedStreams
 } from '../src/frame.js';
-import {framed, refused} from './support.js';
+import {fixture, framed, refused} from './support.js';
 
-const fixture = (name: string) =>
-  new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
 describe('splitFramedStreams', () => {
   it('finds tiles, points and trailer, and no sub-cells, in a payload with no underlay', () => {
