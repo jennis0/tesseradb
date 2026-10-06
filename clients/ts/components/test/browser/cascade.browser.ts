@@ -135,9 +135,11 @@ describe('a list that opens over what sits below it', () => {
         status: {status: 'shown', sessionWarm: true, refusal: null, stale: false, expired: false, retrying: false},
         view: {id: 's0'},
         filters: {draft: {filter: {}, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
+        legend: {colourBy: null},
+        artifacts: {served: [], colours: new Map()},
         aggregates: new Map()
       };
-      const store = {get: (name: string) => projections[name], subscribe: () => () => {}};
+      const store = {get: (name: string) => projections[name], subscribe: () => () => {}, setAggregate: () => {}};
       const panel = document.querySelector('tessera-filter-panel') as HTMLElement & {store: unknown; updateComplete: Promise<unknown>};
       panel.store = store;
       await panel.updateComplete;

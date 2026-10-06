@@ -104,7 +104,7 @@ The plain-HTML example's app server mints the tokens for all four, so start it a
 
 The elements are custom elements, so any framework can render them. Frameworks differ in how they set a property whose value is an object, and in whether they need telling that a tag is not one of their own components.
 
-Importing `@tesseradb/components` defines every element. A subpath such as `@tesseradb/components/count` defines one. The map, the explorer, the legend, the artifact list and the artifact card import `@tesseradb/deck` and so pull in deck.gl; the other subpaths do not. An element rendered before its module has loaded is an unknown element until it upgrades, which shows as blank space. Defining an element needs the browser's `customElements`, so a server-rendered app imports the package on the client only.
+Importing `@tesseradb/components` defines every element. A subpath such as `@tesseradb/components/count` defines one. The map, the explorer, the field card, the field column and the artifact card import `@tesseradb/deck` and so pull in deck.gl; the other subpaths do not. An element rendered before its module has loaded is an unknown element until it upgrades, which shows as blank space. Defining an element needs the browser's `customElements`, so a server-rendered app imports the package on the client only.
 
 An element takes its store from its `store` property, or else from the nearest `<tessera-store>` or `<tessera-explorer>` above it in the page. `<tessera-map>`, `<tessera-explorer>` and `<tessera-store>` can also build their own from a `viewer-url` and a `token`, or an `authorise` function in place of the token. The component reference lists each element's attributes, properties and events.
 

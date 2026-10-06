@@ -49,6 +49,9 @@ type Offer = {row: BrowseRow; path: string[] | null; beyond: boolean};
  * clause selects everything outside; its × takes the clause off. The arrow keys move through the
  * list, Enter chooses the row reached, the first by default, and Escape closes the list.
  *
+ * `bare` draws the search box alone, without the layer's title or the chips, for a host such as
+ * `<tessera-field-card>` that shows those itself.
+ *
  * @summary One layer's clusters as a filter field.
  * @tagname tessera-cluster-filter
  * @category Elements
@@ -84,6 +87,15 @@ export class TesseraClusterFilter extends TesseraElement {
       [part='label'] {
         font-weight: 600;
         color: var(--_tessera-ink);
+      }
+      :host([bare]) .input {
+        height: 28px;
+        gap: 6px;
+        padding: 0 8px;
+        font-size: 12px;
+      }
+      :host([bare]) .input input {
+        font-size: 12px;
       }
       :host([verb='highlight']) .input:focus-within {
         outline: 0;
@@ -177,6 +189,10 @@ export class TesseraClusterFilter extends TesseraElement {
   @property() accessor layer = '';
   /** The position the field's clauses join: `filter` or `highlight`. */
   @property({reflect: true}) accessor verb: ClauseVerb = 'filter';
+  /** Draws the search box alone. */
+  @property({type: Boolean, reflect: true}) accessor bare = false;
+  /** The search box's placeholder, in place of the field's own. */
+  @property() accessor placeholder = '';
 
   /** @internal */
   @state() accessor search = '';
@@ -469,7 +485,7 @@ export class TesseraClusterFilter extends TesseraElement {
       </button>`;
     };
     const box = html`<div class="combo">
-      <div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder="Type a name"
+      <div class="input">${icon('search', this.bare ? 12 : 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder=${this.placeholder || 'Type a name'}
         role="combobox" aria-expanded=${open ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${open && active ? `c-${active.row.tesseraId}` : nothing}
         aria-label=${`${title}: find a cluster`} .value=${this.search}
         @focus=${() => {
@@ -511,6 +527,7 @@ export class TesseraClusterFilter extends TesseraElement {
             })}
           </div>`
         : nothing;
+    if (this.bare) return html`${box}${note}`;
     return html`<div class="head"><label part="label" for="ctl">${title}</label></div>${box}${note}${chips}`;
   }
 }

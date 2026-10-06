@@ -12,7 +12,7 @@
 // and how many outlines and labels the map drew. It fails if the counts do not change with the
 // mask, if a cluster is served to everyone alike, or if no geometry or label arrived.
 //
-// Everything is read through the components' parts and the probe. Requires a running
+// Everything is read through the components' parts, the explorer's store and the probe. Requires a running
 // `tessera serve` with a published layer (`scripts/publish-clusters.mjs`) and a running `vite dev`.
 import {mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -59,28 +59,22 @@ const settled = async (limitMs = 45_000) => {
   }
 };
 
-/** The artifact list as rendered, through its parts: how many were served and each one's count. */
+/**
+ * The artifacts served, from the explorer's store: the channel's state, how many were served, and
+ * each one's count and name, keyed by `tessera_id`, which is the same for every principal.
+ */
 const artifactList = async () =>
-  page.locator('tessera-artifact-list').first().evaluate((root) => {
-    const scope = root.shadowRoot ?? root;
-    const state = scope.querySelector('[part="state"]')?.getAttribute('data-state') ?? null;
+  page.evaluate(() => {
+    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {status: string; served: {tesseraId: bigint; maskedCount: bigint; content: string[]}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const artifacts = explorer?.activeStore?.get('artifacts');
     const counts = {};
     const names = {};
-    for (const item of scope.querySelectorAll('[part="item"]')) {
-      // Keyed by `tessera_id`, which is the same for every principal; nameless rows all show the
-      // same placeholder.
-      const id = item.getAttribute('data-id') ?? '';
-      const name = item.querySelector('[part="name"]')?.textContent?.trim() ?? '';
-      const countEl = item.querySelector('tessera-count');
-      const text = (countEl?.shadowRoot ?? countEl)?.querySelector('[part="count"]')?.textContent ?? '';
-      const n = Number(text.replaceAll(',', ''));
-      if (id && Number.isFinite(n)) {
-        counts[id] = n;
-        names[id] = name;
-      }
+    for (const a of artifacts?.served ?? []) {
+      counts[String(a.tesseraId)] = Number(a.maskedCount);
+      names[String(a.tesseraId)] = a.content[0] ?? '';
     }
-    const served = /([\d,]+) clusters?/.exec(scope.textContent ?? '');
-    return {state, served: served ? Number(served[1].replaceAll(',', '')) : null, empty: /Nothing in this view/.test(scope.textContent ?? ''), counts, names};
+    const served = artifacts?.served.length ?? null;
+    return {state: artifacts?.status ?? null, served, empty: served === 0, counts, names};
   });
 
 /**
@@ -154,13 +148,18 @@ for (const p of [Math.max(0, principals - 3), principals - 1]) {
   shotsTaken.push({label, file, list: await artifactList(), drawn: await drawn()});
 }
 
-// Opening a cluster draws its outline and no other. Opened through a list row, since deck's pick
+// Opening a cluster draws its outline and no other. Opened through the store, since deck's pick
 // does not fire headless.
 let openedDrawn = null;
 {
-  const row = page.locator('tessera-artifact-list [part="item"]').first();
-  if (await row.count()) {
-    await row.click({timeout: 30_000}).catch(() => {});
+  const opened = await page.evaluate(() => {
+    const store = /** @type {{activeStore: {get(name: 'artifacts'): {served: {tesseraId: bigint}[]}; openArtifact(id: bigint): Promise<void>} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')))?.activeStore;
+    const first = store?.get('artifacts').served[0];
+    if (!store || !first) return false;
+    void store.openArtifact(first.tesseraId);
+    return true;
+  });
+  if (opened) {
     await page.waitForTimeout(2000);
     openedDrawn = (await drawn())?.outlinesDrawn ?? null;
   }

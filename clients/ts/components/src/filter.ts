@@ -63,6 +63,10 @@ const TOP_VALUES = 5;
  * position of the store's draft (`Store.setFilters`). The host carries `data-on` while the control
  * holds a value.
  *
+ * `bare` draws the search box alone, without the column's name, the commonest values, the chips
+ * of the values chosen or the line on how to write a query, for a host such as
+ * `<tessera-field-card>` that shows those itself; the commonest values are then not counted.
+ *
  * @summary One filter control, drawn by the column's type.
  * @tagname tessera-filter
  * @category Elements
@@ -116,6 +120,15 @@ export class TesseraFilter extends TesseraElement {
       button[part='aside'] {
         font-weight: 500;
         color: var(--_tessera-ink-2);
+      }
+      :host([bare]) .input {
+        height: 28px;
+        gap: 6px;
+        padding: 0 8px;
+        font-size: 12px;
+      }
+      :host([bare]) .input input {
+        font-size: 12px;
       }
       :host([verb='highlight']) .input:focus-within {
         outline: 0;
@@ -370,6 +383,10 @@ export class TesseraFilter extends TesseraElement {
   @property({attribute: false}) accessor operand: FilterOperandSet | null = null;
   /** The position the control edits: the column's `filter` clause or its `highlight` clause. */
   @property({reflect: true}) accessor verb: ClauseVerb = 'filter';
+  /** Draws the search box alone. */
+  @property({type: Boolean, reflect: true}) accessor bare = false;
+  /** The search box's placeholder, in place of the control's own. */
+  @property() accessor placeholder = '';
 
   /** @internal */
   @state() accessor draft: ColumnDraft | null = null;
@@ -514,7 +531,7 @@ export class TesseraFilter extends TesseraElement {
     else this.removeAttribute('data-on');
     this.floating.update();
     this.operatorMenu.update();
-    const category = this.isConnected && this.resolvedOperand?.family === 'category';
+    const category = this.isConnected && !this.bare && this.resolvedOperand?.family === 'category';
     this.top.set(
       this.resolvedStore,
       category ? {groupings: [{by: {field: this.column, top: TOP_VALUES}}], ...(this.verb === 'filter' ? {without: this.column} : {})} : null
@@ -562,6 +579,7 @@ export class TesseraFilter extends TesseraElement {
     if (!o) return nothing;
     const draft = this.currentDraft(o);
     if (!draft) return nothing;
+    if (this.bare) return this.body(o, draft);
     return html`<div class="head"><label part="label" for="ctl">${columnCaption(this.column)}</label>${this.aside(draft)}</div>${this.body(o, draft)}`;
   }
 
@@ -603,10 +621,10 @@ export class TesseraFilter extends TesseraElement {
         <span part="hint" id="hint">Set from outside. Clear it to type a search.</span>`;
     }
     const hint = draft.phrase ? 'Words match together. Use “quotes” for a phrase, OR for either.' : 'Words match together. Use OR for either.';
-    return html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.query} placeholder="Search the text" autocomplete="off"
-        aria-describedby="hint"
+    return html`<div class="input">${icon('search', this.bare ? 12 : 14)}<input id="ctl" part="entry" type="search" .value=${draft.query} placeholder=${this.placeholder || 'Search the text'} autocomplete="off"
+        aria-label=${this.bare ? this.placeholder || columnCaption(this.column) : nothing} aria-describedby=${this.bare ? nothing : 'hint'}
         @input=${(e: Event) => this.change({family: 'text', query: (e.target as HTMLInputElement).value, phrase: draft.phrase}, false)} /></div>
-      <span part="hint" id="hint">${hint}</span>`;
+      ${this.bare ? nothing : html`<span part="hint" id="hint">${hint}</span>`}`;
   }
 
   /** A keyword control, offering the operators the column publishes in a menu. */
@@ -704,7 +722,8 @@ export class TesseraFilter extends TesseraElement {
       const at = active ? choosable.indexOf(active) : -1;
       this.activeCode = choosable[(at + by + choosable.length) % choosable.length]!.code;
     };
-    const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder="Type a value"
+    const field = html`<div class="input">${icon('search', this.bare ? 12 : 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder=${this.placeholder || 'Type a value'}
+        aria-label=${this.bare ? this.placeholder || columnCaption(this.column) : nothing}
         role="combobox" aria-expanded=${rows.length > 0 ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${active ? `value-${active.code}` : nothing}
         .value=${this.search}
         @focus=${() => (this.focused = true)}
@@ -784,6 +803,7 @@ export class TesseraFilter extends TesseraElement {
             })}
           </div>`
         : nothing;
+    if (this.bare) return html`<div class="combo">${field}${list}</div>${note}`;
     return html`<div class="combo">${field}${list}</div>${note}${topList}${chips}`;
   }
 

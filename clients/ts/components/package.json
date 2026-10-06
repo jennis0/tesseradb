@@ -47,6 +47,11 @@
       "types": "./dist/cluster-filter.d.ts",
       "default": "./dist/cluster-filter.js"
     },
+    "./field-card": {
+      "tessera-source": "./src/field-card.ts",
+      "types": "./dist/field-card.d.ts",
+      "default": "./dist/field-card.js"
+    },
     "./filter-panel": {
       "tessera-source": "./src/filter-panel.ts",
       "types": "./dist/filter-panel.d.ts",
@@ -72,11 +77,6 @@
       "types": "./dist/key-picker.d.ts",
       "default": "./dist/key-picker.js"
     },
-    "./artifact-list": {
-      "tessera-source": "./src/artifact-list.ts",
-      "types": "./dist/artifact-list.d.ts",
-      "default": "./dist/artifact-list.js"
-    },
     "./artifact-card": {
       "tessera-source": "./src/artifact-card.ts",
       "types": "./dist/artifact-card.d.ts",
@@ -86,11 +86,6 @@
       "tessera-source": "./src/hierarchy.ts",
       "types": "./dist/hierarchy.d.ts",
       "default": "./dist/hierarchy.js"
-    },
-    "./legend": {
-      "tessera-source": "./src/legend.ts",
-      "types": "./dist/legend.d.ts",
-      "default": "./dist/legend.js"
     },
     "./explorer": {
       "tessera-source": "./src/explorer.ts",

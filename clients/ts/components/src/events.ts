@@ -63,6 +63,10 @@ export type TesseraEventDetails = {
    * placed between them.
    */
   'tessera-sizechange': {sizeBy: string | null; min: number; max: number; scale: SizeScale};
+  /** A field card's fold button folded it to one line (`folded` true) or opened it. */
+  'tessera-fold': {field: string; folded: boolean};
+  /** Most points was let go: the store now aims to draw `budget` marks on screen. */
+  'tessera-budgetchange': {budget: number};
   /** The level to colour and label at is now `level`; null is the level drawn by default. */
   'tessera-levelchange': {level: number | null};
   /**
@@ -72,7 +76,7 @@ export type TesseraEventDetails = {
    * map's or the explorer's `valueColours`.
    */
   'tessera-valuecolour': {column: string; value: string; colour: string | null};
-  /** The palette, the ramp, the ramp's scale or its direction was chosen in the legend; the detail is all four as they now stand. */
+  /** The palette, the ramp, the ramp's scale or its direction was chosen in the explorer's Colour section; the detail is all four as they now stand. */
   'tessera-palettechange': {palette: CategoryPaletteName; ramp: RampName; scale: RampScale; reverse: boolean};
   /**
    * A display setting was changed in the explorer's Layers popover; the detail is every setting as
@@ -92,13 +96,14 @@ export type TesseraEventDetails = {
     densityScale: DensityScale;
   };
   /**
-   * A filter changed. `column` is the column whose control changed, or null for Clear all. After an
-   * edit in a control or a legend row, `expr` is the expression the edited position now composes,
-   * null for none, and `verb` names that position (`filter` where absent). Where a chip was
-   * removed, `verb` is the position it was in and `expr` is null; after Clear all, `expr` is null.
+   * A filter changed. `column` is the column whose control changed, or null for Clear all and for
+   * clearing the highlight. After an edit in a control or on a field card, `expr` is the expression
+   * the edited position now composes, null for none, and `verb` names that position (`filter` where
+   * absent). Where a chip was removed, `verb` is the position it was in and `expr` is null; after
+   * Clear all, `expr` is null, and after clearing the highlight `verb` is `highlight`.
    */
   'tessera-filterchange': {column: string | null; expr?: FilterExpr | null; verb?: ClauseVerb};
-  /** A column's chip was pressed under `chips-only`: its control is to be shown, editing `verb`. */
+  /** A column's chip was pressed under `chips-only`: its card is to be shown; `verb` is the chip's position. */
   'tessera-chipopen': {column: string; verb: ClauseVerb};
   /** Open was pressed on the item `id`: `fields` is its record's fields. */
   'tessera-open': {id: string; fields: Record<string, unknown>};

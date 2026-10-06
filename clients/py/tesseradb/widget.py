@@ -110,8 +110,8 @@ class Map(anywidget.AnyWidget):
       times `artifacts_per_tile` bounds the annotations one level draws.
     - `budget`: how many points the map aims to draw on screen. `0`, the default, leaves the
       map's own, 250,000.
-    - `budget_min`, `budget_max`: the fewest and the most points a control for `budget` offers.
-      The defaults are 1,000 and 2,000,000. Neither changes `budget`.
+    - `budget_min`, `budget_max`: the ends of the Most points slider in the map's Layers
+      popover. The defaults are 1,000 and 2,000,000. Neither changes `budget`.
 
     Read the widget's attributes in a later cell:
 

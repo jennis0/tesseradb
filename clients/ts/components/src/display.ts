@@ -4,8 +4,8 @@ import type {TesseraEventDetails} from './events.js';
 import {densityStops} from '@tesseradb/deck/internal';
 
 /**
- * What the Display section of the explorer's Layers popover shares with the elements that render
- * choices like it: the settings it holds, the arrow keys of a radio group, and its styles.
+ * What the display sections of the explorer's Layers popover share with the elements that render
+ * choices like them: the settings they hold, the arrow keys of a radio group, and their styles.
  */
 
 /** Every display setting, as the explorer holds it and `tessera-displaychange` reports it. */
@@ -31,74 +31,138 @@ export function radioKeys(e: KeyboardEvent, count: number, at: number, choose: (
   void Promise.resolve().then(() => group?.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus());
 }
 
-/** The Display section's styles, for the element that renders it. */
+/** The display sections' styles, for the element that renders them. */
 export const displayStyles = css`
-  .display {
-    padding: 12px 14px 4px;
+  .sec {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
   }
-  .display .hd {
-    margin-bottom: 4px;
+  .sec + .sec {
+    border-top: 1px solid var(--_tessera-line-2);
   }
-  .display .line {
+  .sec .hd {
+    margin: 0;
+  }
+  .sec-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    min-height: 32px;
   }
-  .display .lead {
+  .switch.small {
+    width: 30px;
+    height: 18px;
+    border-radius: 9px;
+  }
+  .switch.small .knob {
+    width: 14px;
+    height: 14px;
+  }
+  .most {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .most-top {
+    display: flex;
+    justify-content: space-between;
+  }
+  .most-top label {
     font-weight: 500;
   }
-  .display .rule {
-    height: 1px;
-    margin: 4px -14px 8px;
-    background: var(--_tessera-line-2);
+  .most-value {
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
-  .display .gap {
-    height: 8px;
+  .ticks {
+    position: relative;
+    height: 16px;
+    font-size: 12px;
+    color: var(--_tessera-ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .ticks span {
+    position: absolute;
+  }
+  .ticks .mid {
+    transform: translateX(-50%);
   }
   .sliders {
     display: grid;
     grid-template-columns: 72px minmax(0, 1fr);
     align-items: center;
-    gap: 6px 0;
-    padding: 2px 0 10px;
-    font-size: 12px;
-    color: var(--_tessera-ink-2);
+    gap: 10px;
   }
-  .sliders input[type='range'] {
+  .sliders > span,
+  .sliders > label {
+    font-weight: 500;
+  }
+  /* A slider: a thin track filled to the thumb, as far as its --fill says. */
+  .slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 16px;
     margin: 0;
-    height: auto;
     padding: 0;
     border: 0;
     background: none;
-    accent-color: var(--_tessera-accent);
+    cursor: pointer;
   }
-  .sliders input[type='range']:disabled {
+  .slider::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--_tessera-accent) var(--fill, 0%), var(--_tessera-line) var(--fill, 0%));
+  }
+  .slider::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--_tessera-accent) var(--fill, 0%), var(--_tessera-line) var(--fill, 0%));
+  }
+  .slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 1.5px solid var(--_tessera-accent);
+    background: var(--_tessera-surface);
+  }
+  .slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 1.5px solid var(--_tessera-accent);
+    background: var(--_tessera-surface);
+  }
+  .slider:disabled {
     opacity: 0.4;
+    cursor: default;
   }
   .modes {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    margin: 4px 0 10px;
-    padding: 3px;
-    border-radius: var(--_tessera-radius);
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 7px;
     background: var(--_tessera-surface-3);
   }
   .modes button {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 3px;
-    padding: 6px 0 5px;
-    border-radius: var(--_tessera-radius-control);
-    font-size: 11px;
+    flex: 1 1 0;
+    height: 24px;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: 500;
     color: var(--_tessera-ink-2);
   }
   .modes button[aria-checked='true'] {
     background: var(--_tessera-surface);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
     color: var(--_tessera-ink);
-    font-weight: 500;
+    font-weight: 600;
   }
   /* The readout column the other sliders keep on their right is kept here too, so the tracks end
      together; this slider's readout is the line under it. */
@@ -141,17 +205,61 @@ export const displayStyles = css`
   .ramp-choice {
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-self: start;
+    gap: 4px;
     min-width: 0;
-    padding: 4px 8px;
+    max-width: 100%;
+    padding: 3px 8px;
     border: 1px solid var(--_tessera-line);
     border-radius: var(--_tessera-radius-control);
     background: var(--_tessera-surface);
     font-size: 12px;
+    font-weight: 500;
     color: var(--_tessera-ink);
   }
+  .ramp-choice.stretch {
+    justify-self: stretch;
+    gap: 8px;
+    padding: 4px 8px;
+  }
+  .ramp-choice.stretch .t {
+    flex: 1 1 auto;
+    text-align: left;
+  }
   .ramp-choice svg {
-    margin-left: auto;
+    flex: none;
+  }
+  .strip {
+    display: flex;
+    flex: none;
+    gap: 2px;
+  }
+  .strip span {
+    width: 8px;
+    height: 10px;
+    border-radius: 1px;
+  }
+  .bar.wide {
+    width: 90px;
+    height: 10px;
+  }
+  .scale-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .toggle {
+    padding: 3px 8px;
+    border: 1px solid var(--_tessera-line);
+    border-radius: var(--_tessera-radius-control);
+    background: var(--_tessera-surface);
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .toggle[aria-pressed='true'] {
+    border-color: var(--_tessera-accent);
+    background: var(--_tessera-accent);
+    color: var(--_tessera-accent-ink);
   }
   .ramp-choice .t {
     overflow: hidden;
@@ -190,21 +298,29 @@ export const displayStyles = css`
   .seg {
     display: inline-flex;
     justify-self: start;
+    gap: 2px;
+    height: auto;
     padding: 2px;
+    border: 0;
     border-radius: 7px;
     background: var(--_tessera-surface-3);
   }
   .seg button {
-    padding: 3px 10px;
+    height: 24px;
+    padding: 0 10px;
     border-radius: 5px;
     font-size: 12px;
+    font-weight: 500;
     color: var(--_tessera-ink-2);
+  }
+  .seg button + button {
+    border-left: 0;
   }
   .seg button[aria-checked='true'] {
     background: var(--_tessera-surface);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
     color: var(--_tessera-ink);
-    font-weight: 500;
+    font-weight: 600;
   }
   /* The Size by menu, in the top layer beside the popover. */
   .size-menu {
@@ -243,6 +359,14 @@ export const displayStyles = css`
   }
   .size-menu [role='menuitemradio']:focus-visible {
     outline-offset: -2px;
+  }
+  .size-menu.wide {
+    width: 260px;
+  }
+  .size-menu .lead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .size-menu .kind {
     font-size: 12px;

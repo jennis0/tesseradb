@@ -241,6 +241,17 @@ export function emit<K extends keyof TesseraEventDetails>(from: HTMLElement, nam
   from.dispatchEvent(new CustomEvent(name, {detail, bubbles: true, composed: true}));
 }
 
+/**
+ * A count shortened to its first figures and a letter, `250K`, `25.2M`, `3.5B`, where room is
+ * short; below a thousand, whole.
+ */
+export function shortCount(n: number): string {
+  const size = Math.abs(n);
+  const [unit, letter] = size >= 1e9 ? [1e9, 'B'] : size >= 1e6 ? [1e6, 'M'] : size >= 1e3 ? [1e3, 'K'] : [1, ''];
+  const v = n / unit;
+  return `${unit === 1 ? Math.round(v) : Number(v.toFixed(Math.abs(v) < 100 ? 1 : 0))}${letter}`;
+}
+
 /** An id as the decimal string events carry, the wire's JSON form. */
 export function idString(id: bigint): string {
   return id.toString(10);

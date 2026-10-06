@@ -363,20 +363,22 @@ await settled();
 
 // ---- 8: an artifact's count does not move across a pan -------------------------------------------
 
-/** The artifact list's rows, id → count, through its parts. */
+/**
+ * A layer's field card's rows, id → the count over everything matching, through its parts: the
+ * figure after the slash, or the one figure while what is in view is everything matching.
+ */
 const listCounts = async () =>
   page
-    .locator('tessera-artifact-list')
+    .locator('tessera-field-card[data-field^="cluster:"]')
     .first()
     .evaluate((root) => {
       const scope = root.shadowRoot ?? root;
       /** @type {Record<string, number>} */
       const out = {};
-      for (const item of Array.from(scope.querySelectorAll('[part="item"]'))) {
-        const id = item.getAttribute('data-id') ?? '';
-        const countEl = item.querySelector('tessera-count');
-        const text = (countEl?.shadowRoot ?? countEl)?.querySelector('[part="count"]')?.textContent ?? '';
-        out[id] = Number(text.replaceAll(',', ''));
+      for (const row of Array.from(scope.querySelectorAll('[part~="row"]'))) {
+        const id = row.getAttribute('data-key') ?? '';
+        const text = row.querySelector('[part="count"]')?.textContent ?? '';
+        out[id] = Number((text.split('/').at(-1) ?? '').trim().replaceAll(',', ''));
       }
       return out;
     })
@@ -416,8 +418,9 @@ const countsAfter = await listCounts();
 
 // ---- 9: a coloured point's ordinal resolves to a served artifact ---------------------------------
 
-await page.locator('tessera-legend [part="colour-by"]').first().click().catch(() => null);
-const clusterEntry = page.locator('tessera-legend [part="option"][data-kind="layer"]').first();
+await page.locator('tessera-explorer [part="layers-toggle"]').first().click().catch(() => null);
+await page.locator('tessera-explorer [part="colour-by"]').first().click().catch(() => null);
+const clusterEntry = page.locator('tessera-explorer [part~="colour-option"][data-value^="cluster:"]').first();
 const clusterOption = await clusterEntry.getAttribute('data-value', {timeout: 5_000}).catch(() => null);
 const refillStarted = Date.now();
 if (clusterOption) await clusterEntry.click();

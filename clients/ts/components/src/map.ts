@@ -456,12 +456,12 @@ export class TesseraMap extends TesseraElement {
   @property({attribute: 'density-scale'}) accessor densityScale: DensityScale = DEFAULT_DENSITY_SCALE;
   /**
    * The palette a category column's values are coloured from: `tableau10`, `okabe-ito`, `set2` or
-   * `dark2`. Unset, the choice made in `<tessera-legend>` stands, Tableau 10 until one is made.
+   * `dark2`. Unset, the choice made in the explorer's Colour section stands, Tableau 10 until one is made.
    */
   @property({attribute: 'category-palette'}) accessor categoryPalette: CategoryPaletteName | '' = '';
   /**
    * The ramp a number column's values are coloured on: `viridis`, `cividis`, `magma`, `greys` or
-   * `red-blue`. Unset, the choice made in `<tessera-legend>` stands, Viridis until one is made.
+   * `red-blue`. Unset, the choice made in the explorer's Colour section stands, Viridis until one is made.
    */
   @property() accessor ramp: RampName | '' = '';
   /** How numbers are placed on the ramp, `linear` or `log`. Unset, the legend's choice stands. */

@@ -20,6 +20,10 @@ const PATHS = {
   plus: {box: 24, body: svg`<path d="M12 5v14M5 12h14"/>`},
   search: {box: 24, body: svg`<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>`},
   chev: {box: 24, body: svg`<path d="M6 9l6 6 6-6"/>`},
+  chevup: {box: 24, body: svg`<path d="M6 15l6-6 6 6"/>`},
+  check: {box: 24, body: svg`<path d="M5 12.5l4.5 4.5L19 7.5"/>`},
+  /** A drop of paint, for colouring the map by a field. */
+  drop: {box: 24, body: svg`<path d="M12 3.5c3 3.6 6 7 6 10.2a6 6 0 0 1-12 0C6 10.5 9 7.1 12 3.5z"/>`},
   chevr: {box: 24, body: svg`<path d="M9 6l6 6-6 6"/>`},
   info: {box: 16, body: svg`<circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 5v.5"/>`},
   open: {box: 16, body: svg`<path d="M9 3h4v4M13 3l-6 6M7 3H3v10h10V9"/>`},

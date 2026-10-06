@@ -227,13 +227,16 @@ export function deepText(el: Element | null): string {
 }
 
 /** One row of an aggregate table as a test writes it; `group` defaults to `listed`. */
-export type AggregateRow = {group?: 'listed' | 'rest' | 'none'; key?: string | bigint | null; title?: string | null; cell?: bigint; count: number};
+export type AggregateRow = {group?: 'listed' | 'rest' | 'none'; key?: string | bigint | null; title?: string | null; cell?: bigint; lower?: number | bigint; upper?: number | bigint; count: number};
+
+/** A table of an answer as a test writes it: its rows, and its head's figures where they matter. */
+export type AggregateTableSpec = {rows: AggregateRow[]; groups?: number | null; total?: number; sample?: {sampled: boolean; items: number} | null};
 
 /**
  * An answered aggregate, one table per entry of `tables`, as the store publishes it. The rows are a
  * stand-in for an Arrow table with the columns an aggregate carries, read by name.
  */
-export function aggregateEntry(tables: {rows: AggregateRow[]; groups?: number | null; total?: number}[], view = 's0'): AggregateEntry {
+export function aggregateEntry(tables: AggregateTableSpec[], view = 's0', summaries: AggregateEntry['summaries'] = tables.map(() => null)): AggregateEntry {
   const table = (rows: AggregateRow[]) => {
     const column = (read: (r: AggregateRow) => unknown) => ({get: (i: number) => read(rows[i]!), toArray: () => rows.map(read)});
     const columns: Record<string, {get(i: number): unknown; toArray(): unknown[]}> = {
@@ -243,15 +246,19 @@ export function aggregateEntry(tables: {rows: AggregateRow[]; groups?: number | 
       count: column((r) => BigInt(r.count))
     };
     if (rows.some((r) => r.cell !== undefined)) columns.cell = column((r) => r.cell);
+    if (rows.some((r) => r.lower !== undefined)) {
+      columns.lower = column((r) => r.lower ?? null);
+      columns.upper = column((r) => r.upper ?? null);
+    }
     return {numRows: rows.length, getChild: (name: string) => columns[name] ?? null} as unknown as AggregateTable['rows'];
   };
   return {
     status: 'shown',
     view,
     refusal: null,
-    summaries: tables.map(() => null),
+    summaries,
     result: {
-      tables: tables.map((t, grouping) => ({grouping, total: t.total ?? t.rows.reduce((n, r) => n + r.count, 0), referenceTotal: null, groups: t.groups ?? null, sample: null, rows: table(t.rows)})),
+      tables: tables.map((t, grouping) => ({grouping, total: t.total ?? t.rows.reduce((n, r) => n + r.count, 0), referenceTotal: null, groups: t.groups ?? null, sample: t.sample ? {...t.sample, referenceItems: null} : null, rows: table(t.rows)})),
       region: null,
       recomposed: false,
       identityKey: 'ik',

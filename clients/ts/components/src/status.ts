@@ -22,7 +22,8 @@ import './count.js';
  * sizes to its content and does not wrap. `compact` shortens the figures (`16.8M of 21.4M match`)
  * and drops the shown count. `expanded` renders the figures again as a card below the strip.
  *
- * The strip is an `aria-live` region, so a refusal, an expiry or a change of data is announced. The
+ * The state cell is an `aria-live` region, so a refusal, an expiry or a change of data is announced;
+ * the counts are not, so a pan does not read them out. The
  * state is one of the eight panel states (see `PanelState`); what was refused and why stays in the
  * store's `status.refusal`, and the refusal's code is on the refusal part's `data-code`.
  *
@@ -191,17 +192,19 @@ export class TesseraStatus extends TesseraElement {
     const refresh = () => this.resolvedStore?.refresh();
     // Up to date and updating, the two states a pan moves between, are each a dot alone, so the
     // strip keeps its width through a gesture; every other state names itself beside its dot.
-    const bare = (cls: string, words: string) =>
-      html`<div class="cell state bare"><span part="state" data-state=${state}><span class=${cls} role="img" aria-label=${words} title=${words}></span></span></div>`;
-    const first =
+    const bare = (cls: string, words: string) => html`<span part="state" data-state=${state}><span class=${cls} role="img" aria-label=${words} title=${words}></span></span>`;
+    const dotAlone = state === 'shown' || (state === 'loading' && status?.sessionWarm === true);
+    const inner =
       state === 'shown'
         ? bare('dot', 'Up to date')
-        : state === 'loading' && status?.sessionWarm
+        : dotAlone
           ? bare('dot quiet', 'Updating')
           : state === 'empty'
-            ? html`<div class="cell state"><span part="state" data-state="empty"><span class="dot quiet"></span>Nothing in view</span></div>`
-            : html`<div class="cell state">${renderState(state, status, {onRefresh: refresh, onRetry: refresh, onReauthorise: this.reauthorise})}</div>`;
-    return html`<div part="strip" role="status" aria-live="polite" data-state=${state}>${first}${this.counts(state, v, stale)}</div>
+            ? html`<span part="state" data-state="empty"><span class="dot quiet"></span>Nothing in view</span>`
+            : renderState(state, status, {onRefresh: refresh, onRetry: refresh, onReauthorise: this.reauthorise});
+    // One live element across every state, so each change of state is announced from it.
+    const first = html`<div class=${`cell state${dotAlone ? ' bare' : ''}`} role="status" aria-live="polite">${inner}</div>`;
+    return html`<div part="strip" data-state=${state}>${first}${this.counts(state, v, stale)}</div>
       ${this.expanded && showsContent(state) && v ? this.card(v, stale) : nothing}`;
   }
 
