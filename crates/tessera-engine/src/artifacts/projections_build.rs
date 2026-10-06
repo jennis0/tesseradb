@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 
 use tessera_lifecycle::membership::ArtifactStore;
-use tessera_types::layer::ServingLayout;
+use tessera_types::layer::{LayerDeclaration, ServingLayout};
 
 use tessera_store::permutation::RowSpace;
 
@@ -43,7 +43,7 @@ impl ArtifactProjections {
         layout: ServingLayout,
         predicate: Option<&PredicateSource<'_>>,
         segments_version: u64,
-        column_only: bool,
+        declaration: &LayerDeclaration,
     ) -> (Arc<ArtifactRows>, u64) {
         let at = Coordinate {
             prefix,
@@ -73,13 +73,18 @@ impl ArtifactProjections {
         let partition = source
             .and_then(|source| self.partition_for(&at, store, source));
         let built = match predicate {
-            Some(PredicateSource::Spatial(spatial)) => {
-                self.assembled(&at, spatial, store, space, layout)
-            }
+            Some(PredicateSource::Spatial(spatial)) => self.assembled(
+                &at,
+                spatial,
+                store,
+                space,
+                layout,
+                declaration.fixed_layout().is_none(),
+            ),
             Some(PredicateSource::Attribute(attribute)) => {
-                self.claimed_or_projected(&at, store, space, layout, Some(attribute), column_only)
+                self.claimed_or_projected(&at, store, space, layout, Some(attribute), declaration)
             }
-            None => self.claimed_or_projected(&at, store, space, layout, None, column_only),
+            None => self.claimed_or_projected(&at, store, space, layout, None, declaration),
         };
         self.filed(&at, key, segments_version, built.with_partition(partition))
     }
@@ -147,16 +152,18 @@ impl ArtifactProjections {
         store: &ArtifactStore,
         space: &RowSpace,
         layout: ServingLayout,
+        lists: bool,
     ) -> ArtifactRows {
         let (joined, assembly) = spatial.level.assemble(spatial.segments);
         // Filtered by view: a shape belongs to one view of its group, and resolving it into every
         // view's row space would draw it on every view's map with a real masked count.
-        let built = ArtifactRows::build_resolved(
+        let mut built = ArtifactRows::build_resolved(
             store.level_in_view(at.layer, at.level, view_key(at.view)),
             joined,
             spatial.total_rows,
             space,
         );
+        built.lists_on_overlap = lists;
         let column = if !layout.is_row_major() {
             None
         } else if space.extent_count() == 0 {
@@ -209,28 +216,21 @@ impl ArtifactProjections {
         space: &RowSpace,
         layout: ServingLayout,
         attribute: Option<&AttributeSource<'_>>,
-        column_only: bool,
+        declaration: &LayerDeclaration,
     ) -> ArtifactRows {
+        let column_only = super::serves_column_only(declaration);
         let mut adopted = self.claim_index(at);
         let from_prefix = adopted.is_some();
         // A row-major column this prefix holds is transposed, not projected twice: an attribute
         // predicate's column is not a stored membership and is not a candidate for this. A column
         // written before the level last moved is taken only by a form served from its column,
-        // which completes it ([`Self::brought_over`]); transposed, it would hold rows short. Such
-        // a form also takes a label column for a level recorded as a list column since: completing
-        // it recomposes it as a list column, which costs less than composing one from the rows.
+        // which completes it ([`Self::brought_over`]); transposed, it would hold rows short.
         let claimed = match attribute {
             Some(_) => None,
             _ if !layout.is_row_major() => None,
             _ => self
                 .claim_column(at)
-                .filter(|(claimed, behind)| {
-                    let listed_since = column_only
-                        && *behind
-                        && claimed.layout() == ServingLayout::RowMajorLabel
-                        && layout == ServingLayout::RowMajorList;
-                    (claimed.layout() == layout || listed_since) && (column_only || !behind)
-                })
+                .filter(|(claimed, behind)| claimed.layout() == layout && (column_only || !behind))
                 .map(|(claimed, behind)| (Arc::new(claimed), behind)),
         };
         let transposed = claimed.as_ref().and_then(|(column, _)| {
@@ -257,16 +257,18 @@ impl ArtifactProjections {
             );
         }
         let behind = claimed.as_ref().is_some_and(|(_, behind)| *behind);
-        let built = transposed.unwrap_or_else(|| {
+        let mut built = transposed.unwrap_or_else(|| {
             ArtifactRows::build_over(
                 store.level_in_view(at.layer, at.level, view_key(at.view)),
                 space,
                 adopted.take(),
             )
         });
+        built.lists_on_overlap = declaration.fixed_layout().is_none();
         // The column, claimed from the prefix or composed from the form just built. A level
-        // recorded row-major whose memberships turn out to overlap has no label column to compose,
-        // and falls back to the artifact-major route, correct and merely slower than asked for.
+        // recorded as a label column whose memberships turn out to overlap takes the list column,
+        // or under a pin falls back to the artifact-major route, correct and merely slower than
+        // asked for.
         let column = match attribute {
             // The membership *is* the column: the level's own records supply only the ordinal
             // each value's artifact sits at.
@@ -591,22 +593,31 @@ impl ArtifactProjections {
         self.composed_column(rows, layout)
     }
 
-    /// This level's row-major column, composed from the form just built — `None` where the
-    /// memberships do not partition. Over the base rows, with the extent rows as the amendment: a
-    /// pack composed over a row space that already carried extents would hold labels at rows the
-    /// next merge renumbers.
+    /// This level's row-major column, composed from the form just built: the list form where a
+    /// label column was asked for, the memberships do not partition and the layout is the
+    /// automatic pick, and `None` where they do not partition under a pin. Over the base rows, with
+    /// the extent rows as the amendment: a pack composed over a row space that already carried
+    /// extents would hold labels at rows the next merge renumbers.
     fn composed_column(
         &self,
         rows: &ArtifactRows,
         layout: ServingLayout,
     ) -> Option<Arc<RowColumn>> {
-        let composed = RowColumn::compose_over_base(
-            rows.membership(),
-            rows.base_rows,
-            rows.index().row_count(),
-            layout,
-            self.scratch(),
-        )
+        let compose = |layout| {
+            RowColumn::compose_over_base(
+                rows.membership(),
+                rows.base_rows,
+                rows.index().row_count(),
+                layout,
+                self.scratch(),
+            )
+        };
+        let composed = match compose(layout) {
+            None if layout == ServingLayout::RowMajorLabel && rows.lists_on_overlap => {
+                compose(ServingLayout::RowMajorList)
+            }
+            composed => composed,
+        }
         .map(Arc::new);
         if composed.is_some() {
             self.columns_composed

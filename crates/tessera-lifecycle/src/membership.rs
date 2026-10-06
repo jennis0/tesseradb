@@ -2147,24 +2147,6 @@ impl ArtifactStore {
             .unwrap_or(&record.members)
     }
 
-    /// The membership `published` will have once applied: its own, or where it declares none
-    /// and is attached, its target's, as [`Self::members_of`] reads it. `None` where its own does
-    /// not decode.
-    pub fn published_members(&self, published: &crate::wal::PublishedArtifact) -> Option<Bitmap> {
-        let own = deserialise_members(&published.members)?;
-        if !own.is_empty() {
-            return Some(own);
-        }
-        let Some(attachment) = &published.attached_to else {
-            return Some(own);
-        };
-        Some(
-            self.get(&attachment.layer, attachment.level, attachment.ordinal)
-                .filter(|target| target.entity == attachment.entity)
-                .map_or(own, |target| self.members_of(target).whole().into_owned()),
-        )
-    }
-
     /// [`Self::members_of`], reporting the `(layer, level)` of every hop the membership was
     /// borrowed through. A cached derivation records them so it can tell when what it borrowed has
     /// moved ([`Self::level_version`]).

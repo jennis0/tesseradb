@@ -438,6 +438,24 @@ impl ArtifactRows {
         }
     }
 
+    /// Take the list form composed from this form's own bitmaps, after an amendment the label
+    /// column could not express. `false` where the composition failed, an I/O failure: the caller
+    /// drops the form and the next request projects the level whole.
+    pub(super) fn compose_as_list(&mut self, scratch: &std::path::Path) -> bool {
+        let Some(listed) = crate::row_column::RowColumn::compose_over_base(
+            &self.membership,
+            self.base_rows,
+            self.index.row_count(),
+            ServingLayout::RowMajorList,
+            scratch,
+        ) else {
+            return false;
+        };
+        self.layout = ServingLayout::RowMajorList;
+        self.column = Some(Arc::new(listed));
+        true
+    }
+
     /// Take the list form from the column this level already holds, after an amendment the label
     /// form could not express — see [`RowColumn::recompose_as_list`]. The extents are re-derived
     /// from the new column's own bytes, exactly as they were at the build: the form's one

@@ -1364,12 +1364,13 @@ fn a_fold_with_a_batchs_memberships_pending_produces_a_correct_bundle() {
 // The layout follows the memberships
 // ---------------------------------------------------------------------------------------------
 
-/// **A level whose items come to belong to two artifacts is recorded as a list column, and stays
-/// served from a column.** One layer is published an artifact a call: two disjoint calls record the
-/// label column, and a third whose members overlap the second's records the list column. Another
-/// is published disjoint, then a point is ingested naming two of its artifacts. Every count is the
-/// members each artifact holds, no level falls back to the artifact-major route, and all of it holds
-/// after a restart that replays the log.
+/// **A level whose items come to belong to two artifacts is served from a list column.** One
+/// layer is published an artifact a call: the first call records the label column, and a third
+/// call whose members overlap the second's is served from a list column. Another is published
+/// disjoint, then a point is ingested naming two of its artifacts. The record stays the label
+/// column until a fold observes the overlap and records the list column. Every count is the
+/// members each artifact holds, and no level falls back to the artifact-major route, before and
+/// after a restart that replays the log, and after the fold.
 #[test]
 fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
     use tessera_types::layer::ServingLayout;
@@ -1397,6 +1398,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
         ("b", 40..80, ServingLayout::RowMajorLabel),
         ("c", 70..90, ServingLayout::RowMajorList),
     ] {
+        // The record is the first publication's; the served form follows the memberships.
         let n = sources.end - sources.start;
         engine
             .publish_artifacts(
@@ -1406,9 +1408,14 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
             )
             .unwrap();
         tick(&engine);
-        assert_eq!(engine.recorded_layout(CALLS, 0), Some(layout), "after {key}");
         expected.push((key, n));
         assert_eq!(counts(&engine, CALLS), held(&expected), "after {key}");
+        assert_eq!(
+            engine.recorded_layout(CALLS, 0),
+            Some(ServingLayout::RowMajorLabel),
+            "after {key}"
+        );
+        assert_eq!(served_layout(&engine, CALLS), layout, "after {key}");
     }
 
     engine.register_layer(declaration(TAGGED)).unwrap();
@@ -1425,6 +1432,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
     tick(&engine);
     assert_eq!(engine.recorded_layout(TAGGED, 0), Some(ServingLayout::RowMajorLabel));
     assert_eq!(counts(&engine, TAGGED), held(&[("x", 30), ("y", 30)]));
+    assert_eq!(served_layout(&engine, TAGGED), ServingLayout::RowMajorLabel);
     let descriptors = vec![b"0".to_vec()];
     let row = tessera_lifecycle::command::UnallocatedRow {
         view: "s0".to_string(),
@@ -1459,23 +1467,31 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
         .expect("a point naming two artifacts is an ordinary write");
     publish_buffered(&engine);
     tick(&engine);
-    let check = |engine: &Engine, when: &str| {
-        assert_eq!(
-            engine.recorded_layout(CALLS, 0),
-            Some(ServingLayout::RowMajorList),
-            "{when}"
-        );
-        assert_eq!(
-            engine.recorded_layout(TAGGED, 0),
-            Some(ServingLayout::RowMajorList),
-            "{when}: the point is in x and in y"
-        );
+    let check = |engine: &Engine, when: &str, recorded: ServingLayout| {
         assert_eq!(counts(engine, CALLS), held(&expected), "{when}");
         assert_eq!(counts(engine, TAGGED), held(&[("x", 31), ("y", 31)]), "{when}");
+        for layer in [CALLS, TAGGED] {
+            assert_eq!(engine.recorded_layout(layer, 0), Some(recorded), "{when}: {layer}");
+            assert_eq!(
+                served_layout(engine, layer),
+                ServingLayout::RowMajorList,
+                "{when}: {layer} holds an item in two artifacts"
+            );
+        }
         assert_eq!(engine.layout_fallbacks(), 0, "{when}: every level kept a column");
     };
-    check(&engine, "published");
+    check(&engine, "published", ServingLayout::RowMajorLabel);
     drop(engine);
     let reopened = fx.open();
-    check(&reopened, "after a restart");
+    check(&reopened, "after a restart", ServingLayout::RowMajorLabel);
+    fold(&reopened);
+    check(&reopened, "after a fold", ServingLayout::RowMajorList);
+}
+
+/// The layout of the form a level of `layer` is served from in view `s0`.
+fn served_layout(engine: &Engine, layer: &str) -> tessera_types::layer::ServingLayout {
+    engine
+        .held_artifact_form_for_test("s0", layer, 0)
+        .expect("a read built the level's form")
+        .layout()
 }

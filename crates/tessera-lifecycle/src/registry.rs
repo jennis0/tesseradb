@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tessera_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, LevelShape, MembershipSource, RegisteredLayer,
-    ReservedRuns, ServingLayout,
+    ReservedRuns,
 };
 use tessera_types::EntityId;
 
@@ -43,52 +43,25 @@ use crate::alloc::{AllocError, Allocator};
 use crate::membership::{deserialise_members, serialise_members, ArtifactStore, IncomingArtifact};
 use crate::wal::{PublishedArtifact, WalRecord};
 
-/// The items one record adds to a level's artifacts: how many artifacts gain one, every item
-/// added, and whether any item is added to two. A growth's items already in the artifact it names
-/// are not added.
-struct Claimed {
-    artifacts: u64,
-    members: croaring::Bitmap,
-    disjoint: bool,
-}
-
-impl Claimed {
-    /// `sets` by the ordinal each grows, or `None` for an artifact being published.
-    fn of(
-        store: &ArtifactStore,
-        layer: &str,
-        level: u32,
-        mut sets: Vec<(Option<u32>, croaring::Bitmap)>,
-    ) -> Self {
-        // One set an ordinal: two growths of one artifact add to one membership.
-        sets.sort_by_key(|(ordinal, _)| *ordinal);
-        let mut merged: Vec<(Option<u32>, croaring::Bitmap)> = Vec::with_capacity(sets.len());
-        for (ordinal, set) in sets {
-            match merged.last_mut() {
-                Some((last, held)) if ordinal.is_some() && *last == ordinal => held.or_inplace(&set),
-                _ => merged.push((ordinal, set)),
-            }
+/// The shape of the level one publication fills: how many of its artifacts have members of their
+/// own, and whether any item is a member of two.
+fn publication_shape(artifacts: &[PublishedArtifact]) -> LevelShape {
+    let mut shape = LevelShape::empty();
+    let mut claimed = croaring::Bitmap::new();
+    for members in artifacts
+        .iter()
+        .filter_map(|a| deserialise_members(&a.members))
+        .filter(|members| !members.is_empty())
+    {
+        shape.artifacts += 1;
+        if shape.partitions && claimed.intersect(&members) {
+            shape.partitions = false;
         }
-        let mut claimed = Claimed {
-            artifacts: 0,
-            members: croaring::Bitmap::new(),
-            disjoint: true,
-        };
-        for (ordinal, mut set) in merged {
-            if let Some(held) = ordinal.and_then(|ordinal| store.get(layer, level, ordinal)) {
-                store.members_of(held).remove_from(&mut set);
-            }
-            if set.is_empty() {
-                continue;
-            }
-            claimed.artifacts += 1;
-            if claimed.members.intersect(&set) {
-                claimed.disjoint = false;
-            }
-            claimed.members.or_inplace(&set);
+        if shape.partitions {
+            claimed.or_inplace(&members);
         }
-        claimed
     }
+    shape
 }
 
 /// Why a registry operation was refused.
@@ -2832,98 +2805,41 @@ impl LayerRegistry {
         moved
     }
 
-    /// Keep the layout of the level `record` publishes into or grows true to its memberships, by
-    /// the rule a build applies ([`tessera_types::layer::choose`]). Called before `store` applies
-    /// the record, on the live path and on replay alike, so both record the same layout.
-    ///
-    /// - A publication into a level that holds no artifact chooses the level's layout over the
-    ///   memberships it carries.
-    /// - A publication or a growth that gives an item a second artifact in a level recorded as a
-    ///   label column, which no declaration fixes, records the list column.
-    ///
-    /// Returns the level where its layout moved. A form held in the layout it had before is not
-    /// asked for again, and the caller drops it.
+    /// Choose the layout of the level `record` publishes into, where the level holds no artifact
+    /// before it: the rule a build applies ([`tessera_types::layer::choose`]) over the
+    /// memberships this publication carries. Called before `store` applies the record, on the live
+    /// path and on replay alike, so both record the same layout. Returns the level where its
+    /// layout moved: a form held in the layout it had before is not asked for again. The cost is
+    /// one union of the publication's own memberships.
     ///
     /// The memberships are observed in entity space, where an item in two artifacts is an overlap
-    /// whether or not it has a row yet, and an artifact that declares none takes its target's, as
-    /// a fold observes it. Their spread over rows is not known here, so a level not served from a
-    /// column stays artifact-major until a fold observes it. A growth of a target moves the
-    /// memberships of the artifacts attached to it, and is not followed into their level: a level
-    /// with such artifacts is served artifact-major whatever its record says.
+    /// whether or not it has a row yet. Their spread over rows is not known here, so a level not
+    /// served from a column stays artifact-major until a fold observes it. An artifact that
+    /// declares no members and takes its target's counts as having none: a level holding one is
+    /// served artifact-major whatever its record says. A later publication or growth that makes a
+    /// label level overlap leaves the record to the next fold, and the level is served from a list
+    /// column meanwhile (`ArtifactRows::lists_on_overlap` in the engine).
     pub fn settle_layout(
         &mut self,
         store: &ArtifactStore,
         record: &WalRecord,
     ) -> Option<(String, u32)> {
-        let (layer, level, sets) = match record {
-            WalRecord::ArtifactPublish {
-                layer,
-                level,
-                artifacts,
-                ..
-            } => (
-                layer,
-                *level,
-                artifacts
-                    .iter()
-                    .filter_map(|published| Some((None, store.published_members(published)?)))
-                    .collect::<Vec<_>>(),
-            ),
-            WalRecord::ArtifactGrow {
-                layer,
-                level,
-                growth,
-            } => (
-                layer,
-                *level,
-                growth
-                    .iter()
-                    .filter(|grown| grown.set == crate::wal::GrownSet::Membership)
-                    .filter_map(|grown| {
-                        Some((Some(grown.ordinal), deserialise_members(&grown.joining)?))
-                    })
-                    .collect(),
-            ),
-            _ => return None,
+        let WalRecord::ArtifactPublish {
+            layer,
+            level,
+            artifacts,
+            ..
+        } = record
+        else {
+            return None;
         };
-        let registered = self.layers.get(layer.as_str())?;
-        if store.level(layer, level).next().is_none() {
-            if !matches!(record, WalRecord::ArtifactPublish { .. }) {
-                return None;
-            }
-            let claimed = Claimed::of(store, layer, level, sets);
-            let shape = LevelShape {
-                artifacts: claimed.artifacts,
-                partitions: claimed.disjoint,
-                ..LevelShape::empty()
-            };
-            let chosen = tessera_types::layer::choose(&registered.declaration, shape);
-            return self
-                .set_layout(layer, level, chosen)
-                .then(|| (layer.clone(), level));
-        }
-        if registered.declaration.fixed_layout().is_some()
-            || registered.layout_of(level) != ServingLayout::RowMajorLabel
-        {
+        if store.level(layer, *level).next().is_some() {
             return None;
         }
-        // A publication replayed over a manifest that already holds it puts each artifact back in
-        // its own slot, and an artifact does not overlap the one it replaces.
-        let replaced: BTreeSet<u32> = match record {
-            WalRecord::ArtifactPublish { artifacts, .. } => {
-                artifacts.iter().map(|a| a.ordinal).collect()
-            }
-            _ => BTreeSet::new(),
-        };
-        let claimed = Claimed::of(store, layer, level, sets);
-        let overlaps = !claimed.disjoint
-            || (!claimed.members.is_empty()
-                && store.level(layer, level).any(|(ordinal, record)| {
-                    !replaced.contains(&ordinal)
-                        && store.members_of(record).intersect(&claimed.members)
-                }));
-        (overlaps && self.set_layout(layer, level, ServingLayout::RowMajorList))
-            .then(|| (layer.clone(), level))
+        let declaration = &self.layers.get(layer)?.declaration;
+        let chosen = tessera_types::layer::choose(declaration, publication_shape(artifacts));
+        self.set_layout(layer, *level, chosen)
+            .then(|| (layer.clone(), *level))
     }
 
     /// This registry as a manifest carries it: every live layer, and every name ever dropped.
@@ -3373,16 +3289,12 @@ mod tests {
         Ok(record)
     }
 
-    /// **A level's first publication chooses its layout by the rule a build applies, a record
-    /// that gives an item a second artifact moves a label level to the list column, and a replay
-    /// of the log records the same.** Disjoint memberships take the label column and overlapping
-    /// ones the list column; a pin and a treed layer keep what the declaration says. A publication
-    /// of one artifact a call stays a label column while the calls are disjoint, and a call or a
-    /// growth that overlaps an earlier artifact records the list column. A growth adding an item
-    /// its artifact already holds moves nothing. An artifact declaring no members counts with its
-    /// target's.
+    /// **A level's first publication chooses its layout by the rule a build applies, and a replay
+    /// of the log chooses the same.** Disjoint memberships take the label column and overlapping
+    /// ones the list column; a pin and a treed layer keep what the declaration says. A later
+    /// publication leaves the record to the next fold.
     #[test]
-    fn a_levels_layout_follows_what_its_publications_and_growths_carry_and_a_replay_agrees() {
+    fn a_levels_first_publication_chooses_its_layout_and_a_replay_chooses_the_same() {
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let mut alloc = Allocator::new(0);
@@ -3394,8 +3306,6 @@ mod tests {
         for d in [
             declaration("clusters/disjoint"),
             declaration("clusters/overlapping"),
-            declaration("clusters/calls"),
-            declaration("clusters/grown"),
             pinned,
             treed,
         ] {
@@ -3410,66 +3320,20 @@ mod tests {
         let disjoint = [incoming("a", &[1, 2]), incoming("b", &[3, 4])];
         let overlapping = [incoming("a", &[1, 2]), incoming("b", &[2, 3])];
         for (name, batch) in [
-            ("clusters/disjoint", &disjoint[..]),
-            ("clusters/overlapping", &overlapping[..]),
-            ("clusters/calls", &disjoint[..1]),
-            ("clusters/grown", &disjoint[..]),
-            ("clusters/pinned", &overlapping[..]),
-            ("clusters/treed", &disjoint[..]),
+            ("clusters/disjoint", &disjoint),
+            ("clusters/overlapping", &overlapping),
+            ("clusters/pinned", &overlapping),
+            ("clusters/treed", &disjoint),
         ] {
             log.push(publish(&mut reg, &mut store, &mut alloc, name, batch).unwrap());
         }
-        log.push(publish(&mut reg, &mut store, &mut alloc, "clusters/calls", &disjoint[1..]).unwrap());
-        assert_eq!(layout(&reg, "clusters/calls"), ServingLayout::RowMajorLabel);
-        assert_eq!(layout(&reg, "clusters/pinned"), ServingLayout::RowMajorLabel);
         log.push(
-            publish(&mut reg, &mut store, &mut alloc, "clusters/calls", &[incoming("c", &[4, 5])])
-                .unwrap(),
-        );
-        let mut grow = |members: &[u32], log: &mut Vec<WalRecord>| {
-            let join = crate::membership::IncomingGrowth::from_entities(
-                "a".into(),
-                members.iter().map(|&e| EntityId::new(u64::from(e))),
-            );
-            let record = reg
-                .prepare_grow("clusters/grown", 0, &[join], &store)
-                .unwrap()
-                .growth
-                .expect("a member joins");
-            reg.apply(&record);
-            reg.settle_layout(&store, &record);
-            assert_eq!(store.apply(&record, 0), 0);
-            log.push(record);
-            layout(&reg, "clusters/grown")
-        };
-        assert_eq!(grow(&[1, 9], &mut log), ServingLayout::RowMajorLabel);
-        assert_eq!(grow(&[3], &mut log), ServingLayout::RowMajorList);
-        // Two labels declaring no members of their own, attached to one artifact: each takes its
-        // target's members, so the two overlap.
-        let mut labels = declaration("topics/labels");
-        labels.depends_on = vec!["clusters/disjoint".into()];
-        let record = reg.prepare_create(labels, &mut alloc).unwrap();
-        reg.apply(&record);
-        log.push(record);
-        let attached = |key: &str| {
-            let mut label = incoming(key, &[]);
-            label.attached_to = Some(crate::membership::IncomingAttachment {
-                layer: "clusters/disjoint".into(),
-                level: 0,
-                key: "a".into(),
-            });
-            label
-        };
-        log.push(
-            publish(&mut reg, &mut store, &mut alloc, "topics/labels", &[attached("l0"), attached("l1")])
+            publish(&mut reg, &mut store, &mut alloc, "clusters/disjoint", &[incoming("c", &[4])])
                 .unwrap(),
         );
         let want = [
-            ("topics/labels", ServingLayout::RowMajorList),
             ("clusters/disjoint", ServingLayout::RowMajorLabel),
             ("clusters/overlapping", ServingLayout::RowMajorList),
-            ("clusters/calls", ServingLayout::RowMajorList),
-            ("clusters/grown", ServingLayout::RowMajorList),
             ("clusters/pinned", ServingLayout::RowMajorLabel),
             ("clusters/treed", ServingLayout::ArtifactMajor),
         ];

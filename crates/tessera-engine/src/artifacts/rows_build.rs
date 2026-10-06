@@ -66,6 +66,7 @@ impl ArtifactRows {
             base_rows: space.base_rows(),
             covered: covered_by(space),
             inherited: Vec::new(),
+            lists_on_overlap: false,
         }
     }
 
@@ -136,6 +137,7 @@ impl ArtifactRows {
                 base_rows: space.base_rows(),
                 covered: Vec::new(),
                 inherited: Vec::new(),
+                lists_on_overlap: false,
             });
         }
         if column.len() < membership.len() {
@@ -176,6 +178,7 @@ impl ArtifactRows {
             base_rows: space.base_rows(),
             covered: covered_by(space),
             inherited: Vec::new(),
+            lists_on_overlap: false,
         })
     }
 
@@ -209,6 +212,7 @@ impl ArtifactRows {
             base_rows: space.base_rows(),
             covered: covered_by(space),
             inherited: Vec::new(),
+            lists_on_overlap: false,
         }
     }
 
@@ -259,6 +263,7 @@ impl ArtifactRows {
             base_rows: 0,
             covered: Vec::new(),
             inherited: Vec::new(),
+            lists_on_overlap: false,
         }
         .with_column(column)
     }

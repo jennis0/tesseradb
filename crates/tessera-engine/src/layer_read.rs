@@ -137,7 +137,7 @@ impl Engine {
                 layer.layout_of(level),
                 predicate.as_ref(),
                 generation.segments_version,
-                crate::artifacts::serves_column_only(&layer.declaration),
+                &layer.declaration,
             )
         });
         let counts = self.figures(
