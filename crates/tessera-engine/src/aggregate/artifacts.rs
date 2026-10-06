@@ -183,13 +183,20 @@ impl Layer {
                 Some((Vec::new(), reference_rows.map(|_| Vec::new()))),
             ),
             Some(read) if row_major => {
-                let histogram = read
-                    .filtered_counts(engine, mask, set_rows)
-                    .expect("a level with a column counts through it");
-                let counts = ordinals
-                    .iter()
-                    .map(|&o| u64::from(histogram.get(o as usize).copied().unwrap_or(0)))
-                    .collect();
+                // Over the whole visible set, each count is the artifact's figure, already held;
+                // a narrower set is counted by scanning its rows.
+                let counts = match read.counts.as_deref().filter(|_| cx.sets.set.is_whole()) {
+                    Some(figures) => ordinals.iter().map(|&o| figures.get(o)).collect(),
+                    None => {
+                        let histogram = read
+                            .filtered_counts(engine, mask, set_rows)
+                            .expect("a level with a column counts through it");
+                        ordinals
+                            .iter()
+                            .map(|&o| u64::from(histogram.get(o as usize).copied().unwrap_or(0)))
+                            .collect()
+                    }
+                };
                 (counts, None)
             }
             Some(read) => {
