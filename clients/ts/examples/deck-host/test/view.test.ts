@@ -11,7 +11,7 @@ const store = {
 
 describe('the host camera', () => {
   it('asks the store for the whole extent when fitted to a square canvas', () => {
-    expect(viewInputOf(store, fitWorld(800, 800), 800, 800)).toEqual({bbox: [0, -50, 1000, 50], width: 800, height: 800});
+    expect(viewInputOf(store, fitWorld(800, 800), 800, 800)).toEqual({bbox: [0, -50, 1000, 50], zoom: fitWorld(800, 800).zoom, width: 800, height: 800});
   });
 
   it('fits the world square to the shorter side of a wide canvas', () => {

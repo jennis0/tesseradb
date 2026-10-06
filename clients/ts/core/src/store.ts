@@ -65,15 +65,25 @@ export {REGION_HELD_LIMIT, type RegionProjection, type SelectionShape} from './s
 export type {AggregateEntry, AggregateSpec, AggregatesProjection} from './aggregates.js';
 
 /**
- * Where the host's camera looks: a box in the current view's data coordinates, and the pixel size
- * it is drawn at. The store fits the zoom to the tighter axis, so a canvas of another aspect shows
- * more than the box along the other axis.
+ * Where the host's camera looks: a box in the current view's data coordinates, the camera's zoom,
+ * and the pixel size it is drawn at.
  *
  * @category Store
  */
 export type ViewInput = {
-  /** `[x0, y0, x1, y1]` in the current view's data coordinates. */
+  /**
+   * `[x0, y0, x1, y1]` in the current view's data coordinates: what the canvas shows, which may be
+   * clamped to the view's extent, as `viewInputOf` in `@tesseradb/deck` clamps it.
+   */
   bbox: [number, number, number, number];
+  /**
+   * The camera's zoom over the 512-unit world, as deck.gl's `OrthographicView` counts it: the canvas
+   * shows `2 ** zoom` pixels per world unit, so at 0 the world is 512 pixels wide. The levels a
+   * layer shows and the depth its artifacts are asked at follow this zoom. It is not read from
+   * `bbox`, which, clamped where the world is smaller than the canvas, would give the zoom at which
+   * the world fills the canvas.
+   */
+  zoom: number;
   /** The canvas width in pixels. */
   width: number;
   /** The canvas height in pixels. */
@@ -144,8 +154,8 @@ export type StoreOptions = {
    * with; omitted, the cut is unbounded. `heldTiles` is how many tiles of artifacts the store keeps
    * per view, the least recently drawn leaving first; it defaults to `4096`.
    *
-   * Artifacts are asked for by tile at a fixed depth, map zoom + 2 with the zoom rounded down, which
-   * is a tile of 128 to 256 pixels. One request names at most 558 tiles, the most a 3840 by 2160
+   * Artifacts are asked for by tile at a fixed depth, map zoom + 2, the zoom being the camera's as
+   * {@link ViewInput} gives it, rounded down; a tile is 128 to 256 pixels. One request names at most 558 tiles, the most a 3840 by 2160
    * screen touches at that depth, or the deployment's `max_tiles_per_request` where that is fewer; a
    * larger screen is asked for at zoom + 1, then coarser, until its tiles fit. So the tiles in view
    * times `perTile` bounds the artifacts one level draws. The depth does not follow the points'.
@@ -775,6 +785,18 @@ export interface Store {
 /** The `view` projection before a frame has been drawn in view `id`. */
 function noFrame(id: string): ViewProjection {
   return {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0, inView: null};
+}
+
+/**
+ * The camera's centre on one axis, from the box it shows `[lo, hi]` in world units and half the
+ * canvas at its zoom. Where the box is narrower than the canvas it was clamped to the world on the
+ * side that meets an edge; where it meets both, the world's middle shows the same box.
+ */
+function cameraCentre(lo: number, hi: number, half: number): number {
+  const clamped = hi - lo < 2 * half * (1 - 1e-9);
+  if (clamped && lo <= 0 && hi < WORLD_SIZE) return hi - half;
+  if (clamped && hi >= WORLD_SIZE && lo > 0) return lo + half;
+  return (lo + hi) / 2;
 }
 
 /** How long the camera rests before the counts in view are asked for. */
@@ -1608,17 +1630,19 @@ export function createStore(options: StoreOptions): Store {
     return true;
   }
 
+  /**
+   * The camera as the driver and the channel take it: the host's zoom, and the centre whose canvas,
+   * clamped to the world, is `input.bbox`. A box narrower than the canvas at that zoom was clamped
+   * on the side it meets the world's edge, so the centre is half a canvas in from its other side.
+   */
   function toDriverView(input: ViewInput): DriverViewState & {width: number; height: number} {
     const q = frame();
-    const [dx0, dy0, dx1, dy1] = input.bbox;
-    const [wx0, wy0] = dataToWorldXY(dx0, dy0, q);
-    const [wx1, wy1] = dataToWorldXY(dx1, dy1, q);
-    const bw = Math.abs(wx1 - wx0) || 1;
-    const bh = Math.abs(wy1 - wy0) || 1;
-    // Zoom from the tighter axis, so a camera of another aspect over-covers the other axis.
-    const zoom = Math.min(MAX_DEPTH, Math.log2(Math.min(input.width / bw, input.height / bh)));
+    const [wx0, wy0] = dataToWorldXY(input.bbox[0], input.bbox[1], q);
+    const [wx1, wy1] = dataToWorldXY(input.bbox[2], input.bbox[3], q);
+    const zoom = Math.min(MAX_DEPTH, input.zoom);
+    const scale = 2 ** zoom;
     return {
-      target: [(wx0 + wx1) / 2, (wy0 + wy1) / 2, 0],
+      target: [cameraCentre(Math.min(wx0, wx1), Math.max(wx0, wx1), input.width / 2 / scale), cameraCentre(Math.min(wy0, wy1), Math.max(wy0, wy1), input.height / 2 / scale), 0],
       zoom,
       width: input.width,
       height: input.height

@@ -3,7 +3,7 @@ import {LayerManager, OrthographicView, type Layer} from '@deck.gl/core';
 import {tableFromArrays} from 'apache-arrow';
 import {TesseraError, createStore, type AggregateRequest, type AggregateResult, type TesseraClient} from '@tesseradb/client';
 import {mortonOfTile} from '@tesseradb/client/internal';
-import {SELECTION, fakeClock, fakeScheduler, meta, response, result as viewportResult, view} from '../../core/test/support.js';
+import {SELECTION, fakeClock, fakeScheduler, camera as cameraOver, meta, response, result as viewportResult, view} from '../../core/test/support.js';
 import {DENSITY_CELL_SIZES, DENSITY_SETTLE_MS, DensityCounter, cellDepth, resolutionStops, type DensityCamera} from '../src/density-counter.js';
 import {TesseraLayer} from '../src/layer.js';
 import {fakeDevice} from './fake-device.js';
@@ -147,7 +147,7 @@ describe('DensityCounter', () => {
     }) as unknown as TesseraClient['viewport'];
     const {store, counter, settle, clock, scheduler} = await setUp(SELECTION.maxAggregateCells, viewport);
     counter.set(ON);
-    store.setView({bbox: [0, 0, 512, 512], width: WIDTH, height: HEIGHT});
+    store.setView(cameraOver(store.frame(), [0, 0, 512, 512], WIDTH, HEIGHT));
     await clock.advance(600);
     await vi.advanceTimersByTimeAsync(0);
     scheduler.flush();

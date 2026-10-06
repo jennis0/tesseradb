@@ -5,8 +5,9 @@ import type {FilterDraft} from '../src/filters.js';
 import {withMember} from '../src/members.js';
 import {artifactName} from '../src/names.js';
 import type {Artifact, Layer, MembershipColumn, Meta, ViewportArtifactsRequest, ViewportPart, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, tileAnswers, view, scalar} from './support.js';
-import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, tileAnswers, view, scalar, camera} from './support.js';
+import {dataToWorldXY, mortonOfTile, tileXY} from '../src/coords.js';
+import {worldBbox} from '../src/prefetch.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
 /**
@@ -107,7 +108,7 @@ describe('setView converts a data bbox to the driver’s target and zoom', () =>
 
     // A data bbox covering the left half of x and the top quarter of y. World is 512 square, so
     // x [0,50] maps to world [0,256] and y [0,50] maps to world [0,128].
-    store.setView({bbox: [0, 0, 50, 50], width: 800, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 50, 50], 800, 400));
     await clock.advance(600);
     scheduler.flush();
 
@@ -125,7 +126,7 @@ describe('setView converts a data bbox to the driver’s target and zoom', () =>
     const {client, viewport} = fakeClient(() => response('ck'));
     const store = createStore({viewerUrl: 'http://v', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     // Before warm() has resolved: no meta yet.
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     expect(viewport).not.toHaveBeenCalled();
     await clock.advance(600);
     scheduler.flush();
@@ -147,7 +148,7 @@ describe('status.stale keys on the content key, never on x-tessera-stale', () =>
       replica: {revalidateAfterMs: 100}
     });
     await clock.advance(1);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('status').stale).toBe(false);
@@ -157,7 +158,7 @@ describe('status.stale keys on the content key, never on x-tessera-stale', () =>
     // without redrawing, so the store marks itself stale.
     key = 'ck-2';
     await clock.advance(200);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(viewport.mock.calls.length).toBeGreaterThan(drawn); // the revalidation went out
@@ -176,7 +177,7 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     const before = viewport.mock.calls.length;
@@ -201,7 +202,7 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
 
@@ -220,7 +221,7 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
 
@@ -237,7 +238,7 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
 
@@ -254,7 +255,7 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
 
@@ -279,7 +280,7 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     // The fixture's `highlighted` equals `matched`, as for a request with no highlight, so
@@ -303,7 +304,7 @@ describe('the drops', () => {
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler, meta: {...META, layers}});
     // Asked for by name, which is what a host driving `setLayers` directly would do.
     store.setLayers(['clusters/kmeans', 'mesh/descriptors']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     const asked = viewport.mock.calls.map((c) => (c[1] as {layers?: string[]}).layers ?? []);
@@ -338,7 +339,7 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(store.requestFilters()).toBeNull();
@@ -357,12 +358,12 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     // Zoomed in with the request left unanswered: the held coarser bands stand in.
     viewport.mockImplementation(() => new Promise(() => {}));
-    store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 1, 2], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('marks').standIn.length).toBeGreaterThan(0);
@@ -378,7 +379,7 @@ describe('the drops', () => {
     const scheduler = fakeScheduler();
     const {store} = await warm(() => response('ck'), {clock, scheduler});
     store.setColourBy('archive');
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('view').composition).not.toBeNull();
@@ -594,13 +595,13 @@ describe('subscription', () => {
     const {store} = await warm(() => response('ck'), {clock, scheduler});
     const seen: number[] = [];
     const off = (store as Store).subscribe('view', (v) => seen.push(v.served.shown));
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(seen.length).toBeGreaterThan(0);
     off();
     const n = seen.length;
-    store.setView({bbox: [0, 0, 50, 100], width: 400, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 50, 100], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(seen.length).toBe(n);
@@ -628,7 +629,7 @@ describe('setLayers before meta', () => {
     await clock.advance(1);
     expect(store.get('artifacts').layer).toBe('clusters/a');
 
-    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 800, 800));
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
@@ -654,17 +655,55 @@ describe('the depth artifacts are asked at', () => {
       scheduler.flush();
     };
     // 800 pixels over 0.512 world units: zoom 10.6.
-    store.setView({bbox: [50, 100, 50.1, 100.2], width: 800, height: 800});
+    store.setView(camera(store.frame(), [50, 100, 50.1, 100.2], 800, 800));
     await settle();
     const deep = viewportArtifacts.mock.calls.length;
     // The whole world in 800 pixels: zoom 0.6.
-    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 800, 800));
     await settle();
     const calls = viewportArtifacts.mock.calls.map((c) => c[1]);
     expect(deep).toBeGreaterThan(0);
     expect(calls.slice(0, deep).every((c) => c.zoom === 12)).toBe(true);
     expect(calls.slice(deep).map((c) => c.zoom)).toEqual([2]);
     expect(calls[deep]!.tiles).toHaveLength(16);
+  });
+
+  it('follows the camera’s zoom where the world is smaller than the screen and the box is clamped to it', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewportArtifacts} = fakeClient(() => response('ck'));
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
+    await clock.advance(1);
+    store.setLayers(['clusters/a']);
+    /** What a deck host sends: the canvas's world box clamped to the world, in data coordinates. */
+    const look = async (target: [number, number], zoom: number, width: number, height: number) => {
+      const wb = worldBbox({target, zoom, width, height}, 1);
+      const [x0, y0] = store.dataXY(wb[0], wb[1]);
+      const [x1, y1] = store.dataXY(wb[2], wb[3]);
+      const before = viewportArtifacts.mock.calls.length;
+      store.setView({bbox: [x0, y0, x1, y1], zoom, width, height});
+      await clock.advance(600);
+      scheduler.flush();
+      return viewportArtifacts.mock.calls.slice(before).map((c) => c[1]);
+    };
+    // A 1920 by 1080 screen fitted to the world, the whole world shown: the box is the extent and
+    // fills the screen at zoom 1.08, but the camera is at 0.96.
+    const fit = await look([256, 256], 0.96, 1920, 1080);
+    expect(fit.map((r) => r.zoom)).toEqual([2]);
+    // The map's least zoom: depth 0, one tile.
+    const least = await look([256, 256], -2, 1920, 1080);
+    expect(least.map((r) => r.zoom)).toEqual([0]);
+    expect(least[0]!.tiles).toHaveLength(1);
+    // A 3840 by 2160 screen at zoom 0, where the clamped box would fill it at 2.08.
+    const wide = await look([256, 256], 0, 3840, 2160);
+    expect(wide.map((r) => r.zoom)).toEqual([2]);
+    // Panned so the world's left edge is a quarter of the way across: the box is clamped on the
+    // left, and the tiles asked are those of the box, x 0 to 9 of depth 4, not a wider one.
+    const edge = await look([50, 256], 2, 1920, 1080);
+    expect(edge.map((r) => r.zoom)).toEqual([4]);
+    const xs = edge[0]!.tiles!.map((t) => tileXY(t, 4).x);
+    expect(Math.min(...xs)).toBe(0);
+    expect(Math.max(...xs)).toBe(9);
   });
 
   it('reads a camera framed at a whole zoom as that zoom', async () => {
@@ -690,7 +729,7 @@ describe('the depth artifacts are asked at', () => {
       const cx = q.xMin + w / 2 + next() * (q.xMax - q.xMin - w);
       const cy = q.yMin + h / 2 + next() * (q.yMax - q.yMin - h);
       const before = viewportArtifacts.mock.calls.length;
-      store.setView({bbox: [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], width, height});
+      store.setView(camera(store.frame(), [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], width, height));
       await clock.advance(600);
       scheduler.flush();
       for (const call of viewportArtifacts.mock.calls.slice(before)) {
@@ -723,7 +762,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
       artifacts: {perTile: 10}
     });
     store.setLayers(['clusters/a']);
-    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 800, 800));
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
@@ -733,7 +772,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
 
     // A second settle over other ground, answered with the same artifacts: nothing is named, so
     // the colour map is the same object and the lookup texture built from it is not rewritten.
-    store.setView({bbox: [50, 100, 100, 200], width: 800, height: 800});
+    store.setView(camera(store.frame(), [50, 100, 100, 200], 800, 800));
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
@@ -750,7 +789,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     const {client} = fakeClient(() => response('ck'), META, () => served);
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     store.setLayers(['clusters/a']);
-    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 800, 800));
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
@@ -763,7 +802,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     // A settle naming a third artifact. A positional colour depends on one centroid, so the map is
     // extended in place: the same object, with the existing colours as the same objects.
     served = [...served, cluster(3n, [5, 6])];
-    store.setView({bbox: [50, 100, 100, 200], width: 800, height: 800});
+    store.setView(camera(store.frame(), [50, 100, 100, 200], 800, 800));
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
@@ -806,7 +845,7 @@ describe('select: the selection is the region leaf on every request', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm((req) => responseCovering(req, 'ck1'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('marks').count.shown).toBeGreaterThan(0);
@@ -843,7 +882,7 @@ describe('select: the selection is the region leaf on every request', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     store.select({kind: 'box', bbox: [0, 0, 1, 1]});
@@ -879,7 +918,7 @@ describe('select: the selection is the region leaf on every request', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store} = await warm(() => response('ck1'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     store.select({kind: 'box', bbox: [0, 0, 1, 1]});
@@ -904,7 +943,7 @@ describe('select: the selection is the region leaf on every request', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     const before = viewport.mock.calls.length;
@@ -937,7 +976,7 @@ describe('select: the selection is the region leaf on every request', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     const before = viewport.mock.calls.length;
@@ -1027,7 +1066,7 @@ describe('clear() and a refused request reach the region and the shapes', () => 
     Object.assign(client, {artifact: vi.fn(async () => ({layer: 'regions', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}))});
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     store.setLayers(['regions']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
@@ -1054,7 +1093,7 @@ describe('clear() and a refused request reach the region and the shapes', () => 
       },
       {clock, scheduler}
     );
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
 
@@ -1154,7 +1193,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
   it('colours by a layer with nothing drawn: points carry its column and not its labels’, the channel asks for both, and nothing of it is drawn', async () => {
     const {store, settle, asked, tilesAsked} = await open();
     store.setColourBy('cluster:topics');
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
 
     const points = asked().filter((r) => r.k !== 0);
@@ -1192,7 +1231,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     const {store, settle, asked} = await open(traces);
     // `mesh` is named on every point request and tags no point, so no band carries its column.
     store.setColourBy('cluster:mesh');
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
     const points = () => asked().filter((r) => r.k !== 0).length;
     const before = points();
@@ -1211,7 +1250,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     const declared: Meta = {...LAYERED, layers: [...LAYERED.layers.slice(0, 2), drawn('subtopics', {depsOn: ['topics']}), ...LAYERED.layers.slice(2)]};
     const {store, settle, asked} = await open([], declared);
     store.setLayers(['topics']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
     for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'subtopics']);
     expect(Object.keys(store.get('marks').bands[0]!.membership).sort()).toEqual(['subtopics', 'topics']);
@@ -1221,7 +1260,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     const {store, settle, asked} = await open();
     store.setLayers(['topics']);
     store.setColourBy('cluster:kmeans');
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
 
     for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'kmeans']);
@@ -1235,7 +1274,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
   it('asks for nothing when the colour layer is already drawn, and for the layer when it is not', async () => {
     const {store, settle, asked, tilesAsked} = await open();
     store.setLayers(['topics']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
     const before = asked().length;
     const tilesBefore = tilesAsked().length;
@@ -1258,7 +1297,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     const traces: {kind: string; fields: Record<string, number | string>}[] = [];
     const {store, settle, asked} = await open(traces);
     store.setColourBy('cluster:nope');
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
     store.setColourBy('cluster:topic_names');
     await settle();
@@ -1283,7 +1322,7 @@ describe('the token', () => {
     await clock.advance(59_000);
     expect(authorise).toHaveBeenCalledTimes(2);
 
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(viewport.mock.calls.at(-1)![0]).toBe('t2');
@@ -1472,7 +1511,7 @@ describe('the token', () => {
     const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     await clock.advance(1);
     store.setLayers(['l']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
@@ -1490,7 +1529,7 @@ describe('the token', () => {
       },
       {clock, scheduler}
     );
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('status').expired).toBe(false);
@@ -1498,7 +1537,7 @@ describe('the token', () => {
 
     // Zoomed far in, so the held frame cannot answer and a request goes out.
     refuse = true;
-    store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 1, 2], 400, 400));
     await clock.advance(5_000);
     scheduler.flush();
     expect(viewport.mock.calls.length).toBeGreaterThan(asked);
@@ -1589,7 +1628,7 @@ describe('a store serves one viewer', () => {
   it('keeps what is drawn through a renewal for the same viewer, and asks with the new token', async () => {
     const {store, viewport, authorise, clock, scheduler} = twoTokens({renewal: 'a'});
     store.setLayers(['l']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     store.needShape(VIEWERS.a.artifact);
     await clock.advance(1);
@@ -1618,7 +1657,7 @@ describe('a store serves one viewer', () => {
   it('drops everything held for viewer A before viewer B’s first answer is drawn', async () => {
     const {store, authorise, clock, scheduler} = twoTokens({renewal: 'b'});
     store.setLayers(['l']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     store.needShape(VIEWERS.a.artifact);
     await clock.advance(1);
@@ -1657,7 +1696,7 @@ describe('a store serves one viewer', () => {
     const metaB = SHAPED;
     const {store, metaRead, clock, scheduler} = twoTokens({renewal: 'b', metaOf: (token) => (token === 't1' ? metaA : metaB)});
     store.setLayers(['l']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     expect(store.get('meta')).toBe(metaA);
 
@@ -1689,7 +1728,7 @@ describe('a store serves one viewer', () => {
       let open: () => void = () => {};
       const gate = new Promise<void>((resolve) => (open = resolve));
       const {store, authorise, clock, scheduler} = twoTokens({renewal: 'b', gate});
-      store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+      store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
       await settled(clock, scheduler);
       expect(showing(store)).toEqual(new Set(['ik-a']));
 
@@ -1702,7 +1741,7 @@ describe('a store serves one viewer', () => {
       // points for the zoomed view are asked for under viewer B's token. Until they come, viewer
       // A's coarser points stand in.
       now += 56_000;
-      store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+      store.setView(camera(store.frame(), [0, 0, 1, 2], 400, 400));
       for (let i = 0; i < 4; i++) {
         await clock.advance(1);
         scheduler.flush();
@@ -1734,7 +1773,7 @@ describe('a store serves one viewer', () => {
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: 1_000}});
     await clock.advance(1);
     store.setColourBy('archive');
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     const filters: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}};
     store.setFilters(filters);
     const shape = {kind: 'box' as const, bbox: [0, 0, 50, 50] as [number, number, number, number]};
@@ -1754,7 +1793,7 @@ describe('a store serves one viewer', () => {
       if (store.get('view').matched.value === Number(VIEWERS.a.visible)) stale.push('view count');
     });
     await clock.advance(2_000);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
 
     expect(changed).toBe(true);
@@ -1832,7 +1871,7 @@ describe('a store serves one viewer', () => {
         return no;
       }
     });
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     expect(whoShows(store, metas)).toEqual(new Set(['a']));
 
@@ -1865,14 +1904,14 @@ describe('a store serves one viewer', () => {
       }
       return answer(req);
     });
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     expect(whoShows(store, metas)).toEqual(new Set(['a']));
 
     // A zoom on s0 whose points are still on the way when the host moves to s1.
     let open: () => void = () => {};
     gate = new Promise<void>((resolve) => (open = resolve));
-    store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 1, 2], 400, 400));
     await clock.advance(1);
     scheduler.flush();
     store.setCurrentView('s1');
@@ -1933,7 +1972,7 @@ describe('a store serves one viewer', () => {
       tileAnswers(() => [artifact(VIEWERS.a.artifact + (req.view === 's1' ? 100n : 0n))], () => ({identityKey: `a:${req.view}`, contentKey: 'ck-a'}))(token, req, o)
     );
     store.setLayers(['l']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     store.setCurrentView('s1');
     await settled(clock, scheduler);
@@ -1996,7 +2035,7 @@ describe('a store serves one viewer', () => {
           }
         }
       });
-      store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+      store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
       for (let i = 0; i < 20; i++) {
         await new Promise((resolve) => setTimeout(resolve, 0));
         await clock.advance(50);
@@ -2038,7 +2077,7 @@ describe('a store serves one viewer', () => {
       hold: (token, req) => token === 't2' && req.view === 's0'
     });
     store.setLayers(['l']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     expect(whoShows(store, metas)).toEqual(new Set(['a']));
 
@@ -2067,7 +2106,7 @@ describe('a store serves one viewer', () => {
     });
     await clock.advance(1);
     store.setFilters({filter: {secret: {family: 'category', keys: ['x']}, archive: {family: 'category', keys: ['cs']}}, highlight: {secret: {family: 'category', keys: ['y']}}});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     expect(whoShows(store, metas)).toEqual(new Set(['a']));
 
@@ -2085,7 +2124,7 @@ describe('a store serves one viewer', () => {
     const metas = {a: SHAPED, b: meta({...SHAPED})};
     const {store, clock, scheduler} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
     store.setLayers(['l']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     store.setMembers([{layer: 'l', artifact: VIEWERS.a.artifact, outside: false, verb: 'filter', label: 'a1'}]);
     store.select({kind: 'artifact', id: VIEWERS.a.artifact});
@@ -2125,7 +2164,7 @@ describe('a store serves one viewer', () => {
     store.setLayers(['l', 'secret-layer']);
     store.setColourBy('secretcol');
     store.setFilters({filter: {secret: {family: 'category', keys: ['x']}, archive: {family: 'category', keys: ['cs']}}, highlight: {secret: {family: 'category', keys: ['y']}}});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     store.select({kind: 'box', bbox: [0, 0, 50, 50]});
     await settled(clock, scheduler);
     expect(store.get('view').id).toBe('hidden');
@@ -2171,7 +2210,7 @@ describe('a store serves one viewer', () => {
     const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
     store.setLayers(['l']);
     store.setColourBy('archive');
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settled(clock, scheduler);
     store.needShape(VIEWERS.a.artifact);
     await store.pick(7n);
@@ -2327,7 +2366,7 @@ describe('counts before points', () => {
       await new Promise<void>((resolve) => (land = resolve));
       return answer;
     }) as never);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await clock.advance(600);
     scheduler.flush();
     return {store, clock, scheduler, land: async () => {
@@ -2421,7 +2460,7 @@ describe('a point request names the render columns the store reads', () => {
 
   it('names no column while nothing colours, sizes or asks, then the colour, size and asked columns the view renders', async () => {
     const {store, settle, asked} = await open();
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
     expect(asked().length).toBeGreaterThan(0);
     for (const r of asked()) expect(r.pointRows).toEqual([]);
@@ -2439,7 +2478,7 @@ describe('a point request names the render columns the store reads', () => {
 
     // Withdrawing the ask leaves the colour and size columns.
     store.setPointColumns('hover', []);
-    store.setView({bbox: [0, 0, 50, 50], width: 400, height: 400});
+    store.setView(camera(store.frame(), [0, 0, 50, 50], 400, 400));
     await settle();
     expect(asked().at(-1)!.pointRows).toEqual(['archive', 'score']);
   });
@@ -2447,7 +2486,7 @@ describe('a point request names the render columns the store reads', () => {
   it('fetches the held bands again when the colour column changes to one they lack, and not when it changes back', async () => {
     const {store, settle, asked} = await open();
     store.setColourBy('archive');
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
     expect(asked().at(-1)!.pointRows).toEqual(['archive']);
     for (const band of store.get('marks').bands) expect('score' in band.scalars).toBe(false);
@@ -2474,7 +2513,7 @@ describe('a point request names the render columns the store reads', () => {
     const {store, settle, asked, whenStored} = await open();
     store.setColourBy('archive');
     whenStored(() => store.setColourBy('score'));
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 400, 400));
     await settle();
     expect(asked()[0]!.pointRows).toEqual(['archive']);
     await settle();

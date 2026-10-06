@@ -34,7 +34,7 @@ function tell() {
   const [x0, y0, x1, y1] = worldBox(cam, w, h);
   const a = store.dataXY(x0, y0);
   const b = store.dataXY(x1, y1);
-  store.setView({bbox: [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])], width: w, height: h});
+  store.setView({bbox: [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])], zoom: Math.log2(cam.scale), width: w, height: h});
   draw();
 }
 
