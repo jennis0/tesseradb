@@ -484,6 +484,9 @@ describe('the declared-map mirror', () => {
     expect(declaredLevelsAt(levels, 5)).toEqual([1, 2]);
     // A camera framed at zoom 5 that the round trip brought back a hair under it.
     expect(declaredLevelsAt(levels, 4.9999999)).toEqual([1, 2]);
+    // Zoomed out past 0: what zoom 0 declares.
+    expect(declaredLevelsAt(levels, -0.92)).toEqual([0, 2]);
+    expect(declaredLevelsAt(levels, -2)).toEqual([0, 2]);
   });
 });
 

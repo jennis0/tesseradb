@@ -110,7 +110,8 @@ export function wholeZoom(zoom: number): number {
  * @internal
  */
 export function declaredLevelsAt(layer: Pick<Layer, 'levels'>, zoom: number): number[] {
-  zoom = wholeZoom(zoom);
+  // A camera zoomed out past 0 shows what zoom 0 declares.
+  zoom = Math.max(0, wholeZoom(zoom));
   const declared = layer.levels;
   if (declared.length === 0) return [];
   if (!declared.some((d) => d.zoom !== null)) return declared.map((d) => d.level);

@@ -155,10 +155,11 @@ export type StoreOptions = {
    * per view, the least recently drawn leaving first; it defaults to `4096`.
    *
    * Artifacts are asked for by tile at a fixed depth, map zoom + 2, the zoom being the camera's as
-   * {@link ViewInput} gives it, rounded down; a tile is 128 to 256 pixels. One request names at most 558 tiles, the most a 3840 by 2160
-   * screen touches at that depth, or the deployment's `max_tiles_per_request` where that is fewer; a
-   * larger screen is asked for at zoom + 1, then coarser, until its tiles fit. So the tiles in view
-   * times `perTile` bounds the artifacts one level draws. The depth does not follow the points'.
+   * {@link ViewInput} gives it, rounded down; a tile is 128 to 256 pixels. One request names at most
+   * 558 tiles, the most a 3840 by 2160 screen touches at that depth, or the deployment's
+   * `max_tiles_per_request` where that is fewer; a larger screen is asked for at zoom + 1, then
+   * coarser, until its tiles fit. So the tiles in view times `perTile` bounds the artifacts one
+   * level draws. The depth does not follow the points'.
    */
   artifacts?: {perTile?: number; budget?: number; heldTiles?: number};
   /**
@@ -1712,6 +1713,7 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function setView(input: ViewInput): void {
+    if (!Number.isFinite(input.zoom)) throw new TypeError(`setView was given zoom ${String(input.zoom)}: ViewInput.zoom is required, the camera's zoom as a finite number`);
     lastView = {input};
     // From here the request's own status transitions answer for the status.
     awaitingSwitchFrame = false;

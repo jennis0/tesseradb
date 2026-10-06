@@ -1,6 +1,6 @@
 import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
-import {createStore, type Store} from '../src/store.js';
+import {createStore, type Store, type ViewInput} from '../src/store.js';
 import type {FilterDraft} from '../src/filters.js';
 import {withMember} from '../src/members.js';
 import {artifactName} from '../src/names.js';
@@ -704,6 +704,72 @@ describe('the depth artifacts are asked at', () => {
     const xs = edge[0]!.tiles!.map((t) => tileXY(t, 4).x);
     expect(Math.min(...xs)).toBe(0);
     expect(Math.max(...xs)).toBe(9);
+  });
+
+  it('recovers the camera from a box clamped on the right or on y, asking only the tiles shown', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewportArtifacts} = fakeClient(() => response('ck'));
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
+    await clock.advance(1);
+    store.setLayers(['clusters/a']);
+    const look = async (target: [number, number], zoom: number, width: number, height: number) => {
+      const wb = worldBbox({target, zoom, width, height}, 1);
+      const [x0, y0] = store.dataXY(wb[0], wb[1]);
+      const [x1, y1] = store.dataXY(wb[2], wb[3]);
+      const before = viewportArtifacts.mock.calls.length;
+      store.setView({bbox: [x0, y0, x1, y1], zoom, width, height});
+      await clock.advance(600);
+      scheduler.flush();
+      return viewportArtifacts.mock.calls.slice(before).map((c) => c[1]);
+    };
+    const range = (tiles: bigint[], depth: number, axis: 'x' | 'y') => {
+      const v = tiles.map((t) => tileXY(t, depth)[axis]);
+      return [Math.min(...v), Math.max(...v)];
+    };
+    // Against the right edge at zoom 2, a 1920 by 1080 canvas spans 480 by 270 world units. From
+    // x 462 it shows x 222 to 512, tiles 6 to 15 of depth 4, and y 121 to 391, tiles 3 to 12.
+    const right = await look([462, 256], 2, 1920, 1080);
+    expect(right.map((r) => r.zoom)).toEqual([4]);
+    expect(range(right[0]!.tiles!, 4, 'x')).toEqual([6, 15]);
+    expect(range(right[0]!.tiles!, 4, 'y')).toEqual([3, 12]);
+    // Clamped on y at the top: a 1000 by 2000 canvas at zoom 2 from y 100 shows y 0 to 350, tiles
+    // 0 to 10, and x 131 to 381, tiles 4 to 11.
+    const top = await look([256, 100], 2, 1000, 2000);
+    expect(top.map((r) => r.zoom)).toEqual([4]);
+    expect(range(top[0]!.tiles!, 4, 'y')).toEqual([0, 10]);
+    expect(range(top[0]!.tiles!, 4, 'x')).toEqual([4, 11]);
+  });
+
+  it('shows a ranged layer’s zoom-0 levels when zoomed out past 0, as a 480-pixel canvas fitted to the world is', async () => {
+    const ranged = meta({
+      ...META,
+      layers: [layer('admin', {computedContent: ['centroid', 'box'], hierarchy: {kind: 'tiered', pruneChildren: false}, levels: [{level: 0, title: '', zoom: [0, 4]}, {level: 1, title: '', zoom: [5, 16]}]})]
+    });
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewportArtifacts} = fakeClient(() => response('ck'), ranged);
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
+    await clock.advance(1);
+    store.setLayers(['admin']);
+    // Fitted: the whole world in 480 pixels is zoom log2(480 / 512), about -0.09.
+    store.setView(camera(ranged.views[0]!.quantisation, [0, 0, 100, 200], 640, 480));
+    await clock.advance(600);
+    scheduler.flush();
+    expect(viewportArtifacts.mock.calls.at(-1)![1]).toMatchObject({zoom: 1, levels: [0]});
+    store.setView({bbox: [0, 0, 100, 200], zoom: -0.92, width: 640, height: 480});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(viewportArtifacts.mock.calls.at(-1)![1]).toMatchObject({zoom: 1, levels: [0]});
+  });
+
+  it('refuses a camera with no zoom, saying it is required', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
+    await clock.advance(1);
+    expect(() => store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400} as unknown as ViewInput)).toThrow(TypeError);
   });
 
   it('reads a camera framed at a whole zoom as that zoom', async () => {
