@@ -30,6 +30,8 @@ export type AppState = {
   depthChoice: (DepthChoice & {requestedAt: number}) | null;
   /** Target marks on screen. */
   budget: number;
+  /** The most artifacts one level shows in one tile, which the session's store was opened with. */
+  artifactsPerTile: number;
   /** Calibrated marks-per-tile; seeded from `theta_target_marks` and corrected downward only. */
   mTarget: number;
   lastVisibleInView: number | null;

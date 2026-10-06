@@ -3,13 +3,15 @@
 A label is an Accumulo visibility expression without negation, or `public`. A term is written bare
 when it is made of ASCII letters, digits and `_ - . : /`, and otherwise in double quotes, where
 `\\"` and `\\\\` are the only escapes. `&` is conjunction and `|` is disjunction, and one bracket may
-not mix them. Whitespace before and after the whole label is ignored, and whitespace between tokens
-is refused. A quoted term is the text between its quotes, spaces included, with its escapes
-applied.
+not mix them. Whitespace outside quotes separates tokens and is otherwise ignored; two operands
+with only whitespace between them are refused. A quoted term is the text between its quotes, inner
+spaces included, with its escapes applied.
 
 A label is refused when it is empty, when brackets nest more than 256 deep, when a term holds a
-control character, and when a term equals `public` or `inherited` ignoring ASCII case. `public` is
-accepted only as the whole label, and every principal satisfies it. `inherited` is never a label.
+control character, when a quoted term starts or ends with whitespace, which no credential's
+trimmed term can equal, and when a term equals `public` or `inherited` ignoring ASCII case.
+`public` is accepted only as the whole label, and every principal satisfies it. `inherited` is
+never a label.
 
 This module evaluates the tree as written, by direct recursion. It does not normalise, share
 subexpressions or number terms, so agreeing with the engine's label DAG is evidence about both.
@@ -197,6 +199,12 @@ class _Reader:
         self.at = 0
 
     def peek(self) -> str | None:
+        """The next character outside whitespace, moving past the whitespace before it."""
+        while self.at < len(self.text) and self.text[self.at] in WHITESPACE:
+            self.at += 1
+        return self.peek_raw()
+
+    def peek_raw(self) -> str | None:
         return self.text[self.at] if self.at < len(self.text) else None
 
     def expression(self, depth: int):
@@ -232,7 +240,7 @@ class _Reader:
             return _term(self.quoted())
         if c is not None and c in BARE:
             start = self.at
-            while self.peek() is not None and self.peek() in BARE:
+            while self.peek_raw() is not None and self.peek_raw() in BARE:
                 self.at += 1
             return _term(self.text[start:self.at])
         raise Refused(f"expected a term at {self.at}")
@@ -240,14 +248,14 @@ class _Reader:
     def quoted(self) -> str:
         self.at += 1
         name = []
-        while (c := self.peek()) != '"':
+        while (c := self.peek_raw()) != '"':
             if c is None:
                 raise Refused("unclosed quote")
             if c == "\\":
                 self.at += 1
-                if self.peek() not in ('"', "\\"):
+                if self.peek_raw() not in ('"', "\\"):
                     raise Refused(f"bad escape at {self.at}")
-                c = self.peek()
+                c = self.peek_raw()
             name.append(c)
             self.at += 1
         self.at += 1
@@ -259,6 +267,8 @@ def _term(name: str) -> Term:
         raise Refused("empty term")
     if any(unicodedata.category(c) == "Cc" for c in name):
         raise Refused(f"control character in {name!r}")
+    if name.strip(WHITESPACE) != name:
+        raise Refused(f"whitespace at an end of {name!r}")
     if name.isascii() and name.lower() in (PUBLIC, INHERITED):
         raise Refused(f"{name!r} is reserved")
     return Term(name)

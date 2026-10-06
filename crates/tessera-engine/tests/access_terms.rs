@@ -425,6 +425,153 @@ fn a_label_that_is_not_an_expression_refuses_the_build() {
     assert!(!dir.path().join("bundle").join("MANIFEST.json").exists());
 }
 
+/// [`expressions_of`]'s labels, written with whitespace round them and between their tokens.
+fn spaced_of(e: u64) -> Option<Vec<&'static str>> {
+    match e {
+        0 => Some(vec![" ir:analyst & ir:legal "]),
+        1 => Some(vec!["( ir:analyst |\tir:audit ) & eu"]),
+        2 => Some(vec!["ir:legal ", " ir:audit\u{a0}&\u{3000}eu"]),
+        3 => Some(vec![" public "]),
+        _ => Some(vec!["ir:analyst | ir:legal"]),
+    }
+}
+
+/// Credentials that between them tell every label of [`expressions_of`] from every other.
+const CREDENTIALS: [&[&str]; 8] = [
+    &[],
+    &["ir:analyst"],
+    &["ir:legal"],
+    &["ir:audit"],
+    &["eu"],
+    &["ir:analyst", "ir:legal"],
+    &["ir:audit", "eu"],
+    &["ir:analyst", "eu"],
+];
+
+/// **Whitespace outside quotes means nothing at a build**: a corpus whose labels are written with
+/// spaces round and between their tokens admits each credential to what the compact spelling
+/// admits it to.
+#[test]
+fn a_spaced_label_admits_at_a_build_whom_its_compact_spelling_admits() {
+    let compact = tempfile::tempdir().unwrap();
+    let spaced = tempfile::tempdir().unwrap();
+    for (dir, labels) in [
+        (&compact, expressions_of as fn(u64) -> Option<Vec<&'static str>>),
+        (&spaced, spaced_of),
+    ] {
+        write_points(&dir.path().join("points.parquet"), labels);
+        build(&args(
+            &dir.path().join("points.parquet"),
+            &dir.path().join("bundle"),
+            None,
+        ))
+        .expect("the corpus builds");
+    }
+    for terms in CREDENTIALS {
+        assert_eq!(
+            visible(spaced.path(), terms),
+            visible(compact.path(), terms),
+            "{terms:?}"
+        );
+    }
+}
+
+/// **Whitespace outside quotes means nothing at a running service either**, and a quoted term
+/// keeps its inner spaces: each label ingested spaced admits the credentials, and serves the card,
+/// that the same label ingested compact does, before and after a restart. A quoted `"team a"` is
+/// held by a credential presenting ` team a `, which is trimmed, and by no other spelling.
+#[test]
+fn a_spaced_label_ingested_admits_whom_its_compact_spelling_admits_across_a_restart() {
+    let (dir, engine) = expressions_engine();
+    let team = ["\"team a\"&eu", " \"team a\" & eu "];
+    let mut rows: Vec<(&[&str], (f64, f64))> = Vec::new();
+    for e in 0..N {
+        let at = 100.0 + 10.0 * e as f64;
+        rows.push((expressions_of(e).unwrap().leak(), (at, 100.0)));
+        rows.push((spaced_of(e).unwrap().leak(), (at, 200.0)));
+    }
+    rows.push((&team[..1], (300.0, 100.0)));
+    rows.push((&team[1..], (300.0, 200.0)));
+    let ids = create(&engine, "spaced", &rows);
+    engine.request_flush();
+    wait_until("the flush to publish", std::time::Duration::from_secs(30), || {
+        engine.write_executor_stats().flushes >= 1
+    });
+
+    let check = |engine: &Engine| {
+        let presented = CREDENTIALS.iter().copied().chain([
+            &[" team a ", "eu"][..],
+            &["team  a", "eu"],
+            &["team a"],
+        ]);
+        for terms in presented {
+            let session = engine.authorise(&credential(terms)).unwrap();
+            for pair in ids.chunks(2) {
+                let compact = engine.item(&session, pair[0]).unwrap().map(|c| c.labels);
+                let spaced = engine.item(&session, pair[1]).unwrap().map(|c| c.labels);
+                assert_eq!(spaced, compact, "{terms:?}");
+            }
+        }
+        let held = engine.authorise(&credential(&[" team a ", "eu"])).unwrap();
+        let card = engine.item(&held, ids[2 * N as usize]).unwrap().expect("`team a` is held");
+        assert_eq!(card.labels, ["eu&\"team a\""]);
+        let other = engine.authorise(&credential(&["team  a", "eu"])).unwrap();
+        assert!(engine.item(&other, ids[2 * N as usize]).unwrap().is_none());
+    };
+    check(&engine);
+    drop(engine);
+    let reopened = open_engine(
+        &dir.path().join("bundle"),
+        &dir.path().join("cache"),
+        &dir.path().join("wal.log"),
+    );
+    check(&reopened);
+}
+
+/// **A quoted term with whitespace at either end is refused** where a point's label is written,
+/// at a build and at ingest, since a credential's terms are trimmed and none could hold it. The
+/// same term with the spaces inside it is accepted.
+#[test]
+fn a_quoted_term_with_spaces_at_its_ends_is_refused_as_a_points_label() {
+    for label in ["\"ir:legal \"", "eu&\" team a\""] {
+        let dir = tempfile::tempdir().unwrap();
+        write_points(&dir.path().join("points.parquet"), |e| match e {
+            2 => Some(vec![label]),
+            _ => expressions_of(e),
+        });
+        build(&args(
+            &dir.path().join("points.parquet"),
+            &dir.path().join("bundle"),
+            None,
+        ))
+        .expect_err(label);
+        assert!(!dir.path().join("bundle").join("MANIFEST.json").exists());
+    }
+
+    let (_dir, engine) = expressions_engine();
+    for (batch, label) in [("edge", "eu&\"team a \""), ("inner", "eu&\"team a\"")] {
+        let mut body_hash = [0u8; 32];
+        body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
+        let outcome = engine.ingest(IngestRequest {
+            batch_id: batch.to_string(),
+            body_hash,
+            view: Some("s0".to_string()),
+            rows: vec![IngestRow {
+                tessera_id: None,
+                labels: Some(vec![label.as_bytes().to_vec()]),
+                position: Some((30.0, 30.0)),
+                scalars: Vec::new(),
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+            strict: false,
+            tessera_id_column: false,
+        });
+        assert_eq!(outcome.is_ok(), batch == "inner", "{label}");
+    }
+}
+
 /// Collects the pages of one bulk read.
 #[derive(Default)]
 struct Pages(Vec<RecordBatch>);

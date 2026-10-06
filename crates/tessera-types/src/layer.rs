@@ -2038,8 +2038,8 @@ mod tests {
     }
 
     /// A layer's labels are checked where the declaration is, so the build and a running service
-    /// refuse the same words: an empty label, `inherited` where a label is expected, and an empty
-    /// field.
+    /// refuse the same words: an empty label, `inherited` where a label is expected, a quoted term
+    /// with whitespace at an end, and an empty field.
     #[test]
     fn a_layers_labels_are_refused_where_they_cannot_be_read() {
         let mut d = decl(HierarchyKind::Flat, vec![]);
@@ -2048,6 +2048,14 @@ mod tests {
 
         let mut d = decl(HierarchyKind::Flat, vec![]);
         d.visibility = Some("inherited".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some("\"team a \"".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.artifact_visibility.default = MemberDefault::Label("eu&\" team a\"".into());
         assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
 
         let mut d = decl(HierarchyKind::Flat, vec![]);

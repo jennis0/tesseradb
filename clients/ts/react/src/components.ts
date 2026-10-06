@@ -20,11 +20,9 @@ import {createComponent, type EventName} from '@lit/react';
 import * as React from 'react';
 import {
   TesseraArtifactCard as ArtifactCardElement,
-  TesseraClusterFilter as ClusterFilterElement,
   TesseraCount as CountElement,
   TesseraExplorer as ExplorerElement,
   TesseraFieldCard as FieldCardElement,
-  TesseraFilter as FilterElement,
   TesseraFilterPanel as FilterPanelElement,
   TesseraHierarchy as HierarchyElement,
   TesseraItemCard as ItemCardElement,
@@ -130,10 +128,6 @@ export const TesseraCount = wrap('tessera-count', CountElement, {});
  * (`tessera-close`) and `onViewFollow` (`tessera-viewfollow`).
  */
 export const TesseraItemCard = wrap('tessera-item-card', ItemCardElement, {onOpen: ev('tessera-open'), onClose: ev('tessera-close'), onViewFollow: ev('tessera-viewfollow')});
-/** `<tessera-filter>` as a React component. Event prop: `onFilterChange` (`tessera-filterchange`). */
-export const TesseraFilter = wrap('tessera-filter', FilterElement, {onFilterChange: ev('tessera-filterchange')});
-/** `<tessera-cluster-filter>` as a React component. Event prop: `onClauseChange` (`tessera-clausechange`). */
-export const TesseraClusterFilter = wrap('tessera-cluster-filter', ClusterFilterElement, {onClauseChange: ev('tessera-clausechange')});
 /**
  * `<tessera-filter-panel>` as a React component. Event props: `onFilterChange`
  * (`tessera-filterchange`), `onChipOpen` (`tessera-chipopen`), and from its cards
@@ -190,11 +184,9 @@ export const TesseraHierarchy = wrap('tessera-hierarchy', HierarchyElement, {onC
 
 export type {
   ArtifactCardElement,
-  ClusterFilterElement,
   CountElement,
   ExplorerElement,
   FieldCardElement,
-  FilterElement,
   FilterPanelElement,
   HierarchyElement,
   ItemCardElement,

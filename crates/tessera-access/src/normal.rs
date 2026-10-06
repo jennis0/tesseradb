@@ -162,12 +162,16 @@ mod tests {
     fn the_canonical_text_parses_to_the_same_label() {
         for text in [
             "a&(b|\"c d\")",
+            " a & ( b | \"c d\" ) ",
             "(x&y)|(p&(q|r))|z",
             "\"a\\\\\"|b",
             "public",
         ] {
             let label = Label::parse(text, DEFAULT_MAX_NODES).unwrap();
-            let again = Label::parse(&label.canonical(), DEFAULT_MAX_NODES).unwrap();
+            let canonical = label.canonical();
+            let outside_quotes = canonical.split('"').step_by(2).collect::<String>();
+            assert!(!outside_quotes.contains(char::is_whitespace), "{canonical}");
+            let again = Label::parse(&canonical, DEFAULT_MAX_NODES).unwrap();
             assert_eq!(again, label, "{text}");
         }
     }

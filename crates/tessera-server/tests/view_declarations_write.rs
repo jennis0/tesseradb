@@ -433,6 +433,23 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
     let (status, body) = declare_view(&served, "bad_gate", empty_element).await;
     assert_eq!(status, 422, "{body}");
 
+    // A quoted term with whitespace at an end is one no credential holds.
+    let mut edge = embedding();
+    edge["visibility"] = json!(["0", "\"team a \""]);
+    let (status, body) = declare_view(&served, "bad_gate", edge).await;
+    assert_eq!(status, 422, "{body}");
+    let mut edge_group = quarter();
+    edge_group["visibility"] = json!("\" team a\"");
+    let (status, body) = declare_group(&served, "bad_group", edge_group).await;
+    assert_eq!(status, 422, "{body}");
+    let (status, body) = put(
+        &served,
+        "/control/views/gated_group/edge",
+        json!({ "visibility": ["0&\"1 \""], "metadata": { "label": "E" } }),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+
     // The stored gate is the list as written, so a view gated on a label this session holds is
     // served and one gated on a label it does not is a 404.
     let token = token_for(&served.server, &["0"][..]).await;
@@ -505,15 +522,13 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
 /// **`point_visibility.default` is read as an access expression**, on the gate's rule: it is
 /// given to every point that carries no label of its own (decision 0133), so a label that is not
 /// one would put those points in no principal's mask, and the refusal belongs at the
-/// declaration rather than at every batch. `inherited` and the empty string are the build's own
-/// two refusals, transcribed.
+/// declaration rather than at every batch. The empty string, `inherited` and a quoted term with
+/// whitespace at an end are refused, as the build refuses them.
 #[tokio::test]
 async fn a_point_default_is_read_as_an_expression_on_both_routes() {
     let served = Served::build(|dir| build_fixture(dir, N)).await;
 
-    // What the cases below cover is the pair the build refuses too, by the rule
-    // `declared_visibility` applies to a gate.
-    for default in ["", "inherited"] {
+    for default in ["", "inherited", "\"0 \""] {
         let mut view = embedding();
         view["point_visibility"] = json!({ "default": default });
         let (status, body) = declare_view(&served, "bad_default", view).await;
@@ -533,9 +548,10 @@ async fn a_point_default_is_read_as_an_expression_on_both_routes() {
 }
 
 /// **Declared words are stored trimmed**, on both routes: a padded gate is the same declaration
-/// as its trimmed spelling, a view gated ` 0 ` is reached by a credential holding `0`, a gate of
-/// ` public ` is no gate, and a padded point default is given to an unlabelled row as its label,
-/// before and after a restart.
+/// as its trimmed spelling, a view gated ` 0 ` is reached by a credential holding `0`, a gate
+/// spaced between its tokens is the compact gate, a gate of ` public ` is no gate, and a spaced
+/// point default holding a quoted `"team a"` is given to an unlabelled row as its label, reached
+/// by a credential presenting ` team a `, before and after a restart.
 #[tokio::test]
 async fn padded_gates_and_point_defaults_are_stored_trimmed() {
     let served = Served::build(|dir| build_fixture(dir, N)).await;
@@ -546,6 +562,13 @@ async fn padded_gates_and_point_defaults_are_stored_trimmed() {
     let mut same = embedding();
     same["visibility"] = json!("0");
     assert_eq!(declare_view(&served, "gated", same).await.0, 200, "the gate is stored trimmed");
+
+    let mut spaced = embedding();
+    spaced["visibility"] = json!(" 0 & ( 1 | 2 ) ");
+    assert_eq!(declare_view(&served, "spaced", spaced).await.0, 201);
+    let mut same = embedding();
+    same["visibility"] = json!("0&(1|2)");
+    assert_eq!(declare_view(&served, "spaced", same).await.0, 200, "spaces are not stored");
 
     let mut open = embedding();
     open["visibility"] = json!([" public "]);
@@ -568,7 +591,7 @@ async fn padded_gates_and_point_defaults_are_stored_trimmed() {
     assert_eq!(status, 201, "{body}");
 
     let mut defaulted = embedding();
-    defaulted["point_visibility"] = json!({ "default": " 5 " });
+    defaulted["point_visibility"] = json!({ "default": " 5 | \"team a\" " });
     assert_eq!(declare_view(&served, "defaulted", defaulted).await.0, 201);
     let resp = served
         .server
@@ -627,7 +650,12 @@ async fn padded_gates_and_point_defaults_are_stored_trimmed() {
         assert!(!one.contains(&"gated".to_string()), "{one:?}");
         assert!(one.contains(&"open".to_string()), "{one:?}");
         assert!(one.contains(&"gated_group:k".to_string()), "{one:?}");
-        assert_eq!(count_for(served, &["5"]).await, 1, "the default is stored as `5`");
+        assert!(!zero.contains(&"spaced".to_string()), "{zero:?}");
+        let zero_two = views_for(served, &["0", "2"]).await;
+        assert!(zero_two.contains(&"spaced".to_string()), "{zero_two:?}");
+        assert_eq!(count_for(served, &["5"]).await, 1, "the default is stored as `5|\"team a\"`");
+        assert_eq!(count_for(served, &[" team a "]).await, 1, "a held term is trimmed");
+        assert_eq!(count_for(served, &["team  a"]).await, 0);
         assert_eq!(count_for(served, &["0"]).await, 0);
     }
     assert_trimmed(&served).await;

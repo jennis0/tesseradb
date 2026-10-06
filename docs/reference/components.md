@@ -16,8 +16,8 @@ The `tessera-*` custom elements, in the `@tesseradb/components` package, built w
 | [`<tessera-key-picker>`](components/tessera-key-picker.md) | Chooses the view within the current group. |
 | [`<tessera-filter-panel>`](components/tessera-filter-panel.md) | The field cards, what they count, and the clauses applied. |
 | [`<tessera-field-card>`](components/tessera-field-card.md) | One field's counts in view and overall, with its filter and highlight. |
-| [`<tessera-filter>`](components/tessera-filter.md) | One filter control, drawn by the column's type. |
-| [`<tessera-cluster-filter>`](components/tessera-cluster-filter.md) | One layer's clusters as a filter field. |
+| [`<tessera-filter>`](components/tessera-filter.md) | A field card's search box. |
+| [`<tessera-cluster-filter>`](components/tessera-cluster-filter.md) | A layer's field card's search box. |
 | [`<tessera-selection>`](components/tessera-selection.md) | The selected region's counts, marks and actions. |
 | [`<tessera-item-card>`](components/tessera-item-card.md) | The selected item's fields, with Open and Copy id. |
 | [`<tessera-artifact-card>`](components/tessera-artifact-card.md) | The opened artifact, with its lineage and its filter buttons. |

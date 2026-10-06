@@ -36,13 +36,16 @@ composes against what it produced.*
 
 An operator declares an access label on each item. A label is an access expression over terms, in
 the grammar Accumulo's visibility labels use, without negation: `secret&(team_a|team_b)`. A term
-is written bare when it consists of letters, digits and `_ - . : /`, and otherwise in double
-quotes, with `\"` and `\\` as escapes. `&` is conjunction and `|` is disjunction, and mixing the
-two needs brackets: `a&b|c` is refused and `(a&b)|c` is accepted. Whitespace between tokens is
-refused, and a quoted term is taken exactly as written. `public` is reserved, is valid only as the
-whole label, and admits every viewer. A term that equals `public` or `inherited` ignoring case, or
-holds a control character, is refused. An item, a view or an artifact may carry a list of labels,
-and admits a viewer who satisfies any one of them.
+is written bare when it consists of ASCII letters, digits and `_ - . : /`, and otherwise in
+double quotes, with `\"` and `\\` as escapes. `&` is conjunction and `|` is disjunction, and mixing
+the two needs brackets: `a&b|c` is refused and `(a&b)|c` is accepted. Unicode whitespace outside
+quotes is ignored, so `secret & ( team_a | team_b )` is the same label; two operands with only
+whitespace between them are refused. A quoted term is taken exactly as written, so `"team a"`
+holds a space. A credential's terms are trimmed, so a quoted term with whitespace at either end
+could never be held, and it is refused where it is written. `public` is reserved, is valid only as
+the whole label, and admits every viewer. A term that equals `public` or `inherited` ignoring
+case, or holds a control character, is refused. An item, a view or an artifact may carry a list
+of labels, and admits a viewer who satisfies any one of them.
 
 One parser in `tessera-access` reads every label: an item's access column at a build, the `access`
 of an ingest row, a view's, a group's or a layer's `visibility`, an artifact's own label, and a
