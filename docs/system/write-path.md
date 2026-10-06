@@ -620,10 +620,10 @@ follow the same pattern.
 | | Flush | Merge | Compaction |
 |---|---|---|---|
 | A session's cached projection | Extended forward with the new rows; nothing already cached becomes wrong | Rebuilt for the rows inside the merged span; the rest is untouched, because only that span renumbers | Invalid everywhere at the flip. The next request reads a projection the background pass has already rebuilt or, if the pass has not reached that session yet, rebuilds it then, exactly as a newly opened session's request would |
-| Artifacts | Untouched. A flush appends rows it does not hold | Untouched. A merge renumbers rows it does not hold | Rebuilt inside the compaction, the only operation that invalidates it |
+| An annotation level's rows | A level held in memory takes the labels of the flushed rows, so their items count from this flush. The stored column is not rewritten | A level held in memory is relabelled within the merged span when the merge is published | Each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows, and every grant's [figures](serving.md#a-levels-figures) for the level are walked again on their next read |
 
 *What each stage of the write path does to a session's cached row-space projection and to an
-artifact's stored membership.*
+annotation level's rows.*
 
 ## Restart and recovery
 

@@ -19,11 +19,11 @@ therefore one contiguous run of rows, and a count over it is bitmap arithmetic a
 viewer's own visible set rather than a scan of the tile's contents.
 
 A request can also carry a cap on how many points to return per tile (`k`), a filter, a highlight,
-which annotation layers to answer for, and how many levels deeper than the requested zoom to
-compute an exact sub-cell grid for (`underlay_offset`). Naming more tiles than a published ceiling
-allows, nesting a filter expression deeper than the deployment permits, or asking for a sub-cell
-depth or budget past its own ceiling, is refused rather than clamped: an oversized request is
-refused outright, never answered with less than it asked for.
+which annotation layers to tag the points with, and how many levels deeper than the requested zoom
+to compute an exact sub-cell grid for (`underlay_offset`). Naming more tiles than a published
+ceiling allows, nesting a filter expression deeper than the deployment permits, or asking for a
+sub-cell depth or budget past its own ceiling, is refused rather than clamped: an oversized request
+is refused outright, never answered with less than it asked for.
 
 ```mermaid
 flowchart LR
@@ -33,11 +33,10 @@ flowchart LR
   per --> count["counts:<br/>visible, matched, highlighted"]
   per --> sample["sampled points<br/>floor, threshold, cap"]
   per --> cells["sub-cell counts"]
-  per --> arts["artifacts and labels<br/>gated on the visible set"]
+  sample --> tags["each point's artifact<br/>in each layer named"]
   count --> resp["one framed response"]
-  sample --> resp
+  tags --> resp
   cells --> resp
-  arts --> resp
 ```
 
 *A viewport request resolves to tiles, each a contiguous row range answered against the viewer's
@@ -59,9 +58,12 @@ conformance test compares these values with the source corpus for every item, ov
 columns, a timestamp and a bool that hold both absences and genuine zeros, with absences written
 by the build and by a flush, live, after a restart and after a fold.
 
-Where a request names annotation layers, the response also carries the artifacts those layers
-serve inside the requested tiles: clusters, hulls, regions, hierarchy nodes. Each artifact exists
-for this viewer or it does not; that does not depend on which points are drawn.
+Where a request names annotation layers, each point carries, for each of them, the `tessera_id` of
+the artifact it belongs to that this viewer is served, the deepest where the layer has several, or a
+null. A `nested` or `dag` layer's tags are cut to the request's `artifact_budget`, so a tag can name
+an ancestor of the artifact the point belongs to. A client colours points by a layer from these
+tags. The artifacts themselves, with their counts, centroids and boxes, are not in a viewport
+response. They are read tile by tile from [their own route](#the-artifacts-in-each-tile).
 
 ## The visible set and the filtered set
 
@@ -136,6 +138,62 @@ too few for the widest band is read from the full identity column. Either way th
 the same. A deletion or suppression takes effect through the visible set, so nothing in the bands
 changes when one is accepted.
 
+## The artifacts in each tile
+
+`POST /v1/artifacts/viewport` answers which artifacts lie in each tile: clusters, regions, hierarchy
+nodes and their labels. It names a view, a zoom and either a bounding box or a list of tiles, as a
+viewport request does, with the layers to answer for and a quota, `per_tile`, which is required. A
+request may also name the levels of each layer to answer for, by default those whose declared zoom
+range holds the request's zoom; which of `centroid` and `box` to serve, as `computed`, narrowing
+what the layer declares; a filter and a highlight; and a budget for `nested` and `dag` layers. A
+`per_tile` above `selection.max_artifacts_per_tile` in `/v1/meta` is refused, as is a request for a
+shape, which is read by an artifact's `tessera_id` instead.
+
+For each tile, and each level of a `flat`, `stacked` or `tiered` layer, the response holds the
+artifacts this viewer is served that have a member the viewer can see in the tile, at most
+`per_tile` of them. They are ordered by the viewer's count of each artifact's visible members over
+the whole view, largest first, and then by `tessera_id`
+([annotations](annotations.md#how-many-artifacts-a-tile-shows)). An artifact with visible members
+in several tiles is in each tile's frame, with the same count, centroid and box. Every number is
+taken over all of the artifact's members this viewer can see, wherever they lie, so a client
+holding several tiles can draw an artifact once. The filter and highlight flags are the exception:
+each is taken over the artifact's visible members inside the tile. A filter changes nothing else,
+and a filtered request serves the same artifacts with the same counts.
+
+A `nested` or `dag` layer is answered over all the requested tiles together, cut to the request's
+budget by serving ancestors in place of their descendants, as one frame with no tile. A dependent
+artifact is served in a tile only where its target is in that tile's frame or in the frame for
+those layers, when the request also names the target's layer.
+
+### How a client asks for a layer
+
+The TypeScript store asks for the artifacts of the layers it draws by tile, at a depth of the
+camera's zoom rounded down, plus two, so a tile is 128 to 256 pixels across. The depth stops at 16,
+so from a camera zoom of 15 a tile is wider than 256 pixels. A request names at
+most 558 tiles, the most a 3840 by 2160 screen touches at that depth, or
+`selection.max_tiles_per_request` where that is fewer, and a larger screen is asked for one depth
+coarser, then another, until its tiles fit. The store has no quota of its own: a host sets
+`artifacts.perTile` when it creates the store, and without it a drawn layer shows nothing and the
+store says what to set. So the tiles in view times `perTile` bounds the artifacts one level draws.
+
+Each tile's frame depends only on the tile, the layers the request names, their levels, the filter
+and the response's identity and content keys. The layers named matter because a dependent is served
+only where its target is in the frame. The store holds each frame by filter, depth and tile, and
+records inside it which layer and level pairs it answered. A view that has settled asks only for the
+tiles it does not hold, the centre first. A `nested` or `dag` layer is cut over the whole request,
+so the store holds its frame for the view alone and asks for every tile each time. At idle the store
+asks for the ring of tiles around the view and for the view one depth coarser, so a pan or a step
+out draws from held tiles. Held tiles are capped, the least recently drawn leaving first, and all of
+them are dropped when either key changes. A layer the points are coloured by is named in the
+viewport request, so each point carries its tag. Where a tag names an artifact no held tile carries,
+such as one past a tile's quota, the store reads it with a bulk read by `ids`.
+
+The Python client reads the same route with `Viewer.viewport_artifacts` and
+`Database.viewport_artifacts`, each returning a `pyarrow.Table` with a `tile` column, and reads
+artifacts by identifier with `ids=` on `Viewer.artifacts` and `Database.artifacts`. `tessera
+artifacts --ids` does the same at the command line, which has no viewport command and so no tile
+route.
+
 ## Filters
 
 A filter is built from five families of predicate, one per kind of declared field:
@@ -169,12 +227,12 @@ timestamp field.
 
 A field declared unique ([data model](data-model.md#unique-fields)) answers `eq` and `in` from its
 unique index. The server looks up each named value, takes the items holding them, drops deleted
-items, and intersects the result with the viewer's visible set before any other clause reads it.
-An `in` naming a thousand values costs a thousand lookups in the index, and reads none of the
-field's other values. A holder the viewer may not see matches exactly as a value nobody holds. A unique field with
-neither `render` nor `index` has no other filter structure, so it takes `eq` and `in` alone, and any
-other operator on it is refused as an operator outside its family would be. `/v1/meta` lists the two
-operators as that field's `operands`.
+items, and intersects the result with the viewer's visible set before any other clause reads it. An
+`in` naming a thousand values costs a thousand lookups in the index, and reads none of the field's
+other values. A holder the viewer may not see matches exactly as a value nobody holds. A unique
+field with neither `render` nor `index` has no other filter structure, so it takes `eq` and `in`
+alone, and any other operator on it is refused as an operator outside its family would be.
+`/v1/meta` lists the two operators as that field's `operands`.
 
 A text search carries no relevance score and no ranking by how well an item matches, only a plain
 match or no match. A relevance ranking is ordinarily computed from how common each word is across
@@ -274,28 +332,29 @@ not see answer identically, both with a 404, so the response never distinguishes
 from "exists, but not for you."
 
 The response also says why this viewer sees the item, as a sorted list of clauses, each written as
-label text. The item's labels are read as one disjunction, as they are indexed
-([access control](access-control.md#how-labels-are-indexed)), so `a|(b&c)` and the list `a`,
-`b&c` give the same answer. Each term among its operands that the viewer holds is listed, and a
-`public` label gives `public`. Each conjunction among its operands that the viewer satisfies gives
-one clause of it, written as the held terms whose conjunction satisfies it. Within that
-conjunction, at each disjunction the satisfied operand with fewest terms, then the first in byte
-order, is taken. A held term that appears only inside a conjunction is not listed on its own. The
-answer depends on the item's labels and the viewer's terms and on no internal number. The response
-never names a whole conjunction, a clause the viewer does not
-satisfy, or a term the viewer does not hold. Learning that an item they can see also carries one of those would tell the viewer how
-the corpus is labelled beyond what they may see. A bulk read in stored order discloses part of what
-this withholds: which of the viewer's items share a full set of index keys, as
-[security](security.md#reading-in-bulk) states.
+label text. The item's labels are read as one disjunction, as they are indexed ([access
+control](access-control.md#how-labels-are-indexed)), so `a|(b&c)` and the list `a`, `b&c` give the
+same answer. Each term among its operands that the viewer holds is listed, and a `public` label
+gives `public`. Each conjunction among its operands that the viewer satisfies gives one clause of
+it, written as the held terms whose conjunction satisfies it. Within that conjunction, at each
+disjunction the satisfied operand with fewest terms, then the first in byte order, is taken. A held
+term that appears only inside a conjunction is not listed on its own. The answer depends on the
+item's labels and the viewer's terms and on no internal number. The response never names a whole
+conjunction, a clause the viewer does not satisfy, or a term the viewer does not hold. Learning that
+an item they can see also carries one of those would tell the viewer how the corpus is labelled
+beyond what they may see. A bulk read in stored order discloses part of what this withholds: which
+of the viewer's items share a full set of index keys, as [security](security.md#reading-in-bulk)
+states.
 
 ## Reading items and artifacts in bulk
 
 Two routes return in bulk what the map is computed from. `POST /v1/items` returns every item the
-viewer may see in one view that matches a filter, with the fields the caller names.
-`POST /v1/artifacts` returns every artifact of one layer the viewer is served, with the
-properties the caller names. Both answer with pages of Apache Arrow record batches, framed as a
-viewport response is. A caller reads a whole result by passing each response's cursor back in its
-next request until the cursor is null, and the server keeps nothing between requests.
+viewer may see in one view that matches a filter, with the fields the caller names. `POST
+/v1/artifacts` returns every artifact of one layer the viewer is served, or the ones a list of
+`tessera_id`s names, with the properties the caller names. Both answer with pages of Apache Arrow
+record batches, framed as a viewport response is. A caller reads a whole result by passing each
+response's cursor back in its next request until the cursor is null, and the server keeps nothing
+between requests.
 
 Every page is built from the latest published data, with the visible set composed again as a
 viewport composes it, so a deletion or suppression accepted during a read applies from the next
@@ -351,7 +410,12 @@ artifact remained, and the next request is refused as naming an unknown layer. A
 registered again under the same name is another layer, and a cursor from the first does not open
 for it.
 
-`level` reads one level of a levelled layer. `parent` reads the artifacts that name one artifact
+`ids` reads the artifacts those `tessera_id`s name, such as the tags on points a client holds no
+artifact for. An identifier the viewer is not served has no row, as one naming nothing does. A
+read by `ids` builds the figures of the levels its identifiers name and no others, with the levels
+of their parents where `parents` is asked for and the levels of their targets where a target or a
+filter needs them, so it does not wait for a walk of a level it does not read. `level` reads one
+level of a levelled layer. `parent` reads the artifacts that name one artifact
 among their parents, and a parent the viewer is not served answers as a parent with no children
 does. `q` keeps the artifacts whose key, or first text content the viewer is served, contains it,
 ignoring case, and cannot be combined with `parent`. A filter keeps the artifacts with at least one
@@ -406,9 +470,9 @@ An items response evaluates its filter over a stretch: the part of the view ahea
 range of map cells in map order or of item numbers in stored order. A read's first stretch spans a
 page's rows, held to a ceiling that `max_page_bytes` sets. Each time a stretch is used up, the next
 is four times longer, up to that ceiling, and a response stopped inside a stretch passes on one a
-quarter the size. Only the size travels in the cursor. Every response begins a fresh stretch, so a read
-evaluates its filter at least once per response. A sparse filter's stretches reach the ceiling in
-a few steps, and from then on the number of evaluations grows in proportion to the rows scanned.
+quarter the size. Only the size travels in the cursor. Every response begins a fresh stretch, so a
+read evaluates its filter at least once per response. A sparse filter's stretches reach the ceiling
+in a few steps, and from then on the number of evaluations grows in proportion to the rows scanned.
 
 A stretch's result is held in the row positions and the visible set it was evaluated under. A
 flush, merge or compaction renumbers the rows, and a deletion, a suppression or a refreshed
@@ -499,10 +563,10 @@ more bins than were asked for. The filter, the reference and any region play no 
 client drawing the same field over the viewport and over the filtered set gets the same edges for
 both, and the edges stay put as the filters change. The smallest and largest value are the field's
 figures, below, so they are exact and no visible value falls outside the bins. A client that sends
-the first answer's outer edges back as the range, with the number of bins it returned, gets the
-same edges, except for a timestamp binned by months or years. An integer's or a timestamp's edges are whole
-numbers worked out exactly, served as integers, so a value past 2^53 is placed as exactly as a small
-one; a range with a fractional bound has an integer field's bins cut and served as floats. A
+the first answer's outer edges back as the range, with the number of bins it returned, gets the same
+edges, except for a timestamp binned by months or years. An integer's or a timestamp's edges are
+whole numbers worked out exactly, served as integers, so a value past 2^53 is placed as exactly as a
+small one; a range with a fractional bound has an integer field's bins cut and served as floats. A
 grouping by bins has no cell level.
 
 A grouping by bins can ask for a sample size `s`. Where the set holds `N` items and `N` is more
@@ -621,7 +685,7 @@ An item card reads its labels through the same table.
 
 | corpus | key lists × fields tallied | file | open | compose one field |
 |---|---|---|---|---|
-| GBIF ladder, 25.8 million items | 252 × 1 | 93,063 B | in the bundle's open | first summary 0.9 ms, served |
+| a GBIF subset, 25.8 million items | 252 × 1 | 93,063 B | in the bundle's open | first summary 0.9 ms, served |
 | Overture, 73.6 million items | 405 × 2 | 296–300 KB | 0.16–0.22 ms | 0.07–0.16 ms |
 | Tree of Life, 233 million items | 474 × 0, 433 × 0 | 3.8 KB, 3.5 KB | 0.03 ms | none |
 
@@ -629,7 +693,7 @@ The key lists are each corpus's distinct access labels, counted from its sources
 one label an item. The Overture and Tree of Life rows were measured with `field_tallies_shape` on a
 file of their shape, each tally full, not on a built bundle. A tally takes about 370 bytes on
 disk; 100,000 key lists of two fields measured 74 MB, opened in 220 ms and composed one field in
-44 ms. Building the GBIF ladder took 70 to 79 s with the tallies and 70 to 79 s without,
+44 ms. Building that GBIF subset took 70 to 79 s with the tallies and 70 to 79 s without,
 the difference within the spread of two runs of each.
 
 **Not built yet:** a summary over a filtered set, which would need a walk of the set's values for
@@ -638,13 +702,13 @@ of integer fields by value; a grouping of one kind inside another of the same ki
 within cells; and counts across views. A caller asks for each such figure through `/v1/items`
 and computes it.
 
-The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps
-each aggregate a component registers with `Store.setAggregate` counted over the store's current
-filters and selected region, within the camera's area or over the whole visible set where the
-registration asks, and asks again when its request changes, as [clients](clients.md#what-a-registration-counts-and-when-it-is-asked-again)
-says. The Python client reads one with
-`Viewer.aggregate`, `Database.aggregate` and `Selection.aggregate`, each table a `pyarrow.Table`.
-Both follow the cursor until the result is whole.
+The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps each
+aggregate a component registers with `Store.setAggregate` counted over the store's current filters
+and selected region, within the camera's area or over the whole visible set where the registration
+asks, and asks again when its request changes, as
+[clients](clients.md#what-a-registration-counts-and-when-it-is-asked-again) says. The Python client
+reads one with `Viewer.aggregate`, `Database.aggregate` and `Selection.aggregate`, each table a
+`pyarrow.Table`. Both follow the cursor until the result is whole.
 
 `tessera aggregate` reads one grouping's table from a running server and writes it as Arrow
 IPC or Parquet, following the cursor as `tessera items` does.

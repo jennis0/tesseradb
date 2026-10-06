@@ -19,7 +19,7 @@ run them from `~/tessera-docker`, use ports 9161 to 9163 in place of 9151 to 915
 |---|---|---|---|
 | `path` | The bundle: every item, its position, its attributes, the search indexes and the identity key. The server writes to it as it runs, adding a segment each time it makes newly ingested items visible and rewriting it at each compaction | Ingest, until a compaction reclaims what deletions and merges left behind | The database. Restore it from a backup |
 | `wal` | The write-ahead log, which holds every change since the last flush into the bundle, in files named after this path: `wal-000001.log`, `wal-000001.sync` and so on | Writes, until the bundle holds them and the oldest files are deleted | Every change acknowledged since the last flush |
-| `cache` | Work the server can redo: each distinct grant's set of visible items, the name-search suggestions and scratch files | A pair of files for each distinct set of labels a viewer has been granted. A compaction deletes them | Nothing but time. The server rebuilds what it needs |
+| `cache` | Work the server can redo: each distinct grant's set of visible items, each grant's counts for the annotation layers it has read, the name-search suggestions and scratch files | A pair of files for each distinct set of labels a viewer has been granted, and under `figures/` a file for each grant and annotation level read, up to `figures_disk_bytes`. A compaction deletes them | Nothing but time. The server rebuilds what it needs |
 
 Back up the bundle and the log together, with the server stopped. A copy of one without the other
 is a database as it stood at some other moment.
@@ -72,27 +72,33 @@ asks for a new token.
 
 ## Memory
 
-The server holds five caches, each with a limit you can set under `[serve]`:
+The server holds these caches, each with a limit you can set under `[serve]`:
 
 | Key | Default | What it holds |
 |---|---|---|
 | `row_projection_cache_bytes` | 2 GiB | For each session, which rows of the bundle it may see |
 | `fragment_cache_bytes` | 1 GiB | For each distinct set of granted labels, the items it covers. Copies on disc in the cache directory outlive the memory |
-| `masked_count_cache_bytes` | 1 GiB | Visible member counts, centroids and boxes for annotation layers stored by row, one entry per grant and level. Per artifact: 4 B for counts alone, 40 B with a centroid and a box, and for a layer serving a box 4 B more plus 128 B for each artifact with more than sixteen placed rows. A level of 1.4 million artifacts is 56 MB a grant counted with geometry and at most 240 MB with a box, so the default holds four such grant-levels at the worst. Deployments where every user holds their own terms need one entry per user per level. An entry larger than the bound is served and not kept, which `masked_count_cache.not_admitted` on `/control/status` counts. Empty in a corpus without such a layer |
-| `figures_disk_bytes` | 8 GiB | The same entries, and the labels of denied rows they are corrected with, kept in the cache directory so a restart reads them back rather than walking each grant's rows again. Size it as the memory bound above times the number of grant-levels a restart should find, plus about 24 B per denied row per level. Past it, the files least recently written or read are removed |
+| `masked_count_cache_bytes` | 1 GiB | Visible member counts, centroids and boxes for annotation levels served from a column, one entry per grant and level. Per artifact: 4 B for counts alone, 40 B with a centroid and a box, and for a layer serving a box 4 B more plus 128 B for each artifact with more than sixteen placed rows. A level of 1.4 million artifacts is 56 MB a grant counted with geometry, and a layer serving a box keeps at most 185 MB more of reserves in a cache of its own, so the default holds the counts of about nineteen such grant-levels and the reserves of at least five. Deployments where every user holds their own terms need one entry per user per level. An entry larger than the bound is served and not kept, which `masked_count_cache.not_admitted` on `/control/status` counts. Empty in a corpus without such a layer |
+| `figures_disk_bytes` | 8 GiB | The same entries, and the labels of denied rows they are corrected with, kept in the cache directory, so a restart reads them back and does not walk each grant's rows again. Size it as the memory bound above times the number of grant-levels a restart should find, plus about 24 B per denied row per level. Past it, the files least recently written or read are removed |
 | `region_cache_bytes` | 256 MiB | Drawn filter regions broken into map tiles, shared between viewers |
 | `occupancy_cache_bytes` | 32 MiB | How many tiles at each zoom hold something a session can see |
+
+`masked_count_cache_bytes` bounds three caches, each to that size: the counts, the eight most
+extreme rows on each side kept for an annotation layer that serves a box, and the tallies of number
+and timestamp fields, which are under a kilobyte each. Beside them the server keeps what it
+subtracts and adds on each request for deleted and suppressed rows and for recently ingested ones,
+and the labels of denied rows, under fixed limits that come to 1.5 GiB.
 
 The paged reads, `POST /v1/items` and `POST /v1/artifacts`, share one limit. Two may run at once
 (`bulk_admission`), each holding up to seven pages of at most 64 MiB (`max_page_bytes`). The server
 logs what that comes to when it starts, as `bulk_read_memory_bytes=939524096`. With the defaults,
-the caches and paged reads come to about 4.4 GiB.
+the limits on the caches and the paged reads add up to about 8.7 GiB.
 
 The bundle itself is not loaded. The server maps its files, so their pages sit in the kernel's page
-cache and count towards the process's memory. When memory is short the kernel drops them, and
-reads them back from disc when a request needs them. Set the cap (`MemoryMax` under systemd, or a
-memory limit on the container) above the caches and paged reads together. Every gigabyte beyond that keeps more of the bundle in memory. A cap that is too low makes the
-server slower before it makes it fail.
+cache and count towards the process's memory. When memory is short the kernel drops them, and reads
+them back from disc when a request needs them. Set the cap (`MemoryMax` under systemd, or a memory
+limit on the container) above the caches and paged reads together. Every gigabyte beyond that keeps
+more of the bundle in memory. A cap that is too low makes the server slower before it makes it fail.
 
 `/control/status` shows what the process holds. `anon_bytes` is the caches and the allocator's own
 memory, and `file_bytes` is how much of the bundle is in memory:
@@ -122,6 +128,56 @@ other work on the same machine.
 A build sizes itself separately. `tessera build --memory-budget 24g` keeps the build's own
 structures within 24 GiB. Without it the build works out a budget from the memory the machine has
 free, which is too much if the server is running beside it.
+
+## Annotation layers and new viewers
+
+Plan for one cost when viewers first open an annotation layer. A grant is the set of labels a
+viewer holds, and every viewer holding the same set shares one. The cost falls on an annotation
+level served from a column, which holds one entry per row naming its artifacts. Unless the layer
+declares `layout = "rows"`, that is every level of a `flat`, `stacked` or `tiered` layer whose
+memberships are enumerated, every attribute layer's level, and a `nested`, `dag` or shape level of
+at least 1,000 artifacts of which a quarter are spread too widely for the map's index. The
+first time a viewer reads such a level under a grant the server has not seen, the server walks
+every row the last build or compaction wrote that the grant may see, and counts each artifact's
+members, with their positions where the layer serves a centroid or a box. Drawing a layer or
+listing its artifacts reads its levels. Colouring points by a layer reads them when the map then
+reads the artifacts its points are tagged with. Every later request under that grant reads the
+result, corrected for whatever has been deleted, suppressed or ingested since.
+
+The walk takes longer the more of the corpus the grant sees. On a bundle of the 3,495,729,729 GBIF
+occurrences, with 12 threads, under a 24 GB memory cap and starting with nothing in the page cache,
+one level of the taxonomy layer took:
+
+| viewer sees | family | genus | species |
+|---|---:|---:|---:|
+| 1% | 0.29 s | 0.24 s | 1.1 s |
+| 25% | 3.6 s | 2.2 s | 3.2 s |
+| everything | 8.8 s | 10.7 s | 12.5 s |
+
+*One run each, from `probes/2026-10-06-first-open-fills/`. The layer serves a centroid and a box.*
+
+So a viewer who sees 1% of that corpus waits between a fifth of a second and a second for each level
+the first time, and one who sees everything waits 9 to 12 seconds. A request that shows several
+levels for the first time fills them one after another. In the same runs, opening the map at its
+widest view with the family level took 1.8, 4.0 and 9.1 seconds for the three viewers, and the
+first view at zoom 9, which shows genus and species, took 2.7, 6.2 and 24.5 seconds. Most of the 1%
+viewer's 1.8 seconds went on testing which artifacts lie in each tile, not on the walk.
+
+A deployment whose viewers fall into a few groups pays the walk a few times for each level. A
+deployment in which every user holds labels of their own, such as a label per document, pays it for
+each user and each level they open.
+
+The result is written to the cache directory, and a restart reads it back. A compaction changes
+the bundle's identity, and each grant walks again the next time it reads each level.
+`figures_disk_bytes` decides how many results the directory keeps, and `masked_count_cache_bytes`
+how many stay in memory. `/control/status` counts walks under `masked_count_cache.fills` and
+results read back from disc under `masked_count_cache.loads`.
+
+The artifacts a map draws come from `POST /v1/artifacts/viewport`, which has an admission limit of
+its own, `artifact_admission`, one request per compute thread by default. A request past it, and
+past as many waiting, is answered 429, and `/control/status` counts those under
+`artifacts.shed_total`. `max_artifacts_per_tile`, 1,000 by default, is the most artifacts one
+request may ask for in each tile and level.
 
 ## Health and readiness
 
@@ -249,11 +305,15 @@ tessera$ curl -sS --unix-socket /run/tessera/control.sock \
 }
 ```
 
-Between compactions, a write can stall the write side in one case. When a growth gives a row a
-second artifact in a level the server answers from one label per row, the server rewrites that
-level's column as a list, and its member file with it, on the thread that applies writes. Other
-writes wait until it finishes. The member file alone takes about two and a half minutes a level at
-the scale of a 3.5-billion-row corpus. The next compaction writes both files again.
+Between compactions, a write can stall the write side in one case. When a growth, a publication, a
+flush or a merge leaves an item with a second artifact in a level the server answers from one label
+per row, and the server holds that level in memory, it rewrites the level's column as a list, and
+its member file with it, on the thread that applies writes. Other writes wait until it finishes.
+The member file alone takes about two and a half minutes a level at the scale of a 3.5-billion-row
+corpus. A level whose layer declares `layout = "column"`, and whose rows the server holds artifact
+by artifact, is served by artifact instead, with no rewrite. A level the server does not hold is
+composed as a list by the next request that reads it. The next compaction records the level as a
+list and writes both files again.
 
 [Compaction](../system/write-path.md#compaction) in the write-path chapter describes it in full.
 
