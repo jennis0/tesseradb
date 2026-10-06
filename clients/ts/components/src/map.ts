@@ -383,6 +383,11 @@ export class TesseraMap extends TesseraElement {
   /** The most marks a control for `budget` offers. The map sets no budget from it. */
   @property({type: Number, attribute: 'budget-max'}) accessor budgetMax = 2_000_000;
   /**
+   * The most clusters a `nested` or `dag` layer is cut to (`Store.setClusterBudget`). `0` at first
+   * leaves the store's; `0` after a budget was set clears it, to the finest cut.
+   */
+  @property({type: Number, attribute: 'cluster-budget'}) accessor clusterBudget = 0;
+  /**
    * Columns shown beneath a hovered point's title, space- or comma-separated. The map asks the
    * store for them with `setPointColumns`. Only a rendered column's value is in the marks; another
    * shows nothing.
@@ -649,6 +654,10 @@ export class TesseraMap extends TesseraElement {
         emit(this, 'tessera-layerchange', {layers: this.layers});
       }
       if (changed.has('budget') && this.budget > 0) s.setBudget(this.budget);
+      if (changed.has('clusterBudget')) {
+        if (this.clusterBudget > 0) s.setClusterBudget(this.clusterBudget);
+        else if ((changed.get('clusterBudget') ?? 0) > 0) s.setClusterBudget(null);
+      }
       if (changed.has('palette')) s.setPalette(this.palette);
       if (changed.has('tooltipFields') || changed.has('titleField')) this.askPointColumns(s);
       // The ground also sets the positional palette's lightness in the store.
@@ -793,6 +802,7 @@ export class TesseraMap extends TesseraElement {
     if (this.colourBy !== '') store.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
     if (this.layers) store.setLayers(this.layers);
     if (this.budget > 0) store.setBudget(this.budget);
+    if (this.clusterBudget > 0) store.setClusterBudget(this.clusterBudget);
     if (this.palette !== 'positional') store.setPalette(this.palette);
     this.pushColouring(store);
     this.pushSizing(store);

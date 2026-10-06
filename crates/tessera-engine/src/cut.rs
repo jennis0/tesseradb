@@ -1111,6 +1111,30 @@ pub fn cut_at(lineage: &Lineage, passing: &[u32], depth: u32, prune: bool) -> Ve
     Plan::new(lineage, passing, prune).serve_at(depth)
 }
 
+/// The nodes of `served` with no node of `served` beneath them on any path, ascending. A path may
+/// pass through nodes `served` does not hold. On a cut taken with `prune` off this is the cut's
+/// finest layer: what it draws with the ancestors it also draws left out.
+pub fn frontier_of(lineage: &Lineage, served: &[u32]) -> Vec<u32> {
+    let mut above: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+    let mut climb: Vec<u32> = served
+        .iter()
+        .flat_map(|&node| lineage.parents_of(node).iter().copied())
+        .collect();
+    while let Some(node) = climb.pop() {
+        if above.insert(node) {
+            climb.extend_from_slice(lineage.parents_of(node));
+        }
+    }
+    let mut frontier: Vec<u32> = served
+        .iter()
+        .copied()
+        .filter(|node| !above.contains(node))
+        .collect();
+    frontier.sort_unstable();
+    frontier.dedup();
+    frontier
+}
+
 /// `passing`, ascending and deduplicated — the flat case's whole answer.
 fn ascending(passing: &[u32]) -> Vec<u32> {
     let mut out = passing.to_vec();
@@ -1730,6 +1754,51 @@ mod tests {
             multi_parented > 200,
             "only {multi_parented} nodes drew two parents, so the DAG cases are nearly trees"
         );
+    }
+
+    /// **The frontier of a cut drawn with its ancestors is the cut's served nodes with no served
+    /// node beneath them on any path**, over random trees and DAGs, every budget; and a pruned
+    /// cut of a tree is its own frontier.
+    #[test]
+    fn the_frontier_keeps_the_served_nodes_with_nothing_served_beneath() {
+        let mut next = stream(0xF00D);
+        for case in 0..300 {
+            let dag = case % 2 == 1;
+            let n = 1 + (next() % 30) as u32;
+            let (lineage, parents) = random_lineage(&mut next, n, dag);
+            let passing: Vec<u32> = (0..n).filter(|_| !next().is_multiple_of(3)).collect();
+            let ancestors = |node: u32| -> BTreeSet<u32> {
+                let mut seen = BTreeSet::new();
+                let mut climb: Vec<u32> = parents[&node].clone();
+                while let Some(up) = climb.pop() {
+                    if seen.insert(up) {
+                        climb.extend(parents[&up].iter().copied());
+                    }
+                }
+                seen
+            };
+            for budget in [None, Some(1), Some(3), Some(8)] {
+                let whole = cut(&lineage, &passing, budget, false);
+                let covered: BTreeSet<u32> = whole.iter().flat_map(|&s| ancestors(s)).collect();
+                let expected: Vec<u32> =
+                    whole.iter().copied().filter(|s| !covered.contains(s)).collect();
+                assert_eq!(
+                    frontier_of(&lineage, &whole),
+                    expected,
+                    "case {case}, budget {budget:?}"
+                );
+                // On a DAG a pruned cut can draw a node beneath another, reached by a second
+                // parent at another depth; on a tree it never does.
+                let pruned = cut(&lineage, &passing, budget, true);
+                if !dag {
+                    assert_eq!(
+                        frontier_of(&lineage, &pruned),
+                        pruned,
+                        "case {case}, budget {budget:?}: a pruned cut of a tree is its own frontier"
+                    );
+                }
+            }
+        }
     }
 
     /// **On a DAG the served count is not monotone in depth** — two parents at depth 1 replaced by

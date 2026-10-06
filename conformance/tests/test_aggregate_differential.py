@@ -30,6 +30,11 @@ What this module covers:
   artifacts overlap, withheld by their own label, by a label no point carries, by the membership
   requirement and by the layer's default label, under that fixture's six principals, so `rest` and
   `none` count only what each principal is served.
+- **A tree's cut**, over the same fixture's `nested` layer, which draws ancestors beside their
+  descendants: `top` at a cut lists the drawn artifacts with nothing drawn beneath them, by
+  `oracle.aggregate.drawn_cut` and `frontier` over the artifacts each principal is served with a
+  visible member in the cut's tiles, at five zooms, boxes and budgets, with and without a region
+  filter, which changes the counts and never the artifacts drawn. `top` without a cut is refused.
 
 What it does not cover, so the gap is stated: a suppression between pages, and timing.
 """
@@ -416,8 +421,16 @@ def test_overlapping_and_withheld_artifacts_are_the_oracles(label_server, terms)
         assert all((layer, key) in every for key in members_of), f"{layer}: the widest is served all"
         groups = {every[(layer, key)]: members_of[key] for key in members_of if (layer, key) in served}
         named = [every[(layer, key)] for key in sorted(members_of)]
+        top: dict = {"layer": layer, "top": 3}
+        ranked = groups
+        if layer == lfx.TEAMS:
+            # A tree is ranked at a cut: the whole map at zoom 0, every artifact drawn, and of
+            # those the ones with nothing drawn beneath them.
+            top["cut"] = {"zoom": 0, "bbox": [0.0, 0.0, lfx.EXTENT_MAX, lfx.EXTENT_MAX]}
+            drawn = agg.drawn_cut(TEAM_PARENTS, {key for (name, key) in served if name == layer}, None, False)
+            ranked = {every[(layer, key)]: members_of[key] for key in agg.frontier(TEAM_PARENTS, drawn)}
         groupings = [
-            {"by": {"layer": layer, "top": 3}},
+            {"by": top},
             {"by": {"layer": layer, "artifacts": [str(i) for i in named]}},
         ]
         heads, tables = read_tables(
@@ -427,10 +440,85 @@ def test_overlapping_and_withheld_artifacts_are_the_oracles(label_server, terms)
             by = grouping["by"]
             pick = ("top", by["top"]) if "top" in by else ("named", named)
             want_head, want_rows = agg.table(
-                items=visible_items, reference=visible_items, groups=groups, pick=pick,
+                items=visible_items, reference=visible_items,
+                groups=ranked if "top" in by else groups, pick=pick,
                 listable=lambda key: key in groups, depth=None, position={},
             )
             what = f"{terms} / {layer} / {grouping}"
             served_head = {k: v for k, v in heads[index].items() if k not in ("grouping", "resumed")}
             assert served_head == want_head, f"{what}: head {heads[index]}"
             assert_rows_equal(tables[index], want_rows, what)
+
+
+# ---------------------------------------------------------------------------------------------
+# A tree's cut, over the own-label fixture's nested layer
+# ---------------------------------------------------------------------------------------------
+
+#: Each team's stored parents.
+TEAM_PARENTS = {key: [parent] if parent else [] for key, _m, _l, parent in lfx.TEAM_ROWS}
+LABEL_EXTENT = (0.0, lfx.EXTENT_MAX, 0.0, lfx.EXTENT_MAX)
+CUTS = [
+    {"zoom": 0, "bbox": [0.0, 0.0, lfx.EXTENT_MAX, lfx.EXTENT_MAX]},
+    {"zoom": 0, "bbox": [0.0, 0.0, lfx.EXTENT_MAX, lfx.EXTENT_MAX], "budget": 1},
+    {"zoom": 1, "bbox": [0.0, 0.0, lfx.EXTENT_MAX, lfx.EXTENT_MAX], "budget": 2},
+    {"zoom": 2, "bbox": [0.0, 0.0, 30000.0, 30000.0]},
+    {"zoom": 4, "bbox": [20000.0, 30000.0, 40000.0, 45000.0], "budget": 3},
+]
+LEFT = {"region": {"bbox": [0.0, 0.0, 30000.0, lfx.EXTENT_MAX]}}
+
+
+def _in_tiles(cut: dict) -> set[int]:
+    """The points inside the tiles `cut` names: the tile of each point's cell at the cut's zoom."""
+    zoom = cut["zoom"]
+    tiles = set(morton.tiles_for_bbox(tuple(cut["bbox"]), zoom, LABEL_EXTENT))
+    shift = 16 - zoom
+    inside = set()
+    for point, (x, y) in lfx.positions().items():
+        tx = morton.cell(x, 0.0, lfx.EXTENT_MAX) >> shift
+        ty = morton.cell(y, 0.0, lfx.EXTENT_MAX) >> shift
+        if zoom == 0 or morton.interleave_bits(tx, ty, zoom) in tiles:
+            inside.add(point)
+    return inside
+
+
+@pytest.mark.parametrize("terms", lfx.PRINCIPALS, ids=["-".join(t) for t in lfx.PRINCIPALS])
+def test_a_tree_lists_the_cut_the_map_draws(label_server, terms):
+    """`top` on the tree at a cut is the oracle's: the teams this principal is served with a
+    visible member in the cut's tiles, cut to the budget over the principal's own tree, those with
+    nothing drawn beneath them, counted over the visible items the filter admits, by count then
+    `tessera_id`, with `rest` and `none` against them; and `top` without a cut is refused."""
+    every = _served_ids(label_server, lfx.PRINCIPALS[-2])
+    token = label_server.authorise(terms)["token"]
+    visible_items = lfx.visible_to(terms)
+    served = {key for (layer, key) in lfx.served(terms) if layer == lfx.TEAMS}
+    members_of = {key: set(members) for key, members, _l, _p in lfx.TEAM_ROWS}
+    region = RegionColumn(
+        positions={
+            point: (morton.fixed32(x, 0.0, lfx.EXTENT_MAX), morton.fixed32(y, 0.0, lfx.EXTENT_MAX))
+            for point, (x, y) in lfx.positions().items()
+        },
+        artifacts={},
+        quantise=lambda v: morton.fixed32(v, 0.0, lfx.EXTENT_MAX),
+    )
+    for cut in CUTS:
+        inside = _in_tiles(cut) & visible_items
+        passing = {key for key in served if members_of[key] & inside}
+        drawn = agg.drawn_cut(TEAM_PARENTS, passing, cut.get("budget"), False)
+        groups = {every[(lfx.TEAMS, key)]: members_of[key] for key in agg.frontier(TEAM_PARENTS, drawn)}
+        for filters in (None, LEFT):
+            items = visible_items if filters is None else filt.evaluate(filters, {"region": region}, visible_items)
+            body = {"view": lfx.VIEW_ID, "groupings": [{"by": {"layer": lfx.TEAMS, "top": 10, "cut": cut}}]}
+            if filters is not None:
+                body["filters"] = filters
+            heads, tables = read_tables(label_server, token, body)
+            want_head, want_rows = agg.table(
+                items=items, reference=None, groups=groups, pick=("top", 10), depth=None, position={},
+            )
+            what = f"{terms} / {cut} / {filters}"
+            served_head = {k: v for k, v in heads[0].items() if k not in ("grouping", "resumed")}
+            assert served_head == want_head, f"{what}: head {heads[0]}"
+            assert_rows_equal(tables[0], want_rows, what)
+    refused = label_server.aggregate(
+        token, view=lfx.VIEW_ID, groupings=[{"by": {"layer": lfx.TEAMS, "top": 10}}]
+    )
+    assert refused.status_code == 422 and refused.json()["error"] == "contract", refused.text

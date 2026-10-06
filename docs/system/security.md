@@ -363,6 +363,13 @@ travel only inside the sealed cursor. Where a field keeps a record of which item
 a value's count is read from that record over the whole corpus and intersected with the visible set,
 which puts this route in the timing row below.
 
+A tree's artifacts ranked at a cut are the artifacts the viewport's treed frame draws for the same
+view, zoom, box and budget, computed by the same function: the artifacts the viewer is served with
+a member they may see in the cut's tiles, cut over the viewer's own tree, where a withheld node
+occupies no rung. The filter never decides which artifacts are in the cut. A budget only chooses
+how finely to draw what the viewer may already see, so a principal that fails a trunk is shown its
+children in its place, as the map shows them.
+
 ## Residual disclosure
 
 Seven channels let a viewer learn something beyond the items they are entitled to see, past what

@@ -3,7 +3,9 @@
 //! Which artifacts a table can list is what the artifacts frame serves this viewer: the layer's
 //! reach, then each artifact's verdict over the viewer's authorised set, with its label, its
 //! existence criterion and, for an attached artifact, its target's verdict, and content that reads
-//! back. The filtered set never decides it. An artifact's count is its visible members in the set.
+//! back. On a treed layer it is the cut the map draws ([`Cut`]), taken over the artifacts with a
+//! visible member in the cut's tiles; where the layer draws ancestors beside their descendants,
+//! only those with nothing drawn beneath them. The filtered set never decides it. An artifact's count is its visible members in the set.
 //! The rest are the set's items in a served artifact and in no listed one, and none the items in
 //! no served artifact, so an item held only by a withheld artifact counts in none. Artifacts can
 //! overlap, so a table's rows can add to more than the set's size.
@@ -15,7 +17,7 @@ use tessera_types::{EntityId, TesseraId};
 
 use super::set::Cx;
 use super::table::{Groups, Key};
-use super::{AggregateRefused, AggregateTimings, Pick};
+use super::{AggregateRefused, AggregateTimings, Cut, Pick};
 use crate::cells::{pass, CellSet, LabelTable, RowGroups};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
@@ -36,6 +38,7 @@ pub(super) struct Layer {
     entity: EntityId,
     level: u32,
     pick: Pick<TesseraId>,
+    cut: Option<Cut>,
 }
 
 /// A level's served artifacts under one page, and the forms their members are read from.
@@ -52,6 +55,7 @@ pub(super) struct Served {
 
 impl Layer {
     /// The level `layer` and `level` name, where this viewer may read it in `view`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn of(
         engine: &Engine,
         session: &Session,
@@ -60,6 +64,7 @@ impl Layer {
         layer: &str,
         level: Option<u32>,
         pick: &Pick<TesseraId>,
+        cut: Option<Cut>,
     ) -> Result<Layer> {
         let refused = |refusal| {
             EngineError::RecordsRefused(match refusal {
@@ -84,11 +89,32 @@ impl Layer {
                 AggregateRefused::LevelRequired(layer.to_string()),
             ));
         }
+        let treed = matches!(
+            registered.declaration.hierarchy.kind,
+            HierarchyKind::Nested | HierarchyKind::Dag
+        );
+        match (cut, pick) {
+            (Some(_), _) if !treed => {
+                return Err(EngineError::AggregateRefused(
+                    AggregateRefused::CutOnUntreed(layer.to_string()),
+                ))
+            }
+            (None, Pick::Top(_)) if treed => {
+                return Err(EngineError::AggregateRefused(
+                    AggregateRefused::CutRequired(layer.to_string()),
+                ))
+            }
+            _ => {}
+        }
+        if let Some(cut) = cut {
+            engine.tile_extent(generation, view, cut.zoom, cut.bbox, None)?;
+        }
         Ok(Layer {
             name: layer.to_string(),
             entity: registered.entity,
             level: level.unwrap_or(0),
             pick: pick.clone(),
+            cut,
         })
     }
 
@@ -126,34 +152,70 @@ impl Layer {
             .ok()
             .filter(|layer| layer.entity == self.entity)
             .filter(|layer| (self.level as usize) < layer.runs.len());
+        let reachable = engine.reachable_layers(served_view.session);
+        let context = DependencyContext::new(served_view, mask, &reachable);
+        let dependency_served = engine.dependency_gate(&context);
         let mut ordinals: Vec<u32> = Vec::new();
+        // Each served ordinal's rank, which its content is read under.
+        let mut ranks: FxHashMap<u32, Option<u32>> = FxHashMap::default();
         let mut targets = Targets::default();
         let read = match &registered {
             None => None,
             Some(layer) => {
-                let read = engine.read_level(served_view, mask, layer, self.level, false)?;
-                let reachable = engine.reachable_layers(served_view.session);
-                let context = DependencyContext::new(served_view, mask, &reachable);
-                let dependency_served = engine.dependency_gate(&context);
-                let view = read.view(engine, served_view, mask, layer, &dependency_served);
-                let runs = &layer.runs[self.level as usize];
-                for ordinal in 0..read.rows.len() as u32 {
-                    if ordinal % CHUNK == 0 {
-                        cx.check_cancelled()?;
-                    }
-                    let Some(entity) = runs.entity_of(u64::from(ordinal)).map(EntityId::new) else {
-                        continue;
-                    };
-                    let crate::artifacts::ArtifactVerdict::Serve { rank, .. } =
-                        view.verdict(entity, ordinal)
-                    else {
-                        continue;
-                    };
-                    if read
-                        .content(engine, generation, layer, ordinal, entity, rank)
+                // With a cut, the level's figures are the entry the map's treed frame reads.
+                let read =
+                    engine.read_level(served_view, mask, layer, self.level, self.cut.is_some())?;
+                let readable = |ordinal: u32, entity: EntityId, rank: Option<u32>| {
+                    read.content(engine, generation, layer, ordinal, entity, rank)
                         .is_some()
-                    {
-                        ordinals.push(ordinal);
+                };
+                match &self.cut {
+                    Some(cut) => {
+                        let drawn = engine.drawn_cut(
+                            served_view,
+                            mask,
+                            cut.zoom,
+                            cut.bbox,
+                            cut.budget,
+                            &self.name,
+                            &dependency_served,
+                            cx.cancel,
+                        )?;
+                        if let Some(drawn) = drawn {
+                            let listed = match layer.declaration.hierarchy.prune_children {
+                                true => drawn.served.clone(),
+                                false => crate::cut::frontier_of(&drawn.lineage, &drawn.served),
+                            };
+                            for (ordinal, entity, _, rank) in drawn.passing_in(&listed) {
+                                if readable(ordinal, entity, rank) {
+                                    ordinals.push(ordinal);
+                                    ranks.insert(ordinal, rank);
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        let view = read.view(engine, served_view, mask, layer, &dependency_served);
+                        let runs = &layer.runs[self.level as usize];
+                        for ordinal in 0..read.rows.len() as u32 {
+                            if ordinal % CHUNK == 0 {
+                                cx.check_cancelled()?;
+                            }
+                            let Some(entity) =
+                                runs.entity_of(u64::from(ordinal)).map(EntityId::new)
+                            else {
+                                continue;
+                            };
+                            let crate::artifacts::ArtifactVerdict::Serve { rank, .. } =
+                                view.verdict(entity, ordinal)
+                            else {
+                                continue;
+                            };
+                            if readable(ordinal, entity, rank) {
+                                ordinals.push(ordinal);
+                                ranks.insert(ordinal, rank);
+                            }
+                        }
                     }
                 }
                 targets = Targets::of(cx, &read, &ordinals, &dependency_served)?;
@@ -324,6 +386,36 @@ impl Layer {
                     .collect()
             }
         };
+        // Each listed artifact's name, as `/v1/artifacts/browse` names it to this viewer.
+        let titles = match (&served.read, &registered) {
+            (Some(read), Some(layer)) => {
+                let attached = crate::browse::AttachedLevels::default();
+                let namer = crate::browse::Namer::new(
+                    engine,
+                    served_view,
+                    mask,
+                    layer,
+                    &reachable,
+                    &context,
+                    &dependency_served,
+                    &attached,
+                );
+                served
+                    .listed
+                    .iter()
+                    .map(|&o| {
+                        let rank = *ranks.get(&o)?;
+                        let entity = EntityId::new(entity_at(o)?);
+                        let own = read
+                            .content(engine, generation, layer, o, entity, rank)
+                            .and_then(|content| content.name());
+                        namer.name(own, self.level, o)
+                    })
+                    .collect()
+            }
+            _ => vec![None; served.listed.len()],
+        };
+        context.finish()?;
         let named = matches!(self.pick, Pick::Named(_));
         let chosen: Vec<u64> = match chosen {
             Some(chosen) => chosen.to_vec(),
@@ -351,7 +443,7 @@ impl Layer {
                     .map(|&o| named && served.serves(o))
                     .collect(),
                 keys,
-                titles: None,
+                titles: Some(titles),
                 distinct: counts.iter().filter(|&&n| n > 0).count() as u64,
                 sample: None,
             },

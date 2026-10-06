@@ -550,6 +550,19 @@ set. A value or an artifact is listed on the same terms as everywhere else: a va
 vocabulary only where the viewer can see an item carrying it, an artifact only where the viewport
 would serve it, tested against the viewer's whole visible set whatever the filter.
 
+A `nested` or `dag` layer is drawn as a cut through its tree, finer as the map zooms in, so its
+`top` artifacts are ranked at a cut: the grouping names one as `cut`, with the `zoom`, `bbox` and
+`budget` the map's own `POST /v1/artifacts/viewport` request names, and lists only the artifacts
+that request's treed frame would draw. Where the layer is declared with `prune_children = false`
+and draws ancestors beside their descendants, only those with nothing drawn beneath them are
+ranked. `rest` and `none` are then counted against the listed cut. The map and the aggregate take
+the cut from one function in the engine, so the two agree for the same view, zoom, box and budget.
+Which artifacts the cut holds is decided over the viewer's visible items in the cut's tiles; a
+filter changes only their counts and their order. `top` on such a layer without `cut` is refused,
+and so is `cut` on any other layer. The TypeScript store resolves `cut: 'drawn'` in a registered
+aggregate to the cut its map draws at that moment, and asks again when the map's view settles or
+`Store.setClusterBudget` changes the budget.
+
 A grouping by bins counts a number or timestamp field declared with `index` or `render` in at most
 the number of bins asked for, each row carrying the bin's lower and upper edge. A bin holds the
 values from its lower edge up to but not including its upper edge, and the last bin also holds its

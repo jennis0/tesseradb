@@ -27,7 +27,7 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::filter::{FilterExpr, FilterOperand, RegionLeaf};
 use tessera_engine::{
     AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, AggregateTrailer, By,
-    CancelToken, CategoryQuery, Engine, EngineError, Grouping, ItemsRequest, PageEnd, Pick,
+    CancelToken, CategoryQuery, Cut, Engine, EngineError, Grouping, ItemsRequest, PageEnd, Pick,
     RecordsHead, RecordsLimits, RecordsSink, Reference, ResponseEndedBy, Session, SinkResult,
     TableHead, ViewportRequest,
 };
@@ -1626,6 +1626,7 @@ fn layer(name: &str, pick: Pick<tessera_types::TesseraId>) -> Grouping {
             layer: name.to_string(),
             level: None,
             pick,
+            cut: None,
         }),
         cells: None,
         area: None,
@@ -1764,6 +1765,7 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
                     layer: name.to_string(),
                     level: None,
                     pick: Pick::Top(3),
+                    cut: None,
                 }),
                 cells: Some(depth),
                 area: None,
@@ -2183,6 +2185,7 @@ fn artifact_cells_are_the_oracles() {
                         layer: name.to_string(),
                         level: None,
                         pick: Pick::Top(2),
+                        cut: None,
                     }),
                     cells: Some(depth),
                     area: None,
@@ -2407,6 +2410,7 @@ fn a_level_is_required_on_a_layer_with_several() {
             layer: "clusters/tiers".into(),
             level,
             pick: Pick::Top(5),
+            cut: None,
         }),
         cells: None,
         area: None,
@@ -2572,6 +2576,7 @@ fn every_column_has_its_type_and_a_title_is_the_vocabularys() {
             with(vec![
                 ("group", text(DataType::Int8)),
                 ("key", DataType::UInt64),
+                ("title", text(DataType::Int32)),
                 ("cell", DataType::UInt64),
             ])
         );
@@ -2856,4 +2861,324 @@ fn a_table_over_an_area_pages_from_any_cell() {
             "{page_rows} rows a page"
         );
     }
+}
+
+/// A planted node: its key, its parents' keys, its members and its label.
+type Node = (String, Vec<String>, Vec<u64>, Option<&'static str>);
+
+/// A tree over the built items: a root, six branches of 500 and ten leaves of 50 under each. The
+/// subset viewer's label is on branch `m3`, so the broad viewer fails it and is served its leaves
+/// in its place, and no viewer holds `m0-0`'s. On a DAG, `m1-0` hangs from `m2` as well.
+fn planted_tree(dag: bool) -> Vec<Node> {
+    let mut nodes = vec![("root".to_string(), Vec::new(), (0..N).collect(), None)];
+    for m in 0..6u64 {
+        let label = (m == 3).then_some("1");
+        nodes.push((
+            format!("m{m}"),
+            vec!["root".to_string()],
+            (m * 500..(m + 1) * 500).collect(),
+            label,
+        ));
+        for l in 0..10u64 {
+            let mut parents = vec![format!("m{m}")];
+            if dag && (m, l) == (1, 0) {
+                parents.push("m2".to_string());
+            }
+            let start = m * 500 + l * 50;
+            nodes.push((
+                format!("m{m}-{l}"),
+                parents,
+                (start..start + 50).collect(),
+                ((m, l) == (0, 0)).then_some("7"),
+            ));
+        }
+    }
+    nodes
+}
+
+/// Register a treed layer `name` over [`planted_tree`], and answer each node's id by key.
+fn plant_tree(
+    fx: &Fx,
+    name: &str,
+    dag: bool,
+    prune: bool,
+) -> BTreeMap<String, tessera_types::TesseraId> {
+    use tessera_types::layer::HierarchyKind;
+    let mut tree = declaration(name, tessera_types::layer::ServingLayout::ArtifactMajor);
+    tree.layout = None;
+    tree.hierarchy.kind = if dag {
+        HierarchyKind::Dag
+    } else {
+        HierarchyKind::Nested
+    };
+    tree.hierarchy.prune_children = prune;
+    fx.engine.register_layer(tree).unwrap();
+    let nodes = planted_tree(dag);
+    let artifacts = nodes
+        .iter()
+        .map(|(key, parents, members, label)| {
+            let mut artifact = artifact(fx, key, members, *label);
+            artifact.parent_keys = parents.clone();
+            artifact
+        })
+        .collect();
+    let ids = fx
+        .engine
+        .publish_artifacts(name.into(), 0, artifacts)
+        .unwrap();
+    tick(&fx.engine);
+    nodes.into_iter().map(|(key, ..)| key).zip(ids).collect()
+}
+
+fn cut_layer(name: &str, pick: Pick<tessera_types::TesseraId>, cut: Option<Cut>) -> Grouping {
+    Grouping {
+        by: Some(By::Layer {
+            layer: name.to_string(),
+            level: None,
+            pick,
+            cut,
+        }),
+        cells: None,
+        area: None,
+    }
+}
+
+/// The keys of what the treed frame of `/v1/artifacts/viewport` draws for `name` at `cut`.
+fn drawn_keys(engine: &Engine, session: &Session, name: &str, cut: Cut) -> Vec<String> {
+    let names = [name];
+    let out = engine
+        .viewport_artifacts(
+            session,
+            tessera_engine::ViewportArtifactsRequest::new("s0", cut.zoom, cut.bbox, usize::MAX)
+                .budget(cut.budget)
+                .layers(tessera_engine::LayerSelection::Named(&names)),
+        )
+        .unwrap();
+    out.frames
+        .iter()
+        .filter(|frame| frame.tile.is_none())
+        .flat_map(|frame| &frame.artifacts)
+        .map(|artifact| artifact.key.clone().expect("every node has a key"))
+        .collect()
+}
+
+/// **A tree's top artifacts are those the map draws at the same zoom, bbox and budget**, ranked
+/// by their visible members in the set: on a nested and a DAG layer, pruned or drawing ancestors
+/// beside descendants (where only those with nothing drawn beneath them are listed), for a viewer
+/// who fails a branch and is served its leaves, with and without a filter, which changes the
+/// counts and the order and never which artifacts are listed. None counts the set's items in no
+/// listed artifact.
+#[test]
+fn a_tree_lists_the_cut_the_map_draws() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let cuts = [
+        Cut {
+            zoom: 0,
+            bbox: WHOLE_MAP,
+            budget: None,
+        },
+        Cut {
+            zoom: 2,
+            bbox: WHOLE_MAP,
+            budget: Some(1),
+        },
+        Cut {
+            zoom: 2,
+            bbox: WHOLE_MAP,
+            budget: Some(8),
+        },
+        Cut {
+            zoom: 3,
+            bbox: [0.0, 0.0, 120.0, 120.0],
+            budget: None,
+        },
+        Cut {
+            zoom: 5,
+            bbox: [600.0, 300.0, 700.0, 340.0],
+            budget: Some(20),
+        },
+    ];
+    let mut differ = false;
+    for (dag, prune) in [(false, true), (false, false), (true, true), (true, false)] {
+        let name = format!("tree/{dag}-{prune}");
+        let ids = plant_tree(&fx, &name, dag, prune);
+        let tree = planted_tree(dag);
+        let members: BTreeMap<&str, &Vec<u64>> =
+            tree.iter().map(|(key, _, m, _)| (key.as_str(), m)).collect();
+        let parents: BTreeMap<&str, &Vec<String>> =
+            tree.iter().map(|(key, p, ..)| (key.as_str(), p)).collect();
+        let key_of: BTreeMap<String, String> = ids
+            .iter()
+            .map(|(key, id)| (id.raw().to_string(), key.clone()))
+            .collect();
+        for broad in [true, false] {
+            let session = fx.session(broad);
+            for cut in cuts {
+                let drawn = drawn_keys(engine, &session, &name, cut);
+                // Nothing drawn beneath, on any path.
+                let mut above = std::collections::BTreeSet::new();
+                let mut climb: Vec<&String> =
+                    drawn.iter().flat_map(|k| parents[k.as_str()].iter()).collect();
+                while let Some(up) = climb.pop() {
+                    if above.insert(up.clone()) {
+                        climb.extend(parents[up.as_str()].iter());
+                    }
+                }
+                let listed: Vec<&String> = drawn
+                    .iter()
+                    .filter(|key| prune || !above.contains(*key))
+                    .collect();
+                differ |= listed.len() != drawn.len();
+                for (what, filter, keep) in [
+                    (
+                        "no filter",
+                        None,
+                        &(|_: &Item| true) as &dyn Fn(&Item) -> bool,
+                    ),
+                    (
+                        "a filter",
+                        Some(fx.is_in("kind", &["a", "b"])),
+                        &|i: &Item| matches!(i.kind.as_deref(), Some("a" | "b")),
+                    ),
+                ] {
+                    let set: std::collections::BTreeSet<u64> =
+                        fx.visible(broad, keep).map(|i| i.source).collect();
+                    let count = |key: &str| {
+                        members[key].iter().filter(|s| set.contains(s)).count() as u64
+                    };
+                    let mut expected: Vec<(String, u64)> = listed
+                        .iter()
+                        .map(|key| (key.to_string(), count(key)))
+                        .filter(|&(_, n)| n > 0)
+                        .collect();
+                    expected.sort_by(|a, b| b.1.cmp(&a.1).then(ids[&a.0].cmp(&ids[&b.0])));
+                    let groupings = [cut_layer(&name, Pick::Top(100), Some(cut))];
+                    let mut req = request(&groupings);
+                    req.filter = filter.clone();
+                    let (head, rows) = table(engine, &session, req);
+                    let got: Vec<(String, u64)> = rows
+                        .iter()
+                        .filter(|r| r.group.as_deref() == Some("listed"))
+                        .map(|r| (key_of[r.key.as_ref().unwrap()].clone(), r.count))
+                        .collect();
+                    let context = format!("{name}, broad {broad}, {cut:?}, {what}");
+                    assert_eq!(got, expected, "{context}");
+                    assert_eq!(head.groups, Some(expected.len() as u64), "{context}");
+                    let in_listed =
+                        |s: &u64| listed.iter().any(|k| members[k.as_str()].contains(s));
+                    let none = set.iter().filter(|s| !in_listed(s)).count() as u64;
+                    let none_row = rows.iter().find(|r| r.group.as_deref() == Some("none"));
+                    assert_eq!(none_row.map_or(0, |r| r.count), none, "{context}: none");
+                    assert!(
+                        rows.iter().all(|r| r.group.as_deref() != Some("rest")),
+                        "{context}: every listed artifact fits in the top"
+                    );
+                }
+                if broad && cut.budget.is_none() && cut.zoom == 0 {
+                    assert!(
+                        drawn.iter().any(|k| k.starts_with("m3-")),
+                        "{name}: the broad viewer is served the leaves of the branch it fails"
+                    );
+                }
+            }
+        }
+    }
+    assert!(differ, "some layer draws ancestors beside what it lists");
+}
+
+/// **A suppression applies to the next request**: a leaf whose every member is suppressed leaves
+/// the list, and every other leaf keeps its count.
+#[test]
+fn a_suppression_applies_to_the_next_cut() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let ids = plant_tree(&fx, "tree/cut", false, true);
+    let session = fx.session(true);
+    let cut = Cut {
+        zoom: 0,
+        bbox: WHOLE_MAP,
+        budget: None,
+    };
+    let groupings = [cut_layer("tree/cut", Pick::Top(100), Some(cut))];
+    let listed = |rows: &[Row]| -> BTreeMap<String, u64> {
+        rows.iter()
+            .filter(|r| r.group.as_deref() == Some("listed"))
+            .map(|r| (r.key.clone().unwrap(), r.count))
+            .collect()
+    };
+    let (_, before) = table(engine, &session, request(&groupings));
+    let before = listed(&before);
+    let leaf = ids["m1-4"].raw().to_string();
+    assert_eq!(before[&leaf], 50);
+    for s in 700..750u64 {
+        let entity = item_of_id(engine, s).unwrap().expect("a built item");
+        engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+    }
+    let (_, after) = table(engine, &session, request(&groupings));
+    let after = listed(&after);
+    assert!(!after.contains_key(&leaf), "the emptied leaf is not drawn");
+    let mut expected = before.clone();
+    expected.remove(&leaf);
+    assert_eq!(after, expected, "every other leaf keeps its count");
+}
+
+/// **A cut is refused where it cannot be taken**: on a layer that is not a tree, past zoom 16 and
+/// over more tiles than a viewport may ask for; and a tree's top is refused without one, while
+/// naming its artifacts is not.
+#[test]
+fn a_cut_is_refused_where_it_cannot_be_taken() {
+    use tessera_engine::AggregateRefused;
+    let fx = fixture();
+    let engine = &fx.engine;
+    let ids = plant_tree(&fx, "tree/refusals", false, true);
+    plant(
+        &fx,
+        "topics/flat",
+        tessera_types::layer::ServingLayout::ArtifactMajor,
+    );
+    let session = fx.session(true);
+    let whole = Cut {
+        zoom: 0,
+        bbox: WHOLE_MAP,
+        budget: None,
+    };
+    let refusal = |grouping: Grouping| match respond(engine, &session, request(&[grouping])) {
+        Err(e) => e,
+        Ok(_) => panic!("the grouping is answered"),
+    };
+    assert!(matches!(
+        refusal(cut_layer("topics/flat", Pick::Top(3), Some(whole))),
+        EngineError::AggregateRefused(AggregateRefused::CutOnUntreed(_))
+    ));
+    assert!(matches!(
+        refusal(cut_layer("tree/refusals", Pick::Top(3), None)),
+        EngineError::AggregateRefused(AggregateRefused::CutRequired(_))
+    ));
+    assert!(matches!(
+        refusal(cut_layer(
+            "tree/refusals",
+            Pick::Top(3),
+            Some(Cut { zoom: 17, ..whole })
+        )),
+        EngineError::AggregateRefused(AggregateRefused::CutZoomPast16(17))
+    ));
+    assert!(matches!(
+        refusal(cut_layer(
+            "tree/refusals",
+            Pick::Top(3),
+            Some(Cut { zoom: 16, ..whole })
+        )),
+        EngineError::TooManyTiles { .. }
+    ));
+    let (_, rows) = table(
+        engine,
+        &session,
+        request(&[cut_layer(
+            "tree/refusals",
+            Pick::Named(vec![ids["m2"]]),
+            None,
+        )]),
+    );
+    assert_eq!(rows[0].count, 500, "a named branch is counted without a cut");
 }

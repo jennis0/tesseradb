@@ -110,6 +110,55 @@ pub(super) struct Tiling {
 }
 
 impl Engine {
+    /// `view`'s extent, refusing a request for more tiles than `max_tiles_per_request`: the
+    /// `listed` tiles where the request names them, otherwise those `bbox` covers at `zoom`.
+    ///
+    /// `zoom` and `bbox` are both chosen by the caller, and at zoom 16 over the full extent the
+    /// tile set is 65536² tiles, an out-of-memory abort reached before any masking work. Counting
+    /// allocates nothing, which is what makes this a refusal instead.
+    pub(crate) fn tile_extent(
+        &self,
+        generation: &Generation,
+        view: &str,
+        zoom: u8,
+        bbox: [f64; 4],
+        listed: Option<usize>,
+    ) -> Result<Bounds> {
+        // This view's frame, not the bundle's: reading another view's would address different
+        // ground under the same prefix. An unknown name refuses rather than defaulting.
+        let q = generation
+            .bundle
+            .manifest
+            .quantisation_of(view)
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+        let extent = Bounds {
+            x_min: q.x_min,
+            x_max: q.x_max,
+            y_min: q.y_min,
+            y_max: q.y_max,
+        };
+        let demanded = match listed {
+            Some(listed) => listed as u64,
+            None => tiles_for_bbox_count(bbox, zoom, &extent),
+        };
+        let limit = self.config.max_tiles_per_request;
+        if demanded > limit as u64 {
+            return Err(EngineError::TooManyTiles { demanded, limit });
+        }
+        Ok(extent)
+    }
+
+    /// The request's tiles with every tile's row range resolved.
+    pub(super) fn tiling(
+        &self,
+        served: &ServedView<'_>,
+        req: &ViewportRequest<'_>,
+        probe: &mut Probe,
+    ) -> Result<Tiling> {
+        let tiles = self.resolve_tiles(served, req, probe)?;
+        Ok(tile_ranges(tiles, &served.segments, probe))
+    }
+
     /// The request's tiles, counted and refused before they are allocated, and the underlay's three
     /// bounds.
     pub(super) fn resolve_tiles(
@@ -118,35 +167,13 @@ impl Engine {
         req: &ViewportRequest<'_>,
         probe: &mut Probe,
     ) -> Result<TileSet> {
-        // This view's frame, not the bundle's: reading another view's would address different
-        // ground under the same prefix. An unknown name refuses rather than defaulting.
-        let q = served
-            .generation
-            .bundle
-            .manifest
-            .quantisation_of(served.name)
-            .ok_or_else(|| EngineError::UnknownView(served.name.to_string()))?;
-        let extent = Bounds {
-            x_min: q.x_min,
-            x_max: q.x_max,
-            y_min: q.y_min,
-            y_max: q.y_max,
-        };
-
-        // Refuse an over-large tile set before allocating it: `zoom` and `bbox` are both
-        // attacker-chosen, and at zoom 16 over the full extent the tile set is 65536² tiles, an
-        // out-of-memory abort reached before any masking work. Counting first allocates nothing,
-        // which is what makes this a 422 instead. The same bound applies to an explicit list.
-        let tile_count = match req.tiles {
-            Some(list) => list.len() as u64,
-            None => tiles_for_bbox_count(req.bbox, req.zoom, &extent),
-        };
-        if tile_count > self.config.max_tiles_per_request as u64 {
-            return Err(EngineError::TooManyTiles {
-                demanded: tile_count,
-                limit: self.config.max_tiles_per_request,
-            });
-        }
+        let extent = self.tile_extent(
+            served.generation,
+            served.name,
+            req.zoom,
+            req.bbox,
+            req.tiles.map(<[u64]>::len),
+        )?;
         let tiles = match req.tiles {
             // An explicit list replaces the derivation: a tile a client can prove it already holds
             // is absent, and absence costs nothing — no row range, no scan, no gather. Ordering is

@@ -85,6 +85,13 @@ impl Supplied {
         }
         self.values.first().map(String::as_str)
     }
+
+    /// The artifact's own name: its first text, where that is not empty.
+    pub(crate) fn name(&self) -> Option<String> {
+        self.first_text()
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    }
 }
 
 /// A drawn geometry as the wire carries it: parts, then rings, then vertices in grid units.
@@ -978,19 +985,7 @@ impl Engine {
         sets: &ViewportSets<'_>,
         dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Walked> {
-        // Built once per request: the same segment list for every artifact in the response.
-        let locator = crate::derived::RowLocator::new(served.segments.clone());
-        // The postings are the generation's, not the layer's.
-        let source = served.generation.partition_source();
-        let pass = ArtifactPass {
-            served,
-            ask,
-            mask,
-            dependency_served,
-            locator: &locator,
-            source: &source,
-            shard: served.generation.bundle.manifest.identity.shard_id,
-        };
+        let pass = ArtifactPass::new(served, ask, mask, dependency_served);
 
         let mut walked = Walked::default();
         for name in names {
@@ -1014,8 +1009,11 @@ impl Engine {
                     continue;
                 }
                 let level = self.level_pass(&layer, number, runs)?;
-                let passing = self.gate_candidates(&level, sets);
-                let (lineage, cut) = self.cut_level(&level, &passing);
+                let DrawnCut {
+                    lineage,
+                    passing,
+                    served: cut,
+                } = self.level_cut(&level, sets);
                 served_levels.push(ServedLevel {
                     level: number,
                     rows: Arc::clone(&level.rows),
@@ -1158,7 +1156,7 @@ impl Engine {
             served,
             &layer.registered,
             layer.vocabulary,
-            pass.source,
+            &pass.source,
             level,
         );
         // Decided by the level's layout, never the request: artifact-major counts per artifact,
@@ -1206,6 +1204,59 @@ impl Engine {
             denied: served.denied,
             // Kept on the level beside this, so derived geometry reads the same accumulation.
             counts: level.counts.clone(),
+        }
+    }
+
+    /// What a treed layer draws at `zoom` over `bbox` under `budget`, as the treed frame of
+    /// `POST /v1/artifacts/viewport` draws it for the same view, zoom, bbox and budget: the cut
+    /// through the layer's artifacts this viewer is served with a visible member in the tiles.
+    /// `None` where the layer is not one this viewer reads in this view, or not treed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn drawn_cut(
+        &self,
+        served: &ServedView<'_>,
+        mask: &crate::compose::EffectiveMask,
+        zoom: u8,
+        bbox: [f64; 4],
+        budget: Option<u32>,
+        layer: &str,
+        dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+        cancel: &Option<CancelToken>,
+    ) -> Result<Option<DrawnCut>> {
+        let tiles_req = ViewportRequest::new(served.name, zoom, bbox, 0).cancel(cancel.clone());
+        let tiling = self.tiling(served, &tiles_req, &mut Probe::new())?;
+        let ask = ArtifactAsk {
+            zoom,
+            levels: LevelSelection::All,
+            computed: ComputedSelection::Named(&[]),
+            budget,
+            rows: ArtifactRows::Full,
+            cancel: cancel.clone(),
+        };
+        let pass = ArtifactPass::new(served, &ask, mask, dependency_served);
+        let Some(layer) = self.layer_pass(&pass, layer.to_string()) else {
+            return Ok(None);
+        };
+        let Some(runs) = layer.registered.runs.first() else {
+            return Ok(None);
+        };
+        if lineage_kind(layer.registered.declaration.hierarchy.kind).is_none() {
+            return Ok(None);
+        }
+        let level = self.level_pass(&layer, 0, runs)?;
+        let rows = tile_rows(served, &tiling.ranges).unwrap_or_default();
+        Ok(Some(self.level_cut(&level, &viewport_sets(&rows, mask))))
+    }
+
+    /// The verdicts over the candidates `sets` proposes on one level, and the cut through those
+    /// that pass.
+    fn level_cut(&self, level: &LevelPass<'_>, sets: &ViewportSets<'_>) -> DrawnCut {
+        let passing = self.gate_candidates(level, sets);
+        let (lineage, served) = self.cut_level(level, &passing);
+        DrawnCut {
+            lineage,
+            passing,
+            served,
         }
     }
 
@@ -1443,7 +1494,7 @@ impl Engine {
                 }
                 None => (*self.derived_geometry.get_or_derive(key, || {
                     let visible = rows.visible_rows(ordinal, pass.mask);
-                    crate::derived::compute(&layer.declared_derived, &visible, pass.locator)
+                    crate::derived::compute(&layer.declared_derived, &visible, &pass.locator)
                 }))
                 .clone(),
             }
@@ -1486,7 +1537,26 @@ impl Engine {
 
 /// One artifact the gate admitted: its ordinal, its entity, the masked count its verdict carried
 /// and the rank of the content that verdict chose.
-pub(super) type Passing = (u32, EntityId, u64, Option<u32>);
+pub(crate) type Passing = (u32, EntityId, u64, Option<u32>);
+
+/// One treed level's cut for one request: the level's lineage, the artifacts whose verdict passed
+/// among the candidates, and the ordinals of those the cut draws, ascending.
+pub(crate) struct DrawnCut {
+    pub(crate) lineage: Arc<crate::cut::Lineage>,
+    pub(crate) passing: Vec<Passing>,
+    pub(crate) served: Vec<u32>,
+}
+
+impl DrawnCut {
+    /// The passing artifacts among `ordinals`, which is ascending.
+    pub(crate) fn passing_in(&self, ordinals: &[u32]) -> Vec<Passing> {
+        self.passing
+            .iter()
+            .copied()
+            .filter(|(ordinal, ..)| ordinals.binary_search(ordinal).is_ok())
+            .collect()
+    }
+}
 
 /// What a walk of a layer's artifacts is asked for, apart from where: the depth drawn at, the
 /// levels, the computed properties, the budget a treed layer is cut to, the columns and the
@@ -1509,9 +1579,29 @@ pub(super) struct ArtifactPass<'a> {
     pub(super) mask: &'a crate::compose::EffectiveMask,
     /// The dependency prerequisite, closed over this request's state.
     pub(super) dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
-    pub(super) locator: &'a crate::derived::RowLocator<'a>,
-    pub(super) source: &'a crate::containment::PartitionSource<'a>,
+    pub(super) locator: crate::derived::RowLocator<'a>,
+    /// The postings, which are the generation's, not any layer's.
+    pub(super) source: crate::containment::PartitionSource<'a>,
     pub(super) shard: u32,
+}
+
+impl<'a> ArtifactPass<'a> {
+    pub(super) fn new(
+        served: &'a ServedView<'a>,
+        ask: &'a ArtifactAsk<'a>,
+        mask: &'a crate::compose::EffectiveMask,
+        dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+    ) -> Self {
+        ArtifactPass {
+            served,
+            ask,
+            mask,
+            dependency_served,
+            locator: crate::derived::RowLocator::new(served.segments.clone()),
+            source: served.generation.partition_source(),
+            shard: served.generation.bundle.manifest.identity.shard_id,
+        }
+    }
 }
 
 /// One layer of that pass: the registration this walk reads it through, and what is parsed once

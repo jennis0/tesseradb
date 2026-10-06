@@ -620,3 +620,38 @@ describe('the depth asked', () => {
     for (const call of viewportArtifacts.mock.calls) expect(call[1].tiles!.length).toBeLessThanOrEqual(ARTIFACT_TILES_PER_REQUEST);
   });
 });
+
+describe('the drawn cut', () => {
+  const TREED = [layer('tree', {hierarchy: {kind: 'nested', pruneChildren: true}})];
+
+  it('is the depth and the tiles the treed frame is asked at, with its budget, and a new budget asks again', async () => {
+    const {client, viewportArtifacts} = fakeClient(() => [], undefined, () => [cluster(1n, {layer: 'tree'})]);
+    const {ch} = channel(client, {declarations: TREED, budget: 48});
+    expect(ch.drawnCut()).toBeNull();
+    ch.setLayer('tree');
+    ch.refresh(view, 200, 150);
+    await settle();
+    const cut = ch.drawnCut()!;
+    expect(cut.zoom).toBe(asked(viewportArtifacts).zoom);
+    expect(cut.budget).toBe(48);
+    // The box names exactly the tiles asked for: each one's centre is inside it, and no other's.
+    const span = 100 / 2 ** DEPTH;
+    const inside = (x: number, y: number) => {
+      const [cx, cy] = [(x + 0.5) * span, (y + 0.5) * span];
+      return cut.bbox[0] <= cx && cx <= cut.bbox[2] && cut.bbox[1] <= cy && cy <= cut.bbox[3];
+    };
+    const named: bigint[] = [];
+    for (let y = 0; y < 2 ** DEPTH; y++) for (let x = 0; x < 2 ** DEPTH; x++) if (inside(x, y)) named.push(at(x, y));
+    const order = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
+    expect(named.sort(order)).toEqual([...asked(viewportArtifacts).tiles!].sort(order));
+    ch.setBudget(12);
+    await settle();
+    expect(viewportArtifacts).toHaveBeenCalledTimes(2);
+    expect(asked(viewportArtifacts, 1).budget).toBe(12);
+    expect(ch.drawnCut()!.budget).toBe(12);
+    ch.setBudget(undefined);
+    await settle();
+    expect('budget' in asked(viewportArtifacts, 2)).toBe(false);
+    expect('budget' in ch.drawnCut()!).toBe(false);
+  });
+});

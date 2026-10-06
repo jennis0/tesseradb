@@ -5,6 +5,24 @@ import {refusalOf, type Refusal} from './presented.js';
 import type {AggregateRequest, AggregateResult, AggregateTable, FilterExpr, Grouping} from './types.js';
 
 /**
+ * A grouping as an {@link AggregateSpec} names it: a {@link Grouping}, or one ranking a `nested` or
+ * `dag` layer's top artifacts at `cut: 'drawn'`, the cut the store's map draws that layer at: the
+ * artifact channel's tile depth and box for the camera, under {@link Store.setClusterBudget}'s
+ * budget. Each request takes the cut as it stands when it is sent.
+ *
+ * @category Store
+ */
+export type AggregateSpecGrouping = Grouping | DrawnGrouping;
+
+/** A grouping ranking a tree layer's top artifacts at the cut the store's map draws. */
+type DrawnGrouping = Omit<Grouping, 'by'> & {by: {layer: string; top: number; cut: 'drawn'}};
+
+/** Whether `grouping` ranks at the cut the store's map draws. */
+export function isDrawn(grouping: AggregateSpecGrouping): grouping is DrawnGrouping {
+  return grouping.by !== undefined && 'cut' in grouping.by && grouping.by.cut === 'drawn';
+}
+
+/**
  * What a component registers with {@link Store.setAggregate}: the groupings to count, the set they
  * are counted over, and the comparison set where it wants one. The store sends its own filters and
  * selected region as the request's `filters`.
@@ -13,7 +31,7 @@ import type {AggregateRequest, AggregateResult, AggregateTable, FilterExpr, Grou
  */
 export type AggregateSpec = {
   /** One table each, in this order. */
-  groupings: Grouping[];
+  groupings: AggregateSpecGrouping[];
   /**
    * The set the counts are taken over.
    *

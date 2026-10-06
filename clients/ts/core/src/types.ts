@@ -1700,6 +1700,11 @@ export type Grouping = {
  * required on a layer with several levels and refused on one with a single level. A named value or
  * artifact this principal would not be listed gets no row.
  *
+ * On a `nested` or `dag` layer, `top` takes a `cut`, and is refused without one: the artifacts
+ * listed are those the treed frame of {@link TesseraClient.viewportArtifacts} serves for the same
+ * view, zoom, bbox and budget, and on a layer declared with `prune_children: false` only those with
+ * nothing drawn beneath them. A `cut` on any other layer is refused.
+ *
  * With `bins` and a `range`, `[lower, upper]` is cut into `bins` equal bins. On an integer field
  * with whole bounds the edges are whole numbers; where either bound is fractional the bins are cut
  * in float and the edges are numbers. On a timestamp field the bounds are whole microseconds since
@@ -1733,8 +1738,24 @@ export type AggregateBy =
   | {field: string; values: string[]}
   | {field: string; bins: number; range?: [number | bigint, number | bigint]; sample?: number}
   | {field: string; summary: true}
-  | {layer: string; level?: number; top: number}
+  | {layer: string; level?: number; top: number; cut?: AggregateCut}
   | {layer: string; level?: number; artifacts: bigint[]};
+
+/**
+ * Where and how finely a `nested` or `dag` layer is drawn, as {@link ViewportArtifactsRequest}
+ * names it: the tile depth, the box in the view's coordinates, and the most artifacts the cut may
+ * draw. The tiles may number at most `meta.maxTilesPerRequest`.
+ *
+ * @category Requests and responses
+ */
+export type AggregateCut = {
+  /** From 0 to 16. */
+  zoom: number;
+  /** `[x0, y0, x1, y1]` as the viewport's `bbox` takes it. */
+  bbox: [number, number, number, number];
+  /** Unset is the finest cut. */
+  budget?: number;
+};
 
 /**
  * A grouping's inner level: the cells of the view at `depth`, from 0 to 32. Depths 0 to 16 are the
@@ -1759,7 +1780,8 @@ export type AggregateCells = {
  *
  * The columns are, in this order and each only where stated: `group` (`listed`, `rest` or `none`,
  * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null
- * on `rest` and `none`); `title` (the value's title, with `by` on a field); in place of `key` and
+ * on `rest` and `none`); `title` (a value's title, or an artifact's name as
+ * {@link TesseraClient.browse} gives it, with `by`; null where there is none); in place of `key` and
  * `title` with `bins`, `lower` and `upper` (a bin's edges: a `bigint` on an integer field, a number
  * on one whose range has a fractional bound, a number on a float field, and a timestamp in
  * milliseconds since the Unix epoch, as Arrow reads one, on a timestamp field; null on `rest` and

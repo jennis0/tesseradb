@@ -111,12 +111,27 @@ pub enum By {
     /// request's set and reference.
     Summary { column: String },
     /// The artifacts of one level of a layer. `level` is required on a layer with several levels
-    /// and refused on one with a single level.
+    /// and refused on one with a single level. On a treed layer (`nested`, `dag`), `cut` lists
+    /// only the artifacts the map draws there, and `top` requires it.
     Layer {
         layer: String,
         level: Option<u32>,
         pick: Pick<TesseraId>,
+        cut: Option<Cut>,
     },
+}
+
+/// Where and how finely a treed layer is drawn, as `POST /v1/artifacts/viewport` names it: the
+/// artifacts listed are those its treed frame serves for the same view, zoom, bbox and budget. On
+/// a layer declared with `prune_children = false`, only those with nothing drawn beneath them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cut {
+    /// Tile depth, 0–16.
+    pub zoom: u8,
+    /// `[x0, y0, x1, y1]` in the view's extent.
+    pub bbox: [f64; 4],
+    /// The most artifacts the cut may draw; `None` is the finest cut.
+    pub budget: Option<u32>,
 }
 
 /// Which groups a table lists.
@@ -263,6 +278,12 @@ pub enum AggregateRefused {
     DepthPast32(u8),
     /// No `level` on a layer with several.
     LevelRequired(String),
+    /// `top` on a treed layer without a `cut`.
+    CutRequired(String),
+    /// A `cut` on a layer that is not treed.
+    CutOnUntreed(String),
+    /// A `cut` zoom past 16.
+    CutZoomPast16(u8),
     /// More cells at `depth` in the grouping's area than the deployment allows; `deepest` is the
     /// deepest depth at which the area fits, if any does.
     TooManyCells {
@@ -344,6 +365,19 @@ impl std::fmt::Display for AggregateRefused {
             AggregateRefused::LevelRequired(layer) => {
                 write!(f, "layer '{layer}' has several levels; name one with level")
             }
+            AggregateRefused::CutRequired(layer) => write!(
+                f,
+                "layer '{layer}' is a tree, so its top artifacts are ranked at a cut; send cut \
+                 with the map's zoom, bbox and budget, or name the artifacts"
+            ),
+            AggregateRefused::CutOnUntreed(layer) => write!(
+                f,
+                "layer '{layer}' is not a nested or dag layer, so it has no cut; leave cut out"
+            ),
+            AggregateRefused::CutZoomPast16(zoom) => write!(
+                f,
+                "cut zoom {zoom} is past the deepest tile depth; send a zoom from 0 to 16"
+            ),
             AggregateRefused::TooManyCells { limit: 0, .. } => write!(
                 f,
                 "selection.max_aggregate_cells is 0, so no cell level can be served; ask \
@@ -646,10 +680,15 @@ fn refuse_groupings(groupings: &[Grouping], caps: &AggregateCaps) -> Result<()> 
                 Pick::Top(n) => (Some(*n), None),
                 Pick::Named(keys) => (None, Some(keys.len())),
             },
-            Some(By::Layer { pick, .. }) => match pick {
-                Pick::Top(n) => (Some(*n), None),
-                Pick::Named(ids) => (None, Some(ids.len())),
-            },
+            Some(By::Layer { pick, cut, .. }) => {
+                if let Some(zoom) = cut.map(|cut| cut.zoom).filter(|&zoom| zoom > 16) {
+                    return refused(AggregateRefused::CutZoomPast16(zoom));
+                }
+                match pick {
+                    Pick::Top(n) => (Some(*n), None),
+                    Pick::Named(ids) => (None, Some(ids.len())),
+                }
+            }
         };
         match (top, named) {
             (Some(0), _) => return refused(AggregateRefused::ZeroTop),

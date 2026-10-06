@@ -10,6 +10,7 @@ export {createStore, CLUSTER_PREFIX, DEFAULT_BUDGET, REGION_HELD_LIMIT, type Sto
 export type {
   AggregateEntry,
   AggregateSpec,
+  AggregateSpecGrouping,
   AggregatesProjection,
   FieldSummary,
   ArtifactsProjection,

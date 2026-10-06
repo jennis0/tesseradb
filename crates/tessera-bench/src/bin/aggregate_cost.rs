@@ -352,6 +352,7 @@ fn main() -> Result<(), BoxError> {
                     layer: layer.to_string(),
                     level: Some(level.parse()?),
                     pick: Pick::Top(10),
+                    cut: None,
                 }),
                 cells: None,
                 area: None,

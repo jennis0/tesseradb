@@ -285,8 +285,13 @@ impl Plan {
                 sample,
             }) => Outer::Bins(Bins::of(generation, column, *bins, *range, *sample)?),
             Some(By::Summary { column }) => Outer::Summary(Numbers::of(generation, column, true)?),
-            Some(By::Layer { layer, level, pick }) => Outer::Layer(Layer::of(
-                engine, session, generation, view, layer, *level, pick,
+            Some(By::Layer {
+                layer,
+                level,
+                pick,
+                cut,
+            }) => Outer::Layer(Layer::of(
+                engine, session, generation, view, layer, *level, pick, *cut,
             )?),
         };
         let (area, area_cells) = match grouping.cells {
@@ -642,6 +647,10 @@ impl Plan {
                     };
                     let ids = UInt64Array::new(repeated(runs, id).into(), on_listed);
                     push("key", Arc::new(ids), true);
+                    if let Some(titles) = &groups.titles {
+                        let positions = repeated(runs, |g| g.min(listed) as i32).into();
+                        push("title", title_column(runs, listed, positions, titles)?, true);
+                    }
                 }
                 Outer::Bins(bins) => {
                     let edge = |g: u32, upper: bool| match groups.keys.get(g as usize) {
@@ -673,15 +682,7 @@ impl Plan {
                     .map_err(malformed)?;
                     push("key", Arc::new(key), true);
                     if let Some(titles) = &groups.titles {
-                        let titled = valid(runs, |g| g < listed && titles[g as usize].is_some());
-                        let title = DictionaryArray::<Int32Type>::try_new(
-                            Int32Array::new(positions, titled),
-                            Arc::new(StringArray::from_iter(
-                                titles.iter().map(|t| Some(t.as_deref().unwrap_or(""))),
-                            )),
-                        )
-                        .map_err(malformed)?;
-                        push("title", Arc::new(title), true);
+                        push("title", title_column(runs, listed, positions, titles)?, true);
                     }
                 }
             }
@@ -812,6 +813,25 @@ impl Plan {
             next: position.next_table(),
         })
     }
+}
+
+/// The `title` column: each listed row's title, written once in the dictionary, and null on the
+/// rest, the none and a listed group without one.
+fn title_column(
+    runs: &[Run],
+    listed: u32,
+    positions: ScalarBuffer<i32>,
+    titles: &[Option<String>],
+) -> Result<ArrayRef> {
+    let titled = valid(runs, |g| g < listed && titles[g as usize].is_some());
+    let title = DictionaryArray::<Int32Type>::try_new(
+        Int32Array::new(positions, titled),
+        Arc::new(StringArray::from_iter(
+            titles.iter().map(|t| Some(t.as_deref().unwrap_or(""))),
+        )),
+    )
+    .map_err(|e| EngineError::Malformed(format!("an aggregate page did not assemble: {e}")))?;
+    Ok(Arc::new(title))
 }
 
 /// One value per row, `of` each run's group along the run.

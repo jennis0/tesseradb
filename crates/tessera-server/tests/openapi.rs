@@ -2108,6 +2108,7 @@ async fn the_aggregate_read_matches_the_description_with_its_refusals() {
         json!({ "view": "s0", "groupings": [{ "by": { "field": "archive" } }] }),
         json!({ "view": "s0", "groupings": [{ "by": { "field": "score", "top": 1 } }] }),
         json!({ "view": "s0", "groupings": [{ "by": { "layer": LAYER, "top": 1, "level": 0 } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "layer": LAYER, "top": 1, "cut": { "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "budget": 50 } } }] }),
         json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }),
         json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }),
         json!({ "view": "s0", "groupings": [{ "cells": { "depth": 11 } }] }),
@@ -2141,6 +2142,9 @@ async fn the_aggregate_read_matches_the_description_with_its_refusals() {
         json!({ "view": "s0", "groupings": [{ "by": { "field": "a", "top": 1, "values": ["x"] } }] }),
         json!({ "view": "s0", "groupings": [{ "by": { "field": "a", "artifacts": [1] } }] }),
         json!({ "view": "s0", "groupings": [{ "by": { "layer": "a", "values": ["x"] } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "layer": "a", "top": 1, "cut": { "zoom": 17, "bbox": [0.0, 0.0, 1.0, 1.0] } } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "layer": "a", "top": 1, "cut": { "zoom": 2 } } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "layer": "a", "artifacts": [1], "cut": { "zoom": 2, "bbox": [0.0, 0.0, 1.0, 1.0] } } }] }),
         json!({ "view": "s0", "groupings": [{}], "reference": { "a": 1, "b": 2 } }),
         json!({ "view": "s0", "groupings": [{}], "compression": "gzip" }),
     ] {

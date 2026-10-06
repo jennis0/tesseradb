@@ -1,4 +1,4 @@
-import {Aggregates, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
+import {Aggregates, isDrawn, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
@@ -32,6 +32,7 @@ import type {
   BrowsePage,
   BrowseRequest,
   FilterExpr,
+  Grouping,
   ItemDetail,
   Meta,
   Quantisation,
@@ -62,7 +63,7 @@ export {formatCount, formatMasked} from './counts.js';
 export type {TokenSupplier} from './token.js';
 export {CLUSTER_PREFIX, type LegendProjection} from './legend.js';
 export {REGION_HELD_LIMIT, type RegionProjection, type SelectionShape} from './selectedRegion.js';
-export type {AggregateEntry, AggregateSpec, AggregatesProjection, FieldSummary} from './aggregates.js';
+export type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregatesProjection, FieldSummary} from './aggregates.js';
 
 /**
  * Where the host's camera looks: a box in the current view's data coordinates, the camera's zoom,
@@ -151,7 +152,7 @@ export type StoreOptions = {
    * (`setColourBy('cluster:<layer>')`) has no colours either, and the `artifacts` projection is
    * `refused`, saying what to set. `budget` is the most artifacts a `nested` or `dag` layer is cut
    * to, met by drawing ancestors in place of their descendants, and the most it tags the points
-   * with; omitted, the cut is unbounded. `heldTiles` is how many tiles of artifacts the store keeps
+   * with; omitted, the cut is unbounded. {@link Store.setClusterBudget} changes it. `heldTiles` is how many tiles of artifacts the store keeps
    * per view, the least recently drawn leaving first; it defaults to `4096`.
    *
    * Artifacts are asked for by tile at a fixed depth, map zoom + 2, the zoom being the camera's as
@@ -702,6 +703,16 @@ export interface Store {
   /** The marks the store aims to draw: `budget` as created, else 250000, until `setBudget` changes it. */
   readonly budget: number;
   /**
+   * Cut every `nested` and `dag` layer to at most `budget` artifacts, met by drawing ancestors in
+   * place of their descendants, and ask again for the treed layers drawn and for each registered
+   * aggregate ranking a layer at `cut: 'drawn'`. `null` asks for the finest cut. Points fetched
+   * from then on are tagged under the new cut. A value that is not a whole number above zero, or
+   * `null`, is ignored.
+   */
+  setClusterBudget(budget: number | null): void;
+  /** The most artifacts a treed layer is cut to: `artifacts.budget` as created, else `null`, until `setClusterBudget` changes it. */
+  readonly clusterBudget: number | null;
+  /**
    * Make `id` the view the store answers from. An id `meta.views` does not list is ignored, as is
    * the current id. Called before `/v1/meta` arrives, it names the view to open with, in place of
    * `options.view`.
@@ -871,6 +882,7 @@ export function createStore(options: StoreOptions): Store {
 
   let meta: Meta | null = null;
   let budget = options.budget ?? DEFAULT_BUDGET;
+  let clusterBudget: number | null = options.artifacts?.budget ?? null;
   let contentKeyAtFrame = '';
   /** The content key the registered aggregates were last asked under, by {@link observeCorpus}. */
   let corpusKey = '';
@@ -1003,7 +1015,9 @@ export function createStore(options: StoreOptions): Store {
     (spec) => {
       const area = countedArea();
       if (area === null) return null;
-      const body = {groupings: spec.groupings, filters: withArea(aggregateFilters(spec), area)!, reference: withArea(null, area)!};
+      const groupings = drawnGroupings(spec);
+      if (groupings === null) return null;
+      const body = {groupings, filters: withArea(aggregateFilters(spec), area)!, reference: withArea(null, area)!};
       if (!area.selected) boxOf.set(body, lastView!.input.bbox);
       return body;
     }
@@ -1138,7 +1152,7 @@ export function createStore(options: StoreOptions): Store {
         const zoom = ownPresenter?.view?.view.zoom ?? 0;
         const layers = req.k === 0 ? [] : pointLayers();
         const columns = req.k === 0 ? undefined : pointColumns(id);
-        const budget = options.artifacts?.budget;
+        const cut = clusterBudget;
         const response = await client.viewport(
           tok,
           {
@@ -1148,7 +1162,7 @@ export function createStore(options: StoreOptions): Store {
             highlight: requestHighlight(),
             layers,
             ...(columns === undefined ? {} : {pointRows: columns}),
-            ...(layers.length === 0 || budget === undefined ? {} : {artifactBudget: budget}),
+            ...(layers.length === 0 || cut === null ? {} : {artifactBudget: cut}),
             ...(layers.length === 0 || requestLevels(m.layers, layers, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layers, zoom)})
           },
           {
@@ -1221,7 +1235,7 @@ export function createStore(options: StoreOptions): Store {
       quantisation: q,
       projection: m.views.find((v) => v.id === id)?.projection ?? 'none',
       perTile: options.artifacts?.perTile ?? null,
-      ...(options.artifacts?.budget === undefined ? {} : {budget: options.artifacts.budget}),
+      ...(clusterBudget === null ? {} : {budget: clusterBudget}),
       heldTiles: options.artifacts?.heldTiles ?? DEFAULT_HELD_TILES,
       prefetch: options.prefetch ?? true,
       token: () => tokens.get(),
@@ -1543,6 +1557,8 @@ export function createStore(options: StoreOptions): Store {
 
   function onArtifacts(state: ArtifactChannelState): void {
     recomputeStale();
+    // The channel asks once the view has settled, and the cut it draws at may have moved with it.
+    aggregates.refresh(false, {which: drawsCut, changed: true});
     // The channel is asked for the colour layer as well as the drawn ones. Only the drawn layers'
     // rows reach `served`; the colour layer's reach `colourServed`.
     const drawn = new Set(layersOn);
@@ -1881,6 +1897,8 @@ export function createStore(options: StoreOptions): Store {
    * reference. `null` for a `view` aggregate before the camera has been set.
    */
   function aggregateBody(spec: AggregateSpec): AggregateBody | null {
+    const groupings = drawnGroupings(spec);
+    if (groupings === null) return null;
     const subject = spec.subject ?? 'match';
     let filters: FilterExpr | null = null;
     let reference: FilterExpr | undefined = spec.reference === 'visible' ? {} : spec.reference;
@@ -1892,7 +1910,27 @@ export function createStore(options: StoreOptions): Store {
       // Drawn from the same area, as the counts in view's own reference is.
       if (spec.reference !== undefined) reference = withRegion(spec.reference === 'visible' ? null : spec.reference, area.operand, area.outside)!;
     }
-    return {groupings: spec.groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})};
+    return {groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})};
+  }
+
+  /** Whether `spec` ranks a layer at the cut the map draws. */
+  function drawsCut(spec: AggregateSpec): boolean {
+    return spec.groupings.some(isDrawn);
+  }
+
+  /**
+   * `spec`'s groupings with each `cut: 'drawn'` replaced by the current view's drawn cut; `null`
+   * before the current view has noted a camera.
+   */
+  function drawnGroupings(spec: AggregateSpec): Grouping[] | null {
+    const cut = drawsCut(spec) ? (views.current?.channel.drawnCut() ?? null) : null;
+    const groupings: Grouping[] = [];
+    for (const g of spec.groupings) {
+      if (!isDrawn(g)) groupings.push(g);
+      else if (cut === null) return null;
+      else groupings.push({...g, by: {...g.by, cut}});
+    }
+    return groupings;
   }
 
   /** Register an aggregate. One counted in view waits for the camera to rest where it is moving. */
@@ -2083,6 +2121,14 @@ export function createStore(options: StoreOptions): Store {
     if (columns.length === 0) pointColumnAsks.delete(id);
     else pointColumnAsks.set(id, [...columns]);
     checkPointColumns();
+  }
+
+  function setClusterBudget(next: number | null): void {
+    if (next !== null && !(Number.isInteger(next) && next > 0)) return;
+    if (next === clusterBudget) return;
+    clusterBudget = next;
+    for (const held of views.all()) held.channel.setBudget(next ?? undefined);
+    aggregates.refresh(false, {which: drawsCut, changed: true});
   }
 
   function setBudget(next: number): void {
@@ -2291,6 +2337,10 @@ export function createStore(options: StoreOptions): Store {
     setBudget,
     get budget() {
       return budget;
+    },
+    setClusterBudget,
+    get clusterBudget() {
+      return clusterBudget;
     },
     setCurrentView,
     frame: frameOrNull,

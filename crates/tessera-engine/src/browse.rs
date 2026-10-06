@@ -58,7 +58,9 @@ use crate::compose::EffectiveMask;
 use crate::error::Result;
 use crate::filter::FilterExpr;
 use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
-use crate::viewport::{response_rungs, segments_with_row_bases, DependencyContext};
+use crate::viewport::{response_rungs, segments_with_row_bases, DependencyContext, ServedView};
+use crate::Engine;
+use tessera_lifecycle::membership::Attachment;
 use crate::EngineError;
 
 /// Which of §4's three forms a request takes. One verb, three forms (§9 (a), owner ruling).
@@ -386,13 +388,7 @@ impl crate::Engine {
                         level_read.matched_count(ordinal, &mask, filter_rows),
                     );
                 }
-                names.insert(
-                    (walked, ordinal),
-                    content
-                        .first_text()
-                        .filter(|text| !text.is_empty())
-                        .map(str::to_string),
-                );
+                names.insert((walked, ordinal), content.name());
                 keys.insert(
                     (walked, ordinal),
                     self.write
@@ -449,105 +445,24 @@ impl crate::Engine {
         let reachable = self.reachable_layers(session);
         let ctx = DependencyContext::new(&served_view, &mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
-        let label_layers: OnceCell<Vec<(RegisteredLayer, Vec<ReadLevel>)>> = OnceCell::new();
-        let label_views: OnceCell<Vec<Vec<ArtifactView<'_, EffectiveMask>>>> = OnceCell::new();
-        let attached_name = |level: u32, ordinal: u32| -> Option<String> {
-            let target = layer.runs[level as usize]
-                .entity_of(u64::from(ordinal))
-                .map(EntityId::new)?;
-            let layers = label_layers.get_or_init(|| {
-                reachable
-                    .names()
-                    .filter_map(|name| self.readable_layer(session, &generation, name, view).ok())
-                    .filter(|label| label.declaration.depends_on.iter().any(|d| d == req.layer))
-                    .map(|label| {
-                        let levels = (0..label.runs.len() as u32)
-                            .filter_map(|level| {
-                                ctx.held(self.read_level(&served_view, &mask, &label, level, false))
-                            })
-                            .collect();
-                        (label, levels)
-                    })
-                    .collect()
-            });
-            let views = label_views.get_or_init(|| {
-                layers
-                    .iter()
-                    .map(|(label, levels)| {
-                        levels
-                            .iter()
-                            .map(|read| {
-                                read.view(self, &served_view, &mask, label, &dependency_served)
-                            })
-                            .collect()
-                    })
-                    .collect()
-            });
-            layers
-                .iter()
-                .zip(views)
-                .find_map(|((label, levels), views)| {
-                    levels.iter().zip(views).find_map(|(read, view)| {
-                        // An edge naming an entity the target slot no longer holds is into an
-                        // artifact since republished over.
-                        let mut attached: Vec<u32> = read
-                            .rows
-                            .records()
-                            .attached_to(req.layer, level, ordinal)
-                            .filter(|&at| {
-                                read.rows.attachment(at).is_some_and(|a| a.entity == target)
-                            })
-                            .collect();
-                        // The viewport's order within a level: by key, then the keyless by ordinal.
-                        if attached.len() > 1 {
-                            let name = label.declaration.name.as_str();
-                            let keyed: Vec<(Option<String>, u32)> =
-                                self.write.live().with_artifacts(|store| {
-                                    attached
-                                        .iter()
-                                        .map(|&at| {
-                                            (
-                                                store
-                                                    .get(name, read.level, at)
-                                                    .and_then(|r| r.key.clone()),
-                                                at,
-                                            )
-                                        })
-                                        .collect()
-                                });
-                            let mut keyed = keyed;
-                            keyed.sort_unstable_by(|(a, at), (b, bt)| {
-                                (a.is_none(), a, at).cmp(&(b.is_none(), b, bt))
-                            });
-                            attached = keyed.into_iter().map(|(_, at)| at).collect();
-                        }
-                        attached.into_iter().find_map(|at| {
-                            let entity = label.runs[read.level as usize]
-                                .entity_of(u64::from(at))
-                                .map(EntityId::new)?;
-                            let ArtifactVerdict::Serve { rank, .. } = view.verdict(entity, at)
-                            else {
-                                return None;
-                            };
-                            read.content(self, &generation, label, at, entity, rank)?
-                                .first_text()
-                                .filter(|text| !text.is_empty())
-                                .map(str::to_string)
-                        })
-                    })
-                })
-        };
+        let attached = AttachedLevels::default();
+        let namer = Namer::new(
+            self,
+            &served_view,
+            &mask,
+            &layer,
+            &reachable,
+            &ctx,
+            &dependency_served,
+            &attached,
+        );
         let resolved: RefCell<HashMap<(u32, u32), Option<String>>> = RefCell::default();
         let name_of = |g: &Gated| -> Option<String> {
             let at = (g.level, g.ordinal);
             if let Some(name) = resolved.borrow().get(&at) {
                 return name.clone();
             }
-            let name = names
-                .get(&at)
-                .cloned()
-                .flatten()
-                .or_else(|| attached_name(g.level, g.ordinal));
+            let name = namer.name(names.get(&at).cloned().flatten(), g.level, g.ordinal);
             resolved.borrow_mut().insert(at, name.clone());
             name
         };
@@ -730,6 +645,150 @@ impl crate::Engine {
             parents: parent_rows,
             next,
         })
+    }
+}
+
+/// The attached layers a [`Namer`] reads, each with its levels read under the request's mask:
+/// read on the first name that needs one.
+pub(crate) type AttachedLevels = OnceCell<Vec<(RegisteredLayer, Vec<ReadLevel>)>>;
+
+/// An artifact's name as this viewer is shown it: its own text where it has some, otherwise the
+/// text of the first artifact attached to it that this viewer is served, the attached layers taken
+/// in the principal's reachable order and each level's attached artifacts by key, then the keyless
+/// by ordinal, as the viewport orders them.
+pub(crate) struct Namer<'a, 'c> {
+    engine: &'a Engine,
+    served: &'a ServedView<'a>,
+    mask: &'a EffectiveMask,
+    layer: &'a RegisteredLayer,
+    reachable: &'a tessera_lifecycle::ResolvedLayers,
+    ctx: &'a DependencyContext<'c>,
+    dependency_served: &'a dyn Fn(&Attachment) -> bool,
+    attached: &'a AttachedLevels,
+    views: OnceCell<Vec<Vec<ArtifactView<'a, EffectiveMask>>>>,
+}
+
+impl<'a, 'c> Namer<'a, 'c> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        engine: &'a Engine,
+        served: &'a ServedView<'a>,
+        mask: &'a EffectiveMask,
+        layer: &'a RegisteredLayer,
+        reachable: &'a tessera_lifecycle::ResolvedLayers,
+        ctx: &'a DependencyContext<'c>,
+        dependency_served: &'a dyn Fn(&Attachment) -> bool,
+        attached: &'a AttachedLevels,
+    ) -> Self {
+        Namer {
+            engine,
+            served,
+            mask,
+            layer,
+            reachable,
+            ctx,
+            dependency_served,
+            attached,
+            views: OnceCell::new(),
+        }
+    }
+
+    /// The name of the artifact at `ordinal` of `level`, whose own text, where this viewer is
+    /// served its content, is `own`.
+    pub(crate) fn name(&self, own: Option<String>, level: u32, ordinal: u32) -> Option<String> {
+        own.or_else(|| self.attached_name(level, ordinal))
+    }
+
+    fn attached_name(&self, level: u32, ordinal: u32) -> Option<String> {
+        let (engine, served, mask) = (self.engine, self.served, self.mask);
+        let generation = served.generation;
+        let target_layer = self.layer.declaration.name.as_str();
+        let target = self.layer.runs[level as usize]
+            .entity_of(u64::from(ordinal))
+            .map(EntityId::new)?;
+        let layers = self.attached.get_or_init(|| {
+            self.reachable
+                .names()
+                .filter_map(|name| {
+                    engine
+                        .readable_layer(served.session, generation, name, served.name)
+                        .ok()
+                })
+                .filter(|label| {
+                    label
+                        .declaration
+                        .depends_on
+                        .iter()
+                        .any(|d| d == target_layer)
+                })
+                .map(|label| {
+                    let levels = (0..label.runs.len() as u32)
+                        .filter_map(|level| {
+                            self.ctx
+                                .held(engine.read_level(served, mask, &label, level, false))
+                        })
+                        .collect();
+                    (label, levels)
+                })
+                .collect()
+        });
+        let views = self.views.get_or_init(|| {
+            layers
+                .iter()
+                .map(|(label, levels)| {
+                    levels
+                        .iter()
+                        .map(|read| read.view(engine, served, mask, label, self.dependency_served))
+                        .collect()
+                })
+                .collect()
+        });
+        layers
+            .iter()
+            .zip(views)
+            .find_map(|((label, levels), views)| {
+                levels.iter().zip(views).find_map(|(read, view)| {
+                    // An edge naming an entity the target slot no longer holds is into an
+                    // artifact since republished over.
+                    let mut attached: Vec<u32> = read
+                        .rows
+                        .records()
+                        .attached_to(target_layer, level, ordinal)
+                        .filter(|&at| read.rows.attachment(at).is_some_and(|a| a.entity == target))
+                        .collect();
+                    if attached.len() > 1 {
+                        let name = label.declaration.name.as_str();
+                        let mut keyed: Vec<(Option<String>, u32)> =
+                            engine.write.live().with_artifacts(|store| {
+                                attached
+                                    .iter()
+                                    .map(|&at| {
+                                        (
+                                            store
+                                                .get(name, read.level, at)
+                                                .and_then(|r| r.key.clone()),
+                                            at,
+                                        )
+                                    })
+                                    .collect()
+                            });
+                        keyed.sort_unstable_by(|(a, at), (b, bt)| {
+                            (a.is_none(), a, at).cmp(&(b.is_none(), b, bt))
+                        });
+                        attached = keyed.into_iter().map(|(_, at)| at).collect();
+                    }
+                    attached.into_iter().find_map(|at| {
+                        let entity = label.runs[read.level as usize]
+                            .entity_of(u64::from(at))
+                            .map(EntityId::new)?;
+                        let ArtifactVerdict::Serve { rank, .. } = view.verdict(entity, at) else {
+                            return None;
+                        };
+                        read.content(engine, generation, label, at, entity, rank)?
+                            .name()
+                    })
+                })
+            })
     }
 }
 

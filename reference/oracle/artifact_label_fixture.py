@@ -190,14 +190,22 @@ def browse_names(terms: list[str]) -> dict[str, str | None]:
     return names
 
 
-def _write_points(path: Path) -> None:
+def positions() -> dict[int, tuple[float, float]]:
+    """Each point's `(x, y)` as the build reads it: a `float32`, widened."""
     rng = random.Random(SEED)
+    xs = pa.array([rng.uniform(0.0, EXTENT_MAX) for _ in range(N_ITEMS)], pa.float32()).to_pylist()
+    ys = pa.array([rng.uniform(0.0, EXTENT_MAX) for _ in range(N_ITEMS)], pa.float32()).to_pylist()
+    return {e: (xs[e], ys[e]) for e in range(N_ITEMS)}
+
+
+def _write_points(path: Path) -> None:
+    at = positions()
     pq.write_table(
         pa.table(
             {
                 "entity_id": pa.array(range(N_ITEMS), type=pa.uint64()),
-                "x": pa.array([rng.uniform(0.0, EXTENT_MAX) for _ in range(N_ITEMS)], pa.float32()),
-                "y": pa.array([rng.uniform(0.0, EXTENT_MAX) for _ in range(N_ITEMS)], pa.float32()),
+                "x": pa.array([at[e][0] for e in range(N_ITEMS)], pa.float32()),
+                "y": pa.array([at[e][1] for e in range(N_ITEMS)], pa.float32()),
             }
         ),
         path,

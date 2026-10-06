@@ -136,7 +136,10 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  *
  * The Layers button opens a popover in four sections. Points: whether the points are drawn; Most
  * points, a slider from `budget-min` to `budget-max` on a log scale that sets the store's budget
- * when it is let go (`Store.setBudget`); what sizes the points; and their opacity. Size by lists
+ * when it is let go (`Store.setBudget`); while a `nested` or `dag` layer is drawn, Most clusters,
+ * a slider from `cluster-budget-min` to `cluster-budget-max` on a log scale that sets the most
+ * clusters such a layer is cut to when it is let go (`Store.setClusterBudget`); what sizes the
+ * points; and their opacity. Size by lists
  * None and the number columns the points arrive with. Under None one Size slider sets every
  * point's radius, which `hide-size` leaves out; under a column two sliders set the radii of its
  * smallest and largest value, and a Linear, Log or Rank choice places values between them. Colour:
@@ -181,6 +184,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-displaychange']>} tessera-displaychange - A setting in the Points or Density section changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-sizechange']>} tessera-sizechange - Size by, the size range or the scale changed in the Points section.
  * @fires {CustomEvent<TesseraEventDetails['tessera-budgetchange']>} tessera-budgetchange - Most points was let go at a new number.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clusterbudgetchange']>} tessera-clusterbudgetchange - Most clusters was let go at a new number.
  * @fires {CustomEvent<TesseraEventDetails['tessera-fold']>} tessera-fold - A field card was folded to one line or opened.
  * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A colour was chosen or reset for one value on a field card.
  * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette, the ramp, its scale or its direction was chosen in the Colour section.
@@ -214,6 +218,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart points-toggle - The Points switch, with `aria-checked`.
  * @csspart most-points - The Most points slider.
  * @csspart most-points-value - The number of points it stands at, such as "250K".
+ * @csspart most-clusters - The Most clusters slider, while a `nested` or `dag` layer is drawn.
+ * @csspart most-clusters-value - The number of clusters it stands at, such as "1K".
  * @csspart size-by - The Size by button, naming the column the points are sized by or None, with
  *   `aria-expanded` while its menu is open.
  * @csspart size-menu - The Size by menu, while it is open.
@@ -735,6 +741,15 @@ export class TesseraExplorer extends TesseraElement {
   @property({type: Number, attribute: 'budget-min'}) accessor budgetMin = 1_000;
   /** The most marks Most points offers, passed to the map's `budget-max`. */
   @property({type: Number, attribute: 'budget-max'}) accessor budgetMax = 2_000_000;
+  /**
+   * The most clusters a `nested` or `dag` layer is cut to, passed to the map's `cluster-budget`;
+   * `0` is the finest cut. Most clusters in the Layers popover sets the store's itself.
+   */
+  @property({type: Number, attribute: 'cluster-budget'}) accessor clusterBudget = 1_000;
+  /** The fewest clusters Most clusters offers. */
+  @property({type: Number, attribute: 'cluster-budget-min'}) accessor clusterBudgetMin = 10;
+  /** The most clusters Most clusters offers. */
+  @property({type: Number, attribute: 'cluster-budget-max'}) accessor clusterBudgetMax = 10_000;
   /** Passed to the map's `no-points`; the Points switch in the Layers popover changes it. */
   @property({type: Boolean, attribute: 'no-points'}) accessor noPoints = false;
   /** Passed to the map's `radius`; the Size slider in the Layers popover changes it. */
@@ -784,6 +799,8 @@ export class TesseraExplorer extends TesseraElement {
   @state() accessor menu: Menu | null = null;
   /** Where Most points is being dragged, before it is let go. @internal */
   @state() accessor pointsDragged: number | null = null;
+  /** Where Most clusters is being dragged, before it is let go. @internal */
+  @state() accessor clustersDragged: number | null = null;
   /** Whether the list of density colours in the Layers popover is open. @internal */
   @state() accessor densityColoursOpen = false;
   /** @internal */
@@ -1041,6 +1058,7 @@ export class TesseraExplorer extends TesseraElement {
           budget=${this.budget || nothing}
           .budgetMin=${this.budgetMin}
           .budgetMax=${this.budgetMax}
+          .clusterBudget=${this.clusterBudget}
           controls-corner=${compact ? 'bottom-left' : 'top-left'}
           .clusterLevel=${level}
           .noPoints=${this.noPoints}
@@ -1395,7 +1413,7 @@ export class TesseraExplorer extends TesseraElement {
           <button part="points-toggle" class="switch small" type="button" role="switch" aria-checked=${s.points ? 'true' : 'false'} aria-label="Show points"
             @click=${() => change({points: !s.points})}><span class="knob"></span></button>
         </div>
-        ${this.mostPoints(!s.points)}
+        ${this.mostPoints(!s.points)}${this.mostClusters()}
         <div class="sliders">
           ${this.sizeControls(radius, !s.points)}
           <label for="point-opacity">Opacity</label>
@@ -1424,23 +1442,70 @@ export class TesseraExplorer extends TesseraElement {
    */
   private mostPoints(disabled: boolean): TemplateResult {
     const s = this.resolvedStore;
-    const min = Math.max(1, this.budgetMin);
-    const max = Math.max(min * 10, this.budgetMax);
+    return this.mostSlider({
+      id: 'most-points',
+      label: 'Most points',
+      unit: 'points',
+      range: [this.budgetMin, this.budgetMax],
+      shown: this.pointsDragged ?? s?.budget ?? 250_000,
+      disabled: disabled || !s,
+      drag: (n) => (this.pointsDragged = n),
+      set: (n) => this.setBudget(n)
+    });
+  }
+
+  /**
+   * Most clusters, while a `nested` or `dag` layer is drawn: a slider from `cluster-budget-min` to
+   * `cluster-budget-max` as Most points is. Letting go sets the most clusters such a layer is cut to.
+   */
+  private mostClusters(): TemplateResult | typeof nothing {
+    const s = this.resolvedStore;
+    const meta = s?.get('meta') ?? null;
+    if (!s || !meta) return nothing;
+    const treed = s.get('artifacts').layers.some((name) => {
+      const kind = meta.layers.find((l) => l.name === name)?.hierarchy.kind;
+      return kind === 'nested' || kind === 'dag';
+    });
+    if (!treed) return nothing;
+    return this.mostSlider({
+      id: 'most-clusters',
+      label: 'Most clusters',
+      unit: 'clusters',
+      range: [this.clusterBudgetMin, this.clusterBudgetMax],
+      shown: this.clustersDragged ?? s.clusterBudget ?? (this.clusterBudget || this.clusterBudgetMax),
+      disabled: false,
+      drag: (n) => (this.clustersDragged = n),
+      set: (n) => this.setClusterBudget(n)
+    });
+  }
+
+  /** A log-scale slider over `range` on round numbers, with the number it stands at. */
+  private mostSlider(o: {
+    id: 'most-points' | 'most-clusters';
+    label: string;
+    unit: string;
+    range: [number, number];
+    shown: number;
+    disabled: boolean;
+    drag: (n: number) => void;
+    set: (n: number) => void;
+  }): TemplateResult {
+    const min = Math.max(1, o.range[0]);
+    const max = Math.max(min * 10, o.range[1]);
     const span = Math.log(max / min);
     const at = (n: number) => Math.min(1, Math.max(0, Math.log(n / min) / span));
     const of = (t: number) => Math.min(max, Math.max(min, roundPoints(min * Math.exp(t * span))));
-    const shown = this.pointsDragged ?? s?.budget ?? 250_000;
-    const t = at(shown);
+    const t = at(o.shown);
     // A tick at each power of ten between the ends, where it leaves room for the last end's label.
     const ticks: number[] = [];
     for (let p = 10 ** Math.ceil(Math.log10(min) + 1e-9); p < max; p *= 10) if (at(p) > 0.08 && at(p) < 0.85) ticks.push(p);
     const read = (e: Event) => of(Number((e.target as HTMLInputElement).value) / 1000);
     return html`<div class="most">
-      <div class="most-top"><label for="most-points">Most points</label><span part="most-points-value" class="most-value">${pointsText(shown)}</span></div>
-      <input id="most-points" part="most-points" class="slider" type="range" min="0" max="1000" step="1" .value=${String(Math.round(t * 1000))} ?disabled=${disabled || !s}
-        style=${`--fill:${(t * 100).toFixed(1)}%`} aria-valuetext=${`${pointsText(shown)} points`}
-        @input=${(e: Event) => (this.pointsDragged = read(e))}
-        @change=${(e: Event) => this.setBudget(read(e))} />
+      <div class="most-top"><label for=${o.id}>${o.label}</label><span part=${o.id === 'most-points' ? 'most-points-value' : 'most-clusters-value'} class="most-value">${pointsText(o.shown)}</span></div>
+      <input id=${o.id} part=${o.id === 'most-points' ? 'most-points' : 'most-clusters'} class="slider" type="range" min="0" max="1000" step="1" .value=${String(Math.round(t * 1000))} ?disabled=${o.disabled}
+        style=${`--fill:${(t * 100).toFixed(1)}%`} aria-valuetext=${`${pointsText(o.shown)} ${o.unit}`}
+        @input=${(e: Event) => o.drag(read(e))}
+        @change=${(e: Event) => o.set(read(e))} />
       <div class="ticks" aria-hidden="true">
         <span style="left:0">${pointsText(min)}</span>
         ${ticks.map((p) => html`<span class="mid" style=${`left:${(at(p) * 100).toFixed(1)}%`}>${pointsText(p)}</span>`)}
@@ -1457,6 +1522,16 @@ export class TesseraExplorer extends TesseraElement {
     s.setBudget(budget);
     emit(this, 'tessera-budgetchange', {budget});
     this.requestUpdate();
+  }
+
+  /** Set the most clusters a treed layer is cut to from Most clusters, and report it. */
+  private setClusterBudget(budget: number): void {
+    this.clustersDragged = null;
+    const s = this.resolvedStore;
+    if (!s || budget === s.clusterBudget) return;
+    s.setClusterBudget(budget);
+    this.clusterBudget = budget;
+    emit(this, 'tessera-clusterbudgetchange', {budget});
   }
 
   /**

@@ -113,6 +113,12 @@ class Map(anywidget.AnyWidget):
       map's own, 250,000.
     - `budget_min`, `budget_max`: the ends of the Most points slider in the map's Layers
       popover. The defaults are 1,000 and 2,000,000. Neither changes `budget`.
+    - `cluster_budget`: the most clusters a `nested` or `dag` layer is drawn with, met by drawing
+      parents in place of their children, and the cut a cluster card ranks at. The default is
+      1,000; `0` draws every cluster, and setting it to `0` later goes back to every cluster.
+    - `cluster_budget_min`, `cluster_budget_max`: the ends of the Most clusters slider, shown in
+      the Layers popover while such a layer is drawn. The defaults are 10 and 10,000. Neither
+      changes `cluster_budget`.
 
     Read the widget's attributes in a later cell:
 
@@ -129,8 +135,10 @@ class Map(anywidget.AnyWidget):
     - `last_error`: why the page last refused something set here, or `None`.
     - `budget`: as the map draws it; it changes when the Most points slider is let go. Setting
       it in a later cell applies it.
+    - `cluster_budget`: likewise, when the Most clusters slider is let go.
     - `url`, `height`, `explorer_layout`, `title_field`, `artifacts_per_tile`, `budget_min`,
-      `budget_max`: as given. Setting one in a later cell applies it.
+      `budget_max`, `cluster_budget_min`, `cluster_budget_max`: as given. Setting one in a later
+      cell applies it.
     - `tokens_sent`: how many tokens the kernel has sent the page.
 
     `view`, `bbox`, `filters`, `layers`, `colour_by` and the size settings change when the map
@@ -167,6 +175,9 @@ class Map(anywidget.AnyWidget):
     budget = traitlets.Int(0).tag(sync=True)
     budget_min = traitlets.Int(1_000).tag(sync=True)
     budget_max = traitlets.Int(2_000_000).tag(sync=True)
+    cluster_budget = traitlets.Int(1_000).tag(sync=True)
+    cluster_budget_min = traitlets.Int(10).tag(sync=True)
+    cluster_budget_max = traitlets.Int(10_000).tag(sync=True)
     # Both ways, synced up at the settle.
     bbox = traitlets.List(traitlets.Float(), minlen=4, maxlen=4, allow_none=True, default_value=None).tag(sync=True)
     # `None` leaves the explorer's own default; `[]` is none; a list is exactly those (with their
@@ -207,6 +218,9 @@ class Map(anywidget.AnyWidget):
         budget: int = 0,
         budget_min: int = 1_000,
         budget_max: int = 2_000_000,
+        cluster_budget: int = 1_000,
+        cluster_budget_min: int = 10,
+        cluster_budget_max: int = 10_000,
         **kwargs: Any,
     ) -> None:
         if token is None:
@@ -243,6 +257,9 @@ class Map(anywidget.AnyWidget):
             budget=budget,
             budget_min=budget_min,
             budget_max=budget_max,
+            cluster_budget=cluster_budget,
+            cluster_budget_min=cluster_budget_min,
+            cluster_budget_max=cluster_budget_max,
             _esm=bundle.read_text(encoding="utf-8"),
             **kwargs,
         )

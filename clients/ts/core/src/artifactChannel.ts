@@ -1,11 +1,11 @@
 import type {TesseraClient} from './client.js';
 import {rectArea, type TileRect} from './rects.js';
 import {tileRectOfBbox} from './budget.js';
-import {MAX_DEPTH, WORLD_SIZE, mortonOfTile} from './coords.js';
+import {MAX_DEPTH, WORLD_SIZE, mortonOfTile, rectToRequestBbox} from './coords.js';
 import {gridOfData} from './projection.js';
 import {worldBbox, type Viewport} from './prefetch.js';
 import type {ViewState} from './driver.js';
-import type {Artifact, FilterExpr, Layer, MapProjection, Quantisation, ViewportArtifactsFrame} from './types.js';
+import type {AggregateCut, Artifact, FilterExpr, Layer, MapProjection, Quantisation, ViewportArtifactsFrame} from './types.js';
 import {SessionArtifactTable, type ArtifactRef} from './artifactTable.js';
 import {refusalOf} from './presented.js';
 
@@ -256,6 +256,8 @@ export class ArtifactChannel {
   private timer: unknown = null;
   private idleTimer: unknown = null;
   private view: NotedView | null = null;
+  /** The treed frame's `budget`; `undefined` asks for the finest cut. */
+  private budget: number | undefined;
   private readonly clock: ArtifactChannelClock;
   private readonly settleMs: number;
   private readonly idleMs: number;
@@ -292,6 +294,34 @@ export class ArtifactChannel {
     this.idleMs = opts.idleMs ?? PREFETCH_IDLE_MS;
     this.table = opts.table ?? null;
     this.declarations = new Map((opts.declarations ?? []).map((l) => [l.name, l]));
+    this.budget = opts.budget;
+  }
+
+  /**
+   * The cut the treed frame is drawn at for the noted view: its tile depth, the box naming exactly
+   * its tiles in the view's coordinates, and the budget. `null` before a view is noted.
+   */
+  drawnCut(): AggregateCut | null {
+    const view = this.view;
+    if (!view) return null;
+    const bbox = rectToRequestBbox(tileRectOfBbox(view.bbox, view.depth), view.depth, this.opts.quantisation);
+    return {zoom: view.depth, bbox, ...(this.budget === undefined ? {} : {budget: this.budget})};
+  }
+
+  /** Cut the treed layers to `budget`, `undefined` for the finest cut, and ask again where one is asked for. */
+  setBudget(budget: number | undefined): void {
+    if (budget === this.budget) return;
+    this.budget = budget;
+    const walked = this.state.layers.some((name) => {
+      const decl = this.declarations.get(name);
+      return !decl || scopeKindOf(decl) === 'treed';
+    });
+    if (this.view && walked) {
+      this.cancelPrefetch();
+      if (this.timer) this.clock.cancel(this.timer);
+      this.timer = null;
+      void this.request();
+    }
   }
 
   get current(): ArtifactChannelState {
@@ -598,7 +628,7 @@ export class ArtifactChannel {
         ...(want.levels === undefined ? {} : {levels: want.levels}),
         perTile: this.opts.perTile!,
         ...(want.expression === null ? {} : {filters: want.expression}),
-        ...(walked && this.opts.budget !== undefined ? {budget: this.opts.budget} : {})
+        ...(walked && this.budget !== undefined ? {budget: this.budget} : {})
       },
       {
         signal,
