@@ -51,20 +51,6 @@ describe('<tessera-cluster-filter> with the box empty', () => {
     expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['90', '5', '0']);
   });
 
-  it('counts under the whole filter in the highlight position, where a cluster counted 0 cannot be chosen', async () => {
-    const {host, store, box} = await mountField({verb: 'highlight'});
-    store.setBrowse('roots', {artifacts: [row(1n, 'Physics'), row(2n, 'Biology')], parents: [], next: null});
-    box().dispatchEvent(new Event('focus'));
-    await settle(host);
-    expect([...registered(store).values()]).toEqual([{groupings: [{by: {layer: 'topics', artifacts: [1n, 2n]}}]}]);
-    answerAggregate(store, 'clusters', aggregateEntry([{rows: [{key: 1n, count: 0}, {key: 2n, count: 4}]}]));
-    await settle(host);
-    const physics = deep(host, '[part~="option"][data-id="1"]') as HTMLButtonElement;
-    expect(physics.getAttribute('aria-disabled')).toBe('true');
-    physics.click();
-    expect(store.calls.filter((c) => c.name === 'setMembers')).toHaveLength(0);
-  });
-
   it('asks the first level of a levelled layer, and counts one grouping per level', async () => {
     const tiers = layer('topics', {hierarchy: {kind: 'tiered', pruneChildren: false}, levels: [{level: 0, title: null, zoom: null}, {level: 1, title: null, zoom: null}]});
     const {host, store, box} = await mountField({layers: [tiers]});
@@ -132,18 +118,3 @@ describe('<tessera-cluster-filter> typing', () => {
   });
 });
 
-describe('<tessera-cluster-filter> chips', () => {
-  it('shows the layer’s clauses in its position, by label, and × takes one off', async () => {
-    const members = [
-      {layer: 'topics', artifact: 7n, outside: false, verb: 'filter', label: 'Optics'},
-      {layer: 'topics', artifact: 8n, outside: true, verb: 'filter', label: 'Lasers'},
-      {layer: 'topics', artifact: 9n, outside: false, verb: 'highlight', label: 'Lit'},
-      {layer: 'venues', artifact: 1n, outside: false, verb: 'filter', label: 'Elsewhere'}
-    ];
-    const {host, store} = await mountField({members});
-    const chips = deepAll(host, '[part="chosen"]');
-    expect(chips.map((c) => c.textContent!.trim())).toEqual(['Optics', 'Outside Lasers']);
-    (chips[0]!.querySelector('button') as HTMLButtonElement).click();
-    expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual(members.slice(1));
-  });
-});

@@ -15,6 +15,10 @@ import type {Dataset, Preset} from '../config.js';
  *
  * Depth is chosen from the mark budget, not the zoom, so marks on screen stay roughly constant.
  * Calibration only goes deeper, since a shallower request would serve a subset of what is drawn.
+ *
+ * `artifacts per tile` is the most artifacts one level of a drawn layer shows in one tile, up to
+ * the deployment's `max_artifacts_per_tile`. The store takes it when it opens, so a change opens
+ * the session's store again.
  */
 export function renderSource(state: AppState, datasets: Dataset[], presets: Preset[]): string {
   const current = datasets.find((d) => d.id === state.datasetId);
@@ -45,6 +49,8 @@ export function renderSource(state: AppState, datasets: Dataset[], presets: Pres
 
   const active = presets.find((p) => p.label === state.termsLabel);
   const fmt = (n: number) => n.toLocaleString('en-GB');
+  // The range reaches the value in use even where the address asked for more than the deployment allows.
+  const perTileMax = Math.max(state.meta?.selection.maxArtifactsPerTile ?? 0, state.artifactsPerTile);
 
   return panel(
     'Source',
@@ -52,6 +58,8 @@ export function renderSource(state: AppState, datasets: Dataset[], presets: Pres
      ${principal}
      <input id="budget" type="range" min="1000" max="2000000" step="1000" value="${state.budget}" />
      ${row('mark budget', fmt(state.budget))}
+     <input id="per-tile" type="range" min="0" max="${perTileMax}" step="1" value="${state.artifactsPerTile}" />
+     ${row('artifacts per tile', fmt(state.artifactsPerTile))}
      ${row('visible at build', active ? fmt(active.visible) : '—')}
      ${row('prose indexed', current?.prose.length ? current.prose.join(', ') : 'none')}
      ${state.switching ? '<div class="muted">switching: establishing a session…</div>' : ''}`
