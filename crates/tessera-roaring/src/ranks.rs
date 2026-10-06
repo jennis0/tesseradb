@@ -58,26 +58,23 @@ mod tests {
     fn a_rank_is_the_members_below() {
         let mut bitmap = Bitmap::new();
         bitmap.add_range(70_000..140_000);
-        bitmap.add_many(&[5, 9, 1 << 20, (1 << 20) + 3, u32::MAX]);
-        bitmap.run_optimize();
-        let ranks = BlockRanks::of(&bitmap);
-        for value in [
-            5,
-            9,
-            70_000,
-            100_000,
-            139_999,
-            1 << 20,
-            (1 << 20) + 3,
-            u32::MAX,
-        ] {
-            assert_eq!(
-                ranks.rank_of(&bitmap, value),
-                Some(bitmap.rank(value) - 1),
-                "{value}"
-            );
+        bitmap.add_many(&[5, 9, 1 << 20, (1 << 20) + 3, (1 << 20) + 5_000, u32::MAX]);
+        for value in (300_000..400_000).step_by(3) {
+            bitmap.add(value);
         }
-        assert_eq!(ranks.rank_of(&bitmap, 6), None);
+        let mut optimised = bitmap.clone();
+        optimised.run_optimize();
+        for bitmap in [bitmap, optimised] {
+            let ranks = BlockRanks::of(&bitmap);
+            for value in bitmap.iter().step_by(97).chain([u32::MAX, 70_000, 139_999]) {
+                assert_eq!(
+                    ranks.rank_of(&bitmap, value),
+                    Some(bitmap.rank(value) - 1),
+                    "{value}"
+                );
+            }
+            assert_eq!(ranks.rank_of(&bitmap, 6), None);
+        }
         assert_eq!(
             BlockRanks::of(&Bitmap::new()).rank_of(&Bitmap::new(), 3),
             None

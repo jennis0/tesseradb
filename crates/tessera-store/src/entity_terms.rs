@@ -523,6 +523,35 @@ impl EntityTerms {
         Ok(true)
     }
 
+    /// Every list this layer holds for an entity in `range`, in ascending entity order: one rank
+    /// for the first, and each after it the next. For a caller visiting a span of entities, which
+    /// would otherwise pay a rank per entity.
+    pub fn for_each_in(
+        &self,
+        range: std::ops::Range<u32>,
+        mut f: impl FnMut(u32, &[u32]),
+    ) -> Result<()> {
+        let mut members = self.hasrow.iter();
+        members.reset_at_or_after(range.start);
+        let mut rank = None;
+        let mut out = Vec::new();
+        for entity in members.take_while(|&entity| entity < range.end) {
+            let at = match rank {
+                Some(at) => at + 1,
+                None => self
+                    .ranks
+                    .get_or_init(|| tessera_roaring::BlockRanks::of(&self.hasrow))
+                    .rank_of(&self.hasrow, entity)
+                    .expect("an entity the bitmap holds has a rank in it"),
+            };
+            rank = Some(at);
+            out.clear();
+            self.terms_at(at as usize, &mut out)?;
+            f(entity, &out);
+        }
+        Ok(())
+    }
+
     /// The list at `rank` in this layer's has-row order, appended to `out`.
     fn terms_at(&self, rank: usize, out: &mut Vec<u32>) -> Result<()> {
         let start = self.absolute(rank);

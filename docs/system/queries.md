@@ -610,6 +610,28 @@ flowchart LR
 *The three parts of a field's figures. The smallest and largest of F − D come from F's eight most
 extreme rows on each side, or from a walk of F − D where D holds all eight.*
 
+A build and a fold tally the base in entity order, a span of 2^18 entities at a time, so they read
+each entity's key list and held values in the order they are stored and ask one rank a span.
+Measured with `tessera-bench`'s `field_tallies_scale` on a synthetic corpus, a 12-thread machine
+with the files in the page cache, two held fields and 384 key lists, the tally pass took 0.23 s
+over 10 million rows, 1.9 s over 100 million and 18.6 s over a billion, 19 to 23 ns a row. The
+entity terms reader finds an entity's rank from a table of each block's rank below it, which took
+0.9 to 1.4 µs a lookup at all three sizes against croaring's own rank's 1.6 µs, 1.8 µs and 10 µs.
+An item card reads its labels through the same table.
+
+| corpus | key lists × fields tallied | file | open | compose one field |
+|---|---|---|---|---|
+| GBIF ladder, 25.8 million items | 252 × 1 | 93,063 B | in the bundle's open | first summary 0.9 ms, served |
+| Overture, 73.6 million items | 405 × 2 | 296–300 KB | 0.16–0.22 ms | 0.07–0.16 ms |
+| Tree of Life, 233 million items | 474 × 0, 433 × 0 | 3.8 KB, 3.5 KB | 0.03 ms | none |
+
+The key lists are each corpus's distinct access labels, counted from its sources; its views carry
+one label an item. The Overture and Tree of Life rows were measured with `field_tallies_shape` on a
+file of their shape, each tally full, not on a built bundle. A tally takes about 370 bytes on
+disk; 100,000 key lists of two fields measured 74 MB, opened in 220 ms and composed one field in
+44 ms. Building the GBIF ladder took 70 to 79 s with the tallies and 70 to 79 s without,
+the difference within the spread of two runs of each.
+
 **Not built yet:** a summary over a filtered set, which would need a walk of the set's values for
 each request; bins of a number or timestamp field within cells; breakdowns of keyword fields and
 of integer fields by value; a grouping of one kind inside another of the same kind, such as cells

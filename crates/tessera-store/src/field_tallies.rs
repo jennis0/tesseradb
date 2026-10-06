@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::ops::Range;
 use std::path::Path;
 
 use rayon::prelude::*;
@@ -219,8 +220,8 @@ impl TallyMerge {
 pub enum TallySource<'a> {
     /// A drawn column of the base segment's `columns.arrow`, read by row.
     Drawn,
-    /// Values held per entity, `None` where the entity holds none.
-    Held(&'a (dyn Fn(u32) -> Option<Number> + Sync)),
+    /// Values held per entity, visited over a set of entities: each one holding a value, with it.
+    Held(&'a (dyn Fn(&croaring::Bitmap, &mut dyn FnMut(u32, Number)) + Sync)),
 }
 
 /// One field [`derive`] tallies.
@@ -248,8 +249,8 @@ impl FieldTallies {
     }
 }
 
-/// Rows of the base one piece of [`derive`] reads.
-const PIECE_ROWS: u32 = 1 << 20;
+/// Entities one piece of [`derive`] visits.
+const PIECE_ENTITIES: u64 = 1 << 18;
 
 /// One list's tally of one field while a piece adds rows to it.
 struct Tallying {
@@ -315,16 +316,20 @@ impl Tallying {
     }
 }
 
-/// Tally `fields` over the `base_rows` rows of a view's base segment, whose `columns.arrow` is
-/// `columns`, grouping each row by its item's key list, and write the result to `path`.
+/// Tally `fields` over a view's base rows, grouping each row by its item's key list, and write the
+/// result to `path`.
 ///
-/// `entity_of_row` names each base row's entity, and `keys_of` writes an entity's sorted index
-/// keys into the buffer it is handed, as the postings list it under.
+/// The rows are visited in entity order, a span of entities at a time, so nothing is asked of an
+/// entity by rank: `row_of` names each entity's base row in the view, `lists` hands over every key
+/// list held for the entities of a span in ascending order, and a held field hands over its values
+/// over a set of entities the same way. An entity with a row and no list is tallied under the empty
+/// list. `bound` is one past the highest entity the view's base holds. A drawn field is read from
+/// `columns` by row.
 pub fn derive(
-    base_rows: u32,
+    bound: u64,
     columns: Option<&ColumnsRef>,
-    entity_of_row: &(dyn Fn(u32) -> u32 + Sync),
-    keys_of: &(dyn Fn(u32, &mut Vec<u32>) -> io::Result<()> + Sync),
+    row_of: &(dyn Fn(u32) -> Option<u32> + Sync),
+    lists: &(dyn Fn(Range<u32>, &mut dyn FnMut(u32, &[u32])) -> io::Result<()> + Sync),
     fields: &[TallyField<'_>],
     path: &Path,
 ) -> io::Result<FieldTallies> {
@@ -339,43 +344,82 @@ pub fn derive(
         })
         .collect();
     type Groups = HashMap<Vec<u32>, Vec<FieldTally>>;
-    let pieces: Vec<u32> = (0..base_rows.div_ceil(PIECE_ROWS)).collect();
+    let bound = bound.min(u64::from(u32::MAX) + 1);
+    let pieces: Vec<u64> = (0..bound.div_ceil(PIECE_ENTITIES)).collect();
     let tallied: io::Result<Groups> = pieces
         .into_par_iter()
         .map(|piece| -> io::Result<Groups> {
+            let start = (piece * PIECE_ENTITIES) as u32;
+            let end = ((piece + 1) * PIECE_ENTITIES).min(bound);
+            let span = start..(end - 1) as u32 + 1;
+            let width = (end - u64::from(start)) as usize;
+            // Each entity's row, where it has one in the view's base.
+            let mut rows = vec![u32::MAX; width];
+            let mut present = Vec::new();
+            for entity in span.clone() {
+                if let Some(row) = row_of(entity) {
+                    rows[(entity - start) as usize] = row;
+                    present.push(entity);
+                }
+            }
+            if present.is_empty() {
+                return Ok(Groups::new());
+            }
+            let present = croaring::Bitmap::of(&present);
+            // Each held field's values over the span's entities.
+            let mut held: Vec<Vec<Option<Number>>> = Vec::with_capacity(fields.len());
+            for field in fields {
+                let mut values = Vec::new();
+                if let TallySource::Held(over) = &field.source {
+                    values = vec![None; width];
+                    over(&present, &mut |entity, value| {
+                        values[(entity - start) as usize] = Some(value);
+                    });
+                }
+                held.push(values);
+            }
+            // Each entity's key list, as a span of one flat buffer.
+            let mut keys: Vec<u32> = Vec::new();
+            let mut list_of: Vec<(u32, u32)> = vec![(0, 0); width];
+            lists(span.clone(), &mut |entity, list| {
+                let at = (entity - start) as usize;
+                if rows[at] != u32::MAX {
+                    list_of[at] = (keys.len() as u32, list.len() as u32);
+                    keys.extend_from_slice(list);
+                }
+            })?;
             let mut index: HashMap<Vec<u32>, usize> = HashMap::new();
-            let mut lists: Vec<Vec<Tallying>> = Vec::new();
-            // Rows near each other in map order mostly carry the same key list, so a row whose
-            // keys are the last row's takes its tallies without a lookup or an allocation.
-            let (mut keys, mut last_keys) = (Vec::new(), Vec::new());
-            let mut last: Option<usize> = None;
-            let end = piece
-                .saturating_add(1)
-                .saturating_mul(PIECE_ROWS)
-                .min(base_rows);
-            for row in piece * PIECE_ROWS..end {
-                let entity = entity_of_row(row);
-                keys_of(entity, &mut keys)?;
-                let at = match last {
-                    Some(at) if keys == last_keys => at,
+            let mut tallying: Vec<Vec<Tallying>> = Vec::new();
+            let mut last: Option<(Range<usize>, usize)> = None;
+            for entity in present.iter() {
+                let at = (entity - start) as usize;
+                let row = rows[at];
+                let (from, len) = list_of[at];
+                let list = from as usize..(from + len) as usize;
+                // Neighbouring entities mostly carry the same key list, so an entity whose keys
+                // are the last one's takes its tallies without a lookup.
+                let group = match &last {
+                    Some((held_list, group)) if keys[held_list.clone()] == keys[list.clone()] => {
+                        *group
+                    }
                     _ => {
-                        let at = match index.get(keys.as_slice()) {
-                            Some(&at) => at,
+                        let group = match index.get(&keys[list.clone()]) {
+                            Some(&group) => group,
                             None => {
-                                lists.push(fields.iter().map(|f| Tallying::new(f.float)).collect());
-                                index.insert(keys.clone(), lists.len() - 1);
-                                lists.len() - 1
+                                tallying
+                                    .push(fields.iter().map(|f| Tallying::new(f.float)).collect());
+                                index.insert(keys[list.clone()].to_vec(), tallying.len() - 1);
+                                tallying.len() - 1
                             }
                         };
-                        std::mem::swap(&mut keys, &mut last_keys);
-                        last = Some(at);
-                        at
+                        last = Some((list, group));
+                        group
                     }
                 };
-                let tallies = &mut lists[at];
+                let tallies = &mut tallying[group];
                 for (k, field) in fields.iter().enumerate() {
                     let value = match (&field.source, &drawn[k]) {
-                        (TallySource::Held(value_of), _) => value_of(entity),
+                        (TallySource::Held(_), _) => held[k][at],
                         (TallySource::Drawn, Some((slice, presence))) => presence
                             .contains(row)
                             .then(|| slice.number_at(row as usize))
@@ -385,11 +429,11 @@ pub fn derive(
                     tallies[k].add(value, row);
                 }
             }
-            let mut lists: Vec<Option<Vec<Tallying>>> = lists.into_iter().map(Some).collect();
+            let mut tallying: Vec<Option<Vec<Tallying>>> = tallying.into_iter().map(Some).collect();
             Ok(index
                 .into_iter()
-                .map(|(keys, at)| {
-                    let tallies = lists[at].take().expect("one list per key list");
+                .map(|(keys, group)| {
+                    let tallies = tallying[group].take().expect("one group per key list");
                     (keys, tallies.into_iter().map(Tallying::finish).collect())
                 })
                 .collect())
@@ -421,8 +465,8 @@ pub fn derive(
     Ok(out)
 }
 
-/// Values held per entity, for a [`TallySource::Held`] field.
-pub type HeldValues = Box<dyn Fn(u32) -> Option<Number> + Sync + Send>;
+/// A held field's values over a set of entities, for a [`TallySource::Held`] field.
+pub type HeldValues = Box<dyn Fn(&croaring::Bitmap, &mut dyn FnMut(u32, Number)) + Sync + Send>;
 
 /// The fields a view's base is tallied over, from the bundle's declared scalars: every number and
 /// timestamp column without a vocabulary, drawn where it is rendered and otherwise held where it
@@ -445,9 +489,9 @@ pub fn tallied_fields(declared: &[DeclaredScalar]) -> Vec<(String, bool, bool)> 
 }
 
 /// [`derive`] over one view's base as a build or a fold has just written it, into the view's own
-/// directory: its segment `seg_id`'s columns, its row-to-entity table and the partition's entity
-/// terms. The fields are [`tallied_fields`] of `declared`, a held one read through `held` where it
-/// opens one.
+/// directory: its segment `seg_id`'s columns, its permutation and the partition's entity terms.
+/// The fields are [`tallied_fields`] of `declared`, a held one read through `held` where it opens
+/// one.
 pub fn derive_view(
     partition_dir: &Path,
     view: &str,
@@ -484,36 +528,37 @@ pub fn derive_view(
             },
         })
         .collect();
-    let columns = match base_rows {
-        0 => None,
-        _ => Some(ColumnsRef::load(
-            &view_dir.join("segments").join(seg_id).join("columns.arrow"),
-        )?),
-    };
-    let rows = match base_rows {
-        0 => None,
-        _ => Some(crate::RowToEntity::load(
-            &view_dir.join(crate::ROW_ENTITY_FILE),
-        )?),
-    };
+    if base_rows == 0 {
+        write(
+            &path,
+            &FieldTallies {
+                fields: fields.iter().map(|f| (f.name.clone(), f.float)).collect(),
+                ..FieldTallies::default()
+            },
+        )
+        .map_err(io_error(&path))?;
+        return Ok(path);
+    }
+    let columns = ColumnsRef::load(&view_dir.join("segments").join(seg_id).join("columns.arrow"))?;
+    let permutation = crate::Permutation::load(&view_dir.join("permutation.bin"))?;
     let terms =
         crate::entity_terms::EntityTerms::open_dir(&partition_dir.join(crate::ENTITY_TERMS_DIR))?;
-    let entity_of_row = |row: u32| {
-        rows.as_ref()
-            .and_then(|rows| rows.entity_of(tessera_types::RowId::new(row)))
-            .map_or(u32::MAX, |e| e.raw() as u32)
+    let row_of = |entity: u32| {
+        permutation
+            .row_of(tessera_types::EntityId::new(u64::from(entity)))
+            .map(|row| row.raw())
+            .filter(|&row| row < base_rows)
     };
-    let keys_of = |entity: u32, out: &mut Vec<u32>| {
+    let lists = |span: Range<u32>, f: &mut dyn FnMut(u32, &[u32])| {
         terms
-            .terms_into(entity, out)
-            .map(|_| ())
+            .for_each_in(span, f)
             .map_err(|e| io::Error::other(e.to_string()))
     };
     derive(
-        base_rows,
-        columns.as_ref(),
-        &entity_of_row,
-        &keys_of,
+        permutation.bound(),
+        Some(&columns),
+        &row_of,
+        &lists,
         &fields,
         &path,
     )
@@ -712,45 +757,69 @@ pub fn read(path: &Path) -> crate::error::Result<Option<FieldTallies>> {
 mod tests {
     use super::*;
 
-    /// What is written is what is read back, an integer field's sum and a float field's alike.
+    /// What is written is what is read back, an integer field's sum and a float field's alike,
+    /// and an entity with a row and no key list is tallied under the empty list.
     #[test]
     fn a_written_file_reads_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FIELD_TALLIES_FILE);
-        let values: Vec<f64> = vec![1.5, -2.0, f64::NAN, 1e300];
-        let entity = |row: u32| row;
-        let keys = |entity: u32, out: &mut Vec<u32>| {
-            out.clear();
-            out.extend([entity % 2, 7]);
+        // Entities 0 to 5 have a row each, the entity's own number; 6 and 7 have none.
+        let row_of = |entity: u32| (entity < 6).then_some(entity);
+        // Entities 0 to 4 carry a list; 5 carries none.
+        let lists = |span: Range<u32>, f: &mut dyn FnMut(u32, &[u32])| {
+            for entity in span.filter(|&e| e < 5) {
+                f(entity, &[entity % 2, 7]);
+            }
             Ok(())
         };
-        let held = |entity: u32| values.get(entity as usize).map(|&v| Number::Float(v));
-        let whole = |entity: u32| (entity < 5).then_some(Number::Int(-i128::from(entity)));
+        fn over(
+            numbers: fn(u32) -> Option<Number>,
+        ) -> impl Fn(&croaring::Bitmap, &mut dyn FnMut(u32, Number)) + Sync {
+            move |entities, f| {
+                for entity in entities.iter() {
+                    if let Some(value) = numbers(entity) {
+                        f(entity, value);
+                    }
+                }
+            }
+        }
+        let score = over(|e| {
+            [1.5, -2.0, f64::NAN, 1e300]
+                .get(e as usize)
+                .map(|&v| Number::Float(v))
+        });
+        let rank = over(|e| (e < 5).then_some(Number::Int(-i128::from(e))));
         let fields = [
             TallyField {
                 name: "score".to_string(),
                 float: true,
-                source: TallySource::Held(&held),
+                source: TallySource::Held(&score),
             },
             TallyField {
                 name: "rank".to_string(),
                 float: false,
-                source: TallySource::Held(&whole),
+                source: TallySource::Held(&rank),
             },
         ];
-        let derived = derive(6, None, &entity, &keys, &fields, &path).unwrap();
-        assert_eq!(derived.lists, vec![vec![0, 7], vec![1, 7]]);
-        let even = &derived.tallies[0][0];
+        let derived = derive(8, None, &row_of, &lists, &fields, &path).unwrap();
+        assert_eq!(derived.lists, vec![vec![], vec![0, 7], vec![1, 7]]);
+        let unlisted = &derived.tallies[0][0];
+        assert_eq!((unlisted.rows, unlisted.none), (1, 1), "entity 5");
+        let even = &derived.tallies[1][0];
         assert_eq!(
             (even.rows, even.none, even.count),
             (3, 1, 1),
-            "rows 0, 2 and 4: a value, a NaN and none"
+            "entities 0, 2 and 4: a value, a NaN and none"
         );
         assert_eq!(even.sum.mean(even.count), Some(1.5));
-        let odd = &derived.tallies[1][0];
-        assert_eq!((odd.none, odd.count), (1, 2));
+        let odd = &derived.tallies[2][0];
+        assert_eq!((odd.none, odd.count), (0, 2));
         assert_eq!(odd.low.first(), Some(&(Number::Float(-2.0), 1)));
-        assert_eq!(derived.tallies[0][1].sum, Sum::Int(-6), "rows 0, 2 and 4");
+        assert_eq!(
+            derived.tallies[1][1].sum,
+            Sum::Int(-6),
+            "entities 0, 2 and 4"
+        );
         assert_eq!(read(&path).unwrap(), Some(derived));
         assert_eq!(read(&dir.path().join("absent")).unwrap(), None);
     }
