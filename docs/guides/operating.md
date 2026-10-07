@@ -183,6 +183,28 @@ without a `palette_size` no route fills them for colours. On 1,000,000 Tree of L
 resident memory, mapped files included, was 1.5 GB. *One run each, with `tessera-bench`'s
 `slot_cost`.*
 
+On the full GBIF bundle, under the conditions of the table above, a viewer asked for the taxonomy
+layer as the explorer does, with a palette of ten colours, from a server just opened. Each row is
+the time until the whole answer had arrived, split into the walks that fill a level's counts and
+centroids, the colouring itself, and everything else:
+
+| viewer sees | first view | whole answer | map's own fill | coarser fill for colours | colouring | rest |
+|---|---|---:|---:|---:|---:|---:|
+| everything | world, family | 11.0 s | 10.5 s | | 0.02 s | 0.4 s |
+| everything | then zoom 9, genus and species | 28.9 s | 24.4 s | | 2.7 s | 1.8 s |
+| everything | zoom 9 straight away | 39.9 s | 25.9 s | 9.4 s | 2.7 s | 1.9 s |
+| 1% | world, family | 1.7 s | 0.27 s | | 0.01 s | 1.5 s |
+| 1% | then zoom 9, genus and species | 2.4 s | 1.0 s | | 0.21 s | 1.1 s |
+| 1% | zoom 9 straight away | 2.7 s | 1.2 s | 0.10 s | 0.22 s | 1.2 s |
+
+So colouring adds about 2.7 seconds to the first view at zoom 9 for a viewer who sees everything,
+most of it on the 1.4 million species, and a fifth of a second for one who sees 1%. A first view at
+zoom 9 also pays for the family level's fill, 9.4 seconds for the broad viewer. That viewer would
+pay it anyway on zooming out, and it is paid once per grant. The process's peak resident memory
+was 23.6 GB, of which at most 6.7 GB was its own and the rest pages of the bundle held under the
+cap. *One run each, with the server's own log of each fill and
+each colouring; zoom 9 is at each viewer's densest cell.*
+
 The slots are then held for that credential, layer and palette size, shared by every session
 holding the credential, and read back in under a millisecond. After a deletion, a suppression or
 an unsuppression, an edit, a publication, or a change to the layer's registration or edges, the
