@@ -5094,7 +5094,7 @@ components:
       type: integer
       minimum: 2
       maximum: 32
-      description: How many colours the client's palette holds. Each artifact then carries `slot`, this principal's slot for it among them, the same on every route; see `POST /v1/artifacts/viewport`'s **Slots**. Absent serves `slot` as null. Outside 2 to 32 is `422`. On a level whose layer declares a centroid or a box and that is served from its column, the slots are worked out from the centroids the artifacts viewport fills; a route that reads no positions (browse, a bulk read, an aggregate grouping without `cut`) serves the slots that viewport worked out for this principal, and null before it has.
+      description: How many colours the client's palette holds. Each artifact then carries `slot`, this principal's slot for it among them, the same on every route; see `POST /v1/artifacts/viewport`'s **Slots**. Absent serves `slot` as null. Outside 2 to 32 is `422`. On a level whose layer declares a centroid or a box and that is served from its column, the slots are worked out from the centroids the artifacts viewport fills when it draws the level; with `palette_size`, every route fills that same entry where no request has, so browse, a bulk read and an aggregate grouping without `cut` serve the slots the viewport serves. Without `palette_size` no route fills it for slots.
 
     BrowseRequest:
       type: object

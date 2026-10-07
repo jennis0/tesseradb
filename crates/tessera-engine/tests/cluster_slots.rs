@@ -838,7 +838,7 @@ fn a_small_change_in_the_visible_count_moves_few_items_in_or_out_of_the_sample()
     let visible = fx.cells.len() as u64;
     // The visible count sits just above four times the sample.
     engine.set_slot_sample_for_test(visible / 4 - 2);
-    let stats = || engine.cluster_slot_stats(&session, "s0", TREE, 10, false).unwrap();
+    let stats = || engine.cluster_slot_stats(&session, "s0", TREE, 10).unwrap();
     let before = (stats(), slots_of(engine, &session));
     for s in 0..10u64 {
         let entity = item_of_id(engine, s).unwrap().expect("a built item");
@@ -887,10 +887,10 @@ fn an_ingest_is_answered_from_the_slots_held_until_they_are_rebuilt() {
 }
 
 /// **A level whose layer declares a centroid is centred on its figures**, the centroids the map
-/// fills when it draws the level, and coloured once a route that reads its positions asks: a bulk
-/// read before that has no slots for it, and one after has the map's.
+/// fills when it draws the level, whichever route asks first: browse alone serves the slots the
+/// viewport then serves, and a bulk read in another session serves them too.
 #[test]
-fn a_level_centred_by_its_figures_is_coloured_where_its_positions_are_read() {
+fn a_level_centred_by_its_figures_is_coloured_alike_whichever_route_asks() {
     use tessera_types::layer::ServingLayout;
     const FIGURED: &str = "clusters/figured";
     const ONLY_FIGURED: &[&str] = &[FIGURED];
@@ -929,16 +929,113 @@ fn a_level_centred_by_its_figures_is_coloured_where_its_positions_are_read() {
     };
     let engine = &fx.engine;
     let session = fx.session(true);
-    let unread = read_slots(engine, &session, FIGURED, 10);
-    assert_eq!(unread.len(), leaves.len());
-    assert!(unread.values().all(Option::is_none), "no route has read its positions");
+    // Browse first, in a session no other route has coloured for.
+    let browsed: BTreeMap<u64, Option<u8>> = engine
+        .browse(
+            &session,
+            tessera_engine::browse::BrowseRequest {
+                view: "s0",
+                layer: FIGURED,
+                level: None,
+                form: tessera_engine::browse::BrowseForm::Roots,
+                filter: None,
+                limit: 1000,
+                cursor: None,
+                palette_size: Some(10),
+            },
+        )
+        .unwrap()
+        .artifacts
+        .iter()
+        .map(|row| (row.tessera_id.raw(), row.slot))
+        .collect();
+    assert_eq!(browsed.len(), leaves.len());
+    assert!(browsed.values().all(Option::is_some), "browse alone serves slots");
     let drawn = viewport_slots(engine, &session, whole(ONLY_FIGURED, Some(10)));
-    assert_eq!(drawn.len(), leaves.len());
-    assert!(drawn.values().all(Option::is_some));
-    assert_eq!(read_slots(engine, &session, FIGURED, 10), drawn);
+    assert_eq!(drawn, browsed, "the viewport serves the slots browse did");
+    assert_eq!(read_slots(engine, &fx.session(true), FIGURED, 10), drawn);
     let stats = engine
-        .cluster_slot_stats(&session, "s0", FIGURED, 10, true)
+        .cluster_slot_stats(&session, "s0", FIGURED, 10)
         .unwrap();
     assert_eq!(stats.from_figures, leaves.len() as u64);
     assert_eq!(stats.sampled_items, 0, "no sample is read");
+}
+
+/// **A parent has one heir, at whatever level it sits**: on a tiered layer whose middle node the
+/// viewer is not served, the grandchild beneath it is the parent's child in the viewer's tree, and
+/// being larger than the parent's child one level down, it is the one heir and keeps the parent's
+/// slot; the smaller child does not take it.
+#[test]
+fn a_tiered_parent_has_one_heir_across_levels() {
+    use tessera_types::layer::LevelDeclaration;
+    const TIERS: &str = "clusters/tiers";
+    let fx = fixture();
+    let engine = &fx.engine;
+    let nodes = fx.tree(&[]);
+    let members = |key: &str| nodes.iter().find(|n| n.key == key).expect("a node").members.clone();
+    engine
+        .register_layer(LayerDeclaration {
+            scope: Default::default(),
+            name: TIERS.into(),
+            title: None,
+            views: vec!["s0".into()],
+            membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: ArtifactVisibility::carried("visibility"),
+            require_member_visibility: None,
+            hierarchy: Hierarchy {
+                kind: HierarchyKind::Tiered,
+                prune_children: true,
+            },
+            content: ContentDeclaration::default(),
+            depends_on: Vec::new(),
+            levels: (0..3)
+                .map(|level| LevelDeclaration {
+                    level,
+                    title: None,
+                    zoom: None,
+                })
+                .collect(),
+            layout: None,
+            shape: None,
+        })
+        .unwrap();
+    let map = source_to_new_map(&fx.root, "v00000");
+    // (level, key, members of, parent, label)
+    let planted = [
+        (0u32, "p", "b1-0-0", None, None),
+        (1, "hidden", "b2-0-0", Some("p"), Some("7")),
+        (1, "small", "b4-4-0", Some("p"), None),
+        (2, "large", "b3-0-0", Some("hidden"), None),
+        (2, "under-small", "b4-5-0", Some("small"), None),
+    ];
+    let mut ids: BTreeMap<&str, TesseraId> = BTreeMap::new();
+    for level in 0..3u32 {
+        let at: Vec<_> = planted.iter().filter(|p| p.0 == level).collect();
+        let artifacts = at
+            .iter()
+            .map(|&&(_, key, of, parent, label)| {
+                let mut artifact = IncomingArtifact::from_entities(
+                    Some(key.into()),
+                    members(of)
+                        .iter()
+                        .map(|s| tessera_types::EntityId::new(map[s]))
+                        .collect::<Vec<_>>(),
+                );
+                artifact.access = Some(label.map_or_else(Vec::new, |l: &str| vec![l.as_bytes().to_vec()]));
+                artifact.parent_keys = parent.iter().map(|p: &&str| p.to_string()).collect();
+                artifact
+            })
+            .collect();
+        let published = engine.publish_artifacts(TIERS.into(), level, artifacts).unwrap();
+        ids.extend(at.iter().map(|p| p.1).zip(published));
+    }
+    tick(engine);
+    assert!(members("b3-0-0").len() > members("b4-4-0").len());
+    let slots = read_slots(engine, &fx.session(true), TIERS, 10);
+    let slot = |key: &str| slots[&ids[key].raw()].expect("a slot");
+    assert!(!slots.contains_key(&ids["hidden"].raw()));
+    assert_eq!(slot("large"), slot("p"), "the larger child, two levels down, is the heir");
+    assert_ne!(slot("small"), slot("p"), "the smaller child is not a second heir");
 }

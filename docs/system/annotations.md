@@ -335,9 +335,9 @@ spot are set on a ring about it, so each is beside a few of the others.
 Slots are worked out a level at a time, when a request names a palette size for that level, and
 a `tiered` level's coarser levels first. Where the layer declares a centroid or a box and the level
 is served from its column, an artifact's centre is the centroid of its visible members that the
-level's figures carry, the same figures the map fills when it draws the level. A route that does
-not read positions, browse, a bulk read or an aggregate without a cut, does not fill them: it gets
-the slots already worked out for that viewer by a route that does, and otherwise no slot.
+level's figures carry, the same figures the map fills when it draws the level. Any route asked for
+slots fills that same entry where nothing has yet, so browse, a bulk read and an aggregate without a
+cut serve the slots the map serves; a request without a palette size fills nothing for them.
 
 Elsewhere a centre is the mean position of the artifact's members in a sample of the viewer's
 visible items: those whose `tessera_id` is below `⌊2¹⁹ · 2⁶⁴ / N⌋`, `N` being the viewer's visible
@@ -349,7 +349,8 @@ and one with no such ancestor has no centre and no neighbours. For artifacts far
 sample resolves, which neighbours they are kept apart from is therefore approximate.
 
 Every artifact has an order of the slots and a rank, both drawn from its `tessera_id`. A parent's
-heir is its child with the most visible members, ties going to the lower `tessera_id`, and the heir
+heir is its child with the most visible members among all its children in the viewer's tree, on a
+`tiered` layer at whatever level they sit, ties going to the lower `tessera_id`, and the heir
 asks first for its parent's slot, so a cluster keeps its colour as the map zooms into it. Any other
 artifact asks first for the first slot in its order that none of its parents holds. An artifact
 coloured at an earlier depth outranks an heir, and an heir outranks any other; within one class

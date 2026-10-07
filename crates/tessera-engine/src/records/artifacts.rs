@@ -687,7 +687,6 @@ impl ArtifactsPager<'_> {
                             &layer,
                             level as u32,
                             palette,
-                            geometry,
                             &dependency_served,
                         )?,
                         None => None,

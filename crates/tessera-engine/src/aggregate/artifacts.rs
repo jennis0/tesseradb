@@ -427,7 +427,6 @@ impl Layer {
                     layer,
                     self.level,
                     palette,
-                    self.cut.is_some(),
                     &dependency_served,
                 )?;
                 Some(

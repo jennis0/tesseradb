@@ -25,7 +25,6 @@ fn main() {
     let mut view: Option<String> = None;
     let mut layer: Option<String> = None;
     let mut terms: Option<Vec<String>> = None;
-    let mut geometry = false;
     let mut scratch: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -38,11 +37,10 @@ fn main() {
                     .next()
                     .map(|t| t.split(',').map(str::to_string).collect())
             }
-            "--geometry" => geometry = true,
             "--scratch" => scratch = args.next().map(PathBuf::from),
             other => panic!(
                 "unknown argument {other}; pass --bundle, --view and --layer, and optionally \
-                 --terms a,b, --geometry and --scratch <dir>"
+                 --terms a,b and --scratch <dir>"
             ),
         }
     }
@@ -65,7 +63,7 @@ fn main() {
         .authorise(&credential(&terms))
         .expect("the credential authorises");
     println!(
-        "bundle {}  view {view}  layer {layer}  terms {}  geometry {geometry}",
+        "bundle {}  view {view}  layer {layer}  terms {}",
         root.display(),
         terms.len()
     );
@@ -74,7 +72,7 @@ fn main() {
         for pass in ["cold", "warm"] {
             let started = Instant::now();
             let stats = engine
-                .cluster_slot_stats(&session, &view, &layer, palette, geometry)
+                .cluster_slot_stats(&session, &view, &layer, palette)
                 .expect("the layer is coloured");
             let ms = started.elapsed().as_secs_f64() * 1e3;
             let pass = if first { "first" } else { pass };

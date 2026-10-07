@@ -1171,7 +1171,7 @@ impl Engine {
             pass.mask,
             crate::figures::Geometry::declared(&layer.registered.declaration),
         )?;
-        // The level's slots, read as this route reads the level: with its declared positions.
+        // The level's slots, where the request named a palette size.
         let slots = match pass.ask.palette {
             Some(palette) => self.cluster_slots(
                 served,
@@ -1179,7 +1179,6 @@ impl Engine {
                 &layer.registered,
                 level,
                 palette,
-                true,
                 pass.dependency_served,
             )?,
             None => None,

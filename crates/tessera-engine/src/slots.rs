@@ -19,9 +19,9 @@
 //!
 //! **Centres come from the level's figures where the layer declares a centroid or a box** and the
 //! level is served from its column alone: each cluster's centre is the centroid of its visible
-//! members those figures carry, the same entry the map fills when it draws the level. A route
-//! that reads no positions (browse, a bulk read, an aggregate without a cut) does not fill them:
-//! it is answered from slots held, or with none.
+//! members those figures carry, the same entry the map fills when it draws the level. Every route
+//! that names a palette size reads the level as the map does, filling that entry where no route
+//! has; a request without a palette size reads nothing for slots.
 //!
 //! **Elsewhere centres come from a sample.** The items sampled are the visible items whose
 //! `tessera_id` is below the cut `⌊S · 2⁶⁴ / N⌋`, `S` being [`SAMPLE`] and `N` the visible count, or
@@ -53,7 +53,8 @@
 //!
 //! Every cluster has an order of the `N` slots, a permutation drawn from its `tessera_id` and `N`,
 //! and a rank drawn from its `tessera_id`. A parent's **heir** is its child with the most visible
-//! items, ties going to the lower `tessera_id`; a child that is heir to several parents inherits
+//! items, ties going to the lower `tessera_id`, among all its children in the viewer's tree (on a
+//! tiered layer, at whatever level they sit); a child that is heir to several parents inherits
 //! from the one with the most visible items, ties likewise.
 //!
 //! A cluster's **claim** is the slot it asks for first:
@@ -253,7 +254,6 @@ struct Wanted {
     layer: String,
     level: u32,
     palette: u8,
-    geometry: bool,
 }
 
 /// The slots held: the newest built for each [`WithheldKey`], what it was built at, and the
@@ -300,10 +300,9 @@ fn gone(cancel: &Option<crate::CancelToken>) -> bool {
 impl Engine {
     /// This viewer's slots over `level` of `layer` for a palette of `palette` colours: see the
     /// module doc. `mask` is the viewer's composed mask; a filter it carries changes nothing here.
-    /// `geometry` is whether the calling route reads the level's positions.
+    /// The level is read as the map reads it, so the figures filled are the map's entry, whichever
+    /// route asks. `None` for a level the layer does not hold.
     ///
-    /// `None` where the level's centres come from its figures and the route reads no positions,
-    /// and no slots are held: working them out would fill positions the route does not read.
     /// Where only additions separate the slots held from the corpus now, the slots held are
     /// answered and a rebuild is left for [`Self::refresh_cluster_slots`].
     #[allow(clippy::too_many_arguments)]
@@ -314,7 +313,6 @@ impl Engine {
         layer: &RegisteredLayer,
         level: u32,
         palette: u8,
-        geometry: bool,
         dependency_served: &dyn Fn(&Attachment) -> bool,
     ) -> Result<Option<Arc<LevelSlots>>> {
         check_palette_size(u32::from(palette))?;
@@ -336,7 +334,6 @@ impl Engine {
                     layer: layer.declaration.name.clone(),
                     level,
                     palette,
-                    geometry,
                 };
                 let mut all = self.slots.wanted.lock().unwrap_or_else(PoisonError::into_inner);
                 let list = all.entry(withheld.token_id).or_default();
@@ -352,7 +349,6 @@ impl Engine {
             layer,
             level,
             palette,
-            geometry,
             dependency_served,
             withheld,
             added,
@@ -360,8 +356,7 @@ impl Engine {
     }
 
     /// Build this viewer's slots over `level` and hold them under `withheld` and `added`: `None`
-    /// where the level's centres come from its figures and the route reads no positions, or a
-    /// tiered level above it has no slots.
+    /// where a tiered level above it has none.
     #[allow(clippy::too_many_arguments)]
     fn build_and_hold(
         &self,
@@ -370,17 +365,10 @@ impl Engine {
         layer: &RegisteredLayer,
         level: u32,
         palette: u8,
-        geometry: bool,
         dependency_served: &dyn Fn(&Attachment) -> bool,
         withheld: WithheldKey,
         added: AddedKey,
     ) -> Result<Option<Arc<LevelSlots>>> {
-        if !geometry {
-            let read = self.read_level(served, mask, layer, level, false)?;
-            if centred_by_figures(layer, &read) {
-                return Ok(None);
-            }
-        }
         // A tiered level's parents sit at the levels above it, which are coloured first.
         let mut above: Vec<Arc<LevelSlots>> = Vec::new();
         if layer.declaration.hierarchy.kind == HierarchyKind::Tiered {
@@ -391,7 +379,6 @@ impl Engine {
                     layer,
                     coarser,
                     palette,
-                    geometry,
                     dependency_served,
                 )? {
                     Some(slots) => above.push(slots),
@@ -410,7 +397,6 @@ impl Engine {
                     layer,
                     level,
                     palette,
-                    geometry,
                     dependency_served,
                     &above,
                 )
@@ -511,7 +497,6 @@ impl Engine {
                     layer,
                     wanted.level,
                     wanted.palette,
-                    wanted.geometry,
                     gate,
                     withheld,
                     added,
@@ -565,13 +550,12 @@ impl Engine {
         view: &str,
         layer: &str,
         palette: u8,
-        geometry: bool,
     ) -> Result<SlotStats> {
         self.with_slot_view(session, view, layer, |served, mask, registered, gate| {
             let mut stats = SlotStats::default();
             for level in 0..registered.runs.len() as u32 {
                 if let Some(slots) =
-                    self.cluster_slots(served, mask, registered, level, palette, geometry, gate)?
+                    self.cluster_slots(served, mask, registered, level, palette, gate)?
                 {
                     stats = stats.and(slots.stats);
                 }
@@ -588,7 +572,6 @@ impl Engine {
         layer: &RegisteredLayer,
         level: u32,
         palette: u8,
-        geometry: bool,
         dependency_served: &dyn Fn(&Attachment) -> bool,
         above: &[Arc<LevelSlots>],
     ) -> Result<LevelSlots> {
@@ -599,86 +582,87 @@ impl Engine {
         let treed = matches!(kind, HierarchyKind::Nested | HierarchyKind::Dag);
         let stop = || gone(&served.cancel);
 
-        // The levels above, read for their parent edges, with their served clusters as parents
-        // whose slots and centres are already settled.
+        // The clusters this viewer is served, as the artifacts frame serves them: the verdict over
+        // the visible set, and content that reads back. A tiered level is read with every level of
+        // its layer, so that each parent's heir is chosen among all its children in the viewer's
+        // tree, at whatever level they sit; the levels above carry the slots and centres already
+        // settled for them.
+        let tiered = kind == HierarchyKind::Tiered;
+        let levels: Vec<u32> = match tiered {
+            true => (0..layer.runs.len() as u32).collect(),
+            false => vec![level],
+        };
         let mut reads: Vec<ReadLevel> = Vec::new();
         let mut index: Vec<Vec<u32>> = Vec::new();
         let mut clusters: Vec<Cluster> = Vec::new();
         let mut preset: Vec<u8> = Vec::new();
-        for (coarser, slots) in above.iter().enumerate() {
-            let read = self.read_level(served, mask, layer, coarser as u32, geometry)?;
+        let mut first = 0;
+        let mut ordinals: Vec<u32> = Vec::new();
+        for &at_level in &levels {
+            let read = self.read_level(served, mask, layer, at_level, true)?;
+            let runs = &layer.runs[at_level as usize];
+            let view = read.view(self, served, mask, layer, dependency_served);
+            let settled = above.get(at_level as usize).filter(|_| at_level < level);
+            if at_level == level {
+                first = clusters.len();
+            }
             let mut at = vec![u32::MAX; read.rows.len()];
-            for (ordinal, held) in at.iter_mut().enumerate() {
-                if let Some(slot) = slots.get(ordinal as u32) {
-                    *held = clusters.len() as u32;
-                    clusters.push(Cluster {
-                        seed: 0,
-                        count: 0,
-                        parents: Vec::new(),
-                        centre: slots.centre(ordinal as u32),
-                    });
-                    preset.push(slot);
+            for ordinal in 0..read.rows.len() as u32 {
+                if ordinal.is_multiple_of(CHUNK) && stop() {
+                    return Err(EngineError::Cancelled);
+                }
+                let Some(entity) = runs.entity_of(u64::from(ordinal)).map(EntityId::new) else {
+                    continue;
+                };
+                let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal)
+                else {
+                    continue;
+                };
+                if masked_count == 0 {
+                    continue;
+                }
+                if read
+                    .content(self, generation, layer, ordinal, entity, rank)
+                    .is_none()
+                {
+                    continue;
+                }
+                let Ok(id) = self.identity_key.forward(shard, entity) else {
+                    continue;
+                };
+                at[ordinal as usize] = clusters.len() as u32;
+                clusters.push(Cluster {
+                    seed: id.raw(),
+                    count: masked_count,
+                    parents: Vec::new(),
+                    centre: settled.and_then(|slots| slots.centre(ordinal)),
+                });
+                preset.push(settled.and_then(|slots| slots.get(ordinal)).unwrap_or(NO_SLOT));
+                if at_level == level {
+                    ordinals.push(ordinal);
                 }
             }
+            drop(view);
             reads.push(read);
             index.push(at);
         }
-        let first = clusters.len();
-
-        // This level's clusters this viewer is served, as the artifacts frame serves them: the
-        // verdict over the visible set, and content that reads back.
-        let read = self.read_level(served, mask, layer, level, geometry)?;
-        let runs = &layer.runs[level as usize];
-        let view = read.view(self, served, mask, layer, dependency_served);
-        let mut at = vec![u32::MAX; read.rows.len()];
-        let mut ordinals: Vec<u32> = Vec::new();
-        for ordinal in 0..read.rows.len() as u32 {
-            if ordinal.is_multiple_of(CHUNK) && stop() {
-                return Err(EngineError::Cancelled);
-            }
-            let Some(entity) = runs.entity_of(u64::from(ordinal)).map(EntityId::new) else {
-                continue;
-            };
-            let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) else {
-                continue;
-            };
-            if masked_count == 0 {
-                continue;
-            }
-            if read
-                .content(self, generation, layer, ordinal, entity, rank)
-                .is_none()
-            {
-                continue;
-            }
-            let Ok(id) = self.identity_key.forward(shard, entity) else {
-                continue;
-            };
-            at[ordinal as usize] = clusters.len() as u32;
-            clusters.push(Cluster {
-                seed: id.raw(),
-                count: masked_count,
-                parents: Vec::new(),
-                centre: None,
-            });
-            preset.push(NO_SLOT);
-            ordinals.push(ordinal);
-        }
-        drop(view);
-        reads.push(read);
-        index.push(at);
-        let read = reads.last().expect("this level");
-        let here = index.last().expect("this level");
+        let position = |of: u32| if tiered { of as usize } else { 0 };
+        let read = &reads[position(level)];
+        let here = &index[position(level)];
 
         // The viewer's tree: each cluster's nearest served ancestors on every path.
-        if treed || kind == HierarchyKind::Tiered {
-            for (i, &ordinal) in ordinals.iter().enumerate() {
-                clusters[first + i].parents =
-                    nearest_served(&reads, &index, level, ordinal, treed);
+        if treed || tiered {
+            for (l, at) in index.iter().enumerate() {
+                for (ordinal, &c) in at.iter().enumerate() {
+                    if c != u32::MAX {
+                        clusters[c as usize].parents =
+                            nearest_served(&reads, &index, l as u32, ordinal as u32, treed);
+                    }
+                }
             }
         }
 
-        let mine: Vec<u32> = (first as u32..clusters.len() as u32).collect();
+        let mine: Vec<u32> = (first as u32..(first + ordinals.len()) as u32).collect();
         let passes: Vec<Pass> = if treed {
             let lineage_version = self
                 .write
@@ -744,7 +728,7 @@ impl Engine {
             clusters[first + i].centre = *centre;
         }
         let centred: Vec<Option<[f64; 2]>> = clusters.iter().map(|c| c.centre).collect();
-        for c in first..clusters.len() {
+        for c in first..first + ordinals.len() {
             if centred[c].is_some() {
                 continue;
             }

@@ -171,7 +171,9 @@ figures are from samples, not from a full-scale corpus, each with its files in t
 for the viewer who sees everything. On a 25,846,007-row sample of the GBIF occurrences, whose
 `tiered` taxonomy layer holds 251,907 taxa in three levels, the pass took 0.26 to 0.28 s for each
 palette size, and 0.62 s in a process that had not yet drawn the layer, since it then also fills
-the three levels' counts and centroids as drawing does. On 1,000,000 Tree of Life images with
+the three levels' counts and centroids as drawing does. Any route that names a `palette_size`,
+browse and the bulk reads included, fills those same counts and centroids where nothing has yet;
+without a `palette_size` no route fills them for colours. On 1,000,000 Tree of Life images with
 69,872 taxa in seven `tiered` levels it took 0.06 s, and 0.21 s with the fill. The process's peak
 resident memory, mapped files included, was 1.5 GB. *One run each, with `tessera-bench`'s
 `slot_cost`.*

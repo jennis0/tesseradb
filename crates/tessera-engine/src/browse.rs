@@ -450,8 +450,7 @@ impl crate::Engine {
         let reachable = self.reachable_layers(session);
         let ctx = DependencyContext::new(&served_view, &mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
-        // Each level's slots. Browse reads no positions, so a level centred by its figures has
-        // slots here only where a route that reads them has worked them out.
+        // Each level's slots, worked out as the viewport works them out.
         let mut slots: Vec<Option<Arc<crate::slots::LevelSlots>>> = Vec::new();
         if let Some(palette) = req.palette_size {
             for level in 0..layer.runs.len() as u32 {
@@ -461,7 +460,6 @@ impl crate::Engine {
                     &layer,
                     level,
                     palette,
-                    false,
                     &dependency_served,
                 )?);
             }
