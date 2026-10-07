@@ -1124,7 +1124,7 @@ export class TesseraMap extends TesseraElement {
    * set, the fetched shapes, the level or the roster change. Each is the artifact's box until its
    * shape is fetched; where boxes overlap, depth and the mark under the pointer decide.
    */
-  private contoursHeld: {served: object; fetched: object; level: number | null; meta: object | null; shapes: ContourShape[]} | null = null;
+  private contoursHeld: {served: object; fetched: object; level: number | null; meta: object | null; opened: bigint | null; shapes: ContourShape[]} | null = null;
 
   private contours(): ContourShape[] {
     const s = this.resolvedStore;
@@ -1132,10 +1132,11 @@ export class TesseraMap extends TesseraElement {
     if (!a) return [];
     const meta = s?.get('meta') ?? null;
     const level = this.clusterLevel ?? null;
+    const opened = s?.get('selection').artifact?.id ?? null;
     const held = this.contoursHeld;
-    if (held && held.served === a.served && held.fetched === a.shapes && held.level === level && held.meta === meta) return held.shapes;
-    const shapes = contourShapes(a, {level: level ?? undefined, meta});
-    this.contoursHeld = {served: a.served, fetched: a.shapes, level, meta, shapes};
+    if (held && held.served === a.served && held.fetched === a.shapes && held.level === level && held.meta === meta && held.opened === opened) return held.shapes;
+    const shapes = contourShapes(a, {level: level ?? undefined, meta, opened});
+    this.contoursHeld = {served: a.served, fetched: a.shapes, level, meta, opened, shapes};
     return shapes;
   }
 

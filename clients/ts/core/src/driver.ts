@@ -131,6 +131,16 @@ export function retryDelayMs(error: unknown, attempt: number, o: RetryOptions): 
   return Math.min(Math.max(base * 2 ** attempt, asked * 1000), o.retryBackoffMaxMs);
 }
 
+/**
+ * The count field's cells from tiles' counts. A tile nothing matches in is left out, as a response
+ * leaves it out, so it does not read as occupied ground.
+ */
+function countCells(tiles: Iterable<{x: number; y: number; matched: bigint}>): CountCell[] {
+  const cells: CountCell[] = [];
+  for (const t of tiles) if (t.matched > 0n) cells.push({x: t.x, y: t.y, count: Number(t.matched)});
+  return cells;
+}
+
 /** @internal */
 export class Driver {
   private readonly o: Required<DriverOptions>;
@@ -570,8 +580,6 @@ export class Driver {
     this.heldBbox = null;
     this.presented = null;
     this.lastStatus = null;
-    // A request still out answers a question no longer asked.
-    this.generation++;
     this.movedAt = 0;
     this.velocity = undefined;
     this.lastTarget = null;
@@ -652,13 +660,9 @@ export class Driver {
       this.seeded = true;
       return false;
     }
-    const cells: CountCell[] = [];
+    const cells = countCells(tiles.map((t) => ({...tileXY(t.tile, depth), matched: t.matched})));
     let visible = 0;
-    for (const t of tiles) {
-      const {x, y} = tileXY(t.tile, depth);
-      cells.push({x, y, count: Number(t.matched)});
-      visible += Number(t.visible);
-    }
+    for (const t of tiles) visible += Number(t.visible);
     // Complete for the rectangle asked over: a response omits only cells whose masked count is zero.
     this.counts.set(depth, {depth, cells, covers: planned.visible.rect});
     this.lastVisibleInView = visible;
@@ -726,17 +730,14 @@ export class Driver {
       // Visible and served figures are summed over the visible box the prediction was for, not the
       // wider render rect; summing over the render rect inflates `actual` and stalls calibration.
       // Cells are read over the whole render rect, since the next plan may ask about any of it.
-      const cells: CountCell[] = [];
+      const cells = countCells(frame.exact);
       let visible = 0;
       let actual = 0;
       let thinnedServed = 0;
       let thinnedMatched = 0;
       const floor = Math.min(this.meta.kMin ?? 0, this.meta.kMaxMarks);
       for (const b of frame.exact) {
-        // A tile that served no point adds no marks to the field, as one with no band did.
-        if (b.served === 0) continue;
         const matched = Number(b.matched);
-        cells.push({x: b.x, y: b.y, count: matched});
         if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
         visible += Number(b.visible);
         actual += b.served;
@@ -797,7 +798,7 @@ export class Driver {
           // The margin is ground now held at the same depth, so it widens the count field.
           this.adopt(
             choice.depth,
-            margin.exact.map((b) => ({x: b.x, y: b.y, count: Number(b.matched)})),
+            countCells(margin.exact),
             planned.foreground.rect,
             planned.render
           );

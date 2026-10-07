@@ -44,6 +44,12 @@ export type CountedTile = {
 /** A counted tile as the cache holds it: where it is, and the content key it was counted under. */
 type HeldCount = CountedTile & {depth: number; x: number; y: number; contentKey: string};
 
+/**
+ * What a band of no points costs the budget: about what one such band was measured to take on the
+ * heap. It holds no array, so without it any number of them would cost nothing.
+ */
+const EMPTY_BAND_BYTES = 800;
+
 /** The band of a tile that was asked for points and serves none: its counts, and nothing to draw. */
 function emptyBand(tile: TileCounts, depth: number, x: number, y: number, identityKey: string, contentKey: string, capUsed: number, now: number): Band {
   return {
@@ -64,7 +70,7 @@ function emptyBand(tile: TileCounts, depth: number, x: number, y: number, identi
     heldBelow: 0n,
     identityKey,
     contentKey,
-    bytes: 0,
+    bytes: EMPTY_BAND_BYTES,
     touchedAt: now,
     columnsAsked: null,
     // No point to tag, so no layer is missing a column.
@@ -521,10 +527,13 @@ export class BandBudget {
 }
 
 /**
- * Deepest first, then least recently touched, then farthest from the focus. Coarse points are
- * the head of every band and live in the shallow bands, so this order keeps the overview drawn.
+ * Bands of no points first, then deepest first, then least recently touched, then farthest from the
+ * focus. A band of no points is cheap to ask for again. Coarse points are the head of every band
+ * and live in the shallow bands, so this order keeps the overview drawn.
  */
 function evictionOrder(a: Band, b: Band, focus: EvictionFocus): number {
+  const empty = Number(b.ids.length === 0) - Number(a.ids.length === 0);
+  if (empty !== 0) return empty;
   if (a.depth !== b.depth) return b.depth - a.depth;
   if (a.touchedAt !== b.touchedAt) return a.touchedAt - b.touchedAt;
   return Number(distance(b, focus) - distance(a, focus));
@@ -935,8 +944,21 @@ export class BandCache {
     return [...this.bands.values()];
   }
 
-  /** Halves one band, keeping its head. False where the band is one point. */
+  /**
+   * Halves one band, keeping its head, or drops a band of no points and withdraws coverage over its
+   * tile, so it is asked again. False where the band is one point.
+   */
   shed(band: Band): boolean {
+    if (band.ids.length === 0) {
+      const key = bandKey(band.depth, band.prefix);
+      if (this.bands.get(key) !== band) return false;
+      this.retractCoverage(band.depth, band.x, band.y);
+      this.bands.delete(key);
+      this.byDepth.get(band.depth)?.delete(key);
+      this.held -= band.bytes;
+      this.changes++;
+      return true;
+    }
     const keep = Math.max(1, Math.floor(band.ids.length / 2));
     if (keep >= band.ids.length) return false;
     this.truncate(band, keep);

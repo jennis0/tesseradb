@@ -32,12 +32,12 @@ function noneMatch(): ViewportResponse {
   return response(servedResult(0, [tile(0n, 1000n, {matched: 0n, highlighted: 0n})], {scalars: {archive: {arrowType: 'u16', values: new Uint16Array(0)}}}));
 }
 
-async function shown(reply: (req: Asked) => ViewportResponse | Promise<ViewportResponse>, revalidateAfterMs = Infinity): Promise<{store: Store; clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>; asked: () => number}> {
+async function shown(reply: (req: Asked) => ViewportResponse | Promise<ViewportResponse>, revalidateAfterMs = Infinity, cacheBytes?: number): Promise<{store: Store; clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>; asked: () => number}> {
   const clock = fakeClock();
   const scheduler = fakeScheduler();
   const viewport = vi.fn(async (_t: string, req: Asked) => ({...(await reply(req)), region: null}));
   const client = {meta: async () => META, viewport, viewportArtifacts: async () => ({}), close: () => {}} as unknown as TesseraClient;
-  const store = createStore({viewerUrl: 'http://v', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs}});
+  const store = createStore({viewerUrl: 'http://v', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs, ...(cacheBytes === undefined ? {} : {cacheBytes})}});
   await clock.advance(1);
   store.setView(camera(Q, [0, 0, 100, 200], 400, 400));
   await clock.advance(600);
@@ -271,6 +271,39 @@ describe('a camera answered from held tiles while the slot is busy', () => {
       scheduler.flush();
     }
     expect(store.get('status').status).toBe('empty');
+  });
+});
+
+describe('tiles that serve nothing, under a small budget', () => {
+  it('are evicted, and their ground is asked again', async () => {
+    const answer = (req: Asked) => leftHalfMatches(req, 1_000_000n, (x, z) => z < 8 || x === 0);
+    const {store, clock, scheduler, asked} = await shown((req) => (req.filters ? answer(req) : three()), Infinity, 40_000);
+    store.setFilters(FILTER);
+    await clock.advance(600);
+    scheduler.flush();
+    const here = camera(Q, [0, 0, 3, 6], 400, 400);
+    store.setView(here);
+    await clock.advance(600);
+    scheduler.flush();
+    // Held whole: the same camera asks for nothing.
+    store.setView({...here, bbox: [0, 0, 3, 6.001]});
+    await clock.advance(600);
+    scheduler.flush();
+    const held = asked();
+    store.setView({...here, bbox: [0, 0, 3, 6]});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(asked()).toBe(held);
+
+    // Elsewhere, then back: the ground's bands of no points made way, so it is asked again.
+    store.setView(camera(Q, [50, 100, 53, 106], 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    const away = asked();
+    store.setView(here);
+    await clock.advance(600);
+    scheduler.flush();
+    expect(asked()).toBeGreaterThan(away);
   });
 });
 

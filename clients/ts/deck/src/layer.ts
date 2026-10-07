@@ -462,18 +462,21 @@ export type OutlineOptions = {
   meta?: Meta | null;
 };
 
-/** The level cut and the layer roster, which decide what may be hovered. */
+/** The level cut, the layer roster and the opened artifact, which decide what may be hovered. */
 export type ContourOptions = {
   level: number | undefined;
   meta?: Meta | null;
+  /** The opened artifact, which may be pointed at whether or not a filter matches it. */
+  opened?: bigint | null;
 };
 
 /**
  * Whether a served artifact is drawn at `level` and has no drawn child: {@link frontier}'s rule for
- * one artifact. Under a filter, one with no matching member in view is not drawn.
+ * one artifact. Under a filter, one with no matching member in view is not drawn, except `opened`,
+ * which the viewer chose.
  */
-function onFrontier(a: ArtifactsProjection, artifact: Artifact, level: number | undefined): boolean {
-  const drawn = (x: Artifact) => x.matched !== false && (level === undefined || x.rung <= level);
+function onFrontier(a: ArtifactsProjection, artifact: Artifact, level: number | undefined, opened: bigint | null = null): boolean {
+  const drawn = (x: Artifact) => (x.matched !== false || x.tesseraId === opened) && (level === undefined || x.rung <= level);
   if (!drawn(artifact)) return false;
   return !(a.lineage.childrenOf.get(artifact.tesseraId) ?? []).some((c) => drawn(c));
 }
@@ -500,7 +503,7 @@ function shapeKindOf(meta: Meta | null | undefined, layer: string): ShapeKind | 
  */
 export function contourShapes(a: ArtifactsProjection, o: ContourOptions): ContourShape[] {
   const dependent = dependentLayers(o.meta);
-  const front = frontier(a, o.level);
+  const front = frontier(a, o.level, o.opened ?? null);
   const shapes: ContourShape[] = [];
   for (const artifact of a.served) {
     if (!front.has(artifact.tesseraId)) continue;
@@ -537,7 +540,7 @@ export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): Outlin
     const artifact = a.served.find((x) => x.tesseraId === id);
     if (!artifact) continue;
     if (dependent.has(artifact.layer)) continue;
-    if (!onFrontier(a, artifact, o.level)) continue;
+    if (!onFrontier(a, artifact, o.level, o.opened)) continue;
     const outline = outlineOf(artifact, a.shapes?.get(id));
     if (!outline) continue;
     const box = outline.source === 'box';
@@ -616,9 +619,9 @@ const TOPIC_SIZE = 12;
  * points are drawn, so its name and its outline would stand over empty ground. A parent whose
  * children all match nothing is on the frontier in their place.
  */
-export function frontier(a: ArtifactsProjection, level: number | undefined): Set<bigint> {
+export function frontier(a: ArtifactsProjection, level: number | undefined, opened: bigint | null = null): Set<bigint> {
   const out = new Set<bigint>();
-  for (const artifact of a.served) if (onFrontier(a, artifact, level)) out.add(artifact.tesseraId);
+  for (const artifact of a.served) if (onFrontier(a, artifact, level, opened)) out.add(artifact.tesseraId);
   return out;
 }
 

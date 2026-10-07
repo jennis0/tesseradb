@@ -33,7 +33,10 @@ const META = meta({
 
 type FakeRequest = {view: string; zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[]};
 
-/** A response answering every tile the request spans, so coverage is the client's arithmetic. */
+/**
+ * A response answering every tile the request spans, so coverage is the client's arithmetic: the
+ * served points on the first, and the rest empty, which the server leaves out.
+ */
 function responseCovering(req: FakeRequest, served = 3): ViewportResponse {
   // No membership column, so a band is colour-stale when a layer goes on while its view is held.
   const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: served}, () => 5)}};
@@ -47,7 +50,7 @@ function responseCovering(req: FakeRequest, served = 3): ViewportResponse {
     prefixes = [];
     for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) prefixes.push(mortonOfTile(x, y, req.zoom));
   }
-  const tiles = prefixes.map((prefix) => tile(prefix, 1000n));
+  const tiles = prefixes.slice(0, 1).map((prefix) => tile(prefix, 1000n));
   return response(servedResult(served, tiles, {scalars}));
 }
 
@@ -292,6 +295,37 @@ describe('a switch across frames publishes no camera and drops the selection', (
     expect(asked('v0').filter((c) => c[1].bbox?.[0] === -1000)).toHaveLength(0);
     expect(store.get('view').composition).not.toBeNull();
   });
+});
+
+describe('a refit made during a switch across frames is the camera the store keeps', () => {
+  for (const when of ['the first publish', 'the frame publish'] as const) {
+    it(`asks for the incoming view again under a filter set after a refit at ${when}`, async () => {
+      const clock = fakeClock();
+      const scheduler = fakeScheduler();
+      const {store, viewport} = open({view: 'v0', clock, scheduler});
+      await clock.advance(1);
+      await shown(store, clock, scheduler);
+
+      let refitted = false;
+      const refit = () => {
+        if (refitted || store.frame() !== OTHER_FRAME) return;
+        refitted = true;
+        store.setView(camera(store.frame(), [-1000, -500, 1000, 500], 800, 400));
+      };
+      const stop = when === 'the first publish' ? store.subscribe(refit) : store.subscribe('view', refit);
+      store.setCurrentView('far');
+      await clock.advance(600);
+      scheduler.flush();
+      stop();
+      expect(refitted).toBe(true);
+
+      store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
+      await clock.advance(600);
+      scheduler.flush();
+      const filtered = viewport.mock.calls.map((c) => c[1] as FakeRequest).filter((r) => r.view === 'far' && r.filters);
+      expect(filtered.length).toBeGreaterThan(0);
+    });
+  }
 });
 
 describe('a view that is not current asks for nothing', () => {

@@ -1184,14 +1184,12 @@ export function createStore(options: StoreOptions): Store {
               onPart &&
               ((part) => {
                 if (!admitted(part.identityKey, tok)) throw identityChanged();
-                signal?.throwIfAborted();
                 return onPart(part);
               }),
             onCounts:
               onCounts &&
               ((counts) => {
                 if (!admitted(counts.identityKey, tok)) throw identityChanged();
-                signal?.throwIfAborted();
                 onCounts(counts);
               })
           }
@@ -1618,6 +1616,8 @@ export function createStore(options: StoreOptions): Store {
     const a = projections.artifacts;
     const layers = pointLayers();
     const machinery = views.current;
+    // During a switch, until the marks are cleared, the marks on screen are the outgoing view's.
+    if (projections.view.id !== views.id) return;
     if (!machinery || a.status !== 'shown' || layers.length === 0) {
       if (a.coverage.stale !== 0 || a.coverage.current !== 0) replaceProjection('artifacts', {...a, coverage: {current: 0, stale: 0}});
       return;
@@ -1755,27 +1755,27 @@ export function createStore(options: StoreOptions): Store {
     const incoming = views.enter(id);
     // A `setView` from a subscriber clears this, and its request then answers for the status.
     awaitingSwitchFrame = true;
-    // No marks until the incoming view presents. Cleared before the settings below publish, so no
-    // check run on their publication reads the outgoing view's marks as the incoming view's.
-    replaceProjection('view', noFrame(id));
-    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
-    replaceProjection('tiles', {tiles: []});
-    // The shared settings reach a view as it becomes current. Set on a held view, they would make it ask.
-    incoming.channel.setLayers(layersAsked());
+    // The camera is in the outgoing frame's data coordinates. Dropped before anything below publishes,
+    // so a subscriber that refits the camera on a publish keeps its refit.
+    if (!kept) lastView = null;
+    // The shared settings reach a view as it becomes current, before a refit can ask. Set on a held
+    // view, they would make it ask.
     incoming.presenter.setBudget(budget);
+    incoming.channel.setLayers(layersAsked());
     // The content key, the bands asked for again and the shapes were the outgoing view's.
     contentKeyAtFrame = '';
     corpusKey = '';
     colourAsked.clear();
     shapes.forget('all');
 
-    if (!kept) {
-      // The camera and the selection are in the outgoing frame's data coordinates.
-      lastView = null;
-      region.drop();
-    }
+    // The selection is in the outgoing frame's data coordinates too.
+    if (!kept) region.drop();
 
-    // The incoming channel's artifacts.
+    // No marks until the incoming view presents, and the incoming channel's artifacts. A subscriber
+    // that refits the camera here reaches the incoming view with its settings in place.
+    replaceProjection('view', noFrame(id));
+    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
+    replaceProjection('tiles', {tiles: []});
     onArtifacts(incoming.channel.current);
     replaceProjection('status', {...projections.status, status: 'loading', refusal: null, stale: false});
     publishReplica(projections.replica.lastPlan);

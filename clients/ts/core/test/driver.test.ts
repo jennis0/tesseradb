@@ -138,6 +138,20 @@ describe('driver', () => {
     expect(h.calls.length).toBe(before);
   });
 
+  it('a count-only answer that lands after cancel() is not adopted: the next view counts afresh', async () => {
+    const h = harness({hang: (_n, k) => k === 0, respond: () => servedResponse(100_000n, 8)});
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(10);
+    expect(h.calls.filter((c) => c.k === 0)).toHaveLength(1);
+    h.driver.cancel();
+    for (const release of h.hung.splice(0)) release();
+    await h.clock.advance(10);
+
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(1000);
+    expect(h.calls.filter((c) => c.k === 0)).toHaveLength(2);
+  });
+
   it('a camera the held tiles answer after a shed request reports their status and drops the retry', async () => {
     const statuses: string[] = [];
     const clock = fakeClock();

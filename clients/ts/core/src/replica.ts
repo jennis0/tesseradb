@@ -293,6 +293,8 @@ export class Replica {
   async counts(want: TileRect, depth: number, signal?: AbortSignal): Promise<TileCounts[]> {
     const bbox = rectToRequestBbox(want, depth, this.quantisation);
     const response = await this.fetchViewport({view: this.opts.view, zoom: depth, bbox, k: 0}, signal);
+    // An abandoned request's answer is for a question no longer asked.
+    signal?.throwIfAborted();
     this.observe(response);
     return response.result.tiles;
   }
@@ -448,8 +450,10 @@ export class Replica {
       signal?.throwIfAborted();
       fetched = fetched.concat(piece.landed);
       // Once per response, since eviction sorts every held band.
-      if (this.opts.cache !== false && piece.landed.length > 0) {
-        this.cache.evict({depth, prefix: piece.landed[0]!.prefix, protect: {depth, rect: render}});
+      // Bands of no points come from the tiles, so a response that served nothing evicts too.
+      const focus = piece.landed[0]?.prefix ?? response.result.tiles[0]?.tile;
+      if (this.opts.cache !== false && focus !== undefined) {
+        this.cache.evict({depth, prefix: focus, protect: {depth, rect: render}});
       }
       // Marked only after the bands are in, or the next plan would skip ground whose data never
       // arrived. An aborted piece does not reach here, so its ground stays novel.
