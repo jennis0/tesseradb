@@ -1628,7 +1628,7 @@ async fn browse(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
     ApiJson(req): ApiJson<BrowseReq>,
-) -> Result<Json<BrowseResp>, ApiError> {
+) -> Result<Response, ApiError> {
     use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
     // `limit` clamps and `0` refuses, as on `/v1/categories`.
     if req.limit == Some(0) {
@@ -1711,14 +1711,28 @@ async fn browse(
                 .map_err(crate::error::map_engine_error)
         })
         .await?;
-    drop(tokio::task::spawn_blocking(move || {
-        crate::state::refresh_cluster_slots(&refresh.0, &refresh.1);
-    }));
-    Ok(Json(BrowseResp {
+    let body = serde_json::to_vec(&BrowseResp {
         artifacts: out.artifacts.into_iter().map(browse_row).collect(),
         parents: out.parents.into_iter().map(browse_row).collect(),
         next: out.next.map(|c| c.encode()),
-    }))
+    })
+    .map_err(|e| ApiError::FailClosed(format!("a browse page did not serialise: {e}")))?;
+    // Weak, so a body a connection still holds keeps no server alive after it stops.
+    let (state, session) = (Arc::downgrade(&refresh.0), refresh.1);
+    drop(refresh.0);
+    let after = crate::stream::AfterSent::new(body, move || {
+        let (Some(state), Ok(runtime)) = (state.upgrade(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        drop(runtime.spawn_blocking(move || {
+            crate::state::refresh_cluster_slots(&state, &session);
+        }));
+    });
+    Ok(Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from_stream(after))
+        .expect("response construction cannot fail"))
 }
 
 /// `POST /v1/artifacts/{tessera_id}`: one artifact's drill-down. A separate route from

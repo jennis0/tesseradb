@@ -197,6 +197,19 @@ impl Fx {
         layout: Option<tessera_types::layer::ServingLayout>,
         computed: Vec<String>,
     ) -> BTreeMap<String, TesseraId> {
+        self.plant_declared(name, kind, nodes, layout, computed, None)
+    }
+
+    /// [`Self::plant_as`] with an existence criterion of the caller's.
+    fn plant_declared(
+        &self,
+        name: &str,
+        kind: HierarchyKind,
+        nodes: &[Node],
+        layout: Option<tessera_types::layer::ServingLayout>,
+        computed: Vec<String>,
+        criterion: Option<tessera_types::layer::ExistenceCriterion>,
+    ) -> BTreeMap<String, TesseraId> {
         self.engine
             .register_layer(LayerDeclaration {
                 scope: Default::default(),
@@ -207,7 +220,7 @@ impl Fx {
                 value_set: Default::default(),
                 visibility: None,
                 artifact_visibility: ArtifactVisibility::carried("visibility"),
-                require_member_visibility: None,
+                require_member_visibility: criterion,
                 hierarchy: Hierarchy {
                     kind,
                     prune_children: true,
@@ -1161,4 +1174,185 @@ fn colouring_a_tiered_level_fills_no_deeper_level() {
     // The finest level's read, and the map's entries of the two levels below the coarsest, which
     // colouring the coarsest did not start.
     assert_eq!(started(Some(2)), 3, "the deeper levels are filled when they are asked for");
+}
+
+/// The subset viewer's credential, spelt another way: the same terms, held under another
+/// credential, so its slots are built afresh rather than shared.
+fn subset_again() -> Vec<u8> {
+    br#"{"terms":["1"]}"#.to_vec()
+}
+
+/// **On a layer whose criterion is a fraction, a member joining that the viewer cannot see is
+/// answered with slots built over it**: the cluster it withholds has none, and the slots are a
+/// fresh build's.
+#[test]
+fn a_hidden_member_joining_a_fraction_layer_is_answered_with_slots_built_over_it() {
+    use tessera_types::layer::ExistenceCriterion;
+    const FRACTION: &str = "clusters/fraction";
+    let fx = fixture();
+    let engine = &fx.engine;
+    let leaves: Vec<Node> = fx
+        .tree(&[])
+        .into_iter()
+        .filter(|n| n.key.starts_with("b4-"))
+        .collect();
+    let ids = fx.plant_declared(
+        FRACTION,
+        HierarchyKind::Flat,
+        &leaves,
+        None,
+        Vec::new(),
+        Some(ExistenceCriterion::Fraction(0.25)),
+    );
+    let session = fx.session(false);
+    let before = read_slots(engine, &session, FRACTION, 10);
+    let grown = &leaves[100];
+    assert!(before[&ids[&grown.key].raw()].is_some(), "served before the join");
+
+    // Every built item the subset viewer cannot see, outside the leaf, joins it.
+    let map = source_to_new_map(&fx.root, "v00000");
+    let hidden: Vec<tessera_types::EntityId> = (0..fx.cells.len() as u64)
+        .filter(|s| !subset_sees(*s) && !grown.members.contains(s))
+        .take(400)
+        .map(|s| tessera_types::EntityId::new(map[&s]))
+        .collect();
+    engine
+        .grow_memberships(
+            FRACTION.into(),
+            0,
+            vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                grown.key.clone(),
+                hidden,
+            )],
+        )
+        .unwrap();
+    tick(engine);
+
+    let after = read_slots(engine, &session, FRACTION, 10);
+    assert!(!engine.cluster_slots_stale(&session), "nothing was answered from slots held");
+    assert!(!after.contains_key(&ids[&grown.key].raw()), "the joined cluster is withheld");
+    let fresh = engine.authorise(&subset_again()).unwrap();
+    assert_eq!(after, read_slots(engine, &fresh, FRACTION, 10));
+}
+
+/// **A tiered level rebuilt after additions is built over its coarser levels rebuilt first**: a
+/// growth that makes another child its parent's heir, a read of the finest level answered from
+/// the slots held, then the rebuild, gives the finest level the slots a fresh build gives it.
+#[test]
+fn a_tiered_level_is_rebuilt_over_rebuilt_coarser_levels() {
+    use tessera_types::layer::LevelDeclaration;
+    const TIERS: &str = "clusters/growing";
+    let fx = fixture();
+    let engine = &fx.engine;
+    let nodes = fx.tree(&[]);
+    engine
+        .register_layer(LayerDeclaration {
+            scope: Default::default(),
+            name: TIERS.into(),
+            title: None,
+            views: vec!["s0".into()],
+            membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: ArtifactVisibility::inherited(),
+            require_member_visibility: None,
+            hierarchy: Hierarchy {
+                kind: HierarchyKind::Tiered,
+                prune_children: true,
+            },
+            content: ContentDeclaration::default(),
+            depends_on: Vec::new(),
+            levels: (0..3)
+                .map(|level| LevelDeclaration {
+                    level,
+                    title: None,
+                    zoom: None,
+                })
+                .collect(),
+            layout: None,
+            shape: None,
+        })
+        .unwrap();
+    let map = source_to_new_map(&fx.root, "v00000");
+    for level in 0..3u32 {
+        let artifacts = nodes
+            .iter()
+            .filter(|n| n.key.starts_with(&format!("b{}-", level + 1)))
+            .map(|node| {
+                let mut artifact = IncomingArtifact::from_entities(
+                    Some(node.key.clone()),
+                    node.members
+                        .iter()
+                        .map(|s| tessera_types::EntityId::new(map[s]))
+                        .collect::<Vec<_>>(),
+                );
+                if level > 0 {
+                    artifact.parent_keys = node.parent.iter().cloned().collect();
+                }
+                artifact
+            })
+            .collect();
+        engine.publish_artifacts(TIERS.into(), level, artifacts).unwrap();
+    }
+    tick(engine);
+    let session = fx.session(true);
+    let level_slots = |session: &Session, level: u32| -> BTreeMap<u64, Option<u8>> {
+        let fields = ["slot".to_string()];
+        let mut pages = Pages::default();
+        engine
+            .artifacts_stream(
+                session,
+                ArtifactsRequest {
+                    view: "s0",
+                    layer: TIERS,
+                    level: Some(level),
+                    parent: None,
+                    q: None,
+                    ids: None,
+                    filter: None,
+                    keep_unmatched: false,
+                    count: false,
+                    fields: &fields,
+                    palette_size: Some(10),
+                    page_rows: None,
+                    pages: None,
+                    cursor: None,
+                    limits: limits(),
+                    cancel: None,
+                },
+                &mut pages,
+            )
+            .unwrap();
+        id_slots(&pages.pages, "tessera_id").into_iter().collect()
+    };
+    let before = level_slots(&session, 2);
+
+    // The sparsest block of the first quadrant takes in a far corner's items and becomes the
+    // quadrant's heir.
+    let far: Vec<tessera_types::EntityId> = nodes
+        .iter()
+        .find(|n| n.key == "b2-3-3")
+        .expect("a block")
+        .members
+        .iter()
+        .map(|s| tessera_types::EntityId::new(map[s]))
+        .collect();
+    engine
+        .grow_memberships(
+            TIERS.into(),
+            1,
+            vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                "b2-0-0".into(),
+                far,
+            )],
+        )
+        .unwrap();
+    tick(engine);
+    assert_eq!(level_slots(&session, 2), before, "answered from the slots held");
+    assert!(engine.cluster_slots_stale(&session));
+    engine.refresh_cluster_slots(&session).unwrap();
+    let rebuilt = level_slots(&session, 2);
+    let fresh = engine.authorise(br#"{"terms":["0"]}"#).unwrap();
+    assert_eq!(rebuilt, level_slots(&fresh, 2), "the rebuild is a fresh build's");
+    assert_ne!(rebuilt, before, "the new heir moved slots at the finest level");
 }

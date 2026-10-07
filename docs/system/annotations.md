@@ -385,12 +385,16 @@ served. Every artifact had a centre of its own members. Centred by the sample in
 sample's taxonomy has 172,885 taxa placed beside an ancestor and 21,868 with no centre, and clashes
 at 2.0%, 0.93%, 0.11% and 0.08%.*
 
-The slots of a layer are held for each session and palette size. A deletion, a suppression or an
-unsuppression, an edit, a fold, a change to the layer registry, to the layer's edges or to a layer
-it depends on is answered with slots worked out over it. A change that only adds, an ingest, a
-flush or a publication into the layer, is answered with the slots held, which were worked out over
-what the viewer could see then, and the server works them out again once that response is sent. A
-host's own colour for an artifact is applied by the client, over its slot.
+The slots of a layer are held for each credential and palette size, so sessions holding one
+credential share them. A deletion, a suppression or an unsuppression, an edit, a fold, a
+publication, a change to the layer registry, to the layer's edges or to a layer it depends on is
+answered with slots worked out over it. So is every change on a layer whose criterion is a
+fraction or whose content has a generating set, where a member joining that the viewer cannot see
+can withhold an artifact. On any other layer an ingest, a flush or a growth of a membership is
+answered with the slots held, worked out over what the viewer could see then, and the server works
+them out again once that response is sent, a `tiered` level's coarser levels first, on at most two
+sessions at once; a session that ends stops its rebuild. A host's own colour for an artifact is
+applied by the client, over its slot.
 
 ## How membership is stored
 

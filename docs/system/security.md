@@ -215,10 +215,15 @@ served is no input, and the viewer's slots are those of a corpus without it: a t
 slots of a viewer from whom an artifact's label withholds it with the slots after that artifact is
 suppressed, and finds them equal. A slot therefore says nothing about an artifact the viewer is not
 served, about a member they cannot see, or about the slots another viewer is given. The slots are
-held per session, and no session is answered from another's. A deletion or a suppression is
-answered with slots worked out over it. After a change that only adds, the slots held answer until
-they are worked out again, which starts once the response is sent; they were worked out over items
-the viewer could see.
+held per credential, keyed on the digest of its grant and the digest of the credential itself,
+since an artifact's own labels and the layers a viewer reaches are tested against every term the
+credential names; two sessions share slots only where they hold one credential. A deletion, a
+suppression, an edit or a publication is answered with slots worked out over it. So is any change
+on a layer whose criterion is a fraction or whose content has a generating set, where an ingested
+member the viewer cannot see can withhold an artifact. After an ingest or a growth on any other
+layer, the slots held answer until they are worked out again, which starts once the response is
+sent; they were worked out over items and artifacts the viewer could see, and no artifact they
+name is withheld by the change.
 
 ## Samples are taken after masking
 

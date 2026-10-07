@@ -179,12 +179,18 @@ without a `palette_size` no route fills them for colours. On 1,000,000 Tree of L
 resident memory, mapped files included, was 1.5 GB. *One run each, with `tessera-bench`'s
 `slot_cost`.*
 
-The slots are then held for that viewer, layer and palette size and read back in under a
-millisecond. After a deletion, a suppression or an unsuppression, an edit, or a change to the
-layer's registration or edges, the viewer's next request that colours the layer pays the pass
-again before it is answered. After an ingest, a flush or a publication into the layer, the next
-request is answered from the slots held and the server works them out again once that response is
-sent, so the viewer pays nothing for it.
+The slots are then held for that credential, layer and palette size, shared by every session
+holding the credential, and read back in under a millisecond. After a deletion, a suppression or
+an unsuppression, an edit, a publication, or a change to the layer's registration or edges, the
+viewer's next request that colours the layer pays the pass again before it is answered, and so
+does every change on a layer whose criterion is a fraction or whose content has a generating set.
+After an ingest, a flush or a growth of a membership on any other layer, the next request is
+answered from the slots held and the server works them out again once that response is sent, on
+at most two sessions at once, so the viewer pays nothing for it.
+
+Browse and a bulk read of `/v1/artifacts` with a `palette_size` work out slots for every level
+whose rows they return, and on a `tiered` layer for the levels above each, filling each level's
+counts and centroids as drawing it would. Without `palette_size` they fill nothing for colours.
 
 A deployment whose viewers fall into a few groups pays the walk a few times for each level. A
 deployment in which every user holds labels of their own, such as a label per document, pays it for

@@ -379,3 +379,38 @@ impl futures_core::Stream for StreamBody {
         }
     }
 }
+
+/// A body of one buffer that runs `then` once it has been sent, or once the connection carrying it
+/// is gone: work a route leaves for after its response.
+pub(crate) struct AfterSent {
+    body: Option<Bytes>,
+    then: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl AfterSent {
+    pub(crate) fn new(body: Vec<u8>, then: impl FnOnce() + Send + 'static) -> Self {
+        AfterSent {
+            body: Some(Bytes::from(body)),
+            then: Some(Box::new(then)),
+        }
+    }
+}
+
+impl futures_core::Stream for AfterSent {
+    type Item = Result<Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(self.body.take().map(Ok))
+    }
+}
+
+impl Drop for AfterSent {
+    fn drop(&mut self) {
+        if let Some(then) = self.then.take() {
+            then();
+        }
+    }
+}

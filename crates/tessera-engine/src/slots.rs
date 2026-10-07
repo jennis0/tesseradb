@@ -15,7 +15,11 @@
 //! corpus without it.
 //!
 //! Slots are worked out a level at a time, when a request names a palette size for that level; a
-//! tiered level's parents' levels first.
+//! tiered level's parents' levels first. They are held under [`WithheldKey`] and [`AddedKey`]: a
+//! change to the first is answered with slots built over it, so a cluster a change withholds is
+//! never answered from slots built before it; a change to the second alone is answered with the
+//! slots held, which were built over what the viewer could see and name no cluster the change
+//! withholds, and rebuilt after the response.
 //!
 //! **Centres come from the level's figures where the layer declares a centroid or a box** and the
 //! level is served from its column alone: each cluster's centre is the centroid of its visible
@@ -215,12 +219,20 @@ impl SlotStats {
     }
 }
 
-/// What a viewer's slots are a function of where a change can withhold something: a deletion, a
-/// suppression or an unsuppression, an edit, a fold, the session, the layer registry, the layer's
-/// edges and the layers it depends on. A change here is answered with slots built over it.
+/// What a viewer's slots are a function of where a change can withhold something: the viewer, a
+/// deletion, a suppression or an unsuppression, an edit, a fold, the layer registry, the layer's
+/// edges and the layers it depends on, and on a layer whose verdict can withhold a cluster when an
+/// invisible member joins it, every addition too. A change here is answered with slots built over
+/// it.
+///
+/// The viewer is named by the grant's digest and the credential's: the item mask is the grant's,
+/// but an artifact's own labels and the layers the viewer reaches are tested against every term
+/// the credential names, including terms no item carries, which the grant leaves out. Sessions
+/// holding one credential share their slots.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct WithheldKey {
-    token_id: u64,
+    terms: [u8; 32],
+    credential: [u8; 32],
     view: String,
     layer: String,
     entity: u64,
@@ -235,11 +247,15 @@ pub(crate) struct WithheldKey {
     edit_epoch: u64,
     fold_epoch: u64,
     fragment_identity: [u8; 32],
+    /// The additions, on a layer declaring a fractional criterion or content with a generating
+    /// set: an ingested member the viewer cannot see can withhold a cluster there.
+    added: Option<AddedKey>,
 }
 
-/// What a viewer's slots are a function of where a change only adds: a flush, an ingest, a growth
-/// of the layer's memberships, a publication. A change here alone is answered with the slots held
-/// and rebuilt after the response.
+/// What a viewer's slots are a function of where a change only adds rows or members: a flush, an
+/// ingest, a growth of the layer's memberships. A change here alone is answered with the slots
+/// held, which hold nothing the viewer could not see when they were built, and they are rebuilt
+/// after the response.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AddedKey {
     /// Each level's record version.
@@ -248,6 +264,18 @@ pub(crate) struct AddedKey {
     projection_segments_version: u64,
     overlay_version: u64,
     fragment_watermark: u64,
+}
+
+impl AddedKey {
+    /// Whether every version here is at least `other`'s: these slots are no older.
+    fn at_least(&self, other: &AddedKey) -> bool {
+        self.levels.len() == other.levels.len()
+            && self.levels.iter().zip(&other.levels).all(|(a, b)| a >= b)
+            && self.segments_version >= other.segments_version
+            && self.projection_segments_version >= other.projection_segments_version
+            && self.overlay_version >= other.overlay_version
+            && self.fragment_watermark >= other.fragment_watermark
+    }
 }
 
 /// A rebuild a request left for after its response.
@@ -259,12 +287,17 @@ struct Wanted {
     palette: u8,
 }
 
-/// The slots held: the newest built for each [`WithheldKey`], what it was built at, and the
-/// rebuilds wanted, by session.
+/// How many sessions' rebuilds run at once.
+const REBUILDS: usize = 2;
+
+/// The slots held, under one byte bound, least recently used going first; which additions the
+/// newest held for each [`WithheldKey`] were built at; the rebuilds wanted, by session; and the
+/// rebuilds running, by session, with the token that ends them.
 pub(crate) struct SlotsCache {
     builds: tessera_cache::SingleFlightCache<(WithheldKey, AddedKey), LevelSlots>,
-    newest: Mutex<FxHashMap<WithheldKey, (AddedKey, Arc<LevelSlots>)>>,
+    newest: Mutex<FxHashMap<WithheldKey, AddedKey>>,
     wanted: Mutex<FxHashMap<u64, Vec<Wanted>>>,
+    rebuilding: Mutex<FxHashMap<u64, crate::CancelToken>>,
 }
 
 impl SlotsCache {
@@ -275,21 +308,56 @@ impl SlotsCache {
             builds,
             newest: Mutex::default(),
             wanted: Mutex::default(),
+            rebuilding: Mutex::default(),
         }
     }
 
-    /// Hold `slots` as the newest for `withheld`, letting older entries go while the held
-    /// slots weigh more than [`SLOTS_BYTES`].
-    fn hold(&self, withheld: WithheldKey, added: AddedKey, slots: Arc<LevelSlots>) {
+    /// The slots held for `withheld` and the additions they were built at, where still held.
+    fn held(&self, withheld: &WithheldKey) -> Option<(AddedKey, Arc<LevelSlots>)> {
+        let added = self
+            .newest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(withheld)
+            .cloned()?;
+        match self.builds.peek(&(withheld.clone(), added.clone())) {
+            tessera_cache::Peek::Ready(slots) => Some((added, slots)),
+            tessera_cache::Peek::Building => None,
+            tessera_cache::Peek::Absent => {
+                self.newest
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(withheld);
+                None
+            }
+        }
+    }
+
+    /// Note `added` as the newest built for `withheld`, unless what is noted is newer.
+    fn note(&self, withheld: WithheldKey, added: AddedKey) {
         let mut newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
-        newest.insert(withheld.clone(), (added, slots));
-        let mut weight: u64 = newest.values().map(|(_, s)| s.weight()).sum();
-        while weight > SLOTS_BYTES {
-            let Some(other) = newest.keys().find(|k| **k != withheld).cloned() else {
-                break;
-            };
-            if let Some((_, gone)) = newest.remove(&other) {
-                weight -= gone.weight();
+        match newest.get(&withheld) {
+            Some(held) if !added.at_least(held) => {}
+            _ => {
+                newest.insert(withheld, added);
+            }
+        }
+    }
+
+    /// Forget the sessions `token_ids` names: their wanted rebuilds, and any running.
+    pub(crate) fn end(&self, token_ids: &FxHashSet<u64>) {
+        self.wanted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|token, _| !token_ids.contains(token));
+        for (token, cancel) in self
+            .rebuilding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            if token_ids.contains(token) {
+                cancel.cancel();
             }
         }
     }
@@ -323,14 +391,7 @@ impl Engine {
             return Ok(None);
         }
         let (withheld, added) = self.slot_keys(served, layer, level, palette);
-        let held = self
-            .slots
-            .newest
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&withheld)
-            .cloned();
-        if let Some((at, slots)) = held {
+        if let Some((at, slots)) = self.slots.held(&withheld) {
             if at != added {
                 let wanted = Wanted {
                     view: served.name.to_string(),
@@ -339,7 +400,7 @@ impl Engine {
                     palette,
                 };
                 let mut all = self.slots.wanted.lock().unwrap_or_else(PoisonError::into_inner);
-                let list = all.entry(withheld.token_id).or_default();
+                let list = all.entry(served.session.token_id()).or_default();
                 if !list.contains(&wanted) {
                     list.push(wanted);
                 }
@@ -358,7 +419,7 @@ impl Engine {
         )
     }
 
-    /// Build this viewer's slots over `level` and hold them under `withheld` and `added`: `None`
+    /// Build this viewer's slots over `level` at `withheld` and `added`, and note them: `None`
     /// where a tiered level above it has none.
     #[allow(clippy::too_many_arguments)]
     fn build_and_hold(
@@ -405,7 +466,7 @@ impl Engine {
                 )
             })
             .map_err(crate::figures::waited)?;
-        self.slots.hold(withheld, added, Arc::clone(&slots));
+        self.slots.note(withheld, added);
         Ok(Some(slots))
     }
 
@@ -446,9 +507,27 @@ impl Engine {
             .collect();
         let id = served.mask_identity;
         let generation = served.generation;
+        let added = AddedKey {
+            levels: own.iter().map(|&(record, _)| record).collect(),
+            segments_version: id.segments_version,
+            projection_segments_version: id.projection_segments_version,
+            overlay_version: id.overlay_version,
+            fragment_watermark: id.fragment_watermark,
+        };
+        let declaration = &layer.declaration;
+        let fractional = matches!(
+            declaration.require_member_visibility,
+            Some(tessera_types::layer::ExistenceCriterion::Fraction(_))
+        );
+        let contained = declaration
+            .content
+            .supplied
+            .iter()
+            .any(|c| c.require_member_visibility == tessera_types::layer::SuppliedRequirement::All);
         (
             WithheldKey {
-                token_id: id.token_id,
+                terms: id.terms,
+                credential: served.session.auth_data_hash(),
                 view: served.name.to_string(),
                 layer: name.to_string(),
                 entity: layer.entity.raw(),
@@ -461,14 +540,9 @@ impl Engine {
                 edit_epoch: generation.edit_epoch,
                 fold_epoch: generation.fold_epoch,
                 fragment_identity: id.fragment_identity,
+                added: (fractional || contained).then(|| added.clone()),
             },
-            AddedKey {
-                levels: own.iter().map(|&(record, _)| record).collect(),
-                segments_version: id.segments_version,
-                projection_segments_version: id.projection_segments_version,
-                overlay_version: id.overlay_version,
-                fragment_watermark: id.fragment_watermark,
-            },
+            added,
         )
     }
 
@@ -482,32 +556,72 @@ impl Engine {
     }
 
     /// Rebuild the slots `session`'s requests found held over a corpus that has since only grown,
-    /// over the corpus now. A route calls this once its response is sent.
+    /// over the corpus now, a tiered level's coarser levels first. A route calls this once its
+    /// response is sent. At most [`REBUILDS`] sessions rebuild at once; a session past that keeps
+    /// its rebuild for its next response. Ending the session stops its rebuild.
     pub fn refresh_cluster_slots(&self, session: &crate::Session) -> Result<()> {
+        let token = session.token_id();
+        let cancel = {
+            let mut running = self
+                .slots
+                .rebuilding
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if running.len() >= REBUILDS || running.contains_key(&token) {
+                return Ok(());
+            }
+            let cancel = crate::CancelToken::new();
+            running.insert(token, cancel.clone());
+            cancel
+        };
         let wanted = self
             .slots
             .wanted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&session.token_id())
+            .remove(&token)
             .unwrap_or_default();
+        let mut outcome = Ok(());
         for wanted in wanted {
-            self.with_slot_view(session, &wanted.view, &wanted.layer, |served, mask, layer, gate| {
-                let (withheld, added) = self.slot_keys(served, layer, wanted.level, wanted.palette);
-                self.build_and_hold(
-                    served,
-                    mask,
-                    layer,
-                    wanted.level,
-                    wanted.palette,
-                    gate,
-                    withheld,
-                    added,
-                )
-                .map(|_| ())
-            })?;
+            let rebuilt = self.with_slot_view(
+                session,
+                &wanted.view,
+                &wanted.layer,
+                &Some(cancel.clone()),
+                |served, mask, layer, gate| {
+                    let tiered = layer.declaration.hierarchy.kind == HierarchyKind::Tiered;
+                    let first = if tiered { 0 } else { wanted.level };
+                    for level in first..=wanted.level {
+                        let (withheld, added) =
+                            self.slot_keys(served, layer, level, wanted.palette);
+                        if self.slots.held(&withheld).is_some_and(|(at, _)| at == added) {
+                            continue;
+                        }
+                        self.build_and_hold(
+                            served,
+                            mask,
+                            layer,
+                            level,
+                            wanted.palette,
+                            gate,
+                            withheld,
+                            added,
+                        )?;
+                    }
+                    Ok(())
+                },
+            );
+            if let Err(e) = rebuilt {
+                outcome = Err(e);
+                break;
+            }
         }
-        Ok(())
+        self.slots
+            .rebuilding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&token);
+        outcome
     }
 
     /// Run `f` over `layer` in `view` as `session` reads it, with the dependency hook the
@@ -517,6 +631,7 @@ impl Engine {
         session: &crate::Session,
         view: &str,
         layer: &str,
+        cancel: &Option<crate::CancelToken>,
         f: impl FnOnce(
             &ServedView<'_>,
             &EffectiveMask,
@@ -525,13 +640,14 @@ impl Engine {
         ) -> Result<T>,
     ) -> Result<T> {
         let generation = self.generation.load_full();
-        let open = self.open_view(
+        let mut open = self.open_view(
             session,
             &generation,
             view,
-            &None,
+            cancel,
             &mut crate::timing::Probe::new(),
         )?;
+        open.served.cancel = cancel.clone();
         let Ok(registered) = self.readable_layer(session, &generation, layer, view) else {
             return Ok(T::default());
         };
@@ -554,7 +670,7 @@ impl Engine {
         layer: &str,
         palette: u8,
     ) -> Result<SlotStats> {
-        self.with_slot_view(session, view, layer, |served, mask, registered, gate| {
+        self.with_slot_view(session, view, layer, &None, |served, mask, registered, gate| {
             let mut stats = SlotStats::default();
             for level in 0..registered.runs.len() as u32 {
                 if let Some(slots) =
@@ -601,6 +717,8 @@ impl Engine {
         let mut first = 0;
         let mut ordinals: Vec<u32> = Vec::new();
         for &at_level in &levels {
+            // A coarser level is read as its own build read it, so its figures are the entry that
+            // build filled.
             let read = self.read_level(served, mask, layer, at_level, true)?;
             let runs = &layer.runs[at_level as usize];
             let view = read.view(self, served, mask, layer, dependency_served);
@@ -1571,7 +1689,7 @@ mod tests {
             let old_heirs = heirs(&clusters);
             let old_graphs = graphs(&clusters, &full);
             for depth in 1..levels.len() - 1 {
-                // A leaf at this depth, where there is one; otherwise the depth's first cluster.
+                // The depth's first cluster goes, and every cluster beneath it.
                 let gone = levels[depth][0];
                 let fewer_clusters = without(&clusters, gone);
                 let descendants: Vec<u32> = (0..clusters.len() as u32)

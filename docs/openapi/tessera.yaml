@@ -1151,9 +1151,10 @@ paths:
         beside what it changed and, where it changes which child is a parent's heir, of that child
         and its neighbours, and then at each depth below of the children of every artifact whose
         slot moved and of the artifacts drawn beside them: a reach that widens by a ring of
-        neighbours a depth. A deletion or suppression is answered with slots worked out over it; a
-        change that only adds, such as an ingest, is answered with the slots held until they are
-        worked out again after that response.
+        neighbours a depth. A deletion, a suppression or a publication is answered with slots worked
+        out over it, and so is any change on a layer whose criterion is a fraction or whose content
+        has a generating set; on any other layer an ingest or a growth of a membership is answered
+        with the slots held until they are worked out again after that response.
 
         Subject to its own admission, `serve.artifact_admission`. Cancelled between tiles when the
         client goes away.
@@ -5094,7 +5095,7 @@ components:
       type: integer
       minimum: 2
       maximum: 32
-      description: How many colours the client's palette holds. Each artifact then carries `slot`, this principal's slot for it among them, the same on every route; see `POST /v1/artifacts/viewport`'s **Slots**. Absent serves `slot` as null. Outside 2 to 32 is `422`. On a level whose layer declares a centroid or a box and that is served from its column, the slots are worked out from the centroids the artifacts viewport fills when it draws the level; with `palette_size`, every route fills that same entry where no request has, so browse, a bulk read and an aggregate grouping without `cut` serve the slots the viewport serves. Without `palette_size` no route fills it for slots.
+      description: How many colours the client's palette holds. Each artifact then carries `slot`, this principal's slot for it among them, the same on every route; see `POST /v1/artifacts/viewport`'s **Slots**. Absent serves `slot` as null. Outside 2 to 32 is `422`. On a level whose layer declares a centroid or a box and that is served from its column, the slots are worked out from the centroids the artifacts viewport fills when it draws the level; with `palette_size`, every route fills that same entry where no request has, so browse, a bulk read and an aggregate grouping without `cut` serve the slots the viewport serves. Without `palette_size` no route fills it for slots. Browse and `POST /v1/artifacts` work out slots for every level whose rows they return, and on a `tiered` layer for the levels above each, so the first such request over a level pays the fill drawing it would.
 
     BrowseRequest:
       type: object
