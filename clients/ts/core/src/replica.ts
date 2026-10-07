@@ -404,14 +404,16 @@ export class Replica {
         signal,
         background,
         async (part) => {
+          signal?.throwIfAborted();
           piece.parts += 1;
-          for (const band of await this.absorb(part, depth, k, startedAt)) piece.landed.push(band);
+          for (const band of await this.absorb(part, depth, k, startedAt, signal)) piece.landed.push(band);
         },
         (counts) => {
           piece.counted = true;
+          signal?.throwIfAborted();
           this.observe(counts);
           if (this.opts.cache === false) return;
-          this.cache.putCounts(depth, counts.tiles, counts.identityKey, counts.contentKey);
+          this.cache.putCounts(depth, counts.tiles, counts.identityKey, counts.contentKey, k, startedAt);
           this.opts.onCounts?.();
         }
       );
@@ -426,20 +428,24 @@ export class Replica {
     for (let i = 0; i < pieces.length; i++) {
       const piece = pending!;
       response = await piece.fetching;
+      // An abandoned request's answer is for a question no longer asked.
+      signal?.throwIfAborted();
       issued += 1;
       responseBytes += response.bytes;
       pending = i + 1 < pieces.length ? request(pieces[i + 1]!) : null;
-      // A transport that answered whole handed over no counts as they landed.
+      // A transport that ignored `onCounts` handed over no counts as they landed.
       if (!piece.counted && this.opts.cache !== false) {
-        this.cache.putCounts(depth, response.result.tiles, response.identityKey, response.contentKey);
+        this.observe(response);
+        this.cache.putCounts(depth, response.result.tiles, response.identityKey, response.contentKey, k, piece.startedAt);
       }
       // A streamed piece has stored its points already and its response carries none, so only its
       // keys are observed. A transport that answered whole is absorbed here.
       if (piece.parts === 0) {
-        for (const band of await this.absorb(response, depth, k, piece.startedAt)) piece.landed.push(band);
+        for (const band of await this.absorb(response, depth, k, piece.startedAt, signal)) piece.landed.push(band);
       } else {
         this.observe(response);
       }
+      signal?.throwIfAborted();
       fetched = fetched.concat(piece.landed);
       // Once per response, since eviction sorts every held band.
       if (this.opts.cache !== false && piece.landed.length > 0) {
@@ -524,7 +530,9 @@ export class Replica {
     depth: number,
     k: number,
     /** The touch time every band of one piece shares: the piece's start. */
-    at: number = this.now()
+    at: number = this.now(),
+    /** The request's signal: a slice is not stored once it aborts. */
+    signal?: AbortSignal
   ): Promise<Band[]> {
     this.observe(arrival);
     const contentKey = this.contentKey;
@@ -546,6 +554,7 @@ export class Replica {
     let longestSliceMs = 0;
     while (!splitter.done()) {
       const started = performance.now();
+      signal?.throwIfAborted();
       const slice = splitter.step(started + ABSORB_SLICE_MS);
       const took = performance.now() - started;
       splitMs += took;

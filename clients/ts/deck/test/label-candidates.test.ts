@@ -129,6 +129,13 @@ describe('labelCandidates', () => {
       {...artifact(2n, 100n, ['something matches here']), matched: true}
     ]);
     expect(labelCandidates(p, META, undefined, 0, 10).candidates.map((c) => String(c.id))).toEqual(['2']);
+    // A parent that matches, whose children all match nothing, is named in their place.
+    const parent = projection([
+      {...artifact(1n, 900n, ['the parent']), matched: true},
+      {...artifact(2n, 500n, ['a child'], 'clusters', 1n), matched: false},
+      {...artifact(3n, 400n, ['another child'], 'clusters', 1n), matched: false}
+    ]);
+    expect(labelCandidates(parent, META, undefined, 0, 10).candidates.map((c) => String(c.id))).toEqual(['1']);
     // A filter matching nothing in view names nothing.
     const none = projection([{...artifact(1n, 900n, ['a']), matched: false}, {...artifact(2n, 100n, ['b']), matched: false}]);
     expect(labelCandidates(none, META, undefined, 0, 10).candidates).toEqual([]);

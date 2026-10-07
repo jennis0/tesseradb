@@ -3,6 +3,7 @@ import {tileXY} from './coords.js';
 import {plan, worldBbox, type Plan, type PlannerInputs, type Viewport} from './prefetch.js';
 import {rectContains, rectContainsTile, rectIntersection, type TileRect} from './rects.js';
 import type {Replica, ReplicaFrame} from './replica.js';
+import type {Band} from './bands.js';
 import {TesseraError} from './client.js';
 
 /**
@@ -159,8 +160,8 @@ export class Driver {
 
   // Foreground lifecycle.
   private inFlight: AbortController | null = null;
-  /** The last `shown` or `empty` reported, so a camera answered from held tiles reports only a change. */
-  private answered: 'shown' | 'empty' | null = null;
+  /** The last status reported, so a camera answered from held tiles reports only a change. */
+  private lastStatus: 'loading' | 'shown' | 'empty' | 'refused' | 'retrying' | null = null;
   private inFlightAt: {rect: TileRect; depth: number; since: number} | null = null;
   private queued: ViewState | null = null;
   private generation = 0;
@@ -344,8 +345,7 @@ export class Driver {
       this.holdSuspended = false;
       this.trace('covered', {depth: this.heldBbox?.depth ?? -1});
       this.movedAt = 0;
-      // No request answers this camera, so the held tiles say whether anything is in view.
-      if (!this.inFlight) this.report(this.heldIn(planned.visible.rect, planned.choice.depth), false);
+      this.reportHeld(planned);
       // A warm client lives on this path, so the staleness bound must be reachable here.
       this.revalidateIfDue(view);
       return;
@@ -461,17 +461,27 @@ export class Driver {
     void this.request(view);
   }
 
-  /** Whether the held bands at `depth` serve anything inside `rect`, as a request's status reads it. */
-  private heldIn(rect: TileRect, depth: number): 'shown' | 'empty' {
-    for (const band of this.replica.exactIn(rect, depth)) if (band.served > 0 || band.visible > 0n) return 'shown';
+  /** Whether `bands` serve anything inside `rect`: what a view's status reports. */
+  private heldIn(bands: Iterable<Band>, rect: TileRect): 'shown' | 'empty' {
+    for (const band of bands) if (band.served > 0 && rectContainsTile(rect, band.x, band.y)) return 'shown';
     return 'empty';
   }
 
-  /** Reports an answer's status: always after a request, and from held tiles only where it changed. */
-  private report(status: 'shown' | 'empty', always = true): void {
-    if (!always && status === this.answered) return;
-    this.answered = status;
-    this.events.onStatus?.(status);
+  private report(status: 'loading' | 'shown' | 'empty' | 'refused' | 'retrying', detail?: unknown): void {
+    this.lastStatus = status;
+    this.events.onStatus?.(status, detail);
+  }
+
+  /**
+   * Reports what the held tiles say of a camera they cover, where no request is out to answer it and
+   * the status differs. A retry pending for an earlier camera is dropped: this one is answered.
+   */
+  private reportHeld(planned: Plan): void {
+    if (this.inFlight || !this.covers(planned)) return;
+    const status = this.heldIn(this.replica.exactIn(planned.visible.rect, planned.choice.depth), planned.visible.rect);
+    if (this.retryHandle) this.clock.cancel(this.retryHandle);
+    this.retryHandle = null;
+    if (status !== this.lastStatus) this.report(status);
   }
 
   private storeCanAnswer(view: ViewState): boolean {
@@ -559,7 +569,9 @@ export class Driver {
     this.queued = null;
     this.heldBbox = null;
     this.presented = null;
-    this.answered = null;
+    this.lastStatus = null;
+    // A request still out answers a question no longer asked.
+    this.generation++;
     this.movedAt = 0;
     this.velocity = undefined;
     this.lastTarget = null;
@@ -672,7 +684,7 @@ export class Driver {
     this.inFlightAt = {rect: planned.render, depth: choice.depth, since: this.clock.now()};
     const generation = ++this.generation;
     const movedAt = this.movedAt || this.clock.now();
-    this.events.onStatus?.('loading');
+    this.report('loading');
 
     try {
       // The cold view fetches counts before marks (see {@link seedCounts}), inside the foreground
@@ -721,6 +733,8 @@ export class Driver {
       let thinnedMatched = 0;
       const floor = Math.min(this.meta.kMin ?? 0, this.meta.kMaxMarks);
       for (const b of frame.exact) {
+        // A tile that served no point adds no marks to the field, as one with no band did.
+        if (b.served === 0) continue;
         const matched = Number(b.matched);
         cells.push({x: b.x, y: b.y, count: matched});
         if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
@@ -757,7 +771,7 @@ export class Driver {
         this.mTarget,
         this.meta.thetaTargetMarks
       );
-      this.report(actual === 0 && visible === 0 ? 'empty' : 'shown');
+      this.report(this.heldIn(frame.exact, planned.visible.rect));
       this.movedAt = 0;
       if (this.queued) {
         this.inFlight = null;
@@ -793,6 +807,8 @@ export class Driver {
       }
       if (generation !== this.generation) return;
       this.inFlight = null;
+      // A camera that moved within the held tiles while the margin was out was not reported.
+      if (this.lastView) this.reportHeld(this.planFor(this.lastView));
       this.dispatchQueued();
     } catch (error) {
       if (controller.signal.aborted || generation !== this.generation) return;
@@ -801,7 +817,7 @@ export class Driver {
 
       const backoff = retryDelayMs(error, attempt, this.o);
       if (backoff !== null) {
-        this.events.onStatus?.('retrying');
+        this.report('retrying');
         this.retryHandle = this.clock.after(backoff, () => {
           this.retryHandle = null;
           // Anything newer supersedes the retry.
@@ -812,7 +828,7 @@ export class Driver {
       this.movedAt = 0;
       this.heldBbox = null;
       this.presented = null;
-      this.events.onStatus?.('refused', error);
+      this.report('refused', error);
     }
   }
 }

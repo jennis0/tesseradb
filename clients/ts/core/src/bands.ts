@@ -32,8 +32,7 @@ export type TileAddress = {depth: number; prefix: bigint};
 /**
  * A tile's counts from the server, held from the moment its response's tiles frame lands until the
  * tile's band arrives, so the tile is counted before its points are drawn. The counts are the ones
- * the band will carry: the same frame supplies both. A tile that serves no point gets no band, and
- * its counts are held for as long as its content key is current.
+ * the band will carry: the same frame supplies both.
  *
  * @internal
  */
@@ -45,6 +44,34 @@ export type CountedTile = {
 /** A counted tile as the cache holds it: where it is, and the content key it was counted under. */
 type HeldCount = CountedTile & {depth: number; x: number; y: number; contentKey: string};
 
+/** The band of a tile that was asked for points and serves none: its counts, and nothing to draw. */
+function emptyBand(tile: TileCounts, depth: number, x: number, y: number, identityKey: string, contentKey: string, capUsed: number, now: number): Band {
+  return {
+    depth,
+    prefix: tile.tile,
+    x,
+    y,
+    ids: new BigUint64Array(0),
+    positions: new Float32Array(0),
+    scalars: {},
+    membership: {},
+    highlightBits: null,
+    served: 0,
+    capUsed,
+    visible: tile.visible,
+    matched: tile.matched,
+    highlighted: tile.highlighted,
+    heldBelow: 0n,
+    identityKey,
+    contentKey,
+    bytes: 0,
+    touchedAt: now,
+    columnsAsked: null,
+    // No point to tag, so no layer is missing a column.
+    layersAsked: 'all'
+  };
+}
+
 /** `${depth}:${prefix}`, the map key. @internal */
 export type BandKey = string;
 
@@ -55,7 +82,8 @@ export function bandKey(depth: number, prefix: bigint): BandKey {
 
 /**
  * One tile's held points, ascending by `tessera_id` as the server sent them. A {@link Composition}
- * and the store's `marks` projection hold bands by reference. Every array is the band's own copy.
+ * and the store's `marks` projection hold bands by reference. Every array is the band's own copy. A
+ * tile that serves no point is a band of none, which carries the tile's counts and draws nothing.
  *
  * @category Projections
  */
@@ -534,9 +562,8 @@ export class BandCache {
    */
   private covered: Coverage[] = [];
   /**
-   * Counts for tiles whose points are on their way, and for tiles that serve none, under the latest
-   * content key only. A tile's entry goes when its band is put, and every entry goes with the
-   * principal.
+   * Counts for tiles whose points are on their way, under the latest content key only. A tile's
+   * entry goes when its band is put, and every entry goes with the principal.
    */
   private counted = new Map<BandKey, HeldCount>();
   private identityKey: string | null = null;
@@ -620,12 +647,13 @@ export class BandCache {
   }
 
   /**
-   * Holds the counts of a response's tiles at `depth`: until its band arrives for a tile that will
-   * carry points, and for as long as the content key holds for one that serves none, so a frame
-   * counts every tile it covers. Counts under an older content key are dropped, and a change of
-   * principal drops everything, as {@link put} does.
+   * Holds the counts of a response's tiles at `depth` that will carry points, until each tile's
+   * band arrives. A tile asked for points (`capUsed` above zero) that serves none is answered
+   * already, and is held at once as a band of no points, so a frame counts it and draws nothing
+   * there. Counts under an older content key are dropped, and a change of principal drops
+   * everything, as {@link put} does.
    */
-  putCounts(depth: number, tiles: readonly TileCounts[], identityKey: string, contentKey: string): void {
+  putCounts(depth: number, tiles: readonly TileCounts[], identityKey: string, contentKey: string, capUsed: number, now: number): void {
     if (this.identityKey !== identityKey) {
       this.dropIdentity();
       this.identityKey = identityKey;
@@ -635,6 +663,10 @@ export class BandCache {
       const key = bandKey(depth, tile.tile);
       if (this.bands.get(key)?.contentKey === contentKey) continue;
       const {x, y} = tileXY(tile.tile, depth);
+      if (tile.served === 0n) {
+        if (capUsed > 0) this.put(emptyBand(tile, depth, x, y, identityKey, contentKey, capUsed, now));
+        continue;
+      }
       this.counted.set(key, {
         prefix: tile.tile,
         depth,

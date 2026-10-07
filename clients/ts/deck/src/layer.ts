@@ -468,9 +468,12 @@ export type ContourOptions = {
   meta?: Meta | null;
 };
 
-/** Whether a served artifact is drawn at `level` and has no drawn child: {@link frontier}'s rule for one artifact. */
+/**
+ * Whether a served artifact is drawn at `level` and has no drawn child: {@link frontier}'s rule for
+ * one artifact. Under a filter, one with no matching member in view is not drawn.
+ */
 function onFrontier(a: ArtifactsProjection, artifact: Artifact, level: number | undefined): boolean {
-  const drawn = (x: {rung: number}) => level === undefined || x.rung <= level;
+  const drawn = (x: Artifact) => x.matched !== false && (level === undefined || x.rung <= level);
   if (!drawn(artifact)) return false;
   return !(a.lineage.childrenOf.get(artifact.tesseraId) ?? []).some((c) => drawn(c));
 }
@@ -610,11 +613,12 @@ const TOPIC_SIZE = 12;
  * would be wrong.
  *
  * Under a filter, an artifact with no member in view that matches it is left out: none of its
- * points are drawn, so its name and its outline would stand over empty ground.
+ * points are drawn, so its name and its outline would stand over empty ground. A parent whose
+ * children all match nothing is on the frontier in their place.
  */
 export function frontier(a: ArtifactsProjection, level: number | undefined): Set<bigint> {
   const out = new Set<bigint>();
-  for (const artifact of a.served) if (artifact.matched !== false && onFrontier(a, artifact, level)) out.add(artifact.tesseraId);
+  for (const artifact of a.served) if (onFrontier(a, artifact, level)) out.add(artifact.tesseraId);
   return out;
 }
 

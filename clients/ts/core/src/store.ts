@@ -1184,12 +1184,14 @@ export function createStore(options: StoreOptions): Store {
               onPart &&
               ((part) => {
                 if (!admitted(part.identityKey, tok)) throw identityChanged();
+                signal?.throwIfAborted();
                 return onPart(part);
               }),
             onCounts:
               onCounts &&
               ((counts) => {
                 if (!admitted(counts.identityKey, tok)) throw identityChanged();
+                signal?.throwIfAborted();
                 onCounts(counts);
               })
           }
@@ -1631,6 +1633,8 @@ export function createStore(options: StoreOptions): Store {
     const tags = new Set<number>();
     for (const band of bands) {
       if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
+      // A tile that serves no point has nothing to colour.
+      if (band.ids.length === 0) continue;
       for (const layer of layers) for (const ordinal of band.membership[layer]?.distinct ?? []) tags.add(ordinal);
       if (layers.every((layer) => resolves(band, layer, a.colours))) current++;
       else staleBands.push(band);
@@ -1751,6 +1755,11 @@ export function createStore(options: StoreOptions): Store {
     const incoming = views.enter(id);
     // A `setView` from a subscriber clears this, and its request then answers for the status.
     awaitingSwitchFrame = true;
+    // No marks until the incoming view presents. Cleared before the settings below publish, so no
+    // check run on their publication reads the outgoing view's marks as the incoming view's.
+    replaceProjection('view', noFrame(id));
+    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
+    replaceProjection('tiles', {tiles: []});
     // The shared settings reach a view as it becomes current. Set on a held view, they would make it ask.
     incoming.channel.setLayers(layersAsked());
     incoming.presenter.setBudget(budget);
@@ -1766,10 +1775,7 @@ export function createStore(options: StoreOptions): Store {
       region.drop();
     }
 
-    // No marks until the incoming view presents, and the incoming channel's artifacts.
-    replaceProjection('view', noFrame(id));
-    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
-    replaceProjection('tiles', {tiles: []});
+    // The incoming channel's artifacts.
     onArtifacts(incoming.channel.current);
     replaceProjection('status', {...projections.status, status: 'loading', refusal: null, stale: false});
     publishReplica(projections.replica.lastPlan);

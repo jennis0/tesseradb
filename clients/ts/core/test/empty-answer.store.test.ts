@@ -32,12 +32,12 @@ function noneMatch(): ViewportResponse {
   return response(servedResult(0, [tile(0n, 1000n, {matched: 0n, highlighted: 0n})], {scalars: {archive: {arrowType: 'u16', values: new Uint16Array(0)}}}));
 }
 
-async function shown(reply: (req: Asked) => ViewportResponse | Promise<ViewportResponse>): Promise<{store: Store; clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>; asked: () => number}> {
+async function shown(reply: (req: Asked) => ViewportResponse | Promise<ViewportResponse>, revalidateAfterMs = Infinity): Promise<{store: Store; clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>; asked: () => number}> {
   const clock = fakeClock();
   const scheduler = fakeScheduler();
   const viewport = vi.fn(async (_t: string, req: Asked) => ({...(await reply(req)), region: null}));
   const client = {meta: async () => META, viewport, viewportArtifacts: async () => ({}), close: () => {}} as unknown as TesseraClient;
-  const store = createStore({viewerUrl: 'http://v', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+  const store = createStore({viewerUrl: 'http://v', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs}});
   await clock.advance(1);
   store.setView(camera(Q, [0, 0, 100, 200], 400, 400));
   await clock.advance(600);
@@ -143,15 +143,14 @@ describe('an answer of no matches draws nothing', () => {
  * Under the filter only the left half of the world matches: one point at the centre of each
  * matching tile asked for, 100 visible items in every tile, and none served or matched on the right.
  */
-function leftHalfMatches(req: Asked): ViewportResponse {
+function leftHalfMatches(req: Asked, per = 100n, matches = (x: number, z: number) => x < 2 ** (z - 1)): ViewportResponse {
   const z = req.zoom;
   const asked = req.bbox ? tilesOf(req.bbox, z) : (req.tiles ?? []);
-  const half = 2 ** (z - 1);
-  const left = asked.filter((p) => tileXY(p, z).x < half);
-  const right = asked.filter((p) => tileXY(p, z).x >= half);
+  const left = asked.filter((p) => matches(tileXY(p, z).x, z));
+  const right = asked.filter((p) => !matches(tileXY(p, z).x, z));
   const span = WORLD_SIZE / 2 ** z;
   const world = Float32Array.from(left.flatMap((p) => [(tileXY(p, z).x + 0.5) * span, (tileXY(p, z).y + 0.5) * span]));
-  const counts = [...left.map((p) => tile(p, 100n, {served: 1n})), ...right.map((p) => tile(p, 100n, {matched: 0n, highlighted: 0n}))];
+  const counts = [...left.map((p) => tile(p, per, {served: 1n})), ...right.map((p) => tile(p, per, {matched: 0n, highlighted: 0n}))];
   return response({
     ...servedResult(left.length, [], {scalars: {archive: {arrowType: 'u16', values: Uint16Array.from(left, () => 5)}}}),
     tiles: counts,
@@ -189,6 +188,23 @@ describe('a frame counts every tile it covers', () => {
   });
 });
 
+describe('a frame counts every tile it covers, with no count-only answer before it', () => {
+  it('counts the tiles a filter leaves with no point to serve when the count-only request fails', async () => {
+    const {store, clock, scheduler} = await shown((req) => {
+      if (!req.filters) return three();
+      if ((req as {k?: number}).k === 0) throw new Error('the count-only request failed');
+      return leftHalfMatches(req);
+    });
+    store.setFilters(FILTER);
+    await clock.advance(600);
+    scheduler.flush();
+
+    const v = store.get('view');
+    const want = v.composition!.want;
+    expect(v.visible.value).toBe(100 * (want.x1 - want.x0 + 1) * (want.y1 - want.y0 + 1));
+  });
+});
+
 describe('a camera answered from held tiles', () => {
   it('reports empty where the filter matches nothing in view, and shown where it matches again', async () => {
     const {store, clock, scheduler, asked} = await shown((req) => (req.filters ? leftHalfMatches(req) : three()));
@@ -213,5 +229,110 @@ describe('a camera answered from held tiles', () => {
     scheduler.flush();
     expect(asked()).toBe(before);
     expect(store.get('status').status).toBe('shown');
+  });
+});
+
+describe('a camera answered from held tiles while the slot is busy', () => {
+  it('reports the held status once the margin fetch clears the slot', async () => {
+    // Only the first column of tiles at depth 8 matches, and every tile is dense, so the camera
+    // below is asked at depth 8 and its margin after it.
+    const answer = (req: Asked) => leftHalfMatches(req, 1_000_000n, (x, z) => z < 8 || x === 0);
+    const waiting: (() => void)[] = [];
+    let hold = false;
+    const {store, clock, scheduler} = await shown((req) => {
+      if (!req.filters || !hold) return req.filters ? answer(req) : three();
+      return new Promise<ViewportResponse>((resolve) => waiting.push(() => resolve(answer(req))));
+    });
+    store.setFilters(FILTER);
+    await clock.advance(600);
+    scheduler.flush();
+    // The ground to the right is held first, whole.
+    store.setView(camera(Q, [3, 0, 6, 6], 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    hold = true;
+    store.setView(camera(Q, [0, 0, 3, 6], 400, 400));
+    await clock.advance(600);
+    waiting.shift()!();
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('status').status).toBe('shown');
+    // The margin is out. The camera moves to ground the primary answer holds, where nothing matches.
+    const margin = waiting.length;
+    expect(margin).toBeGreaterThan(0);
+    store.setView(camera(Q, [1.5, 0, 4.5, 6], 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    // Answered from held tiles: nothing more is asked.
+    expect(waiting.length).toBe(margin);
+    while (waiting.length > 0) {
+      waiting.shift()!();
+      await clock.advance(600);
+      scheduler.flush();
+    }
+    expect(store.get('status').status).toBe('empty');
+  });
+});
+
+describe('an answer that lists no tile', () => {
+  it('drops the marks drawn under the previous filter', async () => {
+    const {store, clock, scheduler} = await shown((req) => (req.filters ? response() : three()));
+    expect(drawn(store)).toHaveLength(3);
+
+    store.setFilters(FILTER);
+    await clock.advance(600);
+    scheduler.flush();
+
+    expect(store.get('status').status).toBe('empty');
+    expect(drawn(store)).toEqual([]);
+    expect(store.get('tiles').tiles).toEqual([]);
+  });
+});
+
+describe('a tile that serves nothing under a new content key', () => {
+  it('replaces the points the tile served under the older key', async () => {
+    let key = 'ck-1';
+    const {store, clock, scheduler} = await shown(() => (key === 'ck-1' ? three() : {...noneMatch(), contentKey: key, pin: key}), 100);
+    expect(drawn(store)).toHaveLength(3);
+
+    // A revalidation observes the new key, and the refresh asks again under it.
+    key = 'ck-2';
+    await clock.advance(200);
+    store.setView(camera(Q, [0, 0, 100, 200], 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('status').stale).toBe(true);
+    store.refresh();
+    await clock.advance(600);
+    scheduler.flush();
+
+    expect(drawn(store)).toEqual([]);
+    expect(store.get('view').matched.value).toBe(0);
+  });
+});
+
+describe('an answer to a question no longer asked', () => {
+  it('draws nothing from a request a filter change abandoned', async () => {
+    const waiting: (() => void)[] = [];
+    let hold = false;
+    const {store, clock, scheduler} = await shown((req) => {
+      if (req.filters) return new Promise<ViewportResponse>(() => {});
+      if (!hold) return three();
+      // The pan's answer, with ids of its own.
+      const late = response(servedResult(3, [tile(0n, 1000n)], {ids: BigUint64Array.from([101n, 102n, 103n]), scalars: {archive: {arrowType: 'u16', values: Uint16Array.from([5, 5, 5])}}}));
+      return new Promise<ViewportResponse>((resolve) => waiting.push(() => resolve(late)));
+    });
+    hold = true;
+    store.setView(camera(Q, [0, 0, 20, 40], 400, 400));
+    await clock.advance(600);
+    expect(waiting.length).toBeGreaterThan(0);
+
+    store.setFilters(FILTER);
+    for (const release of waiting.splice(0)) release();
+    await clock.advance(600);
+    scheduler.flush();
+
+    expect(drawn(store).filter((id) => id > 100n)).toEqual([]);
+    expect(store.get('status').status).toBe('loading');
   });
 });
