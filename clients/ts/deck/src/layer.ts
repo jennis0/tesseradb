@@ -608,10 +608,13 @@ const TOPIC_SIZE = 12;
  * above the level is still named. The level compared is the served `rung`, which the server
  * computes per layer kind; a levelled layer's edges may skip a level, so a client-side depth count
  * would be wrong.
+ *
+ * Under a filter, an artifact with no member in view that matches it is left out: none of its
+ * points are drawn, so its name and its outline would stand over empty ground.
  */
 export function frontier(a: ArtifactsProjection, level: number | undefined): Set<bigint> {
   const out = new Set<bigint>();
-  for (const artifact of a.served) if (onFrontier(a, artifact, level)) out.add(artifact.tesseraId);
+  for (const artifact of a.served) if (artifact.matched !== false && onFrontier(a, artifact, level)) out.add(artifact.tesseraId);
   return out;
 }
 

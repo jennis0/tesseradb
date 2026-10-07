@@ -123,6 +123,17 @@ describe('labelCandidates', () => {
     expect(candidates.map((c) => String(c.id))).toEqual(['3', '4']);
   });
 
+  it('under a filter, an artifact with no matching member in view draws no label', () => {
+    const p = projection([
+      {...artifact(1n, 900n, ['nothing matches here']), matched: false},
+      {...artifact(2n, 100n, ['something matches here']), matched: true}
+    ]);
+    expect(labelCandidates(p, META, undefined, 0, 10).candidates.map((c) => String(c.id))).toEqual(['2']);
+    // A filter matching nothing in view names nothing.
+    const none = projection([{...artifact(1n, 900n, ['a']), matched: false}, {...artifact(2n, 100n, ['b']), matched: false}]);
+    expect(labelCandidates(none, META, undefined, 0, 10).candidates).toEqual([]);
+  });
+
   it('a nameless cluster with a topic attached takes the topic as its name', () => {
     const p = projection([artifact(1n, 100n), artifact(2n, 40n), topic(9n, 1n, 'decoders, thresholds')]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);

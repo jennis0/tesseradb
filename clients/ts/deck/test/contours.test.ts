@@ -174,6 +174,12 @@ describe('contourShapes — what may be hovered', () => {
     expect(new Set(ids(stops, {level: 1}))).toEqual(new Set(['2', '4']));
   });
 
+  it('under a filter, leaves out an artifact with no matching member in view — none of its points are drawn', () => {
+    const p = projection([{...artifact(1n, null), matched: false}, {...artifact(2n, null), matched: true}]);
+    expect(ids(p)).toEqual(['2']);
+    expect(ids(projection([{...artifact(1n, null), matched: false}]))).toEqual([]);
+  });
+
   it('leaves a dependent layer’s artifacts out — they have no shape, and their box is not one', () => {
     // A clustering's topic labels carry no shape, so `outlineOf` would fall back to their box and
     // put a rectangle over the map with nothing drawn on it, hoverable and pointing at a thing

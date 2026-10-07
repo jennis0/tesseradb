@@ -132,6 +132,12 @@ export class Presenter {
   private width = 0;
   private height = 0;
   private status: PresentedStatus = 'idle';
+  /**
+   * Whether the server has answered the question asked since the last {@link cancel}. Until it has,
+   * a frame with nothing in it is the replica not yet holding the answer, and the screen keeps
+   * what it shows; once it has, an empty frame is the answer and is drawn.
+   */
+  private answered = false;
 
   constructor(
     private readonly replica: Replica,
@@ -217,6 +223,7 @@ export class Presenter {
     this.tick = null;
     this.pending = null;
     this.held = null;
+    this.answered = false;
   }
 
   /**
@@ -267,9 +274,9 @@ export class Presenter {
         standIn: fetched.fallback.length
       });
     }
-    // A frame with nothing drawn and nothing counted, over nothing drawn, is not a paint; the status
-    // reports `empty`.
-    if (frame.tiles.length === 0 && this.held === null) return;
+    // A frame with nothing drawn and nothing counted, over nothing drawn, before the server has
+    // answered, is not a paint: the host keeps showing the last answer until this one arrives.
+    if (frame.tiles.length === 0 && this.held === null && !this.answered) return;
     assertCompositionMatchesServed(frame);
     this.held = frame;
     this.status = 'shown';
@@ -284,6 +291,7 @@ export class Presenter {
 
   private transition(status: 'loading' | 'shown' | 'empty' | 'refused' | 'retrying', detail?: unknown): void {
     this.status = status;
+    if (status === 'shown' || status === 'empty') this.answered = true;
     if (status !== 'refused') {
       this.events.onStatus(status, null);
       return;
@@ -291,6 +299,7 @@ export class Presenter {
     // A refusal drops the frame. The replica keeps its bands, which still answer the last view that
     // succeeded.
     this.held = null;
+    this.answered = false;
     this.events.onStatus('refused', refusalOf(detail));
   }
 }
