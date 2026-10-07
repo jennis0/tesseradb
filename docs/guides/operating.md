@@ -167,7 +167,11 @@ A viewer's first request for a layer's colours, with a `palette_size`, also cost
 the layer: the server works out a colour slot for every cluster the viewer is served, over the
 whole layer, one level at a time: the level asked for and, on a `tiered` layer, the levels above
 it, never a deeper one. Where the layer declares a centroid, as a taxonomy does, the pass
-reads the centroids the map fills when it draws the level, so it adds no walk of its own. These
+reads the centroids the map fills when it draws the level, so it adds no walk of its own. A
+viewer whose first view of a `tiered` taxonomy is at genus or species therefore also fills the
+counts and centroids of every coarser level, since each level's slots are worked out from its own
+centroids whichever level is asked first. The fill is kept for each grant, so it is paid once
+per grant. These
 figures are from samples, not from a full-scale corpus, each with its files in the page cache and
 for the viewer who sees everything. On a 25,846,007-row sample of the GBIF occurrences, whose
 `tiered` taxonomy layer holds 251,907 taxa in three levels, the pass took 0.26 to 0.28 s for each
