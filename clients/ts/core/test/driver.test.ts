@@ -138,6 +138,17 @@ describe('driver', () => {
     expect(h.calls.length).toBe(before);
   });
 
+  it('counts no tile nothing matches in as occupied ground', async () => {
+    const h = harness({
+      respond: () =>
+        response(result({tiles: [tile(0n, 50n), tile(1n, 50n, {matched: 0n, highlighted: 0n}), tile(2n, 50n, {matched: 0n, highlighted: 0n})]}), {contentKey: 'p1'})
+    });
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(1000);
+    const seed = h.traces.find((t) => t.kind === 'seed');
+    expect(seed?.fields.n).toBe(1);
+  });
+
   it('a count-only answer that lands after cancel() is not adopted: the next view counts afresh', async () => {
     const h = harness({hang: (_n, k) => k === 0, respond: () => servedResponse(100_000n, 8)});
     h.driver.schedule(h.view, 400, 300);

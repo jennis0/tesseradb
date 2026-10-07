@@ -212,6 +212,7 @@ export class Replica {
 
   /** Drops everything held, for a change of principal, filter or selection. */
   reset(): void {
+    this.onScreen = null;
     this.cache.dropIdentity();
     this.identityKey = '';
     this.contentKey = '';
@@ -297,6 +298,14 @@ export class Replica {
     signal?.throwIfAborted();
     this.observe(response);
     return response.result.tiles;
+  }
+
+  /** The region drawn, at its depth, which eviction keeps whatever fetch overflows the budget. */
+  private onScreen: {depth: number; rect: TileRect} | null = null;
+
+  /** Names the region drawn; see {@link onScreen}. */
+  drawn(rect: TileRect, depth: number): void {
+    this.onScreen = {depth, rect};
   }
 
   /** The byte budget the store was given, so a caller can size its look-ahead against it. */
@@ -453,7 +462,8 @@ export class Replica {
       // Bands of no points come from the tiles, so a response that served nothing evicts too.
       const focus = piece.landed[0]?.prefix ?? response.result.tiles[0]?.tile;
       if (this.opts.cache !== false && focus !== undefined) {
-        this.cache.evict({depth, prefix: focus, protect: {depth, rect: render}});
+        // An anticipatory fetch's region is not the one on screen, so both are kept.
+        this.cache.evict({depth, prefix: focus, protect: this.onScreen ? [{depth, rect: render}, this.onScreen] : [{depth, rect: render}]});
       }
       // Marked only after the bands are in, or the next plan would skip ground whose data never
       // arrived. An aborted piece does not reach here, so its ground stays novel.
@@ -470,6 +480,7 @@ export class Replica {
         {view: this.opts.view, zoom: depth, bbox, k: 0},
         signal
       );
+      signal?.throwIfAborted();
       this.observe(response);
       // Reported so that minutes of settled panning with no revalidation show up in a trace.
       this.opts.onPhase?.('revalidate', performance.now() - revalidatedAt, 1);

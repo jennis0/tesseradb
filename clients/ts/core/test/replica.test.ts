@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {Replica} from '../src/replica.js';
-import {mortonOfTile, tileOfCode, tileToCellBox, tileXY} from '../src/coords.js';
+import {dataToWorldXY, mortonOfTile, tileOfCode, tileToCellBox, tileXY} from '../src/coords.js';
+import {tileRectOfBbox} from '../src/budget.js';
 import type {Quantisation, ViewportResponse} from '../src/types.js';
 import {artifact, response, result, tile} from './support.js';
 import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
@@ -277,5 +278,33 @@ describe('counts held before their points', () => {
     const {ask} = counting();
     expect(await ask(0, 30n, 'ik', 'ck')).toEqual([30n]);
     expect(await ask(1, 7n, 'ik-other', 'ck')).toEqual([7n]);
+  });
+});
+
+describe('eviction keeps the region drawn', () => {
+  it('an anticipatory fetch elsewhere evicts no band of the region on screen', async () => {
+    // Every tile asked for holds items and nothing matches, so each is held as a band of no points.
+    const r = new Replica(
+      async (req) => {
+        const [x0, y0] = dataToWorldXY(req.bbox![0], req.bbox![1], Q);
+        const [x1, y1] = dataToWorldXY(req.bbox![2], req.bbox![3], Q);
+        const span = tileRectOfBbox([x0, y0, x1, y1], req.zoom);
+        const tiles = [];
+        for (let y = span.y0; y <= span.y1; y++) for (let x = span.x0; x <= span.x1; x++) tiles.push(tile(mortonOfTile(x, y, req.zoom), 5n, {matched: 0n, highlighted: 0n}));
+        return response(result({tiles}), {contentKey: 'p1'});
+      },
+      Q,
+      {view: 's', now: () => 0, revalidateAfterMs: Infinity, cacheBytes: 20_000}
+    );
+    r.reset();
+    const shown = rect(0, 0, 15, 15);
+    await r.fetchRegion(shown, 6, 500);
+    r.drawn(shown, 6);
+    const before = r.exactIn(shown, 6).length;
+    expect(before).toBe(256);
+
+    const ring = rect(40, 40, 63, 63);
+    await r.fetchRegion(ring, 6, 500, undefined, ring, 1, false, true);
+    expect(r.exactIn(shown, 6)).toHaveLength(before);
   });
 });

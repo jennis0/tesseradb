@@ -443,6 +443,7 @@ export class Driver {
       version: frame.version,
       standInStale: false
     };
+    this.replica.drawn(planned.render, planned.choice.depth);
     // The hold re-arms around the adopted depth, and a settle readies the bank for the next motion.
     this.holdSuspended = false;
     if (trigger === 'settle') this.bankReady = true;

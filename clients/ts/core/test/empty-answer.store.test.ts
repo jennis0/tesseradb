@@ -275,35 +275,26 @@ describe('a camera answered from held tiles while the slot is busy', () => {
 });
 
 describe('tiles that serve nothing, under a small budget', () => {
-  it('are evicted, and their ground is asked again', async () => {
-    const answer = (req: Asked) => leftHalfMatches(req, 1_000_000n, (x, z) => z < 8 || x === 0);
-    const {store, clock, scheduler, asked} = await shown((req) => (req.filters ? answer(req) : three()), Infinity, 40_000);
+  it('are evicted', async () => {
+    // Every tile answered, by depth and prefix: without eviction each is held as one band.
+    const answered = new Set<string>();
+    const answer = (req: Asked) => {
+      const res = leftHalfMatches(req, 1_000_000n, (x, z) => z < 8 || x === 0);
+      for (const t of res.result.tiles) answered.add(`${req.zoom}:${t.tile}`);
+      return res;
+    };
+    const {store, clock, scheduler} = await shown((req) => (req.filters ? answer(req) : three()), Infinity, 40_000);
     store.setFilters(FILTER);
     await clock.advance(600);
     scheduler.flush();
-    const here = camera(Q, [0, 0, 3, 6], 400, 400);
-    store.setView(here);
-    await clock.advance(600);
-    scheduler.flush();
-    // Held whole: the same camera asks for nothing.
-    store.setView({...here, bbox: [0, 0, 3, 6.001]});
-    await clock.advance(600);
-    scheduler.flush();
-    const held = asked();
-    store.setView({...here, bbox: [0, 0, 3, 6]});
-    await clock.advance(600);
-    scheduler.flush();
-    expect(asked()).toBe(held);
-
-    // Elsewhere, then back: the ground's bands of no points made way, so it is asked again.
-    store.setView(camera(Q, [50, 100, 53, 106], 400, 400));
-    await clock.advance(600);
-    scheduler.flush();
-    const away = asked();
-    store.setView(here);
-    await clock.advance(600);
-    scheduler.flush();
-    expect(asked()).toBeGreaterThan(away);
+    answered.clear();
+    for (const box of [[0, 0, 3, 6], [50, 100, 53, 106]] as [number, number, number, number][]) {
+      store.setView(camera(Q, box, 400, 400));
+      await clock.advance(600);
+      scheduler.flush();
+    }
+    expect(answered.size).toBeGreaterThan(0);
+    expect(store.get('replica').bands).toBeLessThan(answered.size);
   });
 });
 

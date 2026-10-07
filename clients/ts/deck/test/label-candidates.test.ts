@@ -136,6 +136,8 @@ describe('labelCandidates', () => {
       {...artifact(3n, 400n, ['another child'], 'clusters', 1n), matched: false}
     ]);
     expect(labelCandidates(parent, META, undefined, 0, 10).candidates.map((c) => String(c.id))).toEqual(['1']);
+    // An opened child that matches nothing is named in place of its parent, as the hover shapes have it.
+    expect(labelCandidates(parent, META, undefined, 0, 10, 2n).candidates.map((c) => String(c.id))).toEqual(['2']);
     // A filter matching nothing in view names nothing.
     const none = projection([{...artifact(1n, 900n, ['a']), matched: false}, {...artifact(2n, 100n, ['b']), matched: false}]);
     expect(labelCandidates(none, META, undefined, 0, 10).candidates).toEqual([]);

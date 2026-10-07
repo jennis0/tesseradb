@@ -634,11 +634,11 @@ export function frontier(a: ArtifactsProjection, level: number | undefined, open
  * Only the anchor depends on the zoom, so the list is built once per served set, level and budget,
  * and each zoom bucket scales the anchors into a copy.
  */
-export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, zoom: number, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
-  const key = `${a.version}|${level ?? ''}|${budget}`;
+export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, zoom: number, budget: number, opened: bigint | null = null): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
+  const key = `${a.version}|${level ?? ''}|${budget}|${opened ?? ''}`;
   let held = heldCandidates.get(a.served);
   if (!held || held.key !== key) {
-    held = {key, ...namedCandidates(a, meta, level, budget)};
+    held = {key, ...namedCandidates(a, meta, level, budget, opened)};
     heldCandidates.set(a.served, held);
   }
   const scale = 2 ** zoom; // pixels per world unit
@@ -646,12 +646,13 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
 }
 
 /** {@link labelCandidates} with anchors in world units, which the caller scales. */
-function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
+function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, budget: number, opened: bigint | null): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
   const placed = a.served.filter((x) => x.centroid !== null);
   // A dependent layer's artifacts (a clustering's topic labels) are drawn beneath their target's
   // name and are not candidates of their own.
   const dependent = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
-  const front = frontier(a, level);
+  // The same frontier the hover shapes use, so a name and the shape it labels agree.
+  const front = frontier(a, level, opened);
   const named = placed
     .filter((x) => !dependent.has(x.layer) && front.has(x.tesseraId))
     .filter((x) => artifactName(x, a.attached) !== null)
@@ -1437,11 +1438,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const zoom = viewport?.zoom ?? 0;
     const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
     const budget = a ? labelBudget(a.served.length) : 0;
-    const key = a ? `${a.version}|${a.palette}|${bucket}|${budget}|${this.props.clusterLevel ?? ''}` : '';
+    const opened = this.props.openedArtifact ?? null;
+    const key = a ? `${a.version}|${a.palette}|${bucket}|${budget}|${this.props.clusterLevel ?? ''}|${opened ?? ''}` : '';
     let held = a ? heldLabels.get(a.served) : undefined;
     if (a && viewport && (!held || held.key !== key)) {
       const scale = 2 ** zoom; // pixels per world unit
-      const {candidates, byId} = labelCandidates(a, r.meta, this.props.clusterLevel, zoom, budget);
+      const {candidates, byId} = labelCandidates(a, r.meta, this.props.clusterLevel, zoom, budget, opened);
       const data: LabelDatum[] = [];
       const leaders: LeaderDatum[] = [];
       let placed = 0;
