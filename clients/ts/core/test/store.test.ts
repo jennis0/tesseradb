@@ -926,14 +926,15 @@ describe('clusters are coloured by the slot the server gives each, in the chosen
     expect(colourOf(2n)).toEqual(PALETTES['okabe-ito'].colours[2]);
   });
 
-  it('puts a colour chosen by tessera_id over the slot’s, until a later call leaves it out', async () => {
+  it('puts a colour chosen by layer and tessera_id over the slot’s, until a later call leaves it out', async () => {
     const {store, colourOf} = await slotted();
     const chosen = [1, 2, 3, 255] as const;
-    store.setArtifactColours(new Map([[2n, chosen], [4n, chosen]]));
+    store.setArtifactColours(new Map([['clusters/a', new Map([[2n, chosen], [4n, chosen]])], ['clusters/b', new Map([[1n, chosen]])]]));
     expect(colourOf(2n)).toEqual(chosen);
     expect(colourOf(4n)).toEqual(chosen);
+    // Chosen for another layer's artifact with the same id.
     expect(colourOf(1n)).toEqual(PALETTES.tableau10.colours[1]);
-    expect(store.get('artifacts').overrides.get(2n)).toEqual(chosen);
+    expect(store.get('artifacts').overrides.get('clusters/a')?.get(2n)).toEqual(chosen);
     store.setArtifactColours(new Map());
     expect(colourOf(2n)).toEqual(PALETTES.tableau10.colours[2]);
     expect(colourOf(4n)).toEqual(NEUTRAL);

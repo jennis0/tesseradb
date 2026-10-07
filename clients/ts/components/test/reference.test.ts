@@ -196,6 +196,8 @@ function emitsWithin(element: Element, seen = new Set<string>()): Set<string> {
 
 const EVENT_NAMES = new Set(quoted(readFileSync(join(SRC, 'events.ts'), 'utf8'), String.raw`\n  %s\??:`));
 const STATE_PARTS = literals(/const STATE = \[([^\]]*)\]/.exec(readFileSync(join(SRC, 'parts.ts'), 'utf8'))![1]!);
+/** Templates shared between elements, each with what an element that renders it calls; its parts are the element's. */
+const SHARED = [{use: /\bnew ColourPicker\(/, text: readFileSync(join(SRC, 'colour-picker.ts'), 'utf8')}];
 const tokenNames = (text: string) => new Set([...text.matchAll(/var\(\s*(--tessera-[a-z0-9-]+)/g)].map((m) => m[1]!));
 
 describe('each element documents what it renders', () => {
@@ -234,11 +236,14 @@ describe('each element documents what it renders', () => {
       it('documents its parts, and the parts it forwards', () => {
         const parts = tagsOf(element, 'csspart').map((p) => p.name);
         const plain = new Set(parts.filter((p) => !p.endsWith('-<part>')));
-        const literal = new Set([
-          // Not a CSS selector's `[part='...']`, which styles a part and renders none.
-          ...quoted(element.text, String.raw`(?<![\w[-])part=%s`),
-          ...[...element.text.matchAll(/(?<![\w-])part=\$\{([^}]*)\}/g)].flatMap((m) => literals(m[1]!))
-        ]);
+        const rendered = [element.text, ...SHARED.filter((t) => t.use.test(element.text)).map((t) => t.text)];
+        const literal = new Set(
+          rendered.flatMap((text) => [
+            // Not a CSS selector's `[part='...']`, which styles a part and renders none.
+            ...quoted(text, String.raw`(?<![\w[-])part=%s`),
+            ...[...text.matchAll(/(?<![\w-])part=\$\{([^}]*)\}/g)].flatMap((m) => literals(m[1]!))
+          ])
+        );
         const states = /\brenderState\(/.test(element.text);
         for (const part of literal) expect(plain, `@csspart ${part}`).toContain(part);
         if (states) expect(plain, '@csspart state').toContain('state');

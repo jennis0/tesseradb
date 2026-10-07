@@ -28,6 +28,8 @@ import './layer-picker.js';
 import './view-picker.js';
 import './key-picker.js';
 import './artifact-card.js';
+import './colour-editor.js';
+import type {TesseraColourEditor} from './colour-editor.js';
 
 /** Every part of every element the explorer renders, forwarded. */
 const FORWARD = {
@@ -39,7 +41,8 @@ const FORWARD = {
   'filter-panel': exportparts('filter-panel', [...forwarded('field-card'), ...forwarded('filter'), ...forwarded('cluster-filter')]),
   selection: exportparts('selection'),
   'item-card': exportparts('item-card'),
-  'artifact-card': exportparts('artifact-card')
+  'artifact-card': exportparts('artifact-card'),
+  'colour-editor': exportparts('colour-editor', [...forwarded('filter'), ...forwarded('cluster-filter')])
 };
 
 const ALL_PANELS = ['toolbar', 'legend', 'filters', 'selection', 'detail'] as const;
@@ -146,8 +149,10 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * Colour by, which lists None, every layer that can colour (a levelled layer once per level) and
  * the rendered category and number columns; then for a layer or a category the palette, and for a
  * number the ramp, Linear or Log and Reverse, unless `hide-palettes` is set. A layer's palette is
- * the store's (`Store.setPalette`), whose size the clusters' slots are served for. A field card's
- * paint button chooses Colour by too. Density: how density is drawn, at what resolution, in which
+ * the store's (`Store.setPalette`), whose size the clusters' slots are served for. While the
+ * points are coloured by a category or a layer, Edit colours opens `<tessera-colour-editor>` over
+ * the page, listing the values or the clusters drawn (at the level coloured, on a levelled layer)
+ * with their colours to choose and reset, in an order that holds through a pan or a filter. A field card's paint button chooses Colour by too. Density: how density is drawn, at what resolution, in which
  * colours and how strongly. Layers: the layer picker. The display settings are the explorer's properties of
  * the same names, passed to its map. `pinned-filters` names the columns whose cards are listed
  * before they hold a clause.
@@ -187,7 +192,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-budgetchange']>} tessera-budgetchange - Most points was let go at a new number.
  * @fires {CustomEvent<TesseraEventDetails['tessera-clusterbudgetchange']>} tessera-clusterbudgetchange - Most clusters was let go at a new number.
  * @fires {CustomEvent<TesseraEventDetails['tessera-fold']>} tessera-fold - A field card was folded to one line or opened.
- * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A colour was chosen or reset for one value on a field card.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - Colours were chosen or reset for values of a category, on a field card or in Edit colours.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clustercolour']>} tessera-clustercolour - Colours were chosen or reset for clusters of a layer, on a field card or in Edit colours.
  * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette, the ramp, its scale or its direction was chosen in the Colour section.
  * @fires {CustomEvent<TesseraEventDetails['tessera-clusterpalettechange']>} tessera-clusterpalettechange - A palette was chosen for a layer's clusters in the Colour section.
  * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
@@ -243,6 +249,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart palette-menu - The Palette menu, while it is open: a row per palette, each a strip of its
  *   colours, its name and a line saying how many it has.
  * @csspart palette-option - A palette in that menu, with `data-value` and `aria-checked`.
+ * @csspart edit-colours - The Edit colours button, enabled while the points are coloured by a
+ *   category or a layer.
  * @csspart ramp - The Ramp button, while the points are coloured by a number or a date.
  * @csspart ramp-menu - The Ramp menu, while it is open.
  * @csspart ramp-option - A ramp in that menu, with `data-value` and `aria-checked`.
@@ -276,6 +284,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart selection-<part> - A part of the inner `<tessera-selection>`.
  * @csspart item-card-<part> - A part of the inner `<tessera-item-card>`, such as `item-card-title`.
  * @csspart artifact-card-<part> - A part of the inner `<tessera-artifact-card>`.
+ * @csspart colour-editor-<part> - A part of the inner `<tessera-colour-editor>`, such as
+ *   `colour-editor-dialog`.
  * @cssprop --tessera-explorer-height - The explorer's height.
  * @cssprop --tessera-sidebar-width - The width of the docked sidebar and of the card over the map.
  */
@@ -797,6 +807,8 @@ export class TesseraExplorer extends TesseraElement {
   @property({type: Boolean, attribute: 'ramp-reverse'}) accessor rampReverse = false;
   /** Passed to the map's `valueColours`. */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
+  /** Passed to the map's `clusterColours`. */
+  @property({attribute: false}) accessor clusterColours: Record<string, Record<string, string>> | null = null;
   /** The dataset's title, which heads the explorer above the view's name. Unset, the view's name is the heading. */
   @property({attribute: 'dataset-title'}) accessor datasetTitle = '';
   /** Passed to the field column's `pinned`: the columns whose cards are listed before they hold a clause. */
@@ -934,10 +946,12 @@ export class TesseraExplorer extends TesseraElement {
     return this.panels.split(/[\s,]+/).includes(panel);
   }
 
-  /** A press anywhere outside the Layers button and its popover closes the popover. */
+  /** A press anywhere outside the Layers button, its popover and the Edit colours dialog it opens closes the popover. */
   private onOutside = (e: PointerEvent): void => {
+    const path = e.composedPath();
     const group = this.renderRoot.querySelector('.layers');
-    if (group && !e.composedPath().includes(group)) this.closeLayers();
+    const editor = this.renderRoot.querySelector('tessera-colour-editor');
+    if (group && !path.includes(group) && !(editor && path.includes(editor))) this.closeLayers();
   };
 
   private openLayers(): void {
@@ -1087,6 +1101,7 @@ export class TesseraExplorer extends TesseraElement {
           .rampScale=${this.rampScale}
           .rampReverse=${this.rampReverse}
           .valueColours=${this.valueColours}
+          .clusterColours=${this.clusterColours}
           @tessera-viewchange=${() => this.onCamera()}
           @tessera-pick=${() => this.requestUpdate()}
           @tessera-miss=${() => this.onMiss()}
@@ -1105,6 +1120,7 @@ export class TesseraExplorer extends TesseraElement {
         : nothing}
       <div part="strip-row"><tessera-status exportparts=${FORWARD.status}></tessera-status></div>
       <div part="tabs" role="tablist" aria-label="Explorer panels" @keydown=${this.onTabKey}>${tabs.map(tab)}</div>
+      <tessera-colour-editor exportparts=${FORWARD['colour-editor']} field=${s?.get('legend').colourBy ?? ''} .level=${level}></tessera-colour-editor>
     </div>`;
   }
 
@@ -1581,12 +1597,15 @@ export class TesseraExplorer extends TesseraElement {
               <button part="ramp-reverse" class="toggle" type="button" aria-pressed=${colouring.reverse ? 'true' : 'false'} @click=${() => this.choosePalette({reverse: !colouring.reverse})}>Reverse</button>
             </div>`
         : nothing;
+    // A category's values and a layer's clusters have colours of their own to edit.
+    const editable = Boolean(column?.category) || clusters;
     return html`<section class="sec">
       <div class="hd">Colour</div>
       <div class="sliders">
         <span>Colour by</span>${choice('colour', `Colour by: ${byName}`, html`<span class="t">${byName}</span>`)}
         ${palettes}${ramps}
       </div>
+      <button part="edit-colours" class="btn small edit-colours" type="button" aria-haspopup="dialog" ?disabled=${!editable || !meta} @click=${() => this.renderRoot.querySelector<TesseraColourEditor>('tessera-colour-editor')?.show()}>Edit colours…</button>
     </section>`;
   }
 

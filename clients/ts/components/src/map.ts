@@ -10,11 +10,11 @@ import {
   type Store,
   type SelectionShape
 } from '@tesseradb/client';
-import {assertCompositionMatchesServed, hasValue} from '@tesseradb/client/internal';
+import {assertCompositionMatchesServed, chosenColour, hasValue} from '@tesseradb/client/internal';
 import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DensityCounter, TesseraLayer, densityCountAt, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@tesseradb/deck';
 import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, drawnCells, encodingOf, encodingSignature, hoverAt, maxCount, type ContourShape} from '@tesseradb/deck/internal';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import type {PaletteName, Quantisation} from '@tesseradb/client';
+import type {PaletteName, Quantisation, Rgba} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf, type PanelState} from './states.js';
@@ -484,6 +484,15 @@ export class TesseraMap extends TesseraElement {
    */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /**
+   * Colours for single clusters, per layer, per `tessera_id` as a decimal string, as `#rrggbb`, such
+   * as `{topics: {'4021': '#f28e2b'}}`, set on the store in place of their palette colours
+   * (`Store.setArtifactColours`). Setting it replaces every cluster colour chosen before, including
+   * those chosen on a field card or in Edit colours; a host restores a viewer's saved choices this
+   * way, having kept them from `tessera-clustercolour`. An entry that is not a `tessera_id` and a
+   * `#rrggbb` colour is skipped. Unset, the choices made on the cards stand.
+   */
+  @property({attribute: false}) accessor clusterColours: Record<string, Record<string, string>> | null = null;
+  /**
    * Whether the map measures itself for the probe: the frame-gap loop behind `probe.timings.frame`,
    * the colour-by-cluster sample behind `probe.cluster`, and the check that each composition
    * matches what was served. Off, none of the three runs.
@@ -660,6 +669,7 @@ export class TesseraMap extends TesseraElement {
         else if ((changed.get('clusterBudget') ?? 0) > 0) s.setClusterBudget(null);
       }
       if (changed.has('palette') && this.palette !== '') s.setPalette(this.palette);
+      if (changed.has('clusterColours')) this.pushClusterColours(s);
       if (changed.has('tooltipFields') || changed.has('titleField')) this.askPointColumns(s);
       this.pushColouring(s, changed);
     }
@@ -678,6 +688,21 @@ export class TesseraMap extends TesseraElement {
     if (changed ? changed.has('rampReverse') && changed.get('rampReverse') !== undefined : this.rampReverse) patch.reverse = this.rampReverse;
     if (touched('valueColours') && this.valueColours !== null) patch.values = this.valueColours;
     if (Object.keys(patch).length > 0) setColouring(store, patch);
+  }
+
+  /** The cluster colours the host set, on `store`; unset leaves the store's as they stand. */
+  private pushClusterColours(store: Store): void {
+    if (this.clusterColours === null) return;
+    const chosen = new Map<string, Map<bigint, Rgba>>();
+    for (const [layer, colours] of Object.entries(this.clusterColours)) {
+      const own = new Map<bigint, Rgba>();
+      for (const [id, hex] of Object.entries(colours ?? {})) {
+        const rgba = /^\d+$/.test(id) ? chosenColour(hex) : null;
+        if (rgba) own.set(BigInt(id), rgba);
+      }
+      chosen.set(layer, own);
+    }
+    store.setArtifactColours(chosen);
   }
 
   /** The size properties the host set, written to the choices every element over `store` shares. */
@@ -802,6 +827,7 @@ export class TesseraMap extends TesseraElement {
     if (this.budget > 0) store.setBudget(this.budget);
     if (this.clusterBudget > 0) store.setClusterBudget(this.clusterBudget);
     if (this.palette !== '') store.setPalette(this.palette);
+    this.pushClusterColours(store);
     this.pushColouring(store);
     this.pushSizing(store);
     this.pushSizeBy(store);

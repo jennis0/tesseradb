@@ -22,12 +22,13 @@ The `tessera-*` custom elements, in the `@tesseradb/components` package, built w
 | [`<tessera-item-card>`](components/tessera-item-card.md) | The selected item's fields, with Open and Copy id. |
 | [`<tessera-artifact-card>`](components/tessera-artifact-card.md) | The opened artifact, with its lineage and its filter buttons. |
 | [`<tessera-hierarchy>`](components/tessera-hierarchy.md) | A layer's hierarchy, browsed apart from the viewport. |
+| [`<tessera-colour-editor>`](components/tessera-colour-editor.md) | Every value or cluster's colour, to search, choose and reset. |
 
 [Events](components/events.md) lists every event with its `detail`, and [Theme tokens](components/tokens.md) every CSS custom property with its defaults.
 
 ## Loading the elements
 
-`import '@tesseradb/components'` defines every element. Each element also has its own entry, such as `import '@tesseradb/components/map'`, which defines that element and the elements it renders. The map, the explorer, the field card, the field column and the artifact card import `@tesseradb/deck`, which depends on deck.gl; the other elements do not. `@deck.gl/aggregation-layers` is a peer dependency as well, which `@tesseradb/deck` imports only when a map first draws density as hexagons or contours. A host's bundler puts it in a chunk of its own, which a page that never draws those does not load.
+`import '@tesseradb/components'` defines every element. Each element also has its own entry, such as `import '@tesseradb/components/map'`, which defines that element and the elements it renders. The map, the explorer, the field card, the field column, the colour editor and the artifact card import `@tesseradb/deck`, which depends on deck.gl; the other elements do not. `@deck.gl/aggregation-layers` is a peer dependency as well, which `@tesseradb/deck` imports only when a map first draws density as hexagons or contours. A host's bundler puts it in a chunk of its own, which a page that never draws those does not load.
 
 A page with no build step loads the single-file bundle, `tessera-components.js`, which holds Lit, deck.gl, its aggregation layers and the decode worker. `npm run bundle -w @tesseradb/components` in `clients/ts` writes it to `components/dist/` with its subresource-integrity hash in `tessera-components.js.sri`:
 

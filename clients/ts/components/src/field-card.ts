@@ -2,8 +2,8 @@ import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit'
 import {property, state} from 'lit/decorators.js';
 import {
   CLUSTER_PREFIX,
+  PALETTES,
   artifactColour,
-  artifactName,
   colourLayers,
   composeFilters,
   isPopulated,
@@ -12,7 +12,6 @@ import {
   type AggregateEntry,
   type AggregateSpec,
   type AggregateTable,
-  type BrowseRow,
   type ClauseVerb,
   type ColumnDraft,
   type FieldSummary,
@@ -22,15 +21,16 @@ import {
   type PaletteName,
   type Store
 } from '@tesseradb/client';
-import {CATEGORY_PALETTES, RAMPS, type Colouring} from '@tesseradb/deck';
-import {UNMAPPED, colourOfFraction, colourOfRank, css as rgb, fractionOf, hexOf, lighter, rgbOfHex} from '@tesseradb/deck/internal';
-import {HeldAggregate, artifactGroupings, countedByLevel, countsByKey, listedGroups} from './aggregate.js';
-import {TesseraElement, UNNAMED, columnCaption, dateRangeText, emit, idString, keyTitle, shortCount, shortDateText} from './base.js';
-import {colouringOf, setColouring, watchChoices, withValueColour} from './colouring.js';
+import {CATEGORY_PALETTES, RAMPS} from '@tesseradb/deck';
+import {colourOfFraction, css as rgb, fractionOf, hexOf} from '@tesseradb/deck/internal';
+import {HeldAggregate, artifactGroupings, countsByKey, levelOf, listedGroups, rankedGrouping} from './aggregate.js';
+import {TesseraElement, UNNAMED, columnCaption, countText, dateRangeText, emit, idString, keyTitle, shortDateText} from './base.js';
+import {ColourPicker, pickerStyles} from './colour-picker.js';
+import {clusterColour, colouringOf, holdColours, paletteValueColour, setClusterColours, setValueColours, valueColour, valueMet, watchChoices} from './colouring.js';
 import {attachContextRoot, defineOnce} from './define.js';
-import {hsvOf, rgbOfHsv, type Hsv} from './hsv.js';
 import {icon} from './icons.js';
 import {exportparts} from './parts.js';
+import {ClusterPaths} from './paths.js';
 import {chrome, tokens} from './tokens.js';
 import './filter.js';
 import './cluster-filter.js';
@@ -49,15 +49,7 @@ const SAMPLE = 100_000;
 const PLOT_HEIGHT = 56;
 /** The bars of a folded card's small chart. */
 const SPARK_BARS = 8;
-/** The width of the colour picker's hue knob, which its travel along the bar allows for. */
-const HUE_KNOB = 12;
-/** How far each lighter colour in the colour picker is taken towards white. */
-const LIGHTER = 0.45;
 
-/** A count as a row shows it: whole below a million, else shortened, `25.2M`. */
-export function countText(n: number): string {
-  return Math.abs(n) < 1e6 ? Math.round(n).toLocaleString('en-GB') : shortCount(n);
-}
 
 /**
  * A number as an axis prints it: in exponent form from a million up and below a thousandth, else
@@ -77,14 +69,14 @@ type Kind = 'category' | 'cluster' | 'histogram' | 'search';
 /** One bin of a histogram, its edges in the column's units (microseconds on a timestamp). */
 type Bin = {lower: number; upper: number; count: number};
 
-/** One row of a category or cluster card. */
-type Row = {key: string; name: string; path: string; sub: number | null; all: number | null; swatch: string | null};
+/**
+ * One row of a category or cluster card; `own` is a cluster's palette colour, `#rrggbb`, where it
+ * is coloured, and `unmet` marks a category value the map has given no colour yet.
+ */
+type Row = {key: string; name: string; path: string; sub: number | null; all: number | null; swatch: string | null; own: string | null; unmet: boolean};
 
 /** A range dragged across the histogram, by bin, `from` where the drag began. */
 type Brush = {from: number; to: number; open: boolean};
-
-/** The value whose colour the picker is changing. */
-type Picking = {key: string; title: string};
 
 /** The listed bins of a histogram table, in order, with the edges in the column's units. */
 function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
@@ -150,10 +142,12 @@ function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
  *
  * The paint button colours the map by the field, or by nothing where it already does
  * (`Store.setColourBy`), and is pressed while it does. Then a category or cluster card shows each
- * value's colour beside it, and a number or date card the ramp under its plot. A category value's
- * colour is a button that opens a colour picker: the palette's colours and a lighter row, a custom
- * area with a hue bar and a hex field, and Reset, which gives the value its palette colour back. A
- * choice applies at once and fires `tessera-valuecolour`.
+ * value's colour beside it, and a number or date card the ramp under its plot. Each colour is a
+ * button that opens a colour picker: the palette's colours and a lighter row, a custom area with a
+ * hue bar and a hex field, and Reset, which gives the value or the cluster its palette colour back.
+ * A choice applies at once and fires `tessera-valuecolour` for a category value, written to the
+ * colour choices every element over the store shares, or `tessera-clustercolour` for a cluster,
+ * set on the store with its other chosen colours (`Store.setArtifactColours`).
  *
  * `folded` draws the heading alone, with a small chart of the subject's counts.
  *
@@ -168,8 +162,10 @@ function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
  *   button changed what the map is coloured by.
  * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level
  *   choice of a levelled layer's card changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A value's
- *   colour was chosen or reset in the colour picker.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A category
+ *   value's colour was chosen or reset in the colour picker.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clustercolour']>} tessera-clustercolour - A
+ *   cluster's colour was chosen or reset in the colour picker.
  * @fires {CustomEvent<TesseraEventDetails['tessera-fold']>} tessera-fold - The fold button folded or
  *   opened the card.
  * @csspart head - The heading: the name, what it notes, and the buttons.
@@ -182,8 +178,9 @@ function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
  * @csspart rows - A category or cluster card's rows.
  * @csspart row - One row, with `data-key` and `data-state`: `in` for a value the field's filter
  *   keeps, `out` for one it leaves out, `lit` for one its highlight lights, else empty.
- * @csspart swatch - A row's colour, while the map is coloured by the field; a button for a category
- *   value.
+ * @csspart swatch - A row's colour, while the map is coloured by the field, a button that opens the
+ *   colour picker, with `data-unmet` and drawn as an outline for a category value the map has not
+ *   drawn yet and so has given no colour.
  * @csspart name - A row's name, with `data-unnamed` for a cluster that has none.
  * @csspart path - A cluster row's parents.
  * @csspart bar-match - A row's or a bin's pale bar, its share of the whole match.
@@ -215,6 +212,7 @@ export class TesseraFieldCard extends TesseraElement {
   static override styles = [
     tokens,
     chrome,
+    pickerStyles,
     css`
       :host {
         display: block;
@@ -377,6 +375,11 @@ export class TesseraFieldCard extends TesseraElement {
         height: 10px;
         border-radius: 2px;
         background: var(--c);
+      }
+      /* A value the map has given no colour yet: an outline, not a grey that reads as a colour. */
+      [part='swatch'][data-unmet] {
+        background: none;
+        box-shadow: inset 0 0 0 1px var(--_tessera-line-control);
       }
       button[part='swatch'] {
         cursor: pointer;
@@ -611,105 +614,6 @@ export class TesseraFieldCard extends TesseraElement {
         clip-path: inset(50%);
         white-space: nowrap;
       }
-      /* The colour picker, in the top layer beside the card. */
-      .pop {
-        position: fixed;
-        inset: auto;
-        margin: 0;
-        padding: 0;
-        width: 264px;
-        box-sizing: border-box;
-        background: var(--_tessera-surface);
-        color: var(--_tessera-ink);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
-        font-size: 13px;
-        max-height: calc(100vh - 16px);
-        overflow-y: auto;
-      }
-      .pop button:focus-visible {
-        outline-offset: -2px;
-      }
-      .pop .top {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        padding: 12px 14px 8px;
-      }
-      .pop .top .t {
-        font-weight: 600;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .pop .choices {
-        display: grid;
-        gap: 6px;
-        padding: 0 14px 10px;
-      }
-      [part='choice'] {
-        aspect-ratio: 1;
-        width: 100%;
-        border-radius: 5px;
-      }
-      [part='choice'][aria-pressed='true'] {
-        box-shadow:
-          0 0 0 2px var(--_tessera-surface),
-          0 0 0 3.5px var(--_tessera-ink);
-      }
-      .pop .hd {
-        margin: 0;
-        padding: 10px 14px 4px;
-        border-top: 1px solid var(--_tessera-line-2);
-      }
-      .pop .custom {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        padding: 4px 14px 14px;
-      }
-      [part='sv'],
-      [part='hue'] {
-        position: relative;
-        touch-action: none;
-        cursor: crosshair;
-      }
-      [part='sv'] {
-        height: 120px;
-        border-radius: var(--_tessera-radius-control);
-      }
-      [part='hue'] {
-        height: 10px;
-        border-radius: 5px;
-        background: linear-gradient(90deg, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000);
-      }
-      .knob {
-        position: absolute;
-        width: 12px;
-        height: 12px;
-        margin: -6px 0 0 -6px;
-        border: 2px solid #ffffff;
-        border-radius: 50%;
-        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
-        pointer-events: none;
-      }
-      [part='hue'] .knob {
-        top: 50%;
-      }
-      .pop label {
-        display: grid;
-        grid-template-columns: 28px minmax(0, 1fr);
-        align-items: center;
-        gap: 8px;
-        font-size: 12px;
-        color: var(--_tessera-ink-2);
-      }
-      [part='hex'] {
-        font-size: 12px;
-        font-variant-numeric: tabular-nums;
-      }
     `
   ];
 
@@ -728,10 +632,6 @@ export class TesseraFieldCard extends TesseraElement {
   @state() accessor shownRow: string | null = null;
   /** A range being chosen on the histogram. @internal */
   @state() accessor brush: Brush | null = null;
-  /** The value the colour picker is open for. @internal */
-  @state() accessor picking: Picking | null = null;
-  /** The colour picker's custom colour. @internal */
-  @state() accessor hsv: Hsv = [0, 0, 0];
 
   private readonly subjectCounts = new HeldAggregate('field-subject');
   private readonly matchCounts = new HeldAggregate('field-match');
@@ -739,14 +639,9 @@ export class TesseraFieldCard extends TesseraElement {
   /** The whole match's counts of the values in view its commonest do not list. */
   private readonly outsideCounts = new HeldAggregate('field-outside');
   private unwatchChoices: (() => void) | null = null;
-  /** Every cluster the card has met on a browse page, for the names of the paths. */
-  private readonly met = new Map<bigint, BrowseRow>();
-  /** Each cluster's served parents, once asked for. */
-  private readonly parentsOf = new Map<bigint, bigint[]>();
-  /** The clusters whose parents a browse page was asked for. */
-  private readonly asked = new Set<bigint>();
-  /** Moved by {@link resetServerData}, so an answer asked for before is dropped. */
-  private epoch = 0;
+  /** The names of the clusters' parents. */
+  private readonly paths = new ClusterPaths(() => this.requestUpdate());
+  private readonly picker = new ColourPicker(this, () => this.getBoundingClientRect());
 
   /** What the card last drew from, so a publish that changes none of it draws nothing. */
   private drawnFrom: readonly unknown[] = [];
@@ -771,12 +666,9 @@ export class TesseraFieldCard extends TesseraElement {
   }
 
   protected override resetServerData(): void {
-    this.epoch += 1;
-    this.met.clear();
-    this.parentsOf.clear();
-    this.asked.clear();
+    this.paths.reset();
     this.brush = null;
-    this.closePicker(false);
+    this.picker.close(false);
   }
 
   override disconnectedCallback(): void {
@@ -784,10 +676,7 @@ export class TesseraFieldCard extends TesseraElement {
     this.matchCounts.set(null, null);
     this.outsideCounts.set(null, null);
     this.figures.set(null, null);
-    this.closePicker(false);
     document.removeEventListener('pointerdown', this.onPressOutsideBrush, true);
-    if (this.livePick) cancelAnimationFrame(this.livePick.frame);
-    this.livePick = null;
     super.disconnectedCallback();
   }
 
@@ -823,10 +712,7 @@ export class TesseraFieldCard extends TesseraElement {
 
   /** The level a levelled layer's card counts and browses at: the one chosen, else the deepest. */
   private levelOf(layer: Layer): number | undefined {
-    const levelled = (layer.hierarchy.kind === 'stacked' || layer.hierarchy.kind === 'tiered') && layer.levels.length > 0;
-    if (!levelled) return undefined;
-    const chosen = this.level !== null && layer.levels.some((l) => l.level === this.level) ? this.level : null;
-    return chosen ?? layer.levels.at(-1)!.level;
+    return levelOf(layer, this.level);
   }
 
   /** The keys of the field's clause in `verb`: a category's values, or a layer's clusters by id. */
@@ -849,21 +735,15 @@ export class TesseraFieldCard extends TesseraElement {
     return [this.ranked(layer, top), ...this.namedGroupings(layer, meta, named.map((id) => BigInt(id)))];
   }
 
-  /**
-   * The grouping ranking a layer's `top` clusters: at the cut the map draws on a `nested` or `dag`
-   * layer, else at the card's level. Each row carries its slot in the palette the map colours
-   * clusters from, which its swatch is coloured from.
-   */
+  /** The grouping ranking a layer's `top` clusters at the cut the map draws or the card's level; each row's slot colours its swatch. */
   private ranked(layer: Layer, top: number): AggregateSpec['groupings'][number] {
-    if (layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag') return {by: {layer: layer.name, top, cut: 'drawn', paletteSize: 'drawn'}};
-    const level = this.levelOf(layer);
-    return {by: {layer: layer.name, ...(level === undefined || !countedByLevel(layer) ? {} : {level}), top, paletteSize: 'drawn'}};
+    return rankedGrouping(layer, top, this.level);
   }
 
   /** The groupings counting `ids` of `layer` by name, leaving room for one more beside them. */
   private namedGroupings(layer: Layer, meta: Meta, ids: bigint[]): AggregateSpec['groupings'] {
     const level = this.levelOf(layer) ?? 0;
-    const rows = [...new Set(ids)].map((id) => ({tesseraId: id, rung: this.met.get(id)?.rung ?? level}));
+    const rows = [...new Set(ids)].map((id) => ({tesseraId: id, rung: this.paths.rungOf(id) ?? level}));
     return rows.length === 0 ? [] : artifactGroupings(layer, rows, meta.selection, 'drawn').slice(0, meta.selection.maxAggregateGroupings - 1);
   }
 
@@ -929,7 +809,6 @@ export class TesseraFieldCard extends TesseraElement {
     this.matchCounts.set(s, specs.match);
     this.outsideCounts.set(s, live && kind === 'category' && !this.folded ? this.outsideSpec(s, meta) : null);
     this.figures.set(s, specs.figures);
-    this.placePicker(changed);
     if (changed.has('brush')) {
       if (this.brush?.open) document.addEventListener('pointerdown', this.onPressOutsideBrush, true);
       else document.removeEventListener('pointerdown', this.onPressOutsideBrush, true);
@@ -947,46 +826,6 @@ export class TesseraFieldCard extends TesseraElement {
   private highlighting(store: Store): boolean {
     const {draft, members} = store.get('filters');
     return Object.values(draft.highlight).some((d) => isPopulated(d)) || members.some((m) => m.verb === 'highlight');
-  }
-
-  /**
-   * On a `nested` or `dag` layer, ask a browse page for the served parents of each cluster in
-   * `ids`, and then for its first parent's, which name its path. Each is asked for once.
-   */
-  private askPaths(s: Store, layer: Layer, ids: bigint[]): void {
-    if (layer.hierarchy.kind !== 'nested' && layer.hierarchy.kind !== 'dag') return;
-    const epoch = this.epoch;
-    const ask = (id: bigint) => {
-      if (this.asked.has(id)) return;
-      this.asked.add(id);
-      void s
-        .browse({layer: layer.name, filters: null, parent: id, limit: 1})
-        .then((p) => {
-          if (epoch !== this.epoch) return;
-          for (const r of p.parents) this.met.set(r.tesseraId, r);
-          this.parentsOf.set(id, p.parents.map((r) => r.tesseraId));
-          this.requestUpdate();
-        })
-        .catch(() => undefined);
-    };
-    for (const id of ids) {
-      ask(id);
-      const first = this.parentsOf.get(id)?.[0];
-      if (first !== undefined) ask(first);
-    }
-  }
-
-  /** A cluster's parents' names, nearest last, as far up as the card has met them. */
-  private pathOf(id: bigint): string {
-    const names: string[] = [];
-    let parents = this.parentsOf.get(id) ?? this.met.get(id)?.parentIds ?? [];
-    for (let i = 0; i < 2 && parents.length > 0; i++) {
-      const at = this.met.get(parents[0]!);
-      if (!at) break;
-      names.unshift(artifactName(at) ?? UNNAMED);
-      parents = this.parentsOf.get(at.tesseraId) ?? at.parentIds;
-    }
-    return names.join(' › ');
   }
 
   // ---- clauses ---------------------------------------------------------------------------------
@@ -1098,21 +937,21 @@ export class TesseraFieldCard extends TesseraElement {
     const all = countsByKey(match);
     if (all && kind === 'category') for (const [k, n] of countsByKey(this.outsideCounts.entryFor(s)) ?? []) if (!all.has(k)) all.set(k, n);
     const named = [...this.clauseKeys(s, 'filter'), ...this.clauseKeys(s, 'highlight')];
-    const colours = colouringOf(s);
     if (kind === 'category') {
       const titles = new Map<string, string | null>();
       for (const t of [...(subject?.result?.tables ?? []), ...(match?.result?.tables ?? [])]) for (const g of listedGroups(t)) if (!titles.has(g.key) || g.title) titles.set(g.key, g.title);
       const order = [...new Set([...named, ...(sub ? [...sub.keys()] : []), ...(all ? [...all.keys()] : [])])];
       const keys = order.filter((k) => named.includes(k) || (sub?.get(k) ?? 0) > 0 || (!sub && (all?.get(k) ?? 0) > 0));
       keys.sort((a, b) => Number(named.includes(b)) - Number(named.includes(a)) || (sub?.get(b) ?? 0) - (sub?.get(a) ?? 0) || (all?.get(b) ?? 0) - (all?.get(a) ?? 0));
-      const legend = s.get('legend');
       return keys.map((key) => ({
         key,
         name: titles.get(key) ?? keyTitle(s, this.field, key),
         path: '',
         sub: sub?.get(key) ?? null,
         all: all?.get(key) ?? null,
-        swatch: colouring ? this.valueColour(key, legend.categories[this.field] ?? [], legend.ranks[this.field] ?? {}, colours) : null
+        swatch: colouring ? valueColour(s, this.field, key) : null,
+        own: null,
+        unmet: colouring && colouringOf(s).values[this.field]?.[key] === undefined && !valueMet(s, this.field, key)
       }));
     }
     const {palette, overrides} = s.get('artifacts');
@@ -1133,22 +972,15 @@ export class TesseraFieldCard extends TesseraElement {
     return keys.map((key) => {
       const id = BigInt(key);
       const held = slots.get(key);
-      const swatch = colouring ? rgb(artifactColour(held?.palette ?? palette, held?.slot ?? null, overrides.get(id))) : null;
-      return {key, name: titles.get(key) ?? this.clauseName(s, id) ?? UNNAMED, path: this.pathOf(id), sub: sub?.get(key) ?? null, all: all?.get(key) ?? null, swatch};
+      const own = artifactColour(held?.palette ?? palette, held?.slot ?? null);
+      const swatch = colouring ? rgb(overrides.get(this.layerName!)?.get(id) ?? own) : null;
+      return {key, name: titles.get(key) ?? this.clauseName(s, id) ?? UNNAMED, path: this.paths.pathOf(id), sub: sub?.get(key) ?? null, all: all?.get(key) ?? null, swatch, own: colouring ? hexOf(own) : null, unmet: false};
     });
   }
 
   /** The name a cluster's clause carries, for a cluster no table lists. */
   private clauseName(s: Store, id: bigint): string | null {
     return s.get('filters').members.find((m) => m.artifact === id && m.layer === this.layerName)?.label ?? null;
-  }
-
-  /** A category value's colour on the map: the one chosen for it, else its palette colour by rank. */
-  private valueColour(key: string, values: readonly {key: string; code: number}[], ranks: Record<number, number>, colouring: Colouring): string {
-    const chosen = colouring.values[this.field]?.[key];
-    if (chosen) return chosen;
-    const code = values.find((v) => v.key === key)?.code;
-    return code === undefined ? rgb(UNMAPPED) : rgb(colourOfRank(ranks[code], colouring.palette));
   }
 
   private valueCard(s: Store, kind: Kind, layer: Layer | null, head: (sub: TemplateResult | typeof nothing) => TemplateResult, colouring: boolean): TemplateResult {
@@ -1167,7 +999,7 @@ export class TesseraFieldCard extends TesseraElement {
     const filtered = this.clauseKeys(s, 'filter');
     const lit = this.clauseKeys(s, 'highlight');
     const shown = all.slice(0, Math.max(this.expanded ? MORE_ROWS : ROWS, all.filter((r) => filtered.has(r.key) || lit.has(r.key)).length));
-    if (layer) this.askPaths(s, layer, shown.map((r) => BigInt(r.key)));
+    if (layer) this.paths.ask(s, layer, shown.map((r) => BigInt(r.key)));
     // The shares are of each set's total, or of what the field's own filter keeps where it has one.
     const keptTotal = (counts: Map<string, number> | null, table: AggregateTable | undefined) =>
       filtered.size > 0 && counts ? [...filtered].reduce((t, k) => t + (counts.get(k) ?? 0), 0) : (table?.total ?? 0);
@@ -1179,16 +1011,14 @@ export class TesseraFieldCard extends TesseraElement {
     const width = (share: number) => (share > 0 && kind === 'cluster' ? `max(${MIN_BAR_PX}px, ${share.toFixed(1)}%)` : `${share.toFixed(1)}%`);
     const groups = kind === 'category' ? (subject?.result?.tables[0]?.groups ?? null) : all.length;
     const more = groups === null ? 0 : groups - shown.length;
-    const editable = kind === 'category' && colouring;
+
     const row = (r: Row) => {
       const out = filtered.size > 0 && !filtered.has(r.key);
       const inFilter = filtered.has(r.key);
       const onLit = lit.has(r.key);
       const stateOf = out ? 'out' : inFilter ? 'in' : onLit ? 'lit' : '';
       const mark = r.swatch
-        ? editable
-          ? html`<button part="swatch" type="button" style=${`--c:${r.swatch}`} aria-haspopup="dialog" aria-label=${`Colour of ${r.name}`} @click=${(e: Event) => this.openPicker(e, {key: r.key, title: r.name}, r.swatch!)}></button>`
-          : html`<span part="swatch" style=${`--c:${r.swatch}`}></span>`
+        ? html`<button part="swatch" type="button" style=${`--c:${r.swatch}`} ?data-unmet=${r.unmet} aria-haspopup="dialog" aria-label=${`Colour of ${r.name}`} @click=${(e: Event) => this.openPicker(e, r, kind)}></button>`
         : inFilter
           ? icon('check', 12, 2.6)
           : nothing;
@@ -1204,7 +1034,7 @@ export class TesseraFieldCard extends TesseraElement {
         <span class="mark">${mark}</span>
         <span class="label">
           <span class="names"><span part="name" title=${r.name} ?data-unnamed=${r.name === UNNAMED}>${r.name}</span>${r.path ? html`<span part="path" title=${r.path}>${r.path}</span>` : nothing}</span>
-          <span class="bars" aria-hidden="true"><span part="bar-match" style=${`width:${width(out ? 0 : pct(r.all, allTotal))}`}></span><span part="bar-subject" style=${`width:${width(out ? 0 : pct(r.sub, subTotal))}${r.swatch ? `;background:${r.swatch}` : ''}`}></span></span>
+          <span class="bars" aria-hidden="true"><span part="bar-match" style=${`width:${width(out ? 0 : pct(r.all, allTotal))}`}></span><span part="bar-subject" style=${`width:${width(out ? 0 : pct(r.sub, subTotal))}${r.swatch && !r.unmet ? `;background:${r.swatch}` : ''}`}></span></span>
         </span>
         ${counts}
         <span part="verbs">
@@ -1226,7 +1056,7 @@ export class TesseraFieldCard extends TesseraElement {
     const empty = shown.length === 0 && subject?.result ? html`<span class="none">${subTotal === 0 ? 'None in view' : 'None counted'}</span>` : nothing;
     return html`${head(sub)}<div class="body">${search}<div part="rows" role="list" aria-label=${`Commonest ${layer ? 'clusters' : 'values'}`}>${shown.map(
         (r) => html`<div role="listitem">${row(r)}</div>`
-      )}</div>${empty}${moreButton}</div>${this.picking ? this.colourPicker(s, this.picking) : nothing}`;
+      )}</div>${empty}${moreButton}</div>${this.picker.render()}`;
   }
 
   // ---- histogram ---------------------------------------------------------------------------------
@@ -1416,207 +1246,43 @@ export class TesseraFieldCard extends TesseraElement {
     void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="plot"]')?.focus());
   };
 
-  // ---- the colour picker -------------------------------------------------------------------------
+  // ---- colours ---------------------------------------------------------------------------------
 
-  /** The swatch the picker was opened from, which it is placed beside and gives focus back to. */
-  private pickedFrom: HTMLElement | null = null;
-
-  private openPicker(e: Event, picking: Picking, colour: string): void {
-    this.pickedFrom = e.currentTarget as HTMLElement;
-    const c = rgbOfHex(colour) ?? rgbOfHex(hexOf(parseRgb(colour))) ?? [0, 0, 0];
-    this.hsv = hsvOf(c);
-    this.picking = picking;
-    document.addEventListener('pointerdown', this.onOutside, true);
-  }
-
-  private closePicker(refocus: boolean): void {
-    if (this.picking === null) return;
-    this.picking = null;
-    document.removeEventListener('pointerdown', this.onOutside, true);
-    if (refocus) this.pickedFrom?.focus();
-  }
-
-  /** A press outside the picker and its swatch closes it. */
-  private onOutside = (e: PointerEvent): void => {
-    const path = e.composedPath();
-    const pop = this.renderRoot.querySelector('.pop');
-    if ((pop && path.includes(pop)) || (this.pickedFrom && path.includes(this.pickedFrom))) return;
-    this.closePicker(false);
-  };
-
-  /** Give the value being picked `hex`, or its palette colour back where `hex` is null, and report it when `final`. */
-  private pick(hex: string | null, final = true): void {
+  /** Open the colour picker on a row's swatch: a category value's, or a cluster's. */
+  private openPicker(e: Event, r: Row, kind: Kind): void {
     const s = this.resolvedStore;
-    const p = this.picking;
-    if (!s || !p) return;
-    setColouring(s, {values: withValueColour(colouringOf(s).values, this.field, p.key, hex)});
-    if (final) emit(this, 'tessera-valuecolour', {column: this.field, value: p.key, colour: hex});
-  }
-
-  /** A colour waiting for the next frame, while a custom colour is dragged. */
-  private livePick: {hex: string; frame: number} | null = null;
-
-  /** {@link pick} for a drag: at most once a frame, and the final colour at once. */
-  private pickLive(hex: string, final: boolean): void {
-    if (this.livePick) cancelAnimationFrame(this.livePick.frame);
-    this.livePick = null;
-    if (final || typeof requestAnimationFrame === 'undefined') {
-      this.pick(hex, final);
+    const layer = this.layerName;
+    if (!s) return;
+    const from = e.currentTarget as HTMLElement;
+    if (kind === 'category') {
+      this.picker.open(from, {
+        title: r.name,
+        palette: CATEGORY_PALETTES[colouringOf(s).palette],
+        own: paletteValueColour(s, this.field, r.key),
+        current: () => valueColour(s, this.field, r.key),
+        apply: (hex, final) => {
+          setValueColours(s, this.field, [{value: r.key, colour: hex}]);
+          if (final) emit(this, 'tessera-valuecolour', {column: this.field, changes: [{value: r.key, colour: hex}]});
+        },
+        hold: () => holdColours(s)
+      });
       return;
     }
-    this.livePick = {
-      hex,
-      frame: requestAnimationFrame(() => {
-        this.livePick = null;
-        this.pick(hex, false);
-      })
-    };
-  }
-
-  private colourPicker(s: Store, p: Picking): TemplateResult {
-    const colouring = colouringOf(s);
-    const legend = s.get('legend');
-    const palette = CATEGORY_PALETTES[colouring.palette].colours;
-    const code = (legend.categories[this.field] ?? []).find((v) => v.key === p.key)?.code;
-    const own = hexOf(colourOfRank(code === undefined ? undefined : legend.ranks[this.field]?.[code], colouring.palette));
-    const current = colouring.values[this.field]?.[p.key] ?? own;
-    const title = CATEGORY_PALETTES[colouring.palette].title;
-    const n = palette.length;
-    const choices = [
-      ...palette.map((c, i) => ({hex: hexOf(c), label: `${title}, colour ${i + 1} of ${n}`})),
-      ...palette.map((c, i) => ({hex: hexOf(lighter(c, LIGHTER)), label: `${title}, lighter colour ${i + 1} of ${n}`}))
-    ];
-    const [h, sat, val] = this.hsv;
-    const custom = hexOf(rgbOfHsv(this.hsv));
-    const setHsv = (next: Hsv, final: boolean) => {
-      this.hsv = next;
-      this.pickLive(hexOf(rgbOfHsv(next)), final);
-    };
-    const svAt = (e: PointerEvent): Hsv => {
-      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      const x = r.width > 0 ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : sat;
-      const y = r.height > 0 ? Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) : 1 - val;
-      return [h, x, 1 - y];
-    };
-    const hueAt = (e: PointerEvent): Hsv => {
-      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      const run = r.width - HUE_KNOB;
-      return [run > 0 ? Math.min(359, Math.max(0, ((e.clientX - r.left - HUE_KNOB / 2) / run) * 360)) : h, sat, val];
-    };
-    const drag = (read: (e: PointerEvent) => Hsv) => ({
-      down: (e: PointerEvent) => {
-        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-        setHsv(read(e), false);
+    if (layer === null || r.own === null) return;
+    const id = BigInt(r.key);
+    const own = r.own;
+    this.picker.open(from, {
+      title: r.name,
+      palette: PALETTES[s.get('artifacts').palette],
+      own,
+      current: () => clusterColour(s, layer, id, own),
+      apply: (hex, final) => {
+        setClusterColours(s, layer, [{tesseraId: id, colour: hex}]);
+        if (final) emit(this, 'tessera-clustercolour', {layer, changes: [{tesseraId: r.key, colour: hex}]});
       },
-      move: (e: PointerEvent) => {
-        if ((e.currentTarget as HTMLElement).hasPointerCapture?.(e.pointerId)) setHsv(read(e), false);
-      },
-      up: (e: PointerEvent) => setHsv(read(e), true)
+      hold: () => holdColours(s)
     });
-    const sv = drag(svAt);
-    const hue = drag(hueAt);
-    const clamp = (x: number) => Math.min(1, Math.max(0, x));
-    const svKey = (e: KeyboardEvent) => {
-      const step = e.shiftKey ? 0.1 : 0.01;
-      const next: Hsv | undefined = {
-        ArrowLeft: [h, clamp(sat - step), val] as Hsv,
-        ArrowRight: [h, clamp(sat + step), val] as Hsv,
-        ArrowDown: [h, sat, clamp(val - step)] as Hsv,
-        ArrowUp: [h, sat, clamp(val + step)] as Hsv
-      }[e.key];
-      if (!next) return;
-      e.preventDefault();
-      setHsv(next, true);
-    };
-    const hueKey = (e: KeyboardEvent) => {
-      const step = e.shiftKey ? 10 : 1;
-      const next = {ArrowLeft: h - step, ArrowDown: h - step, ArrowRight: h + step, ArrowUp: h + step, Home: 0, End: 359}[e.key];
-      if (next === undefined) return;
-      e.preventDefault();
-      setHsv([(next + 360) % 360, sat, val], true);
-    };
-    return html`<div part="colour-popover" class="pop" popover="manual" role="dialog" aria-label=${`Colour of ${p.title}`}
-      @keydown=${(e: KeyboardEvent) => {
-        if (e.key !== 'Escape') return;
-        e.stopPropagation();
-        this.closePicker(true);
-      }}
-      @focusout=${(e: FocusEvent) => {
-        const to = e.relatedTarget as Node | null;
-        if (to && !(e.currentTarget as HTMLElement).contains(to)) this.closePicker(false);
-      }}>
-      <div class="top"><span class="t">${p.title}</span><button part="reset" class="quiet" type="button" @click=${() => {
-        this.hsv = hsvOf(rgbOfHex(own)!);
-        this.pick(null);
-      }}>Reset</button></div>
-      <div class="choices" role="group" aria-label="Palette colours" style=${`grid-template-columns:repeat(${n}, minmax(0, 1fr))`}>
-        ${choices.map(
-          ({hex, label}) => html`<button part="choice" type="button" style=${`background:${hex}`} aria-label=${`${label}, ${hex}`} title=${`${label}, ${hex}`}
-            aria-pressed=${hex === current ? 'true' : 'false'}
-            @click=${() => {
-              this.hsv = hsvOf(rgbOfHex(hex)!);
-              this.pick(hex);
-            }}></button>`
-        )}
-      </div>
-      <div class="hd">Custom</div>
-      <div class="custom">
-        <div part="sv" role="slider" tabindex="0" aria-label="Saturation and brightness" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(sat * 100)}
-          aria-valuetext=${`Saturation ${Math.round(sat * 100)}%, brightness ${Math.round(val * 100)}%`}
-          style=${`background:linear-gradient(to top, #000000, rgba(0, 0, 0, 0)), linear-gradient(to right, #ffffff, hsl(${h.toFixed(0)}, 100%, 50%))`}
-          @pointerdown=${sv.down} @pointermove=${sv.move} @pointerup=${sv.up} @keydown=${svKey}>
-          <span class="knob" style=${`left:${(sat * 100).toFixed(1)}%;top:${((1 - val) * 100).toFixed(1)}%`}></span>
-        </div>
-        <div part="hue" role="slider" tabindex="0" aria-label="Hue" aria-valuemin="0" aria-valuemax="359" aria-valuenow=${Math.round(h)}
-          @pointerdown=${hue.down} @pointermove=${hue.move} @pointerup=${hue.up} @keydown=${hueKey}>
-          <span class="knob" style=${`left:calc(${HUE_KNOB / 2}px + (100% - ${HUE_KNOB}px) * ${(h / 360).toFixed(4)})`}></span>
-        </div>
-        <label>Hex<input part="hex" type="text" spellcheck="false" .value=${custom.toUpperCase()}
-          @change=${(e: Event) => {
-            const input = e.target as HTMLInputElement;
-            const text = input.value.trim();
-            const c = rgbOfHex(text.startsWith('#') ? text : `#${text}`);
-            if (!c) {
-              input.value = custom.toUpperCase();
-              return;
-            }
-            this.hsv = hsvOf(c);
-            this.pick(hexOf(c));
-          }} /></label>
-      </div>
-    </div>`;
   }
-
-  /** Show the picker in the top layer, right of the card and level with its swatch; focus goes into it as it opens. */
-  private placePicker(changed: PropertyValues<this>): void {
-    const pop = this.renderRoot.querySelector<HTMLElement>('.pop');
-    const from = this.pickedFrom;
-    if (!pop || !from) return;
-    if (typeof pop.showPopover === 'function' && !pop.matches(':popover-open')) {
-      try {
-        pop.showPopover();
-      } catch {
-        // Shown already; the picker is in the page either way.
-      }
-    }
-    const a = from.getBoundingClientRect();
-    const own = this.getBoundingClientRect();
-    const width = pop.offsetWidth || 264;
-    const height = pop.offsetHeight || 0;
-    const vw = typeof innerWidth === 'number' ? innerWidth : 1024;
-    const vh = typeof innerHeight === 'number' ? innerHeight : 768;
-    let left = own.right + 12;
-    if (left + width > vw - 8) left = own.left - width - 12;
-    pop.style.left = `${Math.round(Math.max(8, Math.min(left, vw - width - 8)))}px`;
-    pop.style.top = `${Math.round(Math.max(8, Math.min(a.top - 8, vh - height - 8)))}px`;
-    if (changed.has('picking') && changed.get('picking') === null) (pop.querySelector<HTMLElement>('[aria-pressed="true"]') ?? pop.querySelector<HTMLElement>('button'))?.focus();
-  }
-}
-
-/** `rgb(r, g, b)` as RGB, for a swatch colour that is not a hex string. */
-function parseRgb(text: string): [number, number, number] {
-  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(text);
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
 }
 
 attachContextRoot();

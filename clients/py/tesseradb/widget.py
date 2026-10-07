@@ -19,7 +19,8 @@ Only controls and selection cross the kernel boundary, never data. `url` goes do
 `bbox`, `layers`, `colour_by`, the four size settings and `filters` go both ways, and up only
 when the map settles, once it has finished fetching for a view, so the kernel is never asked on
 every frame. `budget` goes both ways, and up when the map's Most points slider is let go;
-`palette` goes both ways, and up when one is chosen in the map's Colour section.
+`palette` goes both ways, and up when one is chosen in the map's Colour section;
+`value_colours` and `cluster_colours` go both ways, and up as each colour is chosen in the map.
 `selected` and `selected_artifact` go up on a pick, and `region` when a region's
 counts arrive. Ids are decimal strings, because a `tessera_id` is a `u64`, which is not a
 JavaScript number, and a `BigInt` does not serialise.
@@ -28,6 +29,7 @@ JavaScript number, and a `BigInt` does not serialise.
 from __future__ import annotations
 
 import pathlib
+import re
 import warnings
 from typing import Any, Optional, Sequence
 
@@ -69,6 +71,20 @@ def _decimal_id(value: Any, name: str) -> Optional[str]:
     raise traitlets.TraitError(f"{name} is a tessera_id as a decimal string, not {value!r}")
 
 
+def _hex(value: Any, name: str) -> str:
+    """A colour as ``#rrggbb`` in lower case."""
+    if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        return value.lower()
+    raise traitlets.TraitError(f"{name} is a colour as '#rrggbb', not {value!r}")
+
+
+def _by_name(value: Any, trait: str, outer: str, inner: str) -> dict:
+    """A trait's ``{name: {key: colour}}``, checked to be a dictionary of dictionaries."""
+    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, dict) for k, v in value.items()):
+        raise traitlets.TraitError(f"{trait} maps a {outer} to {{{inner}: '#rrggbb'}}; got {value!r}")
+    return value
+
+
 class Map(anywidget.AnyWidget):
     """The interactive map in a notebook cell, reading a Tessera database with a token.
 
@@ -93,6 +109,13 @@ class Map(anywidget.AnyWidget):
       slot below the palette's size, chosen so that annotations drawn beside each other differ,
       and the map draws it in the palette's colour at that slot. `None`, the default, leaves the
       map's choice, Tableau 10 until one is made.
+    - `value_colours`: colours for single values of category columns, as
+      `{column: {value: "#rrggbb"}}`, in place of their palette colours. `None`, the default,
+      leaves the colours chosen in the map; `{}` gives every value its palette colour.
+    - `cluster_colours`: colours for single annotations, per layer, as
+      `{layer: {tessera_id: "#rrggbb"}}` with each `tessera_id` a decimal string, in place of
+      their palette colours under `"cluster:<layer>"`. `None`, the default, leaves the colours
+      chosen in the map; `{}` gives every annotation its palette colour.
     - `size_by`: a number column to size points by. `None`, the default, draws every point at
       one size.
     - `size_min`, `size_max`: the radius in pixels of the smallest and the largest value under
@@ -143,6 +166,9 @@ class Map(anywidget.AnyWidget):
     - `budget`: as the map draws it; it changes when the Most points slider is let go. Setting
       it in a later cell applies it.
     - `cluster_budget`: likewise, when the Most clusters slider is let go.
+    - `value_colours`, `cluster_colours`: every colour chosen, here or in the map, which the map
+      changes when a colour is chosen on a field card or in Edit colours, at once. Setting one
+      replaces every colour of its kind the map holds.
     - `url`, `height`, `explorer_layout`, `title_field`, `artifacts_per_tile`, `budget_min`,
       `budget_max`, `cluster_budget_min`, `cluster_budget_max`: as given. Setting one in a later
       cell applies it.
@@ -192,6 +218,8 @@ class Map(anywidget.AnyWidget):
     layers = traitlets.List(traitlets.Unicode(), allow_none=True, default_value=None).tag(sync=True)
     colour_by = traitlets.Unicode(None, allow_none=True).tag(sync=True)
     palette = traitlets.Enum(["okabe-ito", "tableau10", "tableau20", "kelly"], default_value=None, allow_none=True).tag(sync=True)
+    value_colours = traitlets.Dict(default_value=None, allow_none=True).tag(sync=True)
+    cluster_colours = traitlets.Dict(default_value=None, allow_none=True).tag(sync=True)
     size_by = traitlets.Unicode(None, allow_none=True).tag(sync=True)
     size_min = traitlets.Float(None, allow_none=True).tag(sync=True)
     size_max = traitlets.Float(None, allow_none=True).tag(sync=True)
@@ -214,6 +242,8 @@ class Map(anywidget.AnyWidget):
         layers: Optional[Sequence[str]] = None,
         colour_by: Optional[str] = None,
         palette: Optional[str] = None,
+        value_colours: Optional[dict] = None,
+        cluster_colours: Optional[dict] = None,
         size_by: Optional[str] = None,
         size_min: Optional[float] = None,
         size_max: Optional[float] = None,
@@ -254,6 +284,8 @@ class Map(anywidget.AnyWidget):
             layers=None if layers is None else list(layers),
             colour_by=colour_by,
             palette=palette,
+            value_colours=value_colours,
+            cluster_colours=cluster_colours,
             size_by=size_by,
             size_min=size_min,
             size_max=size_max,
@@ -308,6 +340,27 @@ class Map(anywidget.AnyWidget):
     @traitlets.validate("selected", "selected_artifact")
     def _validate_id(self, proposal: dict) -> Optional[str]:
         return _decimal_id(proposal["value"], proposal["trait"].name)
+
+    @traitlets.validate("value_colours")
+    def _validate_value_colours(self, proposal: dict) -> Optional[dict]:
+        if proposal["value"] is None:
+            return None
+        return {
+            column: {str(k): _hex(v, f"value_colours[{column!r}][{k!r}]") for k, v in values.items()}
+            for column, values in _by_name(proposal["value"], "value_colours", "column", "value").items()
+        }
+
+    @traitlets.validate("cluster_colours")
+    def _validate_cluster_colours(self, proposal: dict) -> Optional[dict]:
+        if proposal["value"] is None:
+            return None
+        return {
+            layer: {
+                _decimal_id(k, f"a cluster_colours[{layer!r}] key"): _hex(v, f"cluster_colours[{layer!r}][{k!r}]")
+                for k, v in ids.items()
+            }
+            for layer, ids in _by_name(proposal["value"], "cluster_colours", "layer", "tessera_id").items()
+        }
 
     @traitlets.validate("layers")
     def _validate_layers(self, proposal: dict) -> Optional[list]:

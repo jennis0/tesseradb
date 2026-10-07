@@ -150,6 +150,12 @@ export class TesseraClusterFilter extends TesseraElement {
   @property() accessor layer = '';
   /** The search box's placeholder, in place of the field's own. */
   @property() accessor placeholder = '';
+  /**
+   * Where set, the box picks a cluster rather than filtering by it: choosing a row calls this with
+   * its `tessera_id` as a decimal string, its name, its path of parents' names as the list shows
+   * it and its rung, changes no clause and empties the box, and no row shows as chosen.
+   */
+  @property({attribute: false}) accessor choose: ((cluster: {id: string; name: string | null; path: string; rung: number}) => void) | null = null;
 
   /** @internal */
   @state() accessor search = '';
@@ -304,9 +310,17 @@ export class TesseraClusterFilter extends TesseraElement {
     return (this.resolvedStore?.get('filters').members ?? []).filter((m) => m.layer === this.layer && m.verb === 'filter');
   }
 
-  private toggle(row: BrowseRow): void {
+  private toggle(offer: Offer): void {
     const s = this.resolvedStore;
     if (!s) return;
+    const row = offer.row;
+    if (this.choose) {
+      this.search = '';
+      this.found = null;
+      this.listOpen = false;
+      this.choose({id: idString(row.tesseraId), name: artifactName(row), path: offer.path && offer.path.length > 0 ? pathText(offer.path, offer.beyond, offer.path.length) : '', rung: row.rung});
+      return;
+    }
     const members = s.get('filters').members;
     const on = this.held().some((m) => m.artifact === row.tesseraId && !m.outside);
     const name = artifactName(row);
@@ -405,7 +419,7 @@ export class TesseraClusterFilter extends TesseraElement {
     const layer = this.declared();
     if (!s || !layer) return nothing;
     const title = layer.title || layer.name;
-    const on = new Set(this.held().filter((m) => !m.outside).map((m) => m.artifact));
+    const on = new Set(this.choose ? [] : this.held().filter((m) => !m.outside).map((m) => m.artifact));
     const counts = countsByKey(this.counts.entry());
     const countOf = (o: Offer) => counts?.get(o.row.tesseraId.toString());
     const listed = this.listed();
@@ -425,7 +439,7 @@ export class TesseraClusterFilter extends TesseraElement {
       const path = o.path && o.path.length > 0 ? pathText(o.path, o.beyond, this.pathFits.get(o.row.tesseraId) ?? o.path.length) : '';
       return html`<button type="button" part="option" role="option" id=${`c-${o.row.tesseraId}`} tabindex="-1" data-id=${idString(o.row.tesseraId)} ?data-active=${o === active}
         aria-selected=${on.has(o.row.tesseraId) ? 'true' : 'false'}
-        @mousedown=${(e: Event) => e.preventDefault()} @click=${() => this.toggle(o.row)}>
+        @mousedown=${(e: Event) => e.preventDefault()} @click=${() => this.toggle(o)}>
         <span class="opt"><span part="name" ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>${path ? html`<span part="path" data-id=${idString(o.row.tesseraId)} title=${full}><bdi>${path}</bdi></span>` : nothing}</span>
         ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
       </button>`;
@@ -446,7 +460,7 @@ export class TesseraClusterFilter extends TesseraElement {
             this.listOpen = true;
             move(e.key === 'ArrowDown' ? 1 : -1);
           } else if (e.key === 'Enter') {
-            if (open && active) this.toggle(active.row);
+            if (open && active) this.toggle(active);
           } else if (e.key === 'Escape' && this.listOpen) {
             e.stopPropagation();
             this.listOpen = false;

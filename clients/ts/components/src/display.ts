@@ -202,6 +202,10 @@ export const displayStyles = css`
     color: var(--_tessera-ink);
     font-weight: 500;
   }
+  /* Edit colours sits under the choices, as wide as its words. */
+  .edit-colours {
+    align-self: flex-start;
+  }
   .ramp-choice {
     display: flex;
     align-items: center;

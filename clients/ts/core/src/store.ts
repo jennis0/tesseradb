@@ -16,7 +16,7 @@ import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
 import {CLUSTER_PREFIX, EMPTY_LEGEND, Legend, type LegendProjection} from './legend.js';
 import {withMembers, type MemberClause} from './members.js';
 import {attachedTextOf} from './names.js';
-import {DEFAULT_PALETTE, PALETTES, paletteSize, type PaletteName, type Rgba} from './palette.js';
+import {DEFAULT_PALETTE, PALETTES, paletteSize, type ChosenColours, type PaletteName, type Rgba} from './palette.js';
 import {worldBbox} from './prefetch.js';
 import {rectContainsTile} from './rects.js';
 import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type Presented, type PresentedStatus, type Refusal} from './presented.js';
@@ -429,10 +429,10 @@ export type ArtifactsProjection = {
   /** The palette `colours` was built under. Its size is the `palette_size` the artifacts are asked with. */
   palette: PaletteName;
   /**
-   * The colours set by `tessera_id` with {@link Store.setArtifactColours}, which `colours` holds in
-   * place of the palette's.
+   * The colours set by layer and `tessera_id` with {@link Store.setArtifactColours}, which
+   * `colours` holds in place of the palette's.
    */
-  overrides: ReadonlyMap<bigint, Rgba>;
+  overrides: ChosenColours;
   /**
    * How many bands in view have a colour for every point under each layer asked for (`current`),
    * and how many do not and are being fetched again (`stale`). Both are `0` unless `status` is
@@ -706,12 +706,12 @@ export interface Store {
    */
   setPalette(palette: PaletteName): void;
   /**
-   * Colour the artifacts `colours` names, by `tessera_id`, with its colours in place of their
-   * palette colours, and every other artifact from the palette. Each call replaces the last; an
-   * empty map colours every artifact from the palette. Publishes `artifacts.colours` and
-   * `artifacts.overrides`.
+   * Colour the artifacts `colours` names, by layer and then by `tessera_id`, with its colours in
+   * place of their palette colours, and every other artifact from the palette. Each call replaces
+   * the last; an empty map colours every artifact from the palette. Publishes `artifacts.colours`
+   * and `artifacts.overrides`.
    */
-  setArtifactColours(colours: ReadonlyMap<bigint, Rgba>): void;
+  setArtifactColours(colours: ChosenColours): void;
   /**
    * Set how many marks the store aims to draw on screen, for every view, and ask again for the
    * current camera. A value that is not a finite number above zero is ignored.

@@ -72,12 +72,21 @@ export type TesseraEventDetails = {
   /** The level to colour and label at is now `level`; null is the level drawn by default. */
   'tessera-levelchange': {level: number | null};
   /**
-   * A colour was chosen for the value `value` (a category key) of the column `column`, as
-   * `#rrggbb`, or the value's chosen colour was reset (`colour` null) so it takes its palette
-   * colour again. The map already draws it; a host that keeps the choice sets it back through the
-   * map's or the explorer's `valueColours`.
+   * Colours were chosen for values of the column `column`, in one action: one value's in a colour
+   * picker, the selected values' in Edit colours, or every value's by Reset to palette there. Each
+   * change names a value (a category key) and its colour as `#rrggbb`, or `null` where its chosen
+   * colour was reset so it takes its palette colour again. The map already draws them; a host that
+   * keeps the choices sets them back through the map's or the explorer's `valueColours`.
    */
-  'tessera-valuecolour': {column: string; value: string; colour: string | null};
+  'tessera-valuecolour': {column: string; changes: {value: string; colour: string | null}[]};
+  /**
+   * Colours were chosen for clusters of the layer `layer`, in one action, as for
+   * `tessera-valuecolour`. Each change names a cluster by its `tessera_id` and its colour as
+   * `#rrggbb`, or `null` where its chosen colour was reset so it takes its palette colour again.
+   * The map already draws them; a host that keeps the choices sets them back through the map's or
+   * the explorer's `clusterColours`.
+   */
+  'tessera-clustercolour': {layer: string; changes: {tesseraId: string; colour: string | null}[]};
   /** The palette, the ramp, the ramp's scale or its direction was chosen in the explorer's Colour section; the detail is all four as they now stand. */
   'tessera-palettechange': {palette: CategoryPaletteName; ramp: RampName; scale: RampScale; reverse: boolean};
   /**

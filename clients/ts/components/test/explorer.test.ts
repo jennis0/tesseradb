@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it} from 'vitest';
 import type {Meta, RegionProjection} from '@tesseradb/client';
 import '../src/explorer.js';
-import {deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
+import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
 
 /** Where a callout was placed: its offset from the map's top-left corner. */
 const placedAt = (el: HTMLElement): [number, number] => {
@@ -778,6 +778,82 @@ describe('<tessera-explorer> the Colour section', () => {
     await settle(host);
     expect(part('ramp-reverse')!.getAttribute('aria-pressed')).toBe('true');
     expect(changes).toEqual([{palette: 'tableau10', ramp: 'viridis', scale: 'linear', reverse: true}]);
+  });
+});
+
+describe('<tessera-explorer> Edit colours', () => {
+  const topics = {name: 'topics', title: 'Topics', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1} as unknown as Meta['layers'][number];
+
+  async function withEditor(markup = '<tessera-explorer></tessera-explorer>') {
+    const host = await mount(markup);
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; clusterColours: Record<string, Record<string, string>> | null; valueColours: unknown};
+    const store = fakeStore({meta: {...META, layers: [topics]}, status: status({})});
+    el.store = store;
+    await settle(host);
+    const shadow = el.shadowRoot!;
+    shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
+    await settle(host);
+    return {host, el, store, shadow, button: () => shadow.querySelector<HTMLButtonElement>('[part="edit-colours"]')!};
+  }
+
+  it('is offered while the points are coloured by a category or a layer, and opens the dialog over the popover, which stays open beneath it', async () => {
+    const {host, store, shadow, button} = await withEditor();
+    expect(button().disabled).toBe(true);
+    store.set('legend', {...store.get('legend'), colourBy: 'archive'});
+    await settle(host);
+    expect(button().disabled).toBe(false);
+    store.set('legend', {...store.get('legend'), colourBy: 'cluster:topics'});
+    await settle(host);
+    button().focus();
+    button().click();
+    await settle(host);
+    const dialog = deep(host, '[part="dialog"]') as HTMLDialogElement;
+    expect(dialog.open).toBe(true);
+    expect(deep(host, '[part="title"]#title')!.textContent).toBe('Topics');
+    expect([...registered(store).values()]).toContainEqual({groupings: [{by: {layer: 'topics', top: 1000, paletteSize: 'drawn'}}], subject: 'visible'});
+    // A press inside the dialog leaves the Layers popover open, so Done gives focus back to the button.
+    dialog.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, composed: true}));
+    await settle(host);
+    expect(shadow.querySelector('[part="layers-popover"]')).not.toBeNull();
+    (deep(host, '[part="done"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(dialog.open).toBe(false);
+    expect(shadow.activeElement).toBe(button());
+  });
+
+  it('sets the cluster colours a host keeps on the store, and reports a change made in the dialog for the host to keep', async () => {
+    const {host, el, store, button} = await withEditor();
+    el.clusterColours = {topics: {'7': '#112233', '8': '#445566', nonsense: '#000000', '9': 'red'}, other: {'7': '#000000'}};
+    await settle(host);
+    const set = () => store.calls.filter((c) => c.name === 'setArtifactColours').at(-1)!.args[0] as Map<string, Map<bigint, readonly number[]>>;
+    expect([...set().get('topics')!].map(([id, c]) => [id, c.slice(0, 3)])).toEqual([
+      [7n, [0x11, 0x22, 0x33]],
+      [8n, [0x44, 0x55, 0x66]]
+    ]);
+    store.set('legend', {...store.get('legend'), colourBy: 'cluster:topics'});
+    await settle(host);
+    button().click();
+    await settle(host);
+    const kept: unknown[] = [];
+    host.addEventListener('tessera-clustercolour', (e) => kept.push((e as CustomEvent).detail));
+    (deep(host, '[part="reset-all"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(kept).toEqual([
+      {
+        layer: 'topics',
+        changes: [
+          {tesseraId: '7', colour: null},
+          {tesseraId: '8', colour: null}
+        ]
+      }
+    ]);
+    // Another layer's colours stay.
+    expect([...store.get('artifacts').overrides.keys()]).toEqual(['other']);
+    // The host's copy is the host's: setting it again replaces the store's.
+    el.clusterColours = {topics: {'8': '#445566'}};
+    await settle(host);
+    expect([...set().keys()]).toEqual(['topics']);
+    expect([...set().get('topics')!.keys()]).toEqual([8n]);
   });
 });
 

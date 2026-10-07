@@ -1,8 +1,8 @@
 /**
  * The `tessera-*` custom elements. Importing the root entry defines every element. A host that
  * wants one element imports its subpath, such as `@tesseradb/components/count`. The map, the
- * explorer, the field card, the field column and the artifact card import `@tesseradb/deck`, which
- * depends on deck.gl; the other elements do not.
+ * explorer, the field card, the field column, the colour editor and the artifact card import
+ * `@tesseradb/deck`, which depends on deck.gl; the other elements do not.
  *
  * @module @tesseradb/components
  */
@@ -18,6 +18,7 @@ import './view-picker.js';
 import './key-picker.js';
 import './artifact-card.js';
 import './hierarchy.js';
+import './colour-editor.js';
 import './map.js';
 import './explorer.js';
 
@@ -33,6 +34,7 @@ export {TesseraViewPicker} from './view-picker.js';
 export {TesseraKeyPicker} from './key-picker.js';
 export {TesseraArtifactCard} from './artifact-card.js';
 export {TesseraHierarchy} from './hierarchy.js';
+export {TesseraColourEditor} from './colour-editor.js';
 export {TesseraMap, type MapProbe} from './map.js';
 export {TesseraExplorer} from './explorer.js';
 export type {StoreSource} from './base.js';

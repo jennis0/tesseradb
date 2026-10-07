@@ -1,4 +1,4 @@
-import type {AggregateEntry, AggregateSpec, AggregateTable, Layer, Meta, Store} from '@tesseradb/client';
+import type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregateTable, Layer, Meta, Store} from '@tesseradb/client';
 
 /**
  * One listed group of an aggregate table: its key (a vocabulary key for a field, an artifact's
@@ -49,6 +49,30 @@ export function countedByLevel(layer: Pick<Layer, 'levels'>): boolean {
   return layer.levels.length > 1;
 }
 
+/** Whether `layer` is a tree, `nested` or `dag`, whose clusters are ranked at the cut the map draws. */
+export function isTree(layer: Pick<Layer, 'hierarchy'>): boolean {
+  return layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag';
+}
+
+/**
+ * The level of a `stacked` or `tiered` layer that is counted and coloured: `chosen` where the layer
+ * declares it, else its deepest. `undefined` on a layer with no levels to choose.
+ */
+export function levelOf(layer: Pick<Layer, 'hierarchy' | 'levels'>, chosen: number | null): number | undefined {
+  if ((layer.hierarchy.kind !== 'stacked' && layer.hierarchy.kind !== 'tiered') || layer.levels.length === 0) return undefined;
+  return chosen !== null && layer.levels.some((l) => l.level === chosen) ? chosen : layer.levels.at(-1)!.level;
+}
+
+/**
+ * The grouping ranking a layer's `top` clusters: at the cut the map draws on a tree, else at
+ * {@link levelOf} `level`. Each row carries its slot in the palette the map colours clusters from.
+ */
+export function rankedGrouping(layer: Pick<Layer, 'name' | 'hierarchy' | 'levels'>, top: number, level: number | null): AggregateSpecGrouping {
+  if (isTree(layer)) return {by: {layer: layer.name, top, cut: 'drawn', paletteSize: 'drawn'}};
+  const at = levelOf(layer, level);
+  return {by: {layer: layer.name, ...(at === undefined || !countedByLevel(layer) ? {} : {level: at}), top, paletteSize: 'drawn'}};
+}
+
 /**
  * The groupings that count `artifacts` of `layer` by name: one per level where the route addresses
  * the layer by level, else one. The artifacts are taken in the order given, and the first
@@ -80,6 +104,11 @@ export function artifactGroupings(
 
 let registered = 0;
 
+/** A spec as one string, so two that ask the same are equal; empty for none. */
+function keyOf(spec: AggregateSpec | null): string {
+  return spec === null ? '' : JSON.stringify(spec, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+}
+
 /**
  * One aggregate an element keeps registered with its store under an id of its own. {@link set}
  * registers a spec only when it differs from the one held, since each registration sends a
@@ -104,7 +133,7 @@ export class HeldAggregate {
 
   /** Register `spec` with `store`, or drop the registration where `spec` is `null` or the store changed. */
   set(store: Store | null, spec: AggregateSpec | null): void {
-    const key = spec === null ? '' : JSON.stringify(spec, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+    const key = keyOf(spec);
     if (store === this.wanted.store && key === this.wanted.key) return;
     this.wanted = {store, key, spec};
     if (this.queued) return;
@@ -126,6 +155,16 @@ export class HeldAggregate {
   /** The entry the store holds for this registration. */
   entry(): AggregateEntry | undefined {
     return this.store?.get('aggregates').get(this.id);
+  }
+
+  /**
+   * The entry `store` holds for this registration while it is registered with `spec`; nothing
+   * while another spec is registered or one is waiting to be, so an answer to what was asked
+   * before is not read as the answer to `spec`.
+   */
+  entryOf(store: Store | null, spec: AggregateSpec | null): AggregateEntry | undefined {
+    const key = keyOf(spec);
+    return key !== '' && key === this.held && key === this.wanted.key ? this.entryFor(store) : undefined;
   }
 
   /**

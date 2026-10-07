@@ -237,6 +237,12 @@ export class TesseraFilter extends TesseraElement {
   @property() accessor column = '';
   /** The box's placeholder, in place of its own. */
   @property() accessor placeholder = '';
+  /**
+   * Where set, a category's box picks a value rather than filtering by it: choosing a suggestion
+   * calls this with its key and its title, changes no filter and empties the box, and no
+   * suggestion shows as chosen.
+   */
+  @property({attribute: false}) accessor choose: ((value: {key: string; title: string | null}) => void) | null = null;
 
   /** @internal */
   @state() accessor draft: ColumnDraft | null = null;
@@ -477,9 +483,18 @@ export class TesseraFilter extends TesseraElement {
   private category(draft: ColumnDraft & {family: 'category'}) {
     const suggestion = this.resolvedSuggestion;
     const refusal: Refusal | null = this.resolvedStore?.get('filters').suggestErrors[this.column] ?? null;
-    const chosen = new Set(draft.keys);
+    const choose = this.choose;
+    const chosen = new Set(choose ? [] : draft.keys);
     const total = suggestion?.total ? suggestion.total : null;
-    const toggle = (key: string) => this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
+    const toggle = ({key, title}: SuggestValue) => {
+      if (choose) {
+        this.search = '';
+        this.ask('');
+        choose({key, title: title ?? null});
+        return;
+      }
+      this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
+    };
     const typed = this.search !== '';
     // The suggestions show while the box has focus and holds text; the list closes as focus leaves.
     const rows = typed && this.focused ? (suggestion?.values ?? []) : [];
@@ -506,7 +521,7 @@ export class TesseraFilter extends TesseraElement {
             e.preventDefault();
             move(e.key === 'ArrowDown' ? 1 : -1);
           } else if (e.key === 'Enter') {
-            if (active) toggle(active.key);
+            if (active) toggle(active);
           } else if (e.key === 'Escape' && this.search) {
             e.stopPropagation();
             this.search = '';
@@ -517,7 +532,7 @@ export class TesseraFilter extends TesseraElement {
       const count = v.count;
       const share = count === undefined || total === null ? null : count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * count) / total));
       return html`<button type="button" part="tick" role="option" id=${`value-${v.code}`} tabindex="-1" ?data-active=${v === active}
-        aria-selected=${chosen.has(v.key) ? 'true' : 'false'} @mousedown=${(e: Event) => e.preventDefault()} @click=${() => toggle(v.key)}>
+        aria-selected=${chosen.has(v.key) ? 'true' : 'false'} @mousedown=${(e: Event) => e.preventDefault()} @click=${() => toggle(v)}>
         <span class="opt">
           <span class="name">${this.suggestionText(v)}</span>
           ${share === null ? nothing : html`<span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span>`}

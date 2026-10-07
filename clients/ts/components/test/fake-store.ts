@@ -156,7 +156,11 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     },
     needShape: spy('needShape'),
     clearSelection: spy('clearSelection'),
-    setArtifactColours: spy('setArtifactColours'),
+    // Published as the real store publishes it, so an element reads back the colours it set.
+    setArtifactColours: (colours: Projections['artifacts']['overrides']) => {
+      calls.push({name: 'setArtifactColours', args: [colours]});
+      store.set('artifacts', {...projections.artifacts, overrides: new Map([...colours].filter(([, ids]) => ids.size > 0))});
+    },
     select: spy('select'),
     extentOf: () => null,
     dataXY: (x, y) => [x, y],
