@@ -1570,6 +1570,9 @@ struct BrowseReq {
     /// The `next` of a previous page.
     #[serde(default)]
     cursor: Option<String>,
+    /// How many colours the client's palette holds: each row then carries this viewer's `slot`.
+    #[serde(default)]
+    palette_size: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1599,6 +1602,8 @@ struct BrowseRowResp {
     parent_ids: Vec<String>,
     /// How many artifacts this principal is served name this one among their parents.
     child_count: u64,
+    /// Null where the request named no palette size.
+    slot: Option<u8>,
 }
 
 fn browse_row(row: tessera_engine::browse::BrowseRow) -> BrowseRowResp {
@@ -1615,6 +1620,7 @@ fn browse_row(row: tessera_engine::browse::BrowseRow) -> BrowseRowResp {
             .map(|id| id.raw().to_string())
             .collect(),
         child_count: row.child_count,
+        slot: row.slot,
     }
 }
 
@@ -1622,7 +1628,7 @@ async fn browse(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
     ApiJson(req): ApiJson<BrowseReq>,
-) -> Result<Json<BrowseResp>, ApiError> {
+) -> Result<Response, ApiError> {
     use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
     // `limit` clamps and `0` refuses, as on `/v1/categories`.
     if req.limit == Some(0) {
@@ -1650,6 +1656,11 @@ async fn browse(
         (None, Some(q)) => BrowseForm::Search(q.clone()),
         (None, None) => BrowseForm::Roots,
     };
+    let palette_size = req
+        .palette_size
+        .map(tessera_engine::check_palette_size)
+        .transpose()
+        .map_err(crate::error::map_engine_error)?;
     let cursor = match &req.cursor {
         None => None,
         Some(text) => Some(BrowseCursor::parse(text).ok_or_else(|| {
@@ -1659,6 +1670,7 @@ async fn browse(
             )
         })?),
     };
+    let refresh = (Arc::clone(&state), Arc::clone(&session));
     let out = state
         .gated(move |state| {
             let meta = state.engine.meta();
@@ -1693,16 +1705,34 @@ async fn browse(
                         filter,
                         limit,
                         cursor,
+                        palette_size,
                     },
                 )
                 .map_err(crate::error::map_engine_error)
         })
         .await?;
-    Ok(Json(BrowseResp {
+    let body = serde_json::to_vec(&BrowseResp {
         artifacts: out.artifacts.into_iter().map(browse_row).collect(),
         parents: out.parents.into_iter().map(browse_row).collect(),
         next: out.next.map(|c| c.encode()),
-    }))
+    })
+    .map_err(|e| ApiError::FailClosed(format!("a browse page did not serialise: {e}")))?;
+    // Weak, so a body a connection still holds keeps no server alive after it stops.
+    let (state, session) = (Arc::downgrade(&refresh.0), refresh.1);
+    drop(refresh.0);
+    let after = crate::stream::AfterSent::new(body, move || {
+        let (Some(state), Ok(runtime)) = (state.upgrade(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        drop(runtime.spawn_blocking(move || {
+            crate::state::refresh_cluster_slots(&state, &session);
+        }));
+    });
+    Ok(Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from_stream(after))
+        .expect("response construction cannot fail"))
 }
 
 /// `POST /v1/artifacts/{tessera_id}`: one artifact's drill-down. A separate route from

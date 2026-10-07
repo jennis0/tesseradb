@@ -153,7 +153,7 @@ def test_the_synced_surface_is_exactly_the_design_s(make):
     synced = {k for k in synced if not k.startswith("_")}  # `_esm` and `_css` are anywidget's
     assert synced == {
         "url", "view", "explorer_layout", "height", "title_field", "artifacts_per_tile",
-        "budget", "budget_min", "budget_max", "cluster_budget", "cluster_budget_min", "cluster_budget_max", "bbox", "layers", "colour_by", "size_by", "size_min", "size_max", "size_scale", "filters",
+        "budget", "budget_min", "budget_max", "cluster_budget", "cluster_budget_min", "cluster_budget_max", "bbox", "layers", "colour_by", "palette", "size_by", "size_min", "size_max", "size_scale", "filters",
         "selected", "selected_artifact", "region",
     }
 
@@ -168,6 +168,16 @@ def test_size_settings_are_synced_and_leave_the_map_s_choice_by_default(make):
     assert m.get_state()["size_scale"] == "rank"
     with pytest.raises(traitlets.TraitError):
         m.size_scale = "square"
+
+
+def test_the_palette_is_synced_and_leaves_the_map_s_choice_by_default(make):
+    assert make(token="t").get_state()["palette"] is None
+    m = make(token="t", palette="kelly")
+    assert m.get_state()["palette"] == "kelly"
+    m.palette = "okabe-ito"
+    assert m.get_state()["palette"] == "okabe-ito"
+    with pytest.raises(traitlets.TraitError):
+        m.palette = "positional"
 
 
 def test_the_point_budget_and_its_range_are_synced_down_with_their_defaults(make):

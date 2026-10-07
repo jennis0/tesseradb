@@ -292,6 +292,7 @@ export function artifact(tesseraId: bigint, over: Partial<Artifact> = {}): Artif
     matched: null,
     highlighted: null,
     target: null,
+    slot: null,
     ...over
   };
 }

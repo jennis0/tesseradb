@@ -100,6 +100,21 @@ slider, which sits beside Most points while a `nested` or `dag` layer is drawn a
 cluster budget when it is let go. The notebook widget takes them as `cluster_budget`,
 `cluster_budget_min` and `cluster_budget_max`.
 
+Clusters are coloured from a palette: Okabe-Ito with 8 colours, Tableau 10 with 10, which is the
+default, Tableau 20 with 20, or Kelly with 22. The store sends the palette's size as
+`palette_size` with every request for artifacts, and the server answers each cluster with a slot
+below it ([annotations](annotations.md#colour-slots)), the same for this viewer at any zoom, box,
+budget or filter. The store colours a cluster with the palette's colour at its slot, and a cluster
+with no slot with the neutral grey. `Store.setPalette` changes the palette. Slots of one size mean
+nothing under another, so the store asks again with the new size, and each cluster keeps the colour
+of the palette its slot was served under until the new slot arrives.
+`Store.setArtifactColours` gives some clusters a host's own colours, by `tessera_id`, over their
+slots. The explorer's display menu lists the four palettes with each one's swatches and size, and
+the field card's swatches take the slot each row of its table carries. The notebook widget takes
+the palette as `palette`, and the Python client passes `palette_size` to every route that reads
+clusters and gives back each cluster's `slot`. `tessera artifacts --palette-size` adds the `slot`
+field at the command line.
+
 Told where the camera is, it works out which requests are worth making and issues them. Told a
 filter changed, it recomposes one expression from every active clause and sends it whole. Given a
 response, it decides which already-held geometry still answers for the view and which needs

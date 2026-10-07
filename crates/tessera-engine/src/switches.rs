@@ -42,6 +42,8 @@ pub(crate) struct TestSwitches {
     pub(crate) aggregate_alone_rows: AtomicU64,
     /// The most terms a flush may carry the dictionary to: [`tessera_authz::MAX_DISTINCT_TERMS`].
     pub(crate) max_distinct_terms: AtomicU64,
+    /// How many visible items cluster centres are taken from: [`crate::slots::SAMPLE`].
+    pub(crate) slot_sample: AtomicU64,
     /// Whether the next row-projection build waits, inside the build, until this is cleared.
     /// The build that takes the hold clears `projection_build_hold_wanted` and waits on
     /// `projection_build_held`, so later builds run.
@@ -191,6 +193,7 @@ impl Default for TestSwitches {
             aggregate_min_chunk_rows: AtomicU64::new(crate::aggregate::MIN_CHUNK_ROWS),
             aggregate_alone_rows: AtomicU64::new(crate::aggregate::ALONE_ROWS),
             max_distinct_terms: AtomicU64::new(tessera_authz::MAX_DISTINCT_TERMS),
+            slot_sample: AtomicU64::new(crate::slots::SAMPLE),
             #[cfg(feature = "fault-injection")]
             projection_build_hold_wanted: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]

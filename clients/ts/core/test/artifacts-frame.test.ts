@@ -1,11 +1,11 @@
 import {describe, expect, it} from 'vitest';
-import {Bool, Dictionary, Field, Float64, List, Table, Uint16, Uint32, Uint64, Utf8, makeData, makeVector, tableToIPC, vectorFromArray} from 'apache-arrow';
+import {Bool, Dictionary, Field, Float64, List, Table, Uint16, Uint32, Uint64, Uint8, Utf8, makeData, makeVector, tableToIPC, vectorFromArray} from 'apache-arrow';
 import {checkArtifactsTrailer, decodeArtifactsFrame} from '../src/decode.js';
 import {refused} from './support.js';
 
 /**
- * One `/v1/artifacts/viewport` frame: seventeen columns at fixed positions, `layer`
- * dictionary-encoded and `tile` last. Frames are built with apache-arrow's own writer, so these
+ * One `/v1/artifacts/viewport` frame: eighteen columns at fixed positions, `layer`
+ * dictionary-encoded and `tile` and `slot` last. Frames are built with apache-arrow's own writer, so these
  * check the decoder's reading of the layout; the captured goldens check the server's framing.
  */
 
@@ -14,7 +14,7 @@ const TEXTS = new List(new Field('item', new Utf8(), true));
 const PARENTS = new List(new Field('item', new Uint64(), false));
 const LAYER = new Dictionary(new Utf8(), new Uint16());
 
-type Row = {layer?: string; id: bigint; rung?: number; matched?: boolean | null; highlighted?: boolean | null; parentIds?: bigint[]; target?: bigint | null; tile?: number | null; centroid?: [number, number] | null};
+type Row = {layer?: string; id: bigint; rung?: number; matched?: boolean | null; highlighted?: boolean | null; parentIds?: bigint[]; target?: bigint | null; tile?: number | null; centroid?: [number, number] | null; slot?: number | null};
 
 function columns(rows: Row[], layerType: unknown = LAYER): Record<string, unknown> {
   return {
@@ -34,7 +34,8 @@ function columns(rows: Row[], layerType: unknown = LAYER): Record<string, unknow
     matched: vectorFromArray(rows.map((r) => r.matched ?? null), new Bool()),
     highlighted: vectorFromArray(rows.map((r) => r.highlighted ?? null), new Bool()),
     target: vectorFromArray(rows.map((r) => r.target ?? null), new Uint64()),
-    tile: vectorFromArray(rows.map((r) => (r.tile === undefined ? 5 : r.tile)), new Uint32())
+    tile: vectorFromArray(rows.map((r) => (r.tile === undefined ? 5 : r.tile)), new Uint32()),
+    slot: vectorFromArray(rows.map((r) => r.slot ?? null), new Uint8())
   };
 }
 
@@ -42,7 +43,7 @@ const frame = (cols: Record<string, unknown>) => tableToIPC(new Table(cols as ne
 
 describe('an artifacts frame', () => {
   it('reads every column by its place, the layer resolved from its dictionary', () => {
-    const decoded = decodeArtifactsFrame(frame(columns([{id: 1n, rung: 2, matched: true, highlighted: false, parentIds: [3n, 9n], target: 4n}])));
+    const decoded = decodeArtifactsFrame(frame(columns([{id: 1n, rung: 2, matched: true, highlighted: false, parentIds: [3n, 9n], target: 4n, slot: 6}])));
     expect(decoded.tile).toBe(5n);
     expect(decoded.artifacts).toEqual([
       {
@@ -57,7 +58,8 @@ describe('an artifacts frame', () => {
         rung: 2,
         matched: true,
         highlighted: false,
-        target: 4n
+        target: 4n,
+        slot: 6
       }
     ]);
   });
@@ -66,9 +68,9 @@ describe('an artifacts frame', () => {
     expect(decodeArtifactsFrame(frame(columns([{id: 1n}], new Utf8()))).artifacts[0]!.layer).toBe('clusters/x');
   });
 
-  it('reads null bits as no question asked, a null centroid as none declared, and a null target as attached to nothing', () => {
+  it('reads null bits as no question asked, a null centroid as none declared, a null target as attached to nothing and a null slot as no palette asked for', () => {
     const [a] = decodeArtifactsFrame(frame(columns([{id: 1n, centroid: null}]))).artifacts;
-    expect([a!.matched, a!.highlighted, a!.target, a!.centroid]).toEqual([null, null, null, null]);
+    expect([a!.matched, a!.highlighted, a!.target, a!.centroid, a!.slot]).toEqual([null, null, null, null, null]);
   });
 
   it('names no tile for a frame of no rows, and none for the treed frame', () => {

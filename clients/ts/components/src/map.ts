@@ -14,7 +14,7 @@ import {assertCompositionMatchesServed, hasValue} from '@tesseradb/client/intern
 import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DensityCounter, TesseraLayer, densityCountAt, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@tesseradb/deck';
 import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, drawnCells, encodingOf, encodingSignature, hoverAt, maxCount, type ContourShape} from '@tesseradb/deck/internal';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
+import type {PaletteName, Quantisation} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf, type PanelState} from './states.js';
@@ -403,18 +403,19 @@ export class TesseraMap extends TesseraElement {
   /** What a drag does: `pan` moves the camera, `box` draws a box selection and `lasso` a freehand one. */
   @property({reflect: true}) accessor mode: 'pan' | 'box' | 'lasso' = 'pan';
   /**
-   * How artifacts are coloured under colour by cluster: `positional` by where each sits about the
-   * extent's centre, which does not change as the view moves, or `spread`, hues spaced evenly over
-   * the served set.
+   * The palette clusters are coloured from under colour by cluster: `okabe-ito`, `tableau10`,
+   * `tableau20` or `kelly`, set on the store (`Store.setPalette`). Each cluster's colour is the
+   * palette's colour at the slot the server gives it. Unset, the store's palette stands, which is
+   * Tableau 10 until one is chosen.
    */
-  @property() accessor palette: PaletteKind = 'positional';
+  @property() accessor palette: PaletteName | '' = '';
   /** The level to colour and label a nested layer at. Unset, the deepest level served. */
   @property({type: Number, attribute: 'cluster-level'}) accessor clusterLevel: number | null = null;
   /** A deck.gl layer drawn under the points, such as a basemap, in the map's 512-unit world. */
   @property({attribute: false}) accessor basemap: Layer | null = null;
   /**
    * The ground the map draws on, `light` or `dark`, where it differs from the page's, such as a
-   * light basemap under a dark page. The labels and the positional palette follow it, and the
+   * light basemap under a dark page. The labels and the density colours follow it, and the
    * toolbar and panels follow the page. Unset, the host's `color-scheme` decides, else the system
    * preference.
    */
@@ -658,10 +659,8 @@ export class TesseraMap extends TesseraElement {
         if (this.clusterBudget > 0) s.setClusterBudget(this.clusterBudget);
         else if ((changed.get('clusterBudget') ?? 0) > 0) s.setClusterBudget(null);
       }
-      if (changed.has('palette')) s.setPalette(this.palette);
+      if (changed.has('palette') && this.palette !== '') s.setPalette(this.palette);
       if (changed.has('tooltipFields') || changed.has('titleField')) this.askPointColumns(s);
-      // The ground also sets the positional palette's lightness in the store.
-      if (changed.has('ground')) s.setScheme(this.scheme());
       this.pushColouring(s, changed);
     }
     if (changed.has('density') || changed.has('densityResolution')) this.pushDensity();
@@ -729,7 +728,7 @@ export class TesseraMap extends TesseraElement {
   }
 
   /** The ground: `ground` if set, else the host's `color-scheme`, else the system preference. */
-  private scheme(): PaletteScheme {
+  private scheme(): 'light' | 'dark' {
     if (this.ground === 'light' || this.ground === 'dark') return this.ground;
     if (typeof getComputedStyle === 'undefined') return 'dark';
     const declared = getComputedStyle(this).colorScheme ?? '';
@@ -798,12 +797,11 @@ export class TesseraMap extends TesseraElement {
       this.paint();
       return;
     }
-    store.setScheme(this.scheme());
     if (this.colourBy !== '') store.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
     if (this.layers) store.setLayers(this.layers);
     if (this.budget > 0) store.setBudget(this.budget);
     if (this.clusterBudget > 0) store.setClusterBudget(this.clusterBudget);
-    if (this.palette !== 'positional') store.setPalette(this.palette);
+    if (this.palette !== '') store.setPalette(this.palette);
     this.pushColouring(store);
     this.pushSizing(store);
     this.pushSizeBy(store);

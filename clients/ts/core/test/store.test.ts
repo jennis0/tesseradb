@@ -7,6 +7,7 @@ import {FRAME_POINTS, FRAME_TRAILER, FrameReader} from '../src/frame.js';
 import type {FilterDraft} from '../src/filters.js';
 import {withMember} from '../src/members.js';
 import {artifactName} from '../src/names.js';
+import {NEUTRAL, PALETTES} from '../src/palette.js';
 import type {Artifact, Layer, MembershipColumn, Meta, ViewportArtifactsRequest, ViewportPart, ViewportResponse} from '../src/types.js';
 import {FakeWorker, artifact, fakeClock, fixture, fakeScheduler, framed, layer, meta, response as responseOf, servedResult, tile, tileAnswers, view, scalar, camera, settle} from './support.js';
 import {dataToWorldXY, mortonOfTile, tileXY} from '../src/coords.js';
@@ -868,8 +869,8 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     const held = first.get(one);
     expect(first.size).toBe(2);
 
-    // A settle naming a third artifact. A positional colour depends on one centroid, so the map is
-    // extended in place: the same object, with the existing colours as the same objects.
+    // A settle naming a third artifact. A colour depends on its own slot, so the map is extended in
+    // place: the same object, with the existing colours as the same objects.
     served = [...served, cluster(3n, [5, 6])];
     store.setView(camera(store.frame(), [50, 100, 100, 200], 800, 800));
     await clock.advance(600);
@@ -883,10 +884,95 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     expect(next.get(one)).toBe(held);
     expect(next.get(table.ordinalOf('clusters/a', 3n))).toBeDefined();
 
-    // A palette change moves every colour, so the map is rebuilt.
-    store.setPalette('spread');
-    expect(store.get('artifacts').colours).not.toBe(first);
+    // A palette change recolours nothing by itself: each colour moves as its new slot arrives.
+    store.setPalette('kelly');
+    expect(store.get('artifacts').colours).toBe(first);
+    await clock.advance(1);
+    scheduler.flush();
     expect(store.get('artifacts').colours.size).toBe(3);
+  });
+});
+
+describe('clusters are coloured by the slot the server gives each, in the chosen palette', () => {
+  /** A store drawing `clusters/a`, whose artifacts 1, 2 and 3 are served with slot `id mod size` and 4 with none. */
+  async function slotted(options: Partial<StoreOptions> = {}) {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const cluster = (id: bigint, req: ViewportArtifactsRequest) =>
+      artifact(id, {layer: 'clusters/a', key: `c${id}`, maskedCount: 5n, slot: id === 4n || req.paletteSize === undefined ? null : Number(id) % req.paletteSize});
+    const {client, viewportArtifacts} = fakeClient(() => response('ck'), META, (_tile, req) => [1n, 2n, 3n, 4n].map((id) => cluster(id, req)));
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}, ...options});
+    store.setLayers(['clusters/a']);
+    store.setView(camera(META.views[0]!.quantisation, [0, 0, 100, 200], 800, 800));
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    const colourOf = (id: bigint) => store.get('artifacts').colours.get(store.get('artifacts').table.ordinalOf('clusters/a', id));
+    return {store, clock, scheduler, viewportArtifacts, colourOf};
+  }
+
+  it('asks with the palette’s size and colours each artifact from its slot, one served with none neutral', async () => {
+    const {store, viewportArtifacts, colourOf} = await slotted();
+    expect(store.get('artifacts').palette).toBe('tableau10');
+    expect(viewportArtifacts.mock.calls.every((call) => call[1].paletteSize === 10)).toBe(true);
+    expect(colourOf(1n)).toEqual(PALETTES.tableau10.colours[1]);
+    expect(colourOf(3n)).toEqual(PALETTES.tableau10.colours[3]);
+    expect(colourOf(4n)).toEqual(NEUTRAL);
+  });
+
+  it('starts on the palette the options name', async () => {
+    const {viewportArtifacts, colourOf} = await slotted({palette: 'okabe-ito'});
+    expect(viewportArtifacts.mock.calls.every((call) => call[1].paletteSize === 8)).toBe(true);
+    expect(colourOf(2n)).toEqual(PALETTES['okabe-ito'].colours[2]);
+  });
+
+  it('puts a colour chosen by tessera_id over the slot’s, until a later call leaves it out', async () => {
+    const {store, colourOf} = await slotted();
+    const chosen = [1, 2, 3, 255] as const;
+    store.setArtifactColours(new Map([[2n, chosen], [4n, chosen]]));
+    expect(colourOf(2n)).toEqual(chosen);
+    expect(colourOf(4n)).toEqual(chosen);
+    expect(colourOf(1n)).toEqual(PALETTES.tableau10.colours[1]);
+    expect(store.get('artifacts').overrides.get(2n)).toEqual(chosen);
+    store.setArtifactColours(new Map());
+    expect(colourOf(2n)).toEqual(PALETTES.tableau10.colours[2]);
+    expect(colourOf(4n)).toEqual(NEUTRAL);
+  });
+
+  it('asks again with the new size when the palette changes, keeping each held colour until its new slot lands', async () => {
+    const {store, clock, scheduler, viewportArtifacts, colourOf} = await slotted();
+    const before = viewportArtifacts.mock.calls.length;
+    // Every colour artifact 3 is published in, from the change until the new frame has landed.
+    const seen: unknown[] = [];
+    const unsubscribe = store.subscribe(() => seen.push(colourOf(3n)));
+    store.setPalette('okabe-ito');
+    expect(store.get('artifacts').palette).toBe('okabe-ito');
+    // Nothing held is dropped: the artifacts stay served, each in the palette its slot was served for.
+    expect(store.get('artifacts').served.length).toBeGreaterThan(0);
+    expect(colourOf(3n)).toEqual(PALETTES.tableau10.colours[3]);
+    await clock.advance(1);
+    scheduler.flush();
+    unsubscribe();
+    const asked = viewportArtifacts.mock.calls.slice(before);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((call) => call[1].paletteSize === 8)).toBe(true);
+    expect(colourOf(1n)).toEqual(PALETTES['okabe-ito'].colours[1]);
+    expect(colourOf(3n)).toEqual(PALETTES['okabe-ito'].colours[3]);
+    // No publish between drew it grey, or in anything but the old colour or the new.
+    expect(seen.length).toBeGreaterThan(0);
+    for (const c of seen) expect([PALETTES.tableau10.colours[3], PALETTES['okabe-ito'].colours[3]]).toContainEqual(c);
+    // A name no palette has changes nothing.
+    store.setPalette('positional' as never);
+    expect(store.get('artifacts').palette).toBe('okabe-ito');
+  });
+
+  it('keeps the colour of a cluster the points alone name, in its old palette, until it is read again', async () => {
+    const {store, colourOf} = await slotted();
+    // A point's tag naming artifact 4 with a slot from Tableau 10, as a lookup by identifier left it.
+    const table = store.get('artifacts').table as unknown as {take(refs: unknown[]): Uint32Array};
+    table.take([{tesseraId: 9n, layer: 'clusters/a', parentIds: [], slot: {slot: 6, paletteSize: 10}}]);
+    store.setPalette('kelly');
+    expect(colourOf(9n)).toEqual(PALETTES.tableau10.colours[6]);
   });
 });
 

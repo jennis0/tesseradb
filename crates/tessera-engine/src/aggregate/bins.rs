@@ -308,6 +308,7 @@ impl Bins {
                 .map(|b| Key::Bin(edges.edge(b), edges.edge(b + 1)))
                 .collect(),
             titles: None,
+            slots: None,
             distinct: set.bins.iter().filter(|&&n| n > 0).count() as u64,
             sample,
         })

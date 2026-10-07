@@ -32,7 +32,7 @@ function artifacts(): ArtifactsProjection {
     servedOrdinals: new Set(),
     shapes: new Map(),
     colours: new Map(),
-    palette: 'positional',
+    palette: 'tableau10', overrides: new Map(),
     coverage: {current: 0, stale: 0}
   };
 }

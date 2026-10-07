@@ -2,6 +2,7 @@ import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit'
 import {property, state} from 'lit/decorators.js';
 import {
   CLUSTER_PREFIX,
+  artifactColour,
   artifactName,
   colourLayers,
   composeFilters,
@@ -18,9 +19,9 @@ import {
   type FilterDraft,
   type Layer,
   type Meta,
+  type PaletteName,
   type Store
 } from '@tesseradb/client';
-import {NEUTRAL} from '@tesseradb/client/internal';
 import {CATEGORY_PALETTES, RAMPS, type Colouring} from '@tesseradb/deck';
 import {UNMAPPED, colourOfFraction, colourOfRank, css as rgb, fractionOf, hexOf, lighter, rgbOfHex} from '@tesseradb/deck/internal';
 import {HeldAggregate, artifactGroupings, countedByLevel, countsByKey, listedGroups} from './aggregate.js';
@@ -752,13 +753,12 @@ export class TesseraFieldCard extends TesseraElement {
 
   /**
    * Draw again only when what the card reads changed: its counts, the clauses, the colouring, the
-   * view, or the colours of a layer's clusters, and on a cluster card the clusters the map draws,
-   * whose swatches it reads. The store publishes as each frame arrives, which changes none of these.
+   * view, or the palette and chosen colours a layer's clusters take. The store publishes as each
+   * frame arrives, which changes none of these.
    */
   protected override onStoreChange(): void {
     const s = this.resolvedStore;
-    const drawn = s && this.layerName !== null ? [s.get('artifacts').served, s.get('artifacts').colourServed] : [];
-    const now = s ? [s.get('aggregates'), s.get('filters'), s.get('legend'), s.get('meta'), s.get('view').id, s.get('artifacts').colours, ...drawn] : [];
+    const now = s ? [s.get('aggregates'), s.get('filters'), s.get('legend'), s.get('meta'), s.get('view').id, s.get('artifacts').palette, s.get('artifacts').overrides] : [];
     if (now.length === this.drawnFrom.length && now.every((v, i) => v === this.drawnFrom[i])) return;
     this.drawnFrom = now;
     super.onStoreChange();
@@ -851,19 +851,20 @@ export class TesseraFieldCard extends TesseraElement {
 
   /**
    * The grouping ranking a layer's `top` clusters: at the cut the map draws on a `nested` or `dag`
-   * layer, else at the card's level.
+   * layer, else at the card's level. Each row carries its slot in the palette the map colours
+   * clusters from, which its swatch is coloured from.
    */
   private ranked(layer: Layer, top: number): AggregateSpec['groupings'][number] {
-    if (layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag') return {by: {layer: layer.name, top, cut: 'drawn'}};
+    if (layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag') return {by: {layer: layer.name, top, cut: 'drawn', paletteSize: 'drawn'}};
     const level = this.levelOf(layer);
-    return {by: {layer: layer.name, ...(level === undefined || !countedByLevel(layer) ? {} : {level}), top}};
+    return {by: {layer: layer.name, ...(level === undefined || !countedByLevel(layer) ? {} : {level}), top, paletteSize: 'drawn'}};
   }
 
   /** The groupings counting `ids` of `layer` by name, leaving room for one more beside them. */
   private namedGroupings(layer: Layer, meta: Meta, ids: bigint[]): AggregateSpec['groupings'] {
     const level = this.levelOf(layer) ?? 0;
     const rows = [...new Set(ids)].map((id) => ({tesseraId: id, rung: this.met.get(id)?.rung ?? level}));
-    return rows.length === 0 ? [] : artifactGroupings(layer, rows, meta.selection).slice(0, meta.selection.maxAggregateGroupings - 1);
+    return rows.length === 0 ? [] : artifactGroupings(layer, rows, meta.selection, 'drawn').slice(0, meta.selection.maxAggregateGroupings - 1);
   }
 
   /**
@@ -1114,17 +1115,25 @@ export class TesseraFieldCard extends TesseraElement {
         swatch: colouring ? this.valueColour(key, legend.categories[this.field] ?? [], legend.ranks[this.field] ?? {}, colours) : null
       }));
     }
-    const layer = this.declaredLayer(s.get('meta'));
+    const {palette, overrides} = s.get('artifacts');
     const titles = new Map<string, string>();
-    for (const t of [...(subject?.result?.tables ?? []), ...(match?.result?.tables ?? [])]) for (const g of listedGroups(t)) if (g.title) titles.set(g.key, g.title);
+    // Each slot with the palette its answer was asked for, which holds while the next is asked for.
+    const slots = new Map<string, {slot: number; palette: PaletteName}>();
+    for (const entry of [subject, match]) {
+      for (const t of entry?.result?.tables ?? []) {
+        for (const g of listedGroups(t)) {
+          if (g.title) titles.set(g.key, g.title);
+          if (g.slot !== null) slots.set(g.key, {slot: g.slot, palette: entry!.palette ?? palette});
+        }
+      }
+    }
     const ids = [...new Set([...named, ...(sub ? [...sub.keys()] : [])])];
     const keys = ids.filter((k) => named.includes(k) || (sub?.get(k) ?? 0) > 0);
     keys.sort((a, b) => Number(named.includes(b)) - Number(named.includes(a)) || (sub?.get(b) ?? 0) - (sub?.get(a) ?? 0) || (all?.get(b) ?? 0) - (all?.get(a) ?? 0));
-    const artifacts = s.get('artifacts');
     return keys.map((key) => {
       const id = BigInt(key);
-      let swatch: string | null = null;
-      if (colouring && layer) swatch = rgb(artifacts.colours.get(artifacts.table.ordinalOf(layer.name, id)) ?? NEUTRAL);
+      const held = slots.get(key);
+      const swatch = colouring ? rgb(artifactColour(held?.palette ?? palette, held?.slot ?? null, overrides.get(id))) : null;
       return {key, name: titles.get(key) ?? this.clauseName(s, id) ?? UNNAMED, path: this.pathOf(id), sub: sub?.get(key) ?? null, all: all?.get(key) ?? null, swatch};
     });
   }

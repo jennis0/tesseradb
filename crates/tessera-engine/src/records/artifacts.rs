@@ -79,6 +79,9 @@ pub struct ArtifactsRequest<'a> {
     pub count: bool,
     /// Properties, by name, in the order their columns are wanted.
     pub fields: &'a [String],
+    /// The palette size the `slot` property is chosen for ([`crate::slots`]); without one, `slot`
+    /// is null.
+    pub palette_size: Option<u8>,
     pub page_rows: Option<u32>,
     pub pages: Option<u32>,
     pub cursor: Option<&'a str>,
@@ -99,6 +102,7 @@ enum Property {
     Centroid,
     Box,
     Shape,
+    Slot,
 }
 
 impl Property {
@@ -113,6 +117,7 @@ impl Property {
             "centroid" => Property::Centroid,
             "box" => Property::Box,
             "shape" => Property::Shape,
+            "slot" => Property::Slot,
             _ => return None,
         })
     }
@@ -206,6 +211,7 @@ struct Row {
     bbox: Option<[f64; 4]>,
     shape: Option<Vec<u8>>,
     matched: Option<u64>,
+    slot: Option<u8>,
 }
 
 /// What an artifact is when the verdict serves it: its entity and identifier, its count, and its
@@ -241,6 +247,9 @@ struct Scope<'a> {
     /// artifact is its child.
     parent: Option<Option<(u32, u32)>>,
     shard: u32,
+    /// This viewer's slots over each level the page reads, where `slot` is named under a palette
+    /// size.
+    slots: Vec<Option<Arc<crate::slots::LevelSlots>>>,
 }
 
 impl Scope<'_> {
@@ -667,6 +676,24 @@ impl ArtifactsPager<'_> {
                     .collect(),
             })
             .collect();
+        let mut slots: Vec<Option<Arc<crate::slots::LevelSlots>>> = Vec::new();
+        if let Some(palette) = self.req.palette_size {
+            if self.properties.contains(&Property::Slot) {
+                for (level, read) in levels.iter().enumerate() {
+                    slots.push(match read {
+                        Some(_) => engine.cluster_slots(
+                            served,
+                            &open.mask,
+                            &layer,
+                            level as u32,
+                            palette,
+                            &dependency_served,
+                        )?,
+                        None => None,
+                    });
+                }
+            }
+        }
         let mut scope = Scope {
             engine,
             open,
@@ -678,6 +705,7 @@ impl ArtifactsPager<'_> {
             filter_rows,
             parent: None,
             shard: generation.bundle.manifest.identity.shard_id,
+            slots,
         };
         if self.req.parent.is_some() {
             scope.parent = Some(parent.and_then(|(level, ordinal, entity)| {
@@ -737,6 +765,13 @@ impl ArtifactsPager<'_> {
             match property {
                 Property::Key => row.key = scope.key(level, ordinal),
                 Property::Level | Property::MaskedCount => {}
+                Property::Slot => {
+                    row.slot = scope
+                        .slots
+                        .get(level as usize)
+                        .and_then(Option::as_ref)
+                        .and_then(|s| s.get(ordinal));
+                }
                 Property::Parents => {
                     let mut ids: Vec<u64> = read
                         .rows
@@ -817,6 +852,7 @@ impl ArtifactsPager<'_> {
                 Property::Centroid => 17,
                 Property::Box => 33,
                 Property::Shape => 5 + row.shape.as_ref().map_or(0, Vec::len),
+                Property::Slot => 2,
             };
         }
         bytes
@@ -907,6 +943,10 @@ impl ArtifactsPager<'_> {
                         b.append_option(row.shape.as_deref());
                     }
                     push("shape", Arc::new(b.finish()), true);
+                }
+                Property::Slot => {
+                    let slots: arrow::array::UInt8Array = rows.iter().map(|r| r.slot).collect();
+                    push("slot", Arc::new(slots), true);
                 }
             }
         }

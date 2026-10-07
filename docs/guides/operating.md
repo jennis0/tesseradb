@@ -163,6 +163,39 @@ widest view with the family level took 1.8, 4.0 and 9.1 seconds for the three vi
 first view at zoom 9, which shows genus and species, took 2.7, 6.2 and 24.5 seconds. Most of the 1%
 viewer's 1.8 seconds went on testing which artifacts lie in each tile, not on the walk.
 
+A viewer's first request for a layer's colours, with a `palette_size`, also costs one pass over
+the layer: the server works out a colour slot for every cluster the viewer is served, over the
+whole layer, one level at a time: the level asked for and, on a `tiered` layer, the levels above
+it, never a deeper one. Where the layer declares a centroid, as a taxonomy does, the pass
+reads the centroids the map fills when it draws the level, so it adds no walk of its own. A
+viewer whose first view of a `tiered` taxonomy is at genus or species therefore also fills the
+counts and centroids of every coarser level, since each level's slots are worked out from its own
+centroids whichever level is asked first. The fill is kept for each grant, so it is paid once
+per grant. These
+figures are from samples, not from a full-scale corpus, each with its files in the page cache and
+for the viewer who sees everything. On a 25,846,007-row sample of the GBIF occurrences, whose
+`tiered` taxonomy layer holds 251,907 taxa in three levels, the pass took 0.26 to 0.28 s for each
+palette size, and 0.62 s in a process that had not yet drawn the layer, since it then also fills
+the three levels' counts and centroids as drawing does. Any route that names a `palette_size`,
+browse and the bulk reads included, fills those same counts and centroids where nothing has yet;
+without a `palette_size` no route fills them for colours. On 1,000,000 Tree of Life images with
+69,872 taxa in seven `tiered` levels it took 0.06 s, and 0.21 s with the fill. The process's peak
+resident memory, mapped files included, was 1.5 GB. *One run each, with `tessera-bench`'s
+`slot_cost`.*
+
+The slots are then held for that credential, layer and palette size, shared by every session
+holding the credential, and read back in under a millisecond. After a deletion, a suppression or
+an unsuppression, an edit, a publication, or a change to the layer's registration or edges, the
+viewer's next request that colours the layer pays the pass again before it is answered, and so
+does every change on a layer whose criterion is a fraction or whose content has a generating set.
+After an ingest, a flush or a growth of a membership on any other layer, the next request is
+answered from the slots held and the server works them out again once that response is sent, on
+at most two sessions at once, so the viewer pays nothing for it.
+
+Browse and a bulk read of `/v1/artifacts` with a `palette_size` work out slots for every level
+whose rows they return, and on a `tiered` layer for the levels above each, filling each level's
+counts and centroids as drawing it would. Without `palette_size` they fill nothing for colours.
+
 A deployment whose viewers fall into a few groups pays the walk a few times for each level. A
 deployment in which every user holds labels of their own, such as a label per document, pays it for
 each user and each level they open.

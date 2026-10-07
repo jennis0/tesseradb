@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BooleanBufferBuilder, DictionaryArray, Float64Array, Int32Array, Int64Array,
-    Int8Array, StringArray, TimestampMicrosecondArray, UInt64Array,
+    Int8Array, StringArray, TimestampMicrosecondArray, UInt64Array, UInt8Array,
 };
 use arrow::buffer::{NullBuffer, ScalarBuffer};
 use arrow::datatypes::{Field as ArrowField, Int32Type, Int8Type, Schema};
@@ -98,6 +98,8 @@ pub(super) struct Groups {
     pub(super) keys: Vec<Key>,
     /// For each listed group, its title, on a field.
     pub(super) titles: Option<Vec<Option<String>>>,
+    /// For each listed artifact, this viewer's slot, where the grouping named a palette size.
+    pub(super) slots: Option<Vec<Option<u8>>>,
     /// The groups with an item in the set, before the cut.
     pub(super) distinct: u64,
     /// On a histogram asked for with a sample size, how it was counted.
@@ -290,8 +292,9 @@ impl Plan {
                 level,
                 pick,
                 cut,
+                palette,
             }) => Outer::Layer(Layer::of(
-                engine, session, generation, view, layer, *level, pick, *cut,
+                engine, session, generation, view, layer, *level, pick, *cut, *palette,
             )?),
         };
         let (area, area_cells) = match grouping.cells {
@@ -568,8 +571,8 @@ impl Plan {
                 bytes += 1 + 16;
             }
             Outer::Layer(_) => {
-                nullable += 1;
-                bytes += 1 + 8;
+                nullable += 2;
+                bytes += 1 + 8 + 1;
             }
             Outer::Field(_) => {
                 nullable += 1;
@@ -651,6 +654,12 @@ impl Plan {
                         let positions = repeated(runs, |g| g.min(listed) as i32).into();
                         push("title", title_column(runs, listed, positions, titles)?, true);
                     }
+                    let slot = |g: u32| {
+                        let slots = groups.slots.as_ref()?;
+                        slots.get(g as usize).copied().flatten()
+                    };
+                    let slots: UInt8Array = repeated(runs, slot).into_iter().collect();
+                    push("slot", Arc::new(slots), true);
                 }
                 Outer::Bins(bins) => {
                     let edge = |g: u32, upper: bool| match groups.keys.get(g as usize) {
@@ -1295,6 +1304,7 @@ impl Groups {
             always: vec![true],
             keys: Vec::new(),
             titles: None,
+            slots: None,
             distinct: 1,
             sample: None,
         }

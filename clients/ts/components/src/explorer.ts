@@ -2,10 +2,10 @@ import {ContextProvider} from '@lit/context';
 import {css, html, nothing, svg, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import type {ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
+import type {ArtifactDetail, ItemDetail, PaletteName, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import {CATEGORY_PALETTES, DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, RAMPS, cellDepth, nearestStop} from '@tesseradb/deck';
-import {CLUSTER_PREFIX, WORLD_SIZE, activeCount, artifactName, colourLayers, emptyDraft} from '@tesseradb/client';
+import {CLUSTER_PREFIX, PALETTES, WORLD_SIZE, activeCount, artifactName, colourLayers, emptyDraft} from '@tesseradb/client';
 import {hasOneLayout, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, colourOfFraction, css as rgb, hexOf} from '@tesseradb/deck/internal';
 import {TesseraElement, columnCaption, emit, shortCount} from './base.js';
@@ -144,10 +144,11 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * point's radius, which `hide-size` leaves out; under a column two sliders set the radii of its
  * smallest and largest value, and a Linear, Log or Rank choice places values between them. Colour:
  * Colour by, which lists None, every layer that can colour (a levelled layer once per level) and
- * the rendered category and number columns; then for a category the palette, and for a number the
- * ramp, Linear or Log and Reverse, unless `hide-palettes` is set. A field card's paint button
- * chooses Colour by too. Density: how density is drawn, at what resolution, in which colours and
- * how strongly. Layers: the layer picker. The display settings are the explorer's properties of
+ * the rendered category and number columns; then for a layer or a category the palette, and for a
+ * number the ramp, Linear or Log and Reverse, unless `hide-palettes` is set. A layer's palette is
+ * the store's (`Store.setPalette`), whose size the clusters' slots are served for. A field card's
+ * paint button chooses Colour by too. Density: how density is drawn, at what resolution, in which
+ * colours and how strongly. Layers: the layer picker. The display settings are the explorer's properties of
  * the same names, passed to its map. `pinned-filters` names the columns whose cards are listed
  * before they hold a clause.
  *
@@ -188,6 +189,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-fold']>} tessera-fold - A field card was folded to one line or opened.
  * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A colour was chosen or reset for one value on a field card.
  * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette, the ramp, its scale or its direction was chosen in the Colour section.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clusterpalettechange']>} tessera-clusterpalettechange - A palette was chosen for a layer's clusters in the Colour section.
  * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - The session expired.
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A field card or chip changed a clause.
@@ -237,8 +239,9 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart colour-menu - The Colour by menu, while it is open.
  * @csspart colour-option - An entry in the Colour by menu, with `data-value` (empty for None,
  *   `cluster:<layer>@<level>` for one level of a levelled layer) and `aria-checked`.
- * @csspart palette - The Palette button, while the points are coloured by a category.
- * @csspart palette-menu - The Palette menu, while it is open.
+ * @csspart palette - The Palette button, while the points are coloured by a layer or a category.
+ * @csspart palette-menu - The Palette menu, while it is open: a row per palette, each a strip of its
+ *   colours, its name and a line saying how many it has.
  * @csspart palette-option - A palette in that menu, with `data-value` and `aria-checked`.
  * @csspart ramp - The Ramp button, while the points are coloured by a number or a date.
  * @csspart ramp-menu - The Ramp menu, while it is open.
@@ -779,6 +782,11 @@ export class TesseraExplorer extends TesseraElement {
   @property({type: Number, attribute: 'density-resolution'}) accessor densityResolution = DEFAULT_DENSITY_CELL_PX;
   /** Passed to the map's `density-scale`; the Scale choice under Resolution in the Layers popover changes it. */
   @property({attribute: 'density-scale'}) accessor densityScale: DensityScale = DEFAULT_DENSITY_SCALE;
+  /**
+   * Passed to the map's `palette`, the palette a layer's clusters are coloured from; the Palette
+   * choice in the Colour section changes it while the points are coloured by a layer.
+   */
+  @property() accessor palette: PaletteName | '' = '';
   /** Passed to the map's `category-palette`. */
   @property({attribute: 'category-palette'}) accessor categoryPalette: CategoryPaletteName | '' = '';
   /** Passed to the map's `ramp`. */
@@ -1073,6 +1081,7 @@ export class TesseraExplorer extends TesseraElement {
           .densityStrength=${this.densityStrength}
           .densityResolution=${this.densityResolution}
           .densityScale=${this.densityScale}
+          .palette=${this.palette}
           .categoryPalette=${this.categoryPalette}
           .ramp=${this.ramp}
           .rampScale=${this.rampScale}
@@ -1547,14 +1556,15 @@ export class TesseraExplorer extends TesseraElement {
     const column = meta?.declaredScalars.find((c) => c.name === colourBy && c.render) ?? null;
     const scales: RampScale[] = ['linear', 'log'];
     const scaleAt = scales.indexOf(colouring.scale);
-    const palette = CATEGORY_PALETTES[colouring.palette];
+    const clusters = colourBy?.startsWith(CLUSTER_PREFIX) ?? false;
+    const palette = s && clusters ? PALETTES[s.get('artifacts').palette] : CATEGORY_PALETTES[colouring.palette];
     const choice = (menu: Menu, label: string, body: TemplateResult, stretch = false) =>
       html`<button part=${({size: 'size-by', colour: 'colour-by', palette: 'palette', ramp: 'ramp'} as const)[menu]} class=${`ramp-choice${stretch ? ' stretch' : ''}`} type="button" aria-haspopup="menu" aria-expanded=${this.menu === menu ? 'true' : 'false'}
         aria-label=${label} ?disabled=${!meta} @click=${() => (this.menu = this.menu === menu ? null : menu)} @keydown=${this.onMenuButtonKey(menu)}>${body}${icon('chev', 12, 1.4)}</button>`;
     const byName = current?.title ?? 'None';
     const palettes =
-      column?.category && !this.hidePalettes
-        ? html`<span>Palette</span>${choice('palette', `Palette: ${palette.title}`, html`<span class="strip">${palette.colours.map((c) => html`<span style=${`background:${hexOf(c)}`}></span>`)}</span><span class="t">${palette.title}</span>`, true)}`
+      (column?.category || clusters) && !this.hidePalettes
+        ? html`<span>Palette</span>${choice('palette', `Palette: ${palette.title}`, html`<span class="strip">${palette.colours.slice(0, 10).map((c) => html`<span style=${`background:${hexOf(c)}`}></span>`)}</span><span class="t">${palette.title}</span>`, true)}`
         : nothing;
     const ramps =
       column && !column.category && !this.hidePalettes
@@ -1611,6 +1621,15 @@ export class TesseraExplorer extends TesseraElement {
       this.level = Number(value.slice(at + 1));
       emit(this, 'tessera-levelchange', {level: this.level});
     }
+  }
+
+  /** Colour a layer's clusters from `palette`, and report it. */
+  private chooseClusterPalette(palette: PaletteName): void {
+    const s = this.resolvedStore;
+    if (!s) return;
+    s.setPalette(palette);
+    this.palette = palette;
+    emit(this, 'tessera-clusterpalettechange', {palette});
   }
 
   /** Change the palette, the ramp, its scale or its direction, and report all four. */
@@ -1734,8 +1753,11 @@ export class TesseraExplorer extends TesseraElement {
       </div>`;
   }
 
-  /** The entries of `menu`, each with what it shows beside its title, and the one chosen. */
-  private menuEntries(menu: Menu): {title: string; entries: {value: string; title: string; kind: string; swatch?: TemplateResult}[]; checked: string; choose: (value: string) => void} {
+  /**
+   * The entries of `menu`, each with what it shows beside its title, and the one chosen. A palette
+   * is a row: its colours, its title and a line under it.
+   */
+  private menuEntries(menu: Menu): {title: string; entries: {value: string; title: string; kind: string; swatch?: TemplateResult; line?: string}[]; checked: string; choose: (value: string) => void} {
     const colouring = colouringOf(this.resolvedStore);
     switch (menu) {
       case 'size':
@@ -1754,16 +1776,27 @@ export class TesseraExplorer extends TesseraElement {
           choose: (value) => this.chooseColour(value)
         };
       }
-      case 'palette':
+      case 'palette': {
+        const strip = (hexes: readonly string[]) => html`<span class="swatches">${hexes.map((c) => html`<span style=${`background:${c}`}></span>`)}</span>`;
+        const s = this.resolvedStore;
+        if (s?.get('legend').colourBy?.startsWith(CLUSTER_PREFIX)) {
+          return {
+            title: 'Palette',
+            entries: (Object.keys(PALETTES) as PaletteName[]).map((name) => ({value: name, title: PALETTES[name].title, kind: '', line: PALETTES[name].description, swatch: strip(PALETTES[name].colours.map(hexOf))})),
+            checked: s.get('artifacts').palette,
+            choose: (value) => this.chooseClusterPalette(value as PaletteName)
+          };
+        }
         return {
           title: 'Palette',
           entries: (Object.keys(CATEGORY_PALETTES) as CategoryPaletteName[]).map((name) => {
             const p = CATEGORY_PALETTES[name];
-            return {value: name, title: p.title, kind: p.colourBlindSafe ? 'Colour-blind safe' : '', swatch: html`<span class="strip">${p.colours.map((c) => html`<span style=${`background:${hexOf(c)}`}></span>`)}</span>`};
+            return {value: name, title: p.title, kind: '', line: `${p.colours.length} colours${p.colourBlindSafe ? ' · colour-blind safe' : ''}`, swatch: strip(p.colours.map(hexOf))};
           }),
           checked: colouring.palette,
           choose: (value) => this.choosePalette({palette: value as CategoryPaletteName})
         };
+      }
       case 'ramp':
         return {
           title: 'Ramp',
@@ -1798,11 +1831,15 @@ export class TesseraExplorer extends TesseraElement {
       items[next]?.focus();
     };
     const at = Math.max(0, entries.findIndex((o) => o.value === checked));
-    return html`<div part=${({size: 'size-menu', colour: 'colour-menu', palette: 'palette-menu', ramp: 'ramp-menu'} as const)[menu]} class=${`size-menu${menu === 'palette' || menu === 'ramp' ? ' wide' : ''}`} popover="manual" role="menu" aria-labelledby="menu-label" @focusout=${this.onMenuFocusOut}>
+    const row = (o: (typeof entries)[number]) =>
+      o.line === undefined
+        ? html`<span class="lead">${o.swatch ?? nothing}<span>${o.title}</span></span><span class="kind">${o.kind}</span>`
+        : html`${o.swatch ?? nothing}<span class="named"><span class="t">${o.title}</span><span class="line">${o.line}</span></span>`;
+    return html`<div part=${({size: 'size-menu', colour: 'colour-menu', palette: 'palette-menu', ramp: 'ramp-menu'} as const)[menu]} class=${`size-menu${menu === 'ramp' ? ' wide' : menu === 'palette' ? ' palettes' : ''}`} popover="manual" role="menu" aria-labelledby="menu-label" @focusout=${this.onMenuFocusOut}>
       <div class="hd" id="menu-label">${title}</div>
       ${entries.map(
         (o, i) => html`<button part=${({size: 'size-option', colour: 'colour-option', palette: 'palette-option', ramp: 'ramp-option'} as const)[menu]} type="button" role="menuitemradio" data-value=${o.value} aria-checked=${o.value === checked ? 'true' : 'false'}
-          tabindex=${i === at ? '0' : '-1'} @click=${() => pick(o.value)} @keydown=${(e: KeyboardEvent) => keys(e, i)}><span class="lead">${o.swatch ?? nothing}<span>${o.title}</span></span><span class="kind">${o.kind}</span></button>`
+          tabindex=${i === at ? '0' : '-1'} @click=${() => pick(o.value)} @keydown=${(e: KeyboardEvent) => keys(e, i)}>${row(o)}</button>`
       )}
     </div>`;
   }

@@ -37,10 +37,17 @@ export type ArtifactEntry = {
   rung: number;
   /**
    * The artifact's centroid in 32-bit grid units, as the first response that carried one gave it,
-   * or `null`. A positional colour depends on this alone, so an entry can be coloured whether or
-   * not the current view served it.
+   * or `null`.
    */
   centroid: readonly [number, number] | null;
+  /**
+   * The artifact's palette slot, as the latest response that carried one gave it, or `null`. Its
+   * colour depends on this and {@link paletteSize} alone, so an entry can be coloured whether or
+   * not the current view served it.
+   */
+  slot: number | null;
+  /** The `palette_size` {@link slot} was served under, or `null` where no response carried a slot. */
+  paletteSize: number | null;
 };
 
 /** An artifact as a holder hands it to {@link SessionArtifactTable.take}. */
@@ -55,6 +62,11 @@ export type ArtifactRef = {
   centroid?: readonly [number, number] | null;
   /** Its `rung` from the response. Defaults to `0`, the value for a flat layer's artifacts and a tree's roots. */
   rung?: number;
+  /**
+   * Its slot from a response that asked with `palette_size`, and that size. Left out where the
+   * response carried none, as a point's membership does.
+   */
+  slot?: {slot: number | null; paletteSize: number};
 };
 
 /**
@@ -70,8 +82,8 @@ export const NO_ORDINAL = 0;
  *
  * - `named`: the ordinal was assigned. It is on no other ordinal's parent chain yet, so only its
  *   own derived value moved; a link that puts it on one is reported as the child's `linked`.
- * - `placed`: a centroid arrived for an ordinal already named, so its colour moved, and every value
- *   resolved through it.
+ * - `placed`: a centroid or a slot arrived for an ordinal already named, or its slot changed, so its
+ *   colour moved, and every value resolved through it.
  * - `linked`: a parent link was set on an entry that existed before the batch, so its descendants
  *   resolve differently.
  * - `freed`: the last reference went and the slot returned to the free list.
@@ -111,8 +123,8 @@ function keyOf(layer: string, tesseraId: bigint): string {
  */
 export interface ArtifactTable {
   /**
-   * How many times the table has changed: when an ordinal is named or freed, a centroid arrives, a
-   * parent link changes, or the table is cleared. A value derived from the table is current while
+   * How many times the table has changed: when an ordinal is named or freed, a centroid or a slot
+   * arrives, a parent link changes, or the table is cleared. A value derived from the table is current while
    * this has not moved. Compare for equality only.
    */
   readonly version: number;
@@ -244,7 +256,7 @@ export class SessionArtifactTable implements ArtifactTable {
    * hold, and returns their ordinals in order. Each ref's parent links are set to the parents the
    * table holds, in the ref's order. Links already held survive a batch that carries the child
    * alone or resolves only some of its parents. A centroid for an entry that had none is recorded,
-   * and so is a `rung` for an entry named without one.
+   * and so is a `rung` for an entry named without one, and a slot that differs from the one held.
    */
   take(refs: readonly ArtifactRef[]): Uint32Array {
     const ordinals = new Uint32Array(refs.length);
@@ -256,7 +268,15 @@ export class SessionArtifactTable implements ArtifactTable {
       let ordinal = this.ordinals.get(key);
       if (ordinal === undefined) {
         ordinal = this.free.pop() ?? this.entries.length;
-        this.entries[ordinal] = {tesseraId: ref.tesseraId, layer: ref.layer, parentOrdinals: [], rung: ref.rung ?? 0, centroid: ref.centroid ?? null};
+        this.entries[ordinal] = {
+          tesseraId: ref.tesseraId,
+          layer: ref.layer,
+          parentOrdinals: [],
+          rung: ref.rung ?? 0,
+          centroid: ref.centroid ?? null,
+          slot: ref.slot?.slot ?? null,
+          paletteSize: ref.slot?.paletteSize ?? null
+        };
         this.refs[ordinal] = 0;
         this.ordinals.set(key, ordinal);
         if (ref.rung === undefined) this.unranked.add(ordinal);
@@ -264,8 +284,13 @@ export class SessionArtifactTable implements ArtifactTable {
         this.record(ordinal, 'named');
       } else {
         if (ref.centroid && !this.entries[ordinal]!.centroid) {
-          // A centroid arriving late is a colour arriving late, on the same identity.
           this.entries[ordinal] = {...this.entries[ordinal]!, centroid: ref.centroid};
+          this.record(ordinal, 'placed');
+        }
+        const held = this.entries[ordinal]!;
+        if (ref.slot && (ref.slot.slot !== held.slot || ref.slot.paletteSize !== held.paletteSize)) {
+          // A slot arriving late, or under another palette size, is a colour arriving late.
+          this.entries[ordinal] = {...held, slot: ref.slot.slot, paletteSize: ref.slot.paletteSize};
           this.record(ordinal, 'placed');
         }
         if (ref.rung !== undefined && this.unranked.delete(ordinal) && ref.rung !== this.entries[ordinal]!.rung) {

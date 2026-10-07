@@ -1008,6 +1008,9 @@ paths:
           authored shape whole, as `POST /v1/artifacts/{tessera_id}` serves it. Every ring is
           closed and holds at least four points; a hull over one or two members, or over members
           on one line, is a zero-area polygon over their positions, repeated.
+        - `slot`: `uint8`, this principal's palette slot for the artifact among `palette_size`
+          colours, as `POST /v1/artifacts/viewport` serves it; null where the request names no
+          `palette_size`, and for an artifact holding no member this principal can see.
 
         **Cursor.** Bound to the route, the view and its incarnation, the layer as it was
         registered, the `level` named and the credential that received it. A layer dropped and
@@ -1122,10 +1125,11 @@ paths:
         sampling, as one frame with no tile. `rung` there is the depth in that frame's own parent
         links.
 
-        **Columns.** Seventeen, at fixed positions: `layer` (dictionary-encoded), `tessera_id`,
+        **Columns.** Eighteen, at fixed positions: `layer` (dictionary-encoded), `tessera_id`,
         `key`, `masked_count`, `centroid_x`, `centroid_y`, `box_min_x`, `box_min_y`, `box_max_x`,
-        `box_max_y`, `content`, `parent_ids`, `rung`, `matched`, `highlighted`, `target`, and
-        `tile` (`uint32`, the tile's Morton prefix at `zoom`). A null in a geometry column means
+        `box_max_y`, `content`, `parent_ids`, `rung`, `matched`, `highlighted`, `target`, `tile`
+        (`uint32`, the tile's Morton prefix at `zoom`) and `slot` (`uint8`, null where the request
+        names no `palette_size`; see **Slots**). A null in a geometry column means
         the layer declares no such property or the request asked for none. `parent_ids` names the
         parents that are rows of the same frame. `target` is the `tessera_id` of the artifact a row
         is attached to, such as the cluster a label names, in the same frame or the treed frame;
@@ -1137,6 +1141,20 @@ paths:
         request carries no such expression, and a label takes its target's. A filter changes
         nothing else: the same artifacts are served with the same counts, filtered or not. No
         frame carries a shape; `POST /v1/artifacts/{tessera_id}` serves an artifact's.
+
+        **Slots.** With `palette_size`, every row carries `slot`, a number below it that a client
+        maps to a colour. It is this principal's and fixed for them: worked out once over every
+        artifact of the layer they are served with a member they can see, so that artifacts drawn
+        beside each other differ, and the same at any zoom, box, budget or filter, in every frame
+        and on every route that serves the artifact. A child with the most visible members keeps
+        its parent's slot where no neighbour holds it. A change moves the slots of the artifacts
+        beside what it changed and, where it changes which child is a parent's heir, of that child
+        and its neighbours, and then at each depth below of the children of every artifact whose
+        slot moved and of the artifacts drawn beside them: a reach that widens by a ring of
+        neighbours a depth. A deletion, a suppression or a publication is answered with slots worked
+        out over it, and so is any change on a layer whose criterion is a fraction or whose content
+        has a generating set; on any other layer an ingest or a growth of a membership is answered
+        with the slots held until they are worked out again after that response.
 
         Subject to its own admission, `serve.artifact_admission`. Cancelled between tiles when the
         client goes away.
@@ -1514,7 +1532,10 @@ paths:
         `dictionary<int32, utf8>`, or an artifact's `tessera_id` as `uint64`; null on `rest` and
         `none`. `title` (`dictionary<int32, utf8>`, with `by` on a field or a layer): a value's
         title as `/v1/categories` gives it, or an artifact's name as `/v1/artifacts/browse` gives
-        it to this principal; null where it has none. `lower` and `upper` (with `bins`, in
+        it to this principal; null where it has none. `slot` (`uint8`, with `by` on a layer): this
+        principal's palette slot for the artifact among the grouping's `palette_size` colours, as
+        `POST /v1/artifacts/viewport` serves it; null on `rest` and `none` and where the grouping
+        names no `palette_size`. `lower` and `upper` (with `bins`, in
         place of `key` and `title`): the bin's edges, `int64` on a signed integer field, `uint64` on
         an unsigned one, `float64` on a float field and on an integer field whose `range` has a
         fractional bound, and `timestamp[us, UTC]` on a timestamp field; null on `rest` and `none`.
@@ -5067,6 +5088,14 @@ components:
           type: integer
           minimum: 0
           description: The most artifacts the treed frame holds, met by serving ancestors in place of their descendants; without effect on any other layer. Unbounded when absent.
+        palette_size:
+          $ref: "#/components/schemas/PaletteSize"
+
+    PaletteSize:
+      type: integer
+      minimum: 2
+      maximum: 32
+      description: How many colours the client's palette holds. Each artifact then carries `slot`, this principal's slot for it among them, the same on every route; see `POST /v1/artifacts/viewport`'s **Slots**. Absent serves `slot` as null. Outside 2 to 32 is `422`. On a level whose layer declares a centroid or a box and that is served from its column, the slots are worked out from the centroids the artifacts viewport fills when it draws the level; with `palette_size`, every route fills that same entry where no request has, so browse, a bulk read and an aggregate grouping without `cut` serve the slots the viewport serves. Without `palette_size` no route fills it for slots. Browse and `POST /v1/artifacts` work out slots for every level whose rows they return, and on a `tiered` layer for the levels above each, so the first such request over a level pays the fill drawing it would.
 
     BrowseRequest:
       type: object
@@ -5104,6 +5133,8 @@ components:
         cursor:
           type: string
           description: A previous page's `next`, unchanged. Opaque; it carries a count and an identifier this principal was already served.
+        palette_size:
+          $ref: "#/components/schemas/PaletteSize"
 
     BrowseResponse:
       type: object
@@ -5122,7 +5153,7 @@ components:
 
     BrowseRow:
       type: object
-      required: [tessera_id, masked_count, rung, parent_ids, child_count]
+      required: [tessera_id, masked_count, rung, parent_ids, child_count, slot]
       properties:
         tessera_id:
           type: string
@@ -5150,6 +5181,11 @@ components:
           type: integer
           minimum: 0
           description: How many artifacts this principal is served name this one among their parents, which is how many rows the children form with this artifact as `parent` serves across its pages. A child this principal is not served is not counted. `0` for a leaf, and on a `flat` or `stacked` layer, which have no links. Not changed by `filters`.
+        slot:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 31
+          description: This principal's palette slot for the artifact, as `POST /v1/artifacts/viewport` serves it. Null where the request names no `palette_size`, and for an artifact holding no member this principal can see.
 
     FilterExpr:
       description: |
@@ -5420,8 +5456,10 @@ components:
           type: array
           items:
             type: string
-            enum: [key, level, parents, target, masked_count, content, centroid, box, shape]
+            enum: [key, level, parents, target, masked_count, content, centroid, box, shape, slot]
           description: Properties to return, each once, in this order.
+        palette_size:
+          $ref: "#/components/schemas/PaletteSize"
         page_rows:
           type: integer
           minimum: 1
@@ -5654,6 +5692,8 @@ components:
               description: At most `selection.max_aggregate_top`.
             cut:
               $ref: "#/components/schemas/AggregateCut"
+            palette_size:
+              $ref: "#/components/schemas/PaletteSize"
         - type: object
           additionalProperties: false
           required: [layer, artifacts]
@@ -5670,6 +5710,8 @@ components:
                     minimum: 0
                   - type: string
                     pattern: "^[0-9]+$"
+            palette_size:
+              $ref: "#/components/schemas/PaletteSize"
 
     AggregateCut:
       type: object

@@ -228,6 +228,8 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // The detail names the column the caller sent and the view, whose render columns
         // `/v1/meta` publishes.
         EngineError::PointRowsRefused(detail) => ApiError::Contract(detail),
+        // Names only the number the caller sent.
+        palette @ EngineError::PaletteRefused(_) => ApiError::Contract(palette.to_string()),
         // The detail names columns and families, which `/v1/meta` publishes to every principal.
         // `FilterRefused` is an unreadable artefact and stays a 500.
         EngineError::FilterMalformed(detail) => ApiError::Contract(detail),

@@ -757,6 +757,16 @@ pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
 /// extractors in order, so a bad token is refused before the path, query or body is read.
 pub struct ViewerSession(pub Arc<Session>);
 
+/// Rebuild the cluster slots a request of `session` answered from slots held over a corpus that
+/// has since grown. Called once the response is sent, so the rebuild delays no viewer.
+pub(crate) fn refresh_cluster_slots(state: &AppState, session: &Session) {
+    if state.engine.cluster_slots_stale(session) {
+        if let Err(e) = state.engine.refresh_cluster_slots(session) {
+            tracing::debug!(error = %e, "cluster slots were not rebuilt");
+        }
+    }
+}
+
 impl axum::extract::FromRequestParts<Arc<AppState>> for ViewerSession {
     type Rejection = ApiError;
 

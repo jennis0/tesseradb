@@ -157,7 +157,7 @@ function pairKey(layer: string, level: number): string {
 }
 
 /** One held tile: the rows its frame carried and the (layer, level) pairs it answered. */
-type HeldTile = {rows: Artifact[]; answered: Set<string>; usedAt: number};
+type HeldTile = {rows: Artifact[]; answered: Set<string>; usedAt: number; paletteSize: number | undefined};
 
 /** What a view needs: its tiles, centre first, and the pairs and layers it is asked over. */
 type Want = {
@@ -224,6 +224,8 @@ export type ArtifactChannelOptions = {
   perTile: number | null;
   /** The treed frame's `budget`. Omitted, the request names none and the cut is unbounded. */
   budget?: number;
+  /** The request's `palette_size`, so each artifact carries its slot. Omitted, the request names none. */
+  paletteSize?: number;
   /** The most tiles held. */
   heldTiles: number;
   /** Whether to fetch the ring and the parent depth at idle. */
@@ -258,6 +260,8 @@ export class ArtifactChannel {
   private view: NotedView | null = null;
   /** The treed frame's `budget`; `undefined` asks for the finest cut. */
   private budget: number | undefined;
+  /** The request's `palette_size`; `undefined` asks for no slots. */
+  private paletteSize: number | undefined;
   private readonly clock: ArtifactChannelClock;
   private readonly settleMs: number;
   private readonly idleMs: number;
@@ -295,6 +299,7 @@ export class ArtifactChannel {
     this.table = opts.table ?? null;
     this.declarations = new Map((opts.declarations ?? []).map((l) => [l.name, l]));
     this.budget = opts.budget;
+    this.paletteSize = opts.paletteSize;
   }
 
   /**
@@ -318,6 +323,22 @@ export class ArtifactChannel {
     });
     if (this.view && walked) {
       this.cancelPrefetch();
+      if (this.timer) this.clock.cancel(this.timer);
+      this.timer = null;
+      void this.request();
+    }
+  }
+
+  /**
+   * Ask for slots in a palette of `size` colours, and ask again for the noted view. What is held
+   * stays drawn, each artifact in the palette its slot was served for, until a frame of the new
+   * size replaces it; a held tile of another size counts as missing.
+   */
+  setPaletteSize(size: number | undefined): void {
+    if (size === this.paletteSize) return;
+    this.paletteSize = size;
+    this.looked.clear();
+    if (this.view && this.state.layers.length > 0) {
       if (this.timer) this.clock.cancel(this.timer);
       this.timer = null;
       void this.request();
@@ -457,14 +478,21 @@ export class ArtifactChannel {
 
   /**
    * Names a frame's rows on the session table, one reference per distinct artifact held. Every row
-   * is taken, so an artifact already named learns this frame's parent links and centroid; the
-   * reference a held one already had is given back at once.
+   * is taken, so an artifact already named learns this frame's parent links, centroid and slot,
+   * the slot under `paletteSize`, the size the frame was asked with; the reference a held one
+   * already had is given back at once.
    */
-  private name(rows: readonly Artifact[]): void {
+  private name(rows: readonly Artifact[], paletteSize: number | undefined): void {
     const table = this.table;
-    const ordinals = table
-      ? table.take(rows.map((a): ArtifactRef => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, centroid: a.centroid, rung: a.rung})))
-      : new Uint32Array(rows.length);
+    const ref = (a: Artifact): ArtifactRef => ({
+      tesseraId: a.tesseraId,
+      layer: a.layer,
+      parentIds: a.parentIds,
+      centroid: a.centroid,
+      rung: a.rung,
+      ...(paletteSize === undefined ? {} : {slot: {slot: a.slot, paletteSize}})
+    });
+    const ordinals = table ? table.take(rows.map(ref)) : new Uint32Array(rows.length);
     const extra: number[] = [];
     rows.forEach((a, i) => {
       const held = this.named.get(keyOf(a));
@@ -538,7 +566,7 @@ export class ArtifactChannel {
     if (want.pairs.size === 0) return [];
     return want.tiles.filter((tile) => {
       const held = this.tiles.get(tileKey(want.filter, want.depth, tile));
-      if (!held) return true;
+      if (!held || held.paletteSize !== this.paletteSize) return true;
       for (const pair of want.pairs) if (!held.answered.has(pair)) return true;
       return false;
     });
@@ -584,13 +612,13 @@ export class ArtifactChannel {
   }
 
   /** Holds one tile's frame, answering `pairs`, in place of what was held for it. */
-  private holdTile(want: Want, tile: bigint, rows: Artifact[]): void {
+  private holdTile(want: Want, tile: bigint, rows: Artifact[], paletteSize: number | undefined): void {
     const key = tileKey(want.filter, want.depth, tile);
     const before = this.tiles.get(key);
     const kept = rows.filter((a) => want.pairs.has(pairKey(a.layer, a.rung)));
-    this.name(kept);
+    this.name(kept, paletteSize);
     if (before) this.unname(before.rows);
-    this.tiles.set(key, {rows: kept, answered: new Set(want.pairs), usedAt: ++this.uses});
+    this.tiles.set(key, {rows: kept, answered: new Set(want.pairs), usedAt: ++this.uses, paletteSize});
   }
 
   /** Evicts the least recently used tiles past the cap, never one of `protect`'s. */
@@ -618,6 +646,7 @@ export class ArtifactChannel {
     let landed = 0;
     const walkedLayers = new Set(want.walked);
     const fresh: Artifact[] = [];
+    const paletteSize = this.paletteSize;
     await this.client.viewportArtifacts(
       token,
       {
@@ -628,7 +657,8 @@ export class ArtifactChannel {
         ...(want.levels === undefined ? {} : {levels: want.levels}),
         perTile: this.opts.perTile!,
         ...(want.expression === null ? {} : {filters: want.expression}),
-        ...(walked && this.budget !== undefined ? {budget: this.budget} : {})
+        ...(walked && this.budget !== undefined ? {budget: this.budget} : {}),
+        ...(paletteSize === undefined ? {} : {paletteSize})
       },
       {
         signal,
@@ -649,10 +679,10 @@ export class ArtifactChannel {
           }
           const own = frame.artifacts.filter((a) => walkedLayers.has(a.layer));
           if (walked && own.length > 0) {
-            this.name(own);
+            this.name(own, paletteSize);
             fresh.push(...own);
           }
-          if (!frame.treed && frame.tile !== null) this.holdTile(want, frame.tile, frame.artifacts);
+          if (!frame.treed && frame.tile !== null) this.holdTile(want, frame.tile, frame.artifacts, paletteSize);
           // Drawn at the first frame and then at every doubling, so a wide view redraws a few times
           // and not once per tile.
           landed += 1;
@@ -790,7 +820,7 @@ export class ArtifactChannel {
 
   /**
    * Reads by identifier the artifacts that `ordinals` name and no held tile carries, such as a
-   * point's tag past a tile's quota, so the table learns each one's level, parents and centroid.
+   * point's tag past a tile's quota, so the table learns each one's level, parents, centroid and slot.
    * Each is asked once under the current keys. The references taken are given back at once.
    */
   async lookUp(ordinals: Iterable<number>): Promise<void> {
@@ -812,10 +842,17 @@ export class ArtifactChannel {
     const keys = this.heldUnder;
     const q = this.opts.quantisation;
     const projection = this.opts.projection ?? 'none';
+    const paletteSize = this.paletteSize;
     for (const [layer, ids] of byLayer) {
       try {
         const token = await this.opts.token();
-        const read = await this.client.artifacts(token, {view: this.opts.view, layer, ids, fields: ['level', 'parents', 'centroid']});
+        const read = await this.client.artifacts(token, {
+          view: this.opts.view,
+          layer,
+          ids,
+          fields: paletteSize === undefined ? ['level', 'parents', 'centroid'] : ['level', 'parents', 'centroid', 'slot'],
+          ...(paletteSize === undefined ? {} : {paletteSize})
+        });
         const refs: ArtifactRef[] = [];
         for await (const page of read) {
           const id = page.getChild('tessera_id')!;
@@ -823,6 +860,7 @@ export class ArtifactChannel {
           const parents = page.getChild('parents')!;
           const cx = page.getChild('centroid_x')!;
           const cy = page.getChild('centroid_y')!;
+          const slot = page.getChild('slot');
           for (let i = 0; i < page.numRows; i++) {
             const x = cx.get(i) as number | null;
             const y = cy.get(i) as number | null;
@@ -831,12 +869,13 @@ export class ArtifactChannel {
               layer,
               parentIds: Array.from((parents.get(i) as Iterable<bigint> | null) ?? [], (p) => BigInt(p)),
               centroid: x === null || y === null ? null : gridOfData(x, y, projection, q),
-              rung: Number(level.get(i))
+              rung: Number(level.get(i)),
+              ...(slot && paletteSize !== undefined ? {slot: {slot: slot.get(i) === null ? null : Number(slot.get(i)), paletteSize}} : {})
             });
           }
         }
         this.lookWait = LOOK_RETRY_MS;
-        if (table.generation !== generation || this.heldUnder !== keys || refs.length === 0) return;
+        if (table.generation !== generation || this.heldUnder !== keys || this.paletteSize !== paletteSize || refs.length === 0) return;
         table.release(table.take(refs));
       } catch {
         // A tag left unread keeps the neutral colour. It is asked again by the next check once

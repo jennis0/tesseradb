@@ -33,7 +33,8 @@ const artifact = (id: bigint, parent: bigint | null, rung: number, box: [number,
   rung,
   matched: null,
   highlighted: null,
-  target: null
+  target: null,
+  slot: null
 });
 
 function artifactsProjection(served: Artifact[]): ArtifactsProjection {
@@ -54,7 +55,7 @@ function artifactsProjection(served: Artifact[]): ArtifactsProjection {
     servedOrdinals: new Set(ordinals),
     shapes: new Map(),
     colours: new Map(),
-    palette: 'positional',
+    palette: 'tableau10', overrides: new Map(),
     coverage: {current: 0, stale: 0}
   };
 }

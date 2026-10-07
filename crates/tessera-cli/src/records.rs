@@ -69,11 +69,15 @@ pub(crate) struct ArtifactsArgs {
     /// `--view` is refused.
     #[arg(long)]
     layer: String,
-    /// Any of `key`, `level`, `parents`, `target`, `masked_count`, `content`, `centroid`, `box`
-    /// and `shape`, comma-separated, in the order wanted. Any other name, or one repeated, is
-    /// refused.
+    /// Any of `key`, `level`, `parents`, `target`, `masked_count`, `content`, `centroid`, `box`,
+    /// `shape` and `slot`, comma-separated, in the order wanted. Any other name, or one repeated,
+    /// is refused.
     #[arg(long, value_name = "NAMES")]
     fields: String,
+    /// The number of colours, 2 to 32, the `slot` field picks among: each artifact's slot is
+    /// chosen so that artifacts drawn beside each other differ. Without it, `slot` is null.
+    #[arg(long, value_name = "N")]
+    palette_size: Option<u32>,
     /// Only the artifacts at this level of a levelled layer. Refused on a layer with one level,
     /// and past the levels the layer holds.
     #[arg(long)]
@@ -224,6 +228,9 @@ pub(crate) fn artifacts(args: ArtifactsArgs) -> ExitCode {
         }
         if let Some(q) = args.q {
             request.insert("q".into(), q.into());
+        }
+        if let Some(size) = args.palette_size {
+            request.insert("palette_size".into(), size.into());
         }
         if let Some(ids) = &args.ids {
             // Decimal strings: a `tessera_id` past 2^53 is not exact as a JSON number.

@@ -1,4 +1,4 @@
-import type {ArtifactDetail, ClauseVerb, Count, FilterExpr, ItemDetail, Masked, RegionProjection, Refusal, SelectionShape} from '@tesseradb/client';
+import type {ArtifactDetail, ClauseVerb, Count, FilterExpr, ItemDetail, Masked, PaletteName, RegionProjection, Refusal, SelectionShape} from '@tesseradb/client';
 import type {CategoryPaletteName, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale} from '@tesseradb/deck';
 import type {PanelState} from './states.js';
 
@@ -80,6 +80,11 @@ export type TesseraEventDetails = {
   'tessera-valuecolour': {column: string; value: string; colour: string | null};
   /** The palette, the ramp, the ramp's scale or its direction was chosen in the explorer's Colour section; the detail is all four as they now stand. */
   'tessera-palettechange': {palette: CategoryPaletteName; ramp: RampName; scale: RampScale; reverse: boolean};
+  /**
+   * A palette was chosen for a layer's clusters in the explorer's Colour section, and set on the
+   * store (`Store.setPalette`).
+   */
+  'tessera-clusterpalettechange': {palette: PaletteName};
   /**
    * A display setting was changed in the explorer's Layers popover; the detail is every setting as
    * it now stands. `radius` and `pointOpacity` are null where the map sizes and fades the points by

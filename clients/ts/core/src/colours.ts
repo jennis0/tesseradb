@@ -1,74 +1,81 @@
 import type {SessionArtifactTable} from './artifactTable.js';
-import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
+import {artifactColours, slottedColour, type PaletteName, type Rgba} from './palette.js';
 
 /**
  * A colour per live ordinal of the session artifact table, rebuilt only when the table has moved.
  *
- * Under `positional` an ordinal's colour depends on its own centroid alone, so the map is extended
- * in place for the table's changes and keeps its identity; a lookup texture reads identity to tell
- * an extension from a recolour. `spread` assigns hues by rank over the whole set, so any change
- * rebuilds the map, as does a change of palette or scheme.
+ * An ordinal's colour depends on its own slot, the palette size the slot was served under and the
+ * colour chosen for it alone, so the map is extended in place for the table's changes and keeps its
+ * identity; a lookup texture reads identity to tell an extension from a recolour. A change of the
+ * chosen colours rebuilds the map. A change of palette recolours nothing by itself: each artifact
+ * keeps the colour of its slot until a slot of the new size is served for it.
  */
 export class ArtifactColours {
-  private kind: PaletteKind;
-  private scheme: PaletteScheme = 'dark';
+  private name: PaletteName;
+  private chosen: ReadonlyMap<bigint, Rgba> = new Map();
   /** The table version the map was built at. */
   private builtAt = -1;
-  private builtUnder: {palette: PaletteKind; scheme: PaletteScheme} | null = null;
+  /** Whether {@link map} was built under the current chosen colours. */
+  private valid = false;
   private map = new Map<number, Rgba>();
 
   constructor(
     private readonly table: SessionArtifactTable,
-    palette: PaletteKind,
-    private readonly publish: (colours: ReadonlyMap<number, Rgba>, palette: PaletteKind) => void
+    palette: PaletteName,
+    private readonly publish: (colours: ReadonlyMap<number, Rgba>, palette: PaletteName, chosen: ReadonlyMap<bigint, Rgba>) => void
   ) {
-    this.kind = palette;
+    this.name = palette;
   }
 
-  get palette(): PaletteKind {
-    return this.kind;
+  get palette(): PaletteName {
+    return this.name;
+  }
+
+  /** The colours set by `tessera_id` in place of the palette's. */
+  get overrides(): ReadonlyMap<bigint, Rgba> {
+    return this.chosen;
   }
 
   /** The colours, brought up to date with the table. */
   current(): ReadonlyMap<number, Rgba> {
-    return this.table.version === this.builtAt ? this.map : this.build();
+    return this.table.version === this.builtAt && this.valid ? this.map : this.build();
   }
 
-  /** Publish the colours if the table has named or freed an artifact since they were built. */
+  /** Publish the colours if the table has named, placed or freed an artifact since they were built. */
   refresh(): void {
     if (this.table.version === this.builtAt) return;
-    this.publish(this.build(), this.kind);
+    this.publish(this.build(), this.name, this.chosen);
   }
 
-  setPalette(kind: PaletteKind): void {
-    if (kind === this.kind) return;
-    this.kind = kind;
-    this.publish(this.build(), this.kind);
+  setPalette(name: PaletteName): void {
+    if (name === this.name) return;
+    this.name = name;
+    this.publish(this.current(), this.name, this.chosen);
   }
 
-  setScheme(scheme: PaletteScheme): void {
-    if (scheme === this.scheme) return;
-    this.scheme = scheme;
-    this.publish(this.build(), this.kind);
+  /** Colour the artifacts `chosen` names with its colours in place of the palette's, and no others. */
+  setOverrides(chosen: ReadonlyMap<bigint, Rgba>): void {
+    this.chosen = new Map(chosen);
+    this.valid = false;
+    this.publish(this.build(), this.name, this.chosen);
   }
 
   private build(): Map<number, Rgba> {
-    const {table, kind, scheme} = this;
-    const extend = kind === 'positional' && this.builtUnder?.palette === 'positional' && this.builtUnder.scheme === scheme;
-    const changes = extend ? table.changesSince(this.builtAt) : null;
+    const {table, chosen} = this;
+    const changes = this.valid ? table.changesSince(this.builtAt) : null;
     this.builtAt = table.version;
-    this.builtUnder = {palette: kind, scheme};
+    this.valid = true;
     if (changes) {
-      for (const {ordinal, kind: change} of changes) {
-        if (change === 'freed') this.map.delete(ordinal);
-        else this.map.set(ordinal, positionalEntry(table.entry(ordinal)?.centroid ?? null, scheme));
+      for (const {ordinal, kind} of changes) {
+        const entry = table.entry(ordinal);
+        if (kind === 'freed' || !entry) this.map.delete(ordinal);
+        else this.map.set(ordinal, slottedColour(entry, chosen));
       }
       return this.map;
     }
     this.map = artifactColours(
-      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
-      kind,
-      scheme
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: entry.paletteSize})),
+      chosen
     );
     return this.map;
   }

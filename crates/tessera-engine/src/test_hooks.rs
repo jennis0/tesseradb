@@ -44,6 +44,13 @@ impl Engine {
         switches.aggregate_alone_rows.store(alone_rows, Ordering::Relaxed);
     }
 
+    /// Take cluster centres from about `items` visible items rather than [`crate::slots::SAMPLE`].
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_slot_sample_for_test(&self, items: u64) {
+        self.switches.slot_sample.store(items, Ordering::Relaxed);
+    }
+
     /// Turn the background occupancy fill off, so a request computes every rung itself, letting a
     /// test assert what the request path computed rather than what a background fill left behind.
     /// Must be set before the viewport that would spawn the fill.

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 TOKEN_MARGIN = 60.0
 
 #: The `/v1/viewport` and `/v1/artifacts/viewport` fields the server reads as integers.
-_VIEWPORT_INTEGERS = {"k", "artifact_budget", "underlay_offset", "per_tile", "budget"}
+_VIEWPORT_INTEGERS = {"k", "artifact_budget", "underlay_offset", "per_tile", "budget", "palette_size"}
 
 #: The frame kinds of a `/v1/viewport` body, and the artifacts frame of a
 #: `/v1/artifacts/viewport` body, which ends with the same trailer. An unknown kind is refused
@@ -294,7 +294,7 @@ def _no_points():
 
 
 def _no_artifacts():
-    """The table of an artifacts answer that served no frame: its seventeen columns, no rows."""
+    """The table of an artifacts answer that served no frame: its eighteen columns, no rows."""
     import pyarrow as pa
 
     flags = pa.list_(pa.field("item", pa.uint64(), nullable=False))
@@ -318,6 +318,7 @@ def _no_artifacts():
             ("highlighted", pa.bool_()),
             ("target", pa.uint64()),
             ("tile", pa.uint32()),
+            ("slot", pa.uint8()),
         ]
     ).empty_table()
 
@@ -716,6 +717,7 @@ class Selection:
         cluster_budget: int = 1_000,
         cluster_budget_min: int = 10,
         cluster_budget_max: int = 10_000,
+        palette: Optional[str] = None,
     ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
@@ -739,6 +741,7 @@ class Selection:
           drawing parents in place of their children. `0` draws every cluster.
         - `cluster_budget_min`, `cluster_budget_max`: the ends of the Most clusters slider, shown
           while such a layer is drawn. Neither changes `cluster_budget`.
+        - `palette`: the palette clusters are coloured from, as `Map` takes it.
 
         Items outside the box are still drawn when they are in frame.
 
@@ -759,6 +762,7 @@ class Selection:
             cluster_budget=cluster_budget,
             cluster_budget_min=cluster_budget_min,
             cluster_budget_max=cluster_budget_max,
+            palette=palette,
         )
 
     def _expression(self) -> Optional[dict]:
@@ -1010,6 +1014,7 @@ class Viewer:
         pages: Optional[int] = None,
         cursor: Optional[str] = None,
         compression: Optional[str] = None,
+        palette_size: Optional[int] = None,
         batches: bool = False,
     ):
         """Every artifact of `layer` this reader is served, with the properties named, as a
@@ -1023,7 +1028,8 @@ class Viewer:
         - `layer`: the layer to read, as `meta()` lists it.
         - `fields`: any of `"key"`, `"level"`, `"parents"`, `"target"` (the artifact this one is
           attached to), `"masked_count"` (how many of its items this reader may see),
-          `"content"`, `"centroid"`, `"box"` and `"shape"`, in the order wanted.
+          `"content"`, `"centroid"`, `"box"`, `"shape"` and `"slot"` (its palette slot under
+          `palette_size`), in the order wanted.
         - `level`: only the artifacts at this level of a levelled layer.
         - `parent`: only the children of this artifact, by its `tessera_id`.
         - `q`: only the artifacts whose key or first text contains this, ignoring case. It cannot
@@ -1037,6 +1043,9 @@ class Viewer:
         - `count`: also count the artifacts served, `served`, and those that match, `matched`.
           The counts are in the head.
         - `page_rows`, `pages`, `cursor`, `compression`: as for `items`.
+        - `palette_size`: how many colours the caller's palette holds, from 2 to 32. The `slot`
+          field is then each artifact's slot below it, as `viewport_artifacts` gives it; without
+          it the `slot` column is null.
 
         The rows are in order of level, and in the order they were published within a level.
 
@@ -1056,6 +1065,7 @@ class Viewer:
             "pages": pages,
             "cursor": cursor,
             "compression": compression,
+            "palette_size": None if palette_size is None else int(palette_size),
         }
         return self._bulk_read("artifacts", request, given, batches)
 
@@ -1073,6 +1083,7 @@ class Viewer:
         filters: Optional[dict] = None,
         highlight: Optional[dict] = None,
         budget: Optional[int] = None,
+        palette_size: Optional[int] = None,
         pin: Any = None,
         on_tile: Optional[Callable[[Any], None]] = None,
     ):
@@ -1099,6 +1110,11 @@ class Viewer:
           tile. They change nothing else.
         - `budget`: the most annotations a nested layer gives, using coarser ones in place of
           finer. Its rows have a null `tile`: a nested layer is answered over every tile asked.
+        - `palette_size`: how many colours the caller's palette holds, from 2 to 32. Each row's
+          `slot` is then the annotation's palette slot for this reader, a number below it: the
+          index of its colour, chosen so that annotations drawn beside each other differ, and
+          the same at any zoom, box, budget or filter. Without it `slot` is null. A size outside
+          2 to 32 is refused.
         - `pin`: the `x-tessera-pin` value from an earlier answer.
         - `on_tile`: a function called with each tile's rows as a pyarrow table, as they arrive.
 
@@ -1106,7 +1122,7 @@ class Viewer:
         columns are `layer`, `tessera_id`, `key`, `masked_count`, `centroid_x`, `centroid_y`,
         `box_min_x`, `box_min_y`, `box_max_x`, `box_max_y` (positions on the grid of 2^32 steps
         per axis that a sample's `code` uses), `content`, `parent_ids`, `rung` (the level),
-        `matched`, `highlighted`, `target` and `tile`. The schema metadata `tessera.trailer` is
+        `matched`, `highlighted`, `target`, `tile` and `slot`. The schema metadata `tessera.trailer` is
         the server's closing summary and `tessera.request` the request sent.
 
             v.viewport_artifacts("papers", 2, per_tile=20, layers=["topics"]).to_pandas()
@@ -1125,6 +1141,7 @@ class Viewer:
             ("filters", filters),
             ("highlight", highlight),
             ("budget", budget),
+            ("palette_size", palette_size),
             ("pin", pin),
         ):
             if value is not None:
@@ -1183,7 +1200,10 @@ class Viewer:
           `nested` or `dag` layer, `top` needs `"cut": {"zoom": z, "bbox": [x0, y0, x1, y1],
           "budget": b}`, the map's tile depth (0 to 16), box and cluster budget (optional): the
           artifacts listed are those the map draws there, and where the layer was declared with
-          `prune_children=False` only those with nothing drawn beneath them. Or it counts
+          `prune_children=False` only those with nothing drawn beneath them. A grouping by a
+          layer also takes `"palette_size": n`, from 2 to 32, and its table then has each
+          listed artifact's palette slot below `n` in `slot`, as `viewport_artifacts` gives it.
+          Or it counts
           a number or timestamp field in bins, `{"field": name, "bins": n}`. With `"range":
           [lower, upper]` the bins cut that range into `n` equal widths: an integer's in whole
           numbers, or in floats where either bound is fractional, and a timestamp's in whole
@@ -1212,7 +1232,9 @@ class Viewer:
 
         A table's columns are, where they apply: `group` (`listed`, `rest` or `none`), `key` (a
         category's key or an artifact's `tessera_id`), `title` (a category's title, or an artifact's
-        name as `browse_artifacts` gives it), `lower` and `upper` (a bin's edges:
+        name as `browse_artifacts` gives it), `slot` (with a layer, an artifact's palette slot
+        under its `palette_size`, null without one and on the `rest` and `none` rows), `lower`
+        and `upper` (a bin's edges:
         an integer on an integer field, exactly, a float on a float field or on an integer field
         whose range has a fractional bound and a UTC timestamp on a timestamp field; a bin holds
         `lower` up to but not including `upper`, and the last bin also holds its `upper`), `cell`
@@ -1241,6 +1263,7 @@ class Viewer:
             [year] = v.aggregate("papers", [{"by": {"field": "year", "summary": True}}])
             cut = {"zoom": 3, "bbox": [0, 0, 100, 100], "budget": 1000}
             [topics] = v.aggregate("papers", [{"by": {"layer": "topics", "top": 10, "cut": cut}}])
+            [slots] = v.aggregate("papers", [{"by": {"layer": "clusters", "top": 10, "palette_size": 10}}])
         """
         import pyarrow as pa
         from pyarrow import ipc
@@ -1430,6 +1453,7 @@ class Viewer:
         filters: Optional[dict] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
+        palette_size: Optional[int] = None,
     ) -> dict:
         """One page of a layer's annotations, as this reader sees them.
 
@@ -1445,6 +1469,9 @@ class Viewer:
         - `filters`: a filter expression. Each row then also has `matched_count`.
         - `limit`: the most rows on the page.
         - `cursor`: the `next` value of the previous page, to get the page after it.
+        - `palette_size`: how many colours the caller's palette holds, from 2 to 32. Each row
+          then has `slot`, its palette slot below it, as `viewport_artifacts` gives it; without
+          it `slot` is null.
 
         Each row has `masked_count`, the number of the annotation's items this reader may see;
         `child_count`, the number of its children this reader may see, which is how many rows
@@ -1467,6 +1494,8 @@ class Viewer:
             request["limit"] = int(limit)
         if cursor is not None:
             request["cursor"] = cursor
+        if palette_size is not None:
+            request["palette_size"] = int(palette_size)
         return json.loads(self._request("POST", "/v1/artifacts/browse", request))
 
     def artifact(

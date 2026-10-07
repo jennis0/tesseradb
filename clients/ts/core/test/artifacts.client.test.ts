@@ -98,7 +98,8 @@ describe('the artifacts viewport request', () => {
       computed: [],
       filters: {archive: {eq: 'cs'}},
       highlight: {archive: {eq: 'cs'}},
-      budget: 64
+      budget: 64,
+      paletteSize: 10
     });
     expect(seen[0]!.url).toBe('http://viewer/v1/artifacts/viewport');
     expect(seen[0]!.body).toEqual({view: 's0', zoom: 4, tiles: [3, 1], per_tile: 25});
@@ -112,7 +113,8 @@ describe('the artifacts viewport request', () => {
       computed: [],
       filters: {archive: {eq: 'cs'}},
       highlight: {archive: {eq: 'cs'}},
-      budget: 64
+      budget: 64,
+      palette_size: 10
     });
   });
 });
@@ -306,6 +308,19 @@ describe('the artifacts viewport, read from a captured response', () => {
       }
     }
     expect(repeated).toBeGreaterThan(0);
+  });
+
+  it('carries each cluster’s slot below the palette size it was asked with, the same in every tile', async () => {
+    const {frames} = await read('viewport-artifacts.bin');
+    const slots = new Map<bigint, number | null>();
+    for (const a of frames.flatMap((f) => f.artifacts)) {
+      expect(a.slot).toBeTypeOf('number');
+      expect(a.slot!).toBeLessThan(10);
+      if (slots.has(a.tesseraId)) expect(a.slot).toBe(slots.get(a.tesseraId));
+      slots.set(a.tesseraId, a.slot);
+    }
+    // One slot on every row would mean row 0 was read for all.
+    expect(new Set(slots.values()).size).toBeGreaterThan(1);
   });
 
   it('carries the derived geometry in the same grid units as the points', async () => {

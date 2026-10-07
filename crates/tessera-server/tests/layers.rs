@@ -1162,10 +1162,10 @@ fn artifact_schema_names(body: &[u8]) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// **The frame ends at `tile`, whatever its layers declare**: a layer computing a hull puts no
+/// **The frame ends at `tile` and `slot`, whatever its layers declare**: a layer computing a hull puts no
 /// shape column on the wire, and every frame has the one schema.
 #[tokio::test]
-async fn the_artifacts_frame_ends_at_the_tile_and_never_carries_a_shape() {
+async fn the_artifacts_frame_ends_at_the_tile_and_slot_and_never_carries_a_shape() {
     let tmp = TempDir::new().unwrap();
     let server = serve_standard(&tmp).await;
     plant_three_levels(&server).await;
@@ -1182,7 +1182,7 @@ async fn the_artifacts_frame_ends_at_the_tile_and_never_carries_a_shape() {
     let schemas = artifact_schema_names(&bytes);
     assert_eq!(schemas.len(), 5, "the treed layer's frame, then one for each of the four tiles");
     for names in schemas {
-        assert_eq!(names.last().map(String::as_str), Some("tile"), "{names:?}");
+        assert_eq!(&names[names.len() - 2..], ["tile", "slot"], "{names:?}");
         assert!(!names.iter().any(|n| n.starts_with("shape")), "{names:?}");
     }
     let decoded = decode_artifact_frames(&bytes);

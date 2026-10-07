@@ -302,8 +302,10 @@ enum Command {
     /// `--filters` says; `{"by": {"layer": "clusters", "top": 10}}` the largest artifacts of a
     /// layer, and on a `nested` or `dag` layer `{"by": {"layer": "topics", "top": 10, "cut":
     /// {"zoom": 3, "bbox": [0, 0, 100, 100], "budget": 1000}}}` the largest of those the map draws
-    /// at that tile depth, box and cluster budget; `{"cells": {"depth": 8}}` a density surface. The read is carried across responses, and written, as `tessera
-    /// items` carries and writes one. The table's head, with the set's total, is printed on
+    /// at that tile depth, box and cluster budget, and with `"palette_size": 10` beside `layer` a
+    /// `slot` column, each artifact's colour among ten; `{"cells": {"depth": 8}}` a density
+    /// surface. The read is carried across responses, and written, as `tessera items` carries and
+    /// writes one. The table's head, with the set's total, is printed on
     /// stderr at the end.
     ///
     /// For example, `tessera aggregate --server http://127.0.0.1:8080 --view papers --grouping

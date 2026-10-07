@@ -49,6 +49,7 @@ const row = (id: bigint, name: string | null, masked: bigint, extra: Partial<Bro
   rung: 0,
   parentIds: [],
   childCount: 0,
+  slot: null,
   ...extra
 });
 

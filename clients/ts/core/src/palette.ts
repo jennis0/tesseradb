@@ -1,11 +1,9 @@
 /**
- * The artifact palette. The default, `positional`, takes an artifact's hue from its angle about the
- * extent's centre and its lightness from its distance, so a colour depends only on where the
- * cluster sits and does not change under pan or across responses. A palette assigned in served
- * order would recolour every cluster whenever one entered the view. `spread` spaces hues evenly
- * over the set in angle order, which separates neighbours better and changes with the set.
- *
- * Geometry is in the wire's 32-bit grid units; the grid's midpoint is the extent's centre.
+ * The cluster palettes. The server gives each cluster a slot below the palette's size, chosen so
+ * that clusters drawn beside each other differ, and the same at any zoom, box, budget or filter.
+ * The client maps a slot to the palette's colour at that index. A request names the palette's size
+ * as `palette_size`, so the slots of one size mean nothing under another, and a slot is coloured
+ * from the palette of the size it was served for.
  */
 
 /**
@@ -16,117 +14,137 @@
 export type Rgba = readonly [number, number, number, number];
 
 /**
- * How artifacts are coloured. `positional` takes an artifact's hue from its angle about the
- * extent's centre and its lightness from its distance, so its colour depends only on where it sits
- * and does not change as the map pans or new answers arrive. `spread` spaces hues evenly round the
- * colour wheel over every artifact the session holds, in angle order, which separates neighbours
- * better and recolours as the set changes.
+ * A cluster palette, by name: `okabe-ito` (Okabe-Ito, 8 colours, distinguishable under the common
+ * colour-vision deficiencies), `tableau10` (Tableau 10, 10 colours), `tableau20` (Tableau 20, 20
+ * colours in light and dark pairs) or `kelly` (Kelly's 22 colours of maximum contrast).
  *
  * @category Coordinates and colour
  */
-export type PaletteKind = 'positional' | 'spread';
-/**
- * The ground colours are drawn on, `light` or `dark`. The palettes choose lightness against it.
- *
- * @category Coordinates and colour
- */
-export type PaletteScheme = 'light' | 'dark';
+export type PaletteName = 'okabe-ito' | 'tableau10' | 'tableau20' | 'kelly';
 
-/** The grid is 2³² per axis; the extent's centre and its half-width in the same units. @internal */
-export const GRID32_CENTRE = 2 ** 31;
+/**
+ * A cluster palette: its title and a line describing it, as a menu shows them, and its colours,
+ * whose number is the `palette_size` a request sends.
+ *
+ * @category Coordinates and colour
+ */
+export type Palette = {
+  /** The palette's name as a menu shows it. */
+  title: string;
+  /** One line on the palette for a menu: how many colours it has, and what they are chosen for. */
+  description: string;
+  /** The colours, in slot order. */
+  colours: readonly Rgba[];
+};
 
 const ALPHA = 220;
 
-/** `h` in degrees, `s` and `l` in `[0, 1]`, to RGB bytes. @internal */
-export function hslToRgb(h: number, s: number, l: number): [number, number, number] {
-  const hue = ((h % 360) + 360) % 360;
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
-  const m = l - c / 2;
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  if (hue < 60) [r, g, b] = [c, x, 0];
-  else if (hue < 120) [r, g, b] = [x, c, 0];
-  else if (hue < 180) [r, g, b] = [0, c, x];
-  else if (hue < 240) [r, g, b] = [0, x, c];
-  else if (hue < 300) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
-  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+function hex(...colours: string[]): Rgba[] {
+  return colours.map((c) => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16), ALPHA]);
 }
 
-/** The angle about the grid's centre, in degrees `[0, 360)`, and the distance as a fraction of the half-width. @internal */
-export function polarOf(centroid: readonly [number, number]): {angle: number; radius: number} {
-  const dx = centroid[0] - GRID32_CENTRE;
-  const dy = centroid[1] - GRID32_CENTRE;
-  const angle = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
-  const radius = Math.min(1, Math.hypot(dx, dy) / GRID32_CENTRE);
-  return {angle, radius};
-}
+/**
+ * The cluster palettes, by name, in the order a menu lists them.
+ *
+ * @category Coordinates and colour
+ */
+export const PALETTES: Readonly<Record<PaletteName, Palette>> = {
+  'okabe-ito': {
+    title: 'Okabe-Ito',
+    description: '8 colours · colour-blind safe',
+    colours: hex('#e69f00', '#56b4e9', '#009e73', '#f0e442', '#0072b2', '#d55e00', '#cc79a7', '#000000')
+  },
+  tableau10: {
+    title: 'Tableau 10',
+    description: '10 colours',
+    colours: hex('#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f', '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac')
+  },
+  tableau20: {
+    title: 'Tableau 20',
+    description: '20 colours, in light and dark pairs',
+    colours: hex(
+      '#4e79a7', '#a0cbe8', '#f28e2b', '#ffbe7d', '#59a14f', '#8cd17d', '#b6992d', '#f1ce63', '#499894', '#86bcb6',
+      '#e15759', '#ff9d9a', '#79706e', '#bab0ac', '#d37295', '#fabfd2', '#b07aa1', '#d4a6c8', '#9d7660', '#d7b5a6'
+    )
+  },
+  kelly: {
+    title: 'Kelly',
+    description: '22 colours, most distinct',
+    colours: hex(
+      '#f2f3f4', '#222222', '#f3c300', '#875692', '#f38400', '#a1caf1', '#be0032', '#c2b280', '#848482', '#008856', '#e68fac',
+      '#0067a5', '#f99379', '#604e97', '#f6a600', '#b3446c', '#dcd300', '#882d17', '#8db600', '#654522', '#e25822', '#2b3d26'
+    )
+  }
+};
 
-/** The saturation and lightness of a hue on each ground. */
-function shade(radius: number, scheme: PaletteScheme): [number, number] {
-  return scheme === 'dark' ? [0.62, 0.64 + 0.08 * radius] : [0.58, 0.4 - 0.08 * radius];
-}
+/**
+ * The palette a store colours clusters with until another is chosen.
+ *
+ * @category Coordinates and colour
+ */
+export const DEFAULT_PALETTE: PaletteName = 'tableau10';
 
-const HUE_OFFSET = (0.5 + 0.45) * 360;
-
-/** The positional colour of one centroid. @internal */
-export function positionalColour(centroid: readonly [number, number], scheme: PaletteScheme = 'dark'): Rgba {
-  const {angle, radius} = polarOf(centroid);
-  const [s, l] = shade(radius, scheme);
-  const [r, g, b] = hslToRgb(angle + HUE_OFFSET, s, l);
-  return [r, g, b, ALPHA];
+/**
+ * How many colours `palette` has: the `palette_size` a request for its slots sends.
+ *
+ * @category Coordinates and colour
+ */
+export function paletteSize(palette: PaletteName): number {
+  return PALETTES[palette].colours.length;
 }
 
 /**
  * The colour of a point whose artifact has no colour: one the session does not know yet, or one
- * with no centroid.
+ * served with no slot.
  *
  * @category Coordinates and colour
  */
 export const NEUTRAL: Rgba = [118, 126, 140, 200];
 
 /**
- * One artifact's colour under the positional palette, which does not depend on the set. A caller
- * extending a colour map for a newly named ordinal uses this to match {@link artifactColours}.
+ * A cluster's colour: `chosen` where the host set one for it, else its slot's colour in `palette`,
+ * else {@link NEUTRAL} for a null slot or one past the palette's end.
  *
- * @internal
+ * @category Coordinates and colour
  */
-export function positionalEntry(centroid: readonly [number, number] | null, scheme: PaletteScheme = 'dark'): Rgba {
-  return centroid ? positionalColour(centroid, scheme) : NEUTRAL;
+export function artifactColour(palette: PaletteName, slot: number | null, chosen?: Rgba): Rgba {
+  if (chosen) return chosen;
+  return (slot === null ? undefined : PALETTES[palette].colours[slot]) ?? NEUTRAL;
 }
 
-/** An artifact a colour is wanted for: its ordinal in the session table, and where it sits. @internal */
-export type Placed = {ordinal: number; centroid: readonly [number, number] | null};
+/**
+ * The palette with `size` colours, or `null` where none has that many. Each palette has a size of
+ * its own, so a slot's palette is known from the size it was served under.
+ *
+ * @category Coordinates and colour
+ */
+export function paletteOfSize(size: number | null): PaletteName | null {
+  return (Object.keys(PALETTES) as PaletteName[]).find((name) => PALETTES[name].colours.length === size) ?? null;
+}
 
 /**
- * A colour per artifact, by ordinal. Spread colours go round the hue circle in angle order, so map
- * neighbours are hue neighbours. An artifact with no centroid takes the neutral.
- *
- * The caller passes every artifact the session table holds: a band held under a coarser cut names
- * artifacts the current view was not served, and its points take their colours. Under `spread` the
- * hues therefore move with the table.
+ * An artifact a colour is wanted for: its ordinal in the session table, its `tessera_id`, its slot
+ * and the palette size the slot was served under.
  *
  * @internal
  */
-export function artifactColours(
-  placedIn: readonly Placed[],
-  kind: PaletteKind,
-  scheme: PaletteScheme = 'dark'
-): Map<number, Rgba> {
+export type Slotted = {ordinal: number; tesseraId: bigint; slot: number | null; paletteSize: number | null};
+
+/**
+ * A colour per artifact, by ordinal, with the colours `chosen` by `tessera_id` in place of the
+ * palette's. Each slot is coloured from the palette it was served for, so a slot served before a
+ * change of palette keeps its colour until the slot of the new size arrives.
+ *
+ * @internal
+ */
+export function artifactColours(artifacts: readonly Slotted[], chosen: ReadonlyMap<bigint, Rgba> = new Map()): Map<number, Rgba> {
   const out = new Map<number, Rgba>();
-  if (kind === 'positional') {
-    for (const {ordinal, centroid} of placedIn) out.set(ordinal, positionalEntry(centroid, scheme));
-    return out;
-  }
-  const placed = placedIn.filter((s) => s.centroid !== null).map((s) => ({...s, ...polarOf(s.centroid!)}));
-  placed.sort((a, b) => a.angle - b.angle);
-  placed.forEach(({ordinal, radius}, i) => {
-    const [sat, l] = shade(radius, scheme);
-    const [r, g, b] = hslToRgb((i * 360) / placed.length + HUE_OFFSET, sat, l);
-    out.set(ordinal, [r, g, b, ALPHA]);
-  });
-  for (const {ordinal, centroid} of placedIn) if (!centroid) out.set(ordinal, NEUTRAL);
+  for (const a of artifacts) out.set(a.ordinal, slottedColour(a, chosen));
   return out;
+}
+
+/** One artifact's colour, as {@link artifactColours} gives it. @internal */
+export function slottedColour(a: Omit<Slotted, 'ordinal'>, chosen: ReadonlyMap<bigint, Rgba>): Rgba {
+  const palette = paletteOfSize(a.paletteSize);
+  return palette === null ? (chosen.get(a.tesseraId) ?? NEUTRAL) : artifactColour(palette, a.slot, chosen.get(a.tesseraId));
 }

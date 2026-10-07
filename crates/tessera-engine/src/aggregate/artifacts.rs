@@ -39,6 +39,7 @@ pub(super) struct Layer {
     level: u32,
     pick: Pick<TesseraId>,
     cut: Option<Cut>,
+    palette: Option<u8>,
 }
 
 /// A level's served artifacts under one page, and the forms their members are read from.
@@ -65,6 +66,7 @@ impl Layer {
         level: Option<u32>,
         pick: &Pick<TesseraId>,
         cut: Option<Cut>,
+        palette: Option<u8>,
     ) -> Result<Layer> {
         let refused = |refusal| {
             EngineError::RecordsRefused(match refusal {
@@ -115,6 +117,7 @@ impl Layer {
             level: level.unwrap_or(0),
             pick: pick.clone(),
             cut,
+            palette,
         })
     }
 
@@ -415,6 +418,28 @@ impl Layer {
             }
             _ => vec![None; served.listed.len()],
         };
+        // Each listed artifact's slot, over this viewer's whole tree and not the cut or the set.
+        let slots = match (self.palette, &registered) {
+            (Some(palette), Some(layer)) => {
+                let slots = engine.cluster_slots(
+                    served_view,
+                    mask,
+                    layer,
+                    self.level,
+                    palette,
+                    &dependency_served,
+                )?;
+                Some(
+                    served
+                        .listed
+                        .iter()
+                        .map(|&o| slots.as_ref().and_then(|slots| slots.get(o)))
+                        .collect(),
+                )
+            }
+            (Some(_), None) => Some(vec![None; served.listed.len()]),
+            (None, _) => None,
+        };
         context.finish()?;
         let named = matches!(self.pick, Pick::Named(_));
         let chosen: Vec<u64> = match chosen {
@@ -444,6 +469,7 @@ impl Layer {
                     .collect(),
                 keys,
                 titles: Some(titles),
+                slots,
                 distinct: counts.iter().filter(|&&n| n > 0).count() as u64,
                 sample: None,
             },

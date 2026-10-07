@@ -92,6 +92,9 @@ pub(crate) struct ArtifactsReq {
     cursor: Option<String>,
     #[serde(default)]
     compression: Option<CompressionReq>,
+    /// How many colours the client's palette holds, for the `slot` field.
+    #[serde(default)]
+    palette_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -273,6 +276,7 @@ pub(crate) async fn bulk_read(
                 recomposed,
             } => finish(route, &view, outcome, recomposed, sink),
         }
+        crate::state::refresh_cluster_slots(&closure_state, &session);
     }));
 
     let (opening, body) = pending.opened(route, "first frame").await?;
@@ -451,6 +455,14 @@ fn run_artifacts(
         Ok(ids) => req.ids.is_some().then_some(ids),
         Err(e) => return Read::Refused(e),
     };
+    let palette_size = match req
+        .palette_size
+        .map(tessera_engine::check_palette_size)
+        .transpose()
+    {
+        Ok(size) => size,
+        Err(e) => return Read::Refused(crate::error::map_engine_error(e)),
+    };
     let request = ArtifactsRequest {
         view: &view.id,
         layer: &req.layer,
@@ -462,6 +474,7 @@ fn run_artifacts(
         keep_unmatched: req.keep_unmatched,
         count: req.count,
         fields: &req.fields,
+        palette_size,
         page_rows: req.page_rows,
         pages: req.pages,
         cursor: req.cursor.as_deref(),

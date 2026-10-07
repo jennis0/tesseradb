@@ -200,6 +200,31 @@ a grant's rows and the labels of denied rows are read only inside the server. A 
 an artifact's `tessera_id`, key and content, its count over the viewer's visible set, and the
 centroid and box of the members the viewer can see.
 
+## A cluster's colour is computed from what the viewer is served
+
+A request may name a palette size, and each artifact it serves then carries a slot: a number below
+that size which the client turns into a colour ([annotations](annotations.md#colour-slots)). The
+slots are worked out once for each session and layer, from the artifacts the viewer is served that
+hold a member they can see, the viewer's tree over those artifacts, each one's count of visible
+members and `tessera_id`, and a centre over the members the viewer can see: the centroid the
+level's figures carry, which are counted over the viewer's visible set, or the mean over a sample
+of the viewer's visible items. The sample is the visible items whose `tessera_id` falls below a cut
+set by the size of the visible set and a constant, so an item the viewer cannot see is never in it.
+An artifact the viewer is not
+served is no input, and the viewer's slots are those of a corpus without it: a test compares the
+slots of a viewer from whom an artifact's label withholds it with the slots after that artifact is
+suppressed, and finds them equal. A slot therefore says nothing about an artifact the viewer is not
+served, about a member they cannot see, or about the slots another viewer is given. The slots are
+held per credential, keyed on the digest of its grant and the digest of the credential itself,
+since an artifact's own labels and the layers a viewer reaches are tested against every term the
+credential names; two sessions share slots only where they hold one credential. A deletion, a
+suppression, an edit or a publication is answered with slots worked out over it. So is any change
+on a layer whose criterion is a fraction or whose content has a generating set, where an ingested
+member the viewer cannot see can withhold an artifact. After an ingest or a growth on any other
+layer, the slots held answer until they are worked out again, which starts once the response is
+sent; they were worked out over items and artifacts the viewer could see, and no artifact they
+name is withheld by the change.
+
 ## Samples are taken after masking
 
 Where more items are in view than a response carries, the sample MUST be drawn from the viewer's

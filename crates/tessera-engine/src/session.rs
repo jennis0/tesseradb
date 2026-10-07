@@ -386,6 +386,7 @@ impl Engine {
         if token_ids.is_empty() {
             return 0;
         }
+        self.slots.end(token_ids);
         for token_id in token_ids {
             self.stage.cancel(*token_id);
         }

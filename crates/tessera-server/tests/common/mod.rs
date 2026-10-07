@@ -1633,6 +1633,8 @@ pub struct ArtifactRow {
     pub target: Option<u64>,
     /// The tile whose visible members put the row in its frame; `None` for a treed layer's.
     pub tile: Option<u32>,
+    /// The palette slot this viewer's colouring gives it; `None` where no palette size was named.
+    pub slot: Option<u8>,
 }
 
 fn str_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> arrow::array::StringArray {
@@ -1841,8 +1843,9 @@ pub fn decode_artifact_frames(bytes: &[u8]) -> DecodedArtifacts {
 /// The rows of one artifacts frame, every column read by position.
 pub fn decode_artifact_rows(payload: &[u8]) -> Vec<ArtifactRow> {
     let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
-    assert_eq!(reader.schema().fields().len(), 17, "seventeen columns, no more");
+    assert_eq!(reader.schema().fields().len(), 18, "eighteen columns, no more");
     assert_eq!(reader.schema().field(16).name(), "tile");
+    assert_eq!(reader.schema().field(17).name(), "slot");
     let mut rows = Vec::new();
     for batch in reader {
         let batch = batch.unwrap();
@@ -1869,6 +1872,10 @@ pub fn decode_artifact_rows(payload: &[u8]) -> Vec<ArtifactRow> {
         };
         let u64_at = |col: usize, i: usize| {
             let a = batch.column(col).as_any().downcast_ref::<UInt64Array>().unwrap();
+            a.is_valid(i).then(|| a.value(i))
+        };
+        let u8_at = |col: usize, i: usize| {
+            let a = batch.column(col).as_any().downcast_ref::<arrow::array::UInt8Array>().unwrap();
             a.is_valid(i).then(|| a.value(i))
         };
         let bool_at = |col: usize, i: usize| {
@@ -1899,6 +1906,7 @@ pub fn decode_artifact_rows(payload: &[u8]) -> Vec<ArtifactRow> {
                 highlighted: bool_at(14, i),
                 target: u64_at(15, i),
                 tile: u32_at(16, i),
+                slot: u8_at(17, i),
             });
         }
     }
@@ -2192,6 +2200,7 @@ pub struct AggregateRow {
     pub count: u64,
     pub reference_count: Option<u64>,
     pub lift: Option<f64>,
+    pub slot: Option<u8>,
 }
 
 /// A table page's rows, read by column name.
@@ -2230,6 +2239,9 @@ pub fn aggregate_rows(batch: &RecordBatch) -> Vec<AggregateRow> {
             reference_count: u64s("reference_count", row),
             lift: batch.column_by_name("lift").and_then(|c| {
                 (!c.is_null(row)).then(|| c.as_primitive::<Float64Type>().value(row))
+            }),
+            slot: batch.column_by_name("slot").and_then(|c| {
+                (!c.is_null(row)).then(|| c.as_primitive::<arrow::datatypes::UInt8Type>().value(row))
             }),
         })
         .collect()

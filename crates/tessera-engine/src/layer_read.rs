@@ -166,6 +166,7 @@ impl Engine {
         };
         Ok(ReadLevel {
             level,
+            level_version,
             rows,
             counts,
             filtered: None,
@@ -197,6 +198,8 @@ pub(crate) fn check_level(
 /// One level of one layer, resolved for one viewer under one composed mask.
 pub(crate) struct ReadLevel {
     pub(crate) level: u32,
+    /// The version of the level the row form is of.
+    pub(crate) level_version: u64,
     pub(crate) rows: Arc<ArtifactRows>,
     pub(crate) counts: Option<Arc<Figures>>,
     /// Each artifact's visible members matching the filter, on a level served from its column;

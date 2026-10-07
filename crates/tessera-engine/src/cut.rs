@@ -1135,6 +1135,37 @@ pub fn frontier_of(lineage: &Lineage, served: &[u32]) -> Vec<u32> {
     frontier
 }
 
+/// One depth of the viewer's tree: the passing nodes at that rung, and the pruned cut at that
+/// depth, both ascending.
+pub struct Depth {
+    pub entering: Vec<u32>,
+    pub served: Vec<u32>,
+}
+
+/// Every depth of the viewer's tree over `passing`, shallowest first, each with the pruned cut
+/// [`cut_at`] serves there. A flat level is one depth holding every passing node.
+pub fn depths(lineage: &Lineage, passing: &[u32]) -> Vec<Depth> {
+    if lineage.is_flat() {
+        let all = ascending(passing);
+        return vec![Depth {
+            entering: all.clone(),
+            served: all,
+        }];
+    }
+    let plan = Plan::new(lineage, passing, true);
+    (0..plan.rung_at.len().saturating_sub(1))
+        .map(|rung| {
+            let mut entering =
+                plan.by_rung[plan.rung_at[rung] as usize..plan.rung_at[rung + 1] as usize].to_vec();
+            entering.sort_unstable();
+            Depth {
+                entering,
+                served: plan.serve_at(rung as u32),
+            }
+        })
+        .collect()
+}
+
 /// `passing`, ascending and deduplicated — the flat case's whole answer.
 fn ascending(passing: &[u32]) -> Vec<u32> {
     let mut out = passing.to_vec();

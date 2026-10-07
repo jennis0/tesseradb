@@ -353,6 +353,7 @@ fn main() -> Result<(), BoxError> {
                     level: Some(level.parse()?),
                     pick: Pick::Top(10),
                     cut: None,
+                    palette: None,
                 }),
                 cells: None,
                 area: None,

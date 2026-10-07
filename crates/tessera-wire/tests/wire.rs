@@ -420,7 +420,7 @@ fn layers(batch: &RecordBatch) -> Vec<String> {
 }
 
 #[test]
-fn the_artifacts_frame_has_seventeen_fixed_columns_ending_in_the_tile() {
+fn the_artifacts_frame_has_eighteen_fixed_columns_ending_in_the_tile_and_slot() {
     let content = ["label".to_string(), "summary".to_string()];
     let full = ArtifactRow {
         layer: "clusters/a",
@@ -436,6 +436,7 @@ fn the_artifacts_frame_has_seventeen_fixed_columns_ending_in_the_tile() {
         highlighted: Some(false),
         target: None,
         tile: Some(u32::MAX),
+        slot: Some(31),
     };
     let rows = [
         full.clone(),
@@ -464,6 +465,7 @@ fn the_artifacts_frame_has_seventeen_fixed_columns_ending_in_the_tile() {
         "highlighted",
         "target",
         "tile",
+        "slot",
     ];
     assert_eq!(names(&batch), fixed);
     assert_eq!(layers(&batch), ["clusters/a", "regions/b", "clusters/a"]);
@@ -482,6 +484,9 @@ fn the_artifacts_frame_has_seventeen_fixed_columns_ending_in_the_tile() {
         [Some(u32::MAX), Some(5), None],
         "a depth-16 prefix fills the column, and a treed row has none"
     );
+    assert!(nullable(&batch, "slot"));
+    let slot = column::<arrow::array::UInt8Array>(&batch, "slot");
+    assert_eq!(slot.iter().collect::<Vec<_>>(), [Some(31), None, None]);
 
     let lists = |name: &str| -> Vec<String> {
         let column = batch.column_by_name(name).unwrap();
@@ -549,6 +554,7 @@ fn artifact_rows_stay_within_their_size_bound() {
             highlighted: Some(i % 3 == 0),
             target: None,
             tile: Some((i / 50) as u32),
+            slot: Some((i % 10) as u8),
         })
         .collect();
 

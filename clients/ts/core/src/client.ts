@@ -14,7 +14,7 @@ import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader, type Frame} from './frame.js';
 import {readAggregate, type PartialAggregate} from './aggregate.js';
 import {openRecords, type RecordsRead} from './records.js';
-import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, CountsSink, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, Login, LoginCredential, AuthoriseTarget, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportArtifactsFrame, ViewportArtifactsRequest, ViewportArtifactsResponse, ViewportCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, CountsSink, FilterExpr, FilterOperandSet, Grouping, ItemDetail, ItemsHead, ItemsRequest, Layer, Login, LoginCredential, AuthoriseTarget, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportArtifactsFrame, ViewportArtifactsRequest, ViewportArtifactsResponse, ViewportCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
@@ -819,6 +819,7 @@ export class TesseraClient {
     if (req.filters) body.filters = req.filters;
     if (req.highlight) body.highlight = req.highlight;
     if (req.budget !== undefined) body.budget = req.budget;
+    if (req.paletteSize !== undefined) body.palette_size = req.paletteSize;
     if (req.stamp) body.pin = JSON.parse(req.stamp);
 
     const started = performance.now();
@@ -1158,6 +1159,7 @@ export class TesseraClient {
     if (req.filters) body.filters = req.filters;
     if (req.limit !== undefined) body.limit = req.limit;
     if (req.cursor !== undefined) body.cursor = req.cursor;
+    if (req.paletteSize !== undefined) body.palette_size = req.paletteSize;
     const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/browse`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
@@ -1253,7 +1255,8 @@ export class TesseraClient {
    *   and the signal's reason once it aborts.
    */
   aggregate(token: string, req: AggregateRequest, signal?: AbortSignal, options: {follow?: boolean} = {}): Promise<AggregateResult> {
-    const request = (cursor?: string) => this.post('aggregate', token, cursor === undefined ? req : {...req, cursor}, signal);
+    const sent = {...req, groupings: req.groupings.map(wireGrouping)};
+    const request = (cursor?: string) => this.post('aggregate', token, cursor === undefined ? sent : {...sent, cursor}, signal);
     return readAggregate(req, request, signal, options.follow ?? true);
   }
 
@@ -1275,6 +1278,14 @@ export class TesseraClient {
   }
 }
 
+/** A grouping as the wire names it: a layer's `paletteSize` is `palette_size`. */
+function wireGrouping(grouping: Grouping): object {
+  const by = grouping.by;
+  if (!by || !('layer' in by) || by.paletteSize === undefined) return grouping;
+  const {paletteSize, ...rest} = by;
+  return {...grouping, by: {...rest, palette_size: paletteSize}};
+}
+
 /** One row of `POST /v1/artifacts/browse`, as the JSON carries it. */
 type RawBrowseRow = {
   tessera_id: string;
@@ -1285,6 +1296,7 @@ type RawBrowseRow = {
   rung: number;
   parent_ids?: string[];
   child_count: number;
+  slot?: number | null;
 };
 
 type RawBrowsePage = {artifacts?: RawBrowseRow[]; parents?: RawBrowseRow[]; next?: string | null};
@@ -1301,7 +1313,8 @@ function browseRow(r: RawBrowseRow): BrowseRow {
     rung: r.rung,
     // A null cell is the empty list.
     parentIds: (r.parent_ids ?? []).map((v) => BigInt(v)),
-    childCount: r.child_count
+    childCount: r.child_count,
+    slot: r.slot ?? null
   };
 }
 

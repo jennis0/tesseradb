@@ -62,6 +62,10 @@ pub(crate) struct ViewportArtifactsReq {
     /// The budget a treed layer is cut to, met by serving ancestors in place of descendants.
     #[serde(default)]
     budget: Option<u32>,
+    /// How many colours the client's palette holds: each artifact then carries this viewer's
+    /// `slot` among them.
+    #[serde(default)]
+    palette_size: Option<u32>,
 }
 
 /// What the handler needs to answer, sent with the first frame.
@@ -127,6 +131,7 @@ impl ViewportArtifactsSink for WireSink {
                 highlighted: a.highlighted,
                 target: a.target.map(|id| id.raw()),
                 tile,
+                slot: a.slot,
             })
             .collect();
         let frame = artifacts_frame(&rows);
@@ -167,6 +172,13 @@ fn run(
             return;
         }
     };
+    let palette_size = match req.palette_size.map(tessera_engine::check_palette_size).transpose() {
+        Ok(size) => size,
+        Err(e) => {
+            sink.producer.refuse(map_engine_error(e));
+            return;
+        }
+    };
     let tiles = distinct_tiles(req.tiles);
     let names = layer_names(req.layers.as_ref());
     let numbers = level_numbers(req.levels.as_ref());
@@ -192,6 +204,7 @@ fn run(
         None => ComputedSelection::Declared,
     })
     .budget(req.budget)
+    .palette_size(palette_size)
     .cancel(Some(cancel));
     if let Some(filter) = filter {
         request = request.filter(filter);
@@ -289,6 +302,7 @@ pub(crate) async fn viewport_artifacts(
     let closure_state = Arc::clone(&state);
     drop(tokio::task::spawn_blocking(move || {
         run(&closure_state, &session, req, cancel, sink);
+        crate::state::refresh_cluster_slots(&closure_state, &session);
     }));
 
     let (opening, body) = pending.opened("artifacts viewport", "first frame").await?;

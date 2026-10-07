@@ -383,6 +383,9 @@ pub struct ArtifactOut {
     /// inside the request's tiles, satisfies both expressions. `None` where the request carried
     /// no `highlight`. Every rule [`Self::matched`] carries holds here unchanged.
     pub highlighted: Option<bool>,
+    /// The palette slot this viewer's colouring gives the artifact ([`crate::slots`]), where the
+    /// request named a palette size. The same for this viewer at any zoom, box, budget or filter.
+    pub slot: Option<u8>,
 }
 
 /// The masked viewport response. No `serde` derive.

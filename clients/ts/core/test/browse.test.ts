@@ -45,8 +45,9 @@ describe('browse', () => {
     // A `u64` that a JSON number would round; the wire sends it as a string, and it is kept.
     expect(page.artifacts[0]!.tesseraId).toBe(18_064_038_920_082_622_571n);
     expect(page.artifacts[0]!.maskedCount).toBe(393_741n);
-    // No filter was sent, so there is no matched count, rather than zero.
+    // No filter was sent, so there is no matched count, rather than zero; no palette size, no slot.
     expect(page.artifacts[0]!.matchedCount).toBeNull();
+    expect(page.artifacts[0]!.slot).toBeNull();
     expect(page.parents).toEqual([]);
     expect(page.next).toBeNull();
   });
@@ -79,6 +80,15 @@ describe('browse', () => {
     // filter admits nothing of is still served.
     expect(page.artifacts[0]!.matchedCount).toBe(0n);
     expect(page.artifacts[0]!.maskedCount).toBe(100n);
+  });
+
+  it('sends a palette size and reads each row’s slot, parents included', async () => {
+    const fetchMock = answering({artifacts: [row('7', 4, {slot: 3})], parents: [row('3', 90, {slot: 0})], next: null});
+    const page = await client().browse('tok', {view: 's0', layer: 'l', parent: 3n, paletteSize: 8});
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, {body: string}];
+    expect(JSON.parse(init.body)).toEqual({view: 's0', layer: 'l', parent: '3', palette_size: 8});
+    expect(page.artifacts[0]!.slot).toBe(3);
+    expect(page.parents[0]!.slot).toBe(0);
   });
 
   it('throws a TesseraError on a refusal, like every other verb', async () => {

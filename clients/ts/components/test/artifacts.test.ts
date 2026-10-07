@@ -45,7 +45,8 @@ const artifact = (id: bigint, count: bigint, parent: bigint | null = null, conte
   rung: 0,
   matched: null,
   highlighted: null,
-  target: null
+  target: null,
+  slot: null
 });
 
 function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']): ArtifactsProjection {
@@ -66,7 +67,7 @@ function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']
     servedOrdinals: new Set(ordinals),
     shapes: new Map(),
     colours: new Map([...ordinals].map((o) => [o, [10, 20, 30, 255] as const])),
-    palette: 'positional',
+    palette: 'tableau10', overrides: new Map(),
     coverage: {current: 3, stale: 0}
   };
 }

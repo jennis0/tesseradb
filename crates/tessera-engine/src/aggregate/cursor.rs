@@ -127,8 +127,12 @@ pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8;
                 level,
                 pick,
                 cut,
+                palette,
             }) => {
-                format!("layer {layer:?} {level:?} {} cut {cut:?}", pick_text(pick))
+                format!(
+                    "layer {layer:?} {level:?} {} cut {cut:?} palette {palette:?}",
+                    pick_text(pick)
+                )
             }
         };
         part(format!("{by} cells {:?} area {:?}", grouping.cells, grouping.area));

@@ -1,4 +1,4 @@
-import {Aggregates, isDrawn, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
+import {Aggregates, isDrawn, isPaletteDrawn, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
@@ -16,7 +16,7 @@ import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
 import {CLUSTER_PREFIX, EMPTY_LEGEND, Legend, type LegendProjection} from './legend.js';
 import {withMembers, type MemberClause} from './members.js';
 import {attachedTextOf} from './names.js';
-import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
+import {DEFAULT_PALETTE, PALETTES, paletteSize, type PaletteName, type Rgba} from './palette.js';
 import {worldBbox} from './prefetch.js';
 import {rectContainsTile} from './rects.js';
 import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type Presented, type PresentedStatus, type Refusal} from './presented.js';
@@ -118,8 +118,11 @@ export type StoreOptions = {
   view?: string;
   /** How many marks the store aims to draw on screen. Defaults to `250000`; `setBudget` changes it. */
   budget?: number;
-  /** How artifacts are coloured (see {@link PaletteKind}). Defaults to `positional`; `setPalette` changes it. */
-  palette?: PaletteKind;
+  /**
+   * The palette clusters are coloured from (see {@link PaletteName}). Defaults to `tableau10`;
+   * `setPalette` changes it.
+   */
+  palette?: PaletteName;
   /**
    * Whether the store fetches ahead while the camera is still: the tiles around the view and one
    * zoom level deeper. Defaults to `true`.
@@ -423,8 +426,13 @@ export type ArtifactsProjection = {
    * has no colour of its own.
    */
   colours: ReadonlyMap<number, Rgba>;
-  /** The palette `colours` was built under. */
-  palette: PaletteKind;
+  /** The palette `colours` was built under. Its size is the `palette_size` the artifacts are asked with. */
+  palette: PaletteName;
+  /**
+   * The colours set by `tessera_id` with {@link Store.setArtifactColours}, which `colours` holds in
+   * place of the palette's.
+   */
+  overrides: ReadonlyMap<bigint, Rgba>;
   /**
    * How many bands in view have a colour for every point under each layer asked for (`current`),
    * and how many do not and are being fetched again (`stale`). Both are `0` unless `status` is
@@ -691,10 +699,19 @@ export interface Store {
    */
   setPointColumns(id: string, columns: readonly string[]): void;
   /**
-   * Colour artifacts by `kind`. Publishes `artifacts.colours` and `artifacts.palette`; the kind in
-   * use does nothing.
+   * Colour clusters from `palette`. Publishes `artifacts.colours` and `artifacts.palette`; the
+   * palette in use and a name {@link PALETTES} does not list do nothing. A cluster's slot is
+   * served for one palette size, so a palette of another size drops every view's held artifacts
+   * and asks again for the current camera's.
    */
-  setPalette(kind: PaletteKind): void;
+  setPalette(palette: PaletteName): void;
+  /**
+   * Colour the artifacts `colours` names, by `tessera_id`, with its colours in place of their
+   * palette colours, and every other artifact from the palette. Each call replaces the last; an
+   * empty map colours every artifact from the palette. Publishes `artifacts.colours` and
+   * `artifacts.overrides`.
+   */
+  setArtifactColours(colours: ReadonlyMap<bigint, Rgba>): void;
   /**
    * Set how many marks the store aims to draw on screen, for every view, and ask again for the
    * current camera. A value that is not a finite number above zero is ignored.
@@ -759,11 +776,6 @@ export interface Store {
   needShape(id: bigint): void;
   /** Clear the picked item, the opened artifact and their refusals. Publishes `selection`. */
   clearSelection(): void;
-  /**
-   * Set the ground the map is drawn on, which the palette chooses lightness against. The store
-   * starts on `dark`. Publishes `artifacts.colours` when it changes.
-   */
-  setScheme(scheme: PaletteScheme): void;
   /**
    * Select a region, or clear the selection with `null` or a lasso of fewer than three points.
    * Publishes `region`. The selection goes on every request as a `region` filter leaf, so selecting
@@ -925,8 +937,8 @@ export function createStore(options: StoreOptions): Store {
   /** A token a renewal brought, until an answer under it matches a key in {@link identities}. */
   let unconfirmed: string | null = null;
 
-  const colours = new ArtifactColours(table, options.palette ?? 'positional', (map, palette) =>
-    replaceProjection('artifacts', {...projections.artifacts, colours: map, palette})
+  const colours = new ArtifactColours(table, options.palette ?? DEFAULT_PALETTE, (map, palette, overrides) =>
+    replaceProjection('artifacts', {...projections.artifacts, colours: map, palette, overrides})
   );
   /** The served-set version each colour-stale band was last fetched again under. */
   const colourAsked = new Map<BandKey, number>();
@@ -1040,7 +1052,7 @@ export function createStore(options: StoreOptions): Store {
     view: noFrame(''),
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), attached: new Map(), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), attached: new Map(), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, overrides: colours.overrides, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: emptyDraft([]), expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
@@ -1236,6 +1248,7 @@ export function createStore(options: StoreOptions): Store {
       projection: m.views.find((v) => v.id === id)?.projection ?? 'none',
       perTile: options.artifacts?.perTile ?? null,
       ...(clusterBudget === null ? {} : {budget: clusterBudget}),
+      paletteSize: paletteSize(colours.palette),
       heldTiles: options.artifacts?.heldTiles ?? DEFAULT_HELD_TILES,
       prefetch: options.prefetch ?? true,
       token: () => tokens.get(),
@@ -1585,7 +1598,8 @@ export function createStore(options: StoreOptions): Store {
       servedOrdinals,
       shapes: shapes.shapes,
       colours: colours.current(),
-      palette: colours.palette
+      palette: colours.palette,
+      overrides: colours.overrides
     });
     checkColourCoverage();
   }
@@ -1918,17 +1932,27 @@ export function createStore(options: StoreOptions): Store {
     return spec.groupings.some(isDrawn);
   }
 
+  /** Whether `spec` asks for slots in the palette the map colours clusters from. */
+  function drawsPalette(spec: AggregateSpec): boolean {
+    return spec.groupings.some(isPaletteDrawn);
+  }
+
   /**
-   * `spec`'s groupings with each `cut: 'drawn'` replaced by the current view's drawn cut; `null`
-   * before the current view has noted a camera.
+   * `spec`'s groupings with each `cut: 'drawn'` replaced by the current view's drawn cut, and each
+   * `paletteSize: 'drawn'` by the size of the store's palette; `null` before the current view has
+   * noted a camera where a cut is drawn.
    */
   function drawnGroupings(spec: AggregateSpec): Grouping[] | null {
     const cut = drawsCut(spec) ? (views.current?.channel.drawnCut() ?? null) : null;
     const groupings: Grouping[] = [];
     for (const g of spec.groupings) {
-      if (!isDrawn(g)) groupings.push(g);
-      else if (cut === null) return null;
-      else groupings.push({...g, by: {...g.by, cut}});
+      if (isDrawn(g) && cut === null) return null;
+      if (!isDrawn(g) && !isPaletteDrawn(g)) {
+        groupings.push(g as Grouping);
+        continue;
+      }
+      const by = {...g.by, ...(isDrawn(g) ? {cut} : {}), ...(isPaletteDrawn(g) ? {paletteSize: paletteSize(colours.palette)} : {})};
+      groupings.push({...g, by} as Grouping);
     }
     return groupings;
   }
@@ -2129,6 +2153,13 @@ export function createStore(options: StoreOptions): Store {
     clusterBudget = next;
     for (const held of views.all()) held.channel.setBudget(next ?? undefined);
     aggregates.refresh(false, {which: drawsCut, changed: true});
+  }
+
+  function setPalette(next: PaletteName): void {
+    if (!Object.hasOwn(PALETTES, next)) return;
+    colours.setPalette(next);
+    for (const held of views.all()) held.channel.setPaletteSize(paletteSize(next));
+    aggregates.refresh(false, {which: drawsPalette, changed: true});
   }
 
   function setBudget(next: number): void {
@@ -2333,7 +2364,8 @@ export function createStore(options: StoreOptions): Store {
     setColourBy,
     setSizeBy,
     setPointColumns,
-    setPalette: (kind) => colours.setPalette(kind),
+    setPalette,
+    setArtifactColours: (chosen) => colours.setOverrides(chosen),
     setBudget,
     get budget() {
       return budget;
@@ -2349,7 +2381,6 @@ export function createStore(options: StoreOptions): Store {
     openArtifact,
     needShape: (id) => shapes.need(id),
     clearSelection,
-    setScheme: (scheme) => colours.setScheme(scheme),
     select(shape) {
       if (region.select(shape, projections.marks)) requery();
     },

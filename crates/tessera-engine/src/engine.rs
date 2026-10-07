@@ -132,6 +132,8 @@ pub struct Engine {
     pub(crate) suggest_sets: Arc<crate::suggest_set::SuggestSets>,
     /// One lineage per `(layer, level)`, keyed per *deployment* and on the store's version alone.
     pub(crate) lineages: Arc<crate::cut::Lineages>,
+    /// One viewer's cluster slots per layer and palette size ([`crate::slots`]).
+    pub(crate) slots: Arc<crate::slots::SlotsCache>,
     /// One supplied-content table per `(layer, level)`. Keyed per *deployment*: the verdict that
     /// decides whether a viewer is served an artifact runs before this is read.
     pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
@@ -817,6 +819,7 @@ fn first_generation(
             edited: Arc::new(edited),
             edited_live: Arc::new(state.edited_live.clone()),
             edit_epoch: 0,
+            deny_epoch: 0,
             fold_epoch: 0,
             delta_postings: readers.delta_postings.clone(),
             overlay_version: 0,
@@ -1018,6 +1021,7 @@ impl Engine {
             derived_geometry: Arc::new(crate::derived::cache::DerivedCache::default()),
             suggest_sets: Arc::new(crate::suggest_set::SuggestSets::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
+            slots: Arc::new(crate::slots::SlotsCache::new()),
             level_contents: Arc::new(crate::artifact_content::LevelContents::new()),
             pool,
             count_pool,

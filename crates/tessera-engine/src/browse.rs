@@ -94,6 +94,8 @@ pub struct BrowseRequest<'a> {
     /// zero-length page is a question with no answer).
     pub limit: usize,
     pub cursor: Option<BrowseCursor>,
+    /// The palette size each row's slot is chosen for ([`crate::slots`]); `None` serves no slot.
+    pub palette_size: Option<u8>,
 }
 
 /// A position in the total order — `(masked or matched count descending, tessera_id ascending)`.
@@ -156,6 +158,9 @@ pub struct BrowseRow {
     /// How many artifacts this principal is served that name this one among their parents: the
     /// size of this artifact's children form, on the same rule as `parent_ids`.
     pub child_count: u64,
+    /// This viewer's slot for the artifact, where the request named a palette size: the slot
+    /// the artifacts frame serves it with.
+    pub slot: Option<u8>,
 }
 
 /// One browse page.
@@ -445,6 +450,20 @@ impl crate::Engine {
         let reachable = self.reachable_layers(session);
         let ctx = DependencyContext::new(&served_view, &mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
+        // Each level's slots, worked out as the viewport works them out.
+        let mut slots: Vec<Option<Arc<crate::slots::LevelSlots>>> = Vec::new();
+        if let Some(palette) = req.palette_size {
+            for level in 0..layer.runs.len() as u32 {
+                slots.push(self.cluster_slots(
+                    &served_view,
+                    &mask,
+                    &layer,
+                    level,
+                    palette,
+                    &dependency_served,
+                )?);
+            }
+        }
         let attached = AttachedLevels::default();
         let namer = Namer::new(
             self,
@@ -492,6 +511,10 @@ impl crate::Engine {
                 .get(&(g.level, g.ordinal))
                 .copied()
                 .unwrap_or(0),
+            slot: slots
+                .get(g.level as usize)
+                .and_then(Option::as_ref)
+                .and_then(|slots| slots.get(g.ordinal)),
         };
 
         // The form's own candidate set, taken over the gated artifacts and never over the level's
