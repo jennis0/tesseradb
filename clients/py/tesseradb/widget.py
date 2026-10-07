@@ -78,6 +78,13 @@ def _hex(value: Any, name: str) -> str:
     raise traitlets.TraitError(f"{name} is a colour as '#rrggbb', not {value!r}")
 
 
+def _by_name(value: Any, trait: str, outer: str, inner: str) -> dict:
+    """A trait's ``{name: {key: colour}}``, checked to be a dictionary of dictionaries."""
+    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, dict) for k, v in value.items()):
+        raise traitlets.TraitError(f"{trait} maps a {outer} to {{{inner}: '#rrggbb'}}; got {value!r}")
+    return value
+
+
 class Map(anywidget.AnyWidget):
     """The interactive map in a notebook cell, reading a Tessera database with a token.
 
@@ -105,10 +112,10 @@ class Map(anywidget.AnyWidget):
     - `value_colours`: colours for single values of category columns, as
       `{column: {value: "#rrggbb"}}`, in place of their palette colours. `None`, the default,
       leaves the colours chosen in the map; `{}` gives every value its palette colour.
-    - `cluster_colours`: colours for single annotations, as `{tessera_id: "#rrggbb"}` with each
-      `tessera_id` a decimal string, in place of their palette colours under
-      `"cluster:<layer>"`. `None`, the default, leaves the colours chosen in the map; `{}` gives
-      every annotation its palette colour.
+    - `cluster_colours`: colours for single annotations, per layer, as
+      `{layer: {tessera_id: "#rrggbb"}}` with each `tessera_id` a decimal string, in place of
+      their palette colours under `"cluster:<layer>"`. `None`, the default, leaves the colours
+      chosen in the map; `{}` gives every annotation its palette colour.
     - `size_by`: a number column to size points by. `None`, the default, draws every point at
       one size.
     - `size_min`, `size_max`: the radius in pixels of the smallest and the largest value under
@@ -338,22 +345,21 @@ class Map(anywidget.AnyWidget):
     def _validate_value_colours(self, proposal: dict) -> Optional[dict]:
         if proposal["value"] is None:
             return None
-        out = {}
-        for column, values in proposal["value"].items():
-            if not isinstance(column, str) or not isinstance(values, dict):
-                raise traitlets.TraitError(
-                    f"value_colours maps a column to {{value: '#rrggbb'}}; got {column!r}: {values!r}"
-                )
-            out[column] = {str(k): _hex(v, f"value_colours[{column!r}][{k!r}]") for k, v in values.items()}
-        return out
+        return {
+            column: {str(k): _hex(v, f"value_colours[{column!r}][{k!r}]") for k, v in values.items()}
+            for column, values in _by_name(proposal["value"], "value_colours", "column", "value").items()
+        }
 
     @traitlets.validate("cluster_colours")
     def _validate_cluster_colours(self, proposal: dict) -> Optional[dict]:
         if proposal["value"] is None:
             return None
         return {
-            _decimal_id(k, "a cluster_colours key"): _hex(v, f"cluster_colours[{k!r}]")
-            for k, v in proposal["value"].items()
+            layer: {
+                _decimal_id(k, f"a cluster_colours[{layer!r}] key"): _hex(v, f"cluster_colours[{layer!r}][{k!r}]")
+                for k, v in ids.items()
+            }
+            for layer, ids in _by_name(proposal["value"], "cluster_colours", "layer", "tessera_id").items()
         }
 
     @traitlets.validate("layers")

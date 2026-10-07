@@ -97,6 +97,11 @@ export function setValueColours(store: Store, column: string, changes: readonly 
   setColouring(store, {values});
 }
 
+/** Whether the map has met the value `key` of `column`, and so given it a palette colour by its rank. */
+export function valueMet(store: Store, column: string, key: string): boolean {
+  return (store.get('legend').categories[column] ?? []).some((v) => v.key === key);
+}
+
 /** A category value's palette colour as the map draws it, by its rank, `#rrggbb`; grey for a value the map has not met. */
 export function paletteValueColour(store: Store, column: string, key: string): string {
   const legend = store.get('legend');
@@ -112,19 +117,33 @@ export function valueColour(store: Store, column: string, key: string): string {
 /** A colour given to one cluster by `tessera_id`, `#rrggbb`, or `null` for its palette colour. */
 export type ClusterChange = {tesseraId: bigint; colour: string | null};
 
-/** Give each cluster `changes` names its colour, or its palette colour back, keeping every other chosen colour. */
-export function setClusterColours(store: Store, changes: readonly ClusterChange[]): void {
-  const next = new Map(store.get('artifacts').overrides);
+/** Give each cluster of `layer` that `changes` names its colour, or its palette colour back, keeping every other chosen colour. */
+export function setClusterColours(store: Store, layer: string, changes: readonly ClusterChange[]): void {
+  const held = store.get('artifacts').overrides;
+  const own = new Map(held.get(layer));
   for (const c of changes) {
     const rgba = c.colour === null ? null : chosenColour(c.colour);
-    if (rgba === null) next.delete(c.tesseraId);
-    else next.set(c.tesseraId, rgba);
+    if (rgba === null) own.delete(c.tesseraId);
+    else own.set(c.tesseraId, rgba);
   }
-  store.setArtifactColours(next);
+  store.setArtifactColours(new Map([...held, [layer, own]]));
 }
 
-/** A cluster's colour on the map, `#rrggbb`: the one chosen for it, else `own`, its palette colour. */
-export function clusterColour(store: Store, id: bigint, own: string): string {
-  const chosen = store.get('artifacts').overrides.get(id);
+/** A cluster's colour on the map, `#rrggbb`: the one chosen for it in `layer`, else `own`, its palette colour. */
+export function clusterColour(store: Store, layer: string, id: bigint, own: string): string {
+  const chosen = store.get('artifacts').overrides.get(layer)?.get(id);
   return chosen ? hexOf(chosen) : own;
+}
+
+/**
+ * Note the value and cluster colours chosen over `store` now, returning what puts them back, for
+ * a colour shown while it is dragged and then given up.
+ */
+export function holdColours(store: Store): () => void {
+  const values = colouringOf(store).values;
+  const clusters = store.get('artifacts').overrides;
+  return () => {
+    setColouring(store, {values});
+    if (store.get('artifacts').overrides !== clusters) store.setArtifactColours(clusters);
+  };
 }

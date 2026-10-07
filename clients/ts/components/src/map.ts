@@ -484,14 +484,14 @@ export class TesseraMap extends TesseraElement {
    */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /**
-   * Colours for single clusters, by `tessera_id` as a decimal string, as `#rrggbb`, such as
-   * `{'4021': '#f28e2b'}`, set on the store in place of their palette colours
+   * Colours for single clusters, per layer, per `tessera_id` as a decimal string, as `#rrggbb`, such
+   * as `{topics: {'4021': '#f28e2b'}}`, set on the store in place of their palette colours
    * (`Store.setArtifactColours`). Setting it replaces every cluster colour chosen before, including
    * those chosen on a field card or in Edit colours; a host restores a viewer's saved choices this
    * way, having kept them from `tessera-clustercolour`. An entry that is not a `tessera_id` and a
    * `#rrggbb` colour is skipped. Unset, the choices made on the cards stand.
    */
-  @property({attribute: false}) accessor clusterColours: Record<string, string> | null = null;
+  @property({attribute: false}) accessor clusterColours: Record<string, Record<string, string>> | null = null;
   /**
    * Whether the map measures itself for the probe: the frame-gap loop behind `probe.timings.frame`,
    * the colour-by-cluster sample behind `probe.cluster`, and the check that each composition
@@ -693,10 +693,14 @@ export class TesseraMap extends TesseraElement {
   /** The cluster colours the host set, on `store`; unset leaves the store's as they stand. */
   private pushClusterColours(store: Store): void {
     if (this.clusterColours === null) return;
-    const chosen = new Map<bigint, Rgba>();
-    for (const [id, hex] of Object.entries(this.clusterColours)) {
-      const rgba = /^\d+$/.test(id) ? chosenColour(hex) : null;
-      if (rgba) chosen.set(BigInt(id), rgba);
+    const chosen = new Map<string, Map<bigint, Rgba>>();
+    for (const [layer, colours] of Object.entries(this.clusterColours)) {
+      const own = new Map<bigint, Rgba>();
+      for (const [id, hex] of Object.entries(colours ?? {})) {
+        const rgba = /^\d+$/.test(id) ? chosenColour(hex) : null;
+        if (rgba) own.set(BigInt(id), rgba);
+      }
+      chosen.set(layer, own);
     }
     store.setArtifactColours(chosen);
   }

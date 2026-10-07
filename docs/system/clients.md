@@ -108,8 +108,8 @@ budget or filter. The store colours a cluster with the palette's colour at its s
 with no slot with the neutral grey. `Store.setPalette` changes the palette. Slots of one size mean
 nothing under another, so the store asks again with the new size, and each cluster keeps the colour
 of the palette its slot was served under until the new slot arrives.
-`Store.setArtifactColours` gives some clusters a host's own colours, by `tessera_id`, over their
-slots. The explorer's display menu lists the four palettes with each one's swatches and size, and
+`Store.setArtifactColours` gives some clusters a host's own colours, by layer and `tessera_id`,
+over their slots. The explorer's display menu lists the four palettes with each one's swatches and size, and
 the field card's swatches take the slot each row of its table carries. The notebook widget takes
 the palette as `palette`, and the Python client passes `palette_size` to every route that reads
 clusters and gives back each cluster's `slot`. `tessera artifacts --palette-size` adds the `slot`
@@ -118,16 +118,19 @@ field at the command line.
 A user chooses single colours in the browser: from a swatch on a field card, which opens a colour
 picker, or in Edit colours (`<tessera-colour-editor>`), which the explorer's Colour section opens
 while the points are coloured by a category or a layer. Edit colours lists the category's values,
-or the layer's clusters (the cut the map draws on a `nested` or `dag` layer, the level coloured on
-a levelled one), largest first by their counts over everything the viewer may see, with no filter
-and no area, so the order does not move as the map pans or a filter changes. It searches with the
-field card's typeahead, and sets one colour on several rows, or every row's palette colour back,
-in one action. A category value's colour is written to the colour choices the elements over a
-store share, and a cluster's to `Store.setArtifactColours` with the others chosen. Each action
-fires one event, `tessera-valuecolour` or `tessera-clustercolour`, naming every value or cluster it
-changed, and the client keeps none of them: a host that wants them kept stores them and sets them
-back through the map's or the explorer's `valueColours` and `clusterColours`. The notebook widget
-does so as its `value_colours` and `cluster_colours`.
+or the layer's clusters (the level coloured on a levelled layer, and on a `nested` or `dag` layer
+the cut the map draws, whose clusters change as the camera moves), largest first by their counts
+over everything the viewer may see, with no filter and no area, so the rows hold their order
+through a pan or a change of filter. A category value the map has not drawn yet has no palette
+colour, and its swatch is an outline until it has one. It searches with the field card's
+typeahead, over every name in a tree, and sets one colour on several rows, or the palette colour
+back for every value of the field or every cluster of the layer, in one action. A category value's
+colour is written to the colour choices the elements over a store share, and a cluster's to
+`Store.setArtifactColours` under its layer, with the others chosen. Each action fires one event,
+`tessera-valuecolour` or `tessera-clustercolour`, naming every value or cluster it changed, and the
+client keeps none of them: a host that wants them kept stores them and sets them back through the
+map's or the explorer's `valueColours` (by column) and `clusterColours` (by layer). The notebook
+widget does so as its `value_colours` and `cluster_colours`.
 
 Told where the camera is, it works out which requests are worth making and issues them. Told a
 filter changed, it recomposes one expression from every active clause and sends it whole. Given a

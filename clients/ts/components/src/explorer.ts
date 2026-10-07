@@ -152,7 +152,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * the store's (`Store.setPalette`), whose size the clusters' slots are served for. While the
  * points are coloured by a category or a layer, Edit colours opens `<tessera-colour-editor>` over
  * the page, listing the values or the clusters drawn (at the level coloured, on a levelled layer)
- * with their colours to choose and reset. A field card's paint button chooses Colour by too. Density: how density is drawn, at what resolution, in which
+ * with their colours to choose and reset, in an order that holds through a pan or a filter. A field card's paint button chooses Colour by too. Density: how density is drawn, at what resolution, in which
  * colours and how strongly. Layers: the layer picker. The display settings are the explorer's properties of
  * the same names, passed to its map. `pinned-filters` names the columns whose cards are listed
  * before they hold a clause.
@@ -808,7 +808,7 @@ export class TesseraExplorer extends TesseraElement {
   /** Passed to the map's `valueColours`. */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /** Passed to the map's `clusterColours`. */
-  @property({attribute: false}) accessor clusterColours: Record<string, string> | null = null;
+  @property({attribute: false}) accessor clusterColours: Record<string, Record<string, string>> | null = null;
   /** The dataset's title, which heads the explorer above the view's name. Unset, the view's name is the heading. */
   @property({attribute: 'dataset-title'}) accessor datasetTitle = '';
   /** Passed to the field column's `pinned`: the columns whose cards are listed before they hold a clause. */

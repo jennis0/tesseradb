@@ -21,6 +21,8 @@ export type PickerTarget = {
   current: () => string;
   /** Give the target `hex`, or its own colour back where `hex` is null. `final` is false while a custom colour is dragged. */
   apply: (hex: string | null, final: boolean) => void;
+  /** Note what the target is coloured now, returning what puts it back, for a drag given up before it ends. */
+  hold: () => () => void;
 };
 
 /** An element the picker renders inside. */
@@ -31,7 +33,9 @@ type Host = ReactiveElement & {renderRoot: HTMLElement | DocumentFragment};
  * with a saturation and brightness square, a hue bar and a hex field, and Reset. A choice applies
  * at once. It is shown in the top layer beside the rectangle `beside` gives, level with the swatch
  * it was opened from, and focus goes into it; Escape, or a press outside it and its swatch, closes
- * it, Escape giving focus back to the swatch.
+ * it, Escape giving focus back to the swatch. A custom colour shows on the map as it is dragged and
+ * is reported as it is let go; a drag cancelled, or ended by closing the picker, puts back the
+ * colour from before it.
  *
  * The host renders {@link render} where the picker belongs in its tree and adds
  * {@link pickerStyles} to its styles. The parts are the host's: `colour-popover`, `choice`, `sv`,
@@ -46,17 +50,14 @@ export class ColourPicker implements ReactiveController {
   private focusNext = false;
   /** A colour waiting for the next frame, while a custom colour is dragged. */
   private live: {hex: string; frame: number} | null = null;
+  /** What puts back the colour from before a drag, while one shows a colour not yet reported. */
+  private restore: (() => void) | null = null;
 
   constructor(
     private readonly host: Host,
     private readonly beside: () => DOMRect
   ) {
     host.addController(this);
-  }
-
-  /** What the picker is open for, or `null` while it is closed. */
-  get target(): PickerTarget | null {
-    return this.picking;
   }
 
   open(from: HTMLElement, target: PickerTarget): void {
@@ -69,8 +70,7 @@ export class ColourPicker implements ReactiveController {
   }
 
   close(refocus: boolean): void {
-    if (this.live) cancelAnimationFrame(this.live.frame);
-    this.live = null;
+    this.abandon();
     if (this.picking === null) return;
     this.picking = null;
     document.removeEventListener('pointerdown', this.onOutside, true);
@@ -94,14 +94,29 @@ export class ColourPicker implements ReactiveController {
     this.close(false);
   };
 
+  /** Give up a drag that has not ended: put back the colour from before it. */
+  private abandon(): void {
+    if (this.live) cancelAnimationFrame(this.live.frame);
+    this.live = null;
+    const restore = this.restore;
+    this.restore = null;
+    restore?.();
+  }
+
   /** {@link PickerTarget.apply} for a drag: at most once a frame, and the final colour at once. */
   private applyLive(hex: string, final: boolean): void {
     if (this.live) cancelAnimationFrame(this.live.frame);
     this.live = null;
     const target = this.picking;
     if (!target) return;
-    if (final || typeof requestAnimationFrame === 'undefined') {
-      target.apply(hex, final);
+    if (final) {
+      this.restore = null;
+      target.apply(hex, true);
+      return;
+    }
+    this.restore ??= target.hold();
+    if (typeof requestAnimationFrame === 'undefined') {
+      target.apply(hex, false);
       return;
     }
     this.live = {
@@ -117,6 +132,7 @@ export class ColourPicker implements ReactiveController {
     const target = this.picking;
     if (!target) return;
     this.hsv = hsvOf(rgbOfHex(hex ?? target.own) ?? [0, 0, 0]);
+    this.restore = null;
     target.apply(hex, true);
     this.host.requestUpdate();
   }
@@ -157,7 +173,12 @@ export class ColourPicker implements ReactiveController {
       move: (e: PointerEvent) => {
         if ((e.currentTarget as HTMLElement).hasPointerCapture?.(e.pointerId)) setHsv(read(e), false);
       },
-      up: (e: PointerEvent) => setHsv(read(e), true)
+      up: (e: PointerEvent) => setHsv(read(e), true),
+      cancel: () => {
+        this.abandon();
+        this.hsv = hsvOf(rgbOfHex(p.current()) ?? [0, 0, 0]);
+        this.host.requestUpdate();
+      }
     });
     const sv = drag(svAt);
     const hue = drag(hueAt);
@@ -204,11 +225,11 @@ export class ColourPicker implements ReactiveController {
         <div part="sv" role="slider" tabindex="0" aria-label="Saturation and brightness" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(sat * 100)}
           aria-valuetext=${`Saturation ${Math.round(sat * 100)}%, brightness ${Math.round(val * 100)}%`}
           style=${`background:linear-gradient(to top, #000000, rgba(0, 0, 0, 0)), linear-gradient(to right, #ffffff, hsl(${h.toFixed(0)}, 100%, 50%))`}
-          @pointerdown=${sv.down} @pointermove=${sv.move} @pointerup=${sv.up} @keydown=${svKey}>
+          @pointerdown=${sv.down} @pointermove=${sv.move} @pointerup=${sv.up} @pointercancel=${sv.cancel} @keydown=${svKey}>
           <span class="knob" style=${`left:${(sat * 100).toFixed(1)}%;top:${((1 - val) * 100).toFixed(1)}%`}></span>
         </div>
         <div part="hue" role="slider" tabindex="0" aria-label="Hue" aria-valuemin="0" aria-valuemax="359" aria-valuenow=${Math.round(h)}
-          @pointerdown=${hue.down} @pointermove=${hue.move} @pointerup=${hue.up} @keydown=${hueKey}>
+          @pointerdown=${hue.down} @pointermove=${hue.move} @pointerup=${hue.up} @pointercancel=${hue.cancel} @keydown=${hueKey}>
           <span class="knob" style=${`left:calc(${HUE_KNOB / 2}px + (100% - ${HUE_KNOB}px) * ${(h / 360).toFixed(4)})`}></span>
         </div>
         <label>Hex<input part="hex" type="text" spellcheck="false" .value=${custom.toUpperCase()}
@@ -356,10 +377,3 @@ export const pickerStyles = css`
     font-variant-numeric: tabular-nums;
   }
 `;
-
-/** A swatch's colour as `#rrggbb`, from `#rrggbb` or `rgb(r, g, b)`. */
-export function hexOfSwatch(text: string): string {
-  if (rgbOfHex(text)) return text.toLowerCase();
-  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(text);
-  return hexOf(m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0]);
-}

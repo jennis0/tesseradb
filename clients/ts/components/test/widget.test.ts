@@ -339,25 +339,32 @@ describe('the down-sync', () => {
 
   it('applies the value and cluster colours set in the kernel and follows a change; colours chosen in the explorer go up at once', async () => {
     const {colouringOf} = await import('../src/colouring.js');
-    const {model, store, el} = setUp({value_colours: {venue: {nips: '#112233'}}, cluster_colours: {'7': '#445566'}});
+    const {model, store, stores, el} = setUp({value_colours: {venue: {nips: '#112233'}}, cluster_colours: {topics: {'7': '#445566'}}});
     const explorer = el.querySelector('tessera-explorer')!;
     await settle(el);
+    const chosen = () => [...(store.get('artifacts').overrides.get('topics')?.keys() ?? [])];
     expect(colouringOf(store).values).toEqual({venue: {nips: '#112233'}});
-    expect([...store.get('artifacts').overrides.keys()]).toEqual([7n]);
-    model.set('cluster_colours', {'8': '#000000'});
+    expect(chosen()).toEqual([7n]);
+    model.set('cluster_colours', {topics: {'8': '#000000'}});
     await settle(el);
-    expect([...store.get('artifacts').overrides.keys()]).toEqual([8n]);
+    expect(chosen()).toEqual([8n]);
     const saves = model.saves;
     explorer.dispatchEvent(new CustomEvent('tessera-valuecolour', {detail: {column: 'venue', changes: [{value: 'icml', colour: '#abcdef'}, {value: 'nips', colour: null}]}, bubbles: true, composed: true}));
     expect(model.state.value_colours).toEqual({venue: {icml: '#abcdef'}});
+    // The explorer holds them too, so a store it builds next starts with them.
+    expect(explorer.valueColours).toEqual({venue: {icml: '#abcdef'}});
     explorer.dispatchEvent(new CustomEvent('tessera-valuecolour', {detail: {column: 'venue', changes: [{value: 'icml', colour: null}]}, bubbles: true, composed: true}));
     expect(model.state.value_colours).toEqual({});
     explorer.dispatchEvent(new CustomEvent('tessera-clustercolour', {detail: {layer: 'topics', changes: [{tesseraId: '9', colour: '#fedcba'}]}, bubbles: true, composed: true}));
-    expect(model.state.cluster_colours).toEqual({'8': '#000000', '9': '#fedcba'});
+    expect(model.state.cluster_colours).toEqual({topics: {'8': '#000000', '9': '#fedcba'}});
+    expect(explorer.clusterColours).toEqual({topics: {'8': '#000000', '9': '#fedcba'}});
     expect(model.saves).toBe(saves + 3);
-    // The up-sync does not come back down to replace what the store holds.
+    // A store built for a new url starts with the colours chosen.
+    model.set('url', 'http://tessera.test/other');
     await settle(el);
-    expect([...store.get('artifacts').overrides.keys()]).toEqual([8n]);
+    const next = stores.at(-1)!;
+    expect(next).not.toBe(store);
+    expect([...(next.get('artifacts').overrides.get('topics')?.keys() ?? [])]).toEqual([8n, 9n]);
   });
 
   it('applies the size settings set in the kernel, the scale before the column, and follows each change', async () => {

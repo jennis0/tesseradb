@@ -64,17 +64,8 @@ describe('<tessera-colour-editor> on a tree layer', () => {
     ]);
     // Each swatch is its slot's colour: slot 2 of Tableau 10.
     expect(rowsOf(host)[0]!.querySelector('[part="swatch"]')!.getAttribute('style')).toContain('#e15759');
-    expect(deep(host, 'tessera-cluster-filter')!.getAttribute('placeholder')).toBe('Search 3 clusters');
-  });
-
-  it('keeps one request however the filters, the highlight and the camera change, so the order holds', async () => {
-    const {host, store} = await open('cluster:topics');
-    const before = specOf(store, 'colours-ranked');
-    store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}, members: [{layer: 'topics', artifact: 7n, outside: false, verb: 'filter'}]});
-    store.set('view', {...store.get('view'), inView: {status: 'shown', visible: {value: 9, exact: true}, matched: {value: 9, exact: true}, highlighted: {value: 9, exact: true}, shown: 9}});
-    await settle(host);
-    expect(specOf(store, 'colours-ranked')).toEqual(before);
-    expect(store.calls.filter((c) => c.name === 'setAggregate' && String(c.args[0]).startsWith('colours-ranked'))).toHaveLength(1);
+    // The search reaches every cluster of the layer, not only those listed.
+    expect(deep(host, 'tessera-cluster-filter')!.getAttribute('placeholder')).toBe('Search clusters');
   });
 
   it('finds a cluster outside the listed rows with the search box over the whole tree, and lists it first with its count', async () => {
@@ -128,7 +119,7 @@ describe('<tessera-colour-editor> on a tree layer', () => {
         ]
       }
     ]);
-    expect([...store.get('artifacts').overrides.keys()].sort()).toEqual([7n, 9n]);
+    expect([...store.get('artifacts').overrides.get('topics')!.keys()].sort()).toEqual([7n, 9n]);
     expect(rowsOf(host).map((r) => r.querySelector('[part="swatch"]')!.getAttribute('style')!.includes('#123456'))).toEqual([true, false, true]);
     expect(deep(host, '[part="changed"]')!.textContent).toBe('2 colours changed');
     (deep(host, '[part="deselect"]') as HTMLButtonElement).click();
@@ -139,12 +130,9 @@ describe('<tessera-colour-editor> on a tree layer', () => {
   it('resets every colour chosen for the layer’s clusters with one change, and none of another layer’s', async () => {
     const {host, store} = await open('cluster:topics');
     const red = [200, 0, 0, 220] as const;
-    // 7 is listed; 12 is the layer's but not drawn now; 99 is another layer's.
-    store.setArtifactColours(new Map([[7n, red], [12n, red], [99n, red]]));
+    // 7 is listed; 12 is the layer's but not drawn now; 7 and 99 of another layer are that layer's.
+    store.setArtifactColours(new Map([['topics', new Map([[7n, red], [12n, red]])], ['bands', new Map([[7n, red], [99n, red]])]]));
     answerAggregate(store, 'colours-ranked', aggregateEntry([{rows: CUT, groups: 3}], 's0', undefined, 'tableau10'));
-    await settle(host);
-    expect(specOf(store, 'colours-chosen')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 12n, 99n]}}], subject: 'visible'});
-    answerAggregate(store, 'colours-chosen', aggregateEntry([{rows: [{key: 7n, count: 900}, {key: 12n, count: 4}]}]));
     await settle(host);
     expect(deep(host, '[part="changed"]')!.textContent).toBe('2 colours changed');
     const seen: unknown[] = [];
@@ -158,8 +146,69 @@ describe('<tessera-colour-editor> on a tree layer', () => {
         {tesseraId: '12', colour: null}
       ])
     );
-    expect([...store.get('artifacts').overrides.keys()]).toEqual([99n]);
+    expect([...store.get('artifacts').overrides.keys()]).toEqual(['bands']);
+    expect([...store.get('artifacts').overrides.get('bands')!.keys()]).toEqual([7n, 99n]);
     expect((deep(host, '[part="reset-all"]') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('closes only the colour picker on Escape inside it, giving focus back to the swatch it opened from', async () => {
+    const {host, store} = await open('cluster:topics');
+    answerAggregate(store, 'colours-ranked', aggregateEntry([{rows: CUT, groups: 3}], 's0', undefined, 'tableau10'));
+    await settle(host);
+    const swatch = rowsOf(host)[1]!.querySelector('[part="swatch"]') as HTMLButtonElement;
+    swatch.click();
+    await settle(host);
+    const choice = deep(host, '[part="choice"]') as HTMLButtonElement;
+    choice.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+    await settle(host);
+    expect(deep(host, '[part="colour-popover"]')).toBeNull();
+    expect((deep(host, '[part="dialog"]') as HTMLDialogElement).open).toBe(true);
+    const editor = host.querySelector('tessera-colour-editor')!;
+    expect(editor.shadowRoot!.activeElement).toBe(swatch);
+  });
+
+  it('follows a change of field while open: drops what was found and ticked, lists nothing until the new answer, and closes on a field it cannot edit', async () => {
+    const {host, editor, store} = await open('archive');
+    answerAggregate(store, 'colours-ranked', aggregateEntry([{rows: [{key: 'cs', count: 70}, {key: 'math', count: 30}], groups: 2}]));
+    await settle(host);
+    const box = rowsOf(host)[0]!.querySelector('[part="check"]') as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    await settle(host);
+    expect(deep(host, '[part="selected"]')).not.toBeNull();
+    const seen: unknown[] = [];
+    host.addEventListener('tessera-clustercolour', (e) => seen.push((e as CustomEvent).detail));
+    editor.field = 'cluster:topics';
+    await settle(host);
+    // The category's answer is not the layer's, so nothing is listed until the layer's lands.
+    expect(rowsOf(host)).toEqual([]);
+    expect(deep(host, '[part="selected"]')).toBeNull();
+    expect(specOf(store, 'colours-ranked')).toEqual({groupings: [{by: {layer: 'topics', top: 1000, cut: 'drawn', paletteSize: 'drawn'}}], subject: 'visible'});
+    answerAggregate(store, 'colours-ranked', aggregateEntry([{rows: CUT, groups: 3}], 's0', undefined, 'tableau10'));
+    await settle(host);
+    expect(names(host).map((n) => n[0])).toEqual(['7', '8', '9']);
+    (rowsOf(host)[0]!.querySelector('[part="swatch"]') as HTMLButtonElement).click();
+    await settle(host);
+    (deepAll(host, '[part="choice"]')[1] as HTMLButtonElement).click();
+    await settle(host);
+    expect(seen).toEqual([{layer: 'topics', changes: [{tesseraId: '7', colour: '#f28e2b'}]}]);
+    // A field that is neither a category nor a layer: the dialog closes, once.
+    editor.field = 'year';
+    await settle(host);
+    expect((deep(host, '[part="dialog"]') as HTMLDialogElement).open).toBe(false);
+    expect(document.activeElement).toBe(host.querySelector('#opener'));
+  });
+
+  it('outlines a value the map has not drawn yet, which has no palette colour, and still opens its picker', async () => {
+    const {host, store} = await open('archive');
+    store.set('legend', {...store.get('legend'), categories: {archive: [{key: 'cs', code: 1, title: null}]}, ranks: {archive: {1: 0}}});
+    answerAggregate(store, 'colours-ranked', aggregateEntry([{rows: [{key: 'cs', count: 70}, {key: 'math', count: 30}], groups: 2}]));
+    await settle(host);
+    const swatches = rowsOf(host).map((r) => r.querySelector('[part="swatch"]') as HTMLButtonElement);
+    expect(swatches.map((s) => s.hasAttribute('data-unmet'))).toEqual([false, true]);
+    swatches[1]!.click();
+    await settle(host);
+    expect(deep(host, '[part="colour-popover"]')).not.toBeNull();
   });
 
   it('closes on Escape and on Done, gives focus back to what opened it, and stops asking', async () => {

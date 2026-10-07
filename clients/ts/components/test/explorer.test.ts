@@ -786,7 +786,7 @@ describe('<tessera-explorer> Edit colours', () => {
 
   async function withEditor(markup = '<tessera-explorer></tessera-explorer>') {
     const host = await mount(markup);
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; clusterColours: Record<string, string> | null; valueColours: unknown};
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; clusterColours: Record<string, Record<string, string>> | null; valueColours: unknown};
     const store = fakeStore({meta: {...META, layers: [topics]}, status: status({})});
     el.store = store;
     await settle(host);
@@ -823,10 +823,10 @@ describe('<tessera-explorer> Edit colours', () => {
 
   it('sets the cluster colours a host keeps on the store, and reports a change made in the dialog for the host to keep', async () => {
     const {host, el, store, button} = await withEditor();
-    el.clusterColours = {'7': '#112233', '8': '#445566', nonsense: '#000000', '9': 'red'};
+    el.clusterColours = {topics: {'7': '#112233', '8': '#445566', nonsense: '#000000', '9': 'red'}, other: {'7': '#000000'}};
     await settle(host);
-    const set = () => store.calls.filter((c) => c.name === 'setArtifactColours').at(-1)!.args[0] as Map<bigint, readonly number[]>;
-    expect([...set()].map(([id, c]) => [id, c.slice(0, 3)])).toEqual([
+    const set = () => store.calls.filter((c) => c.name === 'setArtifactColours').at(-1)!.args[0] as Map<string, Map<bigint, readonly number[]>>;
+    expect([...set().get('topics')!].map(([id, c]) => [id, c.slice(0, 3)])).toEqual([
       [7n, [0x11, 0x22, 0x33]],
       [8n, [0x44, 0x55, 0x66]]
     ]);
@@ -836,8 +836,6 @@ describe('<tessera-explorer> Edit colours', () => {
     await settle(host);
     const kept: unknown[] = [];
     host.addEventListener('tessera-clustercolour', (e) => kept.push((e as CustomEvent).detail));
-    answerAggregate(store, 'colours-chosen', aggregateEntry([{rows: [{key: 7n, count: 3}, {key: 8n, count: 2}]}]));
-    await settle(host);
     (deep(host, '[part="reset-all"]') as HTMLButtonElement).click();
     await settle(host);
     expect(kept).toEqual([
@@ -849,11 +847,13 @@ describe('<tessera-explorer> Edit colours', () => {
         ]
       }
     ]);
-    expect(set().size).toBe(0);
+    // Another layer's colours stay.
+    expect([...store.get('artifacts').overrides.keys()]).toEqual(['other']);
     // The host's copy is the host's: setting it again replaces the store's.
-    el.clusterColours = {'8': '#445566'};
+    el.clusterColours = {topics: {'8': '#445566'}};
     await settle(host);
-    expect([...set().keys()]).toEqual([8n]);
+    expect([...set().keys()]).toEqual(['topics']);
+    expect([...set().get('topics')!.keys()]).toEqual([8n]);
   });
 });
 

@@ -183,10 +183,10 @@ def test_the_palette_is_synced_and_leaves_the_map_s_choice_by_default(make):
 def test_value_and_cluster_colours_go_down_and_leave_the_map_s_choices_by_default(make):
     state = make(token="t").get_state()
     assert state["value_colours"] is None and state["cluster_colours"] is None
-    m = make(token="t", value_colours={"venue": {"nips": "#A0B0C0"}}, cluster_colours={7: "#112233"})
+    m = make(token="t", value_colours={"venue": {"nips": "#A0B0C0"}}, cluster_colours={"topics": {7: "#112233"}})
     state = m.get_state()
     assert state["value_colours"] == {"venue": {"nips": "#a0b0c0"}}
-    assert state["cluster_colours"] == {"7": "#112233"}
+    assert state["cluster_colours"] == {"topics": {"7": "#112233"}}
     m.cluster_colours = {}
     assert m.get_state()["cluster_colours"] == {}
 
@@ -195,9 +195,9 @@ def test_colours_chosen_in_the_map_come_up_and_are_read_in_a_later_cell(make):
     m = make(token="t")
     seen = []
     m.observe(lambda change: seen.append(change["name"]), names=["value_colours", "cluster_colours"])
-    m.set_state({"value_colours": {"venue": {"icml": "#abcdef"}}, "cluster_colours": {"18446744073709551615": "#000000"}})
+    m.set_state({"value_colours": {"venue": {"icml": "#abcdef"}}, "cluster_colours": {"topics": {"18446744073709551615": "#000000"}}})
     assert m.value_colours == {"venue": {"icml": "#abcdef"}}
-    assert m.cluster_colours == {"18446744073709551615": "#000000"}
+    assert m.cluster_colours == {"topics": {"18446744073709551615": "#000000"}}
     assert sorted(seen) == ["cluster_colours", "value_colours"]
 
 
@@ -206,7 +206,7 @@ def test_colours_must_be_hex_and_clusters_named_by_tessera_id(make):
     for bad in ({"venue": {"nips": "red"}}, {"venue": "#112233"}, {"venue": {"nips": "#12345"}}):
         with pytest.raises(traitlets.TraitError):
             m.value_colours = bad
-    for bad in ({"seven": "#112233"}, {"7": "#11223g"}, {-1: "#112233"}, {2**64: "#112233"}):
+    for bad in ({"7": "#112233"}, {"t": {"seven": "#112233"}}, {"t": {"7": "#11223g"}}, {"t": {-1: "#112233"}}, {"t": {2**64: "#112233"}}):
         with pytest.raises(traitlets.TraitError):
             m.cluster_colours = bad
 

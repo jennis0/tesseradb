@@ -252,6 +252,11 @@ export function shortCount(n: number): string {
   return `${unit === 1 ? Math.round(v) : Number(v.toFixed(Math.abs(v) < 100 ? 1 : 0))}${letter}`;
 }
 
+/** A count as a row shows it: whole below a million, else shortened, `25.2M`. */
+export function countText(n: number): string {
+  return Math.abs(n) < 1e6 ? Math.round(n).toLocaleString('en-GB') : shortCount(n);
+}
+
 /** An id as the decimal string events carry, the wire's JSON form. */
 export function idString(id: bigint): string {
   return id.toString(10);

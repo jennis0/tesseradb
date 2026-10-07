@@ -23,10 +23,10 @@ import {
 } from '@tesseradb/client';
 import {CATEGORY_PALETTES, RAMPS} from '@tesseradb/deck';
 import {colourOfFraction, css as rgb, fractionOf, hexOf} from '@tesseradb/deck/internal';
-import {HeldAggregate, artifactGroupings, countedByLevel, countsByKey, listedGroups} from './aggregate.js';
-import {TesseraElement, UNNAMED, columnCaption, dateRangeText, emit, idString, keyTitle, shortCount, shortDateText} from './base.js';
+import {HeldAggregate, artifactGroupings, countsByKey, levelOf, listedGroups, rankedGrouping} from './aggregate.js';
+import {TesseraElement, UNNAMED, columnCaption, countText, dateRangeText, emit, idString, keyTitle, shortDateText} from './base.js';
 import {ColourPicker, pickerStyles} from './colour-picker.js';
-import {clusterColour, colouringOf, paletteValueColour, setClusterColours, setValueColours, valueColour, watchChoices} from './colouring.js';
+import {clusterColour, colouringOf, holdColours, paletteValueColour, setClusterColours, setValueColours, valueColour, valueMet, watchChoices} from './colouring.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {exportparts} from './parts.js';
@@ -50,10 +50,6 @@ const PLOT_HEIGHT = 56;
 /** The bars of a folded card's small chart. */
 const SPARK_BARS = 8;
 
-/** A count as a row shows it: whole below a million, else shortened, `25.2M`. */
-export function countText(n: number): string {
-  return Math.abs(n) < 1e6 ? Math.round(n).toLocaleString('en-GB') : shortCount(n);
-}
 
 /**
  * A number as an axis prints it: in exponent form from a million up and below a thousandth, else
@@ -73,8 +69,11 @@ type Kind = 'category' | 'cluster' | 'histogram' | 'search';
 /** One bin of a histogram, its edges in the column's units (microseconds on a timestamp). */
 type Bin = {lower: number; upper: number; count: number};
 
-/** One row of a category or cluster card; `own` is a cluster's palette colour, `#rrggbb`, where it is coloured. */
-type Row = {key: string; name: string; path: string; sub: number | null; all: number | null; swatch: string | null; own: string | null};
+/**
+ * One row of a category or cluster card; `own` is a cluster's palette colour, `#rrggbb`, where it
+ * is coloured, and `unmet` marks a category value the map has given no colour yet.
+ */
+type Row = {key: string; name: string; path: string; sub: number | null; all: number | null; swatch: string | null; own: string | null; unmet: boolean};
 
 /** A range dragged across the histogram, by bin, `from` where the drag began. */
 type Brush = {from: number; to: number; open: boolean};
@@ -180,7 +179,8 @@ function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
  * @csspart row - One row, with `data-key` and `data-state`: `in` for a value the field's filter
  *   keeps, `out` for one it leaves out, `lit` for one its highlight lights, else empty.
  * @csspart swatch - A row's colour, while the map is coloured by the field, a button that opens the
- *   colour picker.
+ *   colour picker, with `data-unmet` and drawn as an outline for a category value the map has not
+ *   drawn yet and so has given no colour.
  * @csspart name - A row's name, with `data-unnamed` for a cluster that has none.
  * @csspart path - A cluster row's parents.
  * @csspart bar-match - A row's or a bin's pale bar, its share of the whole match.
@@ -375,6 +375,11 @@ export class TesseraFieldCard extends TesseraElement {
         height: 10px;
         border-radius: 2px;
         background: var(--c);
+      }
+      /* A value the map has given no colour yet: an outline, not a grey that reads as a colour. */
+      [part='swatch'][data-unmet] {
+        background: none;
+        box-shadow: inset 0 0 0 1px var(--_tessera-line-control);
       }
       button[part='swatch'] {
         cursor: pointer;
@@ -707,10 +712,7 @@ export class TesseraFieldCard extends TesseraElement {
 
   /** The level a levelled layer's card counts and browses at: the one chosen, else the deepest. */
   private levelOf(layer: Layer): number | undefined {
-    const levelled = (layer.hierarchy.kind === 'stacked' || layer.hierarchy.kind === 'tiered') && layer.levels.length > 0;
-    if (!levelled) return undefined;
-    const chosen = this.level !== null && layer.levels.some((l) => l.level === this.level) ? this.level : null;
-    return chosen ?? layer.levels.at(-1)!.level;
+    return levelOf(layer, this.level);
   }
 
   /** The keys of the field's clause in `verb`: a category's values, or a layer's clusters by id. */
@@ -733,15 +735,9 @@ export class TesseraFieldCard extends TesseraElement {
     return [this.ranked(layer, top), ...this.namedGroupings(layer, meta, named.map((id) => BigInt(id)))];
   }
 
-  /**
-   * The grouping ranking a layer's `top` clusters: at the cut the map draws on a `nested` or `dag`
-   * layer, else at the card's level. Each row carries its slot in the palette the map colours
-   * clusters from, which its swatch is coloured from.
-   */
+  /** The grouping ranking a layer's `top` clusters at the cut the map draws or the card's level; each row's slot colours its swatch. */
   private ranked(layer: Layer, top: number): AggregateSpec['groupings'][number] {
-    if (layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag') return {by: {layer: layer.name, top, cut: 'drawn', paletteSize: 'drawn'}};
-    const level = this.levelOf(layer);
-    return {by: {layer: layer.name, ...(level === undefined || !countedByLevel(layer) ? {} : {level}), top, paletteSize: 'drawn'}};
+    return rankedGrouping(layer, top, this.level);
   }
 
   /** The groupings counting `ids` of `layer` by name, leaving room for one more beside them. */
@@ -954,7 +950,8 @@ export class TesseraFieldCard extends TesseraElement {
         sub: sub?.get(key) ?? null,
         all: all?.get(key) ?? null,
         swatch: colouring ? valueColour(s, this.field, key) : null,
-        own: null
+        own: null,
+        unmet: colouring && colouringOf(s).values[this.field]?.[key] === undefined && !valueMet(s, this.field, key)
       }));
     }
     const {palette, overrides} = s.get('artifacts');
@@ -976,8 +973,8 @@ export class TesseraFieldCard extends TesseraElement {
       const id = BigInt(key);
       const held = slots.get(key);
       const own = artifactColour(held?.palette ?? palette, held?.slot ?? null);
-      const swatch = colouring ? rgb(overrides.get(id) ?? own) : null;
-      return {key, name: titles.get(key) ?? this.clauseName(s, id) ?? UNNAMED, path: this.paths.pathOf(id), sub: sub?.get(key) ?? null, all: all?.get(key) ?? null, swatch, own: colouring ? hexOf(own) : null};
+      const swatch = colouring ? rgb(overrides.get(this.layerName!)?.get(id) ?? own) : null;
+      return {key, name: titles.get(key) ?? this.clauseName(s, id) ?? UNNAMED, path: this.paths.pathOf(id), sub: sub?.get(key) ?? null, all: all?.get(key) ?? null, swatch, own: colouring ? hexOf(own) : null, unmet: false};
     });
   }
 
@@ -1021,7 +1018,7 @@ export class TesseraFieldCard extends TesseraElement {
       const onLit = lit.has(r.key);
       const stateOf = out ? 'out' : inFilter ? 'in' : onLit ? 'lit' : '';
       const mark = r.swatch
-        ? html`<button part="swatch" type="button" style=${`--c:${r.swatch}`} aria-haspopup="dialog" aria-label=${`Colour of ${r.name}`} @click=${(e: Event) => this.openPicker(e, r, kind)}></button>`
+        ? html`<button part="swatch" type="button" style=${`--c:${r.swatch}`} ?data-unmet=${r.unmet} aria-haspopup="dialog" aria-label=${`Colour of ${r.name}`} @click=${(e: Event) => this.openPicker(e, r, kind)}></button>`
         : inFilter
           ? icon('check', 12, 2.6)
           : nothing;
@@ -1037,7 +1034,7 @@ export class TesseraFieldCard extends TesseraElement {
         <span class="mark">${mark}</span>
         <span class="label">
           <span class="names"><span part="name" title=${r.name} ?data-unnamed=${r.name === UNNAMED}>${r.name}</span>${r.path ? html`<span part="path" title=${r.path}>${r.path}</span>` : nothing}</span>
-          <span class="bars" aria-hidden="true"><span part="bar-match" style=${`width:${width(out ? 0 : pct(r.all, allTotal))}`}></span><span part="bar-subject" style=${`width:${width(out ? 0 : pct(r.sub, subTotal))}${r.swatch ? `;background:${r.swatch}` : ''}`}></span></span>
+          <span class="bars" aria-hidden="true"><span part="bar-match" style=${`width:${width(out ? 0 : pct(r.all, allTotal))}`}></span><span part="bar-subject" style=${`width:${width(out ? 0 : pct(r.sub, subTotal))}${r.swatch && !r.unmet ? `;background:${r.swatch}` : ''}`}></span></span>
         </span>
         ${counts}
         <span part="verbs">
@@ -1266,7 +1263,8 @@ export class TesseraFieldCard extends TesseraElement {
         apply: (hex, final) => {
           setValueColours(s, this.field, [{value: r.key, colour: hex}]);
           if (final) emit(this, 'tessera-valuecolour', {column: this.field, changes: [{value: r.key, colour: hex}]});
-        }
+        },
+        hold: () => holdColours(s)
       });
       return;
     }
@@ -1277,11 +1275,12 @@ export class TesseraFieldCard extends TesseraElement {
       title: r.name,
       palette: PALETTES[s.get('artifacts').palette],
       own,
-      current: () => clusterColour(s, id, own),
+      current: () => clusterColour(s, layer, id, own),
       apply: (hex, final) => {
-        setClusterColours(s, [{tesseraId: id, colour: hex}]);
+        setClusterColours(s, layer, [{tesseraId: id, colour: hex}]);
         if (final) emit(this, 'tessera-clustercolour', {layer, changes: [{tesseraId: r.key, colour: hex}]});
-      }
+      },
+      hold: () => holdColours(s)
     });
   }
 }

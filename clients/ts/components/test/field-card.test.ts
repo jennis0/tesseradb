@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {FilterDraft, FiltersProjection, Meta} from '@tesseradb/client';
+import type {FilterDraft, FiltersProjection, Meta, Rgba} from '@tesseradb/client';
 import '../src/field-card.js';
 import type {TesseraFieldCard} from '../src/field-card.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, meta, mount, registered, scalar, settle, status, type FakeStore} from './fake-store.js';
@@ -227,6 +227,29 @@ describe('<tessera-field-card> on a category', () => {
     ]);
   });
 
+  it('shows a custom colour as it is dragged, and puts back the colour from before when the picker closes before the drag ends', async () => {
+    const {host, store} = await mountCard('archive');
+    const chosen: unknown[] = [];
+    host.addEventListener('tessera-valuecolour', (e) => chosen.push((e as CustomEvent).detail));
+    store.set('legend', {...store.get('legend'), colourBy: 'archive', categories: {archive: [{key: 'cs', code: 1, title: null}]}, ranks: {archive: {1: 0}}});
+    await answer(host, store, [{rows: [{key: 'cs', count: 10}], total: 10}], [{rows: [{key: 'cs', count: 10}], total: 10}]);
+    const swatchStyle = () => rows(host)[0]!.querySelector('[part="swatch"]')!.getAttribute('style');
+    const before = swatchStyle();
+    (rows(host)[0]!.querySelector('button[part="swatch"]') as HTMLButtonElement).click();
+    await settle(host);
+    const sv = deep(host, '[part="sv"]') as HTMLElement;
+    sv.getBoundingClientRect = () => ({left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100, x: 0, y: 0, toJSON: () => ({})});
+    sv.dispatchEvent(new PointerEvent('pointerdown', {clientX: 90, clientY: 10, bubbles: true}));
+    await new Promise((r) => setTimeout(r, 50));
+    await settle(host);
+    expect(swatchStyle()).not.toBe(before);
+    sv.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+    await settle(host);
+    expect(deep(host, '[part="colour-popover"]')).toBeNull();
+    expect(swatchStyle()).toBe(before);
+    expect(chosen).toEqual([]);
+  });
+
   it('offers no paint button on a field the map cannot be coloured by', async () => {
     const {host} = await mountCard('authors');
     expect(deep(host, '[part="paint"]')).toBeNull();
@@ -411,7 +434,7 @@ describe('<tessera-field-card> on a layer', () => {
     // Slot 2 of Tableau 10 is #e15759; a cluster served with no slot is grey.
     expect(swatches()).toEqual(['rgb(225, 87, 89)', 'rgb(118, 126, 140)']);
     // A colour the host chose for a cluster is drawn in place of its slot's.
-    store.set('artifacts', {...store.get('artifacts'), overrides: new Map([[8n, [1, 2, 3, 255] as const]])});
+    store.set('artifacts', {...store.get('artifacts'), overrides: new Map([['topics', new Map([[8n, [1, 2, 3, 255] as const]])]])});
     await settle(host);
     expect(swatches()).toEqual(['rgb(225, 87, 89)', 'rgb(1, 2, 3)']);
     // Under Okabe-Ito the answers held keep Tableau 10's colours until answers for eight colours
@@ -432,7 +455,8 @@ describe('<tessera-field-card> on a layer', () => {
     const store = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
     store.set('view', {...store.get('view'), id: 's0'});
     store.set('legend', {...store.get('legend'), colourBy: 'cluster:topics'});
-    store.set('artifacts', {...store.get('artifacts'), overrides: new Map([[9n, [1, 2, 3, 220] as const]])});
+    // 9 has a colour on this layer; 7 has one on another layer, which is not this cluster's.
+    store.set('artifacts', {...store.get('artifacts'), overrides: new Map([['topics', new Map([[9n, [1, 2, 3, 220] satisfies Rgba]])], ['other', new Map([[7n, [4, 5, 6, 220] satisfies Rgba]])]])});
     card.store = store;
     await settle(host);
     answerAggregate(store, 'field-subject', aggregateEntry([{rows: [{key: 7n, count: 9, title: 'optics', slot: 2}], total: 9}], 's0', undefined, 'tableau10'));
@@ -449,12 +473,15 @@ describe('<tessera-field-card> on a layer', () => {
     (deep(host, '[part="hex"]') as HTMLInputElement).value = '0A0B0C';
     deep(host, '[part="hex"]')!.dispatchEvent(new Event('change'));
     await settle(host);
-    // Set over the slot's colour, beside the colour chosen before for another cluster.
-    expect([...store.get('artifacts').overrides.keys()].sort()).toEqual([7n, 9n]);
+    // Set over the slot's colour, beside the colours chosen before.
+    const ids = (layer: string) => [...(store.get('artifacts').overrides.get(layer)?.keys() ?? [])].sort();
+    expect(ids('topics')).toEqual([7n, 9n]);
+    expect(ids('other')).toEqual([7n]);
     expect(swatch().getAttribute('style')).toContain('rgb(10, 11, 12)');
     (deep(host, '[part="reset"]') as HTMLButtonElement).click();
     await settle(host);
-    expect([...store.get('artifacts').overrides.keys()]).toEqual([9n]);
+    expect(ids('topics')).toEqual([9n]);
+    expect(ids('other')).toEqual([7n]);
     expect(swatch().getAttribute('style')).toContain('rgb(225, 87, 89)');
     expect(chosen).toEqual([
       {layer: 'topics', changes: [{tesseraId: '7', colour: '#0a0b0c'}]},

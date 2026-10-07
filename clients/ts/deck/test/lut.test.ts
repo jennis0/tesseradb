@@ -10,7 +10,7 @@ const slot = (n: number) => ({slot: n % 10, paletteSize: 10});
 
 /** The colours of every artifact the table holds, as the store builds them, with every slot read as one of `size` colours. */
 const coloursOf = (table: SessionArtifactTable, size = 10) =>
-  artifactColours(table.liveEntries().map(({ordinal, entry}) => ({ordinal, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: size})));
+  artifactColours(table.liveEntries().map(({ordinal, entry}) => ({ordinal, layer: entry.layer, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: size})));
 
 /** One entry's colour, as the store extends its map for an ordinal named. */
 const colourOf = (table: SessionArtifactTable, ordinal: number) => slottedColour(table.entry(ordinal)!, new Map());

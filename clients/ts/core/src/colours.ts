@@ -1,5 +1,5 @@
 import type {SessionArtifactTable} from './artifactTable.js';
-import {artifactColours, slottedColour, type PaletteName, type Rgba} from './palette.js';
+import {artifactColours, slottedColour, type ChosenColours, type PaletteName, type Rgba} from './palette.js';
 
 /**
  * A colour per live ordinal of the session artifact table, rebuilt only when the table has moved.
@@ -12,7 +12,7 @@ import {artifactColours, slottedColour, type PaletteName, type Rgba} from './pal
  */
 export class ArtifactColours {
   private name: PaletteName;
-  private chosen: ReadonlyMap<bigint, Rgba> = new Map();
+  private chosen: ChosenColours = new Map();
   /** The table version the map was built at. */
   private builtAt = -1;
   /** Whether {@link map} was built under the current chosen colours. */
@@ -22,7 +22,7 @@ export class ArtifactColours {
   constructor(
     private readonly table: SessionArtifactTable,
     palette: PaletteName,
-    private readonly publish: (colours: ReadonlyMap<number, Rgba>, palette: PaletteName, chosen: ReadonlyMap<bigint, Rgba>) => void
+    private readonly publish: (colours: ReadonlyMap<number, Rgba>, palette: PaletteName, chosen: ChosenColours) => void
   ) {
     this.name = palette;
   }
@@ -31,8 +31,8 @@ export class ArtifactColours {
     return this.name;
   }
 
-  /** The colours set by `tessera_id` in place of the palette's. */
-  get overrides(): ReadonlyMap<bigint, Rgba> {
+  /** The colours set by layer and `tessera_id` in place of the palette's. */
+  get overrides(): ChosenColours {
     return this.chosen;
   }
 
@@ -54,8 +54,9 @@ export class ArtifactColours {
   }
 
   /** Colour the artifacts `chosen` names with its colours in place of the palette's, and no others. */
-  setOverrides(chosen: ReadonlyMap<bigint, Rgba>): void {
-    this.chosen = new Map(chosen);
+  setOverrides(chosen: ChosenColours): void {
+    // A layer with no colour chosen is left out, so an empty layer reads as none.
+    this.chosen = new Map([...chosen].filter(([, ids]) => ids.size > 0).map(([layer, ids]) => [layer, new Map(ids)]));
     this.valid = false;
     this.publish(this.build(), this.name, this.chosen);
   }
@@ -74,7 +75,7 @@ export class ArtifactColours {
       return this.map;
     }
     this.map = artifactColours(
-      table.liveEntries().map(({ordinal, entry}) => ({ordinal, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: entry.paletteSize})),
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, layer: entry.layer, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: entry.paletteSize})),
       chosen
     );
     return this.map;

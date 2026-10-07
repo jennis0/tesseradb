@@ -27,18 +27,20 @@ describe('the cluster palettes', () => {
     expect(artifactColour('tableau10', null, chosen)).toEqual(chosen);
   });
 
-  it('colour each ordinal by its slot in the palette of the size it was served for, a size no palette has neutral', () => {
+  it('colour each ordinal by its slot in the palette of the size it was served for, a size no palette has neutral, and a colour chosen for its layer over it', () => {
     const colours = artifactColours(
       [
-        {ordinal: 1, tesseraId: 10n, slot: 2, paletteSize: 10},
-        {ordinal: 2, tesseraId: 11n, slot: 2, paletteSize: 8},
-        {ordinal: 3, tesseraId: 12n, slot: null, paletteSize: 10},
-        {ordinal: 4, tesseraId: 13n, slot: 5, paletteSize: 10},
-        {ordinal: 5, tesseraId: 14n, slot: 2, paletteSize: 9},
-        {ordinal: 6, tesseraId: 15n, slot: null, paletteSize: null}
+        {ordinal: 1, layer: 'a', tesseraId: 10n, slot: 2, paletteSize: 10},
+        {ordinal: 2, layer: 'a', tesseraId: 11n, slot: 2, paletteSize: 8},
+        {ordinal: 3, layer: 'a', tesseraId: 12n, slot: null, paletteSize: 10},
+        {ordinal: 4, layer: 'a', tesseraId: 13n, slot: 5, paletteSize: 10},
+        {ordinal: 5, layer: 'a', tesseraId: 14n, slot: 2, paletteSize: 9},
+        {ordinal: 6, layer: 'a', tesseraId: 15n, slot: null, paletteSize: null},
+        {ordinal: 7, layer: 'b', tesseraId: 13n, slot: 2, paletteSize: 10}
       ],
-      new Map([[13n, [9, 9, 9, 255] as const]])
+      new Map([['a', new Map([[13n, [9, 9, 9, 255] as const]])]])
     );
+    expect(colours.get(7)).toEqual(PALETTES.tableau10.colours[2]);
     expect(colours.get(1)).toEqual(PALETTES.tableau10.colours[2]);
     expect(colours.get(2)).toEqual(PALETTES['okabe-ito'].colours[2]);
     expect(colours.get(3)).toEqual(NEUTRAL);

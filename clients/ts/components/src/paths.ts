@@ -1,4 +1,5 @@
 import {artifactName, type BrowseRow, type Layer, type Store} from '@tesseradb/client';
+import {isTree} from './aggregate.js';
 import {UNNAMED} from './base.js';
 
 /**
@@ -31,7 +32,7 @@ export class ClusterPaths {
 
   /** Ask for the parents of each of `ids` and of its first parent, on a `nested` or `dag` layer. */
   ask(store: Store, layer: Layer, ids: readonly bigint[]): void {
-    if (layer.hierarchy.kind !== 'nested' && layer.hierarchy.kind !== 'dag') return;
+    if (!isTree(layer)) return;
     const epoch = this.epoch;
     const ask = (id: bigint) => {
       if (this.asked.has(id)) return;
