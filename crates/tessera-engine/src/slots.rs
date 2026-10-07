@@ -53,9 +53,12 @@
 //!
 //! Every cluster has an order of the `N` slots, a permutation drawn from its `tessera_id` and `N`,
 //! and a rank drawn from its `tessera_id`. A parent's **heir** is its child with the most visible
-//! items, ties going to the lower `tessera_id`, among all its children in the viewer's tree (on a
-//! tiered layer, at whatever level they sit); a child that is heir to several parents inherits
-//! from the one with the most visible items, ties likewise.
+//! items, ties going to the lower `tessera_id`; a child that is heir to several parents inherits
+//! from the one with the most visible items, ties likewise. On a tiered layer the heir is chosen
+//! among the parent's children at the shallowest level holding any it is served: a child reached
+//! through a withheld level between is its heir only where it has no child above that, and that
+//! is settled when the child's level is coloured. So colouring a level reads that level and the
+//! ones above it, and never a deeper one.
 //!
 //! A cluster's **claim** is the slot it asks for first:
 //!
@@ -583,13 +586,12 @@ impl Engine {
         let stop = || gone(&served.cancel);
 
         // The clusters this viewer is served, as the artifacts frame serves them: the verdict over
-        // the visible set, and content that reads back. A tiered level is read with every level of
-        // its layer, so that each parent's heir is chosen among all its children in the viewer's
-        // tree, at whatever level they sit; the levels above carry the slots and centres already
-        // settled for them.
+        // the visible set, and content that reads back. A tiered level is read with the levels
+        // above it, which carry the slots and centres already settled for them; no deeper level
+        // is read.
         let tiered = kind == HierarchyKind::Tiered;
         let levels: Vec<u32> = match tiered {
-            true => (0..layer.runs.len() as u32).collect(),
+            true => (0..=level).collect(),
             false => vec![level],
         };
         let mut reads: Vec<ReadLevel> = Vec::new();
@@ -636,6 +638,7 @@ impl Engine {
                     count: masked_count,
                     parents: Vec::new(),
                     centre: settled.and_then(|slots| slots.centre(ordinal)),
+                    tier: at_level,
                 });
                 preset.push(settled.and_then(|slots| slots.get(ordinal)).unwrap_or(NO_SLOT));
                 if at_level == level {
@@ -997,6 +1000,9 @@ pub(crate) struct Cluster {
     /// Its parents in the viewer's tree, as indices of clusters.
     pub(crate) parents: Vec<u32>,
     pub(crate) centre: Option<[f64; 2]>,
+    /// Its level on a tiered layer, 0 otherwise. A parent's heir is chosen among its children at
+    /// the shallowest level holding any.
+    pub(crate) tier: u32,
 }
 
 /// One depth: the clusters drawn there, and those of them coloured there.
@@ -1148,12 +1154,12 @@ pub(crate) fn assign(
 }
 
 /// Each cluster's parent it is heir to, where it is heir to one: of the parents whose child with
-/// the most visible items it is, the one with the most visible items, ties going to the lower
-/// `tessera_id` both times.
+/// the most visible items it is, among the parent's children at the shallowest tier holding any,
+/// the one with the most visible items, ties going to the lower `tessera_id` both times.
 fn heirs(clusters: &[Cluster]) -> Vec<Option<u32>> {
     let weight = |c: u32| {
         let cluster = &clusters[c as usize];
-        (cluster.count, std::cmp::Reverse(cluster.seed))
+        (std::cmp::Reverse(cluster.tier), cluster.count, std::cmp::Reverse(cluster.seed))
     };
     let mut heir_of: Vec<Option<u32>> = vec![None; clusters.len()];
     for (c, cluster) in clusters.iter().enumerate() {
@@ -1165,13 +1171,17 @@ fn heirs(clusters: &[Cluster]) -> Vec<Option<u32>> {
             }
         }
     }
+    let size = |c: u32| {
+        let cluster = &clusters[c as usize];
+        (cluster.count, std::cmp::Reverse(cluster.seed))
+    };
     let mut heir: Vec<Option<u32>> = vec![None; clusters.len()];
     for (p, child) in heir_of.iter().enumerate() {
         let (p, Some(child)) = (p as u32, *child) else {
             continue;
         };
         let held = &mut heir[child as usize];
-        if held.is_none_or(|q| weight(p) > weight(q)) {
+        if held.is_none_or(|q| size(p) > size(q)) {
             *held = Some(p);
         }
     }
@@ -1350,6 +1360,7 @@ mod tests {
             count: 1 << 30,
             parents: Vec::new(),
             centre: Some([0.5, 0.5]),
+            tier: 0,
         }];
         let mut levels: Vec<Vec<u32>> = vec![vec![0]];
         let mut spread = 0.5;
@@ -1368,6 +1379,7 @@ mod tests {
                         count: 1 + splitmix(&mut state) % parent.count.max(2),
                         parents: vec![p],
                         centre: Some(centre),
+                        tier: 0,
                     });
                 }
             }

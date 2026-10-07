@@ -165,7 +165,8 @@ viewer's 1.8 seconds went on testing which artifacts lie in each tile, not on th
 
 A viewer's first request for a layer's colours, with a `palette_size`, also costs one pass over
 the layer: the server works out a colour slot for every cluster the viewer is served, over the
-whole layer, one level at a time. Where the layer declares a centroid, as a taxonomy does, the pass
+whole layer, one level at a time: the level asked for and, on a `tiered` layer, the levels above
+it, never a deeper one. Where the layer declares a centroid, as a taxonomy does, the pass
 reads the centroids the map fills when it draws the level, so it adds no walk of its own. These
 figures are from samples, not from a full-scale corpus, each with its files in the page cache and
 for the viewer who sees everything. On a 25,846,007-row sample of the GBIF occurrences, whose

@@ -961,12 +961,12 @@ fn a_level_centred_by_its_figures_is_coloured_alike_whichever_route_asks() {
     assert_eq!(stats.sampled_items, 0, "no sample is read");
 }
 
-/// **A parent has one heir, at whatever level it sits**: on a tiered layer whose middle node the
-/// viewer is not served, the grandchild beneath it is the parent's child in the viewer's tree, and
-/// being larger than the parent's child one level down, it is the one heir and keeps the parent's
-/// slot; the smaller child does not take it.
+/// **A tiered parent has one heir, at the shallowest level holding a child it is served**: where
+/// a middle node is withheld, the grandchild beneath it is the parent's child in the viewer's tree,
+/// but a child one level down is the heir however much smaller; where the parent has no child one
+/// level down, the grandchild is.
 #[test]
-fn a_tiered_parent_has_one_heir_across_levels() {
+fn a_tiered_parent_has_one_heir_at_its_shallowest_child_level() {
     use tessera_types::layer::LevelDeclaration;
     const TIERS: &str = "clusters/tiers";
     let fx = fixture();
@@ -1005,10 +1005,13 @@ fn a_tiered_parent_has_one_heir_across_levels() {
     // (level, key, members of, parent, label)
     let planted = [
         (0u32, "p", "b1-0-0", None, None),
+        (0, "q", "b1-1-1", None, None),
         (1, "hidden", "b2-0-0", Some("p"), Some("7")),
         (1, "small", "b4-4-0", Some("p"), None),
+        (1, "q-hidden", "b2-2-2", Some("q"), Some("7")),
         (2, "large", "b3-0-0", Some("hidden"), None),
         (2, "under-small", "b4-5-0", Some("small"), None),
+        (2, "q-grandchild", "b3-4-4", Some("q-hidden"), None),
     ];
     let mut ids: BTreeMap<&str, TesseraId> = BTreeMap::new();
     for level in 0..3u32 {
@@ -1036,6 +1039,126 @@ fn a_tiered_parent_has_one_heir_across_levels() {
     let slots = read_slots(engine, &fx.session(true), TIERS, 10);
     let slot = |key: &str| slots[&ids[key].raw()].expect("a slot");
     assert!(!slots.contains_key(&ids["hidden"].raw()));
-    assert_eq!(slot("large"), slot("p"), "the larger child, two levels down, is the heir");
-    assert_ne!(slot("small"), slot("p"), "the smaller child is not a second heir");
+    assert_eq!(slot("small"), slot("p"), "the child one level down is the heir");
+    assert_ne!(slot("large"), slot("p"), "the larger grandchild is not a second heir");
+    assert_eq!(slot("q-grandchild"), slot("q"), "with no child one level down, it is");
+}
+
+/// **Colouring a tiered level reads no deeper level**: asking for the slots of the coarsest level
+/// of a three-level layer, served from its columns with a centroid declared, starts the figures of
+/// that level alone, and colouring the finest then starts the two levels below the coarsest.
+#[test]
+fn colouring_a_tiered_level_fills_no_deeper_level() {
+    use tessera_types::layer::{LevelDeclaration, ServingLayout};
+    const TIERS: &str = "clusters/lazy";
+    let fx = fixture();
+    let nodes = fx.tree(&[]);
+    fx.engine
+        .register_layer(LayerDeclaration {
+            scope: Default::default(),
+            name: TIERS.into(),
+            title: None,
+            views: vec!["s0".into()],
+            membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: ArtifactVisibility::inherited(),
+            require_member_visibility: None,
+            hierarchy: Hierarchy {
+                kind: HierarchyKind::Tiered,
+                prune_children: true,
+            },
+            content: ContentDeclaration {
+                computed: vec!["centroid".to_string()],
+                ..ContentDeclaration::default()
+            },
+            depends_on: Vec::new(),
+            levels: (0..3)
+                .map(|level| LevelDeclaration {
+                    level,
+                    title: None,
+                    zoom: None,
+                })
+                .collect(),
+            layout: Some(ServingLayout::RowMajorLabel),
+            shape: None,
+        })
+        .unwrap();
+    let map = source_to_new_map(&fx.root, "v00000");
+    for level in 0..3u32 {
+        let artifacts = nodes
+            .iter()
+            .filter(|n| n.key.starts_with(&format!("b{}-", level + 1)))
+            .map(|node| {
+                let mut artifact = IncomingArtifact::from_entities(
+                    Some(node.key.clone()),
+                    node.members
+                        .iter()
+                        .map(|s| tessera_types::EntityId::new(map[s]))
+                        .collect::<Vec<_>>(),
+                );
+                if level > 0 {
+                    artifact.parent_keys = node.parent.iter().cloned().collect();
+                }
+                artifact
+            })
+            .collect();
+        fx.engine
+            .publish_artifacts(TIERS.into(), level, artifacts)
+            .unwrap();
+    }
+    tick(&fx.engine);
+    fold(&fx.engine);
+    let Fx {
+        _tmp,
+        root,
+        engine,
+        cells,
+    } = fx;
+    drop(engine);
+    let fx = Fx {
+        engine: engine_at(_tmp.path(), &root, 3600),
+        _tmp,
+        root,
+        cells,
+    };
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let started = |level: Option<u32>| {
+        let before = engine.figures_stats().misses;
+        let fields = ["slot".to_string()];
+        let mut pages = Pages::default();
+        engine
+            .artifacts_stream(
+                &session,
+                ArtifactsRequest {
+                    view: "s0",
+                    layer: TIERS,
+                    level,
+                    parent: None,
+                    q: None,
+                    ids: None,
+                    filter: None,
+                    keep_unmatched: false,
+                    count: false,
+                    fields: &fields,
+                    palette_size: Some(10),
+                    page_rows: None,
+                    pages: None,
+                    cursor: None,
+                    limits: limits(),
+                    cancel: None,
+                },
+                &mut pages,
+            )
+            .unwrap();
+        let rows = id_slots(&pages.pages, "tessera_id");
+        assert!(rows.iter().all(|(_, slot)| slot.is_some()), "{level:?}");
+        engine.figures_stats().misses - before
+    };
+    // The read takes the level's counts, and the slots the map's counts and centroids beside them.
+    assert_eq!(started(Some(0)), 2, "the coarsest level alone is filled");
+    // The finest level's read, and the map's entries of the two levels below the coarsest, which
+    // colouring the coarsest did not start.
+    assert_eq!(started(Some(2)), 3, "the deeper levels are filled when they are asked for");
 }
