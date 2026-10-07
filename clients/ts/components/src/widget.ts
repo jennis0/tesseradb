@@ -13,9 +13,9 @@ import {
   type TokenSupplier
 } from '@tesseradb/client';
 import type {Sizing} from '@tesseradb/deck';
+import {hexOf} from '@tesseradb/deck/internal';
 import {idString} from './base.js';
-import {setSizing, sizingOf} from './colouring.js';
-import type {TesseraEventDetails} from './events.js';
+import {colouringOf, setSizing, sizingOf} from './colouring.js';
 import type {TesseraExplorer} from './explorer.js';
 import './explorer.js';
 
@@ -533,18 +533,19 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     // A palette chosen in the Colour section reaches the kernel at once.
     const onPalette = (e: Event) => syncUp({palette: (e as CustomEvent<{palette: PaletteName}>).detail.palette});
     explorer.addEventListener('tessera-clusterpalettechange', onPalette);
-    // A colour chosen for values or clusters reaches the kernel at once, with the ones held before.
-    // The explorer's property follows, so a store it builds later, or a view mounted after, starts
-    // with them.
-    const onValueColour = (e: Event) => {
-      const {column, changes} = (e as CustomEvent<TesseraEventDetails['tessera-valuecolour']>).detail;
-      const next = withChanges(model.get('value_colours'), column, changes.map((c) => [c.value, c.colour]));
+    // A colour chosen for values or clusters reaches the kernel at once, as every colour the store
+    // now holds, which the event's change is already in; the kernel's copy may be `None`, which
+    // left the map's choices standing. The explorer's property follows, so a store it builds
+    // later, or a view mounted after, starts with them.
+    const onValueColour = () => {
+      if (!v.store) return;
+      const next = structuredClone(colouringOf(v.store).values) as Record<string, Record<string, string>>;
       explorer.valueColours = next;
       syncUp({value_colours: next});
     };
-    const onClusterColour = (e: Event) => {
-      const {layer, changes} = (e as CustomEvent<TesseraEventDetails['tessera-clustercolour']>).detail;
-      const next = withChanges(model.get('cluster_colours'), layer, changes.map((c) => [c.tesseraId, c.colour]));
+    const onClusterColour = () => {
+      if (!v.store) return;
+      const next = clusterColoursOf(v.store);
       explorer.clusterColours = next;
       syncUp({cluster_colours: next});
     };
@@ -584,17 +585,13 @@ function applyBudget(explorer: TesseraExplorer, model: WidgetModel): void {
   if (typeof clustersMax === 'number') explorer.clusterBudgetMax = clustersMax;
 }
 
-/** `held`, colours by column or by layer, with each key of `within` given its colour, or removed where its colour is `null`. */
-function withChanges(held: unknown, within: string, changes: readonly [string, string | null][]): Record<string, Record<string, string>> {
-  const all = {...((held as Record<string, Record<string, string>> | null) ?? {})};
-  const own = {...(all[within] ?? {})};
-  for (const [key, colour] of changes) {
-    if (colour === null) delete own[key];
-    else own[key] = colour;
+/** The cluster colours `store` holds, by layer and `tessera_id`, as `#rrggbb`. */
+function clusterColoursOf(store: Store): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {};
+  for (const [layer, ids] of store.get('artifacts').overrides) {
+    if (ids.size > 0) out[layer] = Object.fromEntries([...ids].map(([id, rgba]) => [idString(id), hexOf(rgba)]));
   }
-  if (Object.keys(own).length === 0) delete all[within];
-  else all[within] = own;
-  return all;
+  return out;
 }
 
 /** The value and cluster colours the kernel set; one it left unset leaves the explorer's. */
