@@ -14,15 +14,27 @@
 //! members. A cluster the viewer is not served is no input, so a viewer's slots are those of a
 //! corpus without it.
 //!
-//! **Centres come from a sample.** The items sampled are the visible items whose `tessera_id` is
-//! below `2^(64 - j)`, `j` the largest whole number with `N_visible / 2^j >= SAMPLE`, read from
-//! identity band `j` ([`tessera_store::bands`]) where there is one and from the segment's columns
-//! where `j` is below the first band. The cut depends on the visible count and [`SAMPLE`] alone. A
-//! cluster's centre is the mean position of its sampled members. A cluster with none takes its
-//! nearest sampled ancestor's centre, moved by an offset of at most [`JITTER`] grid units drawn
-//! from its own `tessera_id`, so that siblings without a sample do not sit on one point. One with
-//! no sampled ancestor has no centre.
+//! Slots are worked out a level at a time, when a request names a palette size for that level; a
+//! tiered level's parents' levels first.
 //!
+//! **Centres come from the level's figures where the layer declares a centroid or a box** and the
+//! level is served from its column alone: each cluster's centre is the centroid of its visible
+//! members those figures carry, the same entry the map fills when it draws the level. A route
+//! that reads no positions (browse, a bulk read, an aggregate without a cut) does not fill them:
+//! it is answered from slots held, or with none.
+//!
+//! **Elsewhere centres come from a sample.** The items sampled are the visible items whose
+//! `tessera_id` is below the cut `⌊S · 2⁶⁴ / N⌋`, `S` being [`SAMPLE`] and `N` the visible count, or
+//! every visible item where `N <= S`. They are read from the narrowest identity band holding the cut
+//! ([`tessera_store::bands`]), or from the segment's columns where no band does, with a column
+//! level's labels read from its band-order copy where it has one. The cut moves in proportion to
+//! `N`, with no step, so a change in the visible count moves the centres only of the clusters
+//! holding an item between the old cut and the new. A cluster's centre is the mean position of its
+//! sampled members. A cluster with none takes its nearest centred ancestor's centre, moved by at
+//! most [`JITTER`] grid units drawn from its own `tessera_id`, and one with no such ancestor has no
+//! centre and no neighbours. So for clusters far smaller than the sample resolves, which neighbours
+//! they are told apart from is approximate.
+
 //! # Depths and neighbours
 //!
 //! A cluster is coloured once, at the first depth it is drawn:
@@ -53,23 +65,35 @@
 //! Among claims of one class the higher rank wins. A cluster takes the first slot of its list (its
 //! claim, then its order without its parents' slots, then its parents' slots) that no neighbour
 //! claims, except that it keeps its own claim against a neighbour of lower rank claiming the same.
-//! Where every slot is claimed by a neighbour, it takes the slot its farthest neighbour claims,
-//! which is a clash.
+//! Where every slot is claimed by a neighbour, it takes the slot its farthest neighbour claims.
 //!
-//! So a slot depends on the cluster's own `tessera_id`, its parents' slots and whether it is an
-//! heir, and on its neighbours' `tessera_id`s and what they inherit, but never on a neighbour's
-//! slot at the same depth. A change to the corpus moves the slots of the clusters whose neighbours
-//! or parents it moved, and of their descendants, and no others. Two neighbours that both give up
-//! their claim can still take the same free slot; [`SlotStats`] counts every drawn edge whose ends
-//! share a slot.
+//! # What a change reaches
+//!
+//! A slot depends on the cluster's own `tessera_id`, its parents' slots and which parent it is heir
+//! to, and on each neighbour's `tessera_id`, which parent the neighbour is heir to, the neighbour's
+//! parents' slots, and the slot of a neighbour coloured at an earlier depth. It never depends on the
+//! slot a neighbour takes at the same depth. So a change reaches:
+//!
+//! - the clusters whose neighbours it changes at a depth: those beside a cluster that appeared,
+//!   went or moved;
+//! - where it changes which child is a parent's heir, the old and the new heir, and their
+//!   neighbours;
+//! - at each depth below, the children of every cluster whose slot changed, every cluster drawn
+//!   beside a cluster whose slot changed, and their neighbours.
+//!
+//! The reach therefore widens by about a ring of neighbours for each depth below the change, and
+//! an heir that changes near the root recolours its subtree. Two neighbours that both give up their
+//! claim can still take one slot; [`SlotStats`] counts every pair of clusters drawn beside each
+//! other at any depth that hold one slot.
 
 use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use croaring::Bitmap;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_lifecycle::membership::Attachment;
 use tessera_types::layer::{HierarchyKind, RegisteredLayer};
+use tessera_store::bands::BandLabels;
 use tessera_types::{EntityId, MortonCode};
 
 use crate::artifacts::ArtifactVerdict;
@@ -82,24 +106,24 @@ use crate::Engine;
 /// The palette sizes a request may name.
 pub const PALETTE_SIZES: RangeInclusive<u8> = 2..=32;
 
-/// About how many visible items the centres are taken from: at least this many and fewer than
-/// twice this, or every visible item where there are fewer than twice this.
-pub const SAMPLE: u64 = 1 << 18;
+/// About how many visible items the centres are taken from, where a level's centres come from a
+/// sample, or every visible item where there are fewer.
+pub const SAMPLE: u64 = 1 << 19;
 
-/// The farthest a cluster with no sampled member is placed from its ancestor's centre, in the
+/// The farthest a cluster centred on an ancestor is placed from the ancestor's centre, in the
 /// 32-bit grid's units: one cell at zoom 16.
 const JITTER: f64 = 65_536.0;
 
 /// No slot: a position that holds no served cluster.
 const NO_SLOT: u8 = u8::MAX;
 
-/// How many ordinals the verdict walk takes between two readings of the cancellation token.
+/// How many steps of a walk are taken between two readings of the cancellation token.
 const CHUNK: u32 = 1024;
 
 /// How long a request waits for another's build of the same slots.
 const BUILD_WAIT_MS: u64 = 600_000;
 
-/// The bound on slots held, which are a byte an artifact.
+/// The bound on slots held, which are nine bytes an artifact.
 const SLOTS_BYTES: u64 = 256 << 20;
 
 /// `size` as a palette size, or the refusal naming the sizes there are.
@@ -110,129 +134,408 @@ pub fn check_palette_size(size: u32) -> Result<u8> {
         .ok_or(EngineError::PaletteRefused(size))
 }
 
-/// One layer's slots for one viewer and one palette size: a byte per ordinal of each level.
-pub(crate) struct LayerSlots {
-    levels: Vec<Vec<u8>>,
+/// Whether a level's centres are the centroids its figures carry: the layer declares a centroid
+/// or a box and the level is served from its column alone, so a route that draws it fills them.
+fn centred_by_figures(layer: &RegisteredLayer, read: &ReadLevel) -> bool {
+    crate::figures::Geometry::declared(&layer.declaration) != crate::figures::Geometry::None
+        && read.rows.column().is_some()
+        && !read.rows.membership().rows_held()
+}
+
+/// One level's slots for one viewer and one palette size, and the centre each cluster was placed
+/// at, by ordinal.
+pub(crate) struct LevelSlots {
+    slots: Vec<u8>,
+    /// `NaN` where the cluster has no centre or is not served.
+    centres: Vec<[f32; 2]>,
     pub(crate) stats: SlotStats,
 }
 
-impl LayerSlots {
-    /// The slot of the cluster at `ordinal` of `level`, where this viewer is served it.
-    pub(crate) fn get(&self, level: u32, ordinal: u32) -> Option<u8> {
-        let slot = *self.levels.get(level as usize)?.get(ordinal as usize)?;
+impl LevelSlots {
+    /// The slot of the cluster at `ordinal`, where this viewer is served it.
+    pub(crate) fn get(&self, ordinal: u32) -> Option<u8> {
+        let slot = *self.slots.get(ordinal as usize)?;
         (slot != NO_SLOT).then_some(slot)
     }
-}
 
-impl tessera_cache::CacheWeight for LayerSlots {
-    fn cache_weight_bytes(&self) -> u64 {
-        self.levels.iter().map(|level| level.len() as u64).sum::<u64>() + 64
+    fn centre(&self, ordinal: u32) -> Option<[f64; 2]> {
+        let [x, y] = *self.centres.get(ordinal as usize)?;
+        (!x.is_nan()).then_some([f64::from(x), f64::from(y)])
+    }
+
+    fn weight(&self) -> u64 {
+        self.slots.len() as u64 * 9 + 64
     }
 }
 
-/// What one build of a layer's slots did.
+impl tessera_cache::CacheWeight for LevelSlots {
+    fn cache_weight_bytes(&self) -> u64 {
+        self.weight()
+    }
+}
+
+/// What one build of a level's slots did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SlotStats {
     /// Clusters given a slot.
     pub clusters: u64,
-    /// Neighbouring pairs, over every depth, at least one of which was coloured there.
+    /// Pairs of clusters drawn beside each other at one depth or more.
     pub edges: u64,
     /// Those pairs whose two clusters hold one slot.
     pub clashes: u64,
-    /// Visible items the centres were taken from.
+    /// Clusters centred on the centroid their level's figures carry.
+    pub from_figures: u64,
+    /// Visible items in the sample, where the level's centres come from one.
     pub sampled_items: u64,
-    /// Clusters with no sampled member, placed beside an ancestor's centre.
-    pub unsampled: u64,
+    /// Clusters with no member in the sample, centred beside an ancestor.
+    pub beside_ancestor: u64,
     /// Clusters with no centre, which have no neighbours.
     pub without_centre: u64,
     /// The build's wall time, in microseconds.
     pub build_us: u64,
 }
 
-/// What a viewer's slots are a function of.
+impl SlotStats {
+    /// Two levels' figures together.
+    pub fn and(self, other: SlotStats) -> SlotStats {
+        SlotStats {
+            clusters: self.clusters + other.clusters,
+            edges: self.edges + other.edges,
+            clashes: self.clashes + other.clashes,
+            from_figures: self.from_figures + other.from_figures,
+            sampled_items: self.sampled_items.max(other.sampled_items),
+            beside_ancestor: self.beside_ancestor + other.beside_ancestor,
+            without_centre: self.without_centre + other.without_centre,
+            build_us: self.build_us + other.build_us,
+        }
+    }
+}
+
+/// What a viewer's slots are a function of where a change can withhold something: a deletion, a
+/// suppression or an unsuppression, an edit, a fold, the session, the layer registry, the layer's
+/// edges and the layers it depends on. A change here is answered with slots built over it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct SlotsKey {
+pub(crate) struct WithheldKey {
     token_id: u64,
     view: String,
     layer: String,
     entity: u64,
-    /// Each level's record and lineage versions.
-    levels: Vec<(u64, u64)>,
+    level: u32,
+    palette: u8,
+    registry_version: u64,
+    /// Each level's lineage version.
+    lineages: Vec<u64>,
+    /// Each layer it depends on, with each of its levels' record and lineage versions.
+    dependencies: Vec<(String, Vec<(u64, u64)>)>,
+    deny_epoch: u64,
+    edit_epoch: u64,
+    fold_epoch: u64,
+    fragment_identity: [u8; 32],
+}
+
+/// What a viewer's slots are a function of where a change only adds: a flush, an ingest, a growth
+/// of the layer's memberships, a publication. A change here alone is answered with the slots held
+/// and rebuilt after the response.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct AddedKey {
+    /// Each level's record version.
+    levels: Vec<u64>,
     segments_version: u64,
     projection_segments_version: u64,
     overlay_version: u64,
-    fragment_identity: [u8; 32],
     fragment_watermark: u64,
-    palette: u8,
 }
 
-/// The slots held, one entry per viewer, layer and palette size, built once for concurrent asks.
-pub(crate) struct SlotsCache(tessera_cache::SingleFlightCache<SlotsKey, LayerSlots>);
+/// A rebuild a request left for after its response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Wanted {
+    view: String,
+    layer: String,
+    level: u32,
+    palette: u8,
+    geometry: bool,
+}
+
+/// The slots held: the newest built for each [`WithheldKey`], what it was built at, and the
+/// rebuilds wanted, by session.
+pub(crate) struct SlotsCache {
+    builds: tessera_cache::SingleFlightCache<(WithheldKey, AddedKey), LevelSlots>,
+    newest: Mutex<FxHashMap<WithheldKey, (AddedKey, Arc<LevelSlots>)>>,
+    wanted: Mutex<FxHashMap<u64, Vec<Wanted>>>,
+}
 
 impl SlotsCache {
     pub(crate) fn new() -> Self {
-        let cache = tessera_cache::SingleFlightCache::new(SLOTS_BYTES);
-        cache.set_wait_budget_ms(BUILD_WAIT_MS);
-        SlotsCache(cache)
+        let builds = tessera_cache::SingleFlightCache::new(SLOTS_BYTES);
+        builds.set_wait_budget_ms(BUILD_WAIT_MS);
+        SlotsCache {
+            builds,
+            newest: Mutex::default(),
+            wanted: Mutex::default(),
+        }
+    }
+
+    /// Hold `slots` as the newest for `withheld`, letting older entries go while the held
+    /// slots weigh more than [`SLOTS_BYTES`].
+    fn hold(&self, withheld: WithheldKey, added: AddedKey, slots: Arc<LevelSlots>) {
+        let mut newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        newest.insert(withheld.clone(), (added, slots));
+        let mut weight: u64 = newest.values().map(|(_, s)| s.weight()).sum();
+        while weight > SLOTS_BYTES {
+            let Some(other) = newest.keys().find(|k| **k != withheld).cloned() else {
+                break;
+            };
+            if let Some((_, gone)) = newest.remove(&other) {
+                weight -= gone.weight();
+            }
+        }
     }
 }
 
+/// Whether the request `cancel` belongs to has gone.
+fn gone(cancel: &Option<crate::CancelToken>) -> bool {
+    cancel.as_ref().is_some_and(|c| c.is_cancelled())
+}
+
 impl Engine {
-    /// This viewer's slots over `layer` for a palette of `palette` colours — see the module doc.
-    /// `mask` is the viewer's composed mask; a filter it carries changes nothing here.
+    /// This viewer's slots over `level` of `layer` for a palette of `palette` colours: see the
+    /// module doc. `mask` is the viewer's composed mask; a filter it carries changes nothing here.
+    /// `geometry` is whether the calling route reads the level's positions.
+    ///
+    /// `None` where the level's centres come from its figures and the route reads no positions,
+    /// and no slots are held: working them out would fill positions the route does not read.
+    /// Where only additions separate the slots held from the corpus now, the slots held are
+    /// answered and a rebuild is left for [`Self::refresh_cluster_slots`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cluster_slots(
         &self,
         served: &ServedView<'_>,
         mask: &EffectiveMask,
         layer: &RegisteredLayer,
+        level: u32,
         palette: u8,
+        geometry: bool,
         dependency_served: &dyn Fn(&Attachment) -> bool,
-    ) -> Result<Arc<LayerSlots>> {
+    ) -> Result<Option<Arc<LevelSlots>>> {
         check_palette_size(u32::from(palette))?;
-        let name = layer.declaration.name.as_str();
-        let levels: Vec<(u64, u64)> = self.write.live().with_artifacts(|store| {
-            (0..layer.runs.len() as u32)
-                .map(|level| {
-                    (
-                        store.level_version(name, level),
-                        store.lineage_version(name, level),
-                    )
-                })
-                .collect()
-        });
-        let id = served.mask_identity;
-        let key = SlotsKey {
-            token_id: id.token_id,
-            view: served.name.to_string(),
-            layer: name.to_string(),
-            entity: layer.entity.raw(),
-            levels: levels.clone(),
-            segments_version: id.segments_version,
-            projection_segments_version: id.projection_segments_version,
-            overlay_version: id.overlay_version,
-            fragment_identity: id.fragment_identity,
-            fragment_watermark: id.fragment_watermark,
+        if level as usize >= layer.runs.len() {
+            return Ok(None);
+        }
+        let (withheld, added) = self.slot_keys(served, layer, level, palette);
+        let held = self
+            .slots
+            .newest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&withheld)
+            .cloned();
+        if let Some((at, slots)) = held {
+            if at != added {
+                let wanted = Wanted {
+                    view: served.name.to_string(),
+                    layer: layer.declaration.name.clone(),
+                    level,
+                    palette,
+                    geometry,
+                };
+                let mut all = self.slots.wanted.lock().unwrap_or_else(PoisonError::into_inner);
+                let list = all.entry(withheld.token_id).or_default();
+                if !list.contains(&wanted) {
+                    list.push(wanted);
+                }
+            }
+            return Ok(Some(slots));
+        }
+        self.build_and_hold(
+            served,
+            mask,
+            layer,
+            level,
             palette,
-        };
-        let cancel = served.cancel.clone().unwrap_or_default();
-        self.slots
-            .0
-            .get_or_try_build_waiting(key, &cancel, || {
-                self.build_slots(served, mask, layer, palette, &levels, dependency_served)
-            })
-            .map_err(crate::figures::waited)
+            geometry,
+            dependency_served,
+            withheld,
+            added,
+        )
     }
 
-    /// What this viewer's slots over `layer` in `view` were built from and took, building them
-    /// where they are not held. For `tessera-bench`'s `slot_cost`; not part of the engine's API.
-    #[doc(hidden)]
-    pub fn cluster_slot_stats(
+    /// Build this viewer's slots over `level` and hold them under `withheld` and `added`: `None`
+    /// where the level's centres come from its figures and the route reads no positions, or a
+    /// tiered level above it has no slots.
+    #[allow(clippy::too_many_arguments)]
+    fn build_and_hold(
+        &self,
+        served: &ServedView<'_>,
+        mask: &EffectiveMask,
+        layer: &RegisteredLayer,
+        level: u32,
+        palette: u8,
+        geometry: bool,
+        dependency_served: &dyn Fn(&Attachment) -> bool,
+        withheld: WithheldKey,
+        added: AddedKey,
+    ) -> Result<Option<Arc<LevelSlots>>> {
+        if !geometry {
+            let read = self.read_level(served, mask, layer, level, false)?;
+            if centred_by_figures(layer, &read) {
+                return Ok(None);
+            }
+        }
+        // A tiered level's parents sit at the levels above it, which are coloured first.
+        let mut above: Vec<Arc<LevelSlots>> = Vec::new();
+        if layer.declaration.hierarchy.kind == HierarchyKind::Tiered {
+            for coarser in 0..level {
+                match self.cluster_slots(
+                    served,
+                    mask,
+                    layer,
+                    coarser,
+                    palette,
+                    geometry,
+                    dependency_served,
+                )? {
+                    Some(slots) => above.push(slots),
+                    None => return Ok(None),
+                }
+            }
+        }
+        let cancel = served.cancel.clone().unwrap_or_default();
+        let slots = self
+            .slots
+            .builds
+            .get_or_try_build_waiting((withheld.clone(), added.clone()), &cancel, || {
+                self.build_level(
+                    served,
+                    mask,
+                    layer,
+                    level,
+                    palette,
+                    geometry,
+                    dependency_served,
+                    &above,
+                )
+            })
+            .map_err(crate::figures::waited)?;
+        self.slots.hold(withheld, added, Arc::clone(&slots));
+        Ok(Some(slots))
+    }
+
+    /// Both halves of the key this viewer's slots over `level` of `layer` are held under.
+    fn slot_keys(
+        &self,
+        served: &ServedView<'_>,
+        layer: &RegisteredLayer,
+        level: u32,
+        palette: u8,
+    ) -> (WithheldKey, AddedKey) {
+        let versions = |name: &str, levels: usize| -> Vec<(u64, u64)> {
+            self.write.live().with_artifacts(|store| {
+                (0..levels as u32)
+                    .map(|level| {
+                        (
+                            store.level_version(name, level),
+                            store.lineage_version(name, level),
+                        )
+                    })
+                    .collect()
+            })
+        };
+        let name = layer.declaration.name.as_str();
+        let own = versions(name, layer.runs.len());
+        let dependencies = layer
+            .declaration
+            .depends_on
+            .iter()
+            .map(|target| {
+                let levels = self
+                    .write
+                    .live()
+                    .registered_layer(target)
+                    .map_or(0, |target| target.runs.len());
+                (target.clone(), versions(target, levels))
+            })
+            .collect();
+        let id = served.mask_identity;
+        let generation = served.generation;
+        (
+            WithheldKey {
+                token_id: id.token_id,
+                view: served.name.to_string(),
+                layer: name.to_string(),
+                entity: layer.entity.raw(),
+                level,
+                palette,
+                registry_version: self.write.live().registry_version(),
+                lineages: own.iter().map(|&(_, lineage)| lineage).collect(),
+                dependencies,
+                deny_epoch: generation.deny_epoch,
+                edit_epoch: generation.edit_epoch,
+                fold_epoch: generation.fold_epoch,
+                fragment_identity: id.fragment_identity,
+            },
+            AddedKey {
+                levels: own.iter().map(|&(record, _)| record).collect(),
+                segments_version: id.segments_version,
+                projection_segments_version: id.projection_segments_version,
+                overlay_version: id.overlay_version,
+                fragment_watermark: id.fragment_watermark,
+            },
+        )
+    }
+
+    /// Whether a request of `session` left a rebuild of its slots for after its response.
+    pub fn cluster_slots_stale(&self, session: &crate::Session) -> bool {
+        self.slots
+            .wanted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&session.token_id())
+    }
+
+    /// Rebuild the slots `session`'s requests found held over a corpus that has since only grown,
+    /// over the corpus now. A route calls this once its response is sent.
+    pub fn refresh_cluster_slots(&self, session: &crate::Session) -> Result<()> {
+        let wanted = self
+            .slots
+            .wanted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session.token_id())
+            .unwrap_or_default();
+        for wanted in wanted {
+            self.with_slot_view(session, &wanted.view, &wanted.layer, |served, mask, layer, gate| {
+                let (withheld, added) = self.slot_keys(served, layer, wanted.level, wanted.palette);
+                self.build_and_hold(
+                    served,
+                    mask,
+                    layer,
+                    wanted.level,
+                    wanted.palette,
+                    wanted.geometry,
+                    gate,
+                    withheld,
+                    added,
+                )
+                .map(|_| ())
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Run `f` over `layer` in `view` as `session` reads it, with the dependency hook the
+    /// viewport uses. A layer the session no longer reads is nothing to do.
+    fn with_slot_view<T: Default>(
         &self,
         session: &crate::Session,
         view: &str,
         layer: &str,
-        palette: u8,
-    ) -> Result<SlotStats> {
+        f: impl FnOnce(
+            &ServedView<'_>,
+            &EffectiveMask,
+            &RegisteredLayer,
+            &dyn Fn(&Attachment) -> bool,
+        ) -> Result<T>,
+    ) -> Result<T> {
         let generation = self.generation.load_full();
         let open = self.open_view(
             session,
@@ -241,106 +544,154 @@ impl Engine {
             &None,
             &mut crate::timing::Probe::new(),
         )?;
-        let registered = self
-            .readable_layer(session, &generation, layer, view)
-            .map_err(|_| {
-                EngineError::RecordsRefused(crate::records::RecordsRefused::UnknownLayer(
-                    layer.to_string(),
-                ))
-            })?;
+        let Ok(registered) = self.readable_layer(session, &generation, layer, view) else {
+            return Ok(T::default());
+        };
         let reachable = self.reachable_layers(session);
         let context = crate::viewport::DependencyContext::new(&open.served, &open.mask, &reachable);
         let dependency_served = self.dependency_gate(&context);
-        let slots = self.cluster_slots(
-            &open.served,
-            &open.mask,
-            &registered,
-            palette,
-            &dependency_served,
-        )?;
+        let out = f(&open.served, &open.mask, &registered, &dependency_served)?;
         context.finish()?;
-        Ok(slots.stats)
+        Ok(out)
     }
 
-    fn build_slots(
+    /// What this viewer's slots over every level of `layer` in `view` were built from and took,
+    /// building them where they are not held. For `tessera-bench`'s `slot_cost`; not part of the
+    /// engine's API.
+    #[doc(hidden)]
+    pub fn cluster_slot_stats(
+        &self,
+        session: &crate::Session,
+        view: &str,
+        layer: &str,
+        palette: u8,
+        geometry: bool,
+    ) -> Result<SlotStats> {
+        self.with_slot_view(session, view, layer, |served, mask, registered, gate| {
+            let mut stats = SlotStats::default();
+            for level in 0..registered.runs.len() as u32 {
+                if let Some(slots) =
+                    self.cluster_slots(served, mask, registered, level, palette, geometry, gate)?
+                {
+                    stats = stats.and(slots.stats);
+                }
+            }
+            Ok(stats)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_level(
         &self,
         served: &ServedView<'_>,
         mask: &EffectiveMask,
         layer: &RegisteredLayer,
+        level: u32,
         palette: u8,
-        versions: &[(u64, u64)],
+        geometry: bool,
         dependency_served: &dyn Fn(&Attachment) -> bool,
-    ) -> Result<LayerSlots> {
+        above: &[Arc<LevelSlots>],
+    ) -> Result<LevelSlots> {
         let started = std::time::Instant::now();
         let generation = served.generation;
         let shard = generation.bundle.manifest.identity.shard_id;
         let kind = layer.declaration.hierarchy.kind;
+        let treed = matches!(kind, HierarchyKind::Nested | HierarchyKind::Dag);
+        let stop = || gone(&served.cancel);
 
-        // The clusters this viewer is served, as the artifacts frame serves them: the verdict over
-        // the visible set, and content that reads back. Each level is read as the map's frames read
-        // it, so its counts are the entry the map fills.
-        let mut clusters: Vec<Cluster> = Vec::new();
-        let mut located: Vec<(u32, u32)> = Vec::new();
-        let mut index: Vec<Vec<u32>> = Vec::new();
+        // The levels above, read for their parent edges, with their served clusters as parents
+        // whose slots and centres are already settled.
         let mut reads: Vec<ReadLevel> = Vec::new();
-        for (level, runs) in layer.runs.iter().enumerate() {
-            let level = level as u32;
-            let read = self.read_level(served, mask, layer, level, true)?;
-            let view = read.view(self, served, mask, layer, dependency_served);
+        let mut index: Vec<Vec<u32>> = Vec::new();
+        let mut clusters: Vec<Cluster> = Vec::new();
+        let mut preset: Vec<u8> = Vec::new();
+        for (coarser, slots) in above.iter().enumerate() {
+            let read = self.read_level(served, mask, layer, coarser as u32, geometry)?;
             let mut at = vec![u32::MAX; read.rows.len()];
-            for ordinal in 0..read.rows.len() as u32 {
-                if ordinal % CHUNK == 0 && served.cancel.as_ref().is_some_and(|c| c.is_cancelled())
-                {
-                    return Err(EngineError::Cancelled);
+            for (ordinal, held) in at.iter_mut().enumerate() {
+                if let Some(slot) = slots.get(ordinal as u32) {
+                    *held = clusters.len() as u32;
+                    clusters.push(Cluster {
+                        seed: 0,
+                        count: 0,
+                        parents: Vec::new(),
+                        centre: slots.centre(ordinal as u32),
+                    });
+                    preset.push(slot);
                 }
-                let Some(entity) = runs.entity_of(u64::from(ordinal)).map(EntityId::new) else {
-                    continue;
-                };
-                let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal)
-                else {
-                    continue;
-                };
-                if masked_count == 0 {
-                    continue;
-                }
-                if read
-                    .content(self, generation, layer, ordinal, entity, rank)
-                    .is_none()
-                {
-                    continue;
-                }
-                let Ok(id) = self.identity_key.forward(shard, entity) else {
-                    continue;
-                };
-                at[ordinal as usize] = clusters.len() as u32;
-                clusters.push(Cluster {
-                    seed: id.raw(),
-                    count: masked_count,
-                    parents: Vec::new(),
-                    centre: None,
-                });
-                located.push((level, ordinal));
             }
-            index.push(at);
             reads.push(read);
+            index.push(at);
         }
+        let first = clusters.len();
+
+        // This level's clusters this viewer is served, as the artifacts frame serves them: the
+        // verdict over the visible set, and content that reads back.
+        let read = self.read_level(served, mask, layer, level, geometry)?;
+        let runs = &layer.runs[level as usize];
+        let view = read.view(self, served, mask, layer, dependency_served);
+        let mut at = vec![u32::MAX; read.rows.len()];
+        let mut ordinals: Vec<u32> = Vec::new();
+        for ordinal in 0..read.rows.len() as u32 {
+            if ordinal.is_multiple_of(CHUNK) && stop() {
+                return Err(EngineError::Cancelled);
+            }
+            let Some(entity) = runs.entity_of(u64::from(ordinal)).map(EntityId::new) else {
+                continue;
+            };
+            let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) else {
+                continue;
+            };
+            if masked_count == 0 {
+                continue;
+            }
+            if read
+                .content(self, generation, layer, ordinal, entity, rank)
+                .is_none()
+            {
+                continue;
+            }
+            let Ok(id) = self.identity_key.forward(shard, entity) else {
+                continue;
+            };
+            at[ordinal as usize] = clusters.len() as u32;
+            clusters.push(Cluster {
+                seed: id.raw(),
+                count: masked_count,
+                parents: Vec::new(),
+                centre: None,
+            });
+            preset.push(NO_SLOT);
+            ordinals.push(ordinal);
+        }
+        drop(view);
+        reads.push(read);
+        index.push(at);
+        let read = reads.last().expect("this level");
+        let here = index.last().expect("this level");
 
         // The viewer's tree: each cluster's nearest served ancestors on every path.
-        let treed = matches!(kind, HierarchyKind::Nested | HierarchyKind::Dag);
         if treed || kind == HierarchyKind::Tiered {
-            for (c, &(level, ordinal)) in located.iter().enumerate() {
-                clusters[c].parents = nearest_served(&reads, &index, level, ordinal, treed);
+            for (i, &ordinal) in ordinals.iter().enumerate() {
+                clusters[first + i].parents =
+                    nearest_served(&reads, &index, level, ordinal, treed);
             }
         }
 
+        let mine: Vec<u32> = (first as u32..clusters.len() as u32).collect();
         let passes: Vec<Pass> = if treed {
-            let rows = &reads[0].rows;
-            let lineage = self.level_lineage(layer, 0, versions[0].1, rows);
-            let passing: Vec<u32> = located.iter().map(|&(_, ordinal)| ordinal).collect();
-            let of = |ordinals: Vec<u32>| -> Vec<u32> {
-                ordinals.into_iter().map(|o| index[0][o as usize]).collect()
+            let lineage_version = self
+                .write
+                .live()
+                .with_artifacts(|store| store.lineage_version(&layer.declaration.name, level));
+            let lineage = self.level_lineage(layer, level, lineage_version, &read.rows);
+            let of = |served: Vec<u32>| -> Vec<u32> {
+                served
+                    .into_iter()
+                    .map(|o| here[o as usize])
+                    .collect()
             };
-            crate::cut::depths(&lineage, &passing)
+            crate::cut::depths(&lineage, &ordinals)
                 .into_iter()
                 .map(|depth| Pass {
                     drawn: of(depth.served),
@@ -348,101 +699,169 @@ impl Engine {
                 })
                 .collect()
         } else {
-            (0..reads.len() as u32)
-                .map(|level| {
-                    let all: Vec<u32> = (0..clusters.len() as u32)
-                        .filter(|&c| located[c as usize].0 == level)
-                        .collect();
-                    Pass {
-                        drawn: all.clone(),
-                        entering: all,
-                    }
-                })
-                .collect()
+            vec![Pass {
+                drawn: mine.clone(),
+                entering: mine.clone(),
+            }]
         };
 
-        let sample = sample(served, mask.visible_all());
-        let mut sums: Vec<([f64; 2], u64)> = vec![([0.0; 2], 0); clusters.len()];
-        let rows_of_sample = Bitmap::of(&sample.iter().map(|&(row, _)| row).collect::<Vec<_>>());
-        for (level, read) in reads.iter().enumerate() {
-            let at = &index[level];
-            let mut add = |c: u32, position: [f64; 2]| {
-                let (sum, n) = &mut sums[c as usize];
-                sum[0] += position[0];
-                sum[1] += position[1];
-                *n += 1;
-            };
-            match read.rows.column() {
-                Some(column) => {
-                    for &(row, position) in &sample {
-                        column.for_each_label(row, |ordinal| {
-                            if let Some(&c) = at.get(ordinal as usize).filter(|&&c| c != u32::MAX)
-                            {
-                                add(c, position);
-                            }
-                        });
-                    }
-                }
-                None => {
-                    for (ordinal, &c) in at.iter().enumerate() {
-                        if c == u32::MAX || read.rows.attachment(ordinal as u32).is_some() {
-                            continue;
-                        }
-                        let Some(members) = read.rows.get(ordinal as u32) else {
-                            continue;
-                        };
-                        for row in members.and(&rows_of_sample).iter() {
-                            if let Ok(i) = sample.binary_search_by_key(&row, |&(r, _)| r) {
-                                add(c, sample[i].1);
-                            }
-                        }
-                    }
-                }
+        let mut stats = SlotStats::default();
+        let figures = read
+            .counts
+            .as_ref()
+            .filter(|figures| centred_by_figures(layer, read) && figures.has_geometry());
+        let own: Vec<Option<[f64; 2]>> = match figures {
+            Some(figures) => {
+                let own: Vec<Option<[f64; 2]>> =
+                    ordinals.iter().map(|&o| figures.centroid(o)).collect();
+                stats.from_figures = own.iter().filter(|c| c.is_some()).count() as u64;
+                own
             }
-        }
-        let mut stats = SlotStats {
-            sampled_items: sample.len() as u64,
-            ..SlotStats::default()
+            None => {
+                let visible = mask.visible_all();
+                let size = self
+                    .switches
+                    .slot_sample
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let cut = sample_cut(visible.cardinality(), size);
+                let sample = sample(served, visible, cut, &stop)?;
+                stats.sampled_items = sample.len() as u64;
+                let copy = served.segments.first().and_then(|&(first, _)| {
+                    read.rows.column()?;
+                    self.artifact_projections.band_labels(
+                        &generation.prefix,
+                        served.name,
+                        &layer.declaration.name,
+                        level,
+                        read.level_version,
+                        first,
+                    )
+                });
+                sample_centres(read, here, first, &sample, copy, &stop)?
+            }
         };
-        let sampled: Vec<Option<[f64; 2]>> = sums
-            .iter()
-            .map(|&(sum, n)| (n > 0).then(|| [sum[0] / n as f64, sum[1] / n as f64]))
-            .collect();
-        for c in 0..clusters.len() {
-            clusters[c].centre = match sampled[c] {
-                Some(centre) => Some(centre),
-                None => {
-                    let placed = beside_ancestor(&clusters, &sampled, c as u32);
-                    match placed {
-                        Some(_) => stats.unsampled += 1,
-                        None => stats.without_centre += 1,
-                    }
-                    placed
-                }
-            };
+        for (i, centre) in own.iter().enumerate() {
+            clusters[first + i].centre = *centre;
+        }
+        let centred: Vec<Option<[f64; 2]>> = clusters.iter().map(|c| c.centre).collect();
+        for c in first..clusters.len() {
+            if centred[c].is_some() {
+                continue;
+            }
+            let placed = beside_ancestor(&clusters, &centred, c as u32);
+            match placed {
+                Some(_) => stats.beside_ancestor += 1,
+                None => stats.without_centre += 1,
+            }
+            clusters[c].centre = placed;
         }
 
-        let (slots, assigned) = assign(&clusters, &passes, palette);
+        let (slots, assigned) =
+            assign(&clusters, &passes, palette, &preset, &stop).ok_or(EngineError::Cancelled)?;
         stats.clusters = assigned.clusters;
         stats.edges = assigned.edges;
         stats.clashes = assigned.clashes;
-        let mut levels: Vec<Vec<u8>> = index.iter().map(|at| vec![NO_SLOT; at.len()]).collect();
-        for (c, &(level, ordinal)) in located.iter().enumerate() {
-            levels[level as usize][ordinal as usize] = slots[c];
+        let mut out = vec![NO_SLOT; here.len()];
+        let mut centres = vec![[f32::NAN; 2]; out.len()];
+        for (i, &ordinal) in ordinals.iter().enumerate() {
+            out[ordinal as usize] = slots[first + i];
+            if let Some([x, y]) = clusters[first + i].centre {
+                centres[ordinal as usize] = [x as f32, y as f32];
+            }
         }
         stats.build_us = started.elapsed().as_micros() as u64;
         tracing::debug!(
             layer = %layer.declaration.name,
+            level,
             palette,
             clusters = stats.clusters,
             edges = stats.edges,
             clashes = stats.clashes,
-            sampled_items = stats.sampled_items,
+            without_centre = stats.without_centre,
             build_us = stats.build_us,
             "cluster slots built"
         );
-        Ok(LayerSlots { levels, stats })
+        Ok(LevelSlots {
+            slots: out,
+            centres,
+            stats,
+        })
     }
+}
+
+/// Each of a level's served clusters' centre over its members in `sample`, in the order of the
+/// clusters, which begin at index `first`; `None` for one with no member there. On a level served
+/// from its column the labels are read from the band-order `copy` where the sample came from the
+/// first segment's bands, and from the column otherwise.
+fn sample_centres(
+    read: &ReadLevel,
+    at: &[u32],
+    first: usize,
+    sample: &[Sampled],
+    copy: Option<Arc<BandLabels>>,
+    stop: &dyn Fn() -> bool,
+) -> Result<Vec<Option<[f64; 2]>>> {
+    let count = at.iter().filter(|&&c| c != u32::MAX).count();
+    let mut sums: Vec<([f64; 2], u32)> = vec![([0.0; 2], 0); count];
+    let cluster = |ordinal: u32| {
+        at.get(ordinal as usize)
+            .copied()
+            .filter(|&c| c != u32::MAX)
+            .map(|c| c as usize - first)
+    };
+    match read.rows.column() {
+        Some(column) => {
+            for (step, item) in sample.iter().enumerate() {
+                if (step as u32).is_multiple_of(CHUNK) && stop() {
+                    return Err(EngineError::Cancelled);
+                }
+                match (item.entry, &copy) {
+                    (Some(e), Some(copy)) => {
+                        if let Some(c) = cluster(copy.label(e)) {
+                            add(&mut sums[c], item.position);
+                        }
+                    }
+                    _ => column.for_each_label(item.row, |ordinal| {
+                        if let Some(c) = cluster(ordinal) {
+                            add(&mut sums[c], item.position);
+                        }
+                    }),
+                }
+            }
+        }
+        None => {
+            let rows = Bitmap::of(&sample.iter().map(|s| s.row).collect::<Vec<_>>());
+            for (ordinal, _) in at.iter().enumerate().filter(|(_, &c)| c != u32::MAX) {
+                if (ordinal as u32).is_multiple_of(CHUNK) && stop() {
+                    return Err(EngineError::Cancelled);
+                }
+                if read.rows.attachment(ordinal as u32).is_some() {
+                    continue;
+                }
+                let (Some(members), Some(c)) =
+                    (read.rows.get(ordinal as u32), cluster(ordinal as u32))
+                else {
+                    continue;
+                };
+                for row in members.and(&rows).iter() {
+                    if let Ok(i) = sample.binary_search_by_key(&row, |s| s.row) {
+                        add(&mut sums[c], sample[i].position);
+                    }
+                }
+            }
+        }
+    }
+    Ok(sums
+        .iter()
+        .map(|&(sum, n)| (n > 0).then(|| [sum[0] / f64::from(n), sum[1] / f64::from(n)]))
+        .collect())
+}
+
+/// Add `position` to a running sum of positions and their number.
+fn add(sum: &mut ([f64; 2], u32), position: [f64; 2]) {
+    sum.0[0] += position[0];
+    sum.0[1] += position[1];
+    sum.1 += 1;
 }
 
 /// The served clusters nearest above `(level, ordinal)` on every path, climbing through the ones
@@ -485,9 +904,9 @@ fn nearest_served(
     found
 }
 
-/// The centre of the nearest ancestor of `c` with a sampled centre, searched breadth first with
-/// parents in ascending order, moved by an offset drawn from `c`'s seed.
-fn beside_ancestor(clusters: &[Cluster], sampled: &[Option<[f64; 2]>], c: u32) -> Option<[f64; 2]> {
+/// The centre of the nearest ancestor of `c` with a centre of its own, searched breadth first
+/// with parents in ascending order, moved by an offset drawn from `c`'s seed.
+fn beside_ancestor(clusters: &[Cluster], own: &[Option<[f64; 2]>], c: u32) -> Option<[f64; 2]> {
     let mut queue: std::collections::VecDeque<u32> =
         clusters[c as usize].parents.iter().copied().collect();
     let mut seen: FxHashSet<u32> = FxHashSet::default();
@@ -495,7 +914,7 @@ fn beside_ancestor(clusters: &[Cluster], sampled: &[Option<[f64; 2]>], c: u32) -
         if !seen.insert(at) {
             continue;
         }
-        if let Some(centre) = sampled[at as usize] {
+        if let Some(centre) = own[at as usize] {
             let mut state = clusters[c as usize].seed ^ 0x5851_F42D_4C95_7F2D;
             let radius = JITTER * unit(splitmix(&mut state)).sqrt();
             let angle = std::f64::consts::TAU * unit(splitmix(&mut state));
@@ -509,35 +928,60 @@ fn beside_ancestor(clusters: &[Cluster], sampled: &[Option<[f64; 2]>], c: u32) -
     None
 }
 
-/// The visible items the centres are taken from, as `(view row, position)` ascending by row: see
-/// the module doc.
-fn sample(served: &ServedView<'_>, visible: &Bitmap) -> Vec<(u32, [f64; 2])> {
-    let n = visible.cardinality();
-    let band = match n / SAMPLE {
-        0 => 0,
-        ratio => 63 - ratio.leading_zeros(),
-    };
-    let position = |code: u32, residual: u32| {
-        let (x, y) = tessera_spatial::unsplit32(MortonCode::new(code), residual);
-        [f64::from(x), f64::from(y)]
-    };
-    let mut out: Vec<(u32, [f64; 2])> = Vec::new();
-    for &(segment, row_base) in &served.segments {
-        if band >= tessera_store::bands::FIRST_BAND {
+/// The `tessera_id` below which a visible item is in the sample, out of `visible` items for a
+/// sample of about `size`: every item where there are no more than `size`.
+fn sample_cut(visible: u64, size: u64) -> u64 {
+    if visible <= size {
+        return u64::MAX;
+    }
+    ((u128::from(size) << 64) / u128::from(visible)) as u64
+}
+
+/// The position a stored `(cell code, residual)` names, in the 32-bit grid's units.
+fn position(code: u32, residual: u32) -> [f64; 2] {
+    let (x, y) = tessera_spatial::unsplit32(MortonCode::new(code), residual);
+    [f64::from(x), f64::from(y)]
+}
+
+/// One item of the sample: its view row, its position, and its entry in the first segment's bands
+/// where it was read from them.
+#[derive(Clone, Copy)]
+struct Sampled {
+    row: u32,
+    position: [f64; 2],
+    entry: Option<usize>,
+}
+
+/// The visible items whose `tessera_id` is below `cut`, ascending by row: read from the narrowest
+/// band holding the cut, or from each segment's columns where no band does.
+fn sample(
+    served: &ServedView<'_>,
+    visible: &Bitmap,
+    cut: u64,
+    stop: &dyn Fn() -> bool,
+) -> Result<Vec<Sampled>> {
+    let band = tessera_store::bands::band_below(cut);
+    let mut out: Vec<Sampled> = Vec::new();
+    for (s, &(segment, row_base)) in served.segments.iter().enumerate() {
+        if stop() {
+            return Err(EngineError::Cancelled);
+        }
+        if let Some(band) = band {
             let bands = &segment.bands;
-            let (rows, codes, residuals) = (bands.rows(), bands.codes(), bands.residuals());
+            let (rows, ids) = (bands.rows(), bands.ids());
+            let (codes, residuals) = (bands.codes(), bands.residuals());
             for e in bands.band(band) {
                 let row = row_base + rows[e];
-                if visible.contains(row) {
-                    out.push((row, position(codes[e], residuals[e])));
+                if ids[e] < cut && visible.contains(row) {
+                    out.push(Sampled {
+                        row,
+                        position: position(codes[e], residuals[e]),
+                        entry: (s == 0).then_some(e),
+                    });
                 }
             }
             continue;
         }
-        let below = match band {
-            0 => u64::MAX,
-            j => (1u64 << (64 - j)) - 1,
-        };
         let (ids, morton, residual) = (
             segment.columns.tessera_id(),
             segment.morton.u32(),
@@ -547,12 +991,16 @@ fn sample(served: &ServedView<'_>, visible: &Bitmap) -> Vec<(u32, [f64; 2])> {
         rows.reset_at_or_after(row_base);
         for row in rows.take_while(|&row| row < row_base + segment.row_count) {
             let local = (row - row_base) as usize;
-            if ids[local] <= below {
-                out.push((row, position(morton[local], residual[local])));
+            if cut == u64::MAX || ids[local] < cut {
+                out.push(Sampled {
+                    row,
+                    position: position(morton[local], residual[local]),
+                    entry: None,
+                });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// A cluster as the rule reads it.
@@ -597,15 +1045,30 @@ impl Claim {
     }
 }
 
-/// Every cluster's slot under the rule in the module doc, by index, and what was counted.
-/// [`NO_SLOT`] for a cluster no pass colours.
-pub(crate) fn assign(clusters: &[Cluster], passes: &[Pass], palette: u8) -> (Vec<u8>, Assigned) {
+/// Every cluster's slot under the rule in the module doc, by index, and what was counted, the
+/// clusters `preset` gives a slot keeping it. [`NO_SLOT`] for a cluster no pass colours. `None`
+/// once `stop` answers true.
+pub(crate) fn assign(
+    clusters: &[Cluster],
+    passes: &[Pass],
+    palette: u8,
+    preset: &[u8],
+    stop: &dyn Fn() -> bool,
+) -> Option<(Vec<u8>, Assigned)> {
     let heirs = heirs(clusters);
-    let mut slots = vec![NO_SLOT; clusters.len()];
+    let mut slots = match preset.is_empty() {
+        true => vec![NO_SLOT; clusters.len()],
+        false => preset.to_vec(),
+    };
     let mut assigned = Assigned::default();
+    // Every pair drawn beside each other at some depth, smaller index first.
+    let mut pairs: FxHashSet<(u32, u32)> = FxHashSet::default();
     // Each drawn cluster's position among the points of the pass, `u32::MAX` where it has none.
     let mut local = vec![u32::MAX; clusters.len()];
     for pass in passes {
+        if stop() {
+            return None;
+        }
         let placed: Vec<u32> = pass
             .drawn
             .iter()
@@ -638,66 +1101,66 @@ pub(crate) fn assign(clusters: &[Cluster], passes: &[Pass], palette: u8) -> (Vec
                 rank: splitmix(&mut clusters[c as usize].seed.clone()),
             })
             .collect();
-        let mut entering = vec![false; placed.len()];
         for (c, list) in &lists {
             let class = u8::from(inherited(&slots, heirs[*c as usize]).is_some());
             let i = local[*c as usize];
             if i != u32::MAX {
                 claims[i as usize].slot = list[0];
                 claims[i as usize].class = class;
-                entering[i as usize] = true;
             }
         }
-        let chosen: Vec<(u32, u8)> = lists
-            .iter()
-            .map(|(c, list)| {
-                let i = local[*c as usize];
-                let around = match i {
-                    u32::MAX => &[][..],
-                    i => near.of(i),
+        let mut chosen: Vec<(u32, u8)> = Vec::with_capacity(lists.len());
+        for (step, (c, list)) in lists.iter().enumerate() {
+            if (step as u32).is_multiple_of(CHUNK) && stop() {
+                return None;
+            }
+            let i = local[*c as usize];
+            if i == u32::MAX {
+                chosen.push((*c, list[0]));
+                continue;
+            }
+            let around = near.of(i);
+            let mine = claims[i as usize];
+            let free = list.iter().copied().find(|&slot| {
+                !around.iter().any(|&n| {
+                    let other = &claims[n as usize];
+                    other.slot == slot && (slot != mine.slot || other.outranks(&mine))
+                })
+            });
+            let slot = free.unwrap_or_else(|| {
+                let at = points[i as usize];
+                let far = |n: u32| {
+                    let p = points[n as usize];
+                    (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2)
                 };
-                let Some(mine) = (i != u32::MAX).then(|| claims[i as usize]) else {
-                    return (*c, list[0]);
-                };
-                let free = list.iter().copied().find(|&slot| {
-                    !around.iter().any(|&n| {
-                        let other = &claims[n as usize];
-                        other.slot == slot && (slot != mine.slot || other.outranks(&mine))
-                    })
-                });
-                let slot = free.unwrap_or_else(|| {
-                    let at = points[i as usize];
-                    let far = |n: u32| {
-                        let p = points[n as usize];
-                        (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2)
-                    };
-                    around
-                        .iter()
-                        .copied()
-                        .max_by(|&a, &b| far(a).total_cmp(&far(b)))
-                        .map_or(mine.slot, |n| claims[n as usize].slot)
-                });
-                (*c, slot)
-            })
-            .collect();
+                around
+                    .iter()
+                    .copied()
+                    .max_by(|&a, &b| far(a).total_cmp(&far(b)))
+                    .map_or(mine.slot, |n| claims[n as usize].slot)
+            });
+            chosen.push((*c, slot));
+        }
         for (c, slot) in chosen {
             slots[c as usize] = slot;
             assigned.clusters += 1;
         }
         for i in 0..placed.len() as u32 {
-            for &j in near.of(i) {
-                if i < j && (entering[i as usize] || entering[j as usize]) {
-                    assigned.edges += 1;
-                    let (a, b) = (placed[i as usize], placed[j as usize]);
-                    assigned.clashes += u64::from(slots[a as usize] == slots[b as usize]);
-                }
+            for &j in near.of(i).iter().filter(|&&j| j > i) {
+                let (a, b) = (placed[i as usize], placed[j as usize]);
+                pairs.insert((a.min(b), a.max(b)));
             }
         }
         for &c in &placed {
             local[c as usize] = u32::MAX;
         }
     }
-    (slots, assigned)
+    assigned.edges = pairs.len() as u64;
+    assigned.clashes = pairs
+        .iter()
+        .filter(|&&(a, b)| slots[a as usize] == slots[b as usize])
+        .count() as u64;
+    Some((slots, assigned))
 }
 
 /// Each cluster's parent it is heir to, where it is heir to one: of the parents whose child with
@@ -896,7 +1359,7 @@ mod tests {
     /// A random tree of `depth` levels below one root, each node with up to `fan` children placed
     /// near it, and the passes a nested layer colours it in: the nodes at each depth, drawn with
     /// the leaves of every shallower depth.
-    fn tree(seed: u64, depth: u32, fan: u64) -> (Vec<Cluster>, Vec<Pass>) {
+    fn tree(seed: u64, depth: u32, fan: u64) -> (Vec<Cluster>, Vec<Vec<u32>>) {
         let mut state = seed;
         let mut clusters = vec![Cluster {
             seed: splitmix(&mut state),
@@ -927,90 +1390,122 @@ mod tests {
             spread /= fan as f64 / 2.0 + 1.0;
             levels.push(next);
         }
-        let has_child: FxHashSet<u32> = clusters.iter().flat_map(|c| c.parents.clone()).collect();
+        (clusters, levels)
+    }
+
+    /// The passes a nested layer colours `levels` in, leaving out the clusters `gone` names.
+    fn passes(clusters: &[Cluster], levels: &[Vec<u32>], gone: &[u32]) -> Vec<Pass> {
+        let has_child: FxHashSet<u32> = clusters
+            .iter()
+            .enumerate()
+            .filter(|(c, _)| !gone.contains(&(*c as u32)))
+            .flat_map(|(_, c)| c.parents.clone())
+            .collect();
         let mut passes: Vec<Pass> = Vec::new();
         let mut leaves: Vec<u32> = Vec::new();
-        for level in &levels {
+        for level in levels {
+            let level: Vec<u32> = level.iter().copied().filter(|c| !gone.contains(c)).collect();
             let mut drawn = leaves.clone();
-            drawn.extend_from_slice(level);
+            drawn.extend_from_slice(&level);
             passes.push(Pass {
                 drawn,
                 entering: level.clone(),
             });
             leaves.extend(level.iter().copied().filter(|c| !has_child.contains(c)));
         }
-        (clusters, passes)
+        passes
     }
 
-    /// Every drawn pair of neighbours sharing a slot, over every pass.
-    fn shared(clusters: &[Cluster], passes: &[Pass], slots: &[u8]) -> (u64, u64) {
-        let (mut edges, mut clashes) = (0, 0);
-        for pass in passes {
-            let points: Vec<[f64; 2]> = pass
-                .drawn
-                .iter()
-                .map(|&c| clusters[c as usize].centre.expect("placed"))
-                .collect();
-            let entering: FxHashSet<u32> = pass.entering.iter().copied().collect();
-            let near = neighbours(&points);
-            for i in 0..points.len() as u32 {
-                for &j in near.of(i) {
-                    let (a, b) = (pass.drawn[i as usize], pass.drawn[j as usize]);
-                    if a < b && (entering.contains(&a) || entering.contains(&b)) {
-                        edges += 1;
-                        clashes += u64::from(slots[a as usize] == slots[b as usize]);
-                    }
-                }
-            }
-        }
-        (edges, clashes)
+    /// The corpus without `gone`: the clusters left as they were, `gone` no longer anyone's child.
+    fn without(clusters: &[Cluster], gone: u32) -> Vec<Cluster> {
+        let mut out = clusters.to_vec();
+        out[gone as usize].parents.clear();
+        out[gone as usize].centre = None;
+        out
+    }
+
+    fn colour(clusters: &[Cluster], passes: &[Pass], palette: u8) -> (Vec<u8>, Assigned) {
+        assign(clusters, passes, palette, &[], &|| false).expect("never stopped")
+    }
+
+    /// Each pass's neighbours as `assign` takes them, by cluster.
+    fn graphs(clusters: &[Cluster], passes: &[Pass]) -> Vec<FxHashMap<u32, Vec<u32>>> {
+        passes
+            .iter()
+            .map(|pass| {
+                let placed: Vec<u32> = pass
+                    .drawn
+                    .iter()
+                    .copied()
+                    .filter(|&c| clusters[c as usize].centre.is_some())
+                    .collect();
+                let mut points: Vec<[f64; 2]> = placed
+                    .iter()
+                    .map(|&c| clusters[c as usize].centre.expect("placed"))
+                    .collect();
+                let seeds: Vec<u64> = placed.iter().map(|&c| clusters[c as usize].seed).collect();
+                spread_coincident(&mut points, &seeds);
+                let near = neighbours(&points);
+                placed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| {
+                        let around = near.of(i as u32).iter().map(|&j| placed[j as usize]);
+                        (c, around.collect())
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     #[test]
-    fn neighbours_share_a_slot_only_where_counted_and_rarely() {
+    fn every_pair_drawn_beside_each_other_is_counted_and_few_share_a_slot() {
         for palette in [8u8, 10, 20, 22] {
             let (mut edges, mut clashes) = (0u64, 0u64);
             for seed in 0..40 {
-                let (clusters, passes) = tree(seed, 4, 6);
-                let (slots, assigned) = assign(&clusters, &passes, palette);
+                let (clusters, levels) = tree(seed, 4, 6);
+                let passes = passes(&clusters, &levels, &[]);
+                let (slots, assigned) = colour(&clusters, &passes, palette);
                 assert!(slots.iter().all(|&s| s < palette), "every cluster is coloured");
-                assert_eq!(
-                    (assigned.edges, assigned.clashes),
-                    shared(&clusters, &passes, &slots)
-                );
+                let pairs: FxHashSet<(u32, u32)> = graphs(&clusters, &passes)
+                    .iter()
+                    .flat_map(|graph| {
+                        graph.iter().flat_map(|(&a, near)| {
+                            near.iter().map(move |&b| (a.min(b), a.max(b)))
+                        })
+                    })
+                    .collect();
+                let shared = pairs
+                    .iter()
+                    .filter(|&&(a, b)| slots[a as usize] == slots[b as usize])
+                    .count() as u64;
+                assert_eq!((assigned.edges, assigned.clashes), (pairs.len() as u64, shared));
                 edges += assigned.edges;
                 clashes += assigned.clashes;
             }
             let rate = clashes as f64 / edges as f64;
-            assert!(rate < 0.05, "{clashes} of {edges} edges clash at N = {palette}");
+            assert!(rate < 0.05, "{clashes} of {edges} pairs clash at N = {palette}");
         }
     }
 
     #[test]
     fn an_heir_keeps_its_parents_slot_where_no_neighbour_holds_or_inherits_it() {
         for seed in 0..40 {
-            let (clusters, passes) = tree(seed, 4, 5);
-            let (slots, _) = assign(&clusters, &passes, 10);
+            let (clusters, levels) = tree(seed, 4, 5);
+            let passes = passes(&clusters, &levels, &[]);
+            let (slots, _) = colour(&clusters, &passes, 10);
             let heirs = heirs(&clusters);
             let mut kept = 0;
-            for pass in &passes {
-                let points: Vec<[f64; 2]> = pass
-                    .drawn
-                    .iter()
-                    .map(|&c| clusters[c as usize].centre.expect("placed"))
-                    .collect();
-                let near = neighbours(&points);
-                for (i, &c) in pass.drawn.iter().enumerate() {
-                    let Some(parent) = heirs[c as usize].filter(|_| pass.entering.contains(&c))
-                    else {
+            for (pass, graph) in passes.iter().zip(graphs(&clusters, &passes)) {
+                for &c in &pass.entering {
+                    let Some(parent) = heirs[c as usize] else {
                         continue;
                     };
                     let slot = slots[parent as usize];
-                    let contested = near.of(i as u32).iter().any(|&j| {
-                        let n = pass.drawn[j as usize];
-                        let inherits = heirs[n as usize].is_some_and(|q| slots[q as usize] == slot)
-                            && pass.entering.contains(&n);
-                        inherits || (!pass.entering.contains(&n) && slots[n as usize] == slot)
+                    let contested = graph[&c].iter().any(|&n| {
+                        let entering = pass.entering.contains(&n);
+                        let inherits = heirs[n as usize].is_some_and(|q| slots[q as usize] == slot);
+                        (entering && inherits) || (!entering && slots[n as usize] == slot)
                     });
                     if !contested {
                         assert_eq!(slots[c as usize], slot, "heir {c} of {parent}");
@@ -1022,34 +1517,108 @@ mod tests {
         }
     }
 
+    /// **A withdrawn leaf moves only the slots it reaches**: its neighbours where it was drawn,
+    /// the clusters drawn there beside new neighbours (a parent left with no child among them),
+    /// and, where it was its parent's heir, the new heir and that heir's neighbours. Over many
+    /// trees and leaves, with every heir chosen again over the corpus without it.
     #[test]
-    fn a_change_moves_only_the_slots_near_it() {
-        let (clusters, passes) = tree(7, 4, 6);
-        let (before, _) = assign(&clusters, &passes, 10);
-        // Withdraw one leaf at the deepest depth: only its neighbours there can move.
-        let last = passes.last().expect("a pass");
-        let gone = last.entering[last.entering.len() / 2];
-        let mut fewer = passes.clone();
-        for pass in &mut fewer {
-            pass.drawn.retain(|&c| c != gone);
-            pass.entering.retain(|&c| c != gone);
+    fn a_withdrawn_leaf_moves_only_its_neighbours_and_the_new_heirs() {
+        let mut moved_beyond_neighbours = 0;
+        for seed in 0..40 {
+            let (clusters, levels) = tree(seed, 4, 6);
+            let full = passes(&clusters, &levels, &[]);
+            let (before, _) = colour(&clusters, &full, 10);
+            let old_heirs = heirs(&clusters);
+            let deepest = levels.last().expect("a level");
+            for &gone in deepest.iter().step_by(7).take(12) {
+                let fewer_clusters = without(&clusters, gone);
+                let fewer = passes(&fewer_clusters, &levels, &[gone]);
+                let (after, _) = colour(&fewer_clusters, &fewer, 10);
+                let new_heirs = heirs(&fewer_clusters);
+                let last_before = &graphs(&clusters, &full)[levels.len() - 1];
+                let last_after = &graphs(&fewer_clusters, &fewer)[levels.len() - 1];
+                let mut reach: FxHashSet<u32> = last_before[&gone].iter().copied().collect();
+                // A parent left with no child is drawn at the last depth, beside new neighbours.
+                for (&c, near) in last_after {
+                    if last_before.get(&c) != Some(near) {
+                        reach.insert(c);
+                        reach.extend(near.iter().copied());
+                    }
+                }
+                for c in 0..clusters.len() as u32 {
+                    if c != gone && old_heirs[c as usize] != new_heirs[c as usize] {
+                        reach.insert(c);
+                        reach.extend(last_before.get(&c).into_iter().flatten().copied());
+                        reach.extend(last_after.get(&c).into_iter().flatten().copied());
+                    }
+                }
+                for c in 0..clusters.len() as u32 {
+                    if c == gone || before[c as usize] == after[c as usize] {
+                        continue;
+                    }
+                    assert!(reach.contains(&c), "seed {seed}: {c} moved when {gone} went");
+                    moved_beyond_neighbours += u32::from(!last_before[&gone].contains(&c));
+                }
+            }
         }
-        let (after, _) = assign(&clusters, &fewer, 10);
-        let points: Vec<[f64; 2]> = last
-            .drawn
-            .iter()
-            .map(|&c| clusters[c as usize].centre.expect("placed"))
-            .collect();
-        let near = neighbours(&points);
-        let at = last.drawn.iter().position(|&c| c == gone).expect("drawn");
-        let close: FxHashSet<u32> = near
-            .of(at as u32)
-            .iter()
-            .map(|&j| last.drawn[j as usize])
-            .collect();
-        for c in 0..clusters.len() as u32 {
-            if c != gone && before[c as usize] != after[c as usize] {
-                assert!(close.contains(&c), "cluster {c} moved, far from the change");
+        assert!(moved_beyond_neighbours > 0, "a new heir and its neighbours do move");
+    }
+
+    /// **A slot depends only on the inputs the module doc lists**: withdrawing a cluster at any
+    /// depth moves only clusters one of whose inputs it changed, depth by depth.
+    #[test]
+    fn a_withdrawal_at_any_depth_moves_only_clusters_whose_inputs_moved() {
+        for seed in 0..30 {
+            let (clusters, levels) = tree(seed, 4, 4);
+            let full = passes(&clusters, &levels, &[]);
+            let (before, _) = colour(&clusters, &full, 10);
+            let old_heirs = heirs(&clusters);
+            let old_graphs = graphs(&clusters, &full);
+            for depth in 1..levels.len() - 1 {
+                // A leaf at this depth, where there is one; otherwise the depth's first cluster.
+                let gone = levels[depth][0];
+                let fewer_clusters = without(&clusters, gone);
+                let descendants: Vec<u32> = (0..clusters.len() as u32)
+                    .filter(|&c| {
+                        let mut at = c;
+                        while let Some(&p) = clusters[at as usize].parents.first() {
+                            if p == gone {
+                                return true;
+                            }
+                            at = p;
+                        }
+                        false
+                    })
+                    .collect();
+                let mut gone_all = descendants.clone();
+                gone_all.push(gone);
+                let fewer = passes(&fewer_clusters, &levels, &gone_all);
+                let (after, _) = colour(&fewer_clusters, &fewer, 10);
+                let new_heirs = heirs(&fewer_clusters);
+                let new_graphs = graphs(&fewer_clusters, &fewer);
+                for (d, pass) in fewer.iter().enumerate() {
+                    let claim_moved = |n: u32| {
+                        gone_all.contains(&n)
+                            || old_heirs[n as usize] != new_heirs[n as usize]
+                            || clusters[n as usize]
+                                .parents
+                                .iter()
+                                .any(|&p| before[p as usize] != after[p as usize])
+                            || (!pass.entering.contains(&n)
+                                && before[n as usize] != after[n as usize])
+                    };
+                    for &c in &pass.entering {
+                        if before[c as usize] == after[c as usize] {
+                            continue;
+                        }
+                        let old_near = &old_graphs[d][&c];
+                        let new_near = &new_graphs[d][&c];
+                        let inputs_moved = claim_moved(c)
+                            || old_near != new_near
+                            || old_near.iter().any(|&n| claim_moved(n));
+                        assert!(inputs_moved, "seed {seed}: {c} moved with its inputs unmoved");
+                    }
+                }
             }
         }
     }
@@ -1072,5 +1641,22 @@ mod tests {
         }
         let line = neighbours(&[[0.0, 0.0], [2.0, 0.0], [1.0, 0.0]]);
         assert_eq!((line.of(0), line.of(1), line.of(2)), (&[2][..], &[2][..], &[0, 1][..]));
+    }
+
+    /// **The sample's cut has no step**: a small change in the visible count changes which items
+    /// are sampled by about as much, never by half of them, at every count.
+    #[test]
+    fn a_small_change_in_the_visible_count_moves_few_items_in_or_out_of_the_sample() {
+        let mut state = 11u64;
+        let ids: Vec<u64> = (0..200_000).map(|_| splitmix(&mut state)).collect();
+        let sampled = |visible: u64| {
+            let cut = sample_cut(visible, 4_000);
+            ids.iter().filter(|&&id| id < cut).count() as i64
+        };
+        for visible in [8_000u64, 15_999, 16_000, 16_001, 31_999, 32_000, 64_000, 1 << 20] {
+            let (a, b) = (sampled(visible), sampled(visible + visible / 100));
+            assert!((a - b).abs() <= a / 50 + 10, "{visible}: {a} then {b}");
+        }
+        assert_eq!(sample_cut(3_000, 4_000), u64::MAX, "few enough are all sampled");
     }
 }

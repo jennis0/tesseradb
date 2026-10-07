@@ -8,15 +8,12 @@ import {fakeDevice} from './fake-device.js';
 /** Each artifact's slot in a palette of ten, as a served frame names it. */
 const slot = (n: number) => ({slot: n % 10, paletteSize: 10});
 
-/** The colours of every artifact the table holds, under Tableau 10, as the store builds them. */
-const coloursOf = (table: SessionArtifactTable, palette: 'tableau10' | 'kelly' = 'tableau10') =>
-  artifactColours(
-    table.liveEntries().map(({ordinal, entry}) => ({ordinal, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: entry.paletteSize})),
-    palette
-  );
+/** The colours of every artifact the table holds, as the store builds them, with every slot read as one of `size` colours. */
+const coloursOf = (table: SessionArtifactTable, size = 10) =>
+  artifactColours(table.liveEntries().map(({ordinal, entry}) => ({ordinal, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: size})));
 
 /** One entry's colour, as the store extends its map for an ordinal named. */
-const colourOf = (table: SessionArtifactTable, ordinal: number) => slottedColour(table.entry(ordinal)!, 'tableau10', new Map());
+const colourOf = (table: SessionArtifactTable, ordinal: number) => slottedColour(table.entry(ordinal)!, new Map());
 
 const artifact = (id: bigint, x: number, parent: bigint | null = null): Artifact => ({
   layer: 'l',
@@ -263,7 +260,7 @@ describe('every colouring interaction is a texture rewrite, never an attribute u
     expect(uploadsAfterBands).toBeGreaterThan(0);
     // The colour map is held per palette, as the store holds it: `update` compares it by
     // identity, so a fresh map of the same colours is a recolour and rewrites (see below).
-    const maps = {tableau10: coloursOf(table), kelly: coloursOf(table, 'kelly')};
+    const maps = {tableau10: coloursOf(table), kelly: coloursOf(table, 22)};
     const inputs = (palette: 'tableau10' | 'kelly', level?: number, highlight?: number) => ({
       artifacts: {table, colours: maps[palette]},
       level,
@@ -285,7 +282,7 @@ describe('every colouring interaction is a texture rewrite, never an attribute u
     // A new colour map object under the same key rewrites the texture even if its contents match:
     // the store extends a map in place while the palette holds, so a new object means every
     // colour may have changed.
-    expect(lut.update({artifacts: {table, colours: coloursOf(table, 'kelly')}, level: 0, highlight: a}, `v1|kelly|0|${a}`)).toBe(true);
+    expect(lut.update({artifacts: {table, colours: coloursOf(table, 22)}, level: 0, highlight: a}, `v1|kelly|0|${a}`)).toBe(true);
     expect(device.textureWrites).toBe(5);
 
     // The switch between cluster and column colour is a uniform: the slab is asked for the same

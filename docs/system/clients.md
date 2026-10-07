@@ -106,7 +106,8 @@ default, Tableau 20 with 20, or Kelly with 22. The store sends the palette's siz
 below it ([annotations](annotations.md#colour-slots)), the same for this viewer at any zoom, box,
 budget or filter. The store colours a cluster with the palette's colour at its slot, and a cluster
 with no slot with the neutral grey. `Store.setPalette` changes the palette. Slots of one size mean
-nothing under another, so a palette of another size drops the artifacts held and asks again.
+nothing under another, so the store asks again with the new size, and each cluster keeps the colour
+of the palette its slot was served under until the new slot arrives.
 `Store.setArtifactColours` gives some clusters a host's own colours, by `tessera_id`, over their
 slots. The explorer's display menu lists the four palettes with each one's swatches and size, and
 the field card's swatches take the slot each row of its table carries. The notebook widget takes

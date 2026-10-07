@@ -2,24 +2,46 @@ import {retryDelayMs, type Clock, type RetryOptions} from './driver.js';
 import {PartialAggregate} from './aggregate.js';
 import {TesseraError} from './client.js';
 import {refusalOf, type Refusal} from './presented.js';
-import type {AggregateRequest, AggregateResult, AggregateTable, FilterExpr, Grouping} from './types.js';
+import {paletteOfSize, type PaletteName} from './palette.js';
+import type {AggregateBy, AggregateCut, AggregateRequest, AggregateResult, AggregateTable, FilterExpr, Grouping} from './types.js';
 
 /**
- * A grouping as an {@link AggregateSpec} names it: a {@link Grouping}, or one ranking a `nested` or
- * `dag` layer's top artifacts at `cut: 'drawn'`, the cut the store's map draws that layer at: the
- * artifact channel's tile depth and box for the camera, under {@link Store.setClusterBudget}'s
- * budget. Each request takes the cut as it stands when it is sent.
+ * A grouping as an {@link AggregateSpec} names it: a {@link Grouping}, in which a layer's grouping
+ * may take two values from the store's map. `cut: 'drawn'` ranks a `nested` or `dag` layer's top
+ * artifacts at the cut the map draws that layer at: the artifact channel's tile depth and box for
+ * the camera, under {@link Store.setClusterBudget}'s budget. `paletteSize: 'drawn'` asks for each
+ * artifact's slot in the palette the map colours clusters from ({@link Store.setPalette}). Each
+ * request takes both as they stand when it is sent.
  *
  * @category Store
  */
-export type AggregateSpecGrouping = Grouping | DrawnGrouping;
+export type AggregateSpecGrouping = Omit<Grouping, 'by'> & {
+  /** As {@link Grouping.by}, where a layer's `cut` and `paletteSize` may be `'drawn'`. */
+  by?: Exclude<AggregateBy, {layer: string}> | DrawnLayerBy;
+};
 
-/** A grouping ranking a tree layer's top artifacts at the cut the store's map draws. */
-type DrawnGrouping = Omit<Grouping, 'by'> & {by: {layer: string; top: number; cut: 'drawn'; paletteSize?: number}};
+type LayerBy = Extract<AggregateBy, {layer: string}>;
+
+/** A layer's grouping whose cut or palette size may be the store map's. */
+type DrawnLayerBy = LayerBy extends infer B ? (B extends LayerBy ? Omit<B, 'cut' | 'paletteSize'> & {cut?: AggregateCut | 'drawn'; paletteSize?: number | 'drawn'} : never) : never;
 
 /** Whether `grouping` ranks at the cut the store's map draws. */
-export function isDrawn(grouping: AggregateSpecGrouping): grouping is DrawnGrouping {
+export function isDrawn(grouping: AggregateSpecGrouping): boolean {
   return grouping.by !== undefined && 'cut' in grouping.by && grouping.by.cut === 'drawn';
+}
+
+/** Whether `grouping` asks for slots in the palette the store's map colours clusters from. */
+export function isPaletteDrawn(grouping: AggregateSpecGrouping): boolean {
+  return grouping.by !== undefined && 'paletteSize' in grouping.by && grouping.by.paletteSize === 'drawn';
+}
+
+/** The palette of the slots `body` asks for, or `null` where no grouping asks for slots. */
+function paletteOf(body: AggregateBody): PaletteName | null {
+  for (const g of body.groupings) {
+    const by = g.by;
+    if (by && 'layer' in by && by.paletteSize !== undefined) return paletteOfSize(by.paletteSize);
+  }
+  return null;
 }
 
 /**
@@ -94,6 +116,11 @@ export type AggregateEntry = {
   result: AggregateResult | null;
   /** The view `result` was counted in; `null` where `result` is. */
   view: string | null;
+  /**
+   * The palette the slots in `result` are for: the one whose size the request named. `null` where
+   * `result` is, or where no grouping asked for slots.
+   */
+  palette: PaletteName | null;
   /** The refusal of the last request, else `null`. */
   refusal: Refusal | null;
   /**
@@ -255,6 +282,7 @@ export class Aggregates {
         status: 'loading',
         result: kept,
         view: kept === null ? null : (held?.view ?? null),
+        palette: kept === null ? null : (held?.palette ?? null),
         refusal: null,
         summaries: kept === null ? [] : (held?.summaries ?? [])
       });
@@ -288,14 +316,14 @@ export class Aggregates {
       }
       this.sent.set(id, bodyKey(body));
       const {result, view} = await this.ask(spec, body, controller.signal);
-      entry = {status: 'shown', result, view, refusal: null, summaries: summariesOf(spec, result)};
+      entry = {status: 'shown', result, view, palette: paletteOf(body), refusal: null, summaries: summariesOf(spec, result)};
     } catch (error) {
       wait = retryDelayMs(error, attempt, this.retry);
       const held = this.entries.get(id);
       entry =
         wait === null
-          ? {status: 'refused', result: null, view: null, refusal: refusalOf(error), summaries: []}
-          : {status: 'retrying', result: held?.result ?? null, view: held?.view ?? null, refusal: refusalOf(error), summaries: held?.summaries ?? []};
+          ? {status: 'refused', result: null, view: null, palette: null, refusal: refusalOf(error), summaries: []}
+          : {status: 'retrying', result: held?.result ?? null, view: held?.view ?? null, palette: held?.palette ?? null, refusal: refusalOf(error), summaries: held?.summaries ?? []};
     }
     // A newer ask for this id, a drop or a dispose has taken its place.
     if (this.asking.get(id) !== controller || controller.signal.aborted) return;

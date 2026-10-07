@@ -2,7 +2,8 @@
  * The cluster palettes. The server gives each cluster a slot below the palette's size, chosen so
  * that clusters drawn beside each other differ, and the same at any zoom, box, budget or filter.
  * The client maps a slot to the palette's colour at that index. A request names the palette's size
- * as `palette_size`, so the slots of one size mean nothing under another.
+ * as `palette_size`, so the slots of one size mean nothing under another, and a slot is coloured
+ * from the palette of the size it was served for.
  */
 
 /**
@@ -112,6 +113,16 @@ export function artifactColour(palette: PaletteName, slot: number | null, chosen
 }
 
 /**
+ * The palette with `size` colours, or `null` where none has that many. Each palette has a size of
+ * its own, so a slot's palette is known from the size it was served under.
+ *
+ * @category Coordinates and colour
+ */
+export function paletteOfSize(size: number | null): PaletteName | null {
+  return (Object.keys(PALETTES) as PaletteName[]).find((name) => PALETTES[name].colours.length === size) ?? null;
+}
+
+/**
  * An artifact a colour is wanted for: its ordinal in the session table, its `tessera_id`, its slot
  * and the palette size the slot was served under.
  *
@@ -120,18 +131,20 @@ export function artifactColour(palette: PaletteName, slot: number | null, chosen
 export type Slotted = {ordinal: number; tesseraId: bigint; slot: number | null; paletteSize: number | null};
 
 /**
- * A colour per artifact, by ordinal, under `palette`, with the colours `chosen` by `tessera_id` in
- * place of the palette's. A slot served under another palette size is no slot here.
+ * A colour per artifact, by ordinal, with the colours `chosen` by `tessera_id` in place of the
+ * palette's. Each slot is coloured from the palette it was served for, so a slot served before a
+ * change of palette keeps its colour until the slot of the new size arrives.
  *
  * @internal
  */
-export function artifactColours(artifacts: readonly Slotted[], palette: PaletteName, chosen: ReadonlyMap<bigint, Rgba> = new Map()): Map<number, Rgba> {
+export function artifactColours(artifacts: readonly Slotted[], chosen: ReadonlyMap<bigint, Rgba> = new Map()): Map<number, Rgba> {
   const out = new Map<number, Rgba>();
-  for (const a of artifacts) out.set(a.ordinal, slottedColour(a, palette, chosen));
+  for (const a of artifacts) out.set(a.ordinal, slottedColour(a, chosen));
   return out;
 }
 
 /** One artifact's colour, as {@link artifactColours} gives it. @internal */
-export function slottedColour(a: Omit<Slotted, 'ordinal'>, palette: PaletteName, chosen: ReadonlyMap<bigint, Rgba>): Rgba {
-  return artifactColour(palette, a.paletteSize === paletteSize(palette) ? a.slot : null, chosen.get(a.tesseraId));
+export function slottedColour(a: Omit<Slotted, 'ordinal'>, chosen: ReadonlyMap<bigint, Rgba>): Rgba {
+  const palette = paletteOfSize(a.paletteSize);
+  return palette === null ? (chosen.get(a.tesseraId) ?? NEUTRAL) : artifactColour(palette, a.slot, chosen.get(a.tesseraId));
 }

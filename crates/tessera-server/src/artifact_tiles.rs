@@ -302,6 +302,7 @@ pub(crate) async fn viewport_artifacts(
     let closure_state = Arc::clone(&state);
     drop(tokio::task::spawn_blocking(move || {
         run(&closure_state, &session, req, cancel, sink);
+        crate::state::refresh_cluster_slots(&closure_state, &session);
     }));
 
     let (opening, body) = pending.opened("artifacts viewport", "first frame").await?;

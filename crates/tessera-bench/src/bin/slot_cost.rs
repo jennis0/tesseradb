@@ -24,47 +24,88 @@ fn main() {
     let mut bundle: Option<PathBuf> = None;
     let mut view: Option<String> = None;
     let mut layer: Option<String> = None;
+    let mut terms: Option<Vec<String>> = None;
+    let mut geometry = false;
+    let mut scratch: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bundle" => bundle = args.next().map(PathBuf::from),
             "--view" => view = args.next(),
             "--layer" => layer = args.next(),
-            other => panic!("unknown argument {other}; pass --bundle, --view and --layer"),
+            "--terms" => {
+                terms = args
+                    .next()
+                    .map(|t| t.split(',').map(str::to_string).collect())
+            }
+            "--geometry" => geometry = true,
+            "--scratch" => scratch = args.next().map(PathBuf::from),
+            other => panic!(
+                "unknown argument {other}; pass --bundle, --view and --layer, and optionally \
+                 --terms a,b, --geometry and --scratch <dir>"
+            ),
         }
     }
     let (Some(root), Some(view), Some(layer)) = (bundle, view, layer) else {
         panic!("pass --bundle, --view and --layer");
     };
-    let tmp = tempfile::TempDir::new().expect("a scratch dir");
+    let tmp = match scratch {
+        Some(dir) => tempfile::TempDir::new_in(dir).expect("a scratch dir"),
+        None => tempfile::TempDir::new().expect("a scratch dir"),
+    };
+    let opening = Instant::now();
     let engine = open(&root, &tmp.path().join("cache"), &tmp.path().join("wal.log"));
+    println!(
+        "opened in {:.1} s, peak resident {} MiB",
+        opening.elapsed().as_secs_f64(),
+        peak_mib()
+    );
+    let terms = terms.unwrap_or_else(|| all_terms(&root));
     let session = engine
-        .authorise(&credential(&all_terms(&root)))
+        .authorise(&credential(&terms))
         .expect("the credential authorises");
-    println!("bundle {}  view {view}  layer {layer}", root.display());
+    println!(
+        "bundle {}  view {view}  layer {layer}  terms {}  geometry {geometry}",
+        root.display(),
+        terms.len()
+    );
     let mut first = true;
     for palette in [8u8, 10, 20, 22] {
         for pass in ["cold", "warm"] {
             let started = Instant::now();
             let stats = engine
-                .cluster_slot_stats(&session, &view, &layer, palette)
+                .cluster_slot_stats(&session, &view, &layer, palette, geometry)
                 .expect("the layer is coloured");
             let ms = started.elapsed().as_secs_f64() * 1e3;
             let pass = if first { "first" } else { pass };
             first = false;
             println!(
                 "  N={palette:<2} {pass:<5} {ms:>9.1} ms  clusters {:>8}  edges {:>9}  \
-                 clashes {:>7} ({:.2}%)  sampled {:>9}  unsampled {:>7}  no centre {}",
+                 clashes {:>7} ({:.2}%)  sampled {:>9}  from figures {:>7}  beside ancestor {:>6}  \
+                 no centre {}  peak {} MiB",
                 stats.clusters,
                 stats.edges,
                 stats.clashes,
                 100.0 * stats.clashes as f64 / stats.edges.max(1) as f64,
                 stats.sampled_items,
-                stats.unsampled,
+                stats.from_figures,
+                stats.beside_ancestor,
                 stats.without_centre,
+                peak_mib(),
             );
         }
     }
+}
+
+/// The process's peak resident memory so far, from `/proc/self/status`.
+fn peak_mib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+            line.split_whitespace().nth(1)?.parse::<u64>().ok()
+        })
+        .map_or(0, |kb| kb / 1024)
 }
 
 fn open(root: &Path, cache: &Path, wal: &Path) -> Engine {

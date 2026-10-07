@@ -276,6 +276,7 @@ pub(crate) async fn bulk_read(
                 recomposed,
             } => finish(route, &view, outcome, recomposed, sink),
         }
+        crate::state::refresh_cluster_slots(&closure_state, &session);
     }));
 
     let (opening, body) = pending.opened(route, "first frame").await?;

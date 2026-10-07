@@ -157,7 +157,7 @@ function pairKey(layer: string, level: number): string {
 }
 
 /** One held tile: the rows its frame carried and the (layer, level) pairs it answered. */
-type HeldTile = {rows: Artifact[]; answered: Set<string>; usedAt: number};
+type HeldTile = {rows: Artifact[]; answered: Set<string>; usedAt: number; paletteSize: number | undefined};
 
 /** What a view needs: its tiles, centre first, and the pairs and layers it is asked over. */
 type Want = {
@@ -330,14 +330,19 @@ export class ArtifactChannel {
   }
 
   /**
-   * Ask for slots in a palette of `size` colours. A slot means nothing under another size, so what
-   * is held is dropped and the noted view asked again.
+   * Ask for slots in a palette of `size` colours, and ask again for the noted view. What is held
+   * stays drawn, each artifact in the palette its slot was served for, until a frame of the new
+   * size replaces it; a held tile of another size counts as missing.
    */
   setPaletteSize(size: number | undefined): void {
     if (size === this.paletteSize) return;
     this.paletteSize = size;
-    this.cancel();
-    this.askAgain();
+    this.looked.clear();
+    if (this.view && this.state.layers.length > 0) {
+      if (this.timer) this.clock.cancel(this.timer);
+      this.timer = null;
+      void this.request();
+    }
   }
 
   get current(): ArtifactChannelState {
@@ -454,11 +459,6 @@ export class ArtifactChannel {
    */
   observeContentKey(contentKey: string): void {
     if (!contentKey || !this.heldUnder || this.heldUnder.contentKey === contentKey) return;
-    this.askAgain();
-  }
-
-  /** Drops what is held and asks again for the noted view where it names a layer. */
-  private askAgain(): void {
     this.dropHeld();
     if (this.view && this.state.layers.length > 0) {
       void this.request();
@@ -566,7 +566,7 @@ export class ArtifactChannel {
     if (want.pairs.size === 0) return [];
     return want.tiles.filter((tile) => {
       const held = this.tiles.get(tileKey(want.filter, want.depth, tile));
-      if (!held) return true;
+      if (!held || held.paletteSize !== this.paletteSize) return true;
       for (const pair of want.pairs) if (!held.answered.has(pair)) return true;
       return false;
     });
@@ -618,7 +618,7 @@ export class ArtifactChannel {
     const kept = rows.filter((a) => want.pairs.has(pairKey(a.layer, a.rung)));
     this.name(kept, paletteSize);
     if (before) this.unname(before.rows);
-    this.tiles.set(key, {rows: kept, answered: new Set(want.pairs), usedAt: ++this.uses});
+    this.tiles.set(key, {rows: kept, answered: new Set(want.pairs), usedAt: ++this.uses, paletteSize});
   }
 
   /** Evicts the least recently used tiles past the cap, never one of `protect`'s. */

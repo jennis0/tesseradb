@@ -1,4 +1,4 @@
-import {Aggregates, isDrawn, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
+import {Aggregates, isDrawn, isPaletteDrawn, joinedAggregate, type AggregateBody, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
@@ -1932,17 +1932,27 @@ export function createStore(options: StoreOptions): Store {
     return spec.groupings.some(isDrawn);
   }
 
+  /** Whether `spec` asks for slots in the palette the map colours clusters from. */
+  function drawsPalette(spec: AggregateSpec): boolean {
+    return spec.groupings.some(isPaletteDrawn);
+  }
+
   /**
-   * `spec`'s groupings with each `cut: 'drawn'` replaced by the current view's drawn cut; `null`
-   * before the current view has noted a camera.
+   * `spec`'s groupings with each `cut: 'drawn'` replaced by the current view's drawn cut, and each
+   * `paletteSize: 'drawn'` by the size of the store's palette; `null` before the current view has
+   * noted a camera where a cut is drawn.
    */
   function drawnGroupings(spec: AggregateSpec): Grouping[] | null {
     const cut = drawsCut(spec) ? (views.current?.channel.drawnCut() ?? null) : null;
     const groupings: Grouping[] = [];
     for (const g of spec.groupings) {
-      if (!isDrawn(g)) groupings.push(g);
-      else if (cut === null) return null;
-      else groupings.push({...g, by: {...g.by, cut}});
+      if (isDrawn(g) && cut === null) return null;
+      if (!isDrawn(g) && !isPaletteDrawn(g)) {
+        groupings.push(g as Grouping);
+        continue;
+      }
+      const by = {...g.by, ...(isDrawn(g) ? {cut} : {}), ...(isPaletteDrawn(g) ? {paletteSize: paletteSize(colours.palette)} : {})};
+      groupings.push({...g, by} as Grouping);
     }
     return groupings;
   }
@@ -2149,6 +2159,7 @@ export function createStore(options: StoreOptions): Store {
     if (!Object.hasOwn(PALETTES, next)) return;
     colours.setPalette(next);
     for (const held of views.all()) held.channel.setPaletteSize(paletteSize(next));
+    aggregates.refresh(false, {which: drawsPalette, changed: true});
   }
 
   function setBudget(next: number): void {

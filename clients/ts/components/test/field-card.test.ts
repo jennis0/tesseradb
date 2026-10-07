@@ -333,8 +333,8 @@ describe('<tessera-field-card> on a layer', () => {
     store.setBrowse('p:8', {artifacts: [], parents: [], next: null});
     card.store = store;
     await settle(host);
-    // Each asks for the clusters' slots in the store's palette, Tableau 10, which the swatches read.
-    const ranked = (top: number) => ({by: {layer: 'topics', top, cut: 'drawn', paletteSize: 10}});
+    // Each asks for the clusters' slots in the palette the map colours from, which the swatches read.
+    const ranked = (top: number) => ({by: {layer: 'topics', top, cut: 'drawn', paletteSize: 'drawn'}});
     expect(spec(store, 'field-subject')).toEqual({groupings: [ranked(5)], subject: 'view', highlighted: true, withoutMembersOf: 'topics'});
     // The whole match counts how many clusters are drawn, which the search box names.
     expect(spec(store, 'field-match')).toEqual({groupings: [ranked(1)], withoutMembersOf: 'topics'});
@@ -343,7 +343,7 @@ describe('<tessera-field-card> on a layer', () => {
     await new Promise((r) => setTimeout(r, 0));
     await settle(host);
     // And then the clusters the subject lists, by name, so each row has both counts.
-    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 8n], paletteSize: 10}}, ranked(1)], withoutMembersOf: 'topics'});
+    expect(spec(store, 'field-match')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 8n], paletteSize: 'drawn'}}, ranked(1)], withoutMembersOf: 'topics'});
     answerAggregate(store, 'field-match', aggregateEntry([{rows: [{key: 8n, count: 50}, {key: 7n, count: 90}], total: 140}, {rows: [{key: 7n, count: 90}], groups: 12}]));
     await settle(host);
     expect(deep(host, 'tessera-cluster-filter')!.getAttribute('placeholder')).toBe('Search 12 clusters');
@@ -375,15 +375,16 @@ describe('<tessera-field-card> on a layer', () => {
     store.set('legend', {...store.get('legend'), colourBy: 'cluster:topics'});
     card.store = store;
     await settle(host);
-    const answerBoth = async () => {
-      answerAggregate(store, 'field-subject', aggregateEntry([{rows: [{key: 7n, count: 9, title: 'optics', slot: 2}, {key: 8n, count: 5, title: 'lasers', slot: null}], total: 14}]));
-      answerAggregate(store, 'field-match', aggregateEntry([{rows: [{key: 7n, count: 9, slot: 2}, {key: 8n, count: 5, slot: null}]}, {rows: [{key: 7n, count: 9, slot: 2}], groups: 2}]));
+    const answerBoth = async (palette: 'tableau10' | 'okabe-ito') => {
+      const none = undefined;
+      answerAggregate(store, 'field-subject', aggregateEntry([{rows: [{key: 7n, count: 9, title: 'optics', slot: 2}, {key: 8n, count: 5, title: 'lasers', slot: null}], total: 14}], 's0', none, palette));
+      answerAggregate(store, 'field-match', aggregateEntry([{rows: [{key: 7n, count: 9, slot: 2}, {key: 8n, count: 5, slot: null}]}, {rows: [{key: 7n, count: 9, slot: 2}], groups: 2}], 's0', none, palette));
       for (let i = 0; i < 3; i++) {
         await new Promise((r) => setTimeout(r, 0));
         await settle(host);
       }
     };
-    await answerBoth();
+    await answerBoth('tableau10');
     const swatches = () => rows(host).map((r) => /--c:([^;]+)/.exec(r.querySelector('[part="swatch"]')!.getAttribute('style')!)![1]);
     // Slot 2 of Tableau 10 is #e15759; a cluster served with no slot is grey.
     expect(swatches()).toEqual(['rgb(225, 87, 89)', 'rgb(118, 126, 140)']);
@@ -391,12 +392,15 @@ describe('<tessera-field-card> on a layer', () => {
     store.set('artifacts', {...store.get('artifacts'), overrides: new Map([[8n, [1, 2, 3, 255] as const]])});
     await settle(host);
     expect(swatches()).toEqual(['rgb(225, 87, 89)', 'rgb(1, 2, 3)']);
-    // Under Okabe-Ito the card asks again with its size, and slot 2 is #009e73.
+    // Under Okabe-Ito the answers held keep Tableau 10's colours until answers for eight colours
+    // land; the spec, which names the map's palette, does not change.
+    const before = spec(store, 'field-subject');
     store.set('artifacts', {...store.get('artifacts'), palette: 'okabe-ito', overrides: new Map()});
     await settle(host);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(spec(store, 'field-subject')).toMatchObject({groupings: [{by: {layer: 'topics', paletteSize: 8}}]});
-    await answerBoth();
+    expect(spec(store, 'field-subject')).toEqual(before);
+    expect(swatches()[0]).toBe('rgb(225, 87, 89)');
+    // Slot 2 of Okabe-Ito is #009e73.
+    await answerBoth('okabe-ito');
     expect(swatches()[0]).toBe('rgb(0, 158, 115)');
   });
 

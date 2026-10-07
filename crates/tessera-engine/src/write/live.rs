@@ -280,6 +280,11 @@ impl LiveState {
         lock_recover(&self.registry).resolve_for(admits)
     }
 
+    /// The registry's version, which every registration and drop moves.
+    pub(crate) fn registry_version(&self) -> u64 {
+        lock_recover(&self.registry).version()
+    }
+
     /// Every registered layer, as the registry holds it: the declarations, never a decision. The
     /// caller applies the gate; this has no principal to resolve against.
     pub(crate) fn registered_layers(&self) -> Vec<tessera_types::layer::RegisteredLayer> {

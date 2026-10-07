@@ -450,16 +450,22 @@ impl crate::Engine {
         let reachable = self.reachable_layers(session);
         let ctx = DependencyContext::new(&served_view, &mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
-        let slots = match req.palette_size {
-            Some(palette) => Some(self.cluster_slots(
-                &served_view,
-                &mask,
-                &layer,
-                palette,
-                &dependency_served,
-            )?),
-            None => None,
-        };
+        // Each level's slots. Browse reads no positions, so a level centred by its figures has
+        // slots here only where a route that reads them has worked them out.
+        let mut slots: Vec<Option<Arc<crate::slots::LevelSlots>>> = Vec::new();
+        if let Some(palette) = req.palette_size {
+            for level in 0..layer.runs.len() as u32 {
+                slots.push(self.cluster_slots(
+                    &served_view,
+                    &mask,
+                    &layer,
+                    level,
+                    palette,
+                    false,
+                    &dependency_served,
+                )?);
+            }
+        }
         let attached = AttachedLevels::default();
         let namer = Namer::new(
             self,
@@ -508,8 +514,9 @@ impl crate::Engine {
                 .copied()
                 .unwrap_or(0),
             slot: slots
-                .as_ref()
-                .and_then(|slots| slots.get(g.level, g.ordinal)),
+                .get(g.level as usize)
+                .and_then(Option::as_ref)
+                .and_then(|slots| slots.get(g.ordinal)),
         };
 
         // The form's own candidate set, taken over the gated artifacts and never over the level's

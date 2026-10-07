@@ -1085,23 +1085,12 @@ impl Engine {
             .collect();
 
         let vocabulary = predicate_vocabulary(generation, &registered.declaration);
-        let slots = match pass.ask.palette {
-            Some(palette) => Some(self.cluster_slots(
-                pass.served,
-                pass.mask,
-                &registered,
-                palette,
-                pass.dependency_served,
-            )?),
-            None => None,
-        };
         Ok(Some(LayerPass {
             pass,
             name,
             registered,
             declared_derived,
             vocabulary,
-            slots,
         }))
     }
 
@@ -1182,6 +1171,19 @@ impl Engine {
             pass.mask,
             crate::figures::Geometry::declared(&layer.registered.declaration),
         )?;
+        // The level's slots, read as this route reads the level: with its declared positions.
+        let slots = match pass.ask.palette {
+            Some(palette) => self.cluster_slots(
+                served,
+                pass.mask,
+                &layer.registered,
+                level,
+                palette,
+                true,
+                pass.dependency_served,
+            )?,
+            None => None,
+        };
         Ok(LevelPass {
             layer,
             level,
@@ -1190,6 +1192,7 @@ impl Engine {
             level_version,
             lineage_version,
             counts,
+            slots,
         })
     }
 
@@ -1558,10 +1561,7 @@ impl Engine {
             target: None,
             matched,
             highlighted,
-            slot: layer
-                .slots
-                .as_ref()
-                .and_then(|slots| slots.get(number, ordinal)),
+            slot: level.slots.as_ref().and_then(|slots| slots.get(ordinal)),
         });
         Ok(())
     }
@@ -1649,8 +1649,6 @@ pub(super) struct LayerPass<'a> {
     /// The predicate's inputs, resolved per level: per-level for a spatial layer, nothing for a
     /// stored-membership one.
     vocabulary: Option<&'a tessera_store::vocabulary::VocabularyMinter>,
-    /// This viewer's slots over the layer, where the request named a palette size.
-    slots: Option<Arc<crate::slots::LayerSlots>>,
 }
 
 /// One level of one layer, as [`Engine::level_pass`] settles it: the values the gate, the cut and
@@ -1667,6 +1665,8 @@ pub(super) struct LevelPass<'a> {
     /// The level's masked counts and accumulated geometry where it has them — `None` on an
     /// artifact-major level.
     pub(super) counts: Option<Arc<crate::figures::Figures>>,
+    /// This viewer's slots over the level, where the request named a palette size.
+    pub(super) slots: Option<Arc<crate::slots::LevelSlots>>,
 }
 
 /// The row-space sets one response, or one tile of it, is answered over, composed once for every

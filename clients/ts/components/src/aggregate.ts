@@ -1,4 +1,4 @@
-import type {AggregateEntry, AggregateSpec, AggregateTable, Grouping, Layer, Meta, Store} from '@tesseradb/client';
+import type {AggregateEntry, AggregateSpec, AggregateTable, Layer, Meta, Store} from '@tesseradb/client';
 
 /**
  * One listed group of an aggregate table: its key (a vocabulary key for a field, an artifact's
@@ -54,9 +54,15 @@ export function countedByLevel(layer: Pick<Layer, 'levels'>): boolean {
  * the layer by level, else one. The artifacts are taken in the order given, and the first
  * `maxAggregateNamed` of each level and the first `maxAggregateGroupings` levels met are counted,
  * so what is counted is what is listed first. The ids are sorted within a grouping only so that one
- * set always makes one request. With `paletteSize`, each row carries its slot in a palette that size.
+ * set always makes one request. With `paletteSize`, each row carries its slot in a palette that size,
+ * or with `'drawn'` in the palette the store's map colours clusters from.
  */
-export function artifactGroupings(layer: Pick<Layer, 'name' | 'levels'>, artifacts: readonly {tesseraId: bigint; rung: number}[], limits: Meta['selection'], paletteSize?: number): Grouping[] {
+export function artifactGroupings(
+  layer: Pick<Layer, 'name' | 'levels'>,
+  artifacts: readonly {tesseraId: bigint; rung: number}[],
+  limits: Meta['selection'],
+  paletteSize?: number | 'drawn'
+): AggregateSpec['groupings'] {
   const byLevel = new Map<number, bigint[]>();
   for (const a of artifacts) {
     const at = countedByLevel(layer) ? a.rung : -1;

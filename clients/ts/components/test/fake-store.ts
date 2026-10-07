@@ -238,7 +238,7 @@ export type AggregateTableSpec = {rows: AggregateRow[]; groups?: number | null; 
  * An answered aggregate, one table per entry of `tables`, as the store publishes it. The rows are a
  * stand-in for an Arrow table with the columns an aggregate carries, read by name.
  */
-export function aggregateEntry(tables: AggregateTableSpec[], view = 's0', summaries: AggregateEntry['summaries'] = tables.map(() => null)): AggregateEntry {
+export function aggregateEntry(tables: AggregateTableSpec[], view = 's0', summaries: AggregateEntry['summaries'] = tables.map(() => null), palette: AggregateEntry['palette'] = null): AggregateEntry {
   const table = (rows: AggregateRow[]) => {
     const column = (read: (r: AggregateRow) => unknown) => ({get: (i: number) => read(rows[i]!), toArray: () => rows.map(read)});
     const columns: Record<string, {get(i: number): unknown; toArray(): unknown[]}> = {
@@ -258,6 +258,7 @@ export function aggregateEntry(tables: AggregateTableSpec[], view = 's0', summar
   return {
     status: 'shown',
     view,
+    palette,
     refusal: null,
     summaries,
     result: {

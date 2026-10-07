@@ -1670,6 +1670,7 @@ async fn browse(
             )
         })?),
     };
+    let refresh = (Arc::clone(&state), Arc::clone(&session));
     let out = state
         .gated(move |state| {
             let meta = state.engine.meta();
@@ -1710,6 +1711,9 @@ async fn browse(
                 .map_err(crate::error::map_engine_error)
         })
         .await?;
+    drop(tokio::task::spawn_blocking(move || {
+        crate::state::refresh_cluster_slots(&refresh.0, &refresh.1);
+    }));
     Ok(Json(BrowseResp {
         artifacts: out.artifacts.into_iter().map(browse_row).collect(),
         parents: out.parents.into_iter().map(browse_row).collect(),

@@ -286,12 +286,14 @@ impl Executor {
         let next = if unsuppressed {
             generation.with_buffer(buffer, &[], |g| {
                 g.overlay_version = overlay_version;
+                g.deny_epoch = generation.deny_epoch + 1;
                 g.overlay = Arc::new(overlay);
                 g.unique_live = unique_live;
             })
         } else {
             generation.with_denies(Arc::new(overlay), &newly_denied, buffer, &[], |g| {
                 g.overlay_version = overlay_version;
+                g.deny_epoch = generation.deny_epoch + 1;
                 g.unique_live = unique_live;
             })
         };

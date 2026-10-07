@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {DEFAULT_PALETTE, NEUTRAL, PALETTES, artifactColour, artifactColours, paletteSize, type PaletteName} from '../src/palette.js';
+import {DEFAULT_PALETTE, NEUTRAL, PALETTES, artifactColour, artifactColours, paletteOfSize, paletteSize, type PaletteName} from '../src/palette.js';
 
 const hexOf = (c: readonly number[]) => `#${c.slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('')}`;
 
@@ -27,20 +27,27 @@ describe('the cluster palettes', () => {
     expect(artifactColour('tableau10', null, chosen)).toEqual(chosen);
   });
 
-  it('colour each ordinal by its slot, and a slot served for another palette size as none', () => {
+  it('colour each ordinal by its slot in the palette of the size it was served for, a size no palette has neutral', () => {
     const colours = artifactColours(
       [
         {ordinal: 1, tesseraId: 10n, slot: 2, paletteSize: 10},
         {ordinal: 2, tesseraId: 11n, slot: 2, paletteSize: 8},
         {ordinal: 3, tesseraId: 12n, slot: null, paletteSize: 10},
-        {ordinal: 4, tesseraId: 13n, slot: 5, paletteSize: 10}
+        {ordinal: 4, tesseraId: 13n, slot: 5, paletteSize: 10},
+        {ordinal: 5, tesseraId: 14n, slot: 2, paletteSize: 9},
+        {ordinal: 6, tesseraId: 15n, slot: null, paletteSize: null}
       ],
-      'tableau10',
       new Map([[13n, [9, 9, 9, 255] as const]])
     );
     expect(colours.get(1)).toEqual(PALETTES.tableau10.colours[2]);
-    expect(colours.get(2)).toEqual(NEUTRAL);
+    expect(colours.get(2)).toEqual(PALETTES['okabe-ito'].colours[2]);
     expect(colours.get(3)).toEqual(NEUTRAL);
     expect(colours.get(4)).toEqual([9, 9, 9, 255]);
+    expect(colours.get(5)).toEqual(NEUTRAL);
+    expect(colours.get(6)).toEqual(NEUTRAL);
+  });
+
+  it('are named by their sizes, each a size of its own', () => {
+    expect([8, 10, 20, 22, 9, null].map(paletteOfSize)).toEqual(['okabe-ito', 'tableau10', 'tableau20', 'kelly', null, null]);
   });
 });

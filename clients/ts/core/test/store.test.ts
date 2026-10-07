@@ -884,9 +884,9 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     expect(next.get(one)).toBe(held);
     expect(next.get(table.ordinalOf('clusters/a', 3n))).toBeDefined();
 
-    // A palette change moves every colour, so the map is rebuilt.
+    // A palette change recolours nothing by itself: each colour moves as its new slot arrives.
     store.setPalette('kelly');
-    expect(store.get('artifacts').colours).not.toBe(first);
+    expect(store.get('artifacts').colours).toBe(first);
     await clock.advance(1);
     scheduler.flush();
     expect(store.get('artifacts').colours.size).toBe(3);
@@ -939,22 +939,40 @@ describe('clusters are coloured by the slot the server gives each, in the chosen
     expect(colourOf(4n)).toEqual(NEUTRAL);
   });
 
-  it('asks again with the new size when the palette changes, and colours from the slots of that size', async () => {
+  it('asks again with the new size when the palette changes, keeping each held colour until its new slot lands', async () => {
     const {store, clock, scheduler, viewportArtifacts, colourOf} = await slotted();
     const before = viewportArtifacts.mock.calls.length;
+    // Every colour artifact 3 is published in, from the change until the new frame has landed.
+    const seen: unknown[] = [];
+    const unsubscribe = store.subscribe(() => seen.push(colourOf(3n)));
     store.setPalette('okabe-ito');
+    expect(store.get('artifacts').palette).toBe('okabe-ito');
+    // Nothing held is dropped: the artifacts stay served, each in the palette its slot was served for.
+    expect(store.get('artifacts').served.length).toBeGreaterThan(0);
+    expect(colourOf(3n)).toEqual(PALETTES.tableau10.colours[3]);
     await clock.advance(1);
     scheduler.flush();
+    unsubscribe();
     const asked = viewportArtifacts.mock.calls.slice(before);
     expect(asked.length).toBeGreaterThan(0);
     expect(asked.every((call) => call[1].paletteSize === 8)).toBe(true);
-    expect(store.get('artifacts').palette).toBe('okabe-ito');
-    // 3 mod 8 and 3 mod 10 are both 3; 1n is slot 1 under either size.
     expect(colourOf(1n)).toEqual(PALETTES['okabe-ito'].colours[1]);
     expect(colourOf(3n)).toEqual(PALETTES['okabe-ito'].colours[3]);
+    // No publish between drew it grey, or in anything but the old colour or the new.
+    expect(seen.length).toBeGreaterThan(0);
+    for (const c of seen) expect([PALETTES.tableau10.colours[3], PALETTES['okabe-ito'].colours[3]]).toContainEqual(c);
     // A name no palette has changes nothing.
     store.setPalette('positional' as never);
     expect(store.get('artifacts').palette).toBe('okabe-ito');
+  });
+
+  it('keeps the colour of a cluster the points alone name, in its old palette, until it is read again', async () => {
+    const {store, colourOf} = await slotted();
+    // A point's tag naming artifact 4 with a slot from Tableau 10, as a lookup by identifier left it.
+    const table = store.get('artifacts').table as unknown as {take(refs: unknown[]): Uint32Array};
+    table.take([{tesseraId: 9n, layer: 'clusters/a', parentIds: [], slot: {slot: 6, paletteSize: 10}}]);
+    store.setPalette('kelly');
+    expect(colourOf(9n)).toEqual(PALETTES.tableau10.colours[6]);
   });
 });
 

@@ -185,6 +185,18 @@ impl Fx {
 
     /// Register `name` over `nodes`, nested or flat, and answer each node's id by key.
     fn plant(&self, name: &str, kind: HierarchyKind, nodes: &[Node]) -> BTreeMap<String, TesseraId> {
+        self.plant_as(name, kind, nodes, None, Vec::new())
+    }
+
+    /// [`Self::plant`] with a layout and computed properties of the caller's.
+    fn plant_as(
+        &self,
+        name: &str,
+        kind: HierarchyKind,
+        nodes: &[Node],
+        layout: Option<tessera_types::layer::ServingLayout>,
+        computed: Vec<String>,
+    ) -> BTreeMap<String, TesseraId> {
         self.engine
             .register_layer(LayerDeclaration {
                 scope: Default::default(),
@@ -200,10 +212,13 @@ impl Fx {
                     kind,
                     prune_children: true,
                 },
-                content: ContentDeclaration::default(),
+                content: ContentDeclaration {
+                    computed,
+                    ..ContentDeclaration::default()
+                },
                 depends_on: Vec::new(),
                 levels: Vec::new(),
-                layout: None,
+                layout,
                 shape: None,
             })
             .unwrap();
@@ -784,4 +799,146 @@ fn stacked_and_tiered_layers_are_coloured_level_by_level() {
             );
         }
     }
+}
+
+/// **Hidden members are no input either**: a viewer denied some items has the slots the broad
+/// viewer has once those items are suppressed.
+#[test]
+fn a_viewer_denied_items_has_the_slots_of_a_corpus_without_them() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let nodes = fx.tree(&[]);
+    fx.plant(TREE, HierarchyKind::Nested, &nodes);
+    let narrow = slots_of(engine, &fx.session(false));
+    for s in (0..fx.cells.len() as u64).filter(|&s| !subset_sees(s)) {
+        let entity = item_of_id(engine, s).unwrap().expect("a built item");
+        engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+    }
+    let broad = slots_of(engine, &fx.session(true));
+    let served = |slots: &BTreeMap<u64, Option<u8>>| -> BTreeMap<u64, u8> {
+        slots
+            .iter()
+            .filter_map(|(&id, &slot)| Some((id, slot?)))
+            .collect()
+    };
+    assert!(!served(&narrow).is_empty());
+    assert_eq!(served(&broad), served(&narrow));
+}
+
+/// **A small change in the visible count moves few items in or out of the sample**: the cut
+/// follows the visible count with no step, so ten items suppressed where a cut at powers of two
+/// would double the sample change it by a few items, and move few slots.
+#[test]
+fn a_small_change_in_the_visible_count_moves_few_items_in_or_out_of_the_sample() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let nodes = fx.tree(&[]);
+    fx.plant(TREE, HierarchyKind::Nested, &nodes);
+    let session = fx.session(true);
+    let visible = fx.cells.len() as u64;
+    // The visible count sits just above four times the sample.
+    engine.set_slot_sample_for_test(visible / 4 - 2);
+    let stats = || engine.cluster_slot_stats(&session, "s0", TREE, 10, false).unwrap();
+    let before = (stats(), slots_of(engine, &session));
+    for s in 0..10u64 {
+        let entity = item_of_id(engine, s).unwrap().expect("a built item");
+        engine.accept_change(entity, ChangeOp::Suppress).unwrap();
+    }
+    let after = (stats(), slots_of(engine, &session));
+    let (was, now) = (before.0.sampled_items, after.0.sampled_items);
+    assert!(now.abs_diff(was) <= 20, "{was} items sampled, then {now}");
+    let moved = before
+        .1
+        .iter()
+        .filter(|&(id, slot)| after.1.get(id).is_some_and(|now| now != slot))
+        .count();
+    assert!(moved * 10 < before.1.len(), "{moved} of {} slots moved", before.1.len());
+}
+
+/// **An ingest is answered from the slots held, and they are rebuilt after the response**; a
+/// suppression is answered from slots built over it.
+#[test]
+fn an_ingest_is_answered_from_the_slots_held_until_they_are_rebuilt() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let nodes = fx.tree(&[]);
+    let ids = fx.plant(TREE, HierarchyKind::Nested, &nodes);
+    let session = fx.session(true);
+    let before = slots_of(engine, &session);
+    assert!(!engine.cluster_slots_stale(&session));
+
+    ingest(engine, "slots-ingest");
+    tick(engine);
+    assert_eq!(slots_of(engine, &session), before, "the slots held answer");
+    assert!(engine.cluster_slots_stale(&session), "a rebuild is left for later");
+    engine.refresh_cluster_slots(&session).unwrap();
+    assert!(!engine.cluster_slots_stale(&session));
+    let rebuilt = slots_of(engine, &session);
+    assert!(!engine.cluster_slots_stale(&session), "the rebuilt slots are current");
+
+    let leaf = ids["b4-3-3"];
+    engine
+        .accept_change(artifact_entity(engine, leaf), ChangeOp::Suppress)
+        .unwrap();
+    let after = slots_of(engine, &session);
+    assert!(!after.contains_key(&leaf.raw()), "the suppression applies to the next request");
+    assert!(!engine.cluster_slots_stale(&session));
+    assert_eq!(rebuilt.len(), after.len() + 1);
+}
+
+/// **A level whose layer declares a centroid is centred on its figures**, the centroids the map
+/// fills when it draws the level, and coloured once a route that reads its positions asks: a bulk
+/// read before that has no slots for it, and one after has the map's.
+#[test]
+fn a_level_centred_by_its_figures_is_coloured_where_its_positions_are_read() {
+    use tessera_types::layer::ServingLayout;
+    const FIGURED: &str = "clusters/figured";
+    const ONLY_FIGURED: &[&str] = &[FIGURED];
+    let fx = fixture();
+    let engine = &fx.engine;
+    let leaves: Vec<Node> = fx
+        .tree(&[])
+        .into_iter()
+        .filter(|n| n.key.starts_with("b4-"))
+        .collect();
+    fx.plant_as(
+        FIGURED,
+        HierarchyKind::Flat,
+        &leaves,
+        Some(ServingLayout::RowMajorLabel),
+        vec!["centroid".to_string()],
+    );
+    assert_eq!(
+        engine.recorded_layout(FIGURED, 0),
+        Some(ServingLayout::RowMajorLabel)
+    );
+    // A fold writes the level's column, and a reopened engine serves the level from it alone.
+    fold(engine);
+    let Fx {
+        _tmp,
+        root,
+        engine,
+        cells,
+    } = fx;
+    drop(engine);
+    let fx = Fx {
+        engine: engine_at(_tmp.path(), &root, 3600),
+        _tmp,
+        root,
+        cells,
+    };
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let unread = read_slots(engine, &session, FIGURED, 10);
+    assert_eq!(unread.len(), leaves.len());
+    assert!(unread.values().all(Option::is_none), "no route has read its positions");
+    let drawn = viewport_slots(engine, &session, whole(ONLY_FIGURED, Some(10)));
+    assert_eq!(drawn.len(), leaves.len());
+    assert!(drawn.values().all(Option::is_some));
+    assert_eq!(read_slots(engine, &session, FIGURED, 10), drawn);
+    let stats = engine
+        .cluster_slot_stats(&session, "s0", FIGURED, 10, true)
+        .unwrap();
+    assert_eq!(stats.from_figures, leaves.len() as u64);
+    assert_eq!(stats.sampled_items, 0, "no sample is read");
 }

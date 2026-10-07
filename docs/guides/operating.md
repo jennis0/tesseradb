@@ -165,13 +165,23 @@ viewer's 1.8 seconds went on testing which artifacts lie in each tile, not on th
 
 A viewer's first request for a layer's colours, with a `palette_size`, also costs one pass over
 the layer: the server works out a colour slot for every cluster the viewer is served, over the
-whole layer. On a bundle of 25,846,007 GBIF occurrences whose taxonomy layer holds 251,907 taxa in
-three levels, the pass took 0.29 s for the viewer who sees everything, and 0.76 s in a process
-that had not yet drawn the layer, since it then also walks the three levels' counts as drawing
-does. On 1,000,000 Tree of Life images with 69,872 taxa in seven levels it took 0.10 s, and
-0.27 s with the walk. The bundles' files were in the page cache. The slots are then held for that
-viewer, layer and palette size, read back in under a millisecond, and worked out again after an
-ingest, a deletion or a suppression. *One run each, with `tessera-bench`'s `slot_cost`.*
+whole layer, one level at a time. Where the layer declares a centroid, as a taxonomy does, the pass
+reads the centroids the map fills when it draws the level, so it adds no walk of its own. These
+figures are from samples, not from a full-scale corpus, each with its files in the page cache and
+for the viewer who sees everything. On a 25,846,007-row sample of the GBIF occurrences, whose
+`tiered` taxonomy layer holds 251,907 taxa in three levels, the pass took 0.26 to 0.28 s for each
+palette size, and 0.62 s in a process that had not yet drawn the layer, since it then also fills
+the three levels' counts and centroids as drawing does. On 1,000,000 Tree of Life images with
+69,872 taxa in seven `tiered` levels it took 0.06 s, and 0.21 s with the fill. The process's peak
+resident memory, mapped files included, was 1.5 GB. *One run each, with `tessera-bench`'s
+`slot_cost`.*
+
+The slots are then held for that viewer, layer and palette size and read back in under a
+millisecond. After a deletion, a suppression or an unsuppression, an edit, or a change to the
+layer's registration or edges, the viewer's next request that colours the layer pays the pass
+again before it is answered. After an ingest, a flush or a publication into the layer, the next
+request is answered from the slots held and the server works them out again once that response is
+sent, so the viewer pays nothing for it.
 
 A deployment whose viewers fall into a few groups pays the walk a few times for each level. A
 deployment in which every user holds labels of their own, such as a label per document, pays it for

@@ -329,12 +329,24 @@ artifact holding no member the viewer can see draws nothing and has no slot.
 Two artifacts are neighbours where the edge between their centres is in the Delaunay triangulation
 of the centres drawn together: each depth of a `nested` or `dag` layer's tree, as the map draws it
 with ancestors in place of their descendants; each level of a `tiered` or `stacked` layer; the one
-level of a `flat` layer. An artifact is coloured at the first depth it is drawn. A centre is the
-mean position of the artifact's members in a sample of about 2¹⁸ to 2¹⁹ of the viewer's visible
-items, those whose `tessera_id` falls below a cut set by the size of the visible set, read from the
-identity bands. An artifact with no member in the sample takes its nearest sampled ancestor's
-centre, moved by up to one zoom-16 cell; one with no sampled ancestor has no centre and no
-neighbours. Artifacts on one spot are set on a ring about it, so each is beside a few of the others.
+level of a `flat` layer. An artifact is coloured at the first depth it is drawn. Artifacts on one
+spot are set on a ring about it, so each is beside a few of the others.
+
+Slots are worked out a level at a time, when a request names a palette size for that level, and
+a `tiered` level's coarser levels first. Where the layer declares a centroid or a box and the level
+is served from its column, an artifact's centre is the centroid of its visible members that the
+level's figures carry, the same figures the map fills when it draws the level. A route that does
+not read positions, browse, a bulk read or an aggregate without a cut, does not fill them: it gets
+the slots already worked out for that viewer by a route that does, and otherwise no slot.
+
+Elsewhere a centre is the mean position of the artifact's members in a sample of the viewer's
+visible items: those whose `tessera_id` is below `⌊2¹⁹ · 2⁶⁴ / N⌋`, `N` being the viewer's visible
+count, read from the narrowest identity band that holds the cut, or every visible item where there
+are no more than 2¹⁹. The cut follows `N` with no step, so a change in the visible count moves only
+the centres of the artifacts holding an item between the old cut and the new. An artifact with no
+member in the sample takes its nearest centred ancestor's centre, moved by up to one zoom-16 cell,
+and one with no such ancestor has no centre and no neighbours. For artifacts far smaller than the
+sample resolves, which neighbours they are kept apart from is therefore approximate.
 
 Every artifact has an order of the slots and a rank, both drawn from its `tessera_id`. A parent's
 heir is its child with the most visible members, ties going to the lower `tessera_id`, and the heir
@@ -345,24 +357,37 @@ the higher rank wins. An artifact takes the first slot in its list that no neigh
 except that it keeps what it asked for against a neighbour of lower rank asking the same; where
 every slot is asked for, it takes the slot its farthest neighbour asks for.
 
-So a slot depends on the artifact's own `tessera_id` and what it inherits, and on its neighbours'
-`tessera_id`s and what they inherit, and never on a neighbour's slot at the same depth. An ingest, a
-deletion or a suppression moves only the slots of the artifacts whose neighbours or parents it
-changed, and of their descendants. Two neighbours that both give up what they asked for can still
-take one slot. Measured over every depth, the share of neighbouring pairs given one slot was:
+So a slot depends on the artifact's own `tessera_id`, its parents' slots and which parent it is
+heir to, and on each neighbour's `tessera_id`, which parent it is heir to, its parents' slots, and
+the slot of a neighbour coloured at an earlier depth; never on the slot a neighbour takes at the
+same depth. A change reaches the artifacts whose neighbours it changes at a depth, those beside an
+artifact that appeared, went or moved; where it changes a parent's heir, the old and the new heir
+and their neighbours; and at each depth below, the children of every artifact whose slot changed,
+the artifacts drawn beside one whose slot changed, and their neighbours. The reach widens by about a
+ring of neighbours for each depth below the change, and a change of heir near the root recolours
+that heir's subtree.
 
-| corpus and layer | artifacts | 8 colours | 10 | 20 | 22 |
-|---|---:|---:|---:|---:|---:|
-| GBIF, 25.8 million occurrences, three-level taxonomy (`tiered`) | 251,907 | 2.0% | 0.95% | 0.11% | 0.08% |
-| Tree of Life, 1 million images, seven-level taxonomy (`tiered`) | 69,872 | 1.8% | 0.83% | 0.10% | 0.06% |
-| arXiv, 2.4 million papers, HDBSCAN (`nested`) | 192 | 0.51% | 0.26% | 0% | 0% |
-| arXiv, k-means (`flat`) | 64 | 1.1% | 1.7% | 0.56% | 0% |
+Two neighbours that both give up what they asked for can still take one slot. Counting every pair
+of artifacts drawn beside each other at any depth, the share given one slot was:
 
-*One run each, every artifact the broadest viewer is served, with `tessera-bench`'s `slot_cost`.*
+| corpus and layer | artifacts | centred by | 8 colours | 10 | 20 | 22 |
+|---|---:|---|---:|---:|---:|---:|
+| GBIF sample, 25.8 million occurrences, three-level taxonomy (`tiered`) | 251,907 | figures | 1.8% | 0.87% | 0.11% | 0.08% |
+| Tree of Life, 1 million images, seven-level taxonomy (`tiered`) | 69,872 | figures | 1.7% | 0.84% | 0.10% | 0.07% |
+| arXiv, 2.4 million papers, HDBSCAN (`nested`) | 192 | sample | 0.13% | 0.26% | 0% | 0.13% |
+| arXiv, k-means (`flat`) | 64 | sample | 1.7% | 0.56% | 0% | 0% |
 
-The slots of a layer are held per session, palette size and state of the layer and the corpus, and
-a request after an ingest, a deletion or a suppression works them out again. A host's own colour
-for an artifact is applied by the client, over its slot.
+*One run each, with `tessera-bench`'s `slot_cost`, over every artifact the broadest viewer is
+served. Every artifact had a centre of its own members. Centred by the sample instead, the GBIF
+sample's taxonomy has 172,885 taxa placed beside an ancestor and 21,868 with no centre, and clashes
+at 2.0%, 0.93%, 0.11% and 0.08%.*
+
+The slots of a layer are held for each session and palette size. A deletion, a suppression or an
+unsuppression, an edit, a fold, a change to the layer registry, to the layer's edges or to a layer
+it depends on is answered with slots worked out over it. A change that only adds, an ingest, a
+flush or a publication into the layer, is answered with the slots held, which were worked out over
+what the viewer could see then, and the server works them out again once that response is sent. A
+host's own colour for an artifact is applied by the client, over its slot.
 
 ## How membership is stored
 

@@ -4,17 +4,18 @@ import {artifactColours, slottedColour, type PaletteName, type Rgba} from './pal
 /**
  * A colour per live ordinal of the session artifact table, rebuilt only when the table has moved.
  *
- * An ordinal's colour depends on its own slot, the palette and the colours chosen for it alone, so
- * the map is extended in place for the table's changes and keeps its identity; a lookup texture
- * reads identity to tell an extension from a recolour. A change of palette or of the chosen colours
- * rebuilds the map.
+ * An ordinal's colour depends on its own slot, the palette size the slot was served under and the
+ * colour chosen for it alone, so the map is extended in place for the table's changes and keeps its
+ * identity; a lookup texture reads identity to tell an extension from a recolour. A change of the
+ * chosen colours rebuilds the map. A change of palette recolours nothing by itself: each artifact
+ * keeps the colour of its slot until a slot of the new size is served for it.
  */
 export class ArtifactColours {
   private name: PaletteName;
   private chosen: ReadonlyMap<bigint, Rgba> = new Map();
   /** The table version the map was built at. */
   private builtAt = -1;
-  /** Whether {@link map} was built under the current palette and chosen colours. */
+  /** Whether {@link map} was built under the current chosen colours. */
   private valid = false;
   private map = new Map<number, Rgba>();
 
@@ -49,8 +50,7 @@ export class ArtifactColours {
   setPalette(name: PaletteName): void {
     if (name === this.name) return;
     this.name = name;
-    this.valid = false;
-    this.publish(this.build(), this.name, this.chosen);
+    this.publish(this.current(), this.name, this.chosen);
   }
 
   /** Colour the artifacts `chosen` names with its colours in place of the palette's, and no others. */
@@ -61,7 +61,7 @@ export class ArtifactColours {
   }
 
   private build(): Map<number, Rgba> {
-    const {table, name, chosen} = this;
+    const {table, chosen} = this;
     const changes = this.valid ? table.changesSince(this.builtAt) : null;
     this.builtAt = table.version;
     this.valid = true;
@@ -69,13 +69,12 @@ export class ArtifactColours {
       for (const {ordinal, kind} of changes) {
         const entry = table.entry(ordinal);
         if (kind === 'freed' || !entry) this.map.delete(ordinal);
-        else this.map.set(ordinal, slottedColour(entry, name, chosen));
+        else this.map.set(ordinal, slottedColour(entry, chosen));
       }
       return this.map;
     }
     this.map = artifactColours(
       table.liveEntries().map(({ordinal, entry}) => ({ordinal, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: entry.paletteSize})),
-      name,
       chosen
     );
     return this.map;

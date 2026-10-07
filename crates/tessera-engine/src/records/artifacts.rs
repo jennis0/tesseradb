@@ -247,8 +247,9 @@ struct Scope<'a> {
     /// artifact is its child.
     parent: Option<Option<(u32, u32)>>,
     shard: u32,
-    /// This viewer's slots over the layer, where `slot` is named under a palette size.
-    slots: Option<Arc<crate::slots::LayerSlots>>,
+    /// This viewer's slots over each level the page reads, where `slot` is named under a palette
+    /// size.
+    slots: Vec<Option<Arc<crate::slots::LevelSlots>>>,
 }
 
 impl Scope<'_> {
@@ -675,12 +676,25 @@ impl ArtifactsPager<'_> {
                     .collect(),
             })
             .collect();
-        let slots = match self.req.palette_size {
-            Some(palette) if self.properties.contains(&Property::Slot) => Some(
-                engine.cluster_slots(served, &open.mask, &layer, palette, &dependency_served)?,
-            ),
-            _ => None,
-        };
+        let mut slots: Vec<Option<Arc<crate::slots::LevelSlots>>> = Vec::new();
+        if let Some(palette) = self.req.palette_size {
+            if self.properties.contains(&Property::Slot) {
+                for (level, read) in levels.iter().enumerate() {
+                    slots.push(match read {
+                        Some(_) => engine.cluster_slots(
+                            served,
+                            &open.mask,
+                            &layer,
+                            level as u32,
+                            palette,
+                            geometry,
+                            &dependency_served,
+                        )?,
+                        None => None,
+                    });
+                }
+            }
+        }
         let mut scope = Scope {
             engine,
             open,
@@ -753,7 +767,11 @@ impl ArtifactsPager<'_> {
                 Property::Key => row.key = scope.key(level, ordinal),
                 Property::Level | Property::MaskedCount => {}
                 Property::Slot => {
-                    row.slot = scope.slots.as_ref().and_then(|s| s.get(level, ordinal));
+                    row.slot = scope
+                        .slots
+                        .get(level as usize)
+                        .and_then(Option::as_ref)
+                        .and_then(|s| s.get(ordinal));
                 }
                 Property::Parents => {
                     let mut ids: Vec<u64> = read

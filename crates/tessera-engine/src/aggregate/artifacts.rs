@@ -421,13 +421,20 @@ impl Layer {
         // Each listed artifact's slot, over this viewer's whole tree and not the cut or the set.
         let slots = match (self.palette, &registered) {
             (Some(palette), Some(layer)) => {
-                let slots =
-                    engine.cluster_slots(served_view, mask, layer, palette, &dependency_served)?;
+                let slots = engine.cluster_slots(
+                    served_view,
+                    mask,
+                    layer,
+                    self.level,
+                    palette,
+                    self.cut.is_some(),
+                    &dependency_served,
+                )?;
                 Some(
                     served
                         .listed
                         .iter()
-                        .map(|&o| slots.get(self.level, o))
+                        .map(|&o| slots.as_ref().and_then(|slots| slots.get(o)))
                         .collect(),
                 )
             }

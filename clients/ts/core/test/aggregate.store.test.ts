@@ -148,10 +148,29 @@ describe('the aggregates projection', () => {
     expect(pending.at(-1)!.req.filters).toEqual({year: {range: {gte: 2020}}});
   });
 
+  it('sends the store’s palette size for a drawn one, and at a palette change asks again keeping the answer and its palette until the new lands', async () => {
+    const {store, pending} = await storeWith();
+    store.setAggregate('card', {groupings: [{by: {layer: 'clusters', top: 5, paletteSize: 'drawn'}}]});
+    await flush();
+    expect(pending[0]!.req.groupings).toEqual([{by: {layer: 'clusters', top: 5, paletteSize: 10}}]);
+    pending[0]!.release(7);
+    await flush();
+    expect(store.get('aggregates').get('card')).toMatchObject({status: 'shown', palette: 'tableau10'});
+    store.setPalette('kelly');
+    await flush();
+    expect(pending.at(-1)!.req.groupings).toEqual([{by: {layer: 'clusters', top: 5, paletteSize: 22}}]);
+    // The answer for ten colours stays, saying so, while the one for twenty-two is asked for.
+    expect(store.get('aggregates').get('card')).toMatchObject({status: 'loading', palette: 'tableau10'});
+    expect(store.get('aggregates').get('card')!.result).not.toBeNull();
+    pending.at(-1)!.release(7);
+    await flush();
+    expect(store.get('aggregates').get('card')).toMatchObject({status: 'shown', palette: 'kelly'});
+  });
+
   it('sends no filters where none is set, and publishes loading, then the answer with its view', async () => {
     const {store, pending} = await storeWith();
     store.setAggregate('a', {groupings: [{}]});
-    expect(store.get('aggregates').get('a')).toEqual({status: 'loading', result: null, view: null, refusal: null, summaries: []});
+    expect(store.get('aggregates').get('a')).toEqual({status: 'loading', result: null, view: null, palette: null, refusal: null, summaries: []});
     await flush();
     expect(pending[0]!.req).toEqual({view: 's0', groupings: [{}]});
     pending[0]!.release(7);
@@ -192,7 +211,7 @@ describe('the aggregates projection', () => {
     pending[0]!.release(7);
     await flush();
     store.setCurrentView('s1');
-    expect(store.get('aggregates').get('a')).toEqual({status: 'loading', result: null, view: null, refusal: null, summaries: []});
+    expect(store.get('aggregates').get('a')).toEqual({status: 'loading', result: null, view: null, palette: null, refusal: null, summaries: []});
     await flush();
     expect(pending[1]!.req.view).toBe('s1');
   });
@@ -219,7 +238,7 @@ describe('the aggregates projection', () => {
     pending[1]!.release(9, 'second');
     await flush();
     await flush();
-    expect(store.get('aggregates').get('a')).toEqual({status: 'loading', result: null, view: null, refusal: null, summaries: []});
+    expect(store.get('aggregates').get('a')).toEqual({status: 'loading', result: null, view: null, palette: null, refusal: null, summaries: []});
     expect(pending).toHaveLength(3);
     pending[2]!.release(9, 'second');
     await flush();

@@ -7,7 +7,6 @@ import {
   colourLayers,
   composeFilters,
   isPopulated,
-  paletteSize,
   withMember,
   withoutMember,
   type AggregateEntry,
@@ -20,6 +19,7 @@ import {
   type FilterDraft,
   type Layer,
   type Meta,
+  type PaletteName,
   type Store
 } from '@tesseradb/client';
 import {CATEGORY_PALETTES, RAMPS, type Colouring} from '@tesseradb/deck';
@@ -846,26 +846,25 @@ export class TesseraFieldCard extends TesseraElement {
     }
     const layer = this.declaredLayer(meta);
     if (!layer) return null;
-    const size = paletteSize(store.get('artifacts').palette);
-    return [this.ranked(layer, top, size), ...this.namedGroupings(layer, meta, named.map((id) => BigInt(id)), size)];
+    return [this.ranked(layer, top), ...this.namedGroupings(layer, meta, named.map((id) => BigInt(id)))];
   }
 
   /**
    * The grouping ranking a layer's `top` clusters: at the cut the map draws on a `nested` or `dag`
-   * layer, else at the card's level. Each row carries its slot in a palette of `size` colours,
-   * which its swatch is coloured from.
+   * layer, else at the card's level. Each row carries its slot in the palette the map colours
+   * clusters from, which its swatch is coloured from.
    */
-  private ranked(layer: Layer, top: number, size: number): AggregateSpec['groupings'][number] {
-    if (layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag') return {by: {layer: layer.name, top, cut: 'drawn', paletteSize: size}};
+  private ranked(layer: Layer, top: number): AggregateSpec['groupings'][number] {
+    if (layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag') return {by: {layer: layer.name, top, cut: 'drawn', paletteSize: 'drawn'}};
     const level = this.levelOf(layer);
-    return {by: {layer: layer.name, ...(level === undefined || !countedByLevel(layer) ? {} : {level}), top, paletteSize: size}};
+    return {by: {layer: layer.name, ...(level === undefined || !countedByLevel(layer) ? {} : {level}), top, paletteSize: 'drawn'}};
   }
 
   /** The groupings counting `ids` of `layer` by name, leaving room for one more beside them. */
-  private namedGroupings(layer: Layer, meta: Meta, ids: bigint[], size: number): AggregateSpec['groupings'] {
+  private namedGroupings(layer: Layer, meta: Meta, ids: bigint[]): AggregateSpec['groupings'] {
     const level = this.levelOf(layer) ?? 0;
     const rows = [...new Set(ids)].map((id) => ({tesseraId: id, rung: this.met.get(id)?.rung ?? level}));
-    return rows.length === 0 ? [] : artifactGroupings(layer, rows, meta.selection, size).slice(0, meta.selection.maxAggregateGroupings - 1);
+    return rows.length === 0 ? [] : artifactGroupings(layer, rows, meta.selection, 'drawn').slice(0, meta.selection.maxAggregateGroupings - 1);
   }
 
   /**
@@ -909,7 +908,7 @@ export class TesseraFieldCard extends TesseraElement {
       kind === 'category'
         ? this.rowGroupings(store, meta, kind, Math.min(MATCH_TOP, meta.selection.maxAggregateTop))
         : layer
-          ? [...this.namedGroupings(layer, meta, listed.map((id) => BigInt(id)), paletteSize(store.get('artifacts').palette)), this.ranked(layer, 1, paletteSize(store.get('artifacts').palette))]
+          ? [...this.namedGroupings(layer, meta, listed.map((id) => BigInt(id))), this.ranked(layer, 1)]
           : null;
     return {
       subject: subject ? {groupings: subject, subject: 'view', highlighted: true, ...leaveOut} : null,
@@ -1116,21 +1115,25 @@ export class TesseraFieldCard extends TesseraElement {
         swatch: colouring ? this.valueColour(key, legend.categories[this.field] ?? [], legend.ranks[this.field] ?? {}, colours) : null
       }));
     }
+    const {palette, overrides} = s.get('artifacts');
     const titles = new Map<string, string>();
-    const slots = new Map<string, number>();
-    for (const t of [...(subject?.result?.tables ?? []), ...(match?.result?.tables ?? [])]) {
-      for (const g of listedGroups(t)) {
-        if (g.title) titles.set(g.key, g.title);
-        if (g.slot !== null) slots.set(g.key, g.slot);
+    // Each slot with the palette its answer was asked for, which holds while the next is asked for.
+    const slots = new Map<string, {slot: number; palette: PaletteName}>();
+    for (const entry of [subject, match]) {
+      for (const t of entry?.result?.tables ?? []) {
+        for (const g of listedGroups(t)) {
+          if (g.title) titles.set(g.key, g.title);
+          if (g.slot !== null) slots.set(g.key, {slot: g.slot, palette: entry!.palette ?? palette});
+        }
       }
     }
     const ids = [...new Set([...named, ...(sub ? [...sub.keys()] : [])])];
     const keys = ids.filter((k) => named.includes(k) || (sub?.get(k) ?? 0) > 0);
     keys.sort((a, b) => Number(named.includes(b)) - Number(named.includes(a)) || (sub?.get(b) ?? 0) - (sub?.get(a) ?? 0) || (all?.get(b) ?? 0) - (all?.get(a) ?? 0));
-    const {palette, overrides} = s.get('artifacts');
     return keys.map((key) => {
       const id = BigInt(key);
-      const swatch = colouring ? rgb(artifactColour(palette, slots.get(key) ?? null, overrides.get(id))) : null;
+      const held = slots.get(key);
+      const swatch = colouring ? rgb(artifactColour(held?.palette ?? palette, held?.slot ?? null, overrides.get(id))) : null;
       return {key, name: titles.get(key) ?? this.clauseName(s, id) ?? UNNAMED, path: this.pathOf(id), sub: sub?.get(key) ?? null, all: all?.get(key) ?? null, swatch};
     });
   }

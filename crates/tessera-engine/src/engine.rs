@@ -819,6 +819,7 @@ fn first_generation(
             edited: Arc::new(edited),
             edited_live: Arc::new(state.edited_live.clone()),
             edit_epoch: 0,
+            deny_epoch: 0,
             fold_epoch: 0,
             delta_postings: readers.delta_postings.clone(),
             overlay_version: 0,
