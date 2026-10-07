@@ -191,7 +191,8 @@ function fromComposition(c: Composition, standIn: Assembled['standIn']): Assembl
     want: c.want,
     version: c.version,
     standInStale: c.standInStale,
-    bands: c.exact,
+    // A tile that serves no point is counted in `tiles` and has no slot to draw.
+    bands: c.exact.filter((band) => band.ids.length > 0),
     standIn,
     tiles: c.tiles,
     exactDrawn: c.exactDrawn,

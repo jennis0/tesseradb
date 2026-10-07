@@ -102,11 +102,10 @@ export type Composition = {
   standInStale: boolean;
 };
 
+/** The tiles exact bands answer, a band of no points among them: nothing is drawn over them. */
 function exactTileSet(exact: readonly Band[], dim: number): Set<number> {
   const tiles = new Set<number>();
-  for (const band of exact) {
-    if (band.ids.length > 0) tiles.add(band.x * dim + band.y);
-  }
+  for (const band of exact) tiles.add(band.x * dim + band.y);
   return tiles;
 }
 
@@ -135,7 +134,6 @@ export function compose(frame: ReplicaFrame): Composition {
   // is drawn as a stand-in over its own tile.
   const truncated: Band[] = [];
   for (const band of frame.exact) {
-    if (band.ids.length === 0) continue;
     if (band.ids.length < band.served) {
       truncated.push(band);
       continue;
@@ -257,7 +255,6 @@ export function fold(held: Composition, exact: Band[], version: number, counted?
   const dim = 2 ** held.depth;
   const span = WORLD_SIZE / dim;
   for (const band of exact) {
-    if (band.ids.length === 0) continue;
     if (band.ids.length < band.served) {
       // Drawn as a stand-in, as in {@link compose}.
       truncated.push(band);

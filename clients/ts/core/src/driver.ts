@@ -3,6 +3,7 @@ import {tileXY} from './coords.js';
 import {plan, worldBbox, type Plan, type PlannerInputs, type Viewport} from './prefetch.js';
 import {rectContains, rectContainsTile, rectIntersection, type TileRect} from './rects.js';
 import type {Replica, ReplicaFrame} from './replica.js';
+import type {Band} from './bands.js';
 import {TesseraError} from './client.js';
 
 /**
@@ -130,6 +131,16 @@ export function retryDelayMs(error: unknown, attempt: number, o: RetryOptions): 
   return Math.min(Math.max(base * 2 ** attempt, asked * 1000), o.retryBackoffMaxMs);
 }
 
+/**
+ * The count field's cells from tiles' counts. A tile nothing matches in is left out, as a response
+ * leaves it out, so it does not read as occupied ground.
+ */
+function countCells(tiles: Iterable<{x: number; y: number; matched: bigint}>): CountCell[] {
+  const cells: CountCell[] = [];
+  for (const t of tiles) if (t.matched > 0n) cells.push({x: t.x, y: t.y, count: Number(t.matched)});
+  return cells;
+}
+
 /** @internal */
 export class Driver {
   private readonly o: Required<DriverOptions>;
@@ -159,6 +170,8 @@ export class Driver {
 
   // Foreground lifecycle.
   private inFlight: AbortController | null = null;
+  /** The last status reported, so a camera answered from held tiles reports only a change. */
+  private lastStatus: 'loading' | 'shown' | 'empty' | 'refused' | 'retrying' | null = null;
   private inFlightAt: {rect: TileRect; depth: number; since: number} | null = null;
   private queued: ViewState | null = null;
   private generation = 0;
@@ -336,11 +349,13 @@ export class Driver {
       });
     }
 
-    if (this.covers(view)) {
+    const planned = this.planFor(view);
+    if (this.covers(planned)) {
       // The plan agreed with the presented depth, so the suspension has done its job.
       this.holdSuspended = false;
       this.trace('covered', {depth: this.heldBbox?.depth ?? -1});
       this.movedAt = 0;
+      this.reportHeld(planned);
       // A warm client lives on this path, so the staleness bound must be reachable here.
       this.revalidateIfDue(view);
       return;
@@ -428,6 +443,7 @@ export class Driver {
       version: frame.version,
       standInStale: false
     };
+    this.replica.drawn(planned.render, planned.choice.depth);
     // The hold re-arms around the adopted depth, and a settle readies the bank for the next motion.
     this.holdSuspended = false;
     if (trigger === 'settle') this.bankReady = true;
@@ -456,13 +472,35 @@ export class Driver {
     void this.request(view);
   }
 
-  private storeCanAnswer(view: ViewState): boolean {
-    return this.covers(view);
+  /** Whether `bands` serve anything inside `rect`: what a view's status reports. */
+  private heldIn(bands: Iterable<Band>, rect: TileRect): 'shown' | 'empty' {
+    for (const band of bands) if (band.served > 0 && rectContainsTile(rect, band.x, band.y)) return 'shown';
+    return 'empty';
   }
 
-  private covers(view: ViewState): boolean {
+  private report(status: 'loading' | 'shown' | 'empty' | 'refused' | 'retrying', detail?: unknown): void {
+    this.lastStatus = status;
+    this.events.onStatus?.(status, detail);
+  }
+
+  /**
+   * Reports what the held tiles say of a camera they cover, where no request is out to answer it and
+   * the status differs. A retry pending for an earlier camera is dropped: this one is answered.
+   */
+  private reportHeld(planned: Plan): void {
+    if (this.inFlight || !this.covers(planned)) return;
+    const status = this.heldIn(this.replica.exactIn(planned.visible.rect, planned.choice.depth), planned.visible.rect);
+    if (this.retryHandle) this.clock.cancel(this.retryHandle);
+    this.retryHandle = null;
+    if (status !== this.lastStatus) this.report(status);
+  }
+
+  private storeCanAnswer(view: ViewState): boolean {
+    return this.covers(this.planFor(view));
+  }
+
+  private covers(planned: Plan): boolean {
     if (!this.heldBbox || !this.presented) return false;
-    const planned = this.planFor(view);
     if (planned.choice.depth !== this.heldBbox.depth) return false;
     // Novelty over the visible box, containment over the render rect: the margin is fetched
     // opportunistically, and its absence does not fail a pan that stays inside the drawn area.
@@ -542,6 +580,7 @@ export class Driver {
     this.queued = null;
     this.heldBbox = null;
     this.presented = null;
+    this.lastStatus = null;
     this.movedAt = 0;
     this.velocity = undefined;
     this.lastTarget = null;
@@ -622,13 +661,9 @@ export class Driver {
       this.seeded = true;
       return false;
     }
-    const cells: CountCell[] = [];
+    const cells = countCells(tiles.map((t) => ({...tileXY(t.tile, depth), matched: t.matched})));
     let visible = 0;
-    for (const t of tiles) {
-      const {x, y} = tileXY(t.tile, depth);
-      cells.push({x, y, count: Number(t.matched)});
-      visible += Number(t.visible);
-    }
+    for (const t of tiles) visible += Number(t.visible);
     // Complete for the rectangle asked over: a response omits only cells whose masked count is zero.
     this.counts.set(depth, {depth, cells, covers: planned.visible.rect});
     this.lastVisibleInView = visible;
@@ -654,7 +689,7 @@ export class Driver {
     this.inFlightAt = {rect: planned.render, depth: choice.depth, since: this.clock.now()};
     const generation = ++this.generation;
     const movedAt = this.movedAt || this.clock.now();
-    this.events.onStatus?.('loading');
+    this.report('loading');
 
     try {
       // The cold view fetches counts before marks (see {@link seedCounts}), inside the foreground
@@ -696,7 +731,7 @@ export class Driver {
       // Visible and served figures are summed over the visible box the prediction was for, not the
       // wider render rect; summing over the render rect inflates `actual` and stalls calibration.
       // Cells are read over the whole render rect, since the next plan may ask about any of it.
-      const cells: CountCell[] = [];
+      const cells = countCells(frame.exact);
       let visible = 0;
       let actual = 0;
       let thinnedServed = 0;
@@ -704,7 +739,6 @@ export class Driver {
       const floor = Math.min(this.meta.kMin ?? 0, this.meta.kMaxMarks);
       for (const b of frame.exact) {
         const matched = Number(b.matched);
-        cells.push({x: b.x, y: b.y, count: matched});
         if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
         visible += Number(b.visible);
         actual += b.served;
@@ -739,7 +773,7 @@ export class Driver {
         this.mTarget,
         this.meta.thetaTargetMarks
       );
-      this.events.onStatus?.(actual === 0 && visible === 0 ? 'empty' : 'shown');
+      this.report(this.heldIn(frame.exact, planned.visible.rect));
       this.movedAt = 0;
       if (this.queued) {
         this.inFlight = null;
@@ -765,7 +799,7 @@ export class Driver {
           // The margin is ground now held at the same depth, so it widens the count field.
           this.adopt(
             choice.depth,
-            margin.exact.map((b) => ({x: b.x, y: b.y, count: Number(b.matched)})),
+            countCells(margin.exact),
             planned.foreground.rect,
             planned.render
           );
@@ -775,6 +809,8 @@ export class Driver {
       }
       if (generation !== this.generation) return;
       this.inFlight = null;
+      // A camera that moved within the held tiles while the margin was out was not reported.
+      if (this.lastView) this.reportHeld(this.planFor(this.lastView));
       this.dispatchQueued();
     } catch (error) {
       if (controller.signal.aborted || generation !== this.generation) return;
@@ -783,7 +819,7 @@ export class Driver {
 
       const backoff = retryDelayMs(error, attempt, this.o);
       if (backoff !== null) {
-        this.events.onStatus?.('retrying');
+        this.report('retrying');
         this.retryHandle = this.clock.after(backoff, () => {
           this.retryHandle = null;
           // Anything newer supersedes the retry.
@@ -794,7 +830,7 @@ export class Driver {
       this.movedAt = 0;
       this.heldBbox = null;
       this.presented = null;
-      this.events.onStatus?.('refused', error);
+      this.report('refused', error);
     }
   }
 }

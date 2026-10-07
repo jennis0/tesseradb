@@ -1616,6 +1616,8 @@ export function createStore(options: StoreOptions): Store {
     const a = projections.artifacts;
     const layers = pointLayers();
     const machinery = views.current;
+    // During a switch, until the marks are cleared, the marks on screen are the outgoing view's.
+    if (projections.view.id !== views.id) return;
     if (!machinery || a.status !== 'shown' || layers.length === 0) {
       if (a.coverage.stale !== 0 || a.coverage.current !== 0) replaceProjection('artifacts', {...a, coverage: {current: 0, stale: 0}});
       return;
@@ -1631,6 +1633,8 @@ export function createStore(options: StoreOptions): Store {
     const tags = new Set<number>();
     for (const band of bands) {
       if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
+      // A tile that serves no point has nothing to colour.
+      if (band.ids.length === 0) continue;
       for (const layer of layers) for (const ordinal of band.membership[layer]?.distinct ?? []) tags.add(ordinal);
       if (layers.every((layer) => resolves(band, layer, a.colours))) current++;
       else staleBands.push(band);
@@ -1751,22 +1755,24 @@ export function createStore(options: StoreOptions): Store {
     const incoming = views.enter(id);
     // A `setView` from a subscriber clears this, and its request then answers for the status.
     awaitingSwitchFrame = true;
-    // The shared settings reach a view as it becomes current. Set on a held view, they would make it ask.
-    incoming.channel.setLayers(layersAsked());
+    // The camera is in the outgoing frame's data coordinates. Dropped before anything below publishes,
+    // so a subscriber that refits the camera on a publish keeps its refit.
+    if (!kept) lastView = null;
+    // The shared settings reach a view as it becomes current, before a refit can ask. Set on a held
+    // view, they would make it ask.
     incoming.presenter.setBudget(budget);
+    incoming.channel.setLayers(layersAsked());
     // The content key, the bands asked for again and the shapes were the outgoing view's.
     contentKeyAtFrame = '';
     corpusKey = '';
     colourAsked.clear();
     shapes.forget('all');
 
-    if (!kept) {
-      // The camera and the selection are in the outgoing frame's data coordinates.
-      lastView = null;
-      region.drop();
-    }
+    // The selection is in the outgoing frame's data coordinates too.
+    if (!kept) region.drop();
 
-    // No marks until the incoming view presents, and the incoming channel's artifacts.
+    // No marks until the incoming view presents, and the incoming channel's artifacts. A subscriber
+    // that refits the camera here reaches the incoming view with its settings in place.
     replaceProjection('view', noFrame(id));
     replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
     replaceProjection('tiles', {tiles: []});

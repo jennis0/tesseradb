@@ -212,6 +212,7 @@ export class Replica {
 
   /** Drops everything held, for a change of principal, filter or selection. */
   reset(): void {
+    this.onScreen = null;
     this.cache.dropIdentity();
     this.identityKey = '';
     this.contentKey = '';
@@ -293,8 +294,18 @@ export class Replica {
   async counts(want: TileRect, depth: number, signal?: AbortSignal): Promise<TileCounts[]> {
     const bbox = rectToRequestBbox(want, depth, this.quantisation);
     const response = await this.fetchViewport({view: this.opts.view, zoom: depth, bbox, k: 0}, signal);
+    // An abandoned request's answer is for a question no longer asked.
+    signal?.throwIfAborted();
     this.observe(response);
     return response.result.tiles;
+  }
+
+  /** The region drawn, at its depth, which eviction keeps whatever fetch overflows the budget. */
+  private onScreen: {depth: number; rect: TileRect} | null = null;
+
+  /** Names the region drawn; see {@link onScreen}. */
+  drawn(rect: TileRect, depth: number): void {
+    this.onScreen = {depth, rect};
   }
 
   /** The byte budget the store was given, so a caller can size its look-ahead against it. */
@@ -395,7 +406,7 @@ export class Replica {
     // piece's keys and byte count, without points.
     const request = (rect: TileRect) => {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
-      const piece = {landed: [] as Band[], parts: 0, startedAt: 0, fetching: null as unknown as Promise<ViewportResponse>};
+      const piece = {landed: [] as Band[], parts: 0, counted: false, startedAt: 0, fetching: null as unknown as Promise<ViewportResponse>};
       // One touch time for the whole piece, so eviction sees its bands as one arrival.
       const startedAt = this.now();
       piece.startedAt = startedAt;
@@ -404,13 +415,16 @@ export class Replica {
         signal,
         background,
         async (part) => {
+          signal?.throwIfAborted();
           piece.parts += 1;
-          for (const band of await this.absorb(part, depth, k, startedAt)) piece.landed.push(band);
+          for (const band of await this.absorb(part, depth, k, startedAt, signal)) piece.landed.push(band);
         },
         (counts) => {
+          piece.counted = true;
+          signal?.throwIfAborted();
           this.observe(counts);
           if (this.opts.cache === false) return;
-          this.cache.putCounts(depth, counts.tiles, counts.identityKey, counts.contentKey);
+          this.cache.putCounts(depth, counts.tiles, counts.identityKey, counts.contentKey, k, startedAt);
           this.opts.onCounts?.();
         }
       );
@@ -425,20 +439,31 @@ export class Replica {
     for (let i = 0; i < pieces.length; i++) {
       const piece = pending!;
       response = await piece.fetching;
+      // An abandoned request's answer is for a question no longer asked.
+      signal?.throwIfAborted();
       issued += 1;
       responseBytes += response.bytes;
       pending = i + 1 < pieces.length ? request(pieces[i + 1]!) : null;
+      // A transport that ignored `onCounts` handed over no counts as they landed.
+      if (!piece.counted && this.opts.cache !== false) {
+        this.observe(response);
+        this.cache.putCounts(depth, response.result.tiles, response.identityKey, response.contentKey, k, piece.startedAt);
+      }
       // A streamed piece has stored its points already and its response carries none, so only its
       // keys are observed. A transport that answered whole is absorbed here.
       if (piece.parts === 0) {
-        for (const band of await this.absorb(response, depth, k, piece.startedAt)) piece.landed.push(band);
+        for (const band of await this.absorb(response, depth, k, piece.startedAt, signal)) piece.landed.push(band);
       } else {
         this.observe(response);
       }
+      signal?.throwIfAborted();
       fetched = fetched.concat(piece.landed);
       // Once per response, since eviction sorts every held band.
-      if (this.opts.cache !== false && piece.landed.length > 0) {
-        this.cache.evict({depth, prefix: piece.landed[0]!.prefix, protect: {depth, rect: render}});
+      // Bands of no points come from the tiles, so a response that served nothing evicts too.
+      const focus = piece.landed[0]?.prefix ?? response.result.tiles[0]?.tile;
+      if (this.opts.cache !== false && focus !== undefined) {
+        // An anticipatory fetch's region is not the one on screen, so both are kept.
+        this.cache.evict({depth, prefix: focus, protect: this.onScreen ? [{depth, rect: render}, this.onScreen] : [{depth, rect: render}]});
       }
       // Marked only after the bands are in, or the next plan would skip ground whose data never
       // arrived. An aborted piece does not reach here, so its ground stays novel.
@@ -455,6 +480,7 @@ export class Replica {
         {view: this.opts.view, zoom: depth, bbox, k: 0},
         signal
       );
+      signal?.throwIfAborted();
       this.observe(response);
       // Reported so that minutes of settled panning with no revalidation show up in a trace.
       this.opts.onPhase?.('revalidate', performance.now() - revalidatedAt, 1);
@@ -519,7 +545,9 @@ export class Replica {
     depth: number,
     k: number,
     /** The touch time every band of one piece shares: the piece's start. */
-    at: number = this.now()
+    at: number = this.now(),
+    /** The request's signal: a slice is not stored once it aborts. */
+    signal?: AbortSignal
   ): Promise<Band[]> {
     this.observe(arrival);
     const contentKey = this.contentKey;
@@ -541,6 +569,7 @@ export class Replica {
     let longestSliceMs = 0;
     while (!splitter.done()) {
       const started = performance.now();
+      signal?.throwIfAborted();
       const slice = splitter.step(started + ABSORB_SLICE_MS);
       const took = performance.now() - started;
       splitMs += took;

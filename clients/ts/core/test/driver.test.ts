@@ -138,6 +138,73 @@ describe('driver', () => {
     expect(h.calls.length).toBe(before);
   });
 
+  it('counts no tile nothing matches in as occupied ground', async () => {
+    const h = harness({
+      respond: () =>
+        response(result({tiles: [tile(0n, 50n), tile(1n, 50n, {matched: 0n, highlighted: 0n}), tile(2n, 50n, {matched: 0n, highlighted: 0n})]}), {contentKey: 'p1'})
+    });
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(1000);
+    const seed = h.traces.find((t) => t.kind === 'seed');
+    expect(seed?.fields.n).toBe(1);
+  });
+
+  it('a count-only answer that lands after cancel() is not adopted: the next view counts afresh', async () => {
+    const h = harness({hang: (_n, k) => k === 0, respond: () => servedResponse(100_000n, 8)});
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(10);
+    expect(h.calls.filter((c) => c.k === 0)).toHaveLength(1);
+    h.driver.cancel();
+    for (const release of h.hung.splice(0)) release();
+    await h.clock.advance(10);
+
+    h.driver.schedule(h.view, 400, 300);
+    await h.clock.advance(1000);
+    expect(h.calls.filter((c) => c.k === 0)).toHaveLength(2);
+  });
+
+  it('a camera the held tiles answer after a shed request reports their status and drops the retry', async () => {
+    const statuses: string[] = [];
+    const clock = fakeClock();
+    let calls = 0;
+    let shed = false;
+    const replica = new Replica(
+      async () => {
+        calls++;
+        if (shed) throw new TesseraError(429, 'shed', 'saturated');
+        return emptyResponse();
+      },
+      Q,
+      {view: 's', now: () => clock.now(), revalidateAfterMs: Infinity}
+    );
+    replica.reset();
+    const driver = new Driver(
+      replica,
+      {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10},
+      clock,
+      {onFrame: () => {}, onStatus: (s) => statuses.push(s)},
+      {},
+      false
+    );
+    const here = {target: [0.5, 0.5, 0] as [number, number, number], zoom: 3};
+    driver.schedule(here, 400, 300);
+    await clock.advance(1000);
+    expect(statuses.at(-1)).toBe('empty');
+
+    // A step out reaches ground not held, and its request is shed.
+    shed = true;
+    driver.schedule({...here, zoom: 1}, 400, 300);
+    await clock.advance(300);
+    expect(statuses.at(-1)).toBe('retrying');
+
+    // Back to ground the held tiles answer.
+    const before = calls;
+    driver.schedule(here, 400, 300);
+    await clock.advance(30_000);
+    expect(statuses.at(-1)).toBe('empty');
+    expect(calls).toBe(before);
+  });
+
   it('retries a 503 not-ready on a short backoff and recovers: a starting server is not a refusal', async () => {
     // A 503 from a server still starting is retried like a 429.
     const statuses: string[] = [];

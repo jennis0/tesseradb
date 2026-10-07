@@ -174,6 +174,14 @@ describe('contourShapes — what may be hovered', () => {
     expect(new Set(ids(stops, {level: 1}))).toEqual(new Set(['2', '4']));
   });
 
+  it('under a filter, leaves out an artifact with no matching member in view — none of its points are drawn', () => {
+    const p = projection([{...artifact(1n, null), matched: false}, {...artifact(2n, null), matched: true}]);
+    expect(ids(p)).toEqual(['2']);
+    expect(ids(projection([{...artifact(1n, null), matched: false}]))).toEqual([]);
+    // The opened artifact may still be pointed at.
+    expect(contourShapes(p, {level: undefined, opened: 1n}).map((s) => String(s.id))).toEqual(['1', '2']);
+  });
+
   it('leaves a dependent layer’s artifacts out — they have no shape, and their box is not one', () => {
     // A clustering's topic labels carry no shape, so `outlineOf` would fall back to their box and
     // put a rectangle over the map with nothing drawn on it, hoverable and pointing at a thing
@@ -242,6 +250,11 @@ describe('focusOutlines — what draws', () => {
     expect(focusOutlines(p, options({}))).toEqual([]);
     expect(focusOutlines(p, options({hovered: 2n})).map((d) => String(d.id))).toEqual(['2']);
     expect(focusOutlines(p, options({opened: 1n, hovered: 3n})).map((d) => String(d.id))).toEqual(['1', '3']);
+  });
+
+  it('under a filter, the opened artifact keeps its outline though nothing in it matches, and a hovered one does not', () => {
+    const p = projection([{...artifact(1n, null), matched: false}, {...artifact(2n, null), matched: false}]);
+    expect(focusOutlines(p, options({opened: 1n, hovered: 2n})).map((d) => String(d.id))).toEqual(['1']);
   });
 
   it('the opened artifact is strong, the hovered one fainter, and opened wins where they are one', () => {

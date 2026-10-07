@@ -44,6 +44,40 @@ export type CountedTile = {
 /** A counted tile as the cache holds it: where it is, and the content key it was counted under. */
 type HeldCount = CountedTile & {depth: number; x: number; y: number; contentKey: string};
 
+/**
+ * What a band of no points costs the budget: about what one such band was measured to take on the
+ * heap. It holds no array, so without it any number of them would cost nothing.
+ */
+const EMPTY_BAND_BYTES = 800;
+
+/** The band of a tile that was asked for points and has none to serve: its counts, and nothing to draw. */
+function emptyBand(tile: TileCounts, depth: number, x: number, y: number, identityKey: string, contentKey: string, capUsed: number, now: number): Band {
+  return {
+    depth,
+    prefix: tile.tile,
+    x,
+    y,
+    ids: new BigUint64Array(0),
+    positions: new Float32Array(0),
+    scalars: {},
+    membership: {},
+    highlightBits: null,
+    served: 0,
+    capUsed,
+    visible: tile.visible,
+    matched: tile.matched,
+    highlighted: tile.highlighted,
+    heldBelow: 0n,
+    identityKey,
+    contentKey,
+    bytes: EMPTY_BAND_BYTES,
+    touchedAt: now,
+    columnsAsked: null,
+    // No point to tag, so no layer is missing a column.
+    layersAsked: 'all'
+  };
+}
+
 /** `${depth}:${prefix}`, the map key. @internal */
 export type BandKey = string;
 
@@ -54,7 +88,8 @@ export function bandKey(depth: number, prefix: bigint): BandKey {
 
 /**
  * One tile's held points, ascending by `tessera_id` as the server sent them. A {@link Composition}
- * and the store's `marks` projection hold bands by reference. Every array is the band's own copy.
+ * and the store's `marks` projection hold bands by reference. Every array is the band's own copy. A
+ * tile in which nothing matches is a band of none, which carries the tile's counts and draws nothing.
  *
  * @category Projections
  */
@@ -420,11 +455,11 @@ export type EvictionFocus = {
   depth: number;
   prefix: bigint;
   /**
-   * The bands on screen at this depth, which eviction does not truncate. A streamed response lands
-   * in parts, so its first rows are the least recently touched; without this they would be halved
-   * while the rest of the same view kept every point.
+   * The bands on screen, each region at its depth, which eviction does not truncate. A streamed
+   * response lands in parts, so its first rows are the least recently touched; without this they
+   * would be halved while the rest of the same view kept every point.
    */
-  protect?: {depth: number; rect: TileRect};
+  protect?: readonly {depth: number; rect: TileRect}[];
 };
 
 /**
@@ -481,21 +516,24 @@ export class BandBudget {
       .sort((a, b) => evictionOrder(a.band, b.band, focus));
     const order = held.concat(evicting);
 
-    const protect = focus.protect;
+    const protect = focus.protect ?? [];
     for (const {cache, band} of order) {
       if (this.bytes <= target) return;
       // Another view's band at the same tile coordinates is not on screen.
-      if (cache === from && protect && band.depth === protect.depth && rectContainsTile(protect.rect, band.x, band.y)) continue;
+      if (cache === from && protect.some((p) => band.depth === p.depth && rectContainsTile(p.rect, band.x, band.y))) continue;
       cache.shed(band);
     }
   }
 }
 
 /**
- * Deepest first, then least recently touched, then farthest from the focus. Coarse points are
- * the head of every band and live in the shallow bands, so this order keeps the overview drawn.
+ * Bands of no points first, then deepest first, then least recently touched, then farthest from the
+ * focus. A band of no points holds only counts, the cheapest thing to lose. Coarse points are the head of every band
+ * and live in the shallow bands, so this order keeps the overview drawn.
  */
 function evictionOrder(a: Band, b: Band, focus: EvictionFocus): number {
+  const empty = Number(b.ids.length === 0) - Number(a.ids.length === 0);
+  if (empty !== 0) return empty;
   if (a.depth !== b.depth) return b.depth - a.depth;
   if (a.touchedAt !== b.touchedAt) return a.touchedAt - b.touchedAt;
   return Number(distance(b, focus) - distance(a, focus));
@@ -619,20 +657,27 @@ export class BandCache {
 
   /**
    * Holds the counts of a response's tiles at `depth` that will carry points, until each tile's
-   * band arrives. A tile that serves no point gets no band, so it is not held. Counts under an
-   * older content key are dropped, and a change of principal drops everything, as {@link put} does.
+   * band arrives. A tile asked for points (`capUsed` above zero) in which nothing matches is
+   * answered already, and is held at once as a band of no points, so a frame counts it and draws
+   * nothing there. Counts under an older content key are dropped, and a change of principal drops
+   * everything, as {@link put} does.
    */
-  putCounts(depth: number, tiles: readonly TileCounts[], identityKey: string, contentKey: string): void {
+  putCounts(depth: number, tiles: readonly TileCounts[], identityKey: string, contentKey: string, capUsed: number, now: number): void {
     if (this.identityKey !== identityKey) {
       this.dropIdentity();
       this.identityKey = identityKey;
     }
     for (const [key, held] of this.counted) if (held.contentKey !== contentKey) this.counted.delete(key);
     for (const tile of tiles) {
-      if (tile.served === 0n) continue;
       const key = bandKey(depth, tile.tile);
       if (this.bands.get(key)?.contentKey === contentKey) continue;
       const {x, y} = tileXY(tile.tile, depth);
+      if (tile.served === 0n) {
+        // A tile with matches and no point served is thinned, not empty: no band, so another depth's
+        // points may stand in over it.
+        if (capUsed > 0 && tile.matched === 0n) this.put(emptyBand(tile, depth, x, y, identityKey, contentKey, capUsed, now));
+        continue;
+      }
       this.counted.set(key, {
         prefix: tile.tile,
         depth,
@@ -901,8 +946,21 @@ export class BandCache {
     return [...this.bands.values()];
   }
 
-  /** Halves one band, keeping its head. False where the band is one point. */
+  /**
+   * Halves one band, keeping its head, or drops a band of no points. The dropped band's coverage
+   * stays, since withdrawing it would withdraw a whole rectangle of held points, so its tile goes
+   * uncounted until its ground is asked for again. False where the band is one point.
+   */
   shed(band: Band): boolean {
+    if (band.ids.length === 0) {
+      const key = bandKey(band.depth, band.prefix);
+      if (this.bands.get(key) !== band) return false;
+      this.bands.delete(key);
+      this.byDepth.get(band.depth)?.delete(key);
+      this.held -= band.bytes;
+      this.changes++;
+      return true;
+    }
     const keep = Math.max(1, Math.floor(band.ids.length / 2));
     if (keep >= band.ids.length) return false;
     this.truncate(band, keep);

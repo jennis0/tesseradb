@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {BandBudget, BandCache, bandSplitter, bandsOfResult, type Band} from '../src/bands.js';
 import {mortonOfTile, tileContains, tileOfCode, tileXY} from '../src/coords.js';
 import type {ScalarColumn} from '../src/types.js';
+import {compose} from '../src/compose.js';
 import {band as heldBand, result, tile} from './support.js';
 
 /**
@@ -213,7 +214,7 @@ describe('BandBudget: one budget over every view', () => {
     current.put(shown);
     held.put(band({depth: 9, prefix: 3n, n: 4, touchedAt: 0}));
 
-    current.evict({depth: 9, prefix: 0n, protect: {depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}});
+    current.evict({depth: 9, prefix: 0n, protect: [{depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}]});
 
     expect(current.get(9, 2n)!.ids.length).toBe(4);
     expect(held.get(9, 3n)!.ids.length).toBe(2);
@@ -227,7 +228,7 @@ describe('BandBudget: one budget over every view', () => {
     current.put(shown);
     held.put(band({depth: 9, prefix: 3n, n: 1, touchedAt: 0}));
 
-    current.evict({depth: 9, prefix: 0n, protect: {depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}});
+    current.evict({depth: 9, prefix: 0n, protect: [{depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}]});
 
     expect(current.get(9, 2n)!.ids.length).toBe(4);
     expect(held.get(9, 3n)!.ids.length).toBe(1);
@@ -270,7 +271,7 @@ describe('BandCache eviction', () => {
     const off = band({depth: 9, prefix: 3n, n: 4, touchedAt: 5});
     cache.put(shown);
     cache.put(off);
-    cache.evict({depth: 9, prefix: 0n, protect: {depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}});
+    cache.evict({depth: 9, prefix: 0n, protect: [{depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}]});
     expect(cache.get(9, 2n)!.ids.length).toBe(4);
     expect(cache.get(9, 3n)!.ids.length).toBe(2);
   });
@@ -443,5 +444,32 @@ describe('bandSplitter', () => {
     expect(sliced.map((b) => [...(b.scalars.w!.values as Uint32Array)])).toEqual(
       whole.map((b) => [...(b.scalars.w!.values as Uint32Array)])
     );
+  });
+});
+
+describe('a tile asked for points that serves none', () => {
+  /**
+   * The frame at depth 3 over tile (0,0) while its answer's counts have landed and its ground is not
+   * yet covered, with a depth-2 band of three points over it.
+   */
+  function frameOver(counts: ReturnType<typeof tile>) {
+    const cache = new BandCache(1e9);
+    cache.put(heldBand(2, 0n, 3, {contentKey: 'ck'}));
+    cache.putCounts(3, [counts], 'ik', 'ck', 500, 0);
+    const want = {x0: 0, y0: 0, x1: 0, y1: 0};
+    const {exact, fallback} = cache.bandsForRegion(want, 3, 'ck', 500);
+    return compose({depth: 3, want, exact, fallback, counted: cache.countedIn(want, 3), version: cache.version, response: null, plan: {wanted: 1, novel: 1, requests: 0, bytes: 0}});
+  }
+
+  it('where nothing matches, is answered: counted, and nothing stands in over it', () => {
+    const frame = frameOver(tile(0n, 3n, {matched: 0n, highlighted: 0n}));
+    expect(frame.provisional).toBe(0);
+    expect(frame.tiles.map((t) => [t.drawn, t.counts?.visible, t.counts?.matched])).toEqual([[0, 3n, 0n]]);
+  });
+
+  it('with matches and none served, is not: a coarser band stands in over it', () => {
+    const frame = frameOver(tile(0n, 3n, {served: 0n}));
+    expect(frame.exact).toEqual([]);
+    expect(frame.provisional).toBeGreaterThan(0);
   });
 });
