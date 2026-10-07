@@ -20,6 +20,7 @@ import {createComponent, type EventName} from '@lit/react';
 import * as React from 'react';
 import {
   TesseraArtifactCard as ArtifactCardElement,
+  TesseraColourEditor as ColourEditorElement,
   TesseraCount as CountElement,
   TesseraExplorer as ExplorerElement,
   TesseraFieldCard as FieldCardElement,
@@ -87,7 +88,7 @@ export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreEleme
  * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
  * elements inside it emit them and each event bubbles out of it: `onPick`, `onMiss`, `onHover`,
  * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactFit`,
- * `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`, `onClusterPaletteChange`,
+ * `onColourChange`, `onLevelChange`, `onValueColour`, `onClusterColour`, `onPaletteChange`, `onClusterPaletteChange`,
  * `onDisplayChange`, `onSizeChange`, `onBudgetChange`, `onClusterBudgetChange`, `onFold`,
  * `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`, `onClauseChange`,
  * `onViewSwitch` and `onViewFollow`, each for the `tessera-` event of the same name in lower case.
@@ -98,6 +99,7 @@ export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', Expl
   onColourChange: ev('tessera-colourchange'),
   onLevelChange: ev('tessera-levelchange'),
   onValueColour: ev('tessera-valuecolour'),
+  onClusterColour: ev('tessera-clustercolour'),
   onPaletteChange: ev('tessera-palettechange'),
   onClusterPaletteChange: ev('tessera-clusterpalettechange'),
   onDisplayChange: ev('tessera-displaychange'),
@@ -134,8 +136,8 @@ export const TesseraItemCard = wrap('tessera-item-card', ItemCardElement, {onOpe
  * `<tessera-filter-panel>` as a React component. Event props: `onFilterChange`
  * (`tessera-filterchange`), `onChipOpen` (`tessera-chipopen`), and from its cards
  * `onClauseChange` (`tessera-clausechange`), `onColourChange` (`tessera-colourchange`),
- * `onLevelChange` (`tessera-levelchange`), `onValueColour` (`tessera-valuecolour`) and `onFold`
- * (`tessera-fold`).
+ * `onLevelChange` (`tessera-levelchange`), `onValueColour` (`tessera-valuecolour`),
+ * `onClusterColour` (`tessera-clustercolour`) and `onFold` (`tessera-fold`).
  */
 export const TesseraFilterPanel = wrap('tessera-filter-panel', FilterPanelElement, {
   onFilterChange: ev('tessera-filterchange'),
@@ -144,6 +146,7 @@ export const TesseraFilterPanel = wrap('tessera-filter-panel', FilterPanelElemen
   onColourChange: ev('tessera-colourchange'),
   onLevelChange: ev('tessera-levelchange'),
   onValueColour: ev('tessera-valuecolour'),
+  onClusterColour: ev('tessera-clustercolour'),
   onFold: ev('tessera-fold')
 });
 /** `<tessera-selection>` as a React component. Event prop: `onSelectChange` (`tessera-selectchange`). */
@@ -168,7 +171,7 @@ export const TesseraArtifactCard = wrap('tessera-artifact-card', ArtifactCardEle
  * `<tessera-field-card>` as a React component. Event props: `onFilterChange`
  * (`tessera-filterchange`), `onClauseChange` (`tessera-clausechange`), `onColourChange`
  * (`tessera-colourchange`), `onLevelChange` (`tessera-levelchange`), `onValueColour`
- * (`tessera-valuecolour`) and `onFold` (`tessera-fold`).
+ * (`tessera-valuecolour`), `onClusterColour` (`tessera-clustercolour`) and `onFold` (`tessera-fold`).
  */
 export const TesseraFieldCard = wrap('tessera-field-card', FieldCardElement, {
   onFold: ev('tessera-fold'),
@@ -176,7 +179,16 @@ export const TesseraFieldCard = wrap('tessera-field-card', FieldCardElement, {
   onClauseChange: ev('tessera-clausechange'),
   onColourChange: ev('tessera-colourchange'),
   onLevelChange: ev('tessera-levelchange'),
-  onValueColour: ev('tessera-valuecolour')
+  onValueColour: ev('tessera-valuecolour'),
+  onClusterColour: ev('tessera-clustercolour')
+});
+/**
+ * `<tessera-colour-editor>` as a React component. Event props: `onValueColour`
+ * (`tessera-valuecolour`) and `onClusterColour` (`tessera-clustercolour`).
+ */
+export const TesseraColourEditor = wrap('tessera-colour-editor', ColourEditorElement, {
+  onValueColour: ev('tessera-valuecolour'),
+  onClusterColour: ev('tessera-clustercolour')
 });
 /**
  * `<tessera-hierarchy>` as a React component. Event props: `onClauseChange` (`tessera-clausechange`)
@@ -186,6 +198,7 @@ export const TesseraHierarchy = wrap('tessera-hierarchy', HierarchyElement, {onC
 
 export type {
   ArtifactCardElement,
+  ColourEditorElement,
   CountElement,
   ExplorerElement,
   FieldCardElement,

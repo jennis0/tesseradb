@@ -113,6 +113,16 @@ export function artifactColour(palette: PaletteName, slot: number | null, chosen
 }
 
 /**
+ * `#rrggbb` as a colour chosen for a cluster, as opaque as the palettes' colours; `null` for any
+ * other text.
+ *
+ * @internal
+ */
+export function chosenColour(text: string): Rgba | null {
+  return /^#[0-9a-f]{6}$/i.test(text) ? hex(text)[0]! : null;
+}
+
+/**
  * The palette with `size` colours, or `null` where none has that many. Each palette has a size of
  * its own, so a slot's palette is known from the size it was served under.
  *

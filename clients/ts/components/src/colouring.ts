@@ -1,5 +1,7 @@
 import type {Store} from '@tesseradb/client';
+import {chosenColour} from '@tesseradb/client/internal';
 import {DEFAULT_COLOURING, DEFAULT_SIZING, type Colouring, type Sizing} from '@tesseradb/deck';
+import {UNMAPPED, colourOfRank, hexOf} from '@tesseradb/deck/internal';
 
 /**
  * The colour and size choices of every element reading one store: the palette, the ramp, the
@@ -83,4 +85,46 @@ export function withValueColour(values: Colouring['values'], column: string, key
   const next = {...values, [column]: own};
   if (Object.keys(own).length === 0) delete next[column];
   return next;
+}
+
+/** A colour given to one category value, `#rrggbb`, or `null` for its palette colour. */
+export type ValueChange = {value: string; colour: string | null};
+
+/** Give each value of `column` that `changes` names its colour, or its palette colour back. */
+export function setValueColours(store: Store, column: string, changes: readonly ValueChange[]): void {
+  let values = colouringOf(store).values;
+  for (const c of changes) values = withValueColour(values, column, c.value, c.colour);
+  setColouring(store, {values});
+}
+
+/** A category value's palette colour as the map draws it, by its rank, `#rrggbb`; grey for a value the map has not met. */
+export function paletteValueColour(store: Store, column: string, key: string): string {
+  const legend = store.get('legend');
+  const code = (legend.categories[column] ?? []).find((v) => v.key === key)?.code;
+  return hexOf(code === undefined ? UNMAPPED : colourOfRank(legend.ranks[column]?.[code], colouringOf(store).palette));
+}
+
+/** A category value's colour on the map, `#rrggbb`: the one chosen for it, else its palette colour. */
+export function valueColour(store: Store, column: string, key: string): string {
+  return colouringOf(store).values[column]?.[key] ?? paletteValueColour(store, column, key);
+}
+
+/** A colour given to one cluster by `tessera_id`, `#rrggbb`, or `null` for its palette colour. */
+export type ClusterChange = {tesseraId: bigint; colour: string | null};
+
+/** Give each cluster `changes` names its colour, or its palette colour back, keeping every other chosen colour. */
+export function setClusterColours(store: Store, changes: readonly ClusterChange[]): void {
+  const next = new Map(store.get('artifacts').overrides);
+  for (const c of changes) {
+    const rgba = c.colour === null ? null : chosenColour(c.colour);
+    if (rgba === null) next.delete(c.tesseraId);
+    else next.set(c.tesseraId, rgba);
+  }
+  store.setArtifactColours(next);
+}
+
+/** A cluster's colour on the map, `#rrggbb`: the one chosen for it, else `own`, its palette colour. */
+export function clusterColour(store: Store, id: bigint, own: string): string {
+  const chosen = store.get('artifacts').overrides.get(id);
+  return chosen ? hexOf(chosen) : own;
 }

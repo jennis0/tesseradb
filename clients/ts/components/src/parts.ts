@@ -58,6 +58,7 @@ export const PARTS = {
     'title',
     'verbs'
   ],
+  'colour-editor': ['changed', 'check', 'choice', 'close', 'colour-popover', 'columns', 'count', 'deselect', 'dialog', 'done', 'hex', 'hue', 'name', 'path', 'reset', 'reset-all', 'row', 'rows', 'selected', 'set-colour', 'sub', 'sv', 'swatch', 'title'],
   hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'dismiss', 'expander', 'filter', 'fit', 'highlight', 'layer', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
   selection: ['action', 'actions', 'count-matched', 'count-served', 'count-visible', 'counts', 'item', 'items', 'label', 'refusal', 'state', 'title'],
   'item-card': ['close', 'copy', 'field', 'headline', 'key', 'label', 'open', 'scoped', 'show-all', 'subtitle', 'title', 'value', 'view-chip', ...STATE],

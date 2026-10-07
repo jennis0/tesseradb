@@ -57,7 +57,7 @@ const META = {
 /** A layer points can be coloured by: it declares geometry and depends on nothing. */
 const clusters = (name: string) => ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1});
 
-const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, palette: null, size_by: null, size_min: null, size_max: null, size_scale: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
+const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, palette: null, value_colours: null, cluster_colours: null, size_by: null, size_min: null, size_max: null, size_scale: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
 
 /** A model initialised and one view rendered, so there is a store: the store is per view. */
 function setUp(initial: Record<string, unknown> = {}) {
@@ -335,6 +335,29 @@ describe('the down-sync', () => {
     expect(model.state.palette).toBe('tableau20');
     // The up-sync does not come back down.
     expect(store.calls.filter((c) => c.name === 'setPalette')).toHaveLength(2);
+  });
+
+  it('applies the value and cluster colours set in the kernel and follows a change; colours chosen in the explorer go up at once', async () => {
+    const {colouringOf} = await import('../src/colouring.js');
+    const {model, store, el} = setUp({value_colours: {venue: {nips: '#112233'}}, cluster_colours: {'7': '#445566'}});
+    const explorer = el.querySelector('tessera-explorer')!;
+    await settle(el);
+    expect(colouringOf(store).values).toEqual({venue: {nips: '#112233'}});
+    expect([...store.get('artifacts').overrides.keys()]).toEqual([7n]);
+    model.set('cluster_colours', {'8': '#000000'});
+    await settle(el);
+    expect([...store.get('artifacts').overrides.keys()]).toEqual([8n]);
+    const saves = model.saves;
+    explorer.dispatchEvent(new CustomEvent('tessera-valuecolour', {detail: {column: 'venue', changes: [{value: 'icml', colour: '#abcdef'}, {value: 'nips', colour: null}]}, bubbles: true, composed: true}));
+    expect(model.state.value_colours).toEqual({venue: {icml: '#abcdef'}});
+    explorer.dispatchEvent(new CustomEvent('tessera-valuecolour', {detail: {column: 'venue', changes: [{value: 'icml', colour: null}]}, bubbles: true, composed: true}));
+    expect(model.state.value_colours).toEqual({});
+    explorer.dispatchEvent(new CustomEvent('tessera-clustercolour', {detail: {layer: 'topics', changes: [{tesseraId: '9', colour: '#fedcba'}]}, bubbles: true, composed: true}));
+    expect(model.state.cluster_colours).toEqual({'8': '#000000', '9': '#fedcba'});
+    expect(model.saves).toBe(saves + 3);
+    // The up-sync does not come back down to replace what the store holds.
+    await settle(el);
+    expect([...store.get('artifacts').overrides.keys()]).toEqual([8n]);
   });
 
   it('applies the size settings set in the kernel, the scale before the column, and follows each change', async () => {

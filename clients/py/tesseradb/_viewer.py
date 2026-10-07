@@ -718,6 +718,8 @@ class Selection:
         cluster_budget_min: int = 10,
         cluster_budget_max: int = 10_000,
         palette: Optional[str] = None,
+        value_colours: Optional[dict] = None,
+        cluster_colours: Optional[dict] = None,
     ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
@@ -742,6 +744,8 @@ class Selection:
         - `cluster_budget_min`, `cluster_budget_max`: the ends of the Most clusters slider, shown
           while such a layer is drawn. Neither changes `cluster_budget`.
         - `palette`: the palette clusters are coloured from, as `Map` takes it.
+        - `value_colours`, `cluster_colours`: colours for single category values and single
+          clusters in place of their palette colours, as `Map` takes them.
 
         Items outside the box are still drawn when they are in frame.
 
@@ -763,6 +767,8 @@ class Selection:
             cluster_budget_min=cluster_budget_min,
             cluster_budget_max=cluster_budget_max,
             palette=palette,
+            value_colours=value_colours,
+            cluster_colours=cluster_colours,
         )
 
     def _expression(self) -> Optional[dict]:

@@ -77,6 +77,11 @@
       "types": "./dist/hierarchy.d.ts",
       "default": "./dist/hierarchy.js"
     },
+    "./colour-editor": {
+      "tessera-source": "./src/colour-editor.ts",
+      "types": "./dist/colour-editor.d.ts",
+      "default": "./dist/colour-editor.js"
+    },
     "./explorer": {
       "tessera-source": "./src/explorer.ts",
       "types": "./dist/explorer.d.ts",

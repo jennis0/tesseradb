@@ -15,6 +15,7 @@ import {
 import type {Sizing} from '@tesseradb/deck';
 import {idString} from './base.js';
 import {setSizing, sizingOf} from './colouring.js';
+import type {TesseraEventDetails} from './events.js';
 import type {TesseraExplorer} from './explorer.js';
 import './explorer.js';
 
@@ -31,8 +32,9 @@ import './explorer.js';
  * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height`,
  * `title_field`, `artifacts_per_tile`, `budget_min`, `budget_max`, `cluster_budget_min` and `cluster_budget_max` come down; `view`, `bbox`, `layers`, `colour_by`, `palette`, `size_by`, `size_min`,
  * `size_max`, `size_scale` and `filters` go both ways, and so do `budget`, sent up when Most points is let go,
- * `cluster_budget`, sent up when Most clusters is let go, and `palette`, sent up when one is chosen;
- * `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
+ * `cluster_budget`, sent up when Most clusters is let go, `palette`, sent up when one is chosen, and
+ * `value_colours` and `cluster_colours`, sent up as each colour is chosen on a card or in Edit
+ * colours; `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
  * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
  * `tessera_id` is a `u64`.
  *
@@ -499,6 +501,12 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       for (const v of state.views.values()) applyBudget(v.explorer, model);
     });
   }
+  for (const key of ['value_colours', 'cluster_colours']) {
+    model.on(`change:${key}`, () => {
+      if (state.syncingUp) return;
+      for (const v of state.views.values()) applyColours(v.explorer, model);
+    });
+  }
   model.on('destroy', () => state.dispose());
 
   // What `render` calls, kept on the state so a test can mount through it.
@@ -525,7 +533,25 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     // A palette chosen in the Colour section reaches the kernel at once.
     const onPalette = (e: Event) => syncUp({palette: (e as CustomEvent<{palette: PaletteName}>).detail.palette});
     explorer.addEventListener('tessera-clusterpalettechange', onPalette);
+    // A colour chosen for values or clusters reaches the kernel at once, with the ones held before.
+    const onValueColour = (e: Event) => {
+      const {column, changes} = (e as CustomEvent<TesseraEventDetails['tessera-valuecolour']>).detail;
+      const held = (model.get('value_colours') as Record<string, Record<string, string>> | null) ?? {};
+      const own = withChanges(held[column] ?? {}, changes.map((c) => [c.value, c.colour]));
+      const next = {...held, [column]: own};
+      if (Object.keys(own).length === 0) delete next[column];
+      syncUp({value_colours: next});
+    };
+    const onClusterColour = (e: Event) => {
+      const {changes} = (e as CustomEvent<TesseraEventDetails['tessera-clustercolour']>).detail;
+      const held = (model.get('cluster_colours') as Record<string, string> | null) ?? {};
+      syncUp({cluster_colours: withChanges(held, changes.map((c) => [c.tesseraId, c.colour]))});
+    };
+    explorer.addEventListener('tessera-valuecolour', onValueColour);
+    explorer.addEventListener('tessera-clustercolour', onClusterColour);
     return () => {
+      explorer.removeEventListener('tessera-valuecolour', onValueColour);
+      explorer.removeEventListener('tessera-clustercolour', onClusterColour);
       explorer.removeEventListener('tessera-budgetchange', onBudget);
       explorer.removeEventListener('tessera-clusterbudgetchange', onClusterBudget);
       explorer.removeEventListener('tessera-clusterpalettechange', onPalette);
@@ -557,6 +583,24 @@ function applyBudget(explorer: TesseraExplorer, model: WidgetModel): void {
   if (typeof clustersMax === 'number') explorer.clusterBudgetMax = clustersMax;
 }
 
+/** `held` with each key given its colour, or removed where its colour is `null`. */
+function withChanges(held: Record<string, string>, changes: readonly [string, string | null][]): Record<string, string> {
+  const next = {...held};
+  for (const [key, colour] of changes) {
+    if (colour === null) delete next[key];
+    else next[key] = colour;
+  }
+  return next;
+}
+
+/** The value and cluster colours the kernel set; one it left unset leaves the explorer's. */
+function applyColours(explorer: TesseraExplorer, model: WidgetModel): void {
+  const values = model.get('value_colours');
+  const clusters = model.get('cluster_colours');
+  if (values && typeof values === 'object') explorer.valueColours = values as Record<string, Record<string, string>>;
+  if (clusters && typeof clusters === 'object') explorer.clusterColours = clusters as Record<string, string>;
+}
+
 const mounts = new WeakMap<ModelState, (explorer: TesseraExplorer) => () => void>();
 
 export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement; signal?: AbortSignal}): () => void {
@@ -571,6 +615,7 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
   explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
   explorer.titleField = titleFieldOf(model);
   applyBudget(explorer, model);
+  applyColours(explorer, model);
   el.append(explorer);
   const unmount = mounts.get(state)!(explorer);
   const v = state.views.get(explorer)!;

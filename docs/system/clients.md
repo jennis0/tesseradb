@@ -115,6 +115,20 @@ the palette as `palette`, and the Python client passes `palette_size` to every r
 clusters and gives back each cluster's `slot`. `tessera artifacts --palette-size` adds the `slot`
 field at the command line.
 
+A user chooses single colours in the browser: from a swatch on a field card, which opens a colour
+picker, or in Edit colours (`<tessera-colour-editor>`), which the explorer's Colour section opens
+while the points are coloured by a category or a layer. Edit colours lists the category's values,
+or the layer's clusters (the cut the map draws on a `nested` or `dag` layer, the level coloured on
+a levelled one), largest first by their counts over everything the viewer may see, with no filter
+and no area, so the order does not move as the map pans or a filter changes. It searches with the
+field card's typeahead, and sets one colour on several rows, or every row's palette colour back,
+in one action. A category value's colour is written to the colour choices the elements over a
+store share, and a cluster's to `Store.setArtifactColours` with the others chosen. Each action
+fires one event, `tessera-valuecolour` or `tessera-clustercolour`, naming every value or cluster it
+changed, and the client keeps none of them: a host that wants them kept stores them and sets them
+back through the map's or the explorer's `valueColours` and `clusterColours`. The notebook widget
+does so as its `value_colours` and `cluster_colours`.
+
 Told where the camera is, it works out which requests are worth making and issues them. Told a
 filter changed, it recomposes one expression from every active clause and sends it whole. Given a
 response, it decides which already-held geometry still answers for the view and which needs
