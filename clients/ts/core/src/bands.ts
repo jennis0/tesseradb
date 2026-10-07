@@ -32,7 +32,8 @@ export type TileAddress = {depth: number; prefix: bigint};
 /**
  * A tile's counts from the server, held from the moment its response's tiles frame lands until the
  * tile's band arrives, so the tile is counted before its points are drawn. The counts are the ones
- * the band will carry: the same frame supplies both.
+ * the band will carry: the same frame supplies both. A tile that serves no point gets no band, and
+ * its counts are held for as long as its content key is current.
  *
  * @internal
  */
@@ -533,8 +534,9 @@ export class BandCache {
    */
   private covered: Coverage[] = [];
   /**
-   * Counts for tiles whose points are on their way, under the latest content key only. A tile's
-   * entry goes when its band is put, and every entry goes with the principal.
+   * Counts for tiles whose points are on their way, and for tiles that serve none, under the latest
+   * content key only. A tile's entry goes when its band is put, and every entry goes with the
+   * principal.
    */
   private counted = new Map<BandKey, HeldCount>();
   private identityKey: string | null = null;
@@ -618,9 +620,10 @@ export class BandCache {
   }
 
   /**
-   * Holds the counts of a response's tiles at `depth` that will carry points, until each tile's
-   * band arrives. A tile that serves no point gets no band, so it is not held. Counts under an
-   * older content key are dropped, and a change of principal drops everything, as {@link put} does.
+   * Holds the counts of a response's tiles at `depth`: until its band arrives for a tile that will
+   * carry points, and for as long as the content key holds for one that serves none, so a frame
+   * counts every tile it covers. Counts under an older content key are dropped, and a change of
+   * principal drops everything, as {@link put} does.
    */
   putCounts(depth: number, tiles: readonly TileCounts[], identityKey: string, contentKey: string): void {
     if (this.identityKey !== identityKey) {
@@ -629,7 +632,6 @@ export class BandCache {
     }
     for (const [key, held] of this.counted) if (held.contentKey !== contentKey) this.counted.delete(key);
     for (const tile of tiles) {
-      if (tile.served === 0n) continue;
       const key = bandKey(depth, tile.tile);
       if (this.bands.get(key)?.contentKey === contentKey) continue;
       const {x, y} = tileXY(tile.tile, depth);

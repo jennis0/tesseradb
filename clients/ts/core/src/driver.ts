@@ -159,6 +159,8 @@ export class Driver {
 
   // Foreground lifecycle.
   private inFlight: AbortController | null = null;
+  /** The last `shown` or `empty` reported, so a camera answered from held tiles reports only a change. */
+  private answered: 'shown' | 'empty' | null = null;
   private inFlightAt: {rect: TileRect; depth: number; since: number} | null = null;
   private queued: ViewState | null = null;
   private generation = 0;
@@ -336,11 +338,14 @@ export class Driver {
       });
     }
 
-    if (this.covers(view)) {
+    const planned = this.planFor(view);
+    if (this.covers(planned)) {
       // The plan agreed with the presented depth, so the suspension has done its job.
       this.holdSuspended = false;
       this.trace('covered', {depth: this.heldBbox?.depth ?? -1});
       this.movedAt = 0;
+      // No request answers this camera, so the held tiles say whether anything is in view.
+      if (!this.inFlight) this.report(this.heldIn(planned.visible.rect, planned.choice.depth), false);
       // A warm client lives on this path, so the staleness bound must be reachable here.
       this.revalidateIfDue(view);
       return;
@@ -456,13 +461,25 @@ export class Driver {
     void this.request(view);
   }
 
-  private storeCanAnswer(view: ViewState): boolean {
-    return this.covers(view);
+  /** Whether the held bands at `depth` serve anything inside `rect`, as a request's status reads it. */
+  private heldIn(rect: TileRect, depth: number): 'shown' | 'empty' {
+    for (const band of this.replica.exactIn(rect, depth)) if (band.served > 0 || band.visible > 0n) return 'shown';
+    return 'empty';
   }
 
-  private covers(view: ViewState): boolean {
+  /** Reports an answer's status: always after a request, and from held tiles only where it changed. */
+  private report(status: 'shown' | 'empty', always = true): void {
+    if (!always && status === this.answered) return;
+    this.answered = status;
+    this.events.onStatus?.(status);
+  }
+
+  private storeCanAnswer(view: ViewState): boolean {
+    return this.covers(this.planFor(view));
+  }
+
+  private covers(planned: Plan): boolean {
     if (!this.heldBbox || !this.presented) return false;
-    const planned = this.planFor(view);
     if (planned.choice.depth !== this.heldBbox.depth) return false;
     // Novelty over the visible box, containment over the render rect: the margin is fetched
     // opportunistically, and its absence does not fail a pan that stays inside the drawn area.
@@ -542,6 +559,7 @@ export class Driver {
     this.queued = null;
     this.heldBbox = null;
     this.presented = null;
+    this.answered = null;
     this.movedAt = 0;
     this.velocity = undefined;
     this.lastTarget = null;
@@ -739,7 +757,7 @@ export class Driver {
         this.mTarget,
         this.meta.thetaTargetMarks
       );
-      this.events.onStatus?.(actual === 0 && visible === 0 ? 'empty' : 'shown');
+      this.report(actual === 0 && visible === 0 ? 'empty' : 'shown');
       this.movedAt = 0;
       if (this.queued) {
         this.inFlight = null;

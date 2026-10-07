@@ -32,7 +32,7 @@ function noneMatch(): ViewportResponse {
   return response(servedResult(0, [tile(0n, 1000n, {matched: 0n, highlighted: 0n})], {scalars: {archive: {arrowType: 'u16', values: new Uint16Array(0)}}}));
 }
 
-async function shown(reply: (req: Asked) => ViewportResponse | Promise<ViewportResponse>): Promise<{store: Store; clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>}> {
+async function shown(reply: (req: Asked) => ViewportResponse | Promise<ViewportResponse>): Promise<{store: Store; clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>; asked: () => number}> {
   const clock = fakeClock();
   const scheduler = fakeScheduler();
   const viewport = vi.fn(async (_t: string, req: Asked) => ({...(await reply(req)), region: null}));
@@ -42,7 +42,7 @@ async function shown(reply: (req: Asked) => ViewportResponse | Promise<ViewportR
   store.setView(camera(Q, [0, 0, 100, 200], 400, 400));
   await clock.advance(600);
   scheduler.flush();
-  return {store, clock, scheduler};
+  return {store, clock, scheduler, asked: () => viewport.mock.calls.length};
 }
 
 /** Every id the marks projection draws, exact and stand-in. */
@@ -52,7 +52,7 @@ function drawn(store: Store): bigint[] {
 }
 
 describe('an answer of no matches draws nothing', () => {
-  it('drops the marks, counted tiles and counts drawn under the previous filter', async () => {
+  it('drops the marks and the counts drawn under the previous filter', async () => {
     const {store, clock, scheduler} = await shown((req) => (req.filters ? noneMatch() : three()));
     expect(drawn(store)).toHaveLength(3);
 
@@ -63,7 +63,8 @@ describe('an answer of no matches draws nothing', () => {
     expect(store.get('status').status).toBe('empty');
     expect(drawn(store)).toEqual([]);
     expect(store.get('marks').count.shown).toBe(0);
-    expect(store.get('tiles').tiles).toEqual([]);
+    // The tile is still counted: it holds visible items, none of which matches.
+    expect(store.get('tiles').tiles.map((t) => [t.drawn, t.counts?.visible, t.counts?.matched])).toEqual([[0, 1000n, 0n]]);
     expect(store.get('view').matched.value).toBe(0);
     expect(store.get('view').served.shown).toBe(0);
   });
@@ -111,23 +112,7 @@ describe('an answer of no matches draws nothing', () => {
   it('a camera moved to where the filter matches nothing draws nothing there', async () => {
     // Under the filter only the left half of the world matches, one point at the centre of each
     // matching tile asked for; the right half holds visible items and serves none.
-    const {store, clock, scheduler} = await shown((req) => {
-      if (!req.filters) return three();
-      const z = req.zoom;
-      const asked = req.bbox ? tilesOf(req.bbox, z) : (req.tiles ?? []);
-      const half = 2 ** (z - 1);
-      const left = asked.filter((p) => tileXY(p, z).x < half);
-      const right = asked.filter((p) => tileXY(p, z).x >= half);
-      const span = WORLD_SIZE / 2 ** z;
-      const world = Float32Array.from(left.flatMap((p) => [(tileXY(p, z).x + 0.5) * span, (tileXY(p, z).y + 0.5) * span]));
-      const counts = [...left.map((p) => tile(p, 100n, {served: 1n})), ...right.map((p) => tile(p, 100n, {matched: 0n, highlighted: 0n}))];
-      return response({
-        ...servedResult(left.length, [], {scalars: {archive: {arrowType: 'u16', values: Uint16Array.from(left, () => 5)}}}),
-        tiles: counts,
-        world,
-        positions: Float64Array.from(world)
-      });
-    });
+    const {store, clock, scheduler} = await shown((req) => (req.filters ? leftHalfMatches(req) : three()));
     store.setFilters(FILTER);
     await clock.advance(600);
     scheduler.flush();
@@ -154,6 +139,27 @@ describe('an answer of no matches draws nothing', () => {
   });
 });
 
+/**
+ * Under the filter only the left half of the world matches: one point at the centre of each
+ * matching tile asked for, 100 visible items in every tile, and none served or matched on the right.
+ */
+function leftHalfMatches(req: Asked): ViewportResponse {
+  const z = req.zoom;
+  const asked = req.bbox ? tilesOf(req.bbox, z) : (req.tiles ?? []);
+  const half = 2 ** (z - 1);
+  const left = asked.filter((p) => tileXY(p, z).x < half);
+  const right = asked.filter((p) => tileXY(p, z).x >= half);
+  const span = WORLD_SIZE / 2 ** z;
+  const world = Float32Array.from(left.flatMap((p) => [(tileXY(p, z).x + 0.5) * span, (tileXY(p, z).y + 0.5) * span]));
+  const counts = [...left.map((p) => tile(p, 100n, {served: 1n})), ...right.map((p) => tile(p, 100n, {matched: 0n, highlighted: 0n}))];
+  return response({
+    ...servedResult(left.length, [], {scalars: {archive: {arrowType: 'u16', values: Uint16Array.from(left, () => 5)}}}),
+    tiles: counts,
+    world,
+    positions: Float64Array.from(world)
+  });
+}
+
 /** The tiles at `zoom` a data bbox spans, as the store asks for them. */
 function tilesOf(bbox: [number, number, number, number], zoom: number): bigint[] {
   const [x0, y0] = dataToWorldXY(bbox[0], bbox[1], Q);
@@ -163,3 +169,49 @@ function tilesOf(bbox: [number, number, number, number], zoom: number): bigint[]
   for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) out.push(mortonOfTile(x, y, zoom));
   return out;
 }
+
+describe('a frame counts every tile it covers', () => {
+  it('counts the tiles a filter leaves with no point to serve', async () => {
+    const {store, clock, scheduler} = await shown((req) => (req.filters ? leftHalfMatches(req) : three()));
+    store.setFilters(FILTER);
+    await clock.advance(600);
+    scheduler.flush();
+
+    const v = store.get('view');
+    const want = v.composition!.want;
+    const tiles = (want.x1 - want.x0 + 1) * (want.y1 - want.y0 + 1);
+    const half = 2 ** (v.depth - 1);
+    const leftTiles = (Math.min(want.x1, half - 1) - want.x0 + 1) * (want.y1 - want.y0 + 1);
+    expect(leftTiles).toBeGreaterThan(0);
+    expect(leftTiles).toBeLessThan(tiles);
+    expect(v.visible.value).toBe(100 * tiles);
+    expect(v.matched.value).toBe(100 * leftTiles);
+  });
+});
+
+describe('a camera answered from held tiles', () => {
+  it('reports empty where the filter matches nothing in view, and shown where it matches again', async () => {
+    const {store, clock, scheduler, asked} = await shown((req) => (req.filters ? leftHalfMatches(req) : three()));
+    store.setFilters(FILTER);
+    await clock.advance(600);
+    scheduler.flush();
+    // Down to the depth the zoomed views draw at, so the pans below are answered from held tiles.
+    store.setView(camera(Q, [0, 0, 25, 50], 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('status').status).toBe('shown');
+    const before = asked();
+
+    store.setView(camera(Q, [75, 0, 100, 50], 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    expect(asked()).toBe(before);
+    expect(store.get('status').status).toBe('empty');
+
+    store.setView(camera(Q, [0, 150, 25, 200], 400, 400));
+    await clock.advance(600);
+    scheduler.flush();
+    expect(asked()).toBe(before);
+    expect(store.get('status').status).toBe('shown');
+  });
+});

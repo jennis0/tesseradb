@@ -395,7 +395,7 @@ export class Replica {
     // piece's keys and byte count, without points.
     const request = (rect: TileRect) => {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
-      const piece = {landed: [] as Band[], parts: 0, startedAt: 0, fetching: null as unknown as Promise<ViewportResponse>};
+      const piece = {landed: [] as Band[], parts: 0, counted: false, startedAt: 0, fetching: null as unknown as Promise<ViewportResponse>};
       // One touch time for the whole piece, so eviction sees its bands as one arrival.
       const startedAt = this.now();
       piece.startedAt = startedAt;
@@ -408,6 +408,7 @@ export class Replica {
           for (const band of await this.absorb(part, depth, k, startedAt)) piece.landed.push(band);
         },
         (counts) => {
+          piece.counted = true;
           this.observe(counts);
           if (this.opts.cache === false) return;
           this.cache.putCounts(depth, counts.tiles, counts.identityKey, counts.contentKey);
@@ -428,6 +429,10 @@ export class Replica {
       issued += 1;
       responseBytes += response.bytes;
       pending = i + 1 < pieces.length ? request(pieces[i + 1]!) : null;
+      // A transport that answered whole handed over no counts as they landed.
+      if (!piece.counted && this.opts.cache !== false) {
+        this.cache.putCounts(depth, response.result.tiles, response.identityKey, response.contentKey);
+      }
       // A streamed piece has stored its points already and its response carries none, so only its
       // keys are observed. A transport that answered whole is absorbed here.
       if (piece.parts === 0) {

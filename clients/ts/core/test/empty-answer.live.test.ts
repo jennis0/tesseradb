@@ -56,6 +56,8 @@ describe('a filter matching nothing against a live server', () => {
       store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}, primary_category: {family: 'category', keys: ['hep-ph']}}, highlight: {}});
       await until('the empty answer', () => store.get('status').status === 'empty' && drawn(store) === 0);
       expect(store.get('view').matched.value).toBe(0);
+      // Every tile is counted, though none serves a point.
+      expect(store.get('view').visible.value).toBeGreaterThan(0);
       expect(store.get('tiles').tiles.every((t) => t.counts === null || t.counts.matched === 0n)).toBe(true);
 
       await until('the artifacts under the filter', () => store.get('artifacts').served.length > 0 && store.get('artifacts').served.every((a) => a.matched !== null));
