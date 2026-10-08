@@ -63,7 +63,7 @@ export {formatCount, formatMasked} from './counts.js';
 export type {TokenSupplier} from './token.js';
 export {CLUSTER_PREFIX, type LegendProjection} from './legend.js';
 export {REGION_HELD_LIMIT, type RegionProjection, type SelectionShape} from './selectedRegion.js';
-export type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregatesProjection, FieldSummary} from './aggregates.js';
+export type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregatesProjection, DrawnLayerBy, FieldSummary} from './aggregates.js';
 
 /**
  * Where the host's camera looks: a box in the current view's data coordinates, the camera's zoom,

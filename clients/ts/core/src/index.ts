@@ -11,6 +11,7 @@ export type {
   AggregateEntry,
   AggregateSpec,
   AggregateSpecGrouping,
+  DrawnLayerBy,
   AggregatesProjection,
   FieldSummary,
   ArtifactsProjection,

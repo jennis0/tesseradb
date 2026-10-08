@@ -145,6 +145,7 @@ nav:
           - tessera-field-card: reference/components/tessera-field-card.md
           - tessera-filter: reference/components/tessera-filter.md
           - tessera-cluster-filter: reference/components/tessera-cluster-filter.md
+          - tessera-colour-editor: reference/components/tessera-colour-editor.md
           - tessera-selection: reference/components/tessera-selection.md
           - tessera-item-card: reference/components/tessera-item-card.md
           - tessera-artifact-card: reference/components/tessera-artifact-card.md

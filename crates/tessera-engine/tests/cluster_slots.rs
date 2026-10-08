@@ -881,7 +881,7 @@ fn an_ingest_is_answered_from_the_slots_held_until_they_are_rebuilt() {
     assert!(!engine.cluster_slots_stale(&session));
 
     ingest(engine, "slots-ingest");
-    tick(engine);
+    publish_buffered(engine);
     assert_eq!(slots_of(engine, &session), before, "the slots held answer");
     assert!(engine.cluster_slots_stale(&session), "a rebuild is left for later");
     engine.refresh_cluster_slots(&session).unwrap();

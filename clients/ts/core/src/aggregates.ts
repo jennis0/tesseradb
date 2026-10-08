@@ -20,10 +20,17 @@ export type AggregateSpecGrouping = Omit<Grouping, 'by'> & {
   by?: Exclude<AggregateBy, {layer: string}> | DrawnLayerBy;
 };
 
-type LayerBy = Extract<AggregateBy, {layer: string}>;
-
-/** A layer's grouping whose cut or palette size may be the store map's. */
-type DrawnLayerBy = LayerBy extends infer B ? (B extends LayerBy ? Omit<B, 'cut' | 'paletteSize'> & {cut?: AggregateCut | 'drawn'; paletteSize?: number | 'drawn'} : never) : never;
+/**
+ * A layer's grouping as an {@link AggregateSpecGrouping} names it, whose `cut` and `paletteSize`
+ * may be `'drawn'`: the cut and palette size the store's map draws that layer with.
+ *
+ * @category Store
+ */
+export type DrawnLayerBy = Extract<AggregateBy, {layer: string}> extends infer B
+  ? B extends {layer: string}
+    ? Omit<B, 'cut' | 'paletteSize'> & {cut?: AggregateCut | 'drawn'; paletteSize?: number | 'drawn'}
+    : never
+  : never;
 
 /** Whether `grouping` ranks at the cut the store's map draws. */
 export function isDrawn(grouping: AggregateSpecGrouping): boolean {
