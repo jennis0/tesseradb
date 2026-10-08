@@ -1441,10 +1441,10 @@ fn neighbours(points: &[[f64; 2]]) -> Neighbours {
                     link(pair[0], pair[1]);
                 }
             } else {
-                for t in triangulation.triangles.chunks_exact(3) {
-                    link(t[0], t[1]);
-                    link(t[1], t[2]);
-                    link(t[2], t[0]);
+                for &[a, b, c] in triangulation.triangles.as_chunks::<3>().0 {
+                    link(a, b);
+                    link(b, c);
+                    link(c, a);
                 }
             }
         }
