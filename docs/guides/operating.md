@@ -184,7 +184,7 @@ resident memory, mapped files included, was 1.5 GB. *One run each, with `tessera
 `slot_cost`.*
 
 On the full GBIF bundle, under the conditions of the table above, a viewer asked for the taxonomy
-layer as the explorer does, with a palette of ten colours, from a server just opened. Each row is
+layer as the explorer does, with a palette of ten colours, from a newly opened server. Each row is
 the time until the whole answer had arrived, split into the walks that fill a level's counts and
 centroids, the colouring itself, and everything else:
 

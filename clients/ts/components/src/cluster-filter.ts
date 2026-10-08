@@ -153,7 +153,7 @@ export class TesseraClusterFilter extends TesseraElement {
   /**
    * Where set, the box picks a cluster rather than filtering by it: choosing a row calls this with
    * its `tessera_id` as a decimal string, its name, its path of parents' names as the list shows
-   * it and its rung, changes no clause and empties the box, and no row shows as chosen.
+   * it and its `rung`, changes no clause and empties the box, and no row shows as chosen.
    */
   @property({attribute: false}) accessor choose: ((cluster: {id: string; name: string | null; path: string; rung: number}) => void) | null = null;
 

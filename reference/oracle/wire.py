@@ -84,6 +84,9 @@ class Artifact(NamedTuple):
     #: The tile, as its Morton prefix at the request's depth, whose visible members put the row in
     #: its frame; `None` in the treed frame.
     tile: int | None = None
+    #: The palette slot this principal's colouring gives the artifact, or `None` where the request
+    #: named no `palette_size`.
+    slot: int | None = None
 
 
 FRAME_TILES = 1
@@ -125,6 +128,7 @@ ARTIFACT_COLUMNS = (
     "highlighted",
     "target",
     "tile",
+    "slot",
 )
 
 
@@ -311,7 +315,7 @@ def decode_viewport_with_subcells(data: bytes):
 
 
 def _artifact_rows(payload: bytes) -> list[Artifact]:
-    """One artifacts frame's rows, its seventeen columns read by name and checked by position.
+    """One artifacts frame's rows, its eighteen columns read by name and checked by position.
 
     `masked_count` is what the *asking principal* can see, never the artifact's membership size,
     and the centroid and box are over the members they can see: two principals legitimately
@@ -352,6 +356,7 @@ def _artifact_rows(payload: bytes) -> list[Artifact]:
                         highlighted=columns["highlighted"][row],
                         target=columns["target"][row],
                         tile=columns["tile"][row],
+                        slot=columns["slot"][row],
                     )
                 )
     return rows
