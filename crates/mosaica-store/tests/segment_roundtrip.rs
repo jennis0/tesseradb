@@ -130,7 +130,7 @@ fn tiler_and_segment_writers_round_trip() {
     let file_bound = u64::from_le_bytes(perm_bytes[8..16].try_into().unwrap());
     let page_count = u32::from_le_bytes(perm_bytes[16..20].try_into().unwrap());
     let present_count = u32::from_le_bytes(perm_bytes[20..24].try_into().unwrap());
-    assert_eq!(version, 2, "the paged form is version 2");
+    assert_eq!(version, 3, "the paged form is version 3");
     assert_eq!(page_shift, 16);
     assert_eq!(file_bound, bound);
     // `bound` here is well under one page, and every entity in it has a row.
