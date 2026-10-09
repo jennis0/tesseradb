@@ -168,6 +168,21 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+# `mosaica serve` binds its listeners only after it has opened the bundle, and a port `free_port`
+# released can be taken by another socket in that time. A start that exits because a port was
+# taken is started again on fresh ones.
+SPAWN_ATTEMPTS = 3
+
+
+class PortTaken(RuntimeError):
+    """`mosaica serve` exited at startup because a port it was given is in use."""
+
+
+def exited_early(returncode: int, output: str) -> RuntimeError:
+    error = PortTaken if "Address already in use" in output else RuntimeError
+    return error(f"mosaica serve exited early ({returncode}):\n{output}")
+
+
 def ensure_cli_built() -> None:
     """Build `target/release/mosaica` with **default features**, always.
 
@@ -941,7 +956,18 @@ theta_target_marks = {theta_target_marks}
     return config_path
 
 
-def spawn_server(
+def spawn_server(bundle_root: Path, tmp_dir: Path, **options) -> tuple[Server, subprocess.Popen]:
+    """`_spawn_server_once`, started again on fresh ports while a port it was given is taken."""
+    for attempt in range(SPAWN_ATTEMPTS):
+        try:
+            return _spawn_server_once(bundle_root, tmp_dir, **options)
+        except PortTaken:
+            if attempt == SPAWN_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable")
+
+
+def _spawn_server_once(
     bundle_root: Path,
     tmp_dir: Path,
     *,
@@ -997,6 +1023,7 @@ def spawn_server(
 
     if log_path is not None:
         log_file = open(log_path, "ab")
+        log_start = log_file.tell()
         stdout_target = log_file
         stderr_target = subprocess.STDOUT
     else:
@@ -1027,8 +1054,8 @@ def spawn_server(
             if proc.stdout is not None:
                 extra = proc.stdout.read().decode(errors="replace")
             elif log_path is not None:
-                extra = log_path.read_text(errors="replace")
-            raise RuntimeError(f"mosaica serve exited early ({proc.returncode}):\n{extra}")
+                extra = log_path.read_bytes()[log_start:].decode(errors="replace")
+            raise exited_early(proc.returncode, extra)
         try:
             resp = requests.get(f"{srv.viewer_base}/healthz", timeout=1)
             if resp.status_code == 200:

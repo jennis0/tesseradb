@@ -106,8 +106,11 @@ from oracle.harness import (
     CLI_BIN,
     OPERATOR_CREDENTIAL,
     REPO_ROOT,
+    SPAWN_ATTEMPTS,
+    PortTaken,
     Server,
     ensure_cli_built,
+    exited_early,
     free_port,
     kill_server,
     stop_server,
@@ -630,6 +633,14 @@ class SuiteHarness:
         else:
             ensure_cli_built()
             binary = CLI_BIN
+        for attempt in range(SPAWN_ATTEMPTS):
+            try:
+                return self._spawn_once(binary)
+            except PortTaken:
+                if attempt == SPAWN_ATTEMPTS - 1:
+                    raise
+
+    def _spawn_once(self, binary: Path) -> None:
         viewer_port, session_port, control_port = free_port(), free_port(), free_port()
         config_path = self.run_dir / "mosaica.toml"
         config_path.write_text(
@@ -684,6 +695,7 @@ class SuiteHarness:
         # tail after a failure still carries what the previous process said before it died.
         self.log_path = self.run_dir / "server.log"
         self._log = self.log_path.open("ab")
+        log_start = self._log.tell()
         self.proc = subprocess.Popen(
             argv,
             cwd=REPO_ROOT,
@@ -695,13 +707,10 @@ class SuiteHarness:
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
-                # The tail, not the whole log: a long run's server.log is large and the last few
-                # kilobytes carry the refusal.
-                raw = self.log_path.read_bytes()[-8192:] if self.log_path.exists() else b""
-                output = raw.decode(errors="replace")
-                raise RuntimeError(
-                    f"mosaica serve exited early ({self.proc.returncode}):\n{output}"
-                )
+                # This process's tail, not the whole log: a long run's server.log is large and the
+                # last few kilobytes carry the refusal.
+                raw = self.log_path.read_bytes()[log_start:][-8192:]
+                raise exited_early(self.proc.returncode, raw.decode(errors="replace"))
             try:
                 if requests.get(f"{self.server.viewer_base}/healthz", timeout=1).status_code == 200:
                     break
