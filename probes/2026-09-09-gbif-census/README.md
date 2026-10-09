@@ -20,7 +20,7 @@ would hold, and which columns a sparse schema should take.
 | headroom for artifacts | 640,478,658 |
 
 Artifact ids allocate downward from `u32::MAX` into the same space
-([sharding.md](../../docs/design/sharding.md)), so the headroom is what the taxonomy's artifacts
+([sharding.md](../../docs/sharding.md)), so the headroom is what the taxonomy's artifacts
 have to fit in. The sample holds 463,351 distinct species and 11,502 families over 81,681,686 rows,
 so a whole-corpus taxonomy is on the order of a few million artifacts against 640 million of room.
 **Sharding is not needed for this rung.** The campaign table's 3.50×10⁹ was low: the vintage staged
