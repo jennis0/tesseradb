@@ -164,7 +164,7 @@ pub struct ViewDropped {
 /// read state only the executor may write, so they are decided there: a handler that checked
 /// first could be overtaken between its check and the enqueue, and two callers would be
 /// acknowledged onto one name. Items and members are addressed by entity, which the handler
-/// resolves at the boundary, because a `tessera_id` means nothing without its key. Large payloads
+/// resolves at the boundary, because a `mosaica_id` means nothing without its key. Large payloads
 /// are boxed so one variant does not set the size of every command in the queue.
 /// One `/control/ingest` batch as its handler resolved it.
 pub(crate) struct IngestSubmission {
@@ -212,7 +212,7 @@ pub(crate) enum Command {
         reply: Reply<()>,
     },
     /// Register an annotation layer. The answer is the layer's own entity, which the handler turns
-    /// into the `tessera_id` a caller later suppresses the layer by.
+    /// into the `mosaica_id` a caller later suppresses the layer by.
     RegisterLayer {
         declaration: Box<mosaica_types::layer::LayerDeclaration>,
         reply: Reply<EntityId>,

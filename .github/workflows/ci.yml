@@ -245,7 +245,7 @@ jobs:
         run: |
           .venv/bin/pytest -v tests \
             --ignore tests/test_differential.py \
-            --deselect tests/test_identity.py::test_fixture_bundle_rows_are_stored_in_morton_then_tessera_id_order \
+            --deselect tests/test_identity.py::test_fixture_bundle_rows_are_stored_in_morton_then_mosaica_id_order \
             --deselect tests/test_identity.py::test_fixture_bundle_identity_column_agrees_with_the_key \
             --deselect tests/test_identity.py::test_fixture_bundle_sidecar_round_trips_through_the_locator
 

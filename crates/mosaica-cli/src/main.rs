@@ -37,9 +37,9 @@ enum Command {
     /// directory in `[bundle] path`, each relative to the file's own directory. The declaration
     /// names the source files.
     ///
-    /// Every build creates a new bundle with a new key for its `tessera_id`s, so a `tessera_id`
+    /// Every build creates a new bundle with a new key for its `mosaica_id`s, so a `mosaica_id`
     /// read from an earlier bundle does not name an item in this one. A copy of a bundle keeps
-    /// its `tessera_id`s.
+    /// its `mosaica_id`s.
     ///
     /// The other flags override `mosaica.toml` or tune the build.
     Build {
@@ -173,12 +173,12 @@ enum Command {
         #[arg(long)]
         payloads: bool,
     },
-    /// Verify a bundle's files and every row's `tessera_id`.
+    /// Verify a bundle's files and every row's `mosaica_id`.
     ///
     /// It opens the bundle as the server does. That checks every manifest digest, the size and
     /// SHA-256 of every file except the unique indexes' runs, and that each segment's permutation
     /// maps one-to-one onto its rows. `--deep` hashes those runs too. It then confirms that the row space holds exactly the rows the segments claim, and computes
-    /// each row's `tessera_id` again from the identity key, failing on the first row that
+    /// each row's `mosaica_id` again from the identity key, failing on the first row that
     /// differs.
     ///
     /// It also prints to stderr each indexed keyword column's count of distinct values against
@@ -266,7 +266,7 @@ enum Command {
     /// writes each page as it arrives. Each of the route's fields is the argument of the same
     /// name, sent only when given, so the server's own setting applies otherwise.
     ///
-    /// The columns are `tessera_id`, the fields in the order named, the system fields in the order
+    /// The columns are `mosaica_id`, the fields in the order named, the system fields in the order
     /// named, then `mosaica:matched` under `--keep-unmatched`. A category field is a dictionary
     /// column of its value keys, each page's dictionary holding the keys of its own rows. A read
     /// that returns no row writes these columns with no rows.
@@ -283,7 +283,7 @@ enum Command {
     ///
     /// An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read is
     /// carried across `POST /v1/artifacts` responses, and written, as `mosaica items` carries and
-    /// writes one. The columns are `tessera_id`, the properties in the order named, then
+    /// writes one. The columns are `mosaica_id`, the properties in the order named, then
     /// `matched_count` under `--filters`. The rows are in order of level, and in the order they
     /// were published within a level.
     ///
@@ -412,7 +412,7 @@ enum CorpusCommand {
     /// Takes no `--n`, and that absence is the point: an item's properties depend on the seed and
     /// the item alone (the generator is prefix-stable), so the verb answers for any key a
     /// response carried without being told how large the corpus was. The keys are `fx_key`
-    /// values — item identities — never `tessera_id`s, which invert to entity ids and say nothing
+    /// values — item identities — never `mosaica_id`s, which invert to entity ids and say nothing
     /// about items (correctness-suite §8).
     Items {
         /// The run's seed.

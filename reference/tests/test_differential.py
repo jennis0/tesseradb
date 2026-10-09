@@ -314,7 +314,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
     assert counts_before == oracle_before
 
     target_entity = min(base_mask)
-    target = oracle_bundle.tessera_id_of(target_entity)
+    target = oracle_bundle.mosaica_id_of(target_entity)
     resp = server.change(target, "suppress")
     assert resp.status_code == 200, resp.text
 
@@ -371,7 +371,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
     payload = []
     for entity_id, op, terms in batch:
-        item = {"op": op, "match": {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id))}}
+        item = {"op": op, "match": {"mosaica_id": str(oracle_bundle.mosaica_id_of(entity_id))}}
         if op == "predicate":
             # The access label is the comma-joined decimal term ids (R6);
             # the dictionary's descriptor bytes for these ids are exactly those decimal strings.
@@ -404,10 +404,10 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
 
 def test_items_drilldown_returns_the_items_own_record(server, oracle_bundle: Bundle):
-    """`/v1/items` on a visible item, named by the `tessera_id` the oracle computes under the
+    """`/v1/items` on a visible item, named by the `mosaica_id` the oracle computes under the
     bundle's key, returns that item's record: its source id is the one the bundle's unique index
     holds for the entity. Requires a post-r6 bundle (`identity` in MANIFEST) so the oracle can
-    compute `tessera_id_of`."""
+    compute `mosaica_id_of`."""
     if oracle_bundle.identity_key is None:
         pytest.skip("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
 
@@ -435,9 +435,9 @@ def test_items_drilldown_returns_the_items_own_record(server, oracle_bundle: Bun
     # ordering dependence between tests sharing a mutable server is exactly what this comment
     # exists to stop someone reintroducing.
     target_entity = max(base_mask)
-    tessera_id = oracle_bundle.tessera_id_of(target_entity)
+    mosaica_id = oracle_bundle.mosaica_id_of(target_entity)
     value_of = {e: v for v, e in oracle_bundle.unique_entities(JOIN_FIELD).items()}
 
-    resp = server.item(token, tessera_id)
+    resp = server.item(token, mosaica_id)
     assert resp.status_code == 200, resp.text
     assert resp.json()["fields"][JOIN_FIELD] == value_of[target_entity]

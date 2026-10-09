@@ -14,7 +14,7 @@ import type {Quantisation, RegionVerdict} from './types.js';
  * - `box`: `bbox` is `[x0, y0, x1, y1]`, with either corner first.
  * - `lasso`: `points` are the drawn polygon's vertices, closed implicitly. A lasso needs at least
  *   three points; one with fewer clears the selection.
- * - `artifact`: `id` is the artifact's `tessera_id`, and the selection is its published shape.
+ * - `artifact`: `id` is the artifact's `mosaica_id`, and the selection is its published shape.
  *
  * @category Projections
  */
@@ -68,7 +68,7 @@ export type RegionProjection = {
    */
   verdict: RegionVerdict | null;
   /**
-   * The held marks inside the shape: the `tessera_id`s and world positions (`x, y` pairs) of the
+   * The held marks inside the shape: the `mosaica_id`s and world positions (`x, y` pairs) of the
    * first {@link REGION_HELD_LIMIT}, and the `count` of every one.
    */
   held: {ids: BigUint64Array; positions: Float32Array; count: number};

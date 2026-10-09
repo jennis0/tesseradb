@@ -1,4 +1,4 @@
-//! `POST /v1/items/{tessera_id}`'s `labels` array: **the clauses the session satisfies, in held
+//! `POST /v1/items/{mosaica_id}`'s `labels` array: **the clauses the session satisfies, in held
 //! terms only**: each held term of a label that is a term or a disjunction of terms, and one
 //! satisfied clause of each label holding a conjunction.
 //!
@@ -23,9 +23,9 @@ use common::*;
 struct Fixture {
     _tmp: TempDir,
     server: TestServer,
-    /// A `tessera_id` for an item labelled `{"0", "1"}`.
+    /// A `mosaica_id` for an item labelled `{"0", "1"}`.
     two_labels: u64,
-    /// A `tessera_id` for an item labelled `{"0"}` alone.
+    /// A `mosaica_id` for an item labelled `{"0"}` alone.
     one_label: u64,
 }
 

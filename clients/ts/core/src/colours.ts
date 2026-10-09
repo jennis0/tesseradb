@@ -31,7 +31,7 @@ export class ArtifactColours {
     return this.name;
   }
 
-  /** The colours set by layer and `tessera_id` in place of the palette's. */
+  /** The colours set by layer and `mosaica_id` in place of the palette's. */
   get overrides(): ChosenColours {
     return this.chosen;
   }
@@ -75,7 +75,7 @@ export class ArtifactColours {
       return this.map;
     }
     this.map = artifactColours(
-      table.liveEntries().map(({ordinal, entry}) => ({ordinal, layer: entry.layer, tesseraId: entry.tesseraId, slot: entry.slot, paletteSize: entry.paletteSize})),
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, layer: entry.layer, mosaicaId: entry.mosaicaId, slot: entry.slot, paletteSize: entry.paletteSize})),
       chosen
     );
     return this.map;

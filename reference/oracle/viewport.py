@@ -14,13 +14,13 @@ can tell which one is wrong by reading it. It is therefore written the slow, lit
 purpose — if it ever looks clever, that is the bug.
 
 §7.2's definition, verbatim, for a tile *T* at depth *d* with `vis(T)` its visible set ordered
-ascending by `tessera_id`:
+ascending by `mosaica_id`:
 
 ```
 cap       = min(k, K_max)
-C_θ(T)    = |{ i ∈ vis(T) : tessera_id(i) < P_d }|
+C_θ(T)    = |{ i ∈ vis(T) : mosaica_id(i) < P_d }|
 m(T)      = min(cap, max(min(k_min, cap), C_θ(T)))
-served(T) = the min(m(T), |vis(T)|) smallest members of vis(T) by tessera_id
+served(T) = the min(m(T), |vis(T)|) smallest members of vis(T) by mosaica_id
 ```
 
 with θ anchored on two quantities of the viewer's own **composed** mask over the view: `P_d =
@@ -43,7 +43,7 @@ the threshold **saturated** (§8.5's match-layer rule — every match served, up
 ## What is literal here, and what is not — the line is drawn deliberately
 
 **Literal, and required to stay so:** the selection itself. A literal sort of the tile's visible
-identities by `tessera_id`; a literal count of how many fall below `P_d`; literal `min`/`max`
+identities by `mosaica_id`; a literal count of how many fall below `P_d`; literal `min`/`max`
 arithmetic for *m*; a literal take of the first *m*. No bitmap, no bounded heap, no partial sort,
 no early exit, no prefix comparison. The engine reaches the same answer with a single pass and a
 bounded heap, and a differential between two transcriptions of the same algorithm proves only that
@@ -64,11 +64,11 @@ side of the path from the set of artefacts the two implementations share.
 
 ## The one artefact that IS shared, and what closes it
 
-`served_rows` sorts by `self.segment.tessera_id` — **the stored column**, which is also what the
+`served_rows` sorts by `self.segment.mosaica_id` — **the stored column**, which is also what the
 engine sorts and serves by. That is a shared artefact on the one §7.2 quantity this differential
 exists to referee, and it is stated here because an earlier draft of this doc claimed the opposite
 ("oracle and engine share no stored artefact anywhere on this path"), which was false. A build
-writing a wrong-but-self-consistent `tessera_id` column — say one still correlated with signature
+writing a wrong-but-self-consistent `mosaica_id` column — say one still correlated with signature
 order, the exact r21 disclosure the negative control's docstring invokes — would be agreed with,
 not caught.
 
@@ -85,7 +85,7 @@ records.
 `conformance/tests/test_mask_catalogue.py` runs both against the catalogue bundle, so on that
 bundle a `Selection` takes nothing about the column on trust. `reference/tests/test_differential.py`
 runs the §7.2 differential over the 250k fixture and calls neither of them. On that bundle the
-shared artefact is open, and a wrong-but-self-consistent `tessera_id` column is agreed with rather
+shared artefact is open, and a wrong-but-self-consistent `mosaica_id` column is agreed with rather
 than caught.
 `conformance.md` §4.6's I7 evidence is the catalogue differential, where the hole is closed, so no
 coverage row rests on the open half — a reader need not re-derive that.
@@ -113,8 +113,8 @@ SATURATED = None
 """θ_d ≥ 1: the threshold admits every identity. A distinct state, never a value.
 
 Not `2**64 - 1`, and not `2**64`: at θ ≥ 1 the threshold must admit *every* identity, and the
-comparison is strict (`tessera_id < P_d`), so any clamp to a representable cut wrongly excludes
-the single row whose `tessera_id` is `2**64 - 1`. Python's unbounded integers would let this
+comparison is strict (`mosaica_id < P_d`), so any clamp to a representable cut wrongly excludes
+the single row whose `mosaica_id` is `2**64 - 1`. Python's unbounded integers would let this
 module get away with `2**64` as a sentinel; it does not, because §7.2 has a saturated *state* and
 this file's job is to look like §7.2.
 """
@@ -190,8 +190,8 @@ class Selection:
         self.depth = depth
         self.segment = bundle.segment(view_id)
 
-        if self.segment.tessera_id is None:
-            raise ValueError("segment has no stored tessera_id column (pre-r6 bundle)")
+        if self.segment.mosaica_id is None:
+            raise ValueError("segment has no stored mosaica_id column (pre-r6 bundle)")
 
         # The full 64-bit positions, recomputed from the source geometry: the cell half decides
         # the tile, and the whole thing is what the wire comparison is against. One derivation,
@@ -204,7 +204,7 @@ class Selection:
         # The literal pass: for every row, which depth-`depth` tile is it in, and is its entity
         # visible? Rows are collected in row order; §7.2's order is imposed at selection time by
         # an explicit sort and never inherited from storage order. The engine stores rows in
-        # `(morton, tessera_id)` order, so inheriting it here would silently assume the very
+        # `(morton, mosaica_id)` order, so inheriting it here would silently assume the very
         # ordering the differential exists to check.
         self.rows_by_tile: dict[int, list[int]] = {}
         for row in range(self.segment.row_count):
@@ -271,17 +271,17 @@ class Selection:
         m_target: int,
         filtered: bool = False,
     ) -> list[int]:
-        """§7.2's `served(T)`, as row ids in served order (ascending `tessera_id`).
+        """§7.2's `served(T)`, as row ids in served order (ascending `mosaica_id`).
 
         Four steps, one per line of the definition, in the definition's own order:
 
-            vis(T) ordered ascending by tessera_id            -- a literal sort
-            C_θ(T) = |{ i ∈ vis(T) : tessera_id(i) < P_d }|   -- a literal count
+            vis(T) ordered ascending by mosaica_id            -- a literal sort
+            C_θ(T) = |{ i ∈ vis(T) : mosaica_id(i) < P_d }|   -- a literal count
             m(T)   = min(cap, max(min(k_min, cap), C_θ(T)))   -- literal arithmetic
             served = the min(m, |vis(T)|) smallest            -- a literal slice
 
-        Ascending `tessera_id` is also the order the payload must arrive in (contracts §2.6: the
-        points batch is ordered ascending by `tessera_id` within each tile). The nesting argument's
+        Ascending `mosaica_id` is also the order the payload must arrive in (contracts §2.6: the
+        points batch is ordered ascending by `mosaica_id` within each tile). The nesting argument's
         client-truncation clause depends on the served set being a prefix, so the order is
         contract, not presentation.
 
@@ -292,7 +292,7 @@ class Selection:
         selection simply does not consult it. The caller passes `vis(T)` already filtered — this
         module holds one visible set per `Selection` and no filter machinery of its own.
         """
-        identities = self.segment.tessera_id
+        identities = self.segment.mosaica_id
         rows = sorted(self.rows_by_tile.get(tile, ()), key=lambda row: int(identities[row]))
 
         cut = SATURATED if filtered else theta_cut(v_total, m_target, self.n_occ)
@@ -311,7 +311,7 @@ class Selection:
         The differential compares by position rather than by identity deliberately: agreement then
         never depends on either side *interpreting* an identifier, only on both selecting the same
         items. It compares the **list**, not a set or a multiset — both sides are in ascending
-        `tessera_id` order and contracts §2.6 makes that order part of the payload contract (see
+        `mosaica_id` order and contracts §2.6 makes that order part of the payload contract (see
         [`served_rows`]), so list equality is strictly stronger for free.
 
         A `u64` code, not a rounded `(x, y)` pair: the comparison is now exact. The old one carried
@@ -320,14 +320,14 @@ class Selection:
         return [self.position_codes[row] for row in self.served_rows(tile, **params)]
 
     def served_identities(self, tile: int, **params) -> list[int]:
-        """[`served_rows`] as `tessera_id`s — the key §7.2's nesting property is stated over.
+        """[`served_rows`] as `mosaica_id`s — the key §7.2's nesting property is stated over.
 
         Used where the question is *which items*, not *which coordinates*: the overlay differential
         asks whether a denied item's identity appears in the payload, and two entities can share
         rounded coordinates inside one tile, so a coordinate answer to that question would be
         approximate where an exact one is available.
         """
-        return [int(self.segment.tessera_id[row]) for row in self.served_rows(tile, **params)]
+        return [int(self.segment.mosaica_id[row]) for row in self.served_rows(tile, **params)]
 
     # -- the negative control ---------------------------------------------------------------------
 
@@ -355,7 +355,7 @@ class Selection:
         comparison to do the work.
         """
         rows = self.rows_by_tile.get(tile, [])
-        identities = self.segment.tessera_id
+        identities = self.segment.mosaica_id
         ordered = sorted(rows, key=lambda row: int(identities[row]))
 
         cut = theta_cut(v_total, m_target, self.n_occ)

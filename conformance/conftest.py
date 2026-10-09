@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO_ROOT / "conformance"))
 #
 # The **catalogue** fixtures below are shared, and for the opposite reason: the adversarial mask
 # catalogue is one designed corpus with one designed entity-ID layout, and two modules asking for
-# two builds of it would be two different `tessera_id` orderings of the same items.
+# two builds of it would be two different `mosaica_id` orderings of the same items.
 
 
 @pytest.fixture(scope="session")
@@ -192,7 +192,7 @@ def catalogue_density_server(tmp_path_factory, private_catalogue_bundle):
 # ---------------------------------------------------------------------------------------------
 #
 # A second designed corpus beside the catalogue, and session-scoped for the same reason: it has one
-# designed entity-ID layout, and two builds of it would be two different `tessera_id` orderings of
+# designed entity-ID layout, and two builds of it would be two different `mosaica_id` orderings of
 # the same items. Its own module doc says why it is not a widening of the catalogue.
 
 

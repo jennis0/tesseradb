@@ -9,7 +9,7 @@
 // get different counts for the same cluster, and under `--min-visible` a cluster the broad one sees
 // is absent for the narrow one.
 //
-// Members are published by `tessera_id`, since the ids come back from the server in the same
+// Members are published by `mosaica_id`, since the ids come back from the server in the same
 // response as the positions clustered on.
 //
 // The viewer draws a cluster from the geometry the server derives per principal (`centroid`,
@@ -146,7 +146,7 @@ const xs = [];
 const ys = [];
 for (const frame of sampled.filter((f) => f.kind === 3)) {
   const table = tableFromIPC(frame.payload);
-  const id = table.getChild('tessera_id').toArray();
+  const id = table.getChild('mosaica_id').toArray();
   const code = table.getChild('code').toArray();
   const halves = new Uint32Array(code.buffer, code.byteOffset, code.length * 2);
   for (let i = 0; i < id.length; i++) {
@@ -235,7 +235,7 @@ const declaration = clusterLayerDeclaration({
 });
 
 const layer = accepted('register', await control.declareLayer(declaration));
-console.log(`registered ${layer.name} (tessera_id ${layer.tessera_id}), the address to suppress it by`);
+console.log(`registered ${layer.name} (mosaica_id ${layer.mosaica_id}), the address to suppress it by`);
 
 let batch = [];
 let batchMembers = 0;
@@ -247,7 +247,7 @@ const publish = async () => {
     level: 0,
     artifacts: batch.map((c) => ({
       key: c.key,
-      members: {tessera_id: c.members.map((id) => id.toString())}
+      members: {mosaica_id: c.members.map((id) => id.toString())}
     }))
   });
   const body = accepted('publish', answer);
@@ -280,7 +280,7 @@ if (labelLayer) {
   });
   const termVisible = new Set();
   for (const frame of termSample.filter((f) => f.kind === 3)) {
-    for (const id of tableFromIPC(frame.payload).getChild('tessera_id').toArray()) termVisible.add(id);
+    for (const id of tableFromIPC(frame.payload).getChild('mosaica_id').toArray()) termVisible.add(id);
   }
   console.log(`term ${labelTerm} sees ${termVisible.size.toLocaleString()} of the sampled points`);
 
@@ -291,7 +291,7 @@ if (labelLayer) {
     clusters: layerName
   });
   const labelsRegistered = accepted('register labels', await control.declareLayer(labelDeclaration));
-  console.log(`registered ${labelLayer} (tessera_id ${labelsRegistered.tessera_id})`);
+  console.log(`registered ${labelLayer} (mosaica_id ${labelsRegistered.mosaica_id})`);
 
   const labels = [];
   for (const cluster of clusters) {
@@ -320,10 +320,10 @@ if (labelLayer) {
       level: 0,
       artifacts: pending.map((l) => ({
         key: l.key,
-        members: {tessera_id: l.members.map((id) => id.toString())},
+        members: {mosaica_id: l.members.map((id) => id.toString())},
         content: l.variations.map((v) => ({
           values: v.values,
-          generated_from: {tessera_id: v.generated_from.map((id) => id.toString())}
+          generated_from: {mosaica_id: v.generated_from.map((id) => id.toString())}
         })),
         // The target is named by its key.
         attached_to: {layer: layerName, level: 0, key: l.cluster}

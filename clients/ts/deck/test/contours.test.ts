@@ -11,7 +11,7 @@ type Shaped = Artifact & {shape: Shape | null};
 
 const artifact = (id: bigint, parent: bigint | null, count = 10n): Shaped => ({
   layer: 'clusters',
-  tesseraId: id,
+  mosaicaId: id,
   key: `c-${id}`,
   maskedCount: count,
   centroid: [2 ** 31, 2 ** 31],
@@ -39,7 +39,7 @@ const meta = (layers: {name: string; computedContent?: string[]; shape?: 'derive
  * parent, at 0). Nothing under test derives it again.
  */
 function withRungs(served: Artifact[]): Artifact[] {
-  const byId = new Map(served.map((a) => [a.tesseraId, a]));
+  const byId = new Map(served.map((a) => [a.mosaicaId, a]));
   const depthOf = (a: Artifact, guard = 0): number => {
     const parent = a.parentIds.length === 0 ? undefined : byId.get(a.parentIds[0]!);
     return parent && guard < 1024 ? depthOf(parent, guard + 1) + 1 : 0;
@@ -55,9 +55,9 @@ const outline = (a: Shaped, fetched?: Shape | null) => outlineOf(servedOf(a), fe
 
 function projection(input: Shaped[]): ArtifactsProjection {
   const served = withRungs(input.map(servedOf));
-  const shapes = new Map(input.filter((a) => a.shape !== null).map((a) => [a.tesseraId, a.shape!]));
+  const shapes = new Map(input.filter((a) => a.shape !== null).map((a) => [a.mosaicaId, a.shape!]));
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
+  const ordinals = table.take(served.map((a) => ({mosaicaId: a.mosaicaId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
   return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], attached: new Map(), lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes, colours: new Map(), palette: 'tableau10', overrides: new Map(), coverage: {current: 0, stale: 0}};
 }
 

@@ -26,7 +26,7 @@ own frame and its own layout, and a second group of two behind a gate.
   equality `served(view) == mask ∩ members(view)` in every view, with `members(view)` read off
   the view's permutation. One token answers every view, and no request re-authorises.
 - **Identity is stable across views** — I9/I10's multi-view form, and §9's cross-view linkage
-  note. An entity present in several views is served the **same** `tessera_id` in each and a
+  note. An entity present in several views is served the **same** `mosaica_id` in each and a
   **different** position; the second half is what stops the first passing on a corpus that reused
   one layout.
 - **The cross-view leak check** — the epic's own sentence, and what it does and does not prove is
@@ -34,7 +34,7 @@ own frame and its own layout, and a second group of two behind a gate.
 - **Pinned leaves** (§5) — a scoped filter under its own view, pinned from another view by key,
   and pinned across views of one group; per-view presence; and the two refusals the section
   names.
-- **Ordering per view** — contracts §2.6's ascending `tessera_id` within each tile, in every view.
+- **Ordering per view** — contracts §2.6's ascending `mosaica_id` within each tile, in every view.
 - **The gate** (§6) — a group, `sealed`, whose `visibility` is a real access label. Three separate
   claims: a principal who fails it finds the group on **no** surface — absent from `/v1/meta`'s
   roster whole, a 404 indistinguishable from a name nobody declared, and the unknown-column
@@ -50,7 +50,7 @@ view's positions from **that view's own points file** — the build's input, not
 its tile membership by applying `tile_of` to every row, so a build that wrote a wrong Morton
 column and then served consistently by its own wrong values fails here rather than agreeing.
 
-What is shared is `viewport.py`'s one shared artefact, the stored `tessera_id` column, and this
+What is shared is `viewport.py`'s one shared artefact, the stored `mosaica_id` column, and this
 module closes it the way `test_mask_catalogue.py` does: `verify_identity_cross_check` and
 `derive_row_order` are run against **every** view before anything rests on the column.
 
@@ -222,7 +222,7 @@ def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:
 
 
 def _served_identities(raw: bytes, entity_of_fx: dict[int, int]) -> dict[int, int]:
-    """`{entity: tessera_id}` for every point the response served.
+    """`{entity: mosaica_id}` for every point the response served.
 
     Both columns off the same batch, in served order, so the pairing is the response's own rather
     than a re-join through anything the oracle holds.
@@ -232,7 +232,7 @@ def _served_identities(raw: bytes, entity_of_fx: dict[int, int]) -> dict[int, in
         return {}
     table = decode_viewport_points(raw)
     keys = table.column("fx_key").to_pylist()
-    idents = table.column("tessera_id").to_pylist()
+    idents = table.column("mosaica_id").to_pylist()
     return {entity_of_fx[key]: int(ident) for key, ident in zip(keys, idents)}
 
 
@@ -263,7 +263,7 @@ def test_the_corpus_is_the_shape_every_case_below_assumes(multiview_bundle: Bund
 def test_the_stored_identity_column_is_the_permutation_it_claims_in_every_view(
     multiview_bundle: Bundle,
 ):
-    """`tessera_id` is `forward(key, shard, entity_of_row)` and the rows are stored in that order.
+    """`mosaica_id` is `forward(key, shard, entity_of_row)` and the rows are stored in that order.
 
     `viewport.py`'s module doc names the stored identity column as the one artefact the selection
     differential shares with the engine, and names these two checks as what closes it. Run **per
@@ -411,7 +411,7 @@ def test_the_mask_the_oracle_derives_carries_no_view(masks, members):
 def test_one_entity_serves_one_identity_and_several_positions(
     multiview_bundle: Bundle, multiview_server, tokens, entity_of_fx
 ):
-    """The same entity carries the same `tessera_id` in every view, and a different position.
+    """The same entity carries the same `mosaica_id` in every view, and a different position.
 
     The view is not an input to the keyed bijection (§9's cross-view linkage note, C17), so a
     viewer joins a visible item to itself across views — that is the design, and this is what
@@ -476,7 +476,7 @@ def test_every_view_together_yields_exactly_what_the_mask_licenses(
     Everything served across **every view this principal may reach**, unioned in entity space, is
     exactly the mask: no view's response contains an entity outside it, and the combination of
     every view yields no identifier the mask does not already explain. The identity half rides on
-    the same union — `tessera_id` is per entity and not per view, so a distinct identifier
+    the same union — `mosaica_id` is per entity and not per view, so a distinct identifier
     appearing across the views that the mask cannot account for would show up here as an entity
     that is not in it.
 
@@ -855,7 +855,7 @@ def test_points_are_served_ascending_by_identity_within_each_tile(
     """Contracts §2.6's within-tile order, in every view.
 
     Order is contract rather than presentation: §7.2's nesting argument has the served set be a
-    prefix of the tile's visible set by ascending `tessera_id`, and a client truncating a response
+    prefix of the tile's visible set by ascending `mosaica_id`, and a client truncating a response
     relies on it. A view owns the permutation and therefore the storage order, so this is a claim
     about each row space separately — asserting it in the plain view alone would leave three
     unchecked.

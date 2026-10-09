@@ -329,7 +329,7 @@ def ensure_fixture_bundle(
     `CURRENT` alone would hand every test a bundle the server will not open, and the failure
     surfaces as an opaque fixture-setup error rather than "your fixture is stale".
 
-    Every build generates the bundle's identity key, so the fixture's `tessera_id`s differ between
+    Every build generates the bundle's identity key, so the fixture's `mosaica_id`s differ between
     rebuilds, which is why nothing may persist them across runs.
 
     The receipt above, not this docstring, keeps a flag from being forgotten: reuse is decided by
@@ -488,7 +488,7 @@ def fixture_recipe(argv: list[str], *, declaration: str = "") -> dict:
     them would force a rebuild per worktree. The binary itself is recorded by [`write_recipe`].
 
     The recipe cannot pin the identity key: every build generates its own, so two bundles from an
-    identical recipe have different `tessera_id`s. Nothing may persist a `tessera_id` from this
+    identical recipe have different `mosaica_id`s. Nothing may persist a `mosaica_id` from this
     fixture across runs, as the docstring above says.
     """
     argv = argv[1:]
@@ -708,10 +708,10 @@ class Server:
             timeout=30,
         )
 
-    def artifact_card(self, token: str, tessera_id: int, view_id: str, **body) -> requests.Response:
-        """`POST /v1/artifacts/{tessera_id}`: one artifact's card, its drawn shape included."""
+    def artifact_card(self, token: str, mosaica_id: int, view_id: str, **body) -> requests.Response:
+        """`POST /v1/artifacts/{mosaica_id}`: one artifact's card, its drawn shape included."""
         return requests.post(
-            f"{self.viewer_base}/v1/artifacts/{tessera_id}",
+            f"{self.viewer_base}/v1/artifacts/{mosaica_id}",
             headers={"Authorization": f"Bearer {token}"},
             json={"view": view_id, **body},
             timeout=30,
@@ -756,9 +756,9 @@ class Server:
             timeout=10,
         )
 
-    def change(self, tessera_id: int | str, op: str, *, strict: bool = False) -> requests.Response:
-        """One `/control/changes` item, naming the item by its `tessera_id`."""
-        return self.changes([{"op": op, "match": {"tessera_id": str(tessera_id)}}], strict=strict)
+    def change(self, mosaica_id: int | str, op: str, *, strict: bool = False) -> requests.Response:
+        """One `/control/changes` item, naming the item by its `mosaica_id`."""
+        return self.changes([{"op": op, "match": {"mosaica_id": str(mosaica_id)}}], strict=strict)
 
     def browse(self, token: str, **body) -> requests.Response:
         """`POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4) — the raw response, not

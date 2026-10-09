@@ -152,7 +152,7 @@ export class MosaicaClusterFilter extends MosaicaElement {
   @property() accessor placeholder = '';
   /**
    * Where set, the box picks a cluster rather than filtering by it: choosing a row calls this with
-   * its `tessera_id` as a decimal string, its name, its path of parents' names as the list shows
+   * its `mosaica_id` as a decimal string, its name, its path of parents' names as the list shows
    * it and its `rung`, changes no clause and empties the box, and no row shows as chosen.
    */
   @property({attribute: false}) accessor choose: ((cluster: {id: string; name: string | null; path: string; rung: number}) => void) | null = null;
@@ -161,7 +161,7 @@ export class MosaicaClusterFilter extends MosaicaElement {
   @state() accessor search = '';
   /** Whether the list is open. @internal */
   @state() accessor listOpen = false;
-  /** The row the arrow keys reached, by `tesseraId`; `null` is the first that can be chosen. @internal */
+  /** The row the arrow keys reached, by `mosaicaId`; `null` is the first that can be chosen. @internal */
   @state() accessor activeId: bigint | null = null;
   /** The top-level clusters, once fetched. @internal */
   @state() accessor tops: Offer[] | null = null;
@@ -224,7 +224,7 @@ export class MosaicaClusterFilter extends MosaicaElement {
   }
 
   private offer(row: BrowseRow): Offer {
-    this.rows.set(row.tesseraId, row);
+    this.rows.set(row.mosaicaId, row);
     return {row, path: row.parentIds.length === 0 ? [] : null, beyond: false};
   }
 
@@ -287,12 +287,12 @@ export class MosaicaClusterFilter extends MosaicaElement {
       const up = at.parentIds[0]!;
       let parent = this.rows.get(up);
       if (!parent && ask) {
-        let held = this.parentsOf.get(at.tesseraId);
+        let held = this.parentsOf.get(at.mosaicaId);
         if (!held) {
-          held = this.browse({parent: at.tesseraId, limit: 1}).then((p) => p.parents, () => []);
-          this.parentsOf.set(at.tesseraId, held);
+          held = this.browse({parent: at.mosaicaId, limit: 1}).then((p) => p.parents, () => []);
+          this.parentsOf.set(at.mosaicaId, held);
         }
-        for (const r of await held) this.rows.set(r.tesseraId, r);
+        for (const r of await held) this.rows.set(r.mosaicaId, r);
         parent = this.rows.get(up);
       }
       if (!parent) break;
@@ -318,18 +318,18 @@ export class MosaicaClusterFilter extends MosaicaElement {
       this.search = '';
       this.found = null;
       this.listOpen = false;
-      this.choose({id: idString(row.tesseraId), name: artifactName(row), path: offer.path && offer.path.length > 0 ? pathText(offer.path, offer.beyond, offer.path.length) : '', rung: row.rung});
+      this.choose({id: idString(row.mosaicaId), name: artifactName(row), path: offer.path && offer.path.length > 0 ? pathText(offer.path, offer.beyond, offer.path.length) : '', rung: row.rung});
       return;
     }
     const members = s.get('filters').members;
-    const on = this.held().some((m) => m.artifact === row.tesseraId && !m.outside);
+    const on = this.held().some((m) => m.artifact === row.mosaicaId && !m.outside);
     const name = artifactName(row);
     s.setMembers(
       on
-        ? withoutMember(members, this.layer, row.tesseraId, 'filter')
-        : withMember(members, {layer: this.layer, artifact: row.tesseraId, outside: false, verb: 'filter', ...(name === null ? {} : {label: name})})
+        ? withoutMember(members, this.layer, row.mosaicaId, 'filter')
+        : withMember(members, {layer: this.layer, artifact: row.mosaicaId, outside: false, verb: 'filter', ...(name === null ? {} : {label: name})})
     );
-    emit(this, 'mosaica-clausechange', {id: idString(row.tesseraId), layer: this.layer, outside: false, verb: 'filter', on: !on});
+    emit(this, 'mosaica-clausechange', {id: idString(row.mosaicaId), layer: this.layer, outside: false, verb: 'filter', on: !on});
     this.search = '';
     this.found = null;
     this.listOpen = false;
@@ -365,7 +365,7 @@ export class MosaicaClusterFilter extends MosaicaElement {
     else super.focus(options);
   }
 
-  /** How many of each offer's parents its path names, where all of them do not fit; by `tessera_id`. */
+  /** How many of each offer's parents its path names, where all of them do not fit; by `mosaica_id`. */
   private pathFits = new Map<bigint, number>();
   /** The rows and width {@link fitPaths} last measured. */
   private pathsMeasured = '';
@@ -385,7 +385,7 @@ export class MosaicaClusterFilter extends MosaicaElement {
     let changed = false;
     for (const el of shown) {
       const id = BigInt(el.dataset.id!);
-      const o = this.listed()?.find((x) => x.row.tesseraId === id);
+      const o = this.listed()?.find((x) => x.row.mosaicaId === id);
       if (!o?.path || el.clientWidth === 0) continue;
       context.font = getComputedStyle(el).font;
       let n = o.path.length;
@@ -421,32 +421,32 @@ export class MosaicaClusterFilter extends MosaicaElement {
     const title = layer.title || layer.name;
     const on = new Set(this.choose ? [] : this.held().filter((m) => !m.outside).map((m) => m.artifact));
     const counts = countsByKey(this.counts.entry());
-    const countOf = (o: Offer) => counts?.get(o.row.tesseraId.toString());
+    const countOf = (o: Offer) => counts?.get(o.row.mosaicaId.toString());
     const listed = this.listed();
     // Largest first once the counts land; the server's order until then.
     const offers = listed === null ? [] : counts === null ? listed : [...listed].sort((a, b) => (countOf(b) ?? -1) - (countOf(a) ?? -1));
-    const active = offers.find((o) => o.row.tesseraId === this.activeId) ?? offers[0] ?? null;
+    const active = offers.find((o) => o.row.mosaicaId === this.activeId) ?? offers[0] ?? null;
     const move = (by: 1 | -1) => {
       if (offers.length === 0) return;
       const at = active ? offers.indexOf(active) : -1;
-      this.activeId = offers[(at + by + offers.length) % offers.length]!.row.tesseraId;
+      this.activeId = offers[(at + by + offers.length) % offers.length]!.row.mosaicaId;
     };
     const open = this.listOpen && offers.length > 0;
     const option = (o: Offer) => {
       const name = artifactName(o.row);
       const count = countOf(o);
       const full = o.path && o.path.length > 0 ? pathText(o.path, o.beyond, o.path.length) : '';
-      const path = o.path && o.path.length > 0 ? pathText(o.path, o.beyond, this.pathFits.get(o.row.tesseraId) ?? o.path.length) : '';
-      return html`<button type="button" part="option" role="option" id=${`c-${o.row.tesseraId}`} tabindex="-1" data-id=${idString(o.row.tesseraId)} ?data-active=${o === active}
-        aria-selected=${on.has(o.row.tesseraId) ? 'true' : 'false'}
+      const path = o.path && o.path.length > 0 ? pathText(o.path, o.beyond, this.pathFits.get(o.row.mosaicaId) ?? o.path.length) : '';
+      return html`<button type="button" part="option" role="option" id=${`c-${o.row.mosaicaId}`} tabindex="-1" data-id=${idString(o.row.mosaicaId)} ?data-active=${o === active}
+        aria-selected=${on.has(o.row.mosaicaId) ? 'true' : 'false'}
         @mousedown=${(e: Event) => e.preventDefault()} @click=${() => this.toggle(o)}>
-        <span class="opt"><span part="name" ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>${path ? html`<span part="path" data-id=${idString(o.row.tesseraId)} title=${full}><bdi>${path}</bdi></span>` : nothing}</span>
+        <span class="opt"><span part="name" ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>${path ? html`<span part="path" data-id=${idString(o.row.mosaicaId)} title=${full}><bdi>${path}</bdi></span>` : nothing}</span>
         ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
       </button>`;
     };
     const box = html`<div class="combo">
       <div class="input">${icon('search', 12)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder=${this.placeholder || 'Type a name'}
-        role="combobox" aria-expanded=${open ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${open && active ? `c-${active.row.tesseraId}` : nothing}
+        role="combobox" aria-expanded=${open ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${open && active ? `c-${active.row.mosaicaId}` : nothing}
         aria-label=${`${title}: find a cluster`} .value=${this.search}
         @focus=${() => {
           this.fetchTops();
@@ -466,7 +466,7 @@ export class MosaicaClusterFilter extends MosaicaElement {
             this.listOpen = false;
           }
         }} /></div>
-      ${open ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${title}>${repeat(offers, (o) => o.row.tesseraId, option)}</div>` : nothing}
+      ${open ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${title}>${repeat(offers, (o) => o.row.mosaicaId, option)}</div>` : nothing}
     </div>`;
     const typed = this.search.trim() !== '';
     const note = this.refusal

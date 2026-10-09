@@ -193,7 +193,7 @@ impl SegmentData {
     ) -> Result<mosaica_types::EntityId> {
         self.entities.entity_of(
             local,
-            self.columns.tessera_id()[local as usize],
+            self.columns.mosaica_id()[local as usize],
             key,
             shard_id,
             &self.seg_id,
@@ -635,7 +635,7 @@ fn open_prefix(
         });
     }
 
-    // A bundle written by a different `tessera_id` construction (or round count) must not be
+    // A bundle written by a different `mosaica_id` construction (or round count) must not be
     // silently read by this one (contracts §2.6 r6) — fail closed before any segment is opened.
     manifest.identity.validate()?;
 
@@ -654,7 +654,7 @@ fn open_prefix(
         verify_files(&prefix_dir, &manifest.files)?;
     }
 
-    // Row space above the build bound is rebuilt from each flush segment's own `tessera_id`
+    // Row space above the build bound is rebuilt from each flush segment's own `mosaica_id`
     // column — see [`SegmentExtent::rebuild`] for why nothing is stored for it and what that
     // costs. Parsed once here rather than per segment: `validate()` above has already refused a
     // manifest whose identity configuration this reader cannot honour.
@@ -960,7 +960,7 @@ fn open_prefix(
 
             // Every segment after the first is one a flush appended or a merge collapsed, and it
             // owns row space above the base. Its entity→row mapping is rebuilt here from its own
-            // `tessera_id` column and the rows an edit moved; see
+            // `mosaica_id` column and the rows an edit moved; see
             // [`SegmentExtent::rebuild`]. `with_extent` then re-checks contiguity and
             // well-formedness, so a manifest listing segments out of entity order, or one whose
             // `row_count` disagrees with what the extent actually owns, fails closed here rather
@@ -1754,7 +1754,7 @@ impl MortonSlice {
         self.mmap.is_empty()
     }
 
-    /// The codes, in row order (ascending; no further tiebreak beyond `tessera_id` at write
+    /// The codes, in row order (ascending; no further tiebreak beyond `mosaica_id` at write
     /// time — contracts §2.6 r6).
     pub fn u32(&self) -> &[u32] {
         // SAFETY: length is a checked multiple of 4 (validated at `load`); the mmap base is
@@ -1770,7 +1770,7 @@ impl MortonSlice {
 ///
 /// # What it is for
 ///
-/// Row order is `(morton, tessera_id)`, so the rows of one leaf cell are contiguous **and their
+/// Row order is `(morton, mosaica_id)`, so the rows of one leaf cell are contiguous **and their
 /// identities ascend within it**. That second half is what selection needs and what nothing on
 /// disk previously said: given a cell's row range, the identities below a threshold are a prefix
 /// of it, and the smallest identities of a tile are a merge of its cells' prefixes. Selection
@@ -2025,7 +2025,7 @@ pub struct ColumnsRef {
 }
 
 const FIXED_COLUMNS: [(&str, DataType); 2] = [
-    ("tessera_id", DataType::UInt64),
+    ("mosaica_id", DataType::UInt64),
     ("residual", DataType::UInt32),
 ];
 
@@ -2118,10 +2118,10 @@ impl ColumnsRef {
     }
 
     /// The row→wire-identity direction (contracts §2.6, §0.3 deviations 2 and 6): the
-    /// `tessera_id` shown to viewers, stored at the row it is shown from. No entity ID is
+    /// `mosaica_id` shown to viewers, stored at the row it is shown from. No entity ID is
     /// stored here — after contracts r6 the gather cannot produce one, which is what makes
     /// I10 structural rather than a discipline at the serialisation chokepoint.
-    pub fn tessera_id(&self) -> &[u64] {
+    pub fn mosaica_id(&self) -> &[u64] {
         downcast::<UInt64Array>(&self.batch, 0).values()
     }
 

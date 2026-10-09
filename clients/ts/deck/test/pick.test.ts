@@ -5,11 +5,11 @@ import {artifactOfMark} from '../src/pick.js';
 
 /** A hovered mark names the artifact it is a member of, through its ordinal and the table. */
 
-const artifact = (id: bigint, parent: bigint | null, rung = 0): Artifact => ({layer: 'clusters', tesseraId: id, key: `c-${id}`, maskedCount: 1n, centroid: null, box: null, content: [], parentIds: parent === null ? [] : [parent], rung, matched: null, highlighted: null, target: null, slot: null});
+const artifact = (id: bigint, parent: bigint | null, rung = 0): Artifact => ({layer: 'clusters', mosaicaId: id, key: `c-${id}`, maskedCount: 1n, centroid: null, box: null, content: [], parentIds: parent === null ? [] : [parent], rung, matched: null, highlighted: null, target: null, slot: null});
 
 function projection(served: Artifact[]): ArtifactsProjection {
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
+  const ordinals = table.take(served.map((a) => ({mosaicaId: a.mosaicaId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
   return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], attached: new Map(), lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'tableau10', overrides: new Map(), coverage: {current: 0, stale: 0}};
 }
 

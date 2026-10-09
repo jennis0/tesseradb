@@ -41,7 +41,7 @@ function bodyBytes(stageNs?: string, subCells = false): Uint8Array {
       for (let p = 0; p < Number(SERVED[tileAt]!); p++) ids.push(id++);
     }
     points.push(
-      tableToIPC(new Table({tessera_id: u64(ids), code: u64(ids.map((v) => v * 7n))}), 'stream')
+      tableToIPC(new Table({mosaica_id: u64(ids), code: u64(ids.map((v) => v * 7n))}), 'stream')
     );
   }
   const total = Number(SERVED.reduce((a, b) => a + b, 0n));

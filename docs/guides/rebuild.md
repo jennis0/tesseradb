@@ -5,23 +5,23 @@ to the running server, or when a new version of Mosaica can't read the old bundl
 goes into a directory of its own while the server keeps running, and replaces the old one in a
 short stop.
 
-A rebuild changes the `tessera_id` a browser uses to name every item. The examples use [the
+A rebuild changes the `mosaica_id` a browser uses to name every item. The examples use [the
 systemd install](systemd.md), and the [Docker guide](docker.md#replace-the-bundle) shows the swap
 under Compose.
 
 ## What a rebuild changes
 
 Inside the server every item has an internal number, which never leaves it. A browser gets a
-`tessera_id` instead, which is the internal number scrambled with a key. The [security
+`mosaica_id` instead, which is the internal number scrambled with a key. The [security
 chapter](../system/security.md#a-client-never-sees-an-entity-id) explains why. `mosaica build`
 draws a new random key each time it creates a bundle and stores it in the bundle, where the server
 reads it. You never see or supply the key.
 
-So a rebuild gives every item a new `tessera_id`, even when the sources have not changed, and a
-`tessera_id` saved from the old bundle does not name an item in the new one. A client that holds
-`tessera_id`s has to read those items again after the swap, by a unique field's values or with a
+So a rebuild gives every item a new `mosaica_id`, even when the sources have not changed, and a
+`mosaica_id` saved from the old bundle does not name an item in the new one. A client that holds
+`mosaica_id`s has to read those items again after the swap, by a unique field's values or with a
 fresh read. A copy of a bundle, such as one restored from a backup, keeps its key and so keeps every
-`tessera_id`.
+`mosaica_id`.
 
 ## Build the new bundle
 

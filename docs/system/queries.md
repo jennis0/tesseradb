@@ -58,7 +58,7 @@ conformance test compares these values with the source corpus for every item, ov
 columns, a timestamp and a bool that hold both absences and genuine zeros, with absences written
 by the build and by a flush, live, after a restart and after a fold.
 
-Where a request names annotation layers, each point carries, for each of them, the `tessera_id` of
+Where a request names annotation layers, each point carries, for each of them, the `mosaica_id` of
 the artifact it belongs to that this viewer is served, the deepest where the layer has several, or a
 null. A `nested` or `dag` layer's tags are cut to the request's `artifact_budget`, so a tag can name
 an ancestor of the artifact the point belongs to. A client colours points by a layer from these
@@ -107,7 +107,7 @@ map.
 A tile can hold far more visible items than a screen can usefully draw. Rather than a flat cap on
 how many marks appear, each tile is served a number of points chosen from three density rules
 working together. Every item carries a fixed, pseudo-random rank derived from its own
-[`tessera_id`](data-model.md#what-an-item-carries) rather than from any internal ordering, so which
+[`mosaica_id`](data-model.md#what-an-item-carries) rather than from any internal ordering, so which
 items appear first at a coarse zoom is unrelated to how an item came to be authorised.
 
 | Rule | What it does |
@@ -127,7 +127,7 @@ Every tile's answer is computed fresh from the viewer's own visible set at reque
 
 At the shallow zooms a tile serves a few of its many visible items, and those are the items with
 the smallest ranks, so they are read from a segment's identity bands rather than from every visible
-item. Band `j` holds each item whose `tessera_id` has at least `j` leading zero bits, about one item
+item. Band `j` holds each item whose `mosaica_id` has at least `j` leading zero bits, about one item
 in `2^j`, with its position and rendered values copied beside it. Any band that holds every rank
 below the threshold can answer a tile; selection starts at the narrowest one expected to hold as
 many of the tile's visible items as it serves, which is wider than the narrowest holding every
@@ -147,12 +147,12 @@ request may also name the levels of each layer to answer for, by default those w
 range holds the request's zoom; which of `centroid` and `box` to serve, as `computed`, narrowing
 what the layer declares; a filter and a highlight; and a budget for `nested` and `dag` layers. A
 `per_tile` above `selection.max_artifacts_per_tile` in `/v1/meta` is refused, as is a request for a
-shape, which is read by an artifact's `tessera_id` instead.
+shape, which is read by an artifact's `mosaica_id` instead.
 
 For each tile, and each level of a `flat`, `stacked` or `tiered` layer, the response holds the
 artifacts this viewer is served that have a member the viewer can see in the tile, at most
 `per_tile` of them. They are ordered by the viewer's count of each artifact's visible members over
-the whole view, largest first, and then by `tessera_id`
+the whole view, largest first, and then by `mosaica_id`
 ([annotations](annotations.md#how-many-artifacts-a-tile-shows)). An artifact with visible members
 in several tiles is in each tile's frame, with the same count, centroid and box. Every number is
 taken over all of the artifact's members this viewer can see, wherever they lie, so a client
@@ -351,7 +351,7 @@ states.
 Two routes return in bulk what the map is computed from. `POST /v1/items` returns every item the
 viewer may see in one view that matches a filter, with the fields the caller names. `POST
 /v1/artifacts` returns every artifact of one layer the viewer is served, or the ones a list of
-`tessera_id`s names, with the properties the caller names. Both answer with pages of Apache Arrow
+`mosaica_id`s names, with the properties the caller names. Both answer with pages of Apache Arrow
 record batches, framed as a viewport response is. A caller reads a whole result by passing each
 response's cursor back in its next request until the cursor is null, and the server keeps nothing
 between requests.
@@ -364,7 +364,7 @@ corpus. Rows returned before a flush and rows returned after it come from differ
 
 ### What a read of items returns
 
-A page holds `tessera_id`, then the named fields in the order named, then either or both of two
+A page holds `mosaica_id`, then the named fields in the order named, then either or both of two
 system fields: `position`, and `labels`, the clauses of the item's labels this viewer satisfies,
 as the item card serves them. A unique
 field is named like any other. Under `keep_unmatched` every visible item is returned, with a
@@ -383,7 +383,7 @@ outside its group. An item joined into a second view before its own ingest is fl
 record fields until that flush.
 
 The rows come in one of two orders, which return the same rows. Map order is by map cell in the
-view, then by `tessera_id`, merged across the view's segments, which is the order rendered fields
+view, then by `mosaica_id`, merged across the view's segments, which is the order rendered fields
 are stored in. Stored order is by the server's internal item numbering, which is the order the
 record store holds items in. In map order a page's items are scattered through the record store,
 so each page decompresses blocks it uses only a few rows of, and the smaller the pages, the more
@@ -410,7 +410,7 @@ artifact remained, and the next request is refused as naming an unknown layer. A
 registered again under the same name is another layer, and a cursor from the first does not open
 for it.
 
-`ids` reads the artifacts those `tessera_id`s name, such as the tags on points a client holds no
+`ids` reads the artifacts those `mosaica_id`s name, such as the tags on points a client holds no
 artifact for. An identifier the viewer is not served has no row, as one naming nothing does. A
 read by `ids` builds the figures of the levels its identifiers name and no others, with the levels
 of their parents where `parents` is asked for and the levels of their targets where a target or a
@@ -583,7 +583,7 @@ small one; a range with a fractional bound has an integer field's bins cut and s
 grouping by bins has no cell level.
 
 A grouping by bins can ask for a sample size `s`. Where the set holds `N` items and `N` is more
-than `s`, the counts are taken over the set's items whose `tessera_id` lies below a cut of `s / N`
+than `s`, the counts are taken over the set's items whose `mosaica_id` lies below a cut of `s / N`
 of the identity range, about `s` items, and each count is scaled by `N` over the items counted, to
 the nearest whole number. The cut is the same for the whole set: no tile, cell or group has a floor
 or a cap, so a region dense in items is counted in proportion to its density. Identities are a

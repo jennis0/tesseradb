@@ -31,7 +31,7 @@ use mosaica_corpus::materialise::PARTITION_LAYER;
 use mosaica_corpus::{Corpus, Grant, BAY_VALUES};
 use mosaica_engine::filter::{FilterExpr, FilterOperand};
 use mosaica_engine::Engine;
-use mosaica_types::TesseraId;
+use mosaica_types::MosaicaId;
 use mosaica_lifecycle::membership::{IncomingAttachment, IncomingContent};
 use mosaica_lifecycle::IncomingArtifact;
 use mosaica_types::layer::{
@@ -463,7 +463,7 @@ fn a_label_carries_its_targets_bits() {
     // layers in one request**, which is what a layer picker offering the closure sends
     // (decision 0096) and what puts the target in the response for its dependent to read.
     let grant = "0,1,2,3,4,5,6,7,8";
-    type Row = (u64, Option<bool>, Option<bool>, Option<TesseraId>, TesseraId);
+    type Row = (u64, Option<bool>, Option<bool>, Option<MosaicaId>, MosaicaId);
     let both = |filter: Option<FilterExpr>,
                 highlight: Option<FilterExpr>|
      -> BTreeMap<(String, String), Row> {
@@ -486,7 +486,7 @@ fn a_label_carries_its_targets_bits() {
                         a.matched,
                         a.highlighted,
                         a.target,
-                        a.tessera_id,
+                        a.mosaica_id,
                     ),
                 )
             })

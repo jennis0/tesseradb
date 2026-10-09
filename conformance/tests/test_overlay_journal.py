@@ -141,10 +141,10 @@ def _oracle_counts(bundle: Bundle, mask: set[int]) -> dict[int, int]:
 
 
 def _engine_view(server, token: str, k: int, depth: int = DEPTH):
-    """`({tile: (visible, served)}, {tile: [code, ...]}, {tile: [tessera_id, ...]})`.
+    """`({tile: (visible, served)}, {tile: [code, ...]}, {tile: [mosaica_id, ...]})`.
 
     Points are split per tile by the tile batch's own `served` column and keep their arrival
-    order — contracts §2.6 makes ascending `tessera_id` within a tile part of the payload, and
+    order — contracts §2.6 makes ascending `mosaica_id` within a tile part of the payload, and
     §7.2's nesting argument depends on the served set being a prefix, so the order is contract.
     """
     raw = server.viewport(token, VIEW, depth, FULL_VIEWPORT, k=k)
@@ -214,7 +214,7 @@ def _compare_served(
             "change, membership means an item the engine had no right to draw."
         )
         assert per_tile_ids[tile] == sorted(per_tile_ids[tile]), (
-            f"{why}: tile {tile}'s points are not ascending by tessera_id (contracts §2.6). A "
+            f"{why}: tile {tile}'s points are not ascending by mosaica_id (contracts §2.6). A "
             "client truncating to its own budget would lose §7.2's nesting property."
         )
         assert served_n == len(expected), f"{why}: the `served` column disagrees for tile {tile}"
@@ -328,7 +328,7 @@ def test_served_points_follow_the_overlay_under_live_theta(
 
     * an engine that samples from the **pre-overlay** mask serves items it has just been told to
       deny. Its counts are right, so nothing before this test could see it. The identity assertion
-      at the end is that disclosure in its most direct form — no denied item's `tessera_id` appears
+      at the end is that disclosure in its most direct form — no denied item's `mosaica_id` appears
       anywhere in the payload — and it is exact rather than coordinate-approximate;
     * an engine that anchors θ on the **pre-overlay** projection serves the right items in the
       wrong quantity, everywhere, by the ratio of the two anchors. §7.2 records this as the I2 leak
@@ -361,16 +361,16 @@ def test_served_points_follow_the_overlay_under_live_theta(
         "almost the right number of marks everywhere and this run could not tell it apart"
     )
 
-    # The disclosure, stated directly: nothing denied is on the wire. By `tessera_id`, which is
+    # The disclosure, stated directly: nothing denied is on the wire. By `mosaica_id`, which is
     # exact — two entities can share rounded coordinates, so a coordinate answer to "was this item
     # served?" is approximate where an exact one is available. The identities are computed from the
     # fixture's own key (`identity.forward`), not read back from the bundle's stored column.
-    denied = {catalogue_bundle.tessera_id_of(e) for e in denied_overlay["denied"]}
+    denied = {catalogue_bundle.mosaica_id_of(e) for e in denied_overlay["denied"]}
     served_ids = {ident for tile_ids in ids.values() for ident in tile_ids}
     leaked = served_ids & denied
     assert not leaked, (
         f"{len(leaked)} denied item(s) were served as drawn marks after their deny was acked — "
-        f"e.g. tessera_id {sorted(leaked)[:3]}. The counts were correct throughout, which is "
+        f"e.g. mosaica_id {sorted(leaked)[:3]}. The counts were correct throughout, which is "
         "exactly why no counts-only test could see this."
     )
     assert served_ids, "nothing was served at all; this test proved nothing"
@@ -476,8 +476,8 @@ def test_the_point_level_overlay_differential_rejects_both_defective_engines(
     )
 
 
-def _entity_of(bundle: Bundle, tessera_id: int) -> int:
-    """`tessera_id -> entity_id`, for the negative control only.
+def _entity_of(bundle: Bundle, mosaica_id: int) -> int:
+    """`mosaica_id -> entity_id`, for the negative control only.
 
     The oracle holds the fixture's identity key, so this is a lookup rather than an inversion: the
     map is built once from the segment's own rows. It exists to name *which* items a defective
@@ -489,9 +489,9 @@ def _entity_of(bundle: Bundle, tessera_id: int) -> int:
     if _ENTITY_BY_IDENTITY is None:
         seg = bundle.segment(VIEW)
         _ENTITY_BY_IDENTITY = {
-            int(seg.tessera_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)
+            int(seg.mosaica_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)
         }
-    return _ENTITY_BY_IDENTITY.get(tessera_id, -1)
+    return _ENTITY_BY_IDENTITY.get(mosaica_id, -1)
 
 
 _ENTITY_BY_IDENTITY: dict[int, int] | None = None
@@ -683,7 +683,7 @@ def test_a_refused_operation_is_not_journalled_and_changes_nothing(
 ):
     """The whole point of `AckedJournal`: submitted is not acked.
 
-    A `/control/changes` item naming a `tessera_id` the deployment has never issued is refused
+    A `/control/changes` item naming a `mosaica_id` the deployment has never issued is refused
     (`ApiError::Unknown`). Three things must then be true, and only the first is obvious: the
     refusal is recorded so a test can assert on it; it contributes **nothing** to the composed
     mask; and the engine's own view has not moved either. A journal that recorded intent would
@@ -699,11 +699,11 @@ def test_a_refused_operation_is_not_journalled_and_changes_nothing(
     before_counts = _engine_counts(overlay_server, token)
     before_mask = journal.resolve(base_mask, session_terms)
 
-    # The `tessera_id` of an entity far past any the deployment has allocated, under its own key,
+    # The `mosaica_id` of an entity far past any the deployment has allocated, under its own key,
     # so it names nothing. It goes through the journal's own submission path, so what is under
     # test is the journal's rule and not a hand-built record of it.
-    never_issued = catalogue_bundle.tessera_id_of(2_000_000_000)
-    response = journal.change(-1, "suppress", tessera_id=never_issued)
+    never_issued = catalogue_bundle.mosaica_id_of(2_000_000_000)
+    response = journal.change(-1, "suppress", mosaica_id=never_issued)
     assert response.status_code != 200, "this call was supposed to be refused"
 
     assert journal.ops == [], "a refused operation must not enter the journal"

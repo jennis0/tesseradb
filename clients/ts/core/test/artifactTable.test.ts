@@ -7,7 +7,7 @@ const ref = (
   layer = 'clusters/x',
   rung = 0
 ): ArtifactRef => ({
-  tesseraId: id,
+  mosaicaId: id,
   layer,
   parentIds: parent === null ? [] : [parent],
   rung
@@ -23,7 +23,7 @@ describe('the session artifact table', () => {
     // The same id in a later response resolves to the same ordinal.
     expect(table.ordinalOf('clusters/x', 10n)).toBe(a);
     expect([...table.take([ref(10n)])]).toEqual([a]);
-    expect(table.entry(a!)?.tesseraId).toBe(10n);
+    expect(table.entry(a!)?.mosaicaId).toBe(10n);
   });
 
   it('links a child to a parent served in the same batch, and takes each rung from the wire', () => {
@@ -224,8 +224,8 @@ describe('the table is what a colour is built from', () => {
     const table = new SessionArtifactTable();
     const before = table.version;
     const [a, b] = table.take([
-      {tesseraId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]},
-      {tesseraId: 2n, layer: 'l', parentIds: [1n]}
+      {mosaicaId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]},
+      {mosaicaId: 2n, layer: 'l', parentIds: [1n]}
     ]);
     expect(table.version).toBeGreaterThan(before);
     expect(table.entry(a!)!.centroid).toEqual([10, 20]);
@@ -233,7 +233,7 @@ describe('the table is what a colour is built from', () => {
     // same identity.
     expect(table.entry(b!)!.centroid).toBeNull();
     const named = table.version;
-    table.take([{tesseraId: 2n, layer: 'l', parentIds: [1n], centroid: [30, 40]}]);
+    table.take([{mosaicaId: 2n, layer: 'l', parentIds: [1n], centroid: [30, 40]}]);
     expect(table.entry(b!)!.centroid).toEqual([30, 40]);
     expect(table.version).toBeGreaterThan(named);
     expect(table.entry(b!)!.parentOrdinals).toEqual([a]);
@@ -241,7 +241,7 @@ describe('the table is what a colour is built from', () => {
     expect(table.liveEntries().map((e) => e.ordinal).sort()).toEqual([a, b].sort());
     // Naming what is already named moves nothing.
     const settled = table.version;
-    table.take([{tesseraId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]}]);
+    table.take([{mosaicaId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]}]);
     expect(table.version).toBe(settled);
 
     // A freed ordinal leaves the live list and stamps the version.
@@ -261,8 +261,8 @@ describe('changesSince', () => {
     const table = new SessionArtifactTable();
     const opened = table.version;
     const [a, b] = table.take([
-      {tesseraId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]},
-      {tesseraId: 2n, layer: 'l', parentIds: []}
+      {mosaicaId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]},
+      {mosaicaId: 2n, layer: 'l', parentIds: []}
     ]);
     expect(table.changesSince(opened)).toEqual([
       {ordinal: a, kind: 'named'},
@@ -271,12 +271,12 @@ describe('changesSince', () => {
     // Nothing since the latest version, and a batch naming nothing new adds nothing.
     expect(table.changesSince(table.version)).toEqual([]);
     const named = table.version;
-    table.take([{tesseraId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]}]);
+    table.take([{mosaicaId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]}]);
     expect(table.changesSince(named)).toEqual([]);
 
     // A centroid arriving for an entry named without one, and a parent link arriving for an entry
     // already here, are both reported, and neither as `named`.
-    table.take([{tesseraId: 2n, layer: 'l', parentIds: [1n], centroid: [30, 40]}]);
+    table.take([{mosaicaId: 2n, layer: 'l', parentIds: [1n], centroid: [30, 40]}]);
     expect(table.changesSince(named)).toEqual([
       {ordinal: b, kind: 'placed'},
       {ordinal: b, kind: 'linked'}
@@ -284,7 +284,7 @@ describe('changesSince', () => {
 
     // A link set on an ordinal the same batch named is part of naming it, not `linked`.
     const linked = table.version;
-    table.take([{tesseraId: 3n, layer: 'l', parentIds: [1n], centroid: [1, 1]}]);
+    table.take([{mosaicaId: 3n, layer: 'l', parentIds: [1n], centroid: [1, 1]}]);
     expect(table.changesSince(linked)!.map((c) => c.kind)).toEqual(['named']);
 
     const before = table.version;
@@ -297,16 +297,16 @@ describe('changesSince', () => {
     const table = new SessionArtifactTable();
     // A point's membership names it with no level, as a points frame arrives before the
     // artifacts frame; the walk then reads it at level 0 and stops there.
-    const [a] = table.take([{tesseraId: 7n, layer: 'l', parentIds: []}]);
+    const [a] = table.take([{mosaicaId: 7n, layer: 'l', parentIds: []}]);
     expect(table.resolve(a!, new Set([a!]), 1)).toBe(a);
     const named = table.version;
-    table.take([{tesseraId: 7n, layer: 'l', parentIds: [], rung: 2}]);
+    table.take([{mosaicaId: 7n, layer: 'l', parentIds: [], rung: 2}]);
     expect(table.entry(a!)!.rung).toBe(2);
     expect(table.changesSince(named)).toEqual([{ordinal: a, kind: 'linked'}]);
     expect(table.resolve(a!, new Set([a!]), 1)).toBe(NO_ORDINAL);
     // A level once given is not moved by a later ref.
     const ranked = table.version;
-    table.take([{tesseraId: 7n, layer: 'l', parentIds: [], rung: 0}]);
+    table.take([{mosaicaId: 7n, layer: 'l', parentIds: [], rung: 0}]);
     expect(table.entry(a!)!.rung).toBe(2);
     expect(table.changesSince(ranked)).toEqual([]);
   });
@@ -314,7 +314,7 @@ describe('changesSince', () => {
   it('answers nothing for a reader further behind than the journal, or across a clear', () => {
     const table = new SessionArtifactTable();
     // Far enough behind that the journal has dropped the reader's version: rebuild whole.
-    for (let i = 0; i < 70_000; i++) table.take([{tesseraId: BigInt(i + 1), layer: 'l', parentIds: []}]);
+    for (let i = 0; i < 70_000; i++) table.take([{mosaicaId: BigInt(i + 1), layer: 'l', parentIds: []}]);
     expect(table.changesSince(0)).toBeNull();
     expect(table.changesSince(table.version - 10)).toHaveLength(10);
 

@@ -1,10 +1,10 @@
 """The identity rule: which item each row of a write names, written as a definition.
 
-A row names items by its `tessera_id` and by every non-null value it carries of a field declared
+A row names items by its `mosaica_id` and by every non-null value it carries of a field declared
 unique. Each identifier names the item that holds it:
 
-- a `tessera_id` names the live or suppressed item it was issued to, and a row whose `tessera_id`
-  names no such item is refused as `unknown_tessera_id`;
+- a `mosaica_id` names the live or suppressed item it was issued to, and a row whose `mosaica_id`
+  names no such item is refused as `unknown_mosaica_id`;
 - a unique value names the live or suppressed item holding it, and names nothing otherwise.
 
 A row whose identifiers name two different items is refused as `names_two_items`. One naming a
@@ -23,19 +23,19 @@ values are free for a new item. A null is no value: it names nothing, and in an 
 an item it clears the value that item holds.
 
 `strict` refuses a whole request at its first refused row. An ingest is then `409`. A change or
-member request is `404` where that row names no item or an unknown `tessera_id`, and `409` where it
+member request is `404` where that row names no item or an unknown `mosaica_id`, and `409` where it
 names two.
 
-Where two reasons apply to one row, the rule's stated order decides which is given: a `tessera_id`
+Where two reasons apply to one row, the rule's stated order decides which is given: a `mosaica_id`
 naming no item, then values naming two items, then naming no item in a row that cannot create, then
 an item an earlier kept row names, then a value an earlier kept row sets.
 
-A column of a member table, and a key of a change's `match`, that is neither `tessera_id` nor a
+A column of a member table, and a key of a change's `match`, that is neither `mosaica_id` nor a
 unique field is ignored and listed in the answer's `ignored_columns`. A `match` left with no key
-names nothing. A request with rows none of which carries `tessera_id` or a unique column is
+names nothing. A request with rows none of which carries `mosaica_id` or a unique column is
 malformed, `422`; a member table with no rows is an empty membership. An ingest batch whose rows can
 only edit, because it has no view or no row carries a position, is malformed in the same way when
-no row carries `tessera_id` or a unique column.
+no row carries `mosaica_id` or a unique column.
 
 This module is written from the rule's statement and the HTTP contract, without reference to the
 server's resolver, so that the two agreeing on a request is evidence about both.
@@ -47,12 +47,12 @@ from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
 NAMES_TWO_ITEMS = "names_two_items"
-UNKNOWN_TESSERA_ID = "unknown_tessera_id"
+UNKNOWN_MOSAICA_ID = "unknown_mosaica_id"
 NAMES_NO_ITEM = "names_no_item"
 ONE_ITEM_TWICE = "one_item_twice"
 ONE_VALUE_TWICE = "one_value_twice"
 
-REASONS = (NAMES_TWO_ITEMS, UNKNOWN_TESSERA_ID, NAMES_NO_ITEM, ONE_ITEM_TWICE, ONE_VALUE_TWICE)
+REASONS = (NAMES_TWO_ITEMS, UNKNOWN_MOSAICA_ID, NAMES_NO_ITEM, ONE_ITEM_TWICE, ONE_VALUE_TWICE)
 
 #: The status a strict ingest is refused with, whatever the reason.
 INGEST_STRICT_STATUS = 409
@@ -61,14 +61,14 @@ INGEST_STRICT_STATUS = 409
 #: refused row.
 ADDRESSING_STRICT_STATUS = {
     NAMES_NO_ITEM: 404,
-    UNKNOWN_TESSERA_ID: 404,
+    UNKNOWN_MOSAICA_ID: 404,
     NAMES_TWO_ITEMS: 409,
 }
 
 KEYWORD = "keyword"
 INTEGER = "integer"
 
-TESSERA_ID = "tessera_id"
+MOSAICA_ID = "mosaica_id"
 
 #: The columns an ingest row carries its position in: `x` and `y`, or `lon` and `lat`.
 POSITION = ("x", "y", "lon", "lat")
@@ -81,7 +81,7 @@ class Creates:
 
 @dataclass(frozen=True)
 class Names:
-    """A row that names exactly one held item, by its `tessera_id`."""
+    """A row that names exactly one held item, by its `mosaica_id`."""
 
     item: int
 
@@ -101,7 +101,7 @@ class Holdings:
     """What a deployment holds, as the rule reads it.
 
     `unique` maps each field declared unique to `KEYWORD` or `INTEGER`. `items` maps each live or
-    suppressed item's `tessera_id` to the values it holds, unique or not, keyed by column; a column
+    suppressed item's `mosaica_id` to the values it holds, unique or not, keyed by column; a column
     the item holds no value in is absent. A deleted item is not in `items`.
     """
 
@@ -149,13 +149,13 @@ def named_by(
     held: Mapping[tuple[str, object], set[int]],
     row: Mapping[str, object],
 ) -> set[int] | None:
-    """The items a row's identifiers name, or `None` where its `tessera_id` names no held item."""
+    """The items a row's identifiers name, or `None` where its `mosaica_id` names no held item."""
     items: set[int] = set()
-    tessera_id = row.get(TESSERA_ID)
-    if tessera_id is not None:
-        if int(tessera_id) not in holdings.items:
+    mosaica_id = row.get(MOSAICA_ID)
+    if mosaica_id is not None:
+        if int(mosaica_id) not in holdings.items:
             return None
-        items.add(int(tessera_id))
+        items.add(int(mosaica_id))
     for value in carried(holdings, row):
         items |= held.get(value, set())
     return items
@@ -167,13 +167,13 @@ def positioned(row: Mapping[str, object]) -> bool:
 
 
 def identifying(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> bool:
-    """Whether any row carries `tessera_id` or a unique column, null or not."""
-    return any(c == TESSERA_ID or c in holdings.unique for row in rows for c in row)
+    """Whether any row carries `mosaica_id` or a unique column, null or not."""
+    return any(c == MOSAICA_ID or c in holdings.unique for row in rows for c in row)
 
 
 def ignored_columns(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> set[str]:
     """The columns of member rows or `match`es that name nothing and are ignored."""
-    return {c for row in rows for c in row if c != TESSERA_ID and c not in holdings.unique}
+    return {c for row in rows for c in row if c != MOSAICA_ID and c not in holdings.unique}
 
 
 def malformed_addressing(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> bool:
@@ -200,7 +200,7 @@ def resolve_ingest(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> 
         items = named_by(holdings, held, row)
         values = carried(holdings, row)
         if items is None:
-            verdicts.append(Refused(UNKNOWN_TESSERA_ID))
+            verdicts.append(Refused(UNKNOWN_MOSAICA_ID))
             continue
         if len(items) > 1:
             verdicts.append(Refused(NAMES_TWO_ITEMS))
@@ -232,7 +232,7 @@ def resolve_addresses(holdings: Holdings, rows: Sequence[Mapping[str, object]]) 
     for row in rows:
         items = named_by(holdings, held, row)
         if items is None:
-            verdicts.append(Refused(UNKNOWN_TESSERA_ID))
+            verdicts.append(Refused(UNKNOWN_MOSAICA_ID))
         elif len(items) > 1:
             verdicts.append(Refused(NAMES_TWO_ITEMS))
         elif not items:
@@ -274,7 +274,7 @@ def apply_ingest(
 ) -> dict[str, int]:
     """Apply an accepted batch to `holdings`, and count what it did.
 
-    `created` maps each creating row's position to the `tessera_id` the server issued it, which
+    `created` maps each creating row's position to the `mosaica_id` the server issued it, which
     this model cannot know. A row naming an item edits it when a column it carries holds a different
     value there, a null clearing a held value, and is unchanged otherwise. Refused rows write
     nothing.
@@ -284,7 +284,7 @@ def apply_ingest(
         cells = {
             column: holdings.key(column, value) if column in holdings.unique else value
             for column, value in row.items()
-            if column != TESSERA_ID
+            if column != MOSAICA_ID
         }
         if isinstance(verdict, Creates):
             holdings.items[created[i]] = {c: v for c, v in cells.items() if v is not None}

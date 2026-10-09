@@ -1,5 +1,5 @@
 //! **One item edited, and every home it has to be carried to.** An edit moves the item to a new
-//! entity and keeps its `tessera_id`, so every place the old entity's data lives must be written
+//! entity and keeps its `mosaica_id`, so every place the old entity's data lives must be written
 //! again for the new one, or read through to it: its rows and positions in every view, every
 //! column family, the record blob, its labels, a unique value, its layer
 //! memberships, the items a content was generated from, a suppression standing against it, and
@@ -26,11 +26,11 @@ use mosaica_engine::filter::{Endpoint, FilterOperand, Scalar};
 use mosaica_engine::{ColumnBuf, Engine, IngestRequest, ItemOut, ScalarOut, ViewportRequest};
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::IngestRow;
-use mosaica_types::{AttrLocalId, EntityId, TesseraId};
+use mosaica_types::{AttrLocalId, EntityId, MosaicaId};
 
 /// What the edited item should hold, and what it held at the build.
 struct Expected {
-    tid: TesseraId,
+    tid: MosaicaId,
     /// The entity the build gave it.
     first: EntityId,
     suppressed: bool,
@@ -65,13 +65,13 @@ fn check(engine: &Engine, expected: &Expected, after: &str) {
         match home {
             // Readable whether or not the item may be seen.
             Home::EditedItems => {
-                let entity = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap_or_else(|| {
-                    panic!("Home::EditedItems: the tessera_id names nothing, after {after}")
+                let entity = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap_or_else(|| {
+                    panic!("Home::EditedItems: the mosaica_id names nothing, after {after}")
                 });
                 assert_eq!(
-                    engine.tessera_id_of(entity).unwrap(),
+                    engine.mosaica_id_of(entity).unwrap(),
                     tid,
-                    "Home::EditedItems: the entity it names answers another tessera_id, after {after}"
+                    "Home::EditedItems: the entity it names answers another mosaica_id, after {after}"
                 );
             }
             Home::Suppression => {
@@ -114,7 +114,7 @@ fn check(engine: &Engine, expected: &Expected, after: &str) {
                     .unwrap();
                 let at = out
                     .points
-                    .tessera_ids
+                    .mosaica_ids
                     .iter()
                     .position(|t| *t == tid.raw())
                     .expect("s0 serves the item");
@@ -334,16 +334,16 @@ fn edit(engine: &Engine, batch: &str, view: &str, row: IngestRow) {
             rows: vec![row],
             artifacts: Default::default(),
             strict: false,
-            tessera_id_column: false,
+            mosaica_id_column: false,
         })
         .expect("the edit is accepted");
     assert_eq!(receipt.edited, 1, "{batch} edits the item: {receipt:?}");
 }
 
-/// A row naming the item by its `tessera_id` and carrying only what `set` gives it.
-fn naming(tid: TesseraId, set: impl FnOnce(&mut IngestRow)) -> IngestRow {
+/// A row naming the item by its `mosaica_id` and carrying only what `set` gives it.
+fn naming(tid: MosaicaId, set: impl FnOnce(&mut IngestRow)) -> IngestRow {
     let mut row = IngestRow {
-        tessera_id: Some(tid),
+        mosaica_id: Some(tid),
         labels: None,
         position: None,
         scalars: vec![WalScalar::Null; DECLARED],
@@ -362,7 +362,7 @@ fn an_edit_carries_every_home() {
     publish(&engine, &root);
 
     let first = EntityId::new(source_to_new_map(&root, "v00000")[&X]);
-    let tid = engine.tessera_id_of(first).unwrap();
+    let tid = engine.mosaica_id_of(first).unwrap();
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     let mut expected = Expected {
         tid,
@@ -393,7 +393,7 @@ fn an_edit_carries_every_home() {
     check(&engine, &expected, "an edit of the suppressed item");
     publish_buffered(&engine);
     check(&engine, &expected, "its flush");
-    let moved = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap();
+    let moved = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap();
     assert_ne!(moved, expected.first, "the edit gave the item a new entity");
     engine.accept_change(moved, ChangeOp::Unsuppress).unwrap();
     expected.suppressed = false;
@@ -447,7 +447,7 @@ fn a_scoped_value_needs_a_row_under_its_key() {
     let engine = open(tmp.path(), &root);
     // Held by `q2` alone.
     let item = EntityId::new(source_to_new_map(&root, "v00000")[&20]);
-    let tid = engine.tessera_id_of(item).unwrap();
+    let tid = engine.mosaica_id_of(item).unwrap();
     let send = |batch: &str, position: Option<(f64, f64)>| {
         let row = naming(tid, |row| {
             row.scoped[0] = WalScalar::F32(12.5);
@@ -463,7 +463,7 @@ fn a_scoped_value_needs_a_row_under_its_key() {
             rows: vec![row],
             artifacts: Default::default(),
             strict: false,
-            tessera_id_column: false,
+            mosaica_id_column: false,
         })
     };
     let refused = send("alone", None);
@@ -499,7 +499,7 @@ fn a_view_dropped_behind_an_edit_in_one_window_keeps_the_item() {
     let root = build_homes(tmp.path());
     let mut engine = open(tmp.path(), &root);
     let first = EntityId::new(source_to_new_map(&root, "v00000")[&X]);
-    let tid = engine.tessera_id_of(first).unwrap();
+    let tid = engine.mosaica_id_of(first).unwrap();
 
     engine.set_work_pass_paused_for_test(true);
     let enqueued = engine.work_enqueued_for_test();
@@ -570,7 +570,7 @@ fn a_growth_and_a_publication_queued_behind_an_edit_follow_the_item() {
     let engine = open(tmp.path(), &root);
     let map = source_to_new_map(&root, "v00000");
     let entity = |s: u64| EntityId::new(map[&s]);
-    let tid = engine.tessera_id_of(entity(X)).unwrap();
+    let tid = engine.mosaica_id_of(entity(X)).unwrap();
     let mut grown = label_layer();
     grown.name = "topics/b".into();
     engine.register_layer(grown).unwrap();
@@ -643,7 +643,7 @@ fn a_growth_and_a_publication_queued_behind_an_edit_follow_the_item() {
     });
     publish_buffered(&engine);
     assert_ne!(
-        engine.resolve_tessera_ids(&[tid]).unwrap()[0],
+        engine.resolve_mosaica_ids(&[tid]).unwrap()[0],
         Some(entity(X)),
         "the edit moved the item"
     );
@@ -719,7 +719,7 @@ fn verify_refuses_edited_items_that_disagree() {
     let root = build_homes(tmp.path());
     let engine = open(tmp.path(), &root);
     let tid = engine
-        .tessera_id_of(EntityId::new(source_to_new_map(&root, "v00000")[&X]))
+        .mosaica_id_of(EntityId::new(source_to_new_map(&root, "v00000")[&X]))
         .unwrap();
     edit(
         &engine,
@@ -778,8 +778,8 @@ fn verify_refuses_edited_items_that_disagree() {
 /// **An item edited twice, the first edit flushed and the second buffered, is found where the
 /// second put it after a restart.** A growth holds the log, so the restart replays both edits;
 /// the first edit's entity has its row and its pair in a run, and replay keeps no pair for it.
-/// The item is served with the second edit's value under its one `tessera_id`, a change addressed
-/// by that `tessera_id` reaches the second edit's entity, and neither earlier entity answers it.
+/// The item is served with the second edit's value under its one `mosaica_id`, a change addressed
+/// by that `mosaica_id` reaches the second edit's entity, and neither earlier entity answers it.
 #[test]
 fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_restart() {
     use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
@@ -789,7 +789,7 @@ fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_resta
     let map = source_to_new_map(&root, "v00000");
     let entity = |s: u64| EntityId::new(map[&s]);
     let a = entity(X);
-    let tid = engine.tessera_id_of(a).unwrap();
+    let tid = engine.mosaica_id_of(a).unwrap();
 
     let mut pinning = label_layer();
     pinning.name = "topics/b".into();
@@ -821,9 +821,9 @@ fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_resta
     };
     edit(&engine, "to-b", "s0", set_score(555));
     publish_buffered(&engine);
-    let b = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap();
+    let b = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap();
     edit(&engine, "to-c", "s0", set_score(777));
-    let c = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap();
+    let c = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap();
     assert!(
         a != b && b != c && a != c,
         "each edit gave the item a new entity"
@@ -842,15 +842,15 @@ fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_resta
     engine = open(tmp.path(), &root);
     for pass in ["the restart", "the flush after it"] {
         assert_eq!(
-            engine.resolve_tessera_ids(&[tid]).unwrap()[0],
+            engine.resolve_mosaica_ids(&[tid]).unwrap()[0],
             Some(c),
-            "the tessera_id names the last entity after {pass}"
+            "the mosaica_id names the last entity after {pass}"
         );
         for earlier in [a, b] {
             assert_eq!(
-                engine.resolve_tessera_ids(&[engine.tessera_id_of(earlier).unwrap()]).unwrap()[0],
+                engine.resolve_mosaica_ids(&[engine.mosaica_id_of(earlier).unwrap()]).unwrap()[0],
                 Some(c),
-                "an earlier entity's tessera_id is the item's, and names the last entity after {pass}"
+                "an earlier entity's mosaica_id is the item's, and names the last entity after {pass}"
             );
         }
         let full = engine.authorise(&full_coverage_credential()).unwrap();
@@ -869,13 +869,13 @@ fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_resta
         publish_buffered(&engine);
     }
 
-    let target = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap();
+    let target = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].unwrap();
     engine.accept_change(target, ChangeOp::Suppress).unwrap();
     tick(&engine);
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(
         engine.item(&full, tid).unwrap().is_none(),
-        "the suppression addressed by the tessera_id reached the last entity"
+        "the suppression addressed by the mosaica_id reached the last entity"
     );
     assert!(!served(&engine, &full, "s0", None).contains(&tid.raw()));
 }

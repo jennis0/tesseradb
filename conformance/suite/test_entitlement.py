@@ -43,7 +43,7 @@ ZOOM = 3
 OFFSET = 2
 VIEWPORT = Viewport("s0", ZOOM, bbox=(0.0, 0.0, 65536.0, 65536.0), underlay_offset=OFFSET)
 
-#: Item identities: (tessera_id, fx). Positions are minted by [`_code`] below.
+#: Item identities: (mosaica_id, fx). Positions are minted by [`_code`] below.
 E, F = (0xE, 0xE0), (0xF, 0xF0)
 A, B, C, D = (0xA, 0xA0), (0xB, 0xB0), (0xC, 0xC0), (0xD, 0xD0)
 
@@ -73,7 +73,7 @@ def _canon(
     points = _stream(
         pa.table(
             {
-                "tessera_id": pa.array([t for t, _c, _f in rows], pa.uint64()),
+                "mosaica_id": pa.array([t for t, _c, _f in rows], pa.uint64()),
                 "code": pa.array([c for _t, c, _f in rows], pa.uint64()),
                 "fx_key": pa.array([f for _t, _c, f in rows], pa.uint64()),
             }

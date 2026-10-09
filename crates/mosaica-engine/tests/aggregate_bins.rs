@@ -1123,7 +1123,7 @@ fn cut_of(s: u64, n: u64) -> Option<u64> {
     (n > s).then(|| ((u128::from(s) << 64) / u128::from(n)) as u64)
 }
 
-/// Each item's `tessera_id`, from the entity its unique `id` names.
+/// Each item's `mosaica_id`, from the entity its unique `id` names.
 fn identities(fx: &Fx) -> HashMap<u64, u64> {
     fx.items
         .iter()
@@ -1646,7 +1646,7 @@ fn an_item_joining_another_view_is_sampled_with_its_indexed_values() {
                 rows,
                 artifacts: Default::default(),
                 strict: true,
-                tessera_id_column: false,
+                mosaica_id_column: false,
             })
             .expect("the batch is accepted");
         assert!(receipt.refused.is_empty(), "{batch}: {:?}", receipt.refused);
@@ -1658,7 +1658,7 @@ fn an_item_joining_another_view_is_sampled_with_its_indexed_values() {
     };
     // Every declared column, `id` alone given.
     let naming = |item: &Item, position: Option<(f64, f64)>, rank: Option<i32>| IngestRow {
-        tessera_id: None,
+        mosaica_id: None,
         labels: None,
         position,
         scalars: (0..8)
@@ -2365,7 +2365,7 @@ fn the_figures_are_the_oracles_through_every_change() {
                 body_hash: [3u8; 32],
                 view: None,
                 rows: vec![IngestRow {
-                    tessera_id: None,
+                    mosaica_id: None,
                     labels: None,
                     position: None,
                     scalars: (0..8)
@@ -2380,7 +2380,7 @@ fn the_figures_are_the_oracles_through_every_change() {
                 }],
                 artifacts: Default::default(),
                 strict: true,
-                tessera_id_column: false,
+                mosaica_id_column: false,
             })
             .expect("the edit is accepted");
         items.iter_mut().find(|i| i.source == edited).unwrap().rank = Some(rank);

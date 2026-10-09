@@ -46,7 +46,7 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 use mosaica_authz::{DeltaTier, PostingRef, PostingsReader};
 use mosaica_store::manifest::{Manifest, SegmentsManifest};
 
-use mosaica_types::{IdentityKey, TesseraId};
+use mosaica_types::{IdentityKey, MosaicaId};
 
 use crate::error::{BuildError, Result};
 use crate::VerifyReport;
@@ -194,7 +194,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
 
 /// **The edited-items map agrees with itself and with the rows.** Its two directions hold the same
 /// pairs, an entity holds one number, a number has at most one live entity, and every row an edit
-/// moved is a pair of the map, its number being what its `tessera_id` inverts to.
+/// moved is a pair of the map, its number being what its `mosaica_id` inverts to.
 fn check_edited_items(
     prefix_dir: &Path,
     phash: &str,
@@ -277,16 +277,16 @@ fn check_edited_items(
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
         for segment in &data.segments {
-            let ids = segment.columns.tessera_id();
+            let ids = segment.columns.mosaica_id();
             for (row, entity) in segment.entities.moved(ids, &key) {
-                let tessera_id = ids.get(row as usize).copied().ok_or_else(|| {
+                let mosaica_id = ids.get(row as usize).copied().ok_or_else(|| {
                     BuildError::Invalid(format!(
                         "view {view}, segment {}: moved row {row} is past its {} rows",
                         segment.seg_id,
                         ids.len()
                     ))
                 })?;
-                let (_, number) = key.invert(TesseraId::new(tessera_id));
+                let (_, number) = key.invert(MosaicaId::new(mosaica_id));
                 if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {
                     return Err(BuildError::Invalid(format!(
                         "view {view}, segment {}: row {row} holds entity {entity}, which the \
@@ -602,7 +602,7 @@ fn record_as_scalar(value: mosaica_filter::RecordValue) -> mosaica_spatial::Scal
 /// the code changes is what makes the cells cover the segment without overlapping — a boundary too
 /// few merges two cells and the ascending-identity property fails across the join; one too many
 /// splits a cell, which loses no row but ends a prefix early and would serve a smaller `C_θ`.
-/// Identities ascending within a cell is the row order itself (`(morton, tessera_id)`), stated
+/// Identities ascending within a cell is the row order itself (`(morton, mosaica_id)`), stated
 /// where selection depends on it rather than assumed from the producer.
 ///
 /// The open has already refused a `cuts.u32` that is not strictly ascending, that starts anywhere
@@ -622,7 +622,7 @@ fn check_cut_index(
         for segment in &data.segments {
             let codes = segment.morton.u32();
             let starts = segment.cuts.starts();
-            let ids = segment.columns.tessera_id();
+            let ids = segment.columns.mosaica_id();
             let where_at = |row: usize| {
                 format!("partition {phash}, view '{view}', segment '{}', row {row}", segment.seg_id)
             };
@@ -754,7 +754,7 @@ fn check_bands(
             }
             // Each banded row's entity, where it is live: a deleted entity's rows wait for the
             // compaction, and its values may already be gone.
-            let ids = segment.columns.tessera_id();
+            let ids = segment.columns.mosaica_id();
             let mut entity_of: std::collections::HashMap<u32, u32> = Default::default();
             let mut wanted = croaring::Bitmap::new();
             let span = segment.bands.band(mosaica_store::bands::FIRST_BAND);

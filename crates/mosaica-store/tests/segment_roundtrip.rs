@@ -1,4 +1,4 @@
-//! Round-trip test for the tiler + segment writers over the `tessera_id`/`priority` schema
+//! Round-trip test for the tiler + segment writers over the `mosaica_id`/`priority` schema
 //! (contracts §2.6): sort a batch, write
 //! `columns.arrow` / `morton.u32` / `permutation.bin`, and read every byte back.
 
@@ -20,18 +20,18 @@ use mosaica_store::manifest::Manifest;
 use mosaica_store::read::ScalarSlice;
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{ColumnsRef, StoreError};
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
-/// A synthetic `tessera_id`-shaped value for test fixtures: full splitmix64 output over a
-/// seed, so its top 16 bits are a `priority` prefix like any real `tessera_id` (contracts
+/// A synthetic `mosaica_id`-shaped value for test fixtures: full splitmix64 output over a
+/// seed, so its top 16 bits are a `priority` prefix like any real `mosaica_id` (contracts
 /// §2.6), without claiming this is the actual Feistel construction — `mosaica-types`'s identity
 /// tests cover that separately.
-fn synthetic_tessera_id(seed: u64) -> TesseraId {
+fn synthetic_mosaica_id(seed: u64) -> MosaicaId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     z ^= z >> 31;
-    TesseraId::new(z)
+    MosaicaId::new(z)
 }
 
 /// Quantise a coordinate against the unit extent the way the importer does — the tiler takes
@@ -47,7 +47,7 @@ fn tiler_and_segment_writers_round_trip() {
 
     let mut items: Vec<TilerItem> = (0..n)
         .map(|entity_id| TilerItem {
-            tessera_id: synthetic_tessera_id(entity_id),
+            mosaica_id: synthetic_mosaica_id(entity_id),
             qx: q(rng.gen_range(0.0f64..1.0)),
             qy: q(rng.gen_range(0.0f64..1.0)),
             scalars: vec![],
@@ -84,7 +84,7 @@ fn tiler_and_segment_writers_round_trip() {
     let mut reader = FileReader::try_new(file, None).expect("FileReader::try_new");
     let schema = reader.schema();
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-    assert_eq!(names, vec!["tessera_id", "residual"]);
+    assert_eq!(names, vec!["mosaica_id", "residual"]);
     assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
     assert_eq!(schema.field(1).data_type(), &DataType::UInt32);
 
@@ -92,12 +92,12 @@ fn tiler_and_segment_writers_round_trip() {
     assert!(reader.next().is_none(), "expected exactly one record batch");
     assert_eq!(batch.num_rows(), items.len());
 
-    let tessera_id_col = batch
+    let mosaica_id_col = batch
         .column(0)
         .as_any()
         .downcast_ref::<UInt64Array>()
         .unwrap();
-    assert_eq!(tessera_id_col.value(0), items[0].tessera_id.raw());
+    assert_eq!(mosaica_id_col.value(0), items[0].mosaica_id.raw());
     let residual_col = batch
         .column(1)
         .as_any()
@@ -109,7 +109,7 @@ fn tiler_and_segment_writers_round_trip() {
     // row i are the two halves of `split32` over the same item, so this also pins that
     // `morton.u32` and `columns.arrow` describe the same points.
     for (i, item) in items.iter().enumerate() {
-        assert_eq!(tessera_id_col.value(i), item.tessera_id.raw());
+        assert_eq!(mosaica_id_col.value(i), item.mosaica_id.raw());
         let (cell, residual) = split32(item.qx, item.qy);
         assert_eq!(residual_col.value(i), residual);
         assert_eq!(codes[i], cell.raw());
@@ -196,7 +196,7 @@ mod paged {
 fn morton_file_is_u32_four_bytes_per_row_and_the_u64_file_is_gone() {
     let mut items: Vec<TilerItem> = (0..1000u64)
         .map(|entity_id| TilerItem {
-            tessera_id: synthetic_tessera_id(entity_id),
+            mosaica_id: synthetic_mosaica_id(entity_id),
             qx: q(((entity_id * 7919) % 1000) as f64 / 1000.0),
             qy: q(((entity_id * 104_729) % 1000) as f64 / 1000.0),
             scalars: vec![],
@@ -227,24 +227,24 @@ fn morton_file_is_u32_four_bytes_per_row_and_the_u64_file_is_gone() {
 }
 
 #[test]
-fn tiebreak_orders_equal_morton_by_tessera_id() {
+fn tiebreak_orders_equal_morton_by_mosaica_id() {
     // Three items at the identical coordinate (identical Morton code): the row order must be
-    // exactly ascending `tessera_id`, with no further tiebreak (contracts §2.6 r6).
+    // exactly ascending `mosaica_id`, with no further tiebreak (contracts §2.6 r6).
     let mut items = vec![
         TilerItem {
-            tessera_id: TesseraId::new(100),
+            mosaica_id: MosaicaId::new(100),
             qx: q(0.5),
             qy: q(0.5),
             scalars: vec![],
         },
         TilerItem {
-            tessera_id: TesseraId::new(1),
+            mosaica_id: MosaicaId::new(1),
             qx: q(0.5),
             qy: q(0.5),
             scalars: vec![],
         },
         TilerItem {
-            tessera_id: TesseraId::new(2),
+            mosaica_id: MosaicaId::new(2),
             qx: q(0.5),
             qy: q(0.5),
             scalars: vec![],
@@ -254,7 +254,7 @@ fn tiebreak_orders_equal_morton_by_tessera_id() {
     let codes = sort_batch(&mut items, &mut entity_ids);
     assert_eq!(codes[0], codes[1]);
     assert_eq!(codes[1], codes[2]);
-    let ordered: Vec<u64> = items.iter().map(|i| i.tessera_id.raw()).collect();
+    let ordered: Vec<u64> = items.iter().map(|i| i.mosaica_id.raw()).collect();
     assert_eq!(ordered, vec![1, 2, 100]);
 }
 
@@ -314,13 +314,13 @@ fn write_segment_scalars_round_trip() {
 
     let mut items = vec![
         TilerItem {
-            tessera_id: TesseraId::new(1),
+            mosaica_id: MosaicaId::new(1),
             qx: q(0.1),
             qy: q(0.2),
             scalars: vec![ScalarValue::U64(42), ScalarValue::Utf8("alpha".to_string())],
         },
         TilerItem {
-            tessera_id: TesseraId::new(2),
+            mosaica_id: MosaicaId::new(2),
             qx: q(0.8),
             qy: q(0.9),
             scalars: vec![ScalarValue::U64(7), ScalarValue::Utf8("beta".to_string())],
@@ -340,7 +340,7 @@ fn write_segment_scalars_round_trip() {
     let mut reader = FileReader::try_new(file, None).expect("FileReader::try_new");
     let schema = reader.schema();
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-    assert_eq!(names, vec!["tessera_id", "residual", "count", "label"]);
+    assert_eq!(names, vec!["mosaica_id", "residual", "count", "label"]);
     let batch = reader.next().unwrap().unwrap();
     let count_col = batch
         .column(2)
@@ -355,8 +355,8 @@ fn write_segment_scalars_round_trip() {
     for (i, item) in items.iter().enumerate() {
         let ScalarValue::U64(v) = &item.scalars[0] else {
             panic!(
-                "expected ScalarValue::U64 at scalars[0] for tessera_id {}, got {:?}",
-                item.tessera_id.raw(),
+                "expected ScalarValue::U64 at scalars[0] for mosaica_id {}, got {:?}",
+                item.mosaica_id.raw(),
                 item.scalars[0]
             );
         };
@@ -364,8 +364,8 @@ fn write_segment_scalars_round_trip() {
 
         let ScalarValue::Utf8(v) = &item.scalars[1] else {
             panic!(
-                "expected ScalarValue::Utf8 at scalars[1] for tessera_id {}, got {:?}",
-                item.tessera_id.raw(),
+                "expected ScalarValue::Utf8 at scalars[1] for mosaica_id {}, got {:?}",
+                item.mosaica_id.raw(),
                 item.scalars[1]
             );
         };
@@ -377,7 +377,7 @@ fn write_segment_scalars_round_trip() {
 fn a_pre_r6_columns_file_is_a_typed_error_not_a_half_read() {
     // Contracts §2.6 r6: renaming the identity column is what makes an old bundle fail
     // closed. Write a five-column pre-r6 schema by hand and assert the reader rejects
-    // it by name, rather than reading `entity_id`'s bytes as `tessera_id` -- which
+    // it by name, rather than reading `entity_id`'s bytes as `mosaica_id` -- which
     // would silently publish entity IDs on the wire, the one thing I10 forbids.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("columns.arrow");
@@ -424,7 +424,7 @@ fn a_pre_residual_columns_file_is_a_typed_error_rather_than_a_misread_position()
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("columns.arrow");
     let schema = Arc::new(Schema::new(vec![
-        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("mosaica_id", DataType::UInt64, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         Field::new("priority", DataType::UInt16, false),
@@ -455,7 +455,7 @@ fn a_pre_residual_columns_file_is_a_typed_error_rather_than_a_misread_position()
 #[test]
 fn a_manifest_without_an_identity_object_is_a_typed_error() {
     // Contracts §2.2 r6: `identity` is required, not defaulted. A bundle read without a key
-    // cannot invert a tessera_id, and a *defaulted* key would invert every identifier to the
+    // cannot invert a mosaica_id, and a *defaulted* key would invert every identifier to the
     // wrong entity -- suppressing the wrong item on /control/changes.
     let json = serde_json::json!({
         "bundle_format": 2,
@@ -509,7 +509,7 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
 /// **Scatter order is free, and it produces exactly the bytes the sequential path does.**
 ///
 /// This is the property compaction's pass 1 needs and the old writer could not offer: the fold
-/// emits rows in `(morton, tessera_id)` order and learns `perm[entity]` in *that* order, which is
+/// emits rows in `(morton, mosaica_id)` order and learns `perm[entity]` in *that* order, which is
 /// not entity order. `write_permutation` remains the sequential producer, and the two must not be
 /// allowed to drift — so the assertion is on the whole file, not on a slot.
 ///
@@ -660,7 +660,7 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
 
     let mut items: Vec<TilerItem> = (0..n)
         .map(|i| TilerItem {
-            tessera_id: synthetic_tessera_id(i),
+            mosaica_id: synthetic_mosaica_id(i),
             qx: q(i as f64 / n as f64),
             qy: q((n - i) as f64 / n as f64),
             scalars: scalars_for(i),
@@ -796,10 +796,10 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
         // column past the size the plan keeps a write's bytes at, which is the case the
         // 25,846,007-row `gbif-64p` fixture found and the smaller row counts here do not.
         for rows in [0usize, 1, 7, 1000, 600_000] {
-            // Ascending, so the rows arrive in the `(morton, tessera_id)` order the writer takes
+            // Ascending, so the rows arrive in the `(morton, mosaica_id)` order the writer takes
             // with every row in one cell.
             let mut mosaica: Vec<u64> = (0..rows as u64)
-                .map(|i| synthetic_tessera_id(i).raw())
+                .map(|i| synthetic_mosaica_id(i).raw())
                 .collect();
             mosaica.sort_unstable();
             let residual: Vec<u32> = (0..rows)
@@ -823,7 +823,7 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
                     columns.iter().map(|column| column[row].clone()).collect();
                 writer
                     .append(SegmentRow {
-                        tessera_id: TesseraId::new(mosaica[row]),
+                        mosaica_id: MosaicaId::new(mosaica[row]),
                         morton: 0,
                         residual: residual[row],
                         scalars: &values,

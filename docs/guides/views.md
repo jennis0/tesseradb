@@ -219,9 +219,9 @@ the fold deletes them.
 **Dropping a view deletes every item it leaves in no view.** An item with a row in
 `quarter:2026-Q1` and in another view keeps that other row and everything it holds. An item whose
 only row was in `quarter:2026-Q1`, flushed or still waiting for a flush, is deleted as
-`POST /control/changes` deletes one: its `tessera_id` stops naming anything at once, and its rows,
+`POST /control/changes` deletes one: its `mosaica_id` stops naming anything at once, and its rows,
 values and layer memberships leave at the next fold. A later batch carrying its `geonameid`
-creates a new item with a new `tessera_id`. The response's `deleted` counts the items the drop
+creates a new item with a new `mosaica_id`. The response's `deleted` counts the items the drop
 deleted.
 
 ## Add a quarter while the service runs
@@ -243,15 +243,15 @@ first-batch-creates route.
 
 ## Add an item already known to a second view, or change it
 
-A row that names an item the service holds, by its `tessera_id` or a unique value such as its
+A row that names an item the service holds, by its `mosaica_id` or a unique value such as its
 `geonameid`, and carries a position in a view the item is not in, adds the item to that view. The item
 keeps its label and its values, stays served in its other views throughout, and is served in the
 new view from its next flush. The receipt counts it as `added` and answers the item's
-`tessera_id`.
+`mosaica_id`.
 
 The row may leave out any field, which keeps what the item stores. A row that carries something
 else, a value, the label or a position in a view the item is already in, edits
-the item. The receipt counts an edit as `edited` and answers the item's `tessera_id`, which an edit
+the item. The receipt counts an edit as `edited` and answers the item's `mosaica_id`, which an edit
 never changes.
 
 An edited item moves to a new entity, carrying every view it is in, every value, its layer
@@ -336,7 +336,7 @@ attribute is undeclared to them entirely, and both spellings collapse to the pla
 `?view=quarter:2026-Q3` or the pinned path `mood@2026-Q3` — two views of a group hold two value
 sets, and each is genuinely that view's own.
 
-**Reading one point's values.** `POST /v1/items/{tessera_id}` returns every scoped family's value
+**Reading one point's values.** `POST /v1/items/{mosaica_id}` returns every scoped family's value
 for that point, by family name and then by **key**:
 
 ```json

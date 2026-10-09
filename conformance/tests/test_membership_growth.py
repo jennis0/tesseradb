@@ -8,7 +8,7 @@ compares against the fixture's own term model: the count is the number of the co
 principal may see, computed from `term_of` and nothing served. A growth that dropped a slice, or a
 count computed over anything but the union inside the mask, disagrees.
 
-Also pinned: the receipt is a `tessera_id` and the count that joined, with no ordinal and no
+Also pinned: the receipt is a `mosaica_id` and the count that joined, with no ordinal and no
 membership size; re-sending a slice joins nothing and moves nothing; and an unknown key refuses the
 whole batch with nothing applied.
 """
@@ -99,7 +99,7 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
     resp = server.viewport_request(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
     assert resp.status_code == 200, resp.text
     table = decode_viewport_points(resp.content)
-    ids = [str(i) for i in table.column("tessera_id").to_pylist()]
+    ids = [str(i) for i in table.column("mosaica_id").to_pylist()]
     assert len(ids) == len(points), "the all-seeing principal is served the whole corpus"
     third = len(ids) // 3
     slices = [ids[:third], ids[third : 2 * third], ids[2 * third :]]
@@ -107,23 +107,23 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
     resp = server.register_layer(_layer())
     assert resp.status_code == 201, resp.text
     resp = server.publish_artifacts(
-        LAYER, artifacts=[{"key": "whole", "members": {"tessera_id": slices[0]}}], strict=True
+        LAYER, artifacts=[{"key": "whole", "members": {"mosaica_id": slices[0]}}], strict=True
     )
     assert resp.status_code == 201, resp.text
-    tessera_id = resp.json()["artifacts"][0]["tessera_id"]
+    mosaica_id = resp.json()["artifacts"][0]["mosaica_id"]
 
     for joining in slices[1:]:
-        resp = grow(server, artifacts=[{"key": "whole", "members": {"tessera_id": joining}}])
+        resp = grow(server, artifacts=[{"key": "whole", "members": {"mosaica_id": joining}}])
         assert resp.status_code == 200, resp.text
         (row,) = resp.json()["artifacts"]
-        assert (row["key"], row["tessera_id"], row["joined"]) == ("whole", tessera_id, len(joining)), row
+        assert (row["key"], row["mosaica_id"], row["joined"]) == ("whole", mosaica_id, len(joining)), row
 
     for terms in PRINCIPALS:
         expected = len(visible(points, terms))
         assert served_count(server, terms) == expected, terms
 
     # Re-sending a slice names the artifact and adds nothing.
-    resp = grow(server, artifacts=[{"key": "whole", "members": {"tessera_id": slices[1]}}])
+    resp = grow(server, artifacts=[{"key": "whole", "members": {"mosaica_id": slices[1]}}])
     assert resp.status_code == 200, resp.text
     assert resp.json()["artifacts"][0]["joined"] == 0
     assert served_count(server, ["1", "2"]) == len(points)
@@ -135,13 +135,13 @@ def test_an_unknown_key_refuses_the_batch_with_nothing_applied(growth_server):
     before = served_count(server, ["1", "2"])
     assert before is not None, "the first test published the artifact"
     resp = server.viewport_request(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
-    ids = [str(i) for i in decode_viewport_points(resp.content).column("tessera_id").to_pylist()]
+    ids = [str(i) for i in decode_viewport_points(resp.content).column("mosaica_id").to_pylist()]
 
     resp = grow(
         server,
         artifacts=[
-            {"key": "whole", "members": {"tessera_id": ids[:5]}},
-            {"key": "never-published", "members": {"tessera_id": ids[5:10]}},
+            {"key": "whole", "members": {"mosaica_id": ids[:5]}},
+            {"key": "never-published", "members": {"mosaica_id": ids[5:10]}},
         ],
     )
     assert resp.status_code == 422, resp.text

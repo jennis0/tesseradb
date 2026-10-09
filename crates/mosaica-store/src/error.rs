@@ -130,7 +130,7 @@ pub enum StoreError {
     /// `permutation.bin` failed header/length/content validation.
     InvalidPermutation { path: PathBuf, detail: String },
     /// `MANIFEST.json`'s `identity` object named an unknown construction or a round count this
-    /// reader doesn't implement — a bundle written by a different `tessera_id` construction
+    /// reader doesn't implement — a bundle written by a different `mosaica_id` construction
     /// must not be silently read by this one (contracts §2.6 r6).
     InvalidIdentity { detail: String },
     /// A key index run ([`crate::key_index`]) failed a check. `part` names the header, the page

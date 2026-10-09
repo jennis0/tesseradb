@@ -146,7 +146,7 @@ async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(f32, f32)]
         .as_u16()
 }
 
-/// The rows a viewport answers for `view`, by `tessera_id`.
+/// The rows a viewport answers for `view`, by `mosaica_id`.
 async fn points(served: &Served, view: &str) -> Vec<u64> {
     let resp = served
         .server

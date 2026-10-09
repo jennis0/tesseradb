@@ -431,7 +431,7 @@ export class MosaicaColourEditor extends MosaicaElement {
     if (this.isCategory(meta)) return {groupings: [{by: {field: this.field, values: this.found.map((f) => f.key).slice(0, meta.selection.maxAggregateNamed).sort()}}], subject: 'visible'};
     const layer = this.layerOf(meta);
     if (!layer) return null;
-    return {groupings: artifactGroupings(layer, this.found.map((f) => ({tesseraId: BigInt(f.key), rung: f.rung})), meta.selection, 'drawn'), subject: 'visible'};
+    return {groupings: artifactGroupings(layer, this.found.map((f) => ({mosaicaId: BigInt(f.key), rung: f.rung})), meta.selection, 'drawn'), subject: 'visible'};
   }
 
   protected override updated(changed: PropertyValues<this>): void {
@@ -530,8 +530,8 @@ export class MosaicaColourEditor extends MosaicaElement {
       if (final) emit(this, 'mosaica-valuecolour', {column: this.field, changes});
       return;
     }
-    setClusterColours(s, layer, keys.map((k) => ({tesseraId: BigInt(k), colour: hex})));
-    if (final) emit(this, 'mosaica-clustercolour', {layer, changes: keys.map((tesseraId) => ({tesseraId, colour: hex}))});
+    setClusterColours(s, layer, keys.map((k) => ({mosaicaId: BigInt(k), colour: hex})));
+    if (final) emit(this, 'mosaica-clustercolour', {layer, changes: keys.map((mosaicaId) => ({mosaicaId, colour: hex}))});
   }
 
   /** The palette the picker offers: the category palette, or the layer's. */

@@ -228,7 +228,7 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> (u16, Value) 
     (status, resp.json().await.unwrap_or(Value::Null))
 }
 
-/// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
+/// The `mosaica_id`s a filtered viewport answers, from a fresh session so the rows flushed since
 /// the last one are in the answer.
 async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
     let token = token_for(&served.server, &["0", "1"][..]).await;

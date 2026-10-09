@@ -173,7 +173,7 @@ def test_the_point_bit_is_present_only_with_a_highlight_and_is_the_oracles(highl
         assert "highlighted" in lit.schema.names
         # Position is contract: after the render scalars and before any membership column.
         names = lit.schema.names
-        assert names[0] == "tessera_id" and names[1] == "code"
+        assert names[0] == "mosaica_id" and names[1] == "code"
         assert not any(n.startswith("membership:") for n in names[: names.index("highlighted")]), (
             "the highlight column sits before the membership columns"
         )
@@ -190,19 +190,19 @@ def test_the_artifact_bit_is_the_conjunctions_and_moves_nothing_else(highlight_s
     for terms in PRINCIPALS:
         token = server.authorise(terms)["token"]
         filters, highlight = below(3000), odd_ids()
-        plain = {a.tessera_id: a for a in decode_viewport_artifacts(artifacts_body(server, token, 0, WHOLE_MAP, filters=filters))}
+        plain = {a.mosaica_id: a for a in decode_viewport_artifacts(artifacts_body(server, token, 0, WHOLE_MAP, filters=filters))}
         assert plain, f"{terms}: the shape layers serve artifacts"
         assert all(a.highlighted is None for a in plain.values()), (
             f"{terms}: no highlight, and yet a bit — a false would answer a question nobody asked"
         )
         lit = {
-            a.tessera_id: a
+            a.mosaica_id: a
             for a in decode_viewport_artifacts(
                 artifacts_body(server, token, 0, WHOLE_MAP, filters=filters, highlight=highlight)
             )
         }
         conjoined = {
-            a.tessera_id: a
+            a.mosaica_id: a
             for a in decode_viewport_artifacts(
                 artifacts_body(server, token, 0, WHOLE_MAP, filters={"all_of": [filters, highlight]})
             )
@@ -227,10 +227,10 @@ def test_the_highlight_projection_serves_the_same_rows_in_a_two_column_frame(hig
             assert [t[:4] for t in tiles_of(projected)] == [t[:4] for t in tiles_of(full)]
             full_table = decode_viewport_points(full)
             projected_table = decode_viewport_points(projected)
-            assert projected_table.schema.names == ["tessera_id", "highlighted"], (
+            assert projected_table.schema.names == ["mosaica_id", "highlighted"], (
                 projected_table.schema.names
             )
-            assert projected_table.column("tessera_id").to_pylist() == full_table.column("tessera_id").to_pylist()
+            assert projected_table.column("mosaica_id").to_pylist() == full_table.column("mosaica_id").to_pylist()
             assert projected_table.column("highlighted").to_pylist() == full_table.column("highlighted").to_pylist()
             # Nine bytes a point against the render columns' width — the projection is the point.
             full_bytes = sum(len(p) for k, p in split_frames(full) if k == FRAME_POINTS)
@@ -240,7 +240,7 @@ def test_the_highlight_projection_serves_the_same_rows_in_a_two_column_frame(hig
         bare = decode_viewport_points(body(server, token, 2, WHOLE_MAP, point_rows="highlight"))
         plain = decode_viewport_points(body(server, token, 2, WHOLE_MAP))
         assert bare.schema.names == plain.schema.names
-        assert bare.column("tessera_id").to_pylist() == plain.column("tessera_id").to_pylist()
+        assert bare.column("mosaica_id").to_pylist() == plain.column("mosaica_id").to_pylist()
 
 
 def test_an_unknown_point_rows_value_is_refused(highlight_server):
@@ -323,7 +323,7 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
     server, _points = highlight_server
     token = server.authorise(["1", "2"])["token"]
     table = decode_viewport_points(body(server, token, 0, WHOLE_MAP))
-    ids = table.column("tessera_id").to_pylist()
+    ids = table.column("mosaica_id").to_pylist()
     keys = table.column("fx_key").to_pylist()
     inside = [str(i) for i, k in zip(ids, keys) if k < 2000]
     outside = [str(i) for i, k in zip(ids, keys) if k >= 2000]
@@ -334,7 +334,7 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
         assert resp.status_code == 201, resp.text
     resp = server.publish_artifacts(
         CLUSTERS,
-        artifacts=[{"key": "c-hit", "members": {"tessera_id": inside}}],
+        artifacts=[{"key": "c-hit", "members": {"mosaica_id": inside}}],
         strict=True,
     )
     assert resp.status_code in (200, 201, 202), resp.text
@@ -343,7 +343,7 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
         artifacts=[
             {
                 "key": "label-hit",
-                "members": {"tessera_id": outside[:10]},
+                "members": {"mosaica_id": outside[:10]},
                 "content": [{"values": ["hit"]}],
                 "attached_to": {"layer": CLUSTERS, "level": 0, "key": "c-hit"},
             }

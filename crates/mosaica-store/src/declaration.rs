@@ -9,7 +9,7 @@ pub const DECLARABLE_TYPES: &str = "bool, u8, u16, u32, u64, i8, i16, i32, i64, 
                                     timestamp_us, keyword, text and category";
 
 /// Columns every segment carries.
-const FIXED_COLUMNS: [&str; 2] = ["tessera_id", "residual"];
+const FIXED_COLUMNS: [&str; 2] = ["mosaica_id", "residual"];
 /// Columns of an ingest batch that are not attributes.
 const INGEST_COLUMNS: [&str; 5] = [
     "x",
@@ -355,7 +355,7 @@ mod tests {
         let refused: Vec<(&str, AttributeSpec)> = vec![
             ("an empty name", spec("", "u8")),
             ("a name that is not a path segment", spec("a/b", "u8")),
-            ("a fixed column's name", spec("tessera_id", "u8")),
+            ("a fixed column's name", spec("mosaica_id", "u8")),
             ("an ingest column's name", spec("access", "u8")),
             ("the member level column's name", spec("level", "u32")),
             ("the record blob's name", spec("record", "u8")),

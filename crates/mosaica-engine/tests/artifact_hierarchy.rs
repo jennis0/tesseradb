@@ -310,7 +310,7 @@ fn two_budgets_agree_on_every_artifact_both_return() {
     for shallow in &cuts {
         for deep in &cuts {
             for a in shallow {
-                let Some(b) = deep.iter().find(|other| other.tessera_id == a.tessera_id) else {
+                let Some(b) = deep.iter().find(|other| other.mosaica_id == a.mosaica_id) else {
                     continue;
                 };
                 assert_eq!(
@@ -390,7 +390,7 @@ fn a_suppressed_parent_does_not_take_its_child_with_it() {
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
     let root_entity = engine
-        .resolve_tessera_ids(&[served[0].tessera_id]).unwrap()[0]
+        .resolve_mosaica_ids(&[served[0].mosaica_id]).unwrap()[0]
         .expect("it names what was issued");
     engine
         .accept_change(root_entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
@@ -445,7 +445,7 @@ fn a_deleted_parent_leaves_its_child_a_root() {
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
     let root_entity = engine
-        .resolve_tessera_ids(&[served[0].tessera_id]).unwrap()[0]
+        .resolve_mosaica_ids(&[served[0].mosaica_id]).unwrap()[0]
         .expect("it names what was issued");
 
     engine
@@ -767,10 +767,10 @@ fn a_served_artifact_names_its_parent_when_the_parent_is_also_served() {
     };
     let country = by_key("country");
     assert!(country.parent_ids.is_empty(), "a root names no parent");
-    assert_eq!(by_key("state-a").parent_ids, vec![country.tessera_id],
+    assert_eq!(by_key("state-a").parent_ids, vec![country.mosaica_id],
         "a state names the country it is in, by the identifier that country was served under"
     );
-    assert_eq!(by_key("state-b").parent_ids, vec![country.tessera_id]);
+    assert_eq!(by_key("state-b").parent_ids, vec![country.mosaica_id]);
 }
 
 /// **A parent that exists and was withheld is null, identically to a root.** That is the whole
@@ -905,10 +905,10 @@ fn a_levelled_layer_may_carry_one_key_at_two_levels() {
         .expect("the level-1 artifact names its parent");
     let parent = served
         .iter()
-        .find(|a| a.tessera_id == child.parent_ids[0])
+        .find(|a| a.mosaica_id == child.parent_ids[0])
         .expect("and the parent is in the response");
     assert_ne!(
-        child.tessera_id, parent.tessera_id,
+        child.mosaica_id, parent.mosaica_id,
         "two artifacts, one name"
     );
 }
@@ -1453,7 +1453,7 @@ fn the_level_is_declared_not_counted_from_parent_links() {
         county.rung, 2,
         "the declared level — a levelled layer's rung"
     );
-    assert_eq!(county.parent_ids, vec![country.tessera_id],
+    assert_eq!(county.parent_ids, vec![country.mosaica_id],
         "and its parent is the country, one link up — which is the count that would say 1"
     );
 }
@@ -1749,7 +1749,7 @@ fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
                 .iter()
                 .find(|a| a.key.as_deref() == Some(key))
                 .unwrap()
-                .tessera_id
+                .mosaica_id
         };
         let child = served
             .iter()
@@ -1779,7 +1779,7 @@ fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
             ],
             "the bundle holds both parents, ascending, each once"
         );
-        let mut ids: Vec<_> = served.iter().map(|a| a.tessera_id).collect();
+        let mut ids: Vec<_> = served.iter().map(|a| a.mosaica_id).collect();
         ids.sort();
         ids
     };
@@ -1788,7 +1788,7 @@ fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
     let engine = fx.open();
     let served = artifacts_of(&engine, &full_coverage_credential(), None);
     assert_eq!(keys(&served), vec!["c", "p0", "p1"]);
-    let mut ids: Vec<_> = served.iter().map(|a| a.tessera_id).collect();
+    let mut ids: Vec<_> = served.iter().map(|a| a.mosaica_id).collect();
     ids.sort();
     assert_eq!(
         ids, served_ids,
@@ -2096,15 +2096,15 @@ fn ingest_levelled(
 }
 
 /// The identifier the viewport serves each artifact under, by key.
-fn ids_by_key(engine: &Engine) -> std::collections::BTreeMap<String, mosaica_types::TesseraId> {
+fn ids_by_key(engine: &Engine) -> std::collections::BTreeMap<String, mosaica_types::MosaicaId> {
     artifacts_of(engine, &full_coverage_credential(), None)
         .into_iter()
-        .filter_map(|a| a.key.map(|key| (key, a.tessera_id)))
+        .filter_map(|a| a.key.map(|key| (key, a.mosaica_id)))
         .collect()
 }
 
 /// The parents the viewport names for `key`.
-fn served_parents(engine: &Engine, key: &str) -> Vec<mosaica_types::TesseraId> {
+fn served_parents(engine: &Engine, key: &str) -> Vec<mosaica_types::MosaicaId> {
     artifacts_of(engine, &full_coverage_credential(), None)
         .into_iter()
         .find(|a| a.key.as_deref() == Some(key))

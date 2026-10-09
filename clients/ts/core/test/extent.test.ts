@@ -47,7 +47,7 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     await clock.advance(600);
     scheduler.flush();
     await clock.advance(600);
-    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([7n]);
+    expect(store.get('artifacts').served.map((a) => a.mosaicaId)).toEqual([7n]);
     // The channel asks with the quota the store was given; the point path names the layer for its
     // tag, and no budget, since none was given.
     const tiles = (client.viewportArtifacts as unknown as {mock: {calls: [string, {perTile: number; layers?: string[]}][]}}).mock.calls.map((c) => c[1]);

@@ -338,7 +338,7 @@ impl Engine {
         &self,
         served: &ServedView<'_>,
         mask: &EffectiveMask,
-        id: TesseraId,
+        id: MosaicaId,
     ) -> Result<Option<GatedArtifact>> {
         let (session, generation) = (served.session, served.generation);
         let (view, view_data) = (served.name, served.data);
@@ -470,7 +470,7 @@ impl Engine {
     pub fn artifact(
         &self,
         session: &Session,
-        id: TesseraId,
+        id: MosaicaId,
         view: &str,
         zoom: Option<u8>,
     ) -> Result<Option<ArtifactOut>> {
@@ -613,7 +613,7 @@ impl Engine {
         Ok(Some(ArtifactOut {
             content: supplied.values,
             layer: name.clone(),
-            tessera_id: id,
+            mosaica_id: id,
             key: self.write.live().with_artifacts(|store| {
                 store.get(&name, level, ordinal).and_then(|r| r.key.clone())
             }),
@@ -1493,7 +1493,7 @@ impl Engine {
         check_cancelled(&ask.cancel)?;
         // The blinding is total over the allocator's space; a failure means the manifest and
         // allocator disagree, and dropping the artifact is the fail-closed reading of that.
-        let Ok(tessera_id) = self.identity_key.forward(pass.shard, entity) else {
+        let Ok(mosaica_id) = self.identity_key.forward(pass.shard, entity) else {
             return Ok(());
         };
         // From the composed mask, and only from it: every property below is a function of the
@@ -1538,7 +1538,7 @@ impl Engine {
         // not reached yet.
         walked
             .served_at
-            .insert((name.clone(), number, ordinal), tessera_id);
+            .insert((name.clone(), number, ordinal), mosaica_id);
         walked.placed.push(Placement {
             at: (name.clone(), number, ordinal),
             parents,
@@ -1549,7 +1549,7 @@ impl Engine {
         walked.out.push(ArtifactOut {
             content,
             layer: name.clone(),
-            tessera_id,
+            mosaica_id,
             key,
             masked_count,
             derived,
@@ -1728,7 +1728,7 @@ pub(super) struct Walked {
     /// The treed layers, whose rung is the response-local chain depth, applied after the row
     /// set is final.
     treed: std::collections::BTreeSet<String>,
-    served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId>,
+    served_at: std::collections::BTreeMap<(String, u32, u32), MosaicaId>,
     /// Positionally aligned with `out`: where each artifact sits, and what it points at.
     placed: Vec<Placement>,
     served_layers: Vec<ServedLayer>,
@@ -1736,7 +1736,7 @@ pub(super) struct Walked {
 
 /// Artifacts served in another frame of the same response, by `(layer, level, ordinal)`: their
 /// identifiers and their two filter bits, which a dependent in this frame may name and take.
-pub(super) type Outside = std::collections::BTreeMap<(String, u32, u32), (TesseraId, FilterBits)>;
+pub(super) type Outside = std::collections::BTreeMap<(String, u32, u32), (MosaicaId, FilterBits)>;
 
 /// One walk, reconciled: the rows served, each walked layer's served set for the membership
 /// column, and every row served by its address.
@@ -1839,31 +1839,31 @@ pub(super) fn settle_response(
         .filter(|a| treed.contains(&a.layer))
         .map(|a| {
             (
-                a.tessera_id.raw(),
+                a.mosaica_id.raw(),
                 a.parent_ids.iter().map(|p| p.raw()).collect(),
             )
         })
         .collect();
     let rungs = response_rungs(&parents_of);
     for artifact in served.iter_mut().filter(|a| treed.contains(&a.layer)) {
-        artifact.rung = rungs.get(&artifact.tessera_id.raw()).copied().unwrap_or(0);
+        artifact.rung = rungs.get(&artifact.mosaica_id.raw()).copied().unwrap_or(0);
     }
     // The membership column's served set is `served_at` after the drop: exactly the artifacts
     // in `served`, each with its response-local rung.
-    for ((name, level, ordinal), tessera_id) in &served_at {
+    for ((name, level, ordinal), mosaica_id) in &served_at {
         if let Some(slot) = served_layers
             .iter_mut()
             .find(|l| &l.name == name)
             .and_then(|l| l.levels.iter_mut().find(|l| l.level == *level))
         {
-            let rung = rungs.get(&tessera_id.raw()).copied().unwrap_or(0);
-            slot.served.insert(*ordinal, (*tessera_id, rung));
+            let rung = rungs.get(&mosaica_id.raw()).copied().unwrap_or(0);
+            slot.served.insert(*ordinal, (*mosaica_id, rung));
         }
     }
     let served_at = kept
         .into_iter()
         .zip(&served)
-        .map(|(at, artifact)| (at, (artifact.tessera_id, (artifact.matched, artifact.highlighted))))
+        .map(|(at, artifact)| (at, (artifact.mosaica_id, (artifact.matched, artifact.highlighted))))
         .collect();
     Settled {
         out: served,
@@ -1888,7 +1888,7 @@ pub(super) fn lineage_kind(kind: mosaica_types::layer::HierarchyKind) -> Option<
 /// The response-local depth of every served treed artifact — its `rung`: the longest parent
 /// chain over the response's own links.
 ///
-/// `parents_of` holds every served row of the treed layers, keyed by `tessera_id`, valued with
+/// `parents_of` holds every served row of the treed layers, keyed by `mosaica_id`, valued with
 /// `parent_ids`, which only ever name identifiers in the same response and layer. An empty
 /// list, or an identifier `parents_of` does not hold, are both roots — rung 0.
 ///
@@ -1963,7 +1963,7 @@ struct Placement {
 fn orphaned_dependents(
     placed: &[Placement],
     in_request: &std::collections::BTreeSet<String>,
-    served_at: &mut std::collections::BTreeMap<(String, u32, u32), TesseraId>,
+    served_at: &mut std::collections::BTreeMap<(String, u32, u32), MosaicaId>,
     outside: &Outside,
 ) -> Vec<bool> {
     let mut dependents_of: std::collections::BTreeMap<(&str, u32, u32), Vec<usize>> =

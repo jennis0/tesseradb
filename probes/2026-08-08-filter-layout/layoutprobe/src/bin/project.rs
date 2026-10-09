@@ -29,9 +29,9 @@ fn splitmix(x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// A tessera_id-order permutation, built by Fisher–Yates so it has no exploitable structure.
+/// A mosaica_id-order permutation, built by Fisher–Yates so it has no exploitable structure.
 /// Returns `(entity_to_row, row_to_entity)` — the design derives the second by inverting the
-/// segment's `tessera_id` column rather than storing it (contracts §2.6), which costs the same
+/// segment's `mosaica_id` column rather than storing it (contracts §2.6), which costs the same
 /// random access this measures.
 fn permutation(n: u64) -> (Vec<u32>, Vec<u32>) {
     let mut entity_to_row: Vec<u32> = (0..n as u32).collect();

@@ -159,7 +159,7 @@ export const HIGHLIGHTED_COLUMN = 'highlighted';
  * Hashes a per-point membership column to a response-local index.
  *
  * The decoder runs in a worker that cannot see the session's artifact ordinals, so it does the
- * per-point work: each distinct `tessera_id` gets a local index from 1, with `0` for null, and the
+ * per-point work: each distinct `mosaica_id` gets a local index from 1, with `0` for null, and the
  * main thread maps the short distinct list to session ordinals (`bands.ts`).
  *
  * Hashed on the two `u32` halves, because a `Map<bigint, …>` allocates a `BigInt` per point. Open
@@ -260,8 +260,8 @@ export type PointsPart = {
   highlighted: Uint8Array | null;
   /**
    * Which projection the frames were in, read from their schema. `'highlight'` carries
-   * `(tessera_id, highlighted)` only: `codes`, `positions`, `world` and `scalars` are empty, and
-   * the caller joins the bits to points it holds by `tessera_id`. A caller holding nothing asks
+   * `(mosaica_id, highlighted)` only: `codes`, `positions`, `world` and `scalars` are empty, and
+   * the caller joins the bits to points it holds by `mosaica_id`. A caller holding nothing asks
    * again with `'full'`.
    */
   projection: PointsProjection;
@@ -292,7 +292,7 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
   {
     let offset = 0;
     for (const t of pointTables) {
-      ids.set(u64Column(t, 'tessera_id'), offset);
+      ids.set(u64Column(t, 'mosaica_id'), offset);
       if (projection === 'full') codes.set(u64Column(t, 'code'), offset);
       offset += t.numRows;
     }
@@ -324,7 +324,7 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
   const membership: Record<string, MembershipColumn> = {};
   if (pointTables.length > 0) {
     for (const field of pointTables[0]!.schema.fields) {
-      if (field.name === 'tessera_id' || field.name === 'code') continue;
+      if (field.name === 'mosaica_id' || field.name === 'code') continue;
       // The highlight bit and the membership columns are not declared scalars; decoded as scalars
       // they would reach the palette and the tooltip.
       if (field.name === HIGHLIGHTED_COLUMN) continue;
@@ -391,7 +391,7 @@ export function decodeSubCells(payload: Uint8Array): SubCell[] {
 /** The columns of an artifacts frame, at fixed positions. */
 const ARTIFACT_COLUMNS = [
   'layer',
-  'tessera_id',
+  'mosaica_id',
   'key',
   'masked_count',
   'centroid_x',
@@ -431,7 +431,7 @@ export function decodeArtifactsFrame(payload: Uint8Array): ArtifactsFramePart {
   // `.get()`.
   const layer = column('layer');
   const key = column('key');
-  const tesseraId = u64Column(t, 'tessera_id');
+  const mosaicaId = u64Column(t, 'mosaica_id');
   const maskedCount = u64Column(t, 'masked_count');
   // Geometry in the same grid units as a point's code. A null means the layer declares none or the
   // request's `computed` left it out; an artifact that could not be served is absent.
@@ -443,7 +443,7 @@ export function decodeArtifactsFrame(payload: Uint8Array): ArtifactsFramePart {
   const boxMaxY = column('box_max_y');
   // Positional to the layer's declared content kinds; empty where it declares none.
   const content = column('content');
-  // A parent appears only where it is also in this frame, ascending by `tessera_id`. An empty list
+  // A parent appears only where it is also in this frame, ascending by `mosaica_id`. An empty list
   // is a root, a flat artifact or a parent this principal was not served, and these are one value.
   const parentIds = column('parent_ids');
   const rung = column('rung');
@@ -456,7 +456,7 @@ export function decodeArtifactsFrame(payload: Uint8Array): ArtifactsFramePart {
   const slot = column('slot');
   const artifacts: Artifact[] = [];
   let frameTile: bigint | null = null;
-  for (let i = 0; i < tesseraId.length; i++) {
+  for (let i = 0; i < mosaicaId.length; i++) {
     const cx = centroidX.get(i);
     const bx = boxMinX.get(i);
     const at = tile.get(i);
@@ -465,7 +465,7 @@ export function decodeArtifactsFrame(payload: Uint8Array): ArtifactsFramePart {
     else if (rowTile !== frameTile) throw new Error(`artifacts frame row ${i} names tile ${rowTile}, and row 0 names ${frameTile}; a frame answers one tile`);
     artifacts.push({
       layer: String(layer.get(i)),
-      tesseraId: tesseraId[i]!,
+      mosaicaId: mosaicaId[i]!,
       // A publisher need not supply a key.
       key: key.get(i) === null ? null : String(key.get(i)),
       maskedCount: maskedCount[i]!,

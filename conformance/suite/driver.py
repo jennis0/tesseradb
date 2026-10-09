@@ -596,9 +596,9 @@ class SuiteHarness:
     proc: subprocess.Popen | None = None
     token: str | None = None
     battery: Battery | None = None
-    #: tessera_id -> fx_key for every point served at establishment — how a deny stage maps a
+    #: mosaica_id -> fx_key for every point served at establishment — how a deny stage maps a
     #: battery item back to the item the fixture planted.
-    fx_by_tessera: dict[int, int] = field(default_factory=dict)
+    fx_by_mosaica: dict[int, int] = field(default_factory=dict)
     item_ids: tuple[int, ...] = ()
     #: The scope unit currently wrapping the server (constrained profile only).
     _scope_unit: str | None = field(default=None, init=False, repr=False)
@@ -757,7 +757,7 @@ class SuiteHarness:
         only when its inputs are still resident from the stage before is exactly what this
         profile exists to catch, and the WAL replay and cache open are boot-time reads too. The
         session does not survive the process, so the harness re-authorises with the same grants;
-        the battery's `tessera_id`s do survive, being minted per build rather than per boot.
+        the battery's `mosaica_id`s do survive, being minted per build rather than per boot.
         """
         self.stop()
         _advise_out_of_page_cache(self.bundle_root, self.run_dir)
@@ -859,9 +859,9 @@ class SuiteHarness:
     def establish_battery(self) -> None:
         """Build the battery from the deployment's own answers, once.
 
-        Item ids come from served responses — a `tessera_id` is a keyed permutation minted per
+        Item ids come from served responses — a `mosaica_id` is a keyed permutation minted per
         build, so nothing may persist one across builds — and the same served points supply the
-        tessera_id -> fx_key join every deny stage needs. A tiles-form viewport is appended
+        mosaica_id -> fx_key join every deny stage needs. A tiles-form viewport is appended
         beside `build_battery`'s bbox forms so both of contracts §3.2's request forms ride every
         stage.
         """
@@ -870,13 +870,13 @@ class SuiteHarness:
             self.token, self.view_id, 3, self.bbox, k=self.k, underlay_offset=2
         )
         points = wire.decode_viewport_points(raw)
-        self.fx_by_tessera = dict(
+        self.fx_by_mosaica = dict(
             zip(
-                points.column("tessera_id").to_pylist(),
+                points.column("mosaica_id").to_pylist(),
                 points.column("fx_key").to_pylist(),
             )
         )
-        self.item_ids = tuple(sorted(self.fx_by_tessera)[:3])
+        self.item_ids = tuple(sorted(self.fx_by_mosaica)[:3])
         battery = build_battery(
             meta,
             view_id=self.view_id,
@@ -1028,7 +1028,7 @@ class Build(Stage):
     The battery cannot run before a server exists, so this is the one stage with no before-state:
     its recording *is* the baseline every later stage is judged against, and the driver skips its
     entitlement check rather than pretending a comparison happened. (Invariance across a rebuild
-    is not a property the system claims — `tessera_id` is minted per build.)
+    is not a property the system claims — `mosaica_id` is minted per build.)
     """
 
     label = "build"
@@ -1242,7 +1242,7 @@ class Deny(Stage):
     The 200 acknowledgement is the barrier: a deny is fail-closed the moment it is accepted
     (write-path §5.4), applying to every subsequent request with nothing later to wait for. The
     target is resolved through a callable so a plan can name a battery item before the battery
-    exists — it runs at apply time against the harness's established tessera->fx join.
+    exists — it runs at apply time against the harness's established mosaica->fx join.
     """
 
     def __init__(
@@ -1256,8 +1256,8 @@ class Deny(Stage):
         self._fx: int | None = None
 
     def apply(self, h: SuiteHarness) -> None:
-        tessera_id, self._fx = self._pick(h)
-        resp = h.server.change(tessera_id, self.op)
+        mosaica_id, self._fx = self._pick(h)
+        resp = h.server.change(mosaica_id, self.op)
         if resp.status_code != 200:
             raise RuntimeError(f"{self.op} refused ({resp.status_code}): {resp.text}")
 

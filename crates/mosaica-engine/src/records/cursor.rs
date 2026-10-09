@@ -156,7 +156,7 @@ impl CursorKey {
     }
 }
 
-/// A row's place in its order: `(cell, tessera_id)` in map order, and `(item number, 0)` in
+/// A row's place in its order: `(cell, mosaica_id)` in map order, and `(item number, 0)` in
 /// stored order, where a scan position past a whole stretch is `(n, u64::MAX)` for `n` the number
 /// just before the next stretch's first item, which need not be an item. Item numbers are held
 /// only inside the seal.

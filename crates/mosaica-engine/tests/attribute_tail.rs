@@ -9,8 +9,8 @@
 //! write. It surfaces as every later row's value read under the wrong identity, or as a reader
 //! refusing a bundle hours afterwards.
 //!
-//! **The assertion is always by `tessera_id`, never by row.** Every one of these producers
-//! legitimately reorders rows: a merge interleaves two segments in `(morton, tessera_id)` order, a
+//! **The assertion is always by `mosaica_id`, never by row.** Every one of these producers
+//! legitimately reorders rows: a merge interleaves two segments in `(morton, mosaica_id)` order, a
 //! fold rewrites the whole permutation. A row-indexed assertion would pass on a producer that
 //! carried the values forward *unpermuted* — values present, every one against the wrong item —
 //! which is precisely the defect that has no other symptom.
@@ -200,11 +200,11 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
     build(&args).expect("a build with a declared schema should succeed");
 }
 
-/// Every `(tessera_id, band, ingested_at, score)` in every live segment of the bundle at `root`.
+/// Every `(mosaica_id, band, ingested_at, score)` in every live segment of the bundle at `root`.
 ///
 /// **Read through `ColumnsRef` by name**, which is how the serving path reads it — so a segment
 /// whose tail is present but misnamed, mistyped or short fails here exactly as it would in a
-/// request. Keyed by `tessera_id` because every producer may reorder rows (see the module doc).
+/// request. Keyed by `mosaica_id` because every producer may reorder rows (see the module doc).
 fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
     let bundle = open_bundle(root).expect("the bundle opens");
     // The prefix is read from `CURRENT` rather than assumed, because a fold publishes into a new
@@ -227,7 +227,7 @@ fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
                 .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
-            let ids = columns.tessera_id();
+            let ids = columns.mosaica_id();
             let band = match columns.scalar("band") {
                 Some(ScalarSlice::U8(v)) => v,
                 other => panic!(
@@ -322,7 +322,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
         .collect();
     assert_eq!(codes, BTreeMap::from([("low", 1), ("mid", 2), ("high", 3)]));
 
-    // And the values are at the rows, joined **source id → entity → tessera_id**.
+    // And the values are at the rows, joined **source id → entity → mosaica_id**.
     //
     // **The source id is not the entity id, and asserting as if it were is how this case passed
     // against a build that gave every item another item's attributes.** Entity ids are assigned
@@ -735,14 +735,14 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
     };
 
     assert!(!out.points.is_empty(), "the viewport served nothing");
-    for (i, (tessera_id, _code)) in out.points.iter().enumerate() {
+    for (i, (mosaica_id, _code)) in out.points.iter().enumerate() {
         let expected = truth
-            .get(&tessera_id.raw())
-            .unwrap_or_else(|| panic!("served a point ({tessera_id:?}) the segments do not hold"));
+            .get(&mosaica_id.raw())
+            .unwrap_or_else(|| panic!("served a point ({mosaica_id:?}) the segments do not hold"));
         assert_eq!(
             (band[i], ingested_at[i], score[i]),
             *expected,
-            "point {i} ({tessera_id:?}) carries another point's tail"
+            "point {i} ({mosaica_id:?}) carries another point's tail"
         );
     }
 
@@ -837,7 +837,7 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
             .collect(),
     );
 
-    // The stored truth, keyed by `tessera_id`: which segment holds the row, its position code and
+    // The stored truth, keyed by `mosaica_id`: which segment holds the row, its position code and
     // its three values, with the score read through the segment's presence record.
     struct Stored {
         segment: usize,
@@ -865,7 +865,7 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
         for row in 0..columns.row_count() as usize {
             let high = (segment.morton.u32()[row] as u64) << 32;
             stored.insert(
-                columns.tessera_id()[row],
+                columns.mosaica_id()[row],
                 Stored {
                     segment: at,
                     code: high | columns.residual()[row] as u64,
@@ -906,7 +906,7 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
     for tile in &out.tiles {
         let mut held = BTreeSet::new();
         for _ in 0..tile.served {
-            let (id, code) = (out.points.tessera_ids[i], out.points.codes[i]);
+            let (id, code) = (out.points.mosaica_ids[i], out.points.codes[i]);
             let truth = stored
                 .get(&id)
                 .unwrap_or_else(|| panic!("point {i} has an id no segment holds"));
@@ -1129,7 +1129,7 @@ fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> Una
     }
 }
 
-/// Every `(tessera_id, band, score)` in every live segment — the render tail read by name, the
+/// Every `(mosaica_id, band, score)` in every live segment — the render tail read by name, the
 /// same truth-by-identity join `tail_by_identity` performs for the all-rendered fixture.
 fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
     let bundle = open_bundle(root).expect("the bundle opens");
@@ -1150,7 +1150,7 @@ fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
                 .unwrap_or_else(|e| panic!("segment {} must open: {e}", segment.seg_id));
-            let ids = columns.tessera_id();
+            let ids = columns.mosaica_id();
             let band = match columns.scalar("band") {
                 Some(ScalarSlice::U8(v)) => v,
                 other => panic!(
@@ -1218,7 +1218,7 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
         513,
         "every row of both segments is served"
     );
-    let flushed_id = engine.tessera_id_of(flushed_entity).unwrap();
+    let flushed_id = engine.mosaica_id_of(flushed_entity).unwrap();
     assert!(
         out.points.iter().any(|(id, _)| id == flushed_id),
         "the flushed item is served, not merely counted"
@@ -1330,7 +1330,7 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
     let entity_of_source = source_to_new_map(&root, "v00000");
     for source in [0u64, 1, 5, 63] {
         let id = engine
-            .tessera_id_of(mosaica_types::EntityId::new(entity_of_source[&source]))
+            .mosaica_id_of(mosaica_types::EntityId::new(entity_of_source[&source]))
             .expect("identity is computable");
         expect_item(
             id,
@@ -1340,7 +1340,7 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
             &format!("built source {source}"),
         );
     }
-    let flushed_id = engine.tessera_id_of(flushed_entity).unwrap();
+    let flushed_id = engine.mosaica_id_of(flushed_entity).unwrap();
     expect_item(flushed_id, 4242, "mid", 9.25, "the flushed item");
 }
 
@@ -1611,7 +1611,7 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
     // publish an extent it never composed — every entity flushed since process start showing its
     // blob-resident fields as absent, silently, until the next fold.
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let flushed_id = engine.tessera_id_of(entity).unwrap();
+    let flushed_id = engine.mosaica_id_of(entity).unwrap();
     let served = engine
         .item(&session, flushed_id)
         .expect("drill-down on a flushed entity")

@@ -365,7 +365,7 @@ def check_stage(server, points, stage: str) -> None:
         # layer whose shapes overlap on a shared edge has two containing artifacts for a point on
         # it; the column names one of them, and the assertion is that it names one of the oracle's.
         table = decode_viewport_points(body)
-        ids_by_key = {(layer, key): a.tessera_id for (layer, key), a in served.items()}
+        ids_by_key = {(layer, key): a.mosaica_id for (layer, key), a in served.items()}
         fx = table.column("fx_key").to_pylist()
         n_visible = len(visible(points, terms))
         assert len(fx) == n_visible, f"{stage}, principal {terms}: {len(fx)} points served of {n_visible} visible"

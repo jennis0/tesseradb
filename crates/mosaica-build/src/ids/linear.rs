@@ -3,7 +3,7 @@
 
 use rustc_hash::FxHashMap;
 use mosaica_lifecycle::resolve::{self, Batch, Holdings, RowIdentity, Verdict};
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::FileRead;
@@ -37,10 +37,10 @@ impl Holdings for Held {
             .collect())
     }
 
-    /// Nothing holds a `tessera_id` in the empty database a build starts from.
-    fn tessera_holders(
+    /// Nothing holds a `mosaica_id` in the empty database a build starts from.
+    fn mosaica_holders(
         &self,
-        ids: &[TesseraId],
+        ids: &[MosaicaId],
     ) -> std::result::Result<Vec<Option<EntityId>>, Self::Error> {
         Ok(vec![None; ids.len()])
     }
@@ -77,7 +77,7 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                 let limit_read = limited.as_ref().and_then(|l| l.read(&carried, creates));
                 let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit_read);
                 if !creates {
-                    resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
+                    resolve::require_identifier(file.mosaica, carried.len()).map_err(|_| {
                         BuildError::Invalid(super::no_identifier(&read.object, path))
                     })?;
                 }
@@ -90,9 +90,9 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                             }
                             continue;
                         }
-                        let carries_tessera = scanned.tessera.as_ref().is_some_and(|t| t[offset]);
+                        let carries_mosaica = scanned.mosaica.as_ref().is_some_and(|t| t[offset]);
                         let identity = RowIdentity {
-                            tessera_id: carries_tessera.then(|| TesseraId::new(0)),
+                            mosaica_id: carries_mosaica.then(|| MosaicaId::new(0)),
                             unique: carried
                                 .iter()
                                 .zip(&scanned.keys)
@@ -121,7 +121,7 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                             return None;
                         }
                         let identity = RowIdentity {
-                            tessera_id: None,
+                            mosaica_id: None,
                             unique: lists
                                 .carried
                                 .iter()
@@ -197,7 +197,7 @@ fn decide(
         let Some((identity, left_out)) = entry else {
             continue;
         };
-        let names = identity.tessera_id.is_some()
+        let names = identity.mosaica_id.is_some()
             || identity
                 .unique
                 .iter()

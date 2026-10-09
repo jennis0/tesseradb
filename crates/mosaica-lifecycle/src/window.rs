@@ -148,15 +148,15 @@ pub struct WindowEntry<W> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     /// The row writes the entry's row at this position: it creates an item, or adds the item
-    /// whose `tessera_id` it carries to a view.
-    Written { row: u32, tessera_id: Option<u64> },
+    /// whose `mosaica_id` it carries to a view.
+    Written { row: u32, mosaica_id: Option<u64> },
     /// The row named this item and changed nothing, so it writes nothing.
-    Unchanged { entity: EntityId, tessera_id: u64 },
+    Unchanged { entity: EntityId, mosaica_id: u64 },
     /// The row places this item in artifacts that do not hold it and changes nothing else: a
     /// change to the artifacts, not the item, which keeps its entity and is answered unchanged.
-    Joined { entity: EntityId, tessera_id: u64 },
+    Joined { entity: EntityId, mosaica_id: u64 },
     /// The row moves its item to a new entity as the entry's edit at this position.
-    Edited { edit: u32, tessera_id: u64 },
+    Edited { edit: u32, mosaica_id: u64 },
     /// The identity rule refused the row, which writes nothing.
     Refused(crate::resolve::Reason),
 }
@@ -693,13 +693,13 @@ impl<W> CommitWindow<W> {
     /// the numbers mean and what they do not. The error path returns none: a window that could not
     /// allocate made no assignment to measure, which is the same statement as "no effect at all".
     ///
-    /// `tessera_id_of` gives a created item's `tessera_id` for the receipt each record carries; a
+    /// `mosaica_id_of` gives a created item's `mosaica_id` for the receipt each record carries; a
     /// row naming an item carries its own.
     #[allow(clippy::type_complexity)]
     pub fn allocate(
         self,
         alloc: &mut Allocator,
-        tessera_id_of: impl Fn(EntityId) -> u64,
+        mosaica_id_of: impl Fn(EntityId) -> u64,
     ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally), (AllocError, Vec<Vec<W>>)> {
         let mut entries = self.entries;
 
@@ -776,7 +776,7 @@ impl<W> CommitWindow<W> {
                 .iter()
                 .enumerate()
                 .map(|(i, slot)| match *slot {
-                    Slot::Written { row, tessera_id } => {
+                    Slot::Written { row, mosaica_id } => {
                         let row: &WalRow = &wal_rows[row as usize];
                         RowReceipt {
                             outcome: if row.join {
@@ -784,27 +784,27 @@ impl<W> CommitWindow<W> {
                             } else {
                                 RowOutcome::Created
                             },
-                            tessera_id: Some(
-                                tessera_id.unwrap_or_else(|| tessera_id_of(row.entity_id)),
+                            mosaica_id: Some(
+                                mosaica_id.unwrap_or_else(|| mosaica_id_of(row.entity_id)),
                             ),
                             over_bound: entry.over_bound.contains(&(i as u32)),
                         }
                     }
-                    Slot::Unchanged { tessera_id, .. } | Slot::Joined { tessera_id, .. } => {
+                    Slot::Unchanged { mosaica_id, .. } | Slot::Joined { mosaica_id, .. } => {
                         RowReceipt {
                             outcome: RowOutcome::Unchanged,
-                            tessera_id: Some(tessera_id),
+                            mosaica_id: Some(mosaica_id),
                             over_bound: false,
                         }
                     }
-                    Slot::Edited { tessera_id, .. } => RowReceipt {
+                    Slot::Edited { mosaica_id, .. } => RowReceipt {
                         outcome: RowOutcome::Edited,
-                        tessera_id: Some(tessera_id),
+                        mosaica_id: Some(mosaica_id),
                         over_bound: entry.over_bound.contains(&(i as u32)),
                     },
                     Slot::Refused(reason) => RowReceipt {
                         outcome: RowOutcome::Refused(reason),
-                        tessera_id: None,
+                        mosaica_id: None,
                         over_bound: false,
                     },
                 })
@@ -866,7 +866,7 @@ mod tests {
             slots: (0..rows.len() as u32)
                 .map(|row| Slot::Written {
                     row,
-                    tessera_id: None,
+                    mosaica_id: None,
                 })
                 .collect(),
             over_bound: Vec::new(),
@@ -995,7 +995,7 @@ mod tests {
             WindowEntry {
                 slots: vec![Slot::Written {
                     row: 0,
-                    tessera_id: None,
+                    mosaica_id: None,
                 }],
                 over_bound: Vec::new(),
                 rows: vec![row(&[1])],

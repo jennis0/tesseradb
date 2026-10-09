@@ -8,7 +8,7 @@
 // is rewritten, and `wire-example/test/expected.json` with them. Each capture checks the arrangement its tests rely on, and where the server did not
 // provide it the script stops and writes nothing.
 //
-// Each build generates its own identity key, so a recapture serves new `tessera_id`s and rewrites
+// Each build generates its own identity key, so a recapture serves new `mosaica_id`s and rewrites
 // every file that carries one.
 import {spawnSync} from 'node:child_process';
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
@@ -205,14 +205,14 @@ async function captureWide() {
 
       const points = tables(plain, 3);
       check(points.length > 0, 'the plain capture served no points');
-      const ids = points.flatMap((t) => column(t, 'tessera_id'));
+      const ids = points.flatMap((t) => column(t, 'mosaica_id'));
       const rendered = meta.declared_scalars.filter((c) => c.render);
       for (const {name, category} of rendered) {
         check(points[0].getChild(name) !== null, `the points frame carries no column ${name}`);
         if (category === null) check(points.some((t) => t.getChild(name).nullCount > 0), `no served point is null in ${name}`);
       }
-      // The worked decodes check a tessera_id survives past 2^53.
-      check(ids[0] > 2n ** 53n, 'the first served tessera_id is below 2^53; run the capture again, which builds under a new key');
+      // The worked decodes check a mosaica_id survives past 2^53.
+      check(ids[0] > 2n ** 53n, 'the first served mosaica_id is below 2^53; run the capture again, which builds under a new key');
       captured.set('meta.json', JSON.stringify(meta, null, 2) + '\n');
       captured.set('viewport-plain.bin', plain);
       captured.set('viewport-underlay.bin', underlay);
@@ -256,7 +256,7 @@ async function captureNotebook() {
     check(kinds.at(-1) === 4 && kinds.slice(0, -1).every((k) => k === 5) && kinds.length === 17, 'the artifacts capture is not sixteen artifacts frames and a trailer');
     const tileFrames = tables(channel, 5);
     check(tileFrames.some((t) => t.numRows === 0), 'no tile of the artifacts capture is empty');
-    const rows = tileFrames.flatMap((t) => column(t, 'tessera_id').map((id, i) => ({id, x: t.getChild('centroid_x').get(i), y: t.getChild('centroid_y').get(i)})));
+    const rows = tileFrames.flatMap((t) => column(t, 'mosaica_id').map((id, i) => ({id, x: t.getChild('centroid_x').get(i), y: t.getChild('centroid_y').get(i)})));
     const distinct = new Map(rows.map((r) => [r.id, `${r.x},${r.y}`]));
     check(distinct.size >= 3 && new Set(distinct.values()).size === distinct.size, 'the clusters do not have distinct centroids');
     check(rows.length > distinct.size, 'no cluster is served in two tiles');
@@ -292,14 +292,14 @@ async function captureNotebook() {
     check(typeof roots.next === 'string', 'the roots page has no next page');
     check(roots.artifacts.every((a) => typeof a.slot === 'number' && a.slot < 10), 'a root has no slot below ten');
     const [root] = (await reader.browse({view: 's0', layer: 'clusters/hdbscan', limit: 1})).artifacts;
-    const children = await reader.browse({view: 's0', layer: 'clusters/hdbscan', parent: root.tessera_id, filters: {archive: {in: ['q-fin']}}});
-    check(children.artifacts.every((a) => a.parent_ids.includes(root.tessera_id)), 'a child does not name the root it was asked under');
+    const children = await reader.browse({view: 's0', layer: 'clusters/hdbscan', parent: root.mosaica_id, filters: {archive: {in: ['q-fin']}}});
+    check(children.artifacts.every((a) => a.parent_ids.includes(root.mosaica_id)), 'a child does not name the root it was asked under');
     check(children.artifacts.every((a) => a.rung === 1), 'a child of the root is not at rung 1');
     check(children.artifacts.some((a) => a.matched_count === 0 && a.masked_count > 0), 'no child is one the filter admits nothing of');
     const search = await reader.browse({view: 's0', layer: 'clusters/hdbscan', q: 'hdb', limit: 2});
     check(typeof search.next === 'string', 'the search page has no next page');
-    const browsed = [roots, children, search].flatMap((p) => [...p.artifacts, ...p.parents].flatMap((a) => [a.tessera_id, ...a.parent_ids]));
-    check(browsed.some((id) => BigInt(id) > 2n ** 53n), 'no browsed tessera_id is past 2^53');
+    const browsed = [roots, children, search].flatMap((p) => [...p.artifacts, ...p.parents].flatMap((a) => [a.mosaica_id, ...a.parent_ids]));
+    check(browsed.some((id) => BigInt(id) > 2n ** 53n), 'no browsed mosaica_id is past 2^53');
 
     captured.set('viewport-artifacts.bin', channel);
     captured.set('artifacts-highlight.bin', litArtifacts);
@@ -319,16 +319,16 @@ async function captureNotebook() {
 function answer(body) {
   const points = tables(body, 3);
   const artifacts = tables(body, 5);
-  const firstPoint = points.find((t) => t.numRows > 0)?.getChild('tessera_id').get(0);
-  const firstArtifact = artifacts.find((t) => t.numRows > 0)?.getChild('tessera_id').get(0);
+  const firstPoint = points.find((t) => t.numRows > 0)?.getChild('mosaica_id').get(0);
+  const firstArtifact = artifacts.find((t) => t.numRows > 0)?.getChild('mosaica_id').get(0);
   return {
     frames: frames(body).map((f) => f.kind),
     tiles: tables(body, 1)[0]?.numRows ?? null,
     sub_cells: tables(body, 2)[0]?.numRows ?? null,
     artifacts: artifacts.length === 0 ? null : artifacts.reduce((n, t) => n + t.numRows, 0),
     points: points.reduce((n, t) => n + t.numRows, 0),
-    first_point_tessera_id: firstPoint === undefined ? null : String(firstPoint),
-    first_artifact_tessera_id: firstArtifact === undefined ? null : String(firstArtifact)
+    first_point_mosaica_id: firstPoint === undefined ? null : String(firstPoint),
+    first_artifact_mosaica_id: firstArtifact === undefined ? null : String(firstArtifact)
   };
 }
 
@@ -337,7 +337,7 @@ await captureNotebook();
 
 const expected = {
   _comment:
-    'What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts (the tiles frame null in an artifacts body, the artifacts frames summed), and the first tessera_id of the points and artifacts as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.'
+    'What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts (the tiles frame null in an artifacts body, the artifacts frames summed), and the first mosaica_id of the points and artifacts as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.'
 };
 for (const name of ['viewport-plain.bin', 'viewport-underlay.bin', 'viewport-artifacts.bin', 'viewport-membership.bin']) {
   expected[name] = answer(captured.get(name));

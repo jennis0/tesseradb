@@ -26,13 +26,13 @@ fn key() -> IdentityKey {
 /// **interleave** in Morton order rather than landing in disjoint regions. That is what makes
 /// this fixture exercise the "inputs are the whole row space, not an adjacent window" property
 /// pass 1 is built for: an entity-ordered scan of the inputs would not reproduce the output order,
-/// only the heap over `(morton, tessera_id)` would.
+/// only the heap over `(morton, mosaica_id)` would.
 fn write_input(dir: &Path, seg_id: &str, entities: &[u64], stride: u64) -> FoldSegmentInput {
     let k = key();
     let mut items: Vec<TilerItem> = entities
         .iter()
         .map(|&e| TilerItem {
-            tessera_id: k.forward(0, EntityId::new(e)).expect("entity fits u32"),
+            mosaica_id: k.forward(0, EntityId::new(e)).expect("entity fits u32"),
             qx: fixed32(((e * stride) % 97) as f64 / 97.0, 0.0, 1.0),
             qy: fixed32(((e * 53) % 89) as f64 / 89.0, 0.0, 1.0),
             scalars: vec![],
@@ -134,7 +134,7 @@ fn fold(
     (out, output_dir, permutation_path)
 }
 
-/// Every input row, as `(entity, tessera_id, morton, residual)`, read straight off the mapped
+/// Every input row, as `(entity, mosaica_id, morton, residual)`, read straight off the mapped
 /// files — never through `unsplit32`, so a test bug here cannot mask a dequantise-requantise
 /// regression the way comparing decoded coordinates would.
 fn read_input_rows(input: &FoldSegmentInput) -> Vec<(u64, u64, u32, u32)> {
@@ -143,11 +143,11 @@ fn read_input_rows(input: &FoldSegmentInput) -> Vec<(u64, u64, u32, u32)> {
     let k = key();
     (0..codes.u32().len())
         .map(|row| {
-            let tessera_id = cols.tessera_id()[row];
-            let (_, entity) = k.invert(mosaica_types::TesseraId::new(tessera_id));
+            let mosaica_id = cols.mosaica_id()[row];
+            let (_, entity) = k.invert(mosaica_types::MosaicaId::new(mosaica_id));
             (
                 entity.raw(),
-                tessera_id,
+                mosaica_id,
                 codes.u32()[row],
                 cols.residual()[row],
             )
@@ -161,7 +161,7 @@ fn read_output_rows(output_dir: &Path) -> Vec<(u64, u32, u32)> {
     (0..codes.u32().len())
         .map(|row| {
             (
-                cols.tessera_id()[row],
+                cols.mosaica_id()[row],
                 codes.u32()[row],
                 cols.residual()[row],
             )
@@ -193,13 +193,13 @@ fn fold_drops_tombstoned_rows_and_keeps_the_rest_in_morton_order() {
     assert!(
         rows.windows(2)
             .all(|w| (w[0].1, w[0].0) <= (w[1].1, w[1].0)),
-        "output rows must be (morton, tessera_id) ascending"
+        "output rows must be (morton, mosaica_id) ascending"
     );
 
     let k = key();
     let surviving_entities: Vec<u64> = rows
         .iter()
-        .map(|&(tid, _, _)| k.invert(mosaica_types::TesseraId::new(tid)).1.raw())
+        .map(|&(tid, _, _)| k.invert(mosaica_types::MosaicaId::new(tid)).1.raw())
         .collect();
     for e in (100..110).chain(200..208) {
         let dropped = [103u64, 105, 202].contains(&e);
@@ -215,7 +215,7 @@ fn fold_drops_tombstoned_rows_and_keeps_the_rest_in_morton_order() {
 /// surviving input row against the output.
 ///
 /// Order is deliberately discarded before comparing (both sides sorted) — pass 1's job is to
-/// reorder into `(morton, tessera_id)` order, so the useful assertion is that no triple was
+/// reorder into `(morton, mosaica_id)` order, so the useful assertion is that no triple was
 /// altered, not that it kept its input position. A dequantise-then-requantise round trip (reading
 /// a row via `unsplit32`/`split32` instead of carrying `(morton, residual)` straight through)
 /// would perturb a residual by up to a cell and show up here as a multiset mismatch, even though
@@ -230,9 +230,9 @@ fn every_surviving_points_triple_matches_its_input_exactly() {
 
     let mut expected: Vec<(u64, u32, u32)> = Vec::new();
     for input in [&a, &b] {
-        for (entity, tessera_id, morton, residual) in read_input_rows(input) {
+        for (entity, mosaica_id, morton, residual) in read_input_rows(input) {
             if !dead.contains(entity as u32) {
-                expected.push((tessera_id, morton, residual));
+                expected.push((mosaica_id, morton, residual));
             }
         }
     }
@@ -257,7 +257,7 @@ fn every_surviving_points_triple_matches_its_input_exactly() {
 ///
 /// Also asserts the row-id-shift property compaction §6 exists for: entity 109's row in the
 /// output is **not** its position in either input, because two earlier rows (100..109's tombstoned
-/// members) were dropped ahead of it in `(morton, tessera_id)` order — an implementation that
+/// members) were dropped ahead of it in `(morton, mosaica_id)` order — an implementation that
 /// scattered using an input row index instead of an emitted-row counter would misplace it.
 #[test]
 fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
@@ -275,15 +275,15 @@ fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
     let permutation = Permutation::load(&perm_path).expect("permutation.bin loads");
     assert_eq!(permutation.bound(), bound);
 
-    // Every surviving entity: `row_of` answers the row where its tessera_id actually landed.
+    // Every surviving entity: `row_of` answers the row where its mosaica_id actually landed.
     for e in (100..110).chain(200..208) {
         if [101u64, 103, 205].contains(&e) {
             continue;
         }
-        let tessera_id = k.forward(0, EntityId::new(e)).unwrap();
+        let mosaica_id = k.forward(0, EntityId::new(e)).unwrap();
         let expected_row = rows
             .iter()
-            .position(|&(tid, _, _)| tid == tessera_id.raw())
+            .position(|&(tid, _, _)| tid == mosaica_id.raw())
             .unwrap_or_else(|| panic!("entity {e} must survive and appear in the output"));
         assert_eq!(
             permutation
@@ -351,8 +351,8 @@ fn the_empty_tombstone_set_is_a_faithful_reemission() {
 
     let mut expected: Vec<(u64, u32, u32)> = Vec::new();
     for input in [&a, &b] {
-        for (_, tessera_id, morton, residual) in read_input_rows(input) {
-            expected.push((tessera_id, morton, residual));
+        for (_, mosaica_id, morton, residual) in read_input_rows(input) {
+            expected.push((mosaica_id, morton, residual));
         }
     }
     expected.sort_unstable();

@@ -47,15 +47,15 @@ def served(server, terms) -> tuple[fx.Served, dict]:
     rows = decode_viewport_artifacts(
         server.artifacts_viewport(token, fx.VIEW_ID, 0, WHOLE, budget=1000)
     )
-    key_of = {row.tessera_id: (row.layer, row.key) for row in rows}
+    key_of = {row.mosaica_id: (row.layer, row.key) for row in rows}
     out = {}
     for row in rows:
         parents = [key_of[p][1] for p in row.parent_ids]
         assert len(parents) <= 1, row
         target = key_of[row.target][1] if row.target is not None else None
         out[(row.layer, row.key)] = (row.masked_count, parents[0] if parents else None, target)
-    membership_names_only_served(body, {row.tessera_id for row in rows})
-    return out, {(row.layer, row.key): row.tessera_id for row in rows}
+    membership_names_only_served(body, {row.mosaica_id for row in rows})
+    return out, {(row.layer, row.key): row.mosaica_id for row in rows}
 
 
 def membership_names_only_served(body: bytes, served_ids: set[int]) -> None:
@@ -75,9 +75,9 @@ def membership_names_only_served(body: bytes, served_ids: set[int]) -> None:
     assert seen, "the response carried membership values to check"
 
 
-def drill(server, token, tessera_id):
+def drill(server, token, mosaica_id):
     response = requests.post(
-        f"{server.viewer_base}/v1/artifacts/{tessera_id}",
+        f"{server.viewer_base}/v1/artifacts/{mosaica_id}",
         headers={"Authorization": f"Bearer {token}"},
         json={"view": fx.VIEW_ID},
         timeout=30,
@@ -116,8 +116,8 @@ def check(server) -> None:
         assert got == expected, terms
         token = server.authorise(terms)["token"]
         never = drill(server, token, NEVER_ISSUED)
-        for key, tessera_id in ids.items():
-            answer = drill(server, token, tessera_id)
+        for key, mosaica_id in ids.items():
+            answer = drill(server, token, mosaica_id)
             if key in expected:
                 assert answer[0] == 200, (terms, key)
                 body = json.loads(answer[1])
@@ -130,7 +130,7 @@ def check(server) -> None:
                 continue
             response = server.viewport_request(
                 token, fx.VIEW_ID, 0, WHOLE, k=0,
-                filters={"member_of": {"layer": key[0], "artifact": str(tessera_id)}},
+                filters={"member_of": {"layer": key[0], "artifact": str(mosaica_id)}},
             )
             if key[0] == fx.GATED and fx.GATE not in terms:
                 # A layer this principal does not reach is refused by name, as one never declared.
@@ -145,10 +145,10 @@ def check(server) -> None:
             key: count for key, (count, parent, _) in teams.items() if parent is None
         }, terms
         never_children = browse_all(server, token, parent=NEVER_ISSUED)
-        for key, tessera_id in ids.items():
+        for key, mosaica_id in ids.items():
             if key[0] != fx.TEAMS:
                 continue
-            children = browse_all(server, token, parent=str(tessera_id))
+            children = browse_all(server, token, parent=str(mosaica_id))
             if key[1] in teams:
                 assert browsed(children) == {
                     child: count for child, (count, parent, _) in teams.items() if parent == key[1]

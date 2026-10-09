@@ -41,7 +41,7 @@ const META = {
 } as unknown as Meta;
 
 const row = (id: bigint, name: string | null, masked: bigint, extra: Partial<BrowseRow> = {}): BrowseRow => ({
-  tesseraId: id,
+  mosaicaId: id,
   key: `d-${id}`,
   name,
   maskedCount: masked,

@@ -1062,14 +1062,14 @@ require_member_visibility = "any"
     assert!(report.refused.iter().all(|entry| !entry.is_refusal()), "{:?}", report.refused);
 }
 
-/// **Under `--limit` a row carrying a `tessera_id` is refused for it, however the file is read**:
+/// **Under `--limit` a row carrying a `mosaica_id` is refused for it, however the file is read**:
 /// the first view's points, read by their own value; a second view's, which name items by `b`
 /// too; and a members file naming items by `a` alone. Each such row's value is past the limit.
 #[test]
-fn a_tessera_id_under_limit_is_refused_in_every_file() {
+fn a_mosaica_id_under_limit_is_refused_in_every_file() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    let ids = |values: &[Option<&str>]| ("tessera_id", strings(values));
+    let ids = |values: &[Option<&str>]| ("mosaica_id", strings(values));
     points(
         &dir.join("points.parquet"),
         &[Some(1), Some(2), Some(50)],
@@ -1141,7 +1141,7 @@ require_member_visibility = "any"
     })
     .expect("the build runs");
     for object in ["view 's0'", "view 'near'", "layer 'groups' members"] {
-        let unknown = refused(&report, object, "unknown_tessera_id").map(|e| e.rows);
+        let unknown = refused(&report, object, "unknown_mosaica_id").map(|e| e.rows);
         assert_eq!(unknown, Some(1), "{object}: {:?}", report.refused);
         assert!(refused(&report, object, "outside_limit").is_none(), "{object}");
     }

@@ -153,11 +153,11 @@ async fn a_named_column_reaches_the_wire_alone_with_the_same_points_counts_and_m
 
     let full = ask(&server, token, None).await;
     let (full_names, full_columns) = columns(&full);
-    assert_eq!(full_names, ["tessera_id", "code", "archive", "score", membership.as_str()]);
+    assert_eq!(full_names, ["mosaica_id", "code", "archive", "score", membership.as_str()]);
 
     let named = ask(&server, token, Some(json!(["score"]))).await;
     let (names, named_columns) = columns(&named);
-    assert_eq!(names, ["tessera_id", "code", "score", membership.as_str()]);
+    assert_eq!(names, ["mosaica_id", "code", "score", membership.as_str()]);
     for name in &names {
         assert_eq!(&named_columns[name], &full_columns[name], "{name}");
     }

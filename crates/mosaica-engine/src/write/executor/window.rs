@@ -481,23 +481,23 @@ impl Executor {
         let stale = stale || {
             let key = &self.deps.identity_key;
             let number_of =
-                |tessera_id: u64| key.invert(mosaica_types::TesseraId::new(tessera_id)).1;
+                |mosaica_id: u64| key.invert(mosaica_types::MosaicaId::new(mosaica_id)).1;
             let mut named: Vec<(EntityId, EntityId)> = edits
                 .iter()
                 .map(|submitted| (submitted.edit.old, submitted.edit.number))
                 .collect();
             for slot in &slots {
                 match slot {
-                    mosaica_lifecycle::Slot::Unchanged { entity, tessera_id }
-                    | mosaica_lifecycle::Slot::Joined { entity, tessera_id } => {
-                        named.push((*entity, number_of(*tessera_id)));
+                    mosaica_lifecycle::Slot::Unchanged { entity, mosaica_id }
+                    | mosaica_lifecycle::Slot::Joined { entity, mosaica_id } => {
+                        named.push((*entity, number_of(*mosaica_id)));
                     }
                     mosaica_lifecycle::Slot::Written {
                         row,
-                        tessera_id: Some(tessera_id),
+                        mosaica_id: Some(mosaica_id),
                     } => {
                         if let Some(entity) = rows.get(*row as usize).and_then(|r| r.join) {
-                            named.push((entity, number_of(*tessera_id)));
+                            named.push((entity, number_of(*mosaica_id)));
                         }
                     }
                     _ => {}
@@ -599,7 +599,7 @@ impl Executor {
             self.deps.identity_key,
             self.generation.load().bundle.manifest.identity.shard_id,
         );
-        let tessera_id_of = |entity: EntityId| {
+        let mosaica_id_of = |entity: EntityId| {
             identity
                 .forward(shard, entity)
                 .map(|id| id.raw())
@@ -607,7 +607,7 @@ impl Executor {
         };
         let closed = match self
             .live
-            .with_allocator(|a| window.allocate(a, tessera_id_of))
+            .with_allocator(|a| window.allocate(a, mosaica_id_of))
         {
             Ok((closed, tally)) => {
                 // Recorded at allocation: a failed append still fragmented the entity axis.

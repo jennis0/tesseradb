@@ -2,12 +2,12 @@ import type {ArtifactDetail, ClauseVerb, Count, FilterExpr, ItemDetail, Masked, 
 import type {CategoryPaletteName, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale} from '@mosaicajs/deck';
 import type {PanelState} from './states.js';
 
-/** A selection shape as an event carries it: an artifact's `tessera_id` as a decimal string. */
+/** A selection shape as an event carries it: an artifact's `mosaica_id` as a decimal string. */
 export type SelectionShapeDetail = Exclude<SelectionShape, {kind: 'artifact'}> | {kind: 'artifact'; id: string; outside?: boolean};
 
 /**
  * Every event the elements fire, by name, with its `detail`. Each bubbles and is composed, so a
- * host listens on any ancestor, including one outside `<mosaica-explorer>`. A `tessera_id` crosses
+ * host listens on any ancestor, including one outside `<mosaica-explorer>`. A `mosaica_id` crosses
  * as a decimal string, since it is a 64-bit integer.
  */
 export type MosaicaEventDetails = {
@@ -22,7 +22,7 @@ export type MosaicaEventDetails = {
    */
   'mosaica-viewchange': {bbox: [number, number, number, number]; zoom: number; width: number; height: number};
   /**
-   * A point was picked: `id` is its `tessera_id`. Fired on the click without `record`, and again
+   * A point was picked: `id` is its `mosaica_id`. Fired on the click without `record`, and again
    * with the item's record once it arrives.
    */
   'mosaica-pick': {id: string; record?: ItemDetail};
@@ -81,12 +81,12 @@ export type MosaicaEventDetails = {
   'mosaica-valuecolour': {column: string; changes: {value: string; colour: string | null}[]};
   /**
    * Colours were chosen for clusters of the layer `layer`, in one action, as for
-   * `mosaica-valuecolour`. Each change names a cluster by its `tessera_id` and its colour as
+   * `mosaica-valuecolour`. Each change names a cluster by its `mosaica_id` and its colour as
    * `#rrggbb`, or `null` where its chosen colour was reset so it takes its palette colour again.
    * The map already draws them; a host that keeps the choices sets them back through the map's or
    * the explorer's `clusterColours`.
    */
-  'mosaica-clustercolour': {layer: string; changes: {tesseraId: string; colour: string | null}[]};
+  'mosaica-clustercolour': {layer: string; changes: {mosaicaId: string; colour: string | null}[]};
   /** The palette, the ramp, the ramp's scale or its direction was chosen in the explorer's Colour section; the detail is all four as they now stand. */
   'mosaica-palettechange': {palette: CategoryPaletteName; ramp: RampName; scale: RampScale; reverse: boolean};
   /**

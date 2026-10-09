@@ -272,7 +272,7 @@ describe('a view change', () => {
     for (const s of stores) expect(s.calls.filter((c) => c.name === 'setCurrentView').map((c) => c.args)).toEqual([['quarter:2026-Q3']]);
   });
 
-  it('a url change is still a rebuild: a tessera_id minted by one bundle means nothing to another', () => {
+  it('a url change is still a rebuild: a mosaica_id minted by one bundle means nothing to another', () => {
     const {model, stores, store} = setUp();
     model.set('url', 'http://other.test');
     expect(stores).toHaveLength(2);
@@ -345,8 +345,8 @@ describe('the down-sync', () => {
         setValueColours(store, column, changes);
         explorer.dispatchEvent(new CustomEvent('mosaica-valuecolour', {detail: {column, changes}, bubbles: true, composed: true}));
       },
-      cluster(layer: string, changes: {tesseraId: string; colour: string | null}[]) {
-        setClusterColours(store, layer, changes.map((c) => ({tesseraId: BigInt(c.tesseraId), colour: c.colour})));
+      cluster(layer: string, changes: {mosaicaId: string; colour: string | null}[]) {
+        setClusterColours(store, layer, changes.map((c) => ({mosaicaId: BigInt(c.mosaicaId), colour: c.colour})));
         explorer.dispatchEvent(new CustomEvent('mosaica-clustercolour', {detail: {layer, changes}, bubbles: true, composed: true}));
       }
     };
@@ -371,7 +371,7 @@ describe('the down-sync', () => {
     expect(explorer.valueColours).toEqual({venue: {icml: '#abcdef'}});
     choose.value('venue', [{value: 'icml', colour: null}]);
     expect(model.state.value_colours).toEqual({});
-    choose.cluster('topics', [{tesseraId: '9', colour: '#fedcba'}]);
+    choose.cluster('topics', [{mosaicaId: '9', colour: '#fedcba'}]);
     expect(model.state.cluster_colours).toEqual({topics: {'8': '#000000', '9': '#fedcba'}});
     expect(explorer.clusterColours).toEqual({topics: {'8': '#000000', '9': '#fedcba'}});
     expect(model.saves).toBe(saves + 3);
@@ -390,13 +390,13 @@ describe('the down-sync', () => {
     const choose = await choosers(store, explorer);
     await settle(el);
     choose.value('venue', [{value: 'nips', colour: '#112233'}]);
-    choose.cluster('topics', [{tesseraId: '7', colour: '#445566'}]);
+    choose.cluster('topics', [{mosaicaId: '7', colour: '#445566'}]);
     // None leaves the colours chosen in the map.
     model.set('value_colours', null);
     model.set('cluster_colours', null);
     await settle(el);
     choose.value('venue', [{value: 'icml', colour: '#abcdef'}]);
-    choose.cluster('topics', [{tesseraId: '8', colour: '#000000'}]);
+    choose.cluster('topics', [{mosaicaId: '8', colour: '#000000'}]);
     await settle(el);
     expect(colouringOf(store).values).toEqual({venue: {nips: '#112233', icml: '#abcdef'}});
     expect(model.state.value_colours).toEqual({venue: {nips: '#112233', icml: '#abcdef'}});

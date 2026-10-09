@@ -119,7 +119,7 @@ impl ViewportArtifactsSink for WireSink {
             .iter()
             .map(|a| ArtifactRow {
                 layer: a.layer.as_str(),
-                tessera_id: a.tessera_id.raw(),
+                mosaica_id: a.mosaica_id.raw(),
                 key: a.key.as_deref(),
                 masked_count: a.masked_count,
                 centroid: a.derived.centroid,
@@ -273,7 +273,7 @@ pub(crate) async fn viewport_artifacts(
     {
         return Err(ApiError::Contract(format!(
             "`computed` names {bad:?}; this route computes {}, and an artifact's shape is read \
-             by its `tessera_id`",
+             by its `mosaica_id`",
             mosaica_engine::ComputedProperty::ASK_VOCABULARY.join(" and ")
         )));
     }

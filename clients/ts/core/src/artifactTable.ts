@@ -18,12 +18,12 @@
  * @category Projections
  */
 export type ArtifactEntry = {
-  /** The artifact's `tessera_id`. */
-  tesseraId: bigint;
+  /** The artifact's `mosaica_id`. */
+  mosaicaId: bigint;
   /** The artifact's layer. */
   layer: string;
   /**
-   * The ordinals of the artifact's parents that the table holds, ascending by `tessera_id` as the
+   * The ordinals of the artifact's parents that the table holds, ascending by `mosaica_id` as the
    * server orders them, and empty where none is held. A parent is known only where it arrived in
    * the same response as the child, so a walk that meets an empty list stops there. A tree has at
    * most one parent; a `dag` layer may have several, and {@link ArtifactTable.resolve} takes
@@ -52,11 +52,11 @@ export type ArtifactEntry = {
 
 /** An artifact as a holder hands it to {@link SessionArtifactTable.take}. */
 export type ArtifactRef = {
-  /** The artifact's `tessera_id`. */
-  tesseraId: bigint;
+  /** The artifact's `mosaica_id`. */
+  mosaicaId: bigint;
   /** The artifact's layer. */
   layer: string;
-  /** The `tessera_id`s of its parents that the same response served, ascending. */
+  /** The `mosaica_id`s of its parents that the same response served, ascending. */
   parentIds: readonly bigint[];
   /** Its centroid in 32-bit grid units, where the response carried one. */
   centroid?: readonly [number, number] | null;
@@ -105,8 +105,8 @@ const KINDS = ['named', 'placed', 'linked', 'freed'] as const;
  */
 const JOURNAL_LIMIT = 1 << 16;
 
-function keyOf(layer: string, tesseraId: bigint): string {
-  return `${layer}\u0000${tesseraId}`;
+function keyOf(layer: string, mosaicaId: bigint): string {
+  return `${layer}\u0000${mosaicaId}`;
 }
 
 /**
@@ -142,7 +142,7 @@ export interface ArtifactTable {
   /** One past the highest ordinal assigned since the last `clear`: the size a lookup texture indexed by ordinal needs. */
   readonly range: number;
   /** The ordinal of an artifact, or {@link NO_ORDINAL} where the table does not hold it. */
-  ordinalOf(layer: string, tesseraId: bigint): number;
+  ordinalOf(layer: string, mosaicaId: bigint): number;
   /** The entry an ordinal names, or `null` for `0`, a freed ordinal or one never assigned. */
   entry(ordinal: number): ArtifactEntry | null;
   /** Every ordinal in use, with its entry, for building a colour per ordinal. */
@@ -150,7 +150,7 @@ export interface ArtifactTable {
   /**
    * The ordinal itself or its nearest ancestor that `served` holds, found by walking parent links.
    * On a `dag` layer the walk takes the first parent at each step, and parents are ordered by
-   * `tessera_id`, so it gives the same answer on every rebuild.
+   * `mosaica_id`, so it gives the same answer on every rebuild.
    *
    * @param served - Anything with `has`, such as a set of ordinals or a colour map.
    * @param maxLevel - The level to colour at. The walk passes a served ancestor whose `rung` is
@@ -234,8 +234,8 @@ export class SessionArtifactTable implements ArtifactTable {
     return this.entries.length;
   }
 
-  ordinalOf(layer: string, tesseraId: bigint): number {
-    return this.ordinals.get(keyOf(layer, tesseraId)) ?? NO_ORDINAL;
+  ordinalOf(layer: string, mosaicaId: bigint): number {
+    return this.ordinals.get(keyOf(layer, mosaicaId)) ?? NO_ORDINAL;
   }
 
   entry(ordinal: number): ArtifactEntry | null {
@@ -264,12 +264,12 @@ export class SessionArtifactTable implements ArtifactTable {
     const namedHere = new Set<number>();
     for (let i = 0; i < refs.length; i++) {
       const ref = refs[i]!;
-      const key = keyOf(ref.layer, ref.tesseraId);
+      const key = keyOf(ref.layer, ref.mosaicaId);
       let ordinal = this.ordinals.get(key);
       if (ordinal === undefined) {
         ordinal = this.free.pop() ?? this.entries.length;
         this.entries[ordinal] = {
-          tesseraId: ref.tesseraId,
+          mosaicaId: ref.mosaicaId,
           layer: ref.layer,
           parentOrdinals: [],
           rung: ref.rung ?? 0,
@@ -358,7 +358,7 @@ export class SessionArtifactTable implements ArtifactTable {
       this.refs[ordinal] = 0;
       this.entries[ordinal] = null;
       this.unranked.delete(ordinal);
-      this.ordinals.delete(keyOf(entry.layer, entry.tesseraId));
+      this.ordinals.delete(keyOf(entry.layer, entry.mosaicaId));
       this.free.push(ordinal);
       this.record(ordinal, 'freed');
     }

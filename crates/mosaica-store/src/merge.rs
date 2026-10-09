@@ -37,7 +37,7 @@ use std::path::Path;
 use croaring::Bitmap;
 
 use mosaica_spatial::tiler::ScalarType;
-use mosaica_types::{IdentityKey, TesseraId};
+use mosaica_types::{IdentityKey, MosaicaId};
 
 use crate::error::{Result, StoreError};
 use crate::flush::{digest_of, write_render_presence};
@@ -190,7 +190,7 @@ const OP: &str = "execute_merge";
 
 /// Merge `spec.inputs` into one segment under `prefix_dir`.
 ///
-/// Every input row is emitted once, in `(morton, tessera_id)` order from a heap over one cursor
+/// Every input row is emitted once, in `(morton, mosaica_id)` order from a heap over one cursor
 /// per input, with its Morton code and residual copied unchanged; dropping a row is the fold's
 /// work. The extent is held in memory at 4 bytes per entity in the merged span, which
 /// `max_merged_segment_bytes` bounds, and 8 bytes per row an input lists below its span.
@@ -254,13 +254,13 @@ pub fn execute_merge(
     let mut entities: Vec<u64> = Vec::new();
 
     // The merged order, from a heap over one key per live cursor. `Reverse` because
-    // `BinaryHeap` is a max-heap and row order is ascending. Two rows share a `tessera_id` where
+    // `BinaryHeap` is a max-heap and row order is ascending. Two rows share a `mosaica_id` where
     // an edit left the item's deleted entity beside its new one, so the cursor index breaks the
     // tie: inputs are in flush order, so the row of the entity the item left comes first.
     let mut heap: BinaryHeap<Reverse<(u32, u64, usize)>> = BinaryHeap::with_capacity(cursors.len());
     for (index, cursor) in cursors.iter().enumerate() {
-        if let Some((morton, tessera_id)) = cursor.key() {
-            heap.push(Reverse((morton, tessera_id, index)));
+        if let Some((morton, mosaica_id)) = cursor.key() {
+            heap.push(Reverse((morton, mosaica_id, index)));
         }
     }
 
@@ -272,12 +272,12 @@ pub fn execute_merge(
 
     let mut row_count: usize = 0;
     let mut edited: Vec<(u32, u32)> = Vec::new();
-    while let Some(Reverse((morton, tessera_raw, index))) = heap.pop() {
+    while let Some(Reverse((morton, mosaica_raw, index))) = heap.pop() {
         let cursor = &mut cursors[index];
         let row = cursor.row;
-        let tessera_id = TesseraId::new(tessera_raw);
+        let mosaica_id = MosaicaId::new(mosaica_raw);
         let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
-        if spec.identity_key.invert(tessera_id).1 != entity {
+        if spec.identity_key.invert(mosaica_id).1 != entity {
             edited.push((row_count as u32, entity.raw() as u32));
         }
         let scalars = gather_scalars(
@@ -295,7 +295,7 @@ pub fn execute_merge(
         };
         writer
             .append(SegmentRow {
-                tessera_id,
+                mosaica_id,
                 morton,
                 residual: cursor.columns.residual()[row],
                 scalars: &scalars,

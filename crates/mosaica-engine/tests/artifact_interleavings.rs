@@ -1219,14 +1219,14 @@ fn built_fixture() -> Fixture {
 ///
 /// The ids are the half a build can get wrong on its own: the row-less region grows downward from
 /// where the build left it, so an online artifact taking an id the build spent would be two
-/// entities under one `tessera_id`.
+/// entities under one `mosaica_id`.
 #[test]
 fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
     let fx = built_fixture();
     let (engine, faults) = fx.open_with_faults();
     let built: Vec<EntityId> = artifacts_of(&engine, &full_coverage_credential())
         .iter()
-        .map(|a| artifact_entity(&engine, a.tessera_id))
+        .map(|a| artifact_entity(&engine, a.mosaica_id))
         .collect();
     assert_eq!(built.len(), 1, "the build published one artifact");
     let members = fx.members(200..250);
@@ -1276,7 +1276,7 @@ fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
     let online = artifacts_of(&engine, &full_coverage_credential())
         .iter()
         .find(|a| a.key.as_deref() == Some("k-online"))
-        .map(|a| artifact_entity(&engine, a.tessera_id))
+        .map(|a| artifact_entity(&engine, a.mosaica_id))
         .expect("the online artifact is served");
     assert!(
         !built.contains(&online),
@@ -1345,7 +1345,7 @@ fn ingest_with_edges(
 }
 
 /// The parents the viewport names for `key`.
-fn parents_of(engine: &Engine, key: &str) -> Vec<mosaica_types::TesseraId> {
+fn parents_of(engine: &Engine, key: &str) -> Vec<mosaica_types::MosaicaId> {
     artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .find(|a| a.key.as_deref() == Some(key))

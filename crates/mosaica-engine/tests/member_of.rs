@@ -27,7 +27,7 @@ use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const LAYER: &str = "clusters/a";
 /// The artifact's members: source ids `0..300`, which the broad credential sees whole and the
@@ -70,7 +70,7 @@ fn visible_members(members: std::ops::Range<u64>, sees: impl Fn(u64) -> bool) ->
     members.filter(|&e| sees(e)).count() as u64
 }
 
-fn member_of(artifact: TesseraId) -> FilterExpr {
+fn member_of(artifact: MosaicaId) -> FilterExpr {
     FilterExpr::MemberOf(MemberOfLeaf {
         layer: LAYER.to_string(),
         artifact,
@@ -101,7 +101,7 @@ struct Fixture {
     _tmp: tempfile::TempDir,
     root: std::path::PathBuf,
     engine: Engine,
-    id: TesseraId,
+    id: MosaicaId,
 }
 
 /// `bar` is the layer's `Count` criterion: at [`BOTH_SERVED`] each principal is served the
@@ -139,7 +139,7 @@ fn fixture(layout: Option<ServingLayout>, bar: u64) -> Fixture {
     Fixture {
         engine,
         root,
-        id: served[0].tessera_id,
+        id: served[0].mosaica_id,
         _tmp: tmp,
     }
 }
@@ -147,7 +147,7 @@ fn fixture(layout: Option<ServingLayout>, bar: u64) -> Fixture {
 impl Fixture {
     /// Publish a second artifact of the same layer over `members`, and return its identifier as
     /// the broad principal is served it.
-    fn second(&self, members: std::ops::Range<u64>, key: &str) -> TesseraId {
+    fn second(&self, members: std::ops::Range<u64>, key: &str) -> MosaicaId {
         let map = source_to_new_map(&self.root, &self.engine.generation().prefix);
         let entities: Vec<EntityId> = members.map(|s| EntityId::new(map[&s])).collect();
         self.engine
@@ -172,7 +172,7 @@ impl Fixture {
             .iter()
             .find(|a| a.key.as_deref() == Some(key))
             .expect("the second artifact is served")
-            .tessera_id
+            .mosaica_id
     }
 }
 
@@ -320,7 +320,7 @@ fn it_composes_under_the_three_combinators() {
 #[test]
 fn an_artifact_that_is_not_served_is_an_empty_operand_and_refuses_nothing() {
     let fx = fixture(None, ONLY_BROAD_SERVED);
-    let unknown = TesseraId::new(0x7777_7777_7777_7777);
+    let unknown = MosaicaId::new(0x7777_7777_7777_7777);
 
     // Withheld by the criterion: the narrow principal is below the bar of 200.
     let withheld = viewport(&fx.engine, &subset_credential(), Some(member_of(fx.id)));
@@ -339,7 +339,7 @@ fn an_artifact_that_is_not_served_is_an_empty_operand_and_refuses_nothing() {
     );
     assert_eq!(matched(&outside), visible(&outside));
 
-    // A `tessera_id` that names a *point* rather than an artifact — the other never-an-artifact
+    // A `mosaica_id` that names a *point* rather than an artifact — the other never-an-artifact
     // shape, and the one a client is most likely to send by mistake.
     let point_id = viewport(&fx.engine, &full_coverage_credential(), None)
         .points
@@ -358,7 +358,7 @@ fn an_artifact_that_is_not_served_is_an_empty_operand_and_refuses_nothing() {
     );
 
     // Suppressed: the broad principal, who was served it, now gets the empty operand too.
-    let entity = fx.engine.resolve_tessera_ids(&[fx.id]).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_mosaica_ids(&[fx.id]).unwrap()[0].unwrap();
     fx.engine.accept_change(entity, ChangeOp::Suppress).unwrap();
     let suppressed = viewport(&fx.engine, &full_coverage_credential(), Some(member_of(fx.id)));
     let never_broad = viewport(&fx.engine, &full_coverage_credential(), Some(member_of(unknown)));
@@ -439,7 +439,7 @@ fn an_unknown_layer_is_the_callers_fault_and_an_unknown_artifact_is_not() {
 fn a_withheld_artifacts_timing_is_not_separable_from_an_unknown_identifiers() {
     let fx = fixture(None, ONLY_BROAD_SERVED);
     let session = fx.engine.authorise(&subset_credential()).unwrap();
-    let ask = |id: TesseraId| {
+    let ask = |id: MosaicaId| {
         let started = Instant::now();
         fx.engine
             .viewport(
@@ -449,7 +449,7 @@ fn a_withheld_artifacts_timing_is_not_separable_from_an_unknown_identifiers() {
             .unwrap();
         started.elapsed()
     };
-    let unknown = TesseraId::new(0x7777_7777_7777_7777);
+    let unknown = MosaicaId::new(0x7777_7777_7777_7777);
     // One warm pair, so neither median carries the first request's cache fills.
     ask(fx.id);
     ask(unknown);

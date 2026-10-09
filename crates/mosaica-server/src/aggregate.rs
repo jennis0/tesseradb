@@ -88,7 +88,7 @@ struct ByReq {
     /// set.
     #[serde(default)]
     summary: bool,
-    /// `tessera_id`s, each a number or its decimal string.
+    /// `mosaica_id`s, each a number or its decimal string.
     #[serde(default)]
     artifacts: Option<Vec<Value>>,
     /// On a treed layer: list the artifacts the map draws at this zoom, bbox and budget.
@@ -411,7 +411,7 @@ fn by_of(
                 (Some(top), None) => Pick::Top(top),
                 (None, Some(ids)) => Pick::Named(
                     ids.iter()
-                        .map(|id| crate::filter_dto::tessera_id(Some(id), "artifacts"))
+                        .map(|id| crate::filter_dto::mosaica_id(Some(id), "artifacts"))
                         .collect::<Result<_, _>>()?,
                 ),
                 (Some(_), Some(_)) => {

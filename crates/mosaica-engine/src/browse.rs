@@ -50,7 +50,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 use crate::artifacts::{ArtifactVerdict, ArtifactView};
 use crate::compose::compose;
@@ -70,7 +70,7 @@ pub enum BrowseForm {
     Roots,
     /// `parent` given: the artifacts naming it among their parents, with the requested artifact's
     /// own served parents beside them.
-    Children(TesseraId),
+    Children(MosaicaId),
     /// `q` given: the artifacts whose key or [`BrowseRow::name`] contains `q` case-insensitively.
     Search(String),
 }
@@ -98,7 +98,7 @@ pub struct BrowseRequest<'a> {
     pub palette_size: Option<u8>,
 }
 
-/// A position in the total order — `(masked or matched count descending, tessera_id ascending)`.
+/// A position in the total order — `(masked or matched count descending, mosaica_id ascending)`.
 ///
 /// **The order is total**, which is what lets a cursor page over tied counts without duplicating
 /// or dropping a row: two artifacts with the same count are separated by their identifiers, and no
@@ -109,21 +109,21 @@ pub struct BrowseRequest<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrowseCursor {
     pub count: u64,
-    pub tessera_id: u64,
+    pub mosaica_id: u64,
 }
 
 impl BrowseCursor {
-    /// The wire spelling: `<count>:<tessera_id>`, both decimal.
+    /// The wire spelling: `<count>:<mosaica_id>`, both decimal.
     pub fn parse(text: &str) -> Option<BrowseCursor> {
         let (count, id) = text.split_once(':')?;
         Some(BrowseCursor {
             count: count.parse().ok()?,
-            tessera_id: id.parse().ok()?,
+            mosaica_id: id.parse().ok()?,
         })
     }
 
     pub fn encode(&self) -> String {
-        format!("{}:{}", self.count, self.tessera_id)
+        format!("{}:{}", self.count, self.mosaica_id)
     }
 }
 
@@ -132,7 +132,7 @@ impl BrowseCursor {
 /// **No geometry.** This verb serves a hierarchy; a layer that draws is drawn by the viewport.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrowseRow {
-    pub tessera_id: TesseraId,
+    pub mosaica_id: MosaicaId,
     /// The publisher's own key, where they supplied one.
     pub key: Option<String>,
     /// The artifact's first supplied text content where it has one, and otherwise the first text
@@ -154,7 +154,7 @@ pub struct BrowseRow {
     pub rung: u32,
     /// This artifact's parents **that this principal is also served**, ascending — C29 per entry,
     /// exactly as the artifacts frame's list is.
-    pub parent_ids: Vec<TesseraId>,
+    pub parent_ids: Vec<MosaicaId>,
     /// How many artifacts this principal is served that name this one among their parents: the
     /// size of this artifact's children form, on the same rule as `parent_ids`.
     pub child_count: u64,
@@ -231,7 +231,7 @@ struct Gated {
     level: u32,
     ordinal: u32,
     masked_count: u64,
-    tessera_id: TesseraId,
+    mosaica_id: MosaicaId,
     parents: Vec<(u32, u32)>,
 }
 
@@ -375,7 +375,7 @@ impl crate::Engine {
                 else {
                     continue;
                 };
-                let Ok(tessera_id) = self.identity_key.forward(shard, entity) else {
+                let Ok(mosaica_id) = self.identity_key.forward(shard, entity) else {
                     continue;
                 };
                 // Content decides servability as well as text: a viewer containing no content's
@@ -404,7 +404,7 @@ impl crate::Engine {
                     level: walked,
                     ordinal,
                     masked_count,
-                    tessera_id,
+                    mosaica_id,
                     parents: rows
                         .parents(ordinal)
                         .iter()
@@ -431,10 +431,10 @@ impl crate::Engine {
                 .iter()
                 .map(|g| {
                     (
-                        g.tessera_id.raw(),
+                        g.mosaica_id.raw(),
                         g.parents
                             .iter()
-                            .filter_map(|at| served.get(at).map(|&i| gated[i].tessera_id.raw()))
+                            .filter_map(|at| served.get(at).map(|&i| gated[i].mosaica_id.raw()))
                             .collect(),
                     )
                 })
@@ -487,7 +487,7 @@ impl crate::Engine {
         };
 
         let row_of = |g: &Gated, children: &HashMap<(u32, u32), u64>| BrowseRow {
-            tessera_id: g.tessera_id,
+            mosaica_id: g.mosaica_id,
             key: keys.get(&(g.level, g.ordinal)).cloned().flatten(),
             name: name_of(g),
             masked_count: g.masked_count,
@@ -495,13 +495,13 @@ impl crate::Engine {
             rung: if levelled {
                 g.level
             } else {
-                rungs.get(&g.tessera_id.raw()).copied().unwrap_or(0)
+                rungs.get(&g.mosaica_id.raw()).copied().unwrap_or(0)
             },
             parent_ids: {
-                let mut ids: Vec<TesseraId> = g
+                let mut ids: Vec<MosaicaId> = g
                     .parents
                     .iter()
-                    .filter_map(|at| served.get(at).map(|&i| gated[i].tessera_id))
+                    .filter_map(|at| served.get(at).map(|&i| gated[i].mosaica_id))
                     .collect();
                 ids.sort_unstable_by_key(|id| id.raw());
                 ids.dedup();
@@ -537,7 +537,7 @@ impl crate::Engine {
                 // leaf: this is §3's empty-operand rule, one verb over.
                 let Some(&at) = gated
                     .iter()
-                    .position(|g| g.tessera_id == *id)
+                    .position(|g| g.mosaica_id == *id)
                     .as_ref()
                     .map(|at| at as &usize)
                 else {
@@ -583,7 +583,7 @@ impl crate::Engine {
             }
         };
 
-        // **The total order**: count descending, then `tessera_id` ascending, so a cursor over tied
+        // **The total order**: count descending, then `mosaica_id` ascending, so a cursor over tied
         // counts neither duplicates nor drops a row. The count is the filtered one under `filters`
         // and the masked one otherwise (§4).
         let sort_key = |at: &usize| {
@@ -592,14 +592,14 @@ impl crate::Engine {
                 .get(&(g.level, g.ordinal))
                 .copied()
                 .unwrap_or(g.masked_count);
-            (std::cmp::Reverse(count), g.tessera_id.raw())
+            (std::cmp::Reverse(count), g.mosaica_id.raw())
         };
         let mut candidates = candidates;
         candidates.sort_by_key(sort_key);
         let after = match req.cursor {
             None => 0,
             Some(cursor) => candidates.partition_point(|at| {
-                sort_key(at) <= (std::cmp::Reverse(cursor.count), cursor.tessera_id)
+                sort_key(at) <= (std::cmp::Reverse(cursor.count), cursor.mosaica_id)
             }),
         };
         let page: Vec<usize> = candidates
@@ -617,7 +617,7 @@ impl crate::Engine {
                             .get(&(g.level, g.ordinal))
                             .copied()
                             .unwrap_or(g.masked_count),
-                        tessera_id: g.tessera_id.raw(),
+                        mosaica_id: g.mosaica_id.raw(),
                     }
                 })
             })
@@ -656,8 +656,8 @@ impl crate::Engine {
             .iter()
             .map(|&at| row_of(&gated[at], &children))
             .collect();
-        parent_rows.sort_by_key(|row| row.tessera_id.raw());
-        parent_rows.dedup_by_key(|row| row.tessera_id.raw());
+        parent_rows.sort_by_key(|row| row.mosaica_id.raw());
+        parent_rows.dedup_by_key(|row| row.mosaica_id.raw());
         let artifacts = page
             .iter()
             .map(|&at| row_of(&gated[at], &children))

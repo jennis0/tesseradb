@@ -1,5 +1,5 @@
 //! The per-point membership column: for each served point and each requested layer, the
-//! `tessera_id` of the **deepest served** artifact the point belongs to, or null.
+//! `mosaica_id` of the **deepest served** artifact the point belongs to, or null.
 //!
 //! **Bounded to the response's own artifacts frame.** A layer with a lineage, or one depending
 //! on another layer the request names, is resolved here against the walk's served set after it
@@ -50,7 +50,7 @@
 //! identifier wins. The rung is counted over the response's own links (decision 0117 E), so the
 //! answer is the same in both worlds.
 //!
-//! **A tie is broken by the lowest `tessera_id`** (`dag-hierarchies.md` §6). On a tree the deepest
+//! **A tie is broken by the lowest `mosaica_id`** (`dag-hierarchies.md` §6). On a tree the deepest
 //! served artifact holding a point is unique; on a DAG, and on a flat layer with multi-membership,
 //! two served artifacts may hold the point at one depth, and a rule that took whichever the
 //! artifact-major route's map iterated first would answer differently from one run to the next
@@ -68,12 +68,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use mosaica_types::TesseraId;
+use mosaica_types::MosaicaId;
 
 use crate::artifacts::ArtifactRows;
 use crate::cut::Lineage;
 
-/// One layer's membership column for a chunk of points: parallel to the chunk's `tessera_ids`,
+/// One layer's membership column for a chunk of points: parallel to the chunk's `mosaica_ids`,
 /// `None` where no served artifact of the layer holds the point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MembershipColumn {
@@ -89,7 +89,7 @@ pub(crate) struct ServedLevel {
     /// Ordinal → identifier and response-local rung, for **exactly** the artifacts of this level
     /// in the response's artifacts frame. Filled after the dependent drop and after the rungs are
     /// settled, so a label whose target went is not here and the rank reads nothing stored.
-    pub served: HashMap<u32, (TesseraId, u32)>,
+    pub served: HashMap<u32, (MosaicaId, u32)>,
 }
 
 /// One layer this response served artifacts from, with its served levels.
@@ -249,10 +249,10 @@ mod tests {
         lineage: &Arc<Lineage>,
         served: &[(u32, u64)],
     ) -> (ServedLayer, ServedLayer) {
-        let served_map = |_: ()| -> HashMap<u32, (TesseraId, u32)> {
+        let served_map = |_: ()| -> HashMap<u32, (MosaicaId, u32)> {
             with_rungs(lineage, served)
                 .into_iter()
-                .map(|(o, id, rung)| (o, (TesseraId::new(id), rung)))
+                .map(|(o, id, rung)| (o, (MosaicaId::new(id), rung)))
                 .collect()
         };
         let artifact_major = Arc::new(ArtifactRows::synthetic(sets, None));

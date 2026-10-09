@@ -5,7 +5,7 @@
 //! of each requested layer (`tag`), and gathers and emits them (`emit_points`). The artifacts
 //! themselves are served tile by tile by [`Engine::viewport_artifacts_stream`] (`tiled`).
 //! [`Engine::viewport`] runs the same producer into a collecting sink and returns the batch
-//! [`ViewportOut`]. Selection itself — floor, threshold and cap over `tessera_id`, evaluated
+//! [`ViewportOut`]. Selection itself — floor, threshold and cap over `mosaica_id`, evaluated
 //! inside the mask — lives in [`crate::select`]; this module resolves the per-request parameters
 //! and gathers what selection returns. The request is two phases: the **sweep**, which counts,
 //! selects and reads the underlay per tile with no gather, and the **emit**, a serial pass over
@@ -45,7 +45,7 @@ use mosaica_store::read::{ScalarSlice, SegmentData};
 use mosaica_store::vocabulary::Vocabularies;
 use mosaica_store::tile_ranges_all;
 use mosaica_types::layer::ComputedProperty;
-use mosaica_types::{EntityId, GenerationStamp, RowId, TermId, TesseraId, API_VERSION};
+use mosaica_types::{EntityId, GenerationStamp, RowId, TermId, MosaicaId, API_VERSION};
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
@@ -175,7 +175,7 @@ impl Engine {
         // An empty response emits no points chunk, but the batch shape still carries one buffer
         // per render column, seeded from the head's schema.
         let points = sink.points.unwrap_or_else(|| PointColumns {
-            tessera_ids: Vec::new(),
+            mosaica_ids: Vec::new(),
             codes: Vec::new(),
             scalars: head
                 .render_scalars

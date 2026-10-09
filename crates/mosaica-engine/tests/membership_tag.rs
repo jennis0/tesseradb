@@ -103,7 +103,7 @@ fn served(
 fn assert_joined(out: &ViewportOut, served: &[ArtifactOut]) {
     let frame: BTreeSet<(&str, u64)> = served
         .iter()
-        .map(|a| (a.layer.as_str(), a.tessera_id.raw()))
+        .map(|a| (a.layer.as_str(), a.mosaica_id.raw()))
         .collect();
     for c in &out.points.membership {
         for id in c.ids.iter().flatten() {
@@ -139,7 +139,7 @@ fn compare_one(
     engine.set_tags_from_labels_for_test(true);
     let labelled = engine.viewport(session, request).unwrap();
     assert_eq!(
-        labelled.points.tessera_ids, walked.points.tessera_ids,
+        labelled.points.mosaica_ids, walked.points.mosaica_ids,
         "{at}: the points"
     );
     for layer in layers {
@@ -380,7 +380,7 @@ fn labels_tag_points_as_the_walk_does_through_growth_ingest_fold_and_suppression
         served_before
             .iter()
             .find(|a| a.layer == layer && a.key.as_deref() == Some(key))
-            .map(|a| a.tessera_id.raw())
+            .map(|a| a.mosaica_id.raw())
     };
     let r1 = named(TIERED, "r1").expect("r1 is served");
     let f2 = named(FLAT, "f2").expect("f2 is served");
@@ -389,7 +389,7 @@ fn labels_tag_points_as_the_walk_does_through_growth_ingest_fold_and_suppression
     for id in [r1, f2] {
         engine
             .accept_change(
-                artifact_entity(&engine, mosaica_types::TesseraId::new(id)),
+                artifact_entity(&engine, mosaica_types::MosaicaId::new(id)),
                 ChangeOp::Suppress,
             )
             .unwrap();
@@ -523,7 +523,7 @@ fn own_labels_content_fractions_filters_and_highlights_tag_as_the_walk_does() {
                         compare_one(engine, &session, request, &layers, &at, &mut compared);
                     let key_of: BTreeMap<u64, String> = served
                         .iter()
-                        .map(|a| (a.tessera_id.raw(), a.key.clone().unwrap_or_default()))
+                        .map(|a| (a.mosaica_id.raw(), a.key.clone().unwrap_or_default()))
                         .collect();
                     for layer in layers {
                         for id in column(&out, layer).into_iter().flatten() {
@@ -710,12 +710,12 @@ artifacts = [
         .unwrap();
     let fresh: BTreeSet<u64> = ingested
         .iter()
-        .map(|&e| engine.tessera_id_of(e).unwrap().raw())
+        .map(|&e| engine.mosaica_id_of(e).unwrap().raw())
         .collect();
     let tags = column(&out, BOXES);
     assert!(
         out.points
-            .tessera_ids
+            .mosaica_ids
             .iter()
             .zip(&tags)
             .any(|(id, tag)| fresh.contains(id) && tag.is_some()),

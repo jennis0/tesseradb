@@ -414,7 +414,7 @@ export type ArtifactsProjection = {
   /** The ordinals of `served` in `table`. */
   servedOrdinals: ReadonlySet<number>;
   /**
-   * Shapes by `tesseraId`: those {@link Store.needShape} fetched, simplified for the view's zoom,
+   * Shapes by `mosaicaId`: those {@link Store.needShape} fetched, simplified for the view's zoom,
    * and those {@link Store.openArtifact} fetched, at full detail. An artifact with no entry has not
    * been asked for, has not answered or was refused, and is drawn as its `box`. A view switch,
    * {@link Store.clear} and an answer under another identity key empty it.
@@ -429,7 +429,7 @@ export type ArtifactsProjection = {
   /** The palette `colours` was built under. Its size is the `palette_size` the artifacts are asked with. */
   palette: PaletteName;
   /**
-   * The colours set by layer and `tessera_id` with {@link Store.setArtifactColours}, which
+   * The colours set by layer and `mosaica_id` with {@link Store.setArtifactColours}, which
    * `colours` holds in place of the palette's.
    */
   overrides: ChosenColours;
@@ -449,14 +449,14 @@ export type ArtifactsProjection = {
  */
 export type SelectionProjection = {
   /**
-   * The item {@link Store.pick} last fetched: its `tessera_id` and its record. `null` before a
+   * The item {@link Store.pick} last fetched: its `mosaica_id` and its record. `null` before a
    * pick, after a refused one, and once {@link Store.openArtifact} succeeds.
    */
   item: {id: bigint; detail: ItemDetail} | null;
   /** The refusal of the last pick, else `null`. */
   itemRefusal: Refusal | null;
   /**
-   * The artifact {@link Store.openArtifact} last fetched: its `tessera_id` and its detail. `null`
+   * The artifact {@link Store.openArtifact} last fetched: its `mosaica_id` and its detail. `null`
    * before one is opened and after a refusal.
    */
   artifact: {id: bigint; detail: ArtifactDetail} | null;
@@ -706,7 +706,7 @@ export interface Store {
    */
   setPalette(palette: PaletteName): void;
   /**
-   * Colour the artifacts `colours` names, by layer and then by `tessera_id`, with its colours in
+   * Colour the artifacts `colours` names, by layer and then by `mosaica_id`, with its colours in
    * place of their palette colours, and every other artifact from the palette. Each call replaces
    * the last; an empty map colours every artifact from the palette. Publishes `artifacts.colours`
    * and `artifacts.overrides`.
@@ -747,7 +747,7 @@ export interface Store {
    */
   frame(): Quantisation | null;
   /**
-   * Fetch one item's record (`POST /v1/items/{tessera_id}`) and publish it as `selection.item`,
+   * Fetch one item's record (`POST /v1/items/{mosaica_id}`) and publish it as `selection.item`,
    * keeping any opened artifact. A refusal is published as `selection.itemRefusal` and the promise
    * still resolves. An id this viewer cannot see is refused as `unknown`, as an id that does not
    * exist is. An answer that lands after `clear` or `dispose` is dropped.
@@ -761,7 +761,7 @@ export interface Store {
    */
   describe(id: bigint): Promise<Record<string, unknown> | null>;
   /**
-   * Fetch one artifact's detail under the current view (`POST /v1/artifacts/{tessera_id}`) and
+   * Fetch one artifact's detail under the current view (`POST /v1/artifacts/{mosaica_id}`) and
    * publish it as `selection.artifact`, clearing `selection.item`. Its shape is held in
    * `artifacts.shapes` at full detail. A refusal is published as `selection.artifactRefusal` and the
    * promise still resolves. An artifact this viewer cannot reach is refused as one that does not
@@ -1579,7 +1579,7 @@ export function createStore(options: StoreOptions): Store {
     const coloured = colourLayer();
     const servedOrdinals = new Set<number>();
     for (const a of served) {
-      const ordinal = table.ordinalOf(a.layer, a.tesseraId);
+      const ordinal = table.ordinalOf(a.layer, a.mosaicaId);
       if (ordinal !== 0) servedOrdinals.add(ordinal);
     }
     replaceProjection('artifacts', {
@@ -2193,7 +2193,7 @@ export function createStore(options: StoreOptions): Store {
 
   /** The kind a served artifact's layer draws, from the meta; null where it draws none. */
   function shapeKindOf(id: bigint): ShapeKind | null {
-    const layer = projections.artifacts.served.find((a) => a.tesseraId === id)?.layer;
+    const layer = projections.artifacts.served.find((a) => a.mosaicaId === id)?.layer;
     if (layer === undefined) return null;
     return projections.meta?.layers.find((l) => l.name === layer)?.shape ?? null;
   }
@@ -2218,7 +2218,7 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function extentOf(artifactId: bigint): [number, number, number, number] | null {
-    const artifact = projections.artifacts.served.find((a) => a.tesseraId === artifactId);
+    const artifact = projections.artifacts.served.find((a) => a.mosaicaId === artifactId);
     const box = artifact?.box;
     if (!box || !meta) return null;
     // The box is in the wire's 32-bit grid units.

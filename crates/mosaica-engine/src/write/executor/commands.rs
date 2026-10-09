@@ -309,7 +309,7 @@ impl Executor {
     /// one lock the preparation was made under.
     ///
     /// Nothing is applied before the record is durable. A membership applied and then lost is an
-    /// artifact whose `tessera_id` a caller already holds and whose members come back empty,
+    /// artifact whose `mosaica_id` a caller already holds and whose members come back empty,
     /// served as absent, indistinguishable from one that failed its criterion. So the append comes
     /// first, and a failure means the batch does not exist.
     pub(super) fn commit_artifacts(
@@ -571,7 +571,7 @@ impl Executor {
     /// leaving an accepted deny unapplied is a fail-open and "in force but not durable" is the
     /// safer of two bad states. A registration has no such asymmetry: a layer that exists in memory
     /// and not in the log comes back from a restart as a name that is free again, having already
-    /// handed a caller a `tessera_id` for its entity. So the append comes first and a failure means
+    /// handed a caller a `mosaica_id` for its entity. So the append comes first and a failure means
     /// the layer does not exist: which is what the caller is told.
     pub(super) fn commit_registry<T>(
         &mut self,

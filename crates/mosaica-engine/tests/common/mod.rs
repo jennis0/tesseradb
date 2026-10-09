@@ -27,7 +27,7 @@ mod ingest_rows {
     use mosaica_types::EntityId;
 
     /// Ingest through [`Engine::ingest`] from rows shaped as the executor writes them: each row
-    /// names the item its `join` holds by `tessera_id`, or none, carries its label and position,
+    /// names the item its `join` holds by `mosaica_id`, or none, carries its label and position,
     /// and carries every value it holds, a null clearing one. Every row names the same view.
     pub trait IngestRows {
         /// Send `rows` as one batch, and answer the entity each row created or named.
@@ -68,9 +68,9 @@ mod ingest_rows {
             let rows = rows
                 .into_iter()
                 .map(|row| IngestRow {
-                    tessera_id: row
+                    mosaica_id: row
                         .join
-                        .map(|entity| self.tessera_id_of(entity).expect("a joined item has an id")),
+                        .map(|entity| self.mosaica_id_of(entity).expect("a joined item has an id")),
                     labels: Some(row.descriptors),
                     position: Some((row.x, row.y)),
                     scalars: row.scalars,
@@ -85,10 +85,10 @@ mod ingest_rows {
                 rows,
                 artifacts,
                 strict: true,
-                tessera_id_column: false,
+                mosaica_id_column: false,
             })?;
             let entities = self
-                .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())
+                .resolve_mosaica_ids(&receipt.mosaica_ids.iter().flatten().copied().collect::<Vec<_>>())
                 .unwrap()
                 .into_iter()
                 .map(|entity| entity.expect("an accepted row names an item"))
@@ -113,7 +113,7 @@ use mosaica_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig}
 use mosaica_lifecycle::UnallocatedRow;
 use mosaica_spatial::Bounds;
 use mosaica_store::read::open_bundle;
-use mosaica_types::{EntityId, IdentityKey, TesseraId};
+use mosaica_types::{EntityId, IdentityKey, MosaicaId};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
@@ -664,7 +664,7 @@ pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
 pub fn over_every_tile(out: &mosaica_engine::ViewportArtifactsOut) -> Vec<ArtifactOut> {
     let mut merged: Vec<ArtifactOut> = Vec::new();
     for artifact in out.frames.iter().flat_map(|frame| &frame.artifacts) {
-        match merged.iter_mut().find(|held| held.tessera_id == artifact.tessera_id) {
+        match merged.iter_mut().find(|held| held.mosaica_id == artifact.mosaica_id) {
             Some(held) => {
                 held.matched = held.matched.zip(artifact.matched).map(|(a, b)| a || b);
                 held.highlighted = held
@@ -683,7 +683,7 @@ pub fn over_every_tile(out: &mosaica_engine::ViewportArtifactsOut) -> Vec<Artifa
 pub fn shape_of(
     engine: &Engine,
     credential: &[u8],
-    id: TesseraId,
+    id: MosaicaId,
 ) -> Option<Vec<Vec<Vec<[u32; 2]>>>> {
     let session = engine.authorise(credential).unwrap();
     engine
@@ -695,8 +695,8 @@ pub fn shape_of(
 }
 
 /// The entity an artifact's served identifier names.
-pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
+pub fn artifact_entity(engine: &Engine, id: MosaicaId) -> EntityId {
+    engine.resolve_mosaica_ids(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
 /// A one-row ingest at the fixture's centre, carrying `ALL_TERM`, under the caller's batch id.
@@ -772,7 +772,7 @@ pub fn unique_holders(
 ) -> Result<Vec<Option<mosaica_types::EntityId>>, mosaica_engine::EngineError> {
     let table = mosaica_engine::AddressTable {
         rows: values.len(),
-        tessera_id: None,
+        mosaica_id: None,
         columns: vec![(
             field.to_string(),
             values

@@ -417,8 +417,8 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
         a.len()
     );
     // Each build generates its own identity key, so the manifests differ in the key and the
-    // columns differ in each row's `tessera_id`. Everything else is compared byte for byte, and a
-    // `tessera_id` column as the entity each row names under its own bundle's key. The identity
+    // columns differ in each row's `mosaica_id`. Everything else is compared byte for byte, and a
+    // `mosaica_id` column as the entity each row names under its own bundle's key. The identity
     // bands and the labels copied in their order select rows by identity, so each bundle's are
     // checked against its own columns by `verify --deep` instead.
     let by_identity = |name: &str| name.ends_with("/bands.bin") || name.contains("/band-labels/");
@@ -482,7 +482,7 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
     }
 }
 
-/// A `columns.arrow` file's batches, with its `tessera_id` column replaced by the entity id each
+/// A `columns.arrow` file's batches, with its `mosaica_id` column replaced by the entity id each
 /// row names under `key`.
 fn entity_columns(bytes: &[u8], key: &mosaica_types::IdentityKey) -> Vec<RecordBatch> {
     let reader =
@@ -491,7 +491,7 @@ fn entity_columns(bytes: &[u8], key: &mosaica_types::IdentityKey) -> Vec<RecordB
     reader
         .map(|batch| {
             let batch = batch.unwrap();
-            let at = batch.schema().index_of("tessera_id").unwrap();
+            let at = batch.schema().index_of("mosaica_id").unwrap();
             let ids = batch
                 .column(at)
                 .as_any()
@@ -500,7 +500,7 @@ fn entity_columns(bytes: &[u8], key: &mosaica_types::IdentityKey) -> Vec<RecordB
             let entities: UInt64Array = ids
                 .values()
                 .iter()
-                .map(|&id| key.invert(mosaica_types::TesseraId::new(id)).1.raw())
+                .map(|&id| key.invert(mosaica_types::MosaicaId::new(id)).1.raw())
                 .collect();
             let mut columns = batch.columns().to_vec();
             columns[at] = Arc::new(entities);

@@ -41,8 +41,8 @@ export class ClusterPaths {
         .browse({layer: layer.name, filters: null, parent: id, limit: 1})
         .then((p) => {
           if (epoch !== this.epoch) return;
-          for (const r of p.parents) this.met.set(r.tesseraId, r);
-          this.parentsOf.set(id, p.parents.map((r) => r.tesseraId));
+          for (const r of p.parents) this.met.set(r.mosaicaId, r);
+          this.parentsOf.set(id, p.parents.map((r) => r.mosaicaId));
           this.changed();
         })
         .catch(() => undefined);
@@ -62,7 +62,7 @@ export class ClusterPaths {
       const at = this.met.get(parents[0]!);
       if (!at) break;
       names.unshift(artifactName(at) ?? UNNAMED);
-      parents = this.parentsOf.get(at.tesseraId) ?? at.parentIds;
+      parents = this.parentsOf.get(at.mosaicaId) ?? at.parentIds;
     }
     return names.join(' › ');
   }

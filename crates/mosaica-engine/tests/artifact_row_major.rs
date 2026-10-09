@@ -14,7 +14,7 @@
 //! and the derived geometry beside them. Over principals, viewports, overlay states, a flat layer
 //! and a treed one, and before and after both a fold and a growth.
 //!
-//! The comparison is on the **publisher's key** rather than on the `tessera_id`, deliberately: an
+//! The comparison is on the **publisher's key** rather than on the `mosaica_id`, deliberately: an
 //! identifier is a blinding of an entity id, and two bundles built independently are entitled to
 //! issue different ones. What must not differ is which artifacts are served and what is said about
 //! them. Parents are compared by the key they resolve to *within the same response*, which is the
@@ -205,7 +205,7 @@ struct Served {
 fn served(artifacts: &[ArtifactOut]) -> Vec<Served> {
     let by_id: BTreeMap<_, _> = artifacts
         .iter()
-        .map(|a| (a.tessera_id, a.key.clone()))
+        .map(|a| (a.mosaica_id, a.key.clone()))
         .collect();
     let mut out: Vec<Served> = artifacts
         .iter()
@@ -618,7 +618,7 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
                 // ⊘ A cold drill-down on a row-major level pays the level's whole histogram; this
                 // is where that is exercised as well as asserted.
                 let alone = engine
-                    .artifact(&session, artifact.tessera_id, "s0", None)
+                    .artifact(&session, artifact.mosaica_id, "s0", None)
                     .expect("the identifier resolves")
                     .expect("and the artifact is served to the viewer the viewport served it to");
                 assert_eq!(
@@ -806,7 +806,7 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         let cold = reopened.authorise(&credential).unwrap();
         for artifact in &response {
             let alone = reopened
-                .artifact(&cold, artifact.tessera_id, "s0", None)
+                .artifact(&cold, artifact.mosaica_id, "s0", None)
                 .expect("the identifier resolves")
                 .expect("and the artifact is served to the viewer the viewport served it to");
             assert_eq!(alone.masked_count, artifact.masked_count);
@@ -976,8 +976,8 @@ fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
         .iter()
         .find(|a| a.layer == FLAT && a.key.as_deref() == Some(key))
         .expect("the artifact is served")
-        .tessera_id;
-    engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
+        .mosaica_id;
+    engine.resolve_mosaica_ids(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
 /// The row of each of `sources` in the served row space, for a column check.
@@ -1292,7 +1292,7 @@ fn a_level_that_holds_no_rows_takes_every_write_through_its_column() {
                         &session,
                         ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize).filter(
                             mosaica_engine::filter::FilterExpr::Region(
-                                mosaica_engine::filter::RegionLeaf::Artifact(artifact.tessera_id),
+                                mosaica_engine::filter::RegionLeaf::Artifact(artifact.mosaica_id),
                             ),
                         ),
                     )

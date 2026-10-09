@@ -1,4 +1,4 @@
-//! `Engine::item`: the drill-down from a `tessera_id` to one item's card, over the shared
+//! `Engine::item`: the drill-down from a `mosaica_id` to one item's card, over the shared
 //! ~10k-item synthetic bundle in [`common`].
 //!
 //! What the verb owes a caller is the same at every layer: an id it cannot see and an id that
@@ -16,7 +16,7 @@ use common::*;
 /// signature-sorted entity id — and therefore its row — is not among the first built, and it comes
 /// back with its own `id`. `Permutation::row_of` is an O(1) bijection lookup and does not
 /// care where the row sits; contracts r6 replaced the identity column's contents with the opaque
-/// `tessera_id`, so a scan of *that* column would search the wrong space entirely.
+/// `mosaica_id`, so a scan of *that* column would search the wrong space entirely.
 ///
 /// **What this pins is the reach of the lookup, not its mechanism.** An implementation that walked
 /// the entity-id column top to bottom would find the same row and pass, so the name says "far from

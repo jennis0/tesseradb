@@ -419,7 +419,7 @@ pub fn served(
         let mut req = ViewportRequest::new(view, 0, WHOLE, 10_000);
         req.filter = filter.clone();
         match engine.viewport(session, req) {
-            Ok(out) => return out.points.tessera_ids.into_iter().collect(),
+            Ok(out) => return out.points.mosaica_ids.into_iter().collect(),
             Err(mosaica_engine::EngineError::ProjectionBuilding)
                 if std::time::Instant::now() < deadline =>
             {

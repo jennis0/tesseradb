@@ -382,7 +382,7 @@ def test_every_served_points_membership_is_the_curved_images(wgs84_server):
         token = server.authorise(terms)["token"]
         body = server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
         ids = {
-            a.key: a.tessera_id
+            a.key: a.mosaica_id
             for a in decode_viewport_artifacts(server.artifacts_viewport(token, VIEW_ID, 0, WHOLE_MAP))
             if a.layer == LAYER
         }

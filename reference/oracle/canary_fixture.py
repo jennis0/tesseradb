@@ -17,10 +17,10 @@ design §2 states four rules; the stage-2.1 plan review added a fifth.
 
 1. **Canary entity IDs are allocated after all real IDs.** Entity IDs are assigned in
    term-signature order and are permanent (I9); an ID inserted in the middle shifts every later
-   item's ID, and `tessera_id` is a keyed permutation of `(shard_id, entity_id)`, so every shifted
+   item's ID, and `mosaica_id` is a keyed permutation of `(shard_id, entity_id)`, so every shifted
    item gets a new identity — and §7.2 selects the lowest identities in a tile. A displaced ID
    therefore changes the *sample*, everywhere, legitimately.
-2. **Coordinates at the Morton-maximal corner.** Rows are stored in `(morton, tessera_id)` order,
+2. **Coordinates at the Morton-maximal corner.** Rows are stored in `(morton, mosaica_id)` order,
    so an item anywhere else shifts the row IDs of everything after it. `(65535.9, 65535.9)`
    quantises to cell 65535 on both axes (contracts §2.5: `v == max` lands in the top cell), which
    is the maximum representable code, so the canary sorts last and shifts nothing.
@@ -189,7 +189,7 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
             f"points={points_path}",
             "--file",
             f"pairs={pairs_path}",
-            # Each build generates its own identity key, so the three bundles' `tessera_id`s
+            # Each build generates its own identity key, so the three bundles' `mosaica_id`s
             # are unrelated. `test_canary.py` compares them by entity under each bundle's own
             # key, and serves every point untruncated so that no sample depends on the key.
             # Allocation rule 5 (see the module doc): the canary gets its own commit window.
@@ -197,7 +197,7 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
             # signature-sorted assignment to. At `N_BASE_ITEMS` the canary-free corpus is
             # exactly one window and the canary corpus is that window plus a second holding
             # the canary alone — so the base items' entity IDs, and therefore their
-            # `tessera_id`s and their row order, are identical between the two builds by
+            # `mosaica_id`s and their row order, are identical between the two builds by
             # construction. Both builds pass it because the value is identity-bearing: two
             # bundles built with different batch sizes are two different permanent
             # assignments of the same corpus.
@@ -217,7 +217,7 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
     This is stronger than checking the four rules separately and it is not a coincidence that one
     assertion covers them all. Every rule is a way of saying "the canary displaces nothing", and
     displacement is observable in exactly one place: the stored rows. A canary allocated in the
-    middle of entity space (rule 1 or 5 broken) changes every later item's `tessera_id`, which is a
+    middle of entity space (rule 1 or 5 broken) changes every later item's `mosaica_id`, which is a
     sort key, so rows move. A canary term interned early (rule 3) renumbers signatures and does the
     same by another route. A canary anywhere but the maximal corner (rule 2) inserts a row in the
     middle. Each is caught here as a row-level difference, with no need to guess which rule failed
@@ -238,8 +238,8 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
     failures: list[str] = []
     free = Bundle(free_bundle).segment(VIEW_ID)
     canary = Bundle(canary_bundle).segment(VIEW_ID)
-    if free.tessera_id is None or canary.tessera_id is None:
-        return ["a canary bundle has no stored tessera_id column (pre-r6 build)"]
+    if free.mosaica_id is None or canary.mosaica_id is None:
+        return ["a canary bundle has no stored mosaica_id column (pre-r6 build)"]
 
     if canary.row_count != free.row_count + 1:
         failures.append(
@@ -253,8 +253,8 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
         # *builds* placed the same items at the same rows, not whether either agrees with the
         # source — so comparing what each wrote is exactly right, and an integer position makes
         # the comparison exact where the old `f32` pair made it approximate.
-        # The entity, not the `tessera_id`: each build generates its own identity key, so the
-        # same entity has a different `tessera_id` in each bundle.
+        # The entity, not the `mosaica_id`: each build generates its own identity key, so the
+        # same entity has a different `mosaica_id` in each bundle.
         if (
             free.stored_code(row) != canary.stored_code(row)
             or int(free.entity_id[row]) != int(canary.entity_id[row])

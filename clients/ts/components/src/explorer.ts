@@ -740,7 +740,7 @@ export class MosaicaExplorer extends MosaicaElement {
   @property() accessor layers = '';
   /** Passed to the map's `tooltip-fields`. */
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
-  /** The field that titles a point, in the map's tooltip and the item card's headline. Unset, the title is the `tessera_id`. */
+  /** The field that titles a point, in the map's tooltip and the item card's headline. Unset, the title is the `mosaica_id`. */
   @property({attribute: 'title-field'}) accessor titleField = '';
   /** The field the item card shows under its headline. Unset, it shows none. */
   @property({attribute: 'subtitle-field'}) accessor subtitleField = '';
@@ -1147,7 +1147,7 @@ export class MosaicaExplorer extends MosaicaElement {
     return sel?.item ? `item:${sel.item.id}` : null;
   }
 
-  /** What a card is called: its item's title field, else its `tessera_id`; a cluster's name. */
+  /** What a card is called: its item's title field, else its `mosaica_id`; a cluster's name. */
   private cardName(key: string | null): string {
     const sel = this.resolvedStore?.get('selection');
     const pinned = this.pinned.find((p) => p.key === key);
@@ -1159,7 +1159,7 @@ export class MosaicaExplorer extends MosaicaElement {
     const id = pinned?.kind === 'artifact' ? pinned.artifact.id : key?.startsWith('artifact:') ? sel?.artifact?.id : undefined;
     if (id !== undefined) {
       const a = this.resolvedStore?.get('artifacts');
-      const row = a?.served.find((x) => x.tesseraId === id) ?? a?.colourServed.find((x) => x.tesseraId === id);
+      const row = a?.served.find((x) => x.mosaicaId === id) ?? a?.colourServed.find((x) => x.mosaicaId === id);
       return (row && a ? artifactName(row, a.attached) : null) ?? 'Cluster';
     }
     return 'Unavailable';

@@ -43,11 +43,11 @@ def decompose(root, n, label):
                     if f=='morton.u32': g='geometry: morton cell'
                     elif f=='columns.arrow':
                         cols,rows,tot = arrow_col_bytes(fp)
-                        tid=cols.pop('tessera_id',0); res=cols.pop('residual',0)
+                        tid=cols.pop('mosaica_id',0); res=cols.pop('residual',0)
                         rend=sum(cols.values())
                         pad = tot-(tid+res+rend)
                         groups['geometry: residual'] += res
-                        groups['wire identity (tessera_id)'] += tid
+                        groups['wire identity (mosaica_id)'] += tid
                         groups['render columns'] += rend + pad
                         continue
                     elif f in ('permutation.bin','row-entity.u32'): g='view maps (permutation, row-entity)'

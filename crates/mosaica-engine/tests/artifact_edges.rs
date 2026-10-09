@@ -19,7 +19,7 @@ use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent,
 };
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
@@ -140,7 +140,7 @@ fn labels_in(served: &[ArtifactOut]) -> Vec<&ArtifactOut> {
 
 /// Whether the identifier route still answers — the route that traverses no edge, and the one the
 /// extra predicate term exists for.
-fn reachable_by_identifier(engine: &Engine, credential: &[u8], id: TesseraId) -> bool {
+fn reachable_by_identifier(engine: &Engine, credential: &[u8], id: MosaicaId) -> bool {
     let session = engine.authorise(credential).unwrap();
     engine.artifact(&session, id, "s0", None).unwrap().is_some()
 }
@@ -160,12 +160,12 @@ fn suppressing_a_cluster_stops_its_labels_serving_on_a_held_identifier_too() {
     let label = labels_in(&served);
     assert_eq!(label.len(), 1, "the label serves while its cluster does");
     assert_eq!(label[0].content, vec!["shipping and logistics".to_string()]);
-    let label_id = label[0].tessera_id;
+    let label_id = label[0].mosaica_id;
     let cluster_id = served
         .iter()
         .find(|a| a.layer == CLUSTERS)
         .expect("the cluster serves too")
-        .tessera_id;
+        .mosaica_id;
     // The identifier is taken *before* the suppression, which is the case that matters: a viewer
     // who was shown the label a moment ago is exactly who would go on reading it.
     assert!(reachable_by_identifier(
@@ -224,7 +224,7 @@ fn a_viewer_who_cannot_reach_the_cluster_layer_is_served_none_of_its_labels() {
     let label = labels_in(&gated);
     assert_eq!(label.len(), 1);
     assert_eq!(label[0].content, vec!["logistics".to_string()]);
-    let label_id = label[0].tessera_id;
+    let label_id = label[0].mosaica_id;
 
     // The principal holding `public` — term 0, which every document carries, so nothing here turns on the
     // mask — reaches the label layer and none of its labels.
@@ -255,7 +255,7 @@ fn suppressing_the_cluster_layer_stops_its_labels_serving() {
     publish_a_cluster_and_its_label(&engine, &fx);
 
     let served = artifacts_of(&engine, &full_coverage_credential());
-    let label_id = labels_in(&served)[0].tessera_id;
+    let label_id = labels_in(&served)[0].mosaica_id;
 
     engine
         .accept_change(artifact_entity(&engine, cluster_layer), ChangeOp::Suppress)
@@ -286,7 +286,7 @@ fn an_attachment_survives_a_restart_and_still_withholds() {
             .iter()
             .find(|a| a.layer == CLUSTERS)
             .expect("the cluster serves")
-            .tessera_id
+            .mosaica_id
     };
 
     let engine = fx.open();
@@ -427,7 +427,7 @@ fn a_label_is_absent_where_its_cluster_is_below_its_own_bar_for_this_principal()
         1,
         "the label serves where its cluster does"
     );
-    let label_id = labels_in(&broad)[0].tessera_id;
+    let label_id = labels_in(&broad)[0].mosaica_id;
     assert_eq!(
         broad.len(),
         2,

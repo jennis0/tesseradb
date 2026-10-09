@@ -14,7 +14,7 @@ here reads a field's value out of the artefact.
 - at build level, `crates/mosaica-build/tests/record_blob.rs` reads every value back through the
   Rust `RecordBlob` reader and compares against its fixture's own generation functions;
 - at the served surface, the record-always-exists differential (records §10; the epic's gate 3)
-  asserts `/v1/items/{tessera_id}` returns every declared field equal to
+  asserts `/v1/items/{mosaica_id}` returns every declared field equal to
   `oracle.catalogue.record_of` — that test lands when drill-down assembles the record from its
   three homes, and writing it against the artefact instead now would be the weaker relation
   records §3 declines.

@@ -63,10 +63,10 @@ fn nullable(batch: &RecordBatch, name: &str) -> bool {
     batch.schema().field_with_name(name).unwrap().is_nullable()
 }
 
-fn row(layer: &str, tessera_id: u64) -> ArtifactRow<'_> {
+fn row(layer: &str, mosaica_id: u64) -> ArtifactRow<'_> {
     ArtifactRow {
         layer,
-        tessera_id,
+        mosaica_id,
         ..Default::default()
     }
 }
@@ -145,8 +145,8 @@ fn a_body_splits_into_frames_that_each_decode_alone() {
     let mut counts = Vec::new();
     for (_, payload) in &frames[1..3] {
         for batch in batches(payload) {
-            assert_eq!(names(&batch), ["tessera_id", "code", "count"]);
-            ids.extend(u64s(&batch, "tessera_id"));
+            assert_eq!(names(&batch), ["mosaica_id", "code", "count"]);
+            ids.extend(u64s(&batch, "mosaica_id"));
             counts.extend(u64s(&batch, "count"));
         }
     }
@@ -347,7 +347,7 @@ fn highlighted_follows_the_scalars_and_membership_follows_it() {
     let b = [None, None, Some(999)];
 
     let plain = batch_of(&points_frame(&ids, &ids, &scalars, None, &[]), FRAME_POINTS);
-    assert_eq!(names(&plain), ["tessera_id", "code", "w"]);
+    assert_eq!(names(&plain), ["mosaica_id", "code", "w"]);
 
     let frame = points_frame(
         &ids,
@@ -360,7 +360,7 @@ fn highlighted_follows_the_scalars_and_membership_follows_it() {
     assert_eq!(
         names(&batch),
         [
-            "tessera_id",
+            "mosaica_id",
             "code",
             "w",
             "highlighted",
@@ -384,8 +384,8 @@ fn the_highlight_projection_is_the_identifier_and_the_bit() {
         &points_highlight_frame(&[5, 6], &[false, true]),
         FRAME_POINTS,
     );
-    assert_eq!(names(&batch), ["tessera_id", "highlighted"]);
-    assert_eq!(u64s(&batch, "tessera_id"), [Some(5), Some(6)]);
+    assert_eq!(names(&batch), ["mosaica_id", "highlighted"]);
+    assert_eq!(u64s(&batch, "mosaica_id"), [Some(5), Some(6)]);
     assert_eq!(bools(&batch, "highlighted"), [Some(false), Some(true)]);
     assert!(!nullable(&batch, "highlighted"));
 }
@@ -424,7 +424,7 @@ fn the_artifacts_frame_has_eighteen_fixed_columns_ending_in_the_tile_and_slot() 
     let content = ["label".to_string(), "summary".to_string()];
     let full = ArtifactRow {
         layer: "clusters/a",
-        tessera_id: 7,
+        mosaica_id: 7,
         key: Some("k7"),
         masked_count: 12,
         centroid: Some([1.5, 2.5]),
@@ -449,7 +449,7 @@ fn the_artifacts_frame_has_eighteen_fixed_columns_ending_in_the_tile_and_slot() 
     let batch = batch_of(&artifacts_frame(&rows), FRAME_ARTIFACTS);
     let fixed = [
         "layer",
-        "tessera_id",
+        "mosaica_id",
         "key",
         "masked_count",
         "centroid_x",
@@ -538,7 +538,7 @@ fn artifact_rows_stay_within_their_size_bound() {
     let rows: Vec<ArtifactRow<'_>> = (0..ROWS)
         .map(|i| ArtifactRow {
             layer: "clusters/hdbsca",
-            tessera_id: i as u64,
+            mosaica_id: i as u64,
             key: Some(&keys[i]),
             masked_count: (i % 1000) as u64,
             centroid: Some([i as f64, (i * 2) as f64]),
@@ -587,7 +587,7 @@ fn records_page(rows: u64) -> RecordBatch {
     }
     let labels: ArrayRef = Arc::new(labels.finish());
     let schema = Arc::new(Schema::new(vec![
-        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("mosaica_id", DataType::UInt64, false),
         Field::new("score", DataType::Float64, true),
         Field::new("archive", archive.data_type().clone(), true),
         Field::new("mosaica:labels", labels.data_type().clone(), false),

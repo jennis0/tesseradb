@@ -458,7 +458,7 @@ impl MembershipRows {
 
     /// Union `rows` into the slot at `idx` — the only way a held form's membership grows. A slot
     /// holding `None` is a hole and stays one: giving it rows would resurrect an artifact a fold
-    /// retired under an identity a caller's `tessera_id` still names. `false` says nothing was done.
+    /// retired under an identity a caller's `mosaica_id` still names. `false` says nothing was done.
     pub(super) fn or_rows(&mut self, idx: usize, rows: &Bitmap) -> bool {
         match self.rows.get_mut(idx) {
             // A column-only form holds the slot and not the set.
@@ -634,7 +634,7 @@ pub(crate) fn view_key(view: &str) -> &str {
 /// amendment makes of the store, so a held form takes a delta for its own view's artifacts alone.
 ///
 /// `None` for a hole, and for an artifact belonging to another view of the same group: putting
-/// such a record into this form would serve that view's key, its `tessera_id` and a live count to
+/// such a record into this form would serve that view's key, its `mosaica_id` and a live count to
 /// a principal of this one. The projecting routes reach the same rule through
 /// [`mosaica_lifecycle::membership::ArtifactStore::level_in_view`], this test over a whole level.
 pub(super) fn drawn_record<'a>(

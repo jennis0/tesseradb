@@ -128,7 +128,7 @@ def run_steps(served: Deployment, run: dict, device: str, phase: str, out: list)
                 str(v)
                 for kind, payload in frames(content)
                 if kind == 5
-                for v in ipc.open_stream(io.BytesIO(payload)).read_all().column("tessera_id").to_pylist()
+                for v in ipc.open_stream(io.BytesIO(payload)).read_all().column("mosaica_id").to_pylist()
             }
         )
         body = {"view": view["id"], "layer": LAYER, "ids": ids, "fields": ["level", "parents", "centroid"]}

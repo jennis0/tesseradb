@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use mosaica_engine::{Engine, EngineConfig, EngineError, IngestRequest};
 use mosaica_lifecycle::{ChangeOp, IngestRow};
-use mosaica_types::TesseraId;
+use mosaica_types::MosaicaId;
 use mosaica_lifecycle::wal::{Wal, WalRecord};
 
 use common::*;
@@ -193,13 +193,13 @@ fn serving(root: &Path) -> Engine {
 }
 
 /// Create one item per name in view `s0`, each holding the `id` of its name, as one batch, and
-/// answer their `tessera_id`s.
-fn create(engine: &Engine, batch: &str, names: &[&str]) -> Vec<TesseraId> {
+/// answer their `mosaica_id`s.
+fn create(engine: &Engine, batch: &str, names: &[&str]) -> Vec<MosaicaId> {
     let rows = names
         .iter()
         .enumerate()
         .map(|(i, name)| IngestRow {
-            tessera_id: None,
+            mosaica_id: None,
             labels: Some(vec![b"0".to_vec()]),
             position: Some((1.0 + i as f64, 1.0)),
             scalars: keyed(name),
@@ -215,12 +215,12 @@ fn create(engine: &Engine, batch: &str, names: &[&str]) -> Vec<TesseraId> {
             rows,
             artifacts: Default::default(),
             strict: false,
-            tessera_id_column: false,
+            mosaica_id_column: false,
         })
         .expect("the batch is accepted")
-        .tessera_ids
+        .mosaica_ids
         .into_iter()
-        .map(|id| id.expect("an accepted row has a tessera_id"))
+        .map(|id| id.expect("an accepted row has a mosaica_id"))
         .collect()
 }
 
@@ -236,19 +236,19 @@ fn the_buffered_rows_reported_after_a_restart_are_the_rows_replayed() {
     assert_eq!(serving(&root).buffered_items(), 3);
 }
 
-/// **A deleted item's `tessera_id` is never given to another item**, even once a fold has removed
+/// **A deleted item's `mosaica_id` is never given to another item**, even once a fold has removed
 /// it and a restart has read the allocator back.
 #[test]
-fn a_deleted_items_tessera_id_is_not_issued_again_after_a_fold_and_a_restart() {
+fn a_deleted_items_mosaica_id_is_not_issued_again_after_a_fold_and_a_restart() {
     let tmp = TempDir::new().unwrap();
     let root = fixture_in(tmp.path());
     let engine = serving(&root);
     let first = create(&engine, "first", &["first"])[0];
-    let entity = engine.resolve_tessera_ids(&[first]).unwrap()[0].expect("the item it created");
+    let entity = engine.resolve_mosaica_ids(&[first]).unwrap()[0].expect("the item it created");
     engine.accept_change(entity, ChangeOp::Delete).unwrap();
     fold(&engine);
     drop(engine);
     let engine = serving(&root);
     let second = create(&engine, "second", &["second"])[0];
-    assert_ne!(second, first, "the new item has a tessera_id of its own");
+    assert_ne!(second, first, "the new item has a mosaica_id of its own");
 }

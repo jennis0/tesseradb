@@ -80,7 +80,7 @@ def test_an_insert_on_something_undeclared_names_the_verb_that_declares_it(tmp_p
 
 def test_a_frame_with_no_unique_column_makes_each_row_an_item(tmp_path):
     """A frame carrying no column of a unique attribute names no item: each row is an item of its
-    own, addressable by the `tessera_id` a pick or the ingest route hands back."""
+    own, addressable by the `mosaica_id` a pick or the ingest route hands back."""
     db = create(tmp_path / "db")
     db.declare_view("map")
     insert = db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")

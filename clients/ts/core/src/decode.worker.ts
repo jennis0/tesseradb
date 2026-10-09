@@ -11,7 +11,7 @@
  * transfer without a copy.
  *
  * No authorisation happens here. The worker parses a response the server has already restricted,
- * and `tessera_id` is opaque on either side.
+ * and `mosaica_id` is opaque on either side.
  */
 import {decodeArtifactsFrame, decodePoints, decodeViewport} from './decode.js';
 import type {MembershipColumn, ScalarColumn} from './types.js';

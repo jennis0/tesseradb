@@ -6,7 +6,7 @@ viewer's visible points from the fixture's own access rule, and asks the fixture
 which artifacts of the two spatial layers hold each point, and its own residue rule which artifacts
 of an enumerated layer of overlapping groups hold it. That layer declares no layout, so the server
 chooses how to store it. For every tile it then names the
-artifacts with a visible member there, ordered by whole visible count and then `tessera_id`, the
+artifacts with a visible member there, ordered by whole visible count and then `mosaica_id`, the
 first `per_tile` of them. The identifiers are learnt from the served rows by key, never from their
 order. Each tile's frame is compared with that, frame by frame, under a quota small enough to bind,
 for a viewer who sees part of the corpus and one who sees all of it, before and after a deny.
@@ -111,7 +111,7 @@ def tile_of(x: float, y: float, zoom: int) -> int:
 
 def oracle(points, ids: dict[tuple[str, str], int], zoom: int) -> dict[int, list[tuple[str, str, int]]]:
     """Every tile holding a visible point: the first `PER_TILE` artifacts of each layer with a
-    visible member there, by whole visible count and then `tessera_id`, as `(layer, key, count)`."""
+    visible member there, by whole visible count and then `mosaica_id`, as `(layer, key, count)`."""
     whole: dict[tuple[str, str], int] = {}
     present: dict[int, set[tuple[str, str]]] = {}
     for fx, x, y in points:
@@ -140,7 +140,7 @@ def assert_tiles_match(server, token: str, seen, zoom: int, at: str) -> dict[int
     frames, _trailer = decode_artifact_frames(body)
     assert len(frames) == len(tiles), f"{at}: one frame per tile asked"
     whole = server.artifacts_viewport(token, VIEW_ID, zoom, WHOLE_MAP, layers=LAYERS)
-    ids = {(a.layer, a.key): a.tessera_id for a in decode_viewport_artifacts(whole)}
+    ids = {(a.layer, a.key): a.mosaica_id for a in decode_viewport_artifacts(whole)}
     want = oracle(seen, ids, zoom)
     got = {}
     for tile, (named, rows) in zip(tiles, frames):
@@ -183,7 +183,7 @@ def test_a_denied_member_leaves_its_tile_and_every_tile_stays_the_oracles(tiles_
     tile = tiles[0]
     denied = {fx for fx, x, y in seen if tile_of(x, y, zoom) == tile and key in holding(fx, x, y)[layer]}
     table = decode_viewport_points(server.viewport(token, VIEW_ID, 0, WHOLE_MAP, k=100_000))
-    by_fx = dict(zip(table.column("fx_key").to_pylist(), table.column("tessera_id").to_pylist()))
+    by_fx = dict(zip(table.column("fx_key").to_pylist(), table.column("mosaica_id").to_pylist()))
     for fx in denied:
         assert server.change(by_fx[fx], "suppress").status_code == 200
     try:

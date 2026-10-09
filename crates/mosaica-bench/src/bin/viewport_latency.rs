@@ -30,7 +30,7 @@ use mosaica_types::IdentityKey;
 const ITEM_LIMIT: u64 = 2_422_486;
 
 /// The fixed, non-degenerate key the engine's own fixtures use. Arbitrary here — nothing inverts
-/// a `tessera_id` — but a real key, since `IdentityKey::from_hex` refuses degenerate ones.
+/// a `mosaica_id` — but a real key, since `IdentityKey::from_hex` refuses degenerate ones.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 /// Server defaults, so this measures a deployment somebody runs.

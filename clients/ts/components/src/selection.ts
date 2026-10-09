@@ -35,7 +35,7 @@ import './count.js';
  * @csspart count-visible - The `<mosaica-count>` visible inside (or outside).
  * @csspart label - The heading above the list.
  * @csspart items - The list of held marks inside.
- * @csspart item - One held mark, by `tessera_id`.
+ * @csspart item - One held mark, by `mosaica_id`.
  * @csspart actions - The action buttons.
  * @csspart action - One action button.
  */

@@ -125,13 +125,13 @@ fn b_subset_session_sees_exactly_its_terms_items() {
     assert_eq!(out.points.len(), expected as usize);
 
     // Every sampled point must actually be a subset-term source item. Invert the wire-visible
-    // `tessera_id` back to the entity id with the same key the fixture was built under (test-only
+    // `mosaica_id` back to the entity id with the same key the fixture was built under (test-only
     // — a real client never gets to do this, per I10) before mapping it to its source id.
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let new_to_source: BTreeMap<u64, u64> = source_to_new.iter().map(|(&s, &n)| (n, s)).collect();
     let key = test_key();
-    for (tessera_id, _) in out.points.iter() {
-        let (shard, entity) = key.invert(tessera_id);
+    for (mosaica_id, _) in out.points.iter() {
+        let (shard, entity) = key.invert(mosaica_id);
         assert_eq!(shard, 0, "fixture uses shard 0 only");
         let source = new_to_source[&entity.raw()];
         assert_eq!(
@@ -245,19 +245,19 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
     assert_eq!(out_b.tiles[0].matched, out_b.tiles[0].visible);
 }
 
-/// (f) Selection returns the *k* lowest `tessera_id`s in the mask — **not** the first *k* in row
+/// (f) Selection returns the *k* lowest `mosaica_id`s in the mask — **not** the first *k* in row
 /// (Morton) order.
 ///
 /// This test replaces one that asserted the opposite, and the replacement is the point: the
 /// placeholder took `mask.iter_range(..)` in row order, which within a leaf Morton cell *is*
-/// `tessera_id` order (storage sort is `(morton, tessera_id)`), so the two only diverge across
+/// `mosaica_id` order (storage sort is `(morton, mosaica_id)`), so the two only diverge across
 /// cells. At zoom 0 the whole segment is one tile spanning every cell, so the divergence is maximal
 /// and the second assertion below — that the served set is *not* the first three rows — is what
 /// actually pins the fix. A sample ordered by row order is a sample ordered by **permission
 /// signature**, because entity IDs are signature-sorted permanently under I9; that is the defect
 /// docs/evidence/memos/2026-07-30-priority-as-identity-prefix.md exists to close.
 #[test]
-fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
+fn f_selection_returns_the_lowest_mosaica_ids_not_the_first_rows() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -268,7 +268,7 @@ fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
 
     let bundle = open_bundle(&bundle_root).unwrap();
     let segment = &bundle.partitions["default"].views["s0"].segments[0];
-    let ids = segment.columns.tessera_id();
+    let ids = segment.columns.mosaica_id();
 
     // The definition's answer, computed independently of the engine: the three smallest identities
     // in the segment, ascending.
@@ -575,7 +575,7 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
 
     let bundle = open_bundle(&bundle_root).unwrap();
     let segment = &bundle.partitions["default"].views["s0"].segments[0];
-    let tessera_ids = segment.columns.tessera_id();
+    let mosaica_ids = segment.columns.mosaica_id();
 
     let tiles = tiles_for_bbox(bbox, ZOOM, &extent());
     let mut expected_prefixes: Vec<u64> = Vec::new();
@@ -589,9 +589,9 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
         // §7.2's served set, not the retired placeholder's "first k rows in row order". This
         // session is full-coverage and `open_engine_uncapped` saturates θ, so `C_θ` is the tile's
         // whole visible count and `m` is `min(K, visible)` — the K LOWEST identities in the tile,
-        // ascending. Row order would be wrong here: storage sorts by `(morton, tessera_id)`, so
+        // ascending. Row order would be wrong here: storage sorts by `(morton, mosaica_id)`, so
         // within one leaf cell the two coincide, but a depth-4 tile spans many cells.
-        let mut ids_in_tile: Vec<u64> = range.clone().map(|r| tessera_ids[r as usize]).collect();
+        let mut ids_in_tile: Vec<u64> = range.clone().map(|r| mosaica_ids[r as usize]).collect();
         ids_in_tile.sort_unstable();
         ids_in_tile.truncate(K);
         expected_points.extend(ids_in_tile);

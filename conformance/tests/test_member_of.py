@@ -62,10 +62,10 @@ def matched_sum(server, token: str, filters: dict) -> int:
     return sum(t[2] for t in tiles)
 
 
-def leaf(layer: str, tessera_id: int) -> dict:
+def leaf(layer: str, mosaica_id: int) -> dict:
     """The wire form: the identifier as a decimal string, which is how a client that cannot carry
     a `u64` intact sends it and what the server accepts beside a JSON number."""
-    return {"member_of": {"layer": layer, "artifact": str(tessera_id)}}
+    return {"member_of": {"layer": layer, "artifact": str(mosaica_id)}}
 
 
 def member_column(points, served, terms: list[str]) -> MemberOfColumn:
@@ -74,7 +74,7 @@ def member_column(points, served, terms: list[str]) -> MemberOfColumn:
     suppressed, of another layer — is absent here too, which is the empty operand."""
     seen = visible(points, terms)
     members = {
-        (a.layer, str(a.tessera_id)): {p[0] for p in seen if a.key in containing(p[1], p[2]).get(a.layer, set())}
+        (a.layer, str(a.mosaica_id)): {p[0] for p in seen if a.key in containing(p[1], p[2]).get(a.layer, set())}
         for a in served
     }
     return MemberOfColumn(members=members, rowed={p[0] for p in points})
@@ -109,7 +109,7 @@ def test_the_leaf_is_the_artifacts_masked_count_and_the_oracles(member_server):
         column = member_column(points, served, terms)
         candidate = {p[0] for p in visible(points, terms)}
         for artifact in served:
-            clause = leaf(artifact.layer, artifact.tessera_id)
+            clause = leaf(artifact.layer, artifact.mosaica_id)
             got = matched_sum(server, token, clause)
             assert got == artifact.masked_count, f"{artifact.layer}/{artifact.key}: {got} != {artifact.masked_count}"
             expected = len(evaluate(clause, {"member_of": column}, candidate))
@@ -125,7 +125,7 @@ def test_it_composes_with_a_numeric_leaf_and_negates_within_the_visible_set(memb
         column = member_column(points, served, terms)
         candidate = {p[0] for p in visible(points, terms)}
         artifact = max(served, key=lambda a: a.masked_count)
-        clause = leaf(artifact.layer, artifact.tessera_id)
+        clause = leaf(artifact.layer, artifact.mosaica_id)
         columns = {"member_of": column, "fx_key": numeric}
 
         composed = {"all_of": [clause, {"fx_key": {"range": {"lt": 1500}}}]}
@@ -157,23 +157,23 @@ def test_an_unknown_a_foreign_a_suppressed_and_a_withheld_artifact_are_one_respo
         return frames, headers
 
     unknown = leaf(GATED, 8589934593)
-    withheld = leaf(GATED, strip.tessera_id)
+    withheld = leaf(GATED, strip.mosaica_id)
     assert bytes_of(narrow, withheld) == bytes_of(narrow, unknown)
     assert matched_sum(server, narrow, unknown) == 0
 
     # The **right identifier under the wrong layer**: a value that does not resolve within the
     # layer named, answered exactly as one that resolves to nothing at all.
-    foreign = leaf(SHAPES, strip.tessera_id)
+    foreign = leaf(SHAPES, strip.mosaica_id)
     assert bytes_of(broad, foreign) == bytes_of(broad, leaf(SHAPES, 8589934593))
     assert matched_sum(server, broad, foreign) == 0
 
     # Suppressed: served to the broad principal a moment ago, and an empty operand from the ack.
     before = matched_sum(server, broad, withheld)
     assert before == strip.masked_count
-    resp = server.changes([{"op": "suppress", "match": {"tessera_id": str(strip.tessera_id)}}], strict=True)
+    resp = server.changes([{"op": "suppress", "match": {"mosaica_id": str(strip.mosaica_id)}}], strict=True)
     assert resp.status_code in (200, 202), resp.text
     assert bytes_of(broad, withheld) == bytes_of(broad, unknown)
-    resp = server.changes([{"op": "unsuppress", "match": {"tessera_id": str(strip.tessera_id)}}], strict=True)
+    resp = server.changes([{"op": "unsuppress", "match": {"mosaica_id": str(strip.mosaica_id)}}], strict=True)
     assert resp.status_code in (200, 202), resp.text
     assert matched_sum(server, broad, withheld) == before
 

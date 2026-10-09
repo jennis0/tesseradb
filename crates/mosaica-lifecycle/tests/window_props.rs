@@ -67,7 +67,7 @@ proptest! {
                 window.push(
                     WindowEntry {
                     edits: Vec::new(),
-                    slots: (0..rows.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
+                    slots: (0..rows.len() as u32).map(|row| Slot::Written { row, mosaica_id: None }).collect(),
                     over_bound: Vec::new(),
                     rows,
                     batch_id: format!("w{w}-e{e}"),
@@ -119,7 +119,7 @@ proptest! {
             chunked.push(
                 WindowEntry {
                 edits: Vec::new(),
-                slots: (0..part.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
+                slots: (0..part.len() as u32).map(|row| Slot::Written { row, mosaica_id: None }).collect(),
                 over_bound: Vec::new(),
                 rows: part.to_vec(),
                 batch_id: format!("c{c}"),
@@ -141,7 +141,7 @@ proptest! {
         whole.push(
             WindowEntry {
             edits: Vec::new(),
-            slots: (0..rows.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
+            slots: (0..rows.len() as u32).map(|row| Slot::Written { row, mosaica_id: None }).collect(),
             over_bound: Vec::new(),
             rows,
             batch_id: "one".into(),
@@ -204,7 +204,7 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
             window.push(
                 WindowEntry {
                 edits: Vec::new(),
-                slots: (0..group.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
+                slots: (0..group.len() as u32).map(|row| Slot::Written { row, mosaica_id: None }).collect(),
                 over_bound: Vec::new(),
                 rows: group.to_vec(),
                 batch_id: "b".into(),
@@ -299,7 +299,7 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
             window.push(
                 WindowEntry {
                 edits: Vec::new(),
-                slots: (0..group.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
+                slots: (0..group.len() as u32).map(|row| Slot::Written { row, mosaica_id: None }).collect(),
                 over_bound: Vec::new(),
                 rows: group.to_vec(),
                 batch_id: "b".into(),

@@ -61,10 +61,10 @@ cosmetic.
 
 | What changed | What it means for a held view |
 |---|---|
-| A different viewer authorises (a new token for a different viewer) | The host calls `clear()` or makes a new store, which drops the replica, held artifacts, the selection and per-column state and reads meta again. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per bundle, not per viewer. |
+| A different viewer authorises (a new token for a different viewer) | The host calls `clear()` or makes a new store, which drops the replica, held artifacts, the selection and per-column state and reads meta again. Every `mosaica_id` the client already holds stays valid, because the permutation is keyed per bundle, not per viewer. |
 | An answer carries another identity key | The store detects a new viewer by the identity key, which hashes the exact credential bytes presented at authorisation, the identity of the viewer's visible-set fragment, and the view. An ingest or a suppression does not change it. The store drops everything the server answered, reads meta again and asks again, and keeps the host's own inputs. A renewal that presents different credential bytes, such as a freshly signed token, changes the key, so the store redraws from scratch at that renewal even for the same person. The check runs on answers; the `Store` reference says how long a host that changes viewer without `clear()` shows the previous viewer's data. |
-| A compaction is published | A compaction rotates the fragment identity the identity key hashes, so every store sees a new key on its next answer: it drops what it holds, reads meta again and draws afresh. Every `tessera_id` stays valid. |
-| The deployment is rebuilt | The new bundle has a new key, so every `tessera_id` the client holds is meaningless. Read the items again, by a unique field's values or afresh. |
+| A compaction is published | A compaction rotates the fragment identity the identity key hashes, so every store sees a new key on its next answer: it drops what it holds, reads meta again and draws afresh. Every `mosaica_id` stays valid. |
+| The deployment is rebuilt | The new bundle has a new key, so every `mosaica_id` the client holds is meaningless. Read the items again, by a unique field's values or afresh. |
 | The content behind the current identity (an item added, denied, or unsuppressed) | The client's counts and marks may be older than the corpus. Mark the view stale and offer refresh. |
 
 Segments merging never reaches a client, because nothing it holds is addressed by row. A
@@ -108,7 +108,7 @@ budget or filter. The store colours a cluster with the palette's colour at its s
 with no slot with the neutral grey. `Store.setPalette` changes the palette. Slots of one size mean
 nothing under another, so the store asks again with the new size, and each cluster keeps the colour
 of the palette its slot was served under until the new slot arrives.
-`Store.setArtifactColours` gives some clusters a host's own colours, by layer and `tessera_id`,
+`Store.setArtifactColours` gives some clusters a host's own colours, by layer and `mosaica_id`,
 over their slots. The explorer's display menu lists the four palettes with each one's swatches and size, and
 the field card's swatches take the slot each row of its table carries. The notebook widget takes
 the palette as `palette`, and the Python client passes `palette_size` to every route that reads
@@ -147,7 +147,7 @@ reads what it publishes.
 The artifacts of the layers drawn are requested on their own, tile by tile
 ([queries](queries.md#how-a-client-asks-for-a-layer)), rather than read off cached point geometry.
 The layer the points are coloured by is named on the point requests, so each point carries its
-artifact's `tessera_id`. Artifacts are clusters, boundaries, hierarchy nodes and their labels, as
+artifact's `mosaica_id`. Artifacts are clusters, boundaries, hierarchy nodes and their labels, as
 [annotations](annotations.md#what-an-artifact-is) defines them. A cache holds geometry it has
 already fetched and does not ask again for a tile it already holds, and such a tile carries no
 artifacts, so a client reading them off the point path would watch clusters disappear from a view

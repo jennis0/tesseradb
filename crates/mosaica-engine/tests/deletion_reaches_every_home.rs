@@ -444,7 +444,7 @@ fn row_of(root: &Path, entity: EntityId) -> Option<u32> {
         .map(|row| row.raw())
 }
 
-/// `Home::RenderColumn` and `Home::RenderPresence`: every live row's `tessera_id`, its two
+/// `Home::RenderColumn` and `Home::RenderPresence`: every live row's `mosaica_id`, its two
 /// rendered values, and whether the render presence bitmap calls its `score` meaningful.
 ///
 /// Keyed by row within its segment, and returned with the segment's own bitmap, because that is
@@ -453,7 +453,7 @@ fn rendered_rows(root: &Path) -> Vec<(u64, u8, i32, bool)> {
     let mut out = Vec::new();
     for dir in segment_dirs(root) {
         let columns = ColumnsRef::load(&dir.join("columns.arrow")).expect("a segment opens");
-        let ids = columns.tessera_id();
+        let ids = columns.mosaica_id();
         let Some(ScalarSlice::U8(band)) = columns.scalar("band") else {
             panic!("a segment must carry 'band' as u8");
         };
@@ -620,19 +620,19 @@ fn a_deletion_reaches_every_home() {
     let deleted = EntityId::new(entity_of_source[&DELETED_SOURCE]);
     let survivor = EntityId::new(entity_of_source[&SUPPRESSED_SOURCE]);
 
-    // **Addressed the way a caller addresses a change.** The control plane takes a `tessera_id` or
+    // **Addressed the way a caller addresses a change.** The control plane takes a `mosaica_id` or
     // a unique field and value and resolves either to an `EntityId` before the deny lane sees
     // anything, so the engine's change path takes only the entity. What is checkable here is that
-    // the two resolutions name the same item, and the delete goes through the `tessera_id` one.
+    // the two resolutions name the same item, and the delete goes through the `mosaica_id` one.
     let by_value = item_of_id(&engine, DELETED_SOURCE)
         .expect("the index reads")
         .expect("the deleted item's `id` names it before the delete");
-    let by_tessera = engine
-        .resolve_tessera_ids(&[engine.tessera_id_of(deleted).expect("a wire identifier")])
+    let by_mosaica = engine
+        .resolve_mosaica_ids(&[engine.mosaica_id_of(deleted).expect("a wire identifier")])
         .unwrap()[0]
         .expect("the identifier names a live item");
     assert_eq!(by_value, deleted, "the unique-field route names the item");
-    assert_eq!(by_tessera, deleted, "and so does the tessera_id route");
+    assert_eq!(by_mosaica, deleted, "and so does the mosaica_id route");
 
     let baseline = {
         let session = engine.authorise(&full_coverage_credential()).unwrap();
@@ -648,7 +648,7 @@ fn a_deletion_reaches_every_home() {
     // Not ceremony. Every assertion after the fold is an absence, and an absence from a home the
     // fixture never wrote is free.
     assert!(row_of(&root, deleted).is_some(), "Home::Row");
-    let deleted_wire = engine.tessera_id_of(deleted).unwrap().raw();
+    let deleted_wire = engine.mosaica_id_of(deleted).unwrap().raw();
     assert!(
         rendered_rows(&root)
             .iter()
@@ -713,7 +713,7 @@ fn a_deletion_reaches_every_home() {
         .accept_change(survivor, ChangeOp::Suppress)
         .expect("a suppression is accepted");
     engine
-        .accept_change(by_tessera, ChangeOp::Delete)
+        .accept_change(by_mosaica, ChangeOp::Delete)
         .expect("a deletion is accepted");
     assert_eq!(
         engine.overlay_depth(),
@@ -777,7 +777,7 @@ fn a_deletion_reaches_every_home() {
         .map(|entity| {
             (
                 engine
-                    .tessera_id_of(EntityId::new(*entity))
+                    .mosaica_id_of(EntityId::new(*entity))
                     .expect("a wire identifier")
                     .raw(),
                 *entity,
@@ -1123,10 +1123,10 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
     let mut engine = every::open(tmp.path(), &root);
     every::publish(&engine, &root);
     let first = EntityId::new(source_to_new_map(&root, "v00000")[&every::X]);
-    let tid = engine.tessera_id_of(first).unwrap();
+    let tid = engine.mosaica_id_of(first).unwrap();
 
-    let blank = |tessera_id| IngestRow {
-        tessera_id,
+    let blank = |mosaica_id| IngestRow {
+        mosaica_id,
         labels: None,
         position: None,
         scalars: vec![WalScalar::Null; every::DECLARED],
@@ -1144,7 +1144,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                 rows: vec![row],
                 artifacts: Default::default(),
                 strict: false,
-                tessera_id_column: false,
+                mosaica_id_column: false,
             })
             .expect("the batch is accepted")
     };
@@ -1154,7 +1154,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
     assert_eq!(send(&engine, "edit", edit).edited, 1);
     publish_buffered(&engine);
     fold(&engine);
-    let moved = engine.resolve_tessera_ids(&[tid]).unwrap()[0].expect("the edited item resolves");
+    let moved = engine.resolve_mosaica_ids(&[tid]).unwrap()[0].expect("the edited item resolves");
     assert_ne!(moved, first, "the edit gave the item a new entity");
     let entities = [first, moved];
     let verified = mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
@@ -1292,9 +1292,9 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
             }
             Home::EditedItems => {
                 assert_eq!(
-                    engine.resolve_tessera_ids(&[tid]).unwrap()[0],
+                    engine.resolve_mosaica_ids(&[tid]).unwrap()[0],
                     None,
-                    "{home:?}: the item's tessera_id still resolves"
+                    "{home:?}: the item's mosaica_id still resolves"
                 );
                 let verified =
                     mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())

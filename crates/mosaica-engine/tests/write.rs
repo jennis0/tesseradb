@@ -1490,7 +1490,7 @@ fn one_fsync_per_window() {
 /// Each waiter receives **its own** rows' ids, in **its own** submitted row order.
 ///
 /// A window that returned the right multiset in the wrong order is a silent misattribution: the
-/// handler turns each id into the `tessera_id` it hands back per row (contracts §3.4), so a
+/// handler turns each id into the `mosaica_id` it hands back per row (contracts §3.4), so a
 /// permuted answer tells a client that row 3 is the entity that is really row 7 — and every later
 /// deny it issues names the wrong item.
 #[test]

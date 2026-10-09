@@ -5,7 +5,7 @@
 //! item that held the id before, in any home, through a flush, a merge, a restart and a fold.
 //!
 //! The freed id is the edited item's middle entity: its first is its number, which stays reserved
-//! so its `tessera_id` never names another item, and its last is the one it holds. A suppressed
+//! so its `mosaica_id` never names another item, and its last is the one it holds. A suppressed
 //! item's old entities lose their suppression at the fold that removes their rows, while the item
 //! stays suppressed through the entity it holds, so the item that takes one is not suppressed. So
 //! does an entity an edit made and a deletion removed before any flush placed it. An
@@ -28,12 +28,12 @@ use mosaica_engine::{AcceptError, Engine, IngestRequest, ScalarOut};
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingContent};
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
 use mosaica_lifecycle::IngestRow;
-use mosaica_types::{AttrLocalId, EntityId, TesseraId};
+use mosaica_types::{AttrLocalId, EntityId, MosaicaId};
 
 /// The source of the items the test edits twice: `X` visibly, `W` under a suppression.
 const W: u64 = 20;
 
-fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<TesseraId> {
+fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<MosaicaId> {
     let mut body_hash = [0u8; 32];
     body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
     engine
@@ -44,19 +44,19 @@ fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<T
             rows,
             artifacts: Default::default(),
             strict: false,
-            tessera_id_column: false,
+            mosaica_id_column: false,
         })
         .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
-        .tessera_ids
+        .mosaica_ids
         .into_iter()
-        .map(|id| id.expect("an accepted row has a tessera_id"))
+        .map(|id| id.expect("an accepted row has a mosaica_id"))
         .collect()
 }
 
 /// A row giving the item `tid` names a new score.
-fn rescore(tid: TesseraId, score: i32) -> IngestRow {
+fn rescore(tid: MosaicaId, score: i32) -> IngestRow {
     let mut row = IngestRow {
-        tessera_id: Some(tid),
+        mosaica_id: Some(tid),
         labels: None,
         position: None,
         scalars: vec![WalScalar::Null; DECLARED],
@@ -70,7 +70,7 @@ fn rescore(tid: TesseraId, score: i32) -> IngestRow {
 /// A row creating an item with a label and a position and nothing else.
 fn create(label: &str, at: (f64, f64)) -> IngestRow {
     IngestRow {
-        tessera_id: None,
+        mosaica_id: None,
         labels: Some(vec![label.as_bytes().to_vec()]),
         position: Some(at),
         scalars: vec![WalScalar::Null; DECLARED],
@@ -79,8 +79,8 @@ fn create(label: &str, at: (f64, f64)) -> IngestRow {
     }
 }
 
-fn entity_of(engine: &Engine, tid: TesseraId) -> EntityId {
-    engine.resolve_tessera_ids(&[tid]).unwrap()[0]
+fn entity_of(engine: &Engine, tid: MosaicaId) -> EntityId {
+    engine.resolve_mosaica_ids(&[tid]).unwrap()[0]
         .unwrap_or_else(|| panic!("{tid:?} names an item"))
 }
 
@@ -113,7 +113,7 @@ const Z_HEAT: f32 = 42.5;
 /// A row creating `z` in [`Q1`] with a value in every home.
 fn create_z() -> IngestRow {
     IngestRow {
-        tessera_id: None,
+        mosaica_id: None,
         labels: Some(vec![b"1".to_vec()]),
         position: Some((901.0, 902.0)),
         scalars: vec![
@@ -155,7 +155,7 @@ fn count_in(engine: &Engine, view: &str, key: &str) -> Option<u64> {
 /// `z` holds the freed id and carries its own values and nothing of `x`, which held it before, in
 /// any home; `x` carries its own. Checked through what each principal is served: `x` carries `0`
 /// alone and `z` carries `1` alone, so each principal sees one of them.
-fn check(engine: &Engine, x: TesseraId, z: TesseraId, x_score: i32, after: &str) {
+fn check(engine: &Engine, x: MosaicaId, z: MosaicaId, x_score: i32, after: &str) {
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     let subset = engine.authorise(&subset_credential()).unwrap();
     let card = engine
@@ -204,7 +204,7 @@ fn check(engine: &Engine, x: TesseraId, z: TesseraId, x_score: i32, after: &str)
                     .unwrap();
                 let at = out
                     .points
-                    .tessera_ids
+                    .mosaica_ids
                     .iter()
                     .position(|t| *t == z.raw())
                     .expect("q1 serves z");
@@ -309,9 +309,9 @@ fn check(engine: &Engine, x: TesseraId, z: TesseraId, x_score: i32, after: &str)
             Home::EditedItems => {
                 let entity = entity_of(engine, z);
                 assert_eq!(
-                    engine.tessera_id_of(entity).unwrap(),
+                    engine.mosaica_id_of(entity).unwrap(),
                     z,
-                    "Home::EditedItems: z's entity answers another tessera_id, after {after}"
+                    "Home::EditedItems: z's entity answers another mosaica_id, after {after}"
                 );
                 assert_ne!(entity_of(engine, x), entity, "x and z name one entity");
             }
@@ -375,8 +375,8 @@ fn a_freed_id_carries_nothing_of_the_item_that_held_it() {
     engine.set_merge_for_test(false);
     publish(&engine, &root);
     let map = source_to_new_map(&root, "v00000");
-    let x = engine.tessera_id_of(EntityId::new(map[&X])).unwrap();
-    let w = engine.tessera_id_of(EntityId::new(map[&W])).unwrap();
+    let x = engine.mosaica_id_of(EntityId::new(map[&X])).unwrap();
+    let w = engine.mosaica_id_of(EntityId::new(map[&W])).unwrap();
 
     // `x` is edited twice; its middle entity is the one a fold frees.
     send(&engine, "x1", "s0", vec![rescore(x, 501)]);
@@ -509,7 +509,7 @@ fn an_id_a_kept_record_names_is_not_issued_after_a_restart() {
     engine.set_merge_for_test(false);
     publish(&engine, &root);
     let map = source_to_new_map(&root, "v00000");
-    let x = engine.tessera_id_of(EntityId::new(map[&X])).unwrap();
+    let x = engine.mosaica_id_of(EntityId::new(map[&X])).unwrap();
     send(&engine, "x1", "s0", vec![rescore(x, 501)]);
     publish_buffered(&engine);
     let freed = entity_of(&engine, x);
@@ -570,7 +570,7 @@ fn a_moved_entitys_suppression_stays_withdrawn_after_a_restart_replays_it() {
     engine.set_merge_for_test(false);
     publish(&engine, &root);
     let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
-    let w = engine.tessera_id_of(number).unwrap();
+    let w = engine.mosaica_id_of(number).unwrap();
     engine.accept_change(number, ChangeOp::Suppress).unwrap();
     send(&engine, "w1", "s0", vec![rescore(w, 601)]);
     publish_buffered(&engine);
@@ -643,7 +643,7 @@ fn a_fold_discarded_after_logging_the_unsuppression_hides_nothing_less() {
     engine.set_merge_for_test(false);
     publish(&engine, &root);
     let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
-    let w = engine.tessera_id_of(number).unwrap();
+    let w = engine.mosaica_id_of(number).unwrap();
     engine.accept_change(number, ChangeOp::Suppress).unwrap();
     send(&engine, "w1", "s0", vec![rescore(w, 601)]);
     publish_buffered(&engine);
@@ -714,7 +714,7 @@ fn a_new_entity_deleted_before_its_flush_is_freed_without_its_suppression() {
     engine.set_merge_for_test(false);
     publish(&engine, &root);
     let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
-    let w = engine.tessera_id_of(number).unwrap();
+    let w = engine.mosaica_id_of(number).unwrap();
     engine.accept_change(number, ChangeOp::Suppress).unwrap();
     send(&engine, "w1", "s0", vec![rescore(w, 601)]);
     let unflushed = entity_of(&engine, w);
@@ -746,7 +746,7 @@ fn a_new_entity_deleted_before_its_flush_is_freed_without_its_suppression() {
         made.iter().all(|t| seen.contains(&t.raw())),
         "the item on the freed id is served"
     );
-    assert!(engine.resolve_tessera_ids(&[w]).unwrap()[0].is_none(), "w names nothing");
+    assert!(engine.resolve_mosaica_ids(&[w]).unwrap()[0].is_none(), "w names nothing");
 }
 
 /// **The pair of an edit's new entity deleted before its flush survives a restart.** The restart
@@ -760,7 +760,7 @@ fn a_new_entity_deleted_before_its_flush_is_freed_after_a_restart() {
     engine.set_merge_for_test(false);
     publish(&engine, &root);
     let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
-    let w = engine.tessera_id_of(number).unwrap();
+    let w = engine.mosaica_id_of(number).unwrap();
     engine.accept_change(number, ChangeOp::Suppress).unwrap();
     send(&engine, "w1", "s0", vec![rescore(w, 601)]);
     let unflushed = entity_of(&engine, w);
@@ -791,7 +791,7 @@ fn an_entity_edited_away_before_its_flush_is_freed_without_its_suppression() {
     engine.set_merge_for_test(false);
     publish(&engine, &root);
     let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
-    let w = engine.tessera_id_of(number).unwrap();
+    let w = engine.mosaica_id_of(number).unwrap();
     engine.accept_change(number, ChangeOp::Suppress).unwrap();
     send(&engine, "w1", "s0", vec![rescore(w, 601)]);
     let middle = entity_of(&engine, w);
@@ -851,7 +851,7 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
                 rows: vec![rescore(x, 777)],
                 artifacts: Default::default(),
                 strict: false,
-                tessera_id_column: false,
+                mosaica_id_column: false,
             })
         })
     };
@@ -902,7 +902,7 @@ fn freed_ids_are_restored_at_open_less_those_issued_since() {
     // Two items, each edited twice: two middle entities, both freed by the fold.
     let mut freed = BTreeSet::new();
     for source in [X, W] {
-        let tid = engine.tessera_id_of(EntityId::new(map[&source])).unwrap();
+        let tid = engine.mosaica_id_of(EntityId::new(map[&source])).unwrap();
         send(&engine, &format!("{source}-1"), "s0", vec![rescore(tid, 1)]);
         publish_buffered(&engine);
         freed.insert(entity_of(&engine, tid));

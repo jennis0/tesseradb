@@ -438,7 +438,7 @@ async fn try_ingest_families(
     (status, resp.text().await.unwrap())
 }
 
-/// The points frames' column names, and `heat` per `tessera_id` where the frame carries it, `None`
+/// The points frames' column names, and `heat` per `mosaica_id` where the frame carries it, `None`
 /// where the value is null.
 ///
 /// Read **by name**, which is what contracts §3.2 requires of a client: the scoped columns follow
@@ -481,7 +481,7 @@ fn points_columns(body: &[u8]) -> (Vec<String>, BTreeMap<u64, Option<f32>>) {
     (names, heat)
 }
 
-/// The source entity a served `tessera_id` stands for, read through the drill-down's `id` — the
+/// The source entity a served `mosaica_id` stands for, read through the drill-down's `id` — the
 /// build gives each entity its source id, and each batch here gives its rows theirs.
 ///
 /// **Through the API rather than through the bundle**, because the entity id a build assigns is
@@ -564,7 +564,7 @@ async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_
     );
 }
 
-/// **`point_rows` naming a column serves `tessera_id`, `code` and that column alone, over the same
+/// **`point_rows` naming a column serves `mosaica_id`, `code` and that column alone, over the same
 /// points and counts; a name that is not a render column of the view is a 422.**
 #[tokio::test]
 async fn named_point_columns_serve_only_those_columns_and_an_unknown_one_is_refused() {
@@ -591,13 +591,13 @@ async fn named_point_columns_serve_only_those_columns_and_an_unknown_one_is_refu
     let named = named.bytes().await.unwrap();
     let (full_names, full_heat) = points_columns(&full);
     let (names, heat) = points_columns(&named);
-    assert_eq!(full_names, ["tessera_id", "code", "heat"]);
+    assert_eq!(full_names, ["mosaica_id", "code", "heat"]);
     assert_eq!(names, full_names);
     assert_eq!(heat, full_heat, "the same points with the same values");
     assert_eq!(decode_tiles_and_codes(&named), decode_tiles_and_codes(&full));
 
     let bare = ask(Some(json!([]))).await.unwrap().bytes().await.unwrap();
-    assert_eq!(points_columns(&bare).0, ["tessera_id", "code"]);
+    assert_eq!(points_columns(&bare).0, ["mosaica_id", "code"]);
     assert_eq!(decode_tiles_and_codes(&bare), decode_tiles_and_codes(&full));
 
     let refused = ask(Some(json!(["heat", "nonesuch"]))).await.unwrap();
@@ -664,7 +664,7 @@ async fn every_render_column_meta_lists_for_a_view_is_accepted_by_point_rows() {
     assert!(scoped_somewhere, "the fixture renders a scoped family under some view");
 }
 
-/// The tiles frame's rows and the points' `(tessera_id, code)` pairs.
+/// The tiles frame's rows and the points' `(mosaica_id, code)` pairs.
 fn decode_tiles_and_codes(body: &[u8]) -> (Vec<u8>, Vec<(u64, u64)>) {
     let mut tiles = Vec::new();
     let mut points = Vec::new();
@@ -680,7 +680,7 @@ fn decode_tiles_and_codes(body: &[u8]) -> (Vec<u8>, Vec<(u64, u64)>) {
                 .unwrap();
         for batch in reader {
             let batch = batch.unwrap();
-            let ids = batch.column_by_name("tessera_id").unwrap();
+            let ids = batch.column_by_name("mosaica_id").unwrap();
             let ids = ids.as_any().downcast_ref::<UInt64Array>().unwrap();
             let codes = batch.column_by_name("code").unwrap();
             let codes = codes.as_any().downcast_ref::<UInt64Array>().unwrap();
@@ -1862,7 +1862,7 @@ async fn note_matches(served: &Served, view: &str, word: &str) -> BTreeSet<u64> 
 /// **One cell, one value, through either door** (`views.md` §5). Two views of one key both name
 /// the cell: the value it holds, sent through the other door, adds the item to that view and
 /// changes nothing else; a different value edits the item, and both views answer with the new
-/// one. The item keeps its `tessera_id` either way.
+/// one. The item keeps its `mosaica_id` either way.
 #[tokio::test]
 async fn a_second_door_naming_one_cell_restates_its_value_or_edits_it() {
     let served = Served::build(build_with_families).await;
@@ -1912,7 +1912,7 @@ async fn a_second_door_naming_one_cell_restates_its_value_or_edits_it() {
         disagrees["edited"], 1,
         "a different value edits the item: {disagrees}"
     );
-    assert_eq!(disagrees["tessera_ids"][0], first["tessera_ids"][1]);
+    assert_eq!(disagrees["mosaica_ids"][0], first["mosaica_ids"][1]);
 
     drain(&served.server).await;
     for (entity, expected) in [(AGREES, VALUE), (DISAGREES, VALUE + 1.0)] {
@@ -2209,7 +2209,7 @@ async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_throug
 // The drill-down: every view the point is in, and every scoped value, that this principal may see
 // ---------------------------------------------------------------------------------------------
 
-/// Every `tessera_id` a view's points frames carry, in the order they arrive.
+/// Every `mosaica_id` a view's points frames carry, in the order they arrive.
 fn served_ids(body: &[u8]) -> Vec<u64> {
     let frames = mosaica_wire::split_frames(body).expect("well-formed frames");
     let mut out = Vec::new();
@@ -2232,7 +2232,7 @@ fn served_ids(body: &[u8]) -> Vec<u64> {
     out
 }
 
-/// The `tessera_id` one source entity is served under, found through the drill-down's `id` — the
+/// The `mosaica_id` one source entity is served under, found through the drill-down's `id` — the
 /// identity permutation is the server's alone (I10), so a test cannot compute one.
 async fn id_of(served: &Served, token: &str, view: &str, entity: u64) -> u64 {
     let (status, body) = viewport_bytes(served, token, view).await;

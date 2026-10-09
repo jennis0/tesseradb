@@ -1,7 +1,7 @@
 //! Does a band over the identity column answer a whole-map viewport, and at what cost?
 //!
 //! A viewport needs two things per tile (architecture §7.2): `C_θ(T)`, how many of the tile's
-//! visible rows carry a `tessera_id` below the depth's cut `P_d`, and the `m(T)` smallest such
+//! visible rows carry a `mosaica_id` below the depth's cut `P_d`, and the `m(T)` smallest such
 //! identities. Every shipped route obtains both by reading the 8 B/row identity column, which at
 //! the largest corpus here is 28 GB and does not stay resident under the cap the server runs in.
 //! This probe runs a second evaluation beside the served one and asks whether a small band-major
@@ -834,7 +834,7 @@ fn band_route(
     let mut out = BandOutcome::new();
     out.compared = reference.is_some();
     out.fp16_measured = options.fp16;
-    let ids = inputs.segment.columns.tessera_id();
+    let ids = inputs.segment.columns.mosaica_id();
     let starts = inputs.segment.cuts.starts();
     let cut = match inputs.params.threshold {
         Threshold::Cut(cut) => Some(cut),
@@ -1457,7 +1457,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The two columns every arm reads scattered. `MADV_RANDOM` applies to the mapping, so this
     // reaches the reference arm's reads of the identity column as well as the band arm's.
     let madv = if args.madv_random {
-        let ids = segment.columns.tessera_id();
+        let ids = segment.columns.mosaica_id();
         let identity = madvise_random(ids.as_ptr() as *const u8, std::mem::size_of_val(ids));
         let lz = madvise_random(bands.lz.as_ptr(), bands.lz.len());
         json!({"applied": true, "identity_bytes": identity, "lz_bytes": lz})
@@ -1615,7 +1615,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut per_tile = String::new();
                         for tile in &out.tiles {
                             let take = tile.served as usize;
-                            let ids = out.points.tessera_ids[at..at + take].to_vec();
+                            let ids = out.points.mosaica_ids[at..at + take].to_vec();
                             at += take;
                             if args.per_tile.is_some() {
                                 per_tile.push_str(

@@ -346,7 +346,7 @@ async fn browse_counts(
 
 /// One browse row, with the fields this file compares.
 struct BrowseRow {
-    tessera_id: String,
+    mosaica_id: String,
     key: String,
     masked_count: u64,
     parents: usize,
@@ -392,7 +392,7 @@ async fn browse_rows(
         .iter()
         .filter_map(|row| {
             Some(BrowseRow {
-                tessera_id: row["tessera_id"].as_str()?.to_string(),
+                mosaica_id: row["mosaica_id"].as_str()?.to_string(),
                 key: row["key"].as_str()?.to_string(),
                 masked_count: row["masked_count"].as_u64().unwrap(),
                 parents: row["parent_ids"].as_array().map_or(0, Vec::len),
@@ -756,7 +756,7 @@ async fn a_tiered_list_column_mints_the_chain_it_declares() {
         &["0", "1"],
         LAYER,
         Some(1),
-        Some(&roots[0].tessera_id),
+        Some(&roots[0].mosaica_id),
     )
     .await;
     assert_eq!(groups.len(), 3, "the root's three groups");
@@ -773,7 +773,7 @@ async fn a_tiered_list_column_mints_the_chain_it_declares() {
             &["0", "1"],
             LAYER,
             Some(2),
-            Some(&group.tessera_id),
+            Some(&group.mosaica_id),
         )
         .await;
         assert_eq!(group.child_count, under.len() as u64, "a group counts the leaves it holds");
@@ -929,7 +929,7 @@ async fn a_page_without_positions_records_an_edge_the_artifact_does_not_hold() {
         &["0", "1"],
         LAYER,
         None,
-        Some(&roots[0].tessera_id),
+        Some(&roots[0].mosaica_id),
     )
     .await;
     assert_eq!(

@@ -56,7 +56,7 @@ const servedArtifacts = () =>
     if (!a) return null;
     const G = 2 ** 32 / 512;
     return a.served.map((x) => ({
-      id: String(x.tesseraId),
+      id: String(x.mosaicaId),
       // The first served parent; the server orders parents by ascending id.
       parent: x.parentIds.length === 0 ? null : String(x.parentIds[0]),
       parents: x.parentIds.map((p) => String(p)),

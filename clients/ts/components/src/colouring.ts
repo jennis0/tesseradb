@@ -114,8 +114,8 @@ export function valueColour(store: Store, column: string, key: string): string {
   return colouringOf(store).values[column]?.[key] ?? paletteValueColour(store, column, key);
 }
 
-/** A colour given to one cluster by `tessera_id`, `#rrggbb`, or `null` for its palette colour. */
-export type ClusterChange = {tesseraId: bigint; colour: string | null};
+/** A colour given to one cluster by `mosaica_id`, `#rrggbb`, or `null` for its palette colour. */
+export type ClusterChange = {mosaicaId: bigint; colour: string | null};
 
 /** Give each cluster of `layer` that `changes` names its colour, or its palette colour back, keeping every other chosen colour. */
 export function setClusterColours(store: Store, layer: string, changes: readonly ClusterChange[]): void {
@@ -123,8 +123,8 @@ export function setClusterColours(store: Store, layer: string, changes: readonly
   const own = new Map(held.get(layer));
   for (const c of changes) {
     const rgba = c.colour === null ? null : chosenColour(c.colour);
-    if (rgba === null) own.delete(c.tesseraId);
-    else own.set(c.tesseraId, rgba);
+    if (rgba === null) own.delete(c.mosaicaId);
+    else own.set(c.mosaicaId, rgba);
   }
   store.setArtifactColours(new Map([...held, [layer, own]]));
 }

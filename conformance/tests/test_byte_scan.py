@@ -8,7 +8,7 @@ tile of the fixture bundle across a range of zooms (a full-extent bbox at each z
 touches every tile the server would ever report a nonzero count for at that depth — deeper zooms
 only re-subdivide tiles already covered by shallower ones).
 
-The server's response for every request, `/v1/items/{tessera_id}` for a sample of tessera ids, AND
+The server's response for every request, `/v1/items/{mosaica_id}` for a sample of mosaica ids, AND
 the full RUST_LOG=info log the server process wrote across the whole run (server spawned with its
 stdout/stderr redirected to a file, so nothing is lost to an unread pipe) must contain no encoding
 of any admitted or denied entity id and no encoding of the bundle's identity key — within the scan
@@ -25,7 +25,7 @@ matters. A realistic term distribution, which this test does not depend on: the 
 **encodings crossing the boundary**, not about how terms are distributed, and the target-id set is
 every entity the segment carries either way. But `SAFE_ID_FLOOR` stayed at 100,000 while the corpus
 shrank from 250,000 entities to 150,000 — so the *floor-filtered* sweeps, which are every sweep
-except the `tessera_id` column's, went from seeing **60% of the entity-id space to 33%**. A leak of
+except the `mosaica_id` column's, went from seeing **60% of the entity-id space to 33%**. A leak of
 an id below the floor was invisible to them before and still is; what changed is how many ids that
 covers. The floor was left at 100,000 deliberately: the only route to more reach is lowering it, and
 the residual this module already records — process ids, which `pid_max` can push well above 65,535 —
@@ -40,14 +40,14 @@ prefix they held by accident of which terms happened to be granted.
 construction.md`; contracts §2.6, §3.2): `columns.arrow`/the points batch no longer carry
 `entity_id` at all — the gather cannot produce one — and the per-session `handle: u32` this test
 previously scanned for is retired from the viewer plane (design r21, Appendix C's new C17). The
-wire now carries `tessera_id: u64`, a keyed Feistel permutation of `(shard_id, entity_id)` that is
+wire now carries `mosaica_id: u64`, a keyed Feistel permutation of `(shard_id, entity_id)` that is
 stable across sessions by design (C17) and inverted only inside the trust boundary. This rewrite
 (Task 13) re-derives the scan against that column instead of `handle`, and adds a sweep the old
 design had no column for: the bundle's identity key, which never leaves the server.
 
-**Why the entity-id scan of the `tessera_id` column is 8 bytes wide, aligned to the column's own
+**Why the entity-id scan of the `mosaica_id` column is 8 bytes wide, aligned to the column's own
 8-byte element stride — not a 4-byte pass, and not a sliding window.** The bug shape this must
-catch is a server that mints `tessera_id = entity_id as u64` (zero-extending a raw, un-permuted
+catch is a server that mints `mosaica_id = entity_id as u64` (zero-extending a raw, un-permuted
 entity id into the identity column) instead of applying the keyed permutation — exactly the
 "keeps the Morton/Roaring machinery, quietly drops I10" case this suite exists to catch. Under
 `bundle_format = 1` every entity id is `< 2^32` (R1), so that bug's output has the entity id in
@@ -57,10 +57,10 @@ nothing to the 64-bit value). A per-element-aligned 8-byte scan (`stride = 8`, o
 stored value, never a byte-straddling slide) therefore catches this bug shape directly, with no
 narrower pass required.
 
-**Why no narrower (4-byte) scan is run against the `tessera_id` column, and why that is not a
+**Why no narrower (4-byte) scan is run against the `mosaica_id` column, and why that is not a
 weaker test than the old `handle` design.** The old `handle` column was a plain sequential `u32`
 counter — a 4-byte-aligned scan against it was exact signal, not noise (see the retained
-reasoning below for `code`). `tessera_id` is different in kind: it is a keyed permutation output,
+reasoning below for `code`). `mosaica_id` is different in kind: it is a keyed permutation output,
 essentially uniform over `2^64`, and a 4-byte-aligned scan would inspect each 32-bit half of that
 uniform value *on its own* — a quantity with no special relationship to the entity-id space at
 all. Against this fixture's 150,000-entity target-id set, the *expected number of coincidental
@@ -72,7 +72,7 @@ has existed, which overstated the noise that argues against scanning more — th
 against a large, dense target-id set produces chance matches at a rate the 8-byte-aligned,
 per-element scan does not, because the *whole* 64-bit value is astronomically unlikely to
 coincide with a value `< 150,000` (see `SAFE_ID_FLOOR`'s section below for the arithmetic).
-**Rule, stated explicitly (brief step 1.2): the `tessera_id` column's own buffer never gets a
+**Rule, stated explicitly (brief step 1.2): the `mosaica_id` column's own buffer never gets a
 narrower-than-8-byte scan; every other buffer, every metadata field and every log line is swept
 at whatever width is safe for its own shape.** Retiring `handle`'s 4-byte pass therefore does not
 reduce coverage of the one bug shape that mattered (raw id zero-extended into the id column) — the
@@ -82,10 +82,10 @@ eliminate for the geometry column.
 
 **Residual gap, stated honestly (mirrors the original file's "Residual gap" section for `x`/`y`,
 now updated for the same underlying reason).** A bug that put a raw entity id in *only* the high
-4 bytes of the `tessera_id` lane (leaving the low 4 bytes non-zero, e.g. from unrelated data) would
+4 bytes of the `mosaica_id` lane (leaving the low 4 bytes non-zero, e.g. from unrelated data) would
 not be caught by the 8-byte-aligned scan — that shape needs a 4-byte-granularity pass, which is
 exactly the pass excluded above for chance-collision reasons. This is judged acceptable for the
-same reason the original `x`/`y` gap was: `tessera_id` is a declared `u64` end-to-end (R5); a real
+same reason the original `x`/`y` gap was: `mosaica_id` is a declared `u64` end-to-end (R5); a real
 implementation bug bad enough to smuggle a raw entity id into only half of it, non-zero-extended,
 is a stranger and less likely failure mode than the direct zero-extension case this scan does
 catch, and `test_identity.py`'s known-answer vectors and `Bundle.verify_identity_cross_check`
@@ -95,7 +95,7 @@ run** against the bundle this module scans by
 citation load-bearing rather than a reference to an uncalled method (it was the latter until the
 seam review caught it; and it became a reference to a check performed on a *different* bundle when
 this module moved off the Phase 0 corpus, which is why the check now runs here. Do not remove it
-without revisiting this paragraph). The `tessera_id` column
+without revisiting this paragraph). The `mosaica_id` column
 remains the one place I10 is actually at risk on the wire, and it gets the width that matters most.
 
 **Why `code` keeps the stride the `x`/`y` pair had, not the width it now has.** The geometry
@@ -106,8 +106,8 @@ and the low half of the next, which is the smuggling shape the two float lanes m
 *did* change is that the aligned case now matters too. A `float32` pair made "an entity id written
 where geometry belongs" implausible — a coordinate is never a reinterpreted integer end to end — but
 a `u64` position column and a `u64` identifier are the same shape, so a build writing a
-`tessera_id` into `code` is now an ordinary bug. Floor-filtering catches it for every id at or
-above the floor, the same guarantee `tessera_id`'s own column carries; both plants are in
+`mosaica_id` into `code` is now an ordinary bug. Floor-filtering catches it for every id at or
+above the floor, the same guarantee `mosaica_id`'s own column carries; both plants are in
 `test_every_scan_mechanism_catches_a_planted_entity_id`.
 
 **Why the scan targets the points batch's decoded column *value buffers*, not the raw framed bytes
@@ -116,7 +116,7 @@ alignment padding, continuation markers) is full of small, unremarkable integers
 *lengths* especially — which land in exactly the same numeric neighbourhood as this fixture's
 entity-id space. A generic sliding-byte-window scan over the whole framed payload matches those
 constantly (verified empirically while writing the original version of this test); the scan is
-restricted to the `tessera_id`/`code` columns' actual decoded value buffers, the only place the
+restricted to the `mosaica_id`/`code` columns' actual decoded value buffers, the only place the
 wire format could ever legitimately carry an entity id or an identity key.
 
 **`SAFE_ID_FLOOR`, re-derived rather than inherited (brief step 1.2).** The constant survives, but
@@ -135,15 +135,15 @@ its job changes completely, because its old job no longer exists.
   some configurations. This was true of the pre-r6 design too and is not re-litigated here; stated
   as an honest residual, matching this file's practice of naming what it does not cover.)
 - *What no longer needs a floor at all:* the **binary, per-element-aligned** entity-id scan of the
-  `tessera_id` column, and *only* that column. Entity ids are `< 150,000`; `tessera_id` values are
-  uniform over `2^64`. The chance any single stored `tessera_id` value coincides with *any* member
+  `mosaica_id` column, and *only* that column. Entity ids are `< 150,000`; `mosaica_id` values are
+  uniform over `2^64`. The chance any single stored `mosaica_id` value coincides with *any* member
   of a 150,000-entity target set is `150,000 / 2^64 ≈ 8.1e-15` — summed over every row this
   fixture could ever produce (150,000 of them), the expected number of coincidental full-width
   matches across the *entire* fixture is `150,000 * 150,000 / 2^64 ≈ 1.2e-9`, i.e. it will not
-  happen. The `tessera_id`-column scan below therefore runs against the **full, unfiltered**
+  happen. The `mosaica_id`-column scan below therefore runs against the **full, unfiltered**
   admitted/denied sets — no floor applied — which is *strictly stronger* coverage than the pre-r6
   test had for its equivalent column (that test could only ever check ids `>= SAFE_ID_FLOOR`).
-- *What still needs a floor, and why, precisely:* `code` is **not** exempt the way `tessera_id`
+- *What still needs a floor, and why, precisely:* `code` is **not** exempt the way `mosaica_id`
   is. Under `x`/`y` this was caught empirically — an ordinary `x == 0.0` has four zero bytes, and
   the 8-byte window spanning it and a small neighbour is `0`, which numerically equals entity id
   **0**, a real and always-present member of a dense `0..N` id space; unfiltered it fired on
@@ -159,28 +159,28 @@ its job changes completely, because its old job no longer exists.
   `T` down to only the top third of the fixture's dense id space (50,000 of 150,000; it was the
   high half at the old corpus size, and the sentence was restated rather than left to drift), keeping this in the same
   low-single-digits territory the pre-r6 design already accepted for the same scan (this risk is
-  orthogonal to the handle-vs-`tessera_id` question — it was already here, unchanged by this
+  orthogonal to the handle-vs-`mosaica_id` question — it was already here, unchanged by this
   revision).
 
 **The identity-key sweep (brief step 1, new in this revision).** The deployment's 128-bit
 identity key (`identity.key` in MANIFEST; `IdentityKey(k0, k1)` in the oracle) inverts every
-`tessera_id` ever issued and must never leave the server (contracts §2.6, memo §3.2's "the key
+`mosaica_id` ever issued and must never leave the server (contracts §2.6, memo §3.2's "the key
 must appear in no log line" — the oracle's own `identity.py` enforces the same rule on its error
 messages). Swept for as: its two 64-bit halves (`k0`, `k1`) as exact 8-byte-aligned matches in the
 points-batch value buffers and as exact matches in the log's binary windows; its decimal-string
 forms and its 32-lowercase-hex-character form as exact substrings of the log text. No floor is
 needed here — these are two fixed, specific values, not a dense target set, so the chance a
-`tessera_id` (or anything else on the wire) coincidentally equals `k0`/`k1` is the same
+`mosaica_id` (or anything else on the wire) coincidentally equals `k0`/`k1` is the same
 `1 / 2^64`-scale argument as above.
 
-**Why `/v1/items/{tessera_id}` gets a separate, textual (decimal) scan, not the binary one.**
+**Why `/v1/items/{mosaica_id}` gets a separate, textual (decimal) scan, not the binary one.**
 Unaffected by this revision: it returns JSON — a leaked id there would appear as an ASCII decimal
 string, not as 8 raw LE bytes, so the binary scan is structurally blind to it. A sample of
-`tessera_id`s actually returned by the viewport fetches above is queried via `/v1/items/
-{tessera_id}`, and the raw response bytes are decimal-string-scanned exactly like the log.
+`mosaica_id`s actually returned by the viewport fetches above is queried via `/v1/items/
+{mosaica_id}`, and the raw response bytes are decimal-string-scanned exactly like the log.
 
 **The drill-down's positions are trimmed from the decimal sweep, and only they are** (owner
-ruling 2026-09-01; contracts §3.2 r68). `POST /v1/items/{tessera_id}` now carries a `views` array
+ruling 2026-09-01; contracts §3.2 r68). `POST /v1/items/{mosaica_id}` now carries a `views` array
 with each reachable view's `x` and `y` — the two 32-bit axes of the row's stored position, which is
 the same quantity the points batch's `code` column carries under a bit permutation (`code` *is*
 `x` and `y` interleaved). `code` has never been swept against the unfiltered target set for exactly
@@ -214,23 +214,23 @@ that actually matches how a text logger would leak an id.
 **`POST /v1/items` is swept whole.** It returns rows by the thousand, so a read is taken in both
 orders with every declared field, both system fields, two pages a response and the cursor carried
 across responses to the end.
-Every frame is swept. A records frame's `tessera_id` column is swept as the points batch's is, at
+Every frame is swept. A records frame's `mosaica_id` column is swept as the points batch's is, at
 its own 8-byte stride against the unfiltered target set, and its `mosaica:x` and `mosaica:y`
 columns at their own stride against the floor-filtered set, since a position at the extent origin
 is `0.0`, whose bits are entity id 0. The declared fields' columns are corpus values the fixture
 planted and are not swept, as the points batch's `fx_key` is not. `mosaica:labels` and the head,
 page-end and trailer JSON get the decimal sweep. A cursor is opaque and encrypted under a fresh nonce, so its decoded bytes are uniform:
 every 8-byte window at every offset is swept against the unfiltered set and the identity key's
-halves, at the same `~1e-9` coincidence rate the `tessera_id` column's sweep argues. A 4-byte
-sweep of the cursor is not run, for the chance-collision reason the `tessera_id` column gets none.
+halves, at the same `~1e-9` coincidence rate the `mosaica_id` column's sweep argues. A 4-byte
+sweep of the cursor is not run, for the chance-collision reason the `mosaica_id` column gets none.
 
 **`POST /v1/artifacts` is swept whole too.** A layer is published over the catalogue after the
 items sweep, each artifact holding admitted and denied items alike, with a parent edge and a
 derived hull, and read with every property, two pages a response and the cursor carried to the
 end. An artifact's own entity is as internal as an item's, so every sweep of this route also
 looks for the entities behind the artifact identifiers it served. The identifier-valued columns
-(`tessera_id`, `parents`, `target`) are swept against the unfiltered set, as the points batch's
-`tessera_id` is. The number columns (`masked_count`,
+(`mosaica_id`, `parents`, `target`) are swept against the unfiltered set, as the points batch's
+`mosaica_id` is. The number columns (`masked_count`,
 `matched_count`, `level`, and the bits of `centroid_*` and `box_*`) and every 8-byte window of each
 `shape`, whose WKB interleaves 4-byte counts with coordinates, are swept against the
 floor-filtered set, for the reason the position columns are. Keys, contents and the JSON frames
@@ -238,19 +238,19 @@ get the decimal sweep, and the cursor the cursor sweep.
 
 **The explicit negative control (brief step 1's closing instruction).** A scan that never finds
 anything proves nothing if it would never have found anything *anyway* — this test asserts that a
-genuine, known `tessera_id` (one actually decoded from a real viewport response) **is** present in
+genuine, known `mosaica_id` (one actually decoded from a real viewport response) **is** present in
 the independently-computed byte-window scan of that same response, so the scan's own mechanics are
 demonstrated to work on real data before its absence-of-a-different-value is trusted as evidence.
 
-**C17 (design Appendix C) — `tessera_id` stability across sessions, asserted positively (brief's
+**C17 (design Appendix C) — `mosaica_id` stability across sessions, asserted positively (brief's
 closing instruction: replace §4.3's retired handle-decorrelation check with what is actually worth
 asserting).** The conformance design's §4.3 previously required asserting that handle values are
-*uncorrelated* across sessions. Under `tessera_id`, that would assert something the design now
+*uncorrelated* across sessions. Under `mosaica_id`, that would assert something the design now
 says is deliberately false: C17 records a stable wire identity across sessions and principals as
 the **intended trade** of the r21 boundary-identity change, not a residual to guard against — it is
 what lets a client bookmark, share or reconcile a point across sessions. This test therefore
 authorises a **second**, independent session with the same grant set and asserts a sampled
-admitted entity's `tessera_id` resolves, via drill-down, to the same item under both sessions —
+admitted entity's `mosaica_id` resolves, via drill-down, to the same item under both sessions —
 the accepted behaviour, checked directly, rather than a retired prohibition kept on life support.
 
 **Known limitation, stated in the file:** absence of a matching byte or decimal-string pattern is
@@ -262,7 +262,7 @@ code review (`mosaica-wire`'s module docs: `columns.arrow` carries no entity-id 
 r6, so the gather cannot produce one) is the other, structural half of I10's assurance; this test
 does not replace it.
 
-**Not swept: `priority`.** Contracts r6 defines it as `high16(tessera_id)` — a **keyed** prefix of
+**Not swept: `priority`.** Contracts r6 defines it as `high16(mosaica_id)` — a **keyed** prefix of
 a value this payload already carries in full — so it narrows nothing and there is nothing to
 protect. An earlier draft of this suite (and of the conformance design's §4.3) swept for it and
 asserted per-session decorrelation, when `priority` was an unkeyed `splitmix64` of the raw entity
@@ -308,9 +308,9 @@ UNDERLAY_OFFSET = 2
 # See module doc's "SAFE_ID_FLOOR, re-derived rather than inherited" section: this now protects
 # only the decimal-text scans (log, /v1/items) against legitimate small integers this harness
 # emits (ports <= 65535, k <= 500, zoom <= 6, shard id, HTTP status). The binary,
-# per-element-aligned entity-id scan of `tessera_id` needs no floor at all (see the same section).
+# per-element-aligned entity-id scan of `mosaica_id` needs no floor at all (see the same section).
 SAFE_ID_FLOOR = 100_000
-ITEM_SAMPLE_SIZE = 25  # tessera ids sampled for the /v1/items/{tessera_id} textual scan
+ITEM_SAMPLE_SIZE = 25  # mosaica ids sampled for the /v1/items/{mosaica_id} textual scan
 # `POST /v1/items`: every declared field, the two system fields, and pages small enough that a
 # read spans several responses carried by the cursor.
 ITEMS_FIELDS = [
@@ -337,7 +337,7 @@ def _le_windows(data: bytes, width: int, *, stride: int = 1) -> set[int]:
     alignment. But for a *column buffer* known to be a native fixed-width array, `stride=1` would
     be actively wrong — it would manufacture byte-straddled values out of two adjacent, harmless
     array elements. Every column scan below uses `stride` equal to that column's own native
-    element width — 8 for `tessera_id`; 4, deliberately, for `code`, whose own width is 8 but
+    element width — 8 for `mosaica_id`; 4, deliberately, for `code`, whose own width is 8 but
     whose half-offset windows are the only ones that see a value straddling two adjacent positions
     (`_points_value_buffer_windows`). So only offsets that could carry a stored value, or a value
     smuggled across two of them, are considered."""
@@ -365,7 +365,7 @@ def _decimal_windows(data: bytes, floor: int) -> set[int]:
 
 
 def _item_body_without_positions(body: bytes) -> bytes:
-    """One `/v1/items/{tessera_id}` body with **`views[*].x` and `views[*].y` removed**, and
+    """One `/v1/items/{mosaica_id}` body with **`views[*].x` and `views[*].y` removed**, and
     nothing else removed, re-serialised for the decimal sweep.
 
     **Why a position is trimmed, and why only a position.** A view's `x`/`y` are the two 32-bit
@@ -408,33 +408,33 @@ def _item_body_without_positions(body: bytes) -> bytes:
 
 
 def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int]]:
-    """Returns `(tessera_id_windows, code_windows)`: every 8-byte-aligned window over the points
-    batch's decoded `tessera_id` column value buffer, and separately every 8-byte window over the
+    """Returns `(mosaica_id_windows, code_windows)`: every 8-byte-aligned window over the points
+    batch's decoded `mosaica_id` column value buffer, and separately every 8-byte window over the
     `code` column's value buffer — deliberately not the raw framed Arrow IPC bytes wholesale
     (module doc: framing is full of small, unremarkable buffer-length integers), and deliberately
-    never a narrower-than-8-byte pass over `tessera_id` (module doc's chance-collision arithmetic).
+    never a narrower-than-8-byte pass over `mosaica_id` (module doc's chance-collision arithmetic).
 
-    `tessera_id` is scanned at its own native stride (8 — one window per stored value, aligned,
+    `mosaica_id` is scanned at its own native stride (8 — one window per stored value, aligned,
     never byte-straddled). `code` — the 64-bit position that replaced the `x`/`y` `f32` pair — is
     scanned at **stride 4**, which is a superset of its own aligned windows and additionally sees
     a value straddling two adjacent codes' halves. That straddle is the same smuggling shape the
     pre-r6 sweep of two 4-byte float lanes existed to catch, so widening the column did not retire
     the case; it is why the stride did not follow the width.
 
-    The two results are kept **separate**, not merged into one set: `tessera_id`'s windows are safe
+    The two results are kept **separate**, not merged into one set: `mosaica_id`'s windows are safe
     to compare against the full, unfiltered target-id set (module doc's `SAFE_ID_FLOOR` section);
     `code`'s are not, because a point at the extent origin has `code == 0`, which numerically
     equals entity id 0 — the same floor-filtering reasoning a genuine `0.0` coordinate needed, for
-    the same reason. **One thing genuinely changed**: a build writing a `tessera_id` into the
+    the same reason. **One thing genuinely changed**: a build writing a `mosaica_id` into the
     `code` column is now a plausible bug shape, which two float columns made implausible.
     Floor-filtering catches it for every id at or above the floor — the same guarantee
-    `tessera_id`'s own column carries.
+    `mosaica_id`'s own column carries.
     """
-    tessera_windows: set[int] = set()
+    mosaica_windows: set[int] = set()
     code_windows: set[int] = set()
     with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
         for batch in reader:
-            for name, width in (("tessera_id", 8), ("code", 8)):
+            for name, width in (("mosaica_id", 8), ("code", 8)):
                 col = batch.column(name)
                 # Arrow buffers are padded to an alignment boundary past the last real element
                 # (Arrow's own spec, independent of anything this suite controls) — trimming to
@@ -447,12 +447,12 @@ def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int
                 data_bufs = [buf for buf in col.buffers() if buf is not None]
                 buf = data_bufs[-1]  # last buffer is always the value buffer (validity, if any, first)
                 trimmed = buf.to_pybytes()[: len(col) * width]
-                if name == "tessera_id":
-                    tessera_windows |= _le_windows(trimmed, 8, stride=8)
+                if name == "mosaica_id":
+                    mosaica_windows |= _le_windows(trimmed, 8, stride=8)
                 else:
                     # `code` at stride 4, not at its own width: the extra half-offset windows are
                     # what see a value straddling two adjacent codes. Kept separate from
-                    # `tessera_id`'s windows below, because a point at the extent origin has
+                    # `mosaica_id`'s windows below, because a point at the extent origin has
                     # `code == 0` — an ordinary position, not a bug — whose 8-byte window
                     # numerically equals entity id 0. That is exactly the "floor exists to keep
                     # small legitimate values out of the target set" problem the module doc
@@ -461,7 +461,7 @@ def _points_value_buffer_windows(points_bytes: bytes) -> tuple[set[int], set[int
                     # against the FLOOR-FILTERED target set, same as the log/decimal scans, not
                     # the full one.
                     code_windows |= _le_windows(trimmed, 8, stride=4)
-    return tessera_windows, code_windows
+    return mosaica_windows, code_windows
 
 
 def _subcell_value_buffer_windows(subcell_bytes: bytes) -> set[int]:
@@ -499,12 +499,12 @@ def _subcell_value_buffer_windows(subcell_bytes: bytes) -> set[int]:
 class RecordsScan(NamedTuple):
     """What the sweep reads from one `POST /v1/items` records frame."""
 
-    #: 8-byte windows of the `tessera_id` column's value buffer, at its own stride.
-    tessera_windows: set[int]
+    #: 8-byte windows of the `mosaica_id` column's value buffer, at its own stride.
+    mosaica_windows: set[int]
     #: 8-byte windows of the `mosaica:x` and `mosaica:y` value buffers, at their own stride.
     position_windows: set[int]
-    tessera_ids: list[int]
-    #: Each row's `serial`, in row order beside `tessera_ids`, where the frame carries it.
+    mosaica_ids: list[int]
+    #: Each row's `serial`, in row order beside `mosaica_ids`, where the frame carries it.
     serials: list[int]
     labels: list[str]
 
@@ -523,9 +523,9 @@ def _records_scan(payload: bytes) -> RecordsScan:
     with ipc.open_stream(io.BytesIO(payload)) as reader:
         for batch in reader:
             names = batch.schema.names
-            ids = batch.column("tessera_id")
-            scan.tessera_windows.update(_le_windows(_value_buffer(ids, 8), 8, stride=8))
-            scan.tessera_ids.extend(ids.to_pylist())
+            ids = batch.column("mosaica_id")
+            scan.mosaica_windows.update(_le_windows(_value_buffer(ids, 8), 8, stride=8))
+            scan.mosaica_ids.extend(ids.to_pylist())
             if "serial" in names:
                 scan.serials.extend(batch.column("serial").to_pylist())
             for name in ("mosaica:x", "mosaica:y"):
@@ -542,13 +542,13 @@ def _records_scan(payload: bytes) -> RecordsScan:
 class ArtifactsScan(NamedTuple):
     """What the sweep reads from one `POST /v1/artifacts` records frame."""
 
-    #: The values of the identifier-valued columns: `tessera_id`, every `parents` entry, `target`.
+    #: The values of the identifier-valued columns: `mosaica_id`, every `parents` entry, `target`.
     id_values: set[int]
     #: The number columns' values, and the bits of the float columns, as `u64`.
     number_values: set[int]
     #: Every 8-byte window of every `shape`, at every offset.
     shape_windows: set[int]
-    tessera_ids: list[int]
+    mosaica_ids: list[int]
     #: Keys and contents, for the decimal sweep.
     text: list[str]
 
@@ -559,8 +559,8 @@ def _artifacts_scan(payload: bytes) -> ArtifactsScan:
     with ipc.open_stream(io.BytesIO(payload)) as reader:
         for batch in reader:
             names = batch.schema.names
-            ids = batch.column("tessera_id").to_pylist()
-            scan.tessera_ids.extend(ids)
+            ids = batch.column("mosaica_id").to_pylist()
+            scan.mosaica_ids.extend(ids)
             scan.id_values.update(ids)
             if "parents" in names:
                 for parents in batch.column("parents").to_pylist():
@@ -601,11 +601,11 @@ def _items_cursors(body: wire.ItemsBody) -> list[str]:
     return [cursor for cursor in ends if cursor is not None]
 
 
-def _decode_tessera_ids(points_bytes: bytes) -> list[int]:
+def _decode_mosaica_ids(points_bytes: bytes) -> list[int]:
     with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
         ids: list[int] = []
         for batch in reader:
-            ids.extend(batch.column("tessera_id").to_pylist())
+            ids.extend(batch.column("mosaica_id").to_pylist())
         return ids
 
 
@@ -630,17 +630,17 @@ def test_the_catalogue_bundles_identity_column_agrees_with_its_key(catalogue_bun
     catalogue_bundle.verify_identity_cross_check(VIEW)
 
 
-def _points_stream(tessera_ids: list[int], codes: list[int]) -> bytes:
+def _points_stream(mosaica_ids: list[int], codes: list[int]) -> bytes:
     """A points batch in the wire's own schema (contracts §3.2), built by the harness."""
     schema = pa.schema(
         [
-            pa.field("tessera_id", pa.uint64()),
+            pa.field("mosaica_id", pa.uint64()),
             pa.field("code", pa.uint64()),
         ]
     )
     batch = pa.record_batch(
         [
-            pa.array(tessera_ids, type=pa.uint64()),
+            pa.array(mosaica_ids, type=pa.uint64()),
             pa.array(codes, type=pa.uint64()),
         ],
         schema=schema,
@@ -678,7 +678,7 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     The scan above is pass-only in the direction that matters. It asserts that no entity id appears
     anywhere, and a scan mechanism broken so that it never returns anything — a mis-parsed buffer,
     a wrong stride, a decoder that silently yields no batches — reports exactly the same green. The
-    existing control (`known_tessera_id in tessera_id_windows`) proves the byte-window mechanism
+    existing control (`known_mosaica_id in mosaica_id_windows`) proves the byte-window mechanism
     against **real traffic**, which is worth having and is a different claim: it shows the scan can
     recover a value that really was transmitted. It does not show the scan fires on an **entity
     id**, which is the value it exists to catch and the one that never legitimately appears.
@@ -686,7 +686,7 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     **The gap between the two controls is not hypothetical, and was measured rather than argued.**
     Filtering `_le_windows` to values `>= 2^32` — the shape of a plausible "suppress obviously
     spurious small windows" change, offered as noise reduction — leaves the scan above **passing**,
-    because every real `tessera_id` is a uniform 64-bit value and sails over the filter. The plant
+    because every real `mosaica_id` is a uniform 64-bit value and sails over the filter. The plant
     below fails immediately, because an entity id is exactly the small value such a filter discards
     and exactly the value I10 is about. That sabotage was run on 2026-08-01: one passed, one failed,
     and the one that passed is the one that was there before.
@@ -711,15 +711,15 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     targets = {planted}
     clean_ids = [0xDEAD_BEEF_1234_5678, 0x0BAD_C0DE_9876_5432]
 
-    # 1. The `tessera_id` column, at the column's own 8-byte stride. This is the bug shape the
-    #    module doc names: a server minting `tessera_id = entity_id as u64` instead of applying the
+    # 1. The `mosaica_id` column, at the column's own 8-byte stride. This is the bug shape the
+    #    module doc names: a server minting `mosaica_id = entity_id as u64` instead of applying the
     #    keyed permutation, so the raw id sits zero-extended in the identity lane.
     tid_w, _code = _points_value_buffer_windows(_points_stream([planted], [0x0102_0304_0506_0708]))
-    assert tid_w & targets, "the tessera_id column sweep did not catch a raw entity id in it"
+    assert tid_w & targets, "the mosaica_id column sweep did not catch a raw entity id in it"
     tid_clean, _ = _points_value_buffer_windows(
         _points_stream(clean_ids, [0x0102_0304_0506_0708, 0x0807_0605_0403_0201])
     )
-    assert not (tid_clean & targets), "the tessera_id column sweep flagged a clean batch"
+    assert not (tid_clean & targets), "the mosaica_id column sweep flagged a clean batch"
 
     # 2. The `code` column. Two plants, because the column carries two distinct bug shapes.
     #
@@ -801,17 +801,17 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     planted_bits = struct.unpack("<d", planted.to_bytes(8, "little"))[0]
     records = _records_stream(
         {
-            "tessera_id": pa.array([planted], type=pa.uint64()),
+            "mosaica_id": pa.array([planted], type=pa.uint64()),
             "mosaica:x": pa.array([0.5], type=pa.float64()),
             "mosaica:y": pa.array([0.5], type=pa.float64()),
         }
     )
-    assert _records_scan(records).tessera_windows & targets, (
-        "the records sweep did not catch a raw entity id in the tessera_id column"
+    assert _records_scan(records).mosaica_windows & targets, (
+        "the records sweep did not catch a raw entity id in the mosaica_id column"
     )
     records = _records_stream(
         {
-            "tessera_id": pa.array(clean_ids, type=pa.uint64()),
+            "mosaica_id": pa.array(clean_ids, type=pa.uint64()),
             "mosaica:x": pa.array([planted_bits, 0.0], type=pa.float64()),
             "mosaica:y": pa.array([0.5, 0.25], type=pa.float64()),
         }
@@ -820,10 +820,10 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     assert scan.position_windows & targets, (
         "the records sweep did not catch an entity id's bits in a position column"
     )
-    assert not (scan.tessera_windows & targets), "the records sweep flagged a clean identifier"
+    assert not (scan.mosaica_windows & targets), "the records sweep flagged a clean identifier"
     artifacts = _records_stream(
         {
-            "tessera_id": pa.array(clean_ids, type=pa.uint64()),
+            "mosaica_id": pa.array(clean_ids, type=pa.uint64()),
             "parents": pa.array([[planted], []], type=pa.list_(pa.uint64())),
             "centroid_x": pa.array([planted_bits, 0.5], type=pa.float64()),
             "shape": pa.array([b"\x01\x06\x00\x00" + planted.to_bytes(8, "little"), None]),
@@ -912,7 +912,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     all_entities = {int(e) for e in seg.entity_id.tolist()}
     denied = all_entities - admitted
 
-    # Unfiltered target set — used ONLY for the tessera_id column's own scan (module doc: no
+    # Unfiltered target set — used ONLY for the mosaica_id column's own scan (module doc: no
     # floor needed there; `code` and the log/item text scans below use the floor-filtered set).
     target_ids = admitted | denied
     assert admitted, "fixture/grant choice must admit >= 1 entity for this test to mean anything"
@@ -934,7 +934,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     identity_key_hex = oracle_bundle.manifest["identity"]["key"]
     identity_key_raw = bytes.fromhex(identity_key_hex)
 
-    tessera_id_windows: set[int] = set()
+    mosaica_id_windows: set[int] = set()
     code_windows: set[int] = set()
     sampled_ids: set[int] = set()
     all_raw_responses: list[bytes] = []
@@ -967,31 +967,31 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
             if kind != wire.FRAME_POINTS:
                 continue
             tid_w, code_w = _points_value_buffer_windows(payload)
-            tessera_id_windows |= tid_w
+            mosaica_id_windows |= tid_w
             code_windows |= code_w
-            sampled_ids.update(_decode_tessera_ids(payload))
+            sampled_ids.update(_decode_mosaica_ids(payload))
     # The identity key must not appear ANYWHERE, sub-cell stream included — it is a 128-bit random
     # value, so there is no chance-collision hazard in widening the haystack for it.
-    all_windows_including_underlay = tessera_id_windows | code_windows | subcell_windows
+    all_windows_including_underlay = mosaica_id_windows | code_windows | subcell_windows
 
-    # --- explicit negative control: the scan must find a REAL tessera_id, or it proves nothing ---
-    assert sampled_ids, "must have decoded at least one tessera_id to exercise the scan at all"
-    known_tessera_id = next(iter(sampled_ids))
-    assert known_tessera_id in tessera_id_windows, (
-        "sanity check failed: a tessera_id actually decoded from a real response was not found by "
+    # --- explicit negative control: the scan must find a REAL mosaica_id, or it proves nothing ---
+    assert sampled_ids, "must have decoded at least one mosaica_id to exercise the scan at all"
+    known_mosaica_id = next(iter(sampled_ids))
+    assert known_mosaica_id in mosaica_id_windows, (
+        "sanity check failed: a mosaica_id actually decoded from a real response was not found by "
         "the independent byte-window scan of that same response — the scan mechanism itself is "
         "broken, so its absence-of-a-leak result below cannot be trusted"
     )
 
     # --- I10: no entity id, at 8-byte-aligned width, anywhere in the points batch's buffers -----
-    # `tessera_id`'s own windows are checked against the FULL, unfiltered target set (module doc:
+    # `mosaica_id`'s own windows are checked against the FULL, unfiltered target set (module doc:
     # negligible chance-collision risk for a uniform 64-bit column). `code`'s windows are checked
     # against the floor-filtered set only, because a point at the extent origin has `code == 0`,
     # which numerically equals entity id 0 (module doc, `_points_value_buffer_windows`).
-    leaked_tid = tessera_id_windows & target_ids
+    leaked_tid = mosaica_id_windows & target_ids
     assert not leaked_tid, (
         f"found {len(leaked_tid)} entity id(s) encoded as an 8-byte-aligned LE integer in the "
-        f"tessera_id column of a viewport points batch: {sorted(leaked_tid)[:20]}"
+        f"mosaica_id column of a viewport points batch: {sorted(leaked_tid)[:20]}"
     )
     leaked_code = code_windows & target_ids_high
     assert not leaked_code, (
@@ -1025,39 +1025,39 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     assert card_sample, "must have at least one admitted entity to open its card"
     first_cards = {}
     for entity_id in card_sample:
-        resp = server.item(token, oracle_bundle.tessera_id_of(entity_id))
+        resp = server.item(token, oracle_bundle.mosaica_id_of(entity_id))
         assert resp.status_code == 200, resp.text
         first_cards[entity_id] = resp.json()
 
-    # --- C17: tessera_id is stable across sessions — the property that replaces the retired,
+    # --- C17: mosaica_id is stable across sessions — the property that replaces the retired,
     # now-false "handle values are uncorrelated across sessions" check (conformance design §4.3,
     # revised 2026-07-30; see that document's Appendix R). A second, independently-authorised
     # session with the SAME visible grant set must resolve the same admitted entity to the SAME
-    # tessera_id — this is the accepted, intended behaviour (design Appendix C, C17), not a
+    # mosaica_id — this is the accepted, intended behaviour (design Appendix C, C17), not a
     # regression to guard against, so it is asserted positively rather than as a decorrelation
     # check.
     auth2 = server.authorise([d.decode("ascii") for d in granted_descriptors])
     token2 = auth2["token"]
     assert token2 != token, "two independent authorisations must not share a session token"
     for entity_id in card_sample:
-        tessera_id = oracle_bundle.tessera_id_of(entity_id)
-        resp2 = server.item(token2, tessera_id)
+        mosaica_id = oracle_bundle.mosaica_id_of(entity_id)
+        resp2 = server.item(token2, mosaica_id)
         assert resp2.status_code == 200, (
-            f"entity {entity_id}'s tessera_id must resolve identically under a second, "
+            f"entity {entity_id}'s mosaica_id must resolve identically under a second, "
             f"independently-authorised session with the same visibility (C17): {resp2.text}"
         )
         assert resp2.json() == first_cards[entity_id], (
-            "the SAME tessera_id must resolve to the SAME item across sessions (C17), but the "
+            "the SAME mosaica_id must resolve to the SAME item across sessions (C17), but the "
             "second session's drill-down disagreed with the first's"
         )
 
-    # --- /v1/items/{tessera_id}: JSON body, so the leak shape is an ASCII decimal string ---------
+    # --- /v1/items/{mosaica_id}: JSON body, so the leak shape is an ASCII decimal string ---------
     sample = sorted(sampled_ids)[:ITEM_SAMPLE_SIZE]
-    assert sample, "must have sampled at least one tessera_id to exercise /v1/items"
+    assert sample, "must have sampled at least one mosaica_id to exercise /v1/items"
     item_decimal_hits: set[int] = set()
     for tid in sample:
         resp = server.item(token, tid)
-        # A tessera_id may legitimately be denied-by-race or already retired; any 2xx/4xx body is
+        # A mosaica_id may legitimately be denied-by-race or already retired; any 2xx/4xx body is
         # still text worth scanning either way, so no status-code assertion is made here.
         # The positions are trimmed and nothing else is — see `_item_body_without_positions`.
         item_decimal_hits |= _decimal_windows(
@@ -1066,13 +1066,13 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     leaked_items = item_decimal_hits & target_ids_high
     assert not leaked_items, (
         f"found {len(leaked_items)} entity id(s) as an ASCII decimal string in a /v1/items/"
-        f"{{tessera_id}} response body: {sorted(leaked_items)[:20]}"
+        f"{{mosaica_id}} response body: {sorted(leaked_items)[:20]}"
     )
 
     # --- POST /v1/items: a whole read in each order, every frame swept ---------------------------
     visible = sum(tile[1] for tile in decode_viewport_with_subcells(all_raw_responses[0])[0])
 
-    items_tessera_windows: set[int] = set()
+    items_mosaica_windows: set[int] = set()
     items_position_windows: set[int] = set()
     items_cursor_windows: set[int] = set()
     items_json = b""
@@ -1104,19 +1104,19 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
                 items_cursor_windows |= _cursor_windows(cursor)
             for records, _end in decoded.pages:
                 scan = _records_scan(records)
-                items_tessera_windows |= scan.tessera_windows
+                items_mosaica_windows |= scan.mosaica_windows
                 items_position_windows |= scan.position_windows
                 items_labels.extend(scan.labels)
-                assert len(scan.serials) == len(scan.tessera_ids)
-                # A row's label names the item its tessera_id names.
-                for tessera_id, serial in zip(scan.tessera_ids, scan.serials):
-                    _shard, entity = identity_mod.invert(identity_key, tessera_id)
+                assert len(scan.serials) == len(scan.mosaica_ids)
+                # A row's label names the item its mosaica_id names.
+                for mosaica_id, serial in zip(scan.mosaica_ids, scan.serials):
+                    _shard, entity = identity_mod.invert(identity_key, mosaica_id)
                     assert entity_of_source[serial - catalogue.PLANTED_ID_BASE] == entity, (
-                        f"the row for tessera_id {tessera_id} carries serial {serial}, which is "
+                        f"the row for mosaica_id {mosaica_id} carries serial {serial}, which is "
                         "not its item's"
                     )
                     serials_checked += 1
-                rows.extend(scan.tessera_ids)
+                rows.extend(scan.mosaica_ids)
             next_cursor = decoded.trailer["next"]
             if next_cursor is None:
                 break
@@ -1128,18 +1128,18 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
         )
         read_sets.append(set(rows))
     assert read_sets[0] == read_sets[1], "the two orders returned different rows"
-    assert serials_checked > 0, "no items row carried a serial to check against its tessera_id"
+    assert serials_checked > 0, "no items row carried a serial to check against its mosaica_id"
 
     # The scan finds a real identifier where one was sent, or its silence proves nothing.
-    assert next(iter(read_sets[0])) in items_tessera_windows
-    leaked = items_tessera_windows & target_ids
-    assert not leaked, f"entity id(s) in an items tessera_id column: {sorted(leaked)[:20]}"
+    assert next(iter(read_sets[0])) in items_mosaica_windows
+    leaked = items_mosaica_windows & target_ids
+    assert not leaked, f"entity id(s) in an items mosaica_id column: {sorted(leaked)[:20]}"
     leaked = items_position_windows & target_ids_high
     assert not leaked, f"entity id(s) in an items position column: {sorted(leaked)[:20]}"
     leaked = items_cursor_windows & target_ids
     assert not leaked, f"entity id(s) in the bytes of an items cursor: {sorted(leaked)[:20]}"
     for half in (identity_key.k0, identity_key.k1):
-        assert half not in items_tessera_windows | items_position_windows | items_cursor_windows, (
+        assert half not in items_mosaica_windows | items_position_windows | items_cursor_windows, (
             "an identity key half found in an items body"
         )
     items_text = items_json + "\n".join(items_labels).encode()
@@ -1184,7 +1184,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
             {
                 "key": f"group-{g}",
                 "members": {
-                    "tessera_id": [str(identity_mod.forward(identity_key, shard, e)) for e in group]
+                    "mosaica_id": [str(identity_mod.forward(identity_key, shard, e)) for e in group]
                 },
                 "content": [{"values": [f"group {g}"]}],
                 "parent": [] if g == 0 else ["group-0"],
@@ -1237,7 +1237,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
             artifact_cursor_windows |= _cursor_windows(cursor)
         for records, _end in decoded.pages:
             scan = _artifacts_scan(records)
-            artifact_ids.update(scan.tessera_ids)
+            artifact_ids.update(scan.mosaica_ids)
             artifact_id_values |= scan.id_values
             artifact_number_values |= scan.number_values
             artifact_shape_windows |= scan.shape_windows
@@ -1289,8 +1289,8 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
         tile_text += json.dumps({k: trailer[k] for k in ("rows", "frames")}).encode() + b"\n"
         for _tile, rows in frames:
             for row in rows:
-                tile_ids.add(row.tessera_id)
-                tile_id_values.update([row.tessera_id, *row.parent_ids])
+                tile_ids.add(row.mosaica_id)
+                tile_id_values.update([row.mosaica_id, *row.parent_ids])
                 if row.target is not None:
                     tile_id_values.add(row.target)
                 tile_number_values.update(

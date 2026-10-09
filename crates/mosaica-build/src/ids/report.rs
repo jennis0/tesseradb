@@ -16,7 +16,7 @@ pub struct RefusedRows {
     /// The block reading it: `view 'world'`, `layer 'taxonomy' members`.
     pub object: String,
     /// `names_two_items`, `one_item_twice`, `one_value_twice`, `names_no_item` or
-    /// `unknown_tessera_id`; or `outside_limit`, a row naming no item `--limit` kept, which is
+    /// `unknown_mosaica_id`; or `outside_limit`, a row naming no item `--limit` kept, which is
     /// left out and is not a refusal.
     pub reason: String,
     pub rows: u64,
@@ -143,7 +143,7 @@ fn reason_text(reason: &str) -> &'static str {
         Refusal::ONE_ITEM_TWICE => "each names an item an earlier row of the file names",
         Refusal::ONE_VALUE_TWICE => "each gives a unique value an earlier row of the file gives",
         Refusal::NAMES_NO_ITEM => "each names no item",
-        Refusal::UNKNOWN_TESSERA_ID => "each carries a tessera_id, which names no item at a build",
+        Refusal::UNKNOWN_MOSAICA_ID => "each carries a mosaica_id, which names no item at a build",
         OUTSIDE_LIMIT => "each names no item --limit kept, and is left out",
         _ => "refused",
     }

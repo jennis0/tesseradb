@@ -344,7 +344,7 @@ async fn register_layer(
 }
 
 /// Publish artifacts into a registered layer, returning the response's per-artifact rows — which is
-/// where a `tessera_id` a suppression can name comes from.
+/// where a `mosaica_id` a suppression can name comes from.
 async fn publish_artifacts(
     server: &TestServer,
     layer: &str,
@@ -366,12 +366,12 @@ async fn publish_artifacts(
 }
 
 /// One `/control/changes` entry against an artifact's own identifier.
-async fn suppress(server: &TestServer, tessera_id: &str, op: &str) {
+async fn suppress(server: &TestServer, mosaica_id: &str, op: &str) {
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "op": op, "match": { "tessera_id": tessera_id } }]))
+        .json(&json!([{ "op": op, "match": { "mosaica_id": mosaica_id } }]))
         .send()
         .await
         .unwrap();
@@ -442,7 +442,7 @@ async fn ingest_tail(
 /// One artifact as a client reads it out of the artifacts frame, **with the identifiers replaced by
 /// the caller's own keys**.
 ///
-/// A `tessera_id` is a blinding permutation of an entity id, and 0091 says in as many words that the
+/// A `mosaica_id` is a blinding permutation of an entity id, and 0091 says in as many words that the
 /// two entry points assign entities differently — so an identifier is exactly the field that may
 /// differ. The key is what a publisher named the artifact, and the parent travels as *its* key,
 /// resolved within the response, which is the same edge without the identity.
@@ -1221,7 +1221,7 @@ async fn a_suppressed_artifacts_key_mints_nothing_and_the_point_joins_it() {
         json!([{ "key": "k", "members": members(0..4u64) }]),
     )
     .await;
-    let id = published[0]["tessera_id"].as_str().unwrap().to_string();
+    let id = published[0]["mosaica_id"].as_str().unwrap().to_string();
     let before = server.state.engine.published_artifacts();
 
     suppress(&server, &id, "suppress").await;
@@ -1289,7 +1289,7 @@ async fn a_deleted_key_that_returns_is_a_new_artifact() {
         json!([{ "key": "k", "members": members(0..4u64) }]),
     )
     .await;
-    let id = published[0]["tessera_id"].as_str().unwrap().to_string();
+    let id = published[0]["mosaica_id"].as_str().unwrap().to_string();
 
     suppress(&server, &id, "delete").await;
     // **The fold is what frees the key**, and that is Rule F rather than anything about minting: a

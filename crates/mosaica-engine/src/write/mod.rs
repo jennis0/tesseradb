@@ -198,9 +198,9 @@ pub enum AcceptError {
     /// unique column's index, the edited-items map, or an item's label, values or rows. Nothing
     /// was submitted.
     Unreadable(String),
-    /// The batch conflicts with what is stored: a row names two items or a `tessera_id` nobody
+    /// The batch conflicts with what is stored: a row names two items or a `mosaica_id` nobody
     /// holds, or two rows name one item or set one value. The detail names rows by position,
-    /// values as sent and items by `tessera_id`. Nothing was submitted.
+    /// values as sent and items by `mosaica_id`. Nothing was submitted.
     Conflict(String),
     /// The batch cannot be taken as sent: a row creates an item with no position or no label, or
     /// carries coordinates in a batch naming no view. Nothing was submitted.
@@ -687,7 +687,7 @@ impl WritePath {
 
     /// Register an annotation layer and wait for its receipt.
     ///
-    /// Returns the layer's own entity, which the caller turns into a `tessera_id`, the only
+    /// Returns the layer's own entity, which the caller turns into a `mosaica_id`, the only
     /// address by which the layer can later be suppressed, since an entity id never crosses the
     /// boundary. A failure means the layer does not exist, the opposite of a deny's posture: see
     /// `Executor::commit_registry`.

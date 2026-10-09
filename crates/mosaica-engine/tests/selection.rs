@@ -1,8 +1,8 @@
 //! §7.2's selection definition, tested against a synthetic segment with hand-chosen identities.
 //!
 //! Why a synthetic segment rather than a built bundle: the definition's behaviour is a function of
-//! how `tessera_id` is *distributed* within a tile, and in a real bundle those identities come out
-//! of the keyed bijection and cannot be chosen. `TilerItem` carries `tessera_id` directly, so
+//! how `mosaica_id` is *distributed* within a tile, and in a real bundle those identities come out
+//! of the keyed bijection and cannot be chosen. `TilerItem` carries `mosaica_id` directly, so
 //! `write_segment` lets a test place a known identity at a known geometry — which is what makes the
 //! density assertions below exact rather than statistical.
 //!
@@ -32,7 +32,7 @@ use mosaica_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, Tiler
 use mosaica_store::read::SegmentData;
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{tile_ranges, Permutation, RowSpace};
-use mosaica_types::{EntityId, TermId, TesseraId};
+use mosaica_types::{EntityId, TermId, MosaicaId};
 
 const EXTENT: Bounds = Bounds {
     x_min: 0.0,
@@ -50,9 +50,9 @@ struct Segment {
 }
 
 impl Segment {
-    /// Row `r`'s `tessera_id`, as stored.
+    /// Row `r`'s `mosaica_id`, as stored.
     fn id_at(&self, row: u32) -> u64 {
-        self.sorted[row as usize].tessera_id.raw()
+        self.sorted[row as usize].mosaica_id.raw()
     }
 
     fn row_count(&self) -> u32 {
@@ -60,13 +60,13 @@ impl Segment {
     }
 }
 
-/// Write a segment from `(x, y, tessera_id)` triples, sorting them into row order first.
+/// Write a segment from `(x, y, mosaica_id)` triples, sorting them into row order first.
 fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
     let temp = TempDir::new().unwrap();
     let mut items: Vec<TilerItem> = points
         .iter()
         .map(|&(x, y, id)| TilerItem {
-            tessera_id: TesseraId::new(id),
+            mosaica_id: MosaicaId::new(id),
             qx: fixed32(x as f64, EXTENT.x_min, EXTENT.x_max),
             qy: fixed32(y as f64, EXTENT.y_min, EXTENT.y_max),
             scalars: Vec::new(),
@@ -195,7 +195,7 @@ fn served_ids(seg: &Segment, mask: &EffectiveMask, tile: &Tile, p: &SelectParams
 
 /// **The regression test for the priority-as-identity-prefix defect.**
 ///
-/// Storage order is `(morton, tessera_id)`, so *within a single leaf Morton cell* row order already
+/// Storage order is `(morton, mosaica_id)`, so *within a single leaf Morton cell* row order already
 /// is identity order and the retired first-*k* placeholder agreed with the definition there. The two
 /// diverge only across cells — so a fixture must span several, and the divergence must be asserted
 /// rather than assumed, or the test silently proves nothing.
@@ -660,7 +660,7 @@ fn selection_matches_the_definition_over_both_internal_branches() {
     );
 }
 
-/// §7.2's definition, brute force: materialise the tile's visible rows, sort by `tessera_id`, count
+/// §7.2's definition, brute force: materialise the tile's visible rows, sort by `mosaica_id`, count
 /// how many fall below the cut, and slice. Deliberately shaped unlike the engine's single-pass
 /// bounded heap — a reference that mirrored the implementation would prove nothing.
 fn reference_served(
@@ -814,7 +814,7 @@ fn per_value_selection(
     if p.cap == 0 {
         return (Vec::new(), 0);
     }
-    let ids = seg.data.columns.tessera_id();
+    let ids = seg.data.columns.mosaica_id();
     let visible_rows = mask.rows_in_range(range);
     let floor = p.k_min.min(p.cap);
     let serves_all =

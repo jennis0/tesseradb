@@ -93,7 +93,7 @@ async function artifacts(token, layers) {
     const table = tableFromIPC(frame.payload);
     const layerCol = table.getChild('layer');
     const keys = table.getChild('key');
-    const ids = table.getChild('tessera_id').toArray();
+    const ids = table.getChild('mosaica_id').toArray();
     const masked = table.getChild('masked_count').toArray();
     const content = table.getChild('content');
     for (let i = 0; i < ids.length; i++) {
@@ -115,7 +115,7 @@ async function points(token, k) {
   // Kind 3 is the points frame, a complete Arrow stream.
   const frame = (await viewport(token, {k})).find((f) => f.kind === 3);
   if (!frame) throw new Error('the viewport served no points frame');
-  return [...tableFromIPC(frame.payload).getChild('tessera_id').toArray()];
+  return [...tableFromIPC(frame.payload).getChild('mosaica_id').toArray()];
 }
 
 async function register(declaration) {
@@ -174,12 +174,12 @@ await register(
 );
 await register(labelLayerDeclaration({name: labelLayer, title: 'write-cycle demo labels', view: meta.views[0].id, clusters: clusterLayer}));
 
-await publish(clusterLayer, [{key: 'c0', members: {tessera_id: members.map(String)}}]);
+await publish(clusterLayer, [{key: 'c0', members: {mosaica_id: members.map(String)}}]);
 await publish(labelLayer, [
   {
     key: 'l-c0',
-    members: {tessera_id: members.map(String)},
-    content: [{values: ['written from three documents'], generated_from: {tessera_id: sources.map(String)}}],
+    members: {mosaica_id: members.map(String)},
+    content: [{values: ['written from three documents'], generated_from: {mosaica_id: sources.map(String)}}],
     attached_to: {layer: clusterLayer, level: 0, key: 'c0'}
   }
 ]);
@@ -193,8 +193,8 @@ if (!before.has(`${labelLayer}::l-c0`)) {
 }
 
 console.log('\n2. delete one of the three documents the label was written from');
-line('tessera_id', sources[0]);
-accepted('delete', await control.changes([{op: 'delete', match: {tessera_id: sources[0].toString()}}]));
+line('mosaica_id', sources[0]);
+accepted('delete', await control.changes([{op: 'delete', match: {mosaica_id: sources[0].toString()}}]));
 
 const afterDelete = await artifacts(token, [clusterLayer, labelLayer]);
 line('cluster', describe(afterDelete.get(`${clusterLayer}::c0`)));

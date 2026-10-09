@@ -51,7 +51,7 @@ use mosaica_spatial::unsplit32;
 use mosaica_store::read::{MortonSlice, SegmentData};
 use mosaica_store::write::{write_permutation, write_segment};
 use mosaica_store::{Permutation, RowSpace};
-use mosaica_types::{EntityId, MortonCode, TermId, TesseraId};
+use mosaica_types::{EntityId, MortonCode, TermId, MosaicaId};
 
 #[derive(Parser)]
 #[command(about = "N_occ(d): the multi-segment union arm against the single-segment counter")]
@@ -246,7 +246,7 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
                 TilerItem {
                     // The source index rides as the identity, which is how the row order the
                     // segment was actually written in is read back below.
-                    tessera_id: TesseraId::new(p as u64),
+                    mosaica_id: MosaicaId::new(p as u64),
                     qx,
                     qy,
                     scalars: Vec::new(),
@@ -256,7 +256,7 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
         let mut entity_ids: Vec<EntityId> = (0..items.len() as u64).map(EntityId::new).collect();
         let written = sort_batch(&mut items, &mut entity_ids);
         for (pos, item) in items.iter().enumerate() {
-            row_of[item.tessera_id.raw() as usize] = base + pos as u32;
+            row_of[item.mosaica_id.raw() as usize] = base + pos as u32;
         }
 
         let temp = TempDir::new().expect("a temp dir for the segment");

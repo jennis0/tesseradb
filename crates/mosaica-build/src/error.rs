@@ -32,7 +32,7 @@ pub enum BuildError {
     /// The input violates an invariant the bundle format depends on.
     Invalid(String),
     Store(mosaica_store::error::StoreError),
-    /// A `tessera_id` derivation failed — in this build, always
+    /// A `mosaica_id` derivation failed — in this build, always
     /// [`mosaica_types::IdentityError::EntityOutOfRange`], which the allocator cap (I-1) makes
     /// unreachable in practice. Never a truncation: see `IdentityKey::forward`'s doc comment.
     Identity(mosaica_types::IdentityError),

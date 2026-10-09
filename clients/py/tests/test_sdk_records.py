@@ -399,8 +399,8 @@ def test_category_dictionaries_that_differ_by_page_join_into_one_column(db):
     assert len({tuple(page.column("venue").dictionary.to_pylist()) for page in pages}) > 1
 
     table = db.items(**PAGED)
-    counted = table.group_by("venue").aggregate([("tessera_id", "count")])
-    by_venue = zip(counted.column("venue").to_pylist(), counted.column("tessera_id_count"))
+    counted = table.group_by("venue").aggregate([("mosaica_id", "count")])
+    by_venue = zip(counted.column("venue").to_pylist(), counted.column("mosaica_id_count"))
     assert {venue: count.as_py() for venue, count in by_venue} == {venue: 5 for venue in VENUES}
 
     pd = pytest.importorskip("pandas")
@@ -553,7 +553,7 @@ def test_a_read_that_returns_no_row_has_the_columns_asked_for(db):
     assert pages[0].schema.remove_metadata() == schema.remove_metadata()
 
     empty = db.artifacts("map", "clusters", ["key", "masked_count"], q="absent")
-    assert (empty.num_rows, empty.column_names) == (0, ["tessera_id", "key", "masked_count"])
+    assert (empty.num_rows, empty.column_names) == (0, ["mosaica_id", "key", "masked_count"])
 
 
 def numbered(db) -> None:
@@ -582,8 +582,8 @@ def test_an_integer_join_value_comes_back_as_the_integer_inserted(served, corpus
     assert table.schema.field("paper").type == pa.int64()
     ids = table.column("paper").to_pylist()
     assert sorted(ids) == [-3, 0, 7, 2**40]
-    for tessera_id, inserted in zip(table.column("tessera_id").to_pylist(), ids):
-        assert one.item(tessera_id)["fields"]["paper"] == inserted
+    for mosaica_id, inserted in zip(table.column("mosaica_id").to_pylist(), ids):
+        assert one.item(mosaica_id)["fields"]["paper"] == inserted
     pages = one.items("map", ["paper"], page_rows=1, batches=True)
     assert sorted(i for page in pages for i in page.column(1).to_pylist()) == sorted(ids)
 

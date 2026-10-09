@@ -17,7 +17,7 @@ import {chrome, tokens} from './tokens.js';
  * The close button appears only while the card shows something: an item, a refusal or a click's
  * result.
  *
- * The headline is the field `title-field` names, else the item's `tessera_id`. Each field has a
+ * The headline is the field `title-field` names, else the item's `mosaica_id`. Each field has a
  * slot, `field-<name>`, so a host can render one as a link. The item is the store's selection
  * (`Store.pick`), or the `item` property.
  *
@@ -54,7 +54,7 @@ import {chrome, tokens} from './tokens.js';
  * @csspart scoped - The group-scoped values, grouped by key.
  * @csspart key - One key's heading among the group-scoped values, with `data-key`.
  * @csspart open - The Open button.
- * @csspart copy - The Copy id button, which copies the `tessera_id` to the clipboard.
+ * @csspart copy - The Copy id button, which copies the `mosaica_id` to the clipboard.
  */
 export class MosaicaItemCard extends MosaicaElement {
   static override styles = [
@@ -203,7 +203,7 @@ export class MosaicaItemCard extends MosaicaElement {
   @property({attribute: false}) accessor pick: PickOutcome = null;
   /** The schema for field order and view names, where the card has no store to read it from. */
   @property({attribute: false}) accessor meta: Meta | null = null;
-  /** The field the headline shows. Unset, or where the item has no value for it, the headline is the `tessera_id`. */
+  /** The field the headline shows. Unset, or where the item has no value for it, the headline is the `mosaica_id`. */
   @property({attribute: 'title-field'}) accessor titleField = '';
   /** Shows the headline, the subtitle and three fields, with the rest under "Show all N fields". */
   @property({type: Boolean, reflect: true}) accessor compact = false;
@@ -263,7 +263,7 @@ export class MosaicaItemCard extends MosaicaElement {
       ${head(
         titleName
           ? html`<div part="headline" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${present(fields[titleName], declared.find((c) => c.name === titleName))}</span></slot></div>`
-          : html`<div part="headline" class="card-title mono" data-name="tessera_id">${id}</div>`,
+          : html`<div part="headline" class="card-title mono" data-name="mosaica_id">${id}</div>`,
         true
       )}
       <span part="state" data-state="shown"></span>
@@ -271,7 +271,7 @@ export class MosaicaItemCard extends MosaicaElement {
       <div class="field">
         ${rest.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
         ${titleName
-          ? html`<div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>`
+          ? html`<div part="field" data-name="mosaica_id" style="display:contents"><span part="label" class="k">mosaica_id</span><span part="value" class="v mono">${id}</span></div>`
           : nothing}
       </div>
       ${this.scoped(item.detail.scoped)}
@@ -292,7 +292,7 @@ export class MosaicaItemCard extends MosaicaElement {
     const shown = this.expanded ? others : others.slice(0, 3);
     const headline = titleName
       ? html`<div part="headline" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${present(fields[titleName], declared.find((c) => c.name === titleName))}</span></slot></div>`
-      : html`<div part="headline" class="card-title mono" data-name="tessera_id">${id}</div>`;
+      : html`<div part="headline" class="card-title mono" data-name="mosaica_id">${id}</div>`;
     const subtitle = subtitleName
       ? html`<div part="subtitle" data-name=${subtitleName}><slot name=${`field-${subtitleName}`}>${present(fields[subtitleName], declared.find((c) => c.name === subtitleName))}</slot></div>`
       : nothing;
@@ -304,7 +304,7 @@ export class MosaicaItemCard extends MosaicaElement {
         <div class="field">
           ${shown.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
           ${this.expanded && titleName
-            ? html`<div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>`
+            ? html`<div part="field" data-name="mosaica_id" style="display:contents"><span part="label" class="k">mosaica_id</span><span part="value" class="v mono">${id}</span></div>`
             : nothing}
         </div>
         ${this.expanded ? this.scoped(item.detail.scoped) : nothing}

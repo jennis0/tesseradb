@@ -84,7 +84,7 @@ fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// The request-serving engine: one immutable [`Generation`] behind an atomically-swappable
 /// pointer, plus the state that is genuinely process-lifetime — the compute pool, the
-/// `tessera_id` key, the row-projection cache and the bundle root. The dictionary, postings
+/// `mosaica_id` key, the row-projection cache and the bundle root. The dictionary, postings
 /// reader and fragment cache live in [`Generation`] instead, since each changes on its own
 /// publication.
 pub struct Engine {
@@ -156,7 +156,7 @@ pub struct Engine {
     /// The write path: the WAL, the entity-id allocator, the resolver's extension state and the
     /// idempotency index.
     pub(crate) write: WritePath,
-    /// The `tessera_id` blinding permutation's key, read from the bundle's manifest and held for
+    /// The `mosaica_id` blinding permutation's key, read from the bundle's manifest and held for
     /// the process lifetime. It never leaves the server; `IdentityKey`'s `Debug` is redacted.
     pub(crate) identity_key: IdentityKey,
     /// The key records cursors are sealed under, derived from the identity key at open.
@@ -408,7 +408,7 @@ pub(crate) struct PrefixReaders {
     pub(crate) dict: Arc<Dict>,
     pub(crate) postings: Arc<PostingsReader>,
     pub(crate) delta_postings: Vec<Arc<DeltaTier>>,
-    /// The deployment's `tessera_id` key. `IdentityKey::from_hex` rejects a degenerate key,
+    /// The deployment's `mosaica_id` key. `IdentityKey::from_hex` rejects a degenerate key,
     /// refusing a bundle rather than blinding identities with a collapsed round schedule.
     pub(crate) identity_key: IdentityKey,
     /// The key records cursors are sealed under, derived from the same identity key.

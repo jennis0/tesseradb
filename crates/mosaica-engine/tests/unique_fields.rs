@@ -267,7 +267,7 @@ fn taken(result: &Result<Vec<EntityId>, AcceptError>) -> bool {
     matches!(result, Err(AcceptError::Conflict(_)))
 }
 
-/// `r`, naming the built item of `source` by its `tessera_id` beside whatever its values name.
+/// `r`, naming the built item of `source` by its `mosaica_id` beside whatever its values name.
 fn naming_built(engine: &Engine, mut r: UnallocatedRow, source: u64) -> UnallocatedRow {
     r.join = Some(built(engine, source));
     r
@@ -282,12 +282,12 @@ fn full(engine: &Engine) -> Session {
     engine.authorise(&full_coverage_credential()).unwrap()
 }
 
-/// The `tessera_id`s a viewport of `s0` under `filter` returns.
+/// The `mosaica_id`s a viewport of `s0` under `filter` returns.
 fn matching(engine: &Engine, session: &Session, filter: FilterExpr) -> BTreeSet<u64> {
     matching_in(engine, session, "s0", filter)
 }
 
-/// The `tessera_id`s a viewport of `view` under `filter` returns.
+/// The `mosaica_id`s a viewport of `view` under `filter` returns.
 fn matching_in(engine: &Engine, session: &Session, view: &str, filter: FilterExpr) -> BTreeSet<u64> {
     let mut req = ViewportRequest::new(view, 0, VIEWPORT, 10_000);
     req.filter = Some(filter);
@@ -314,7 +314,7 @@ fn number_in(column: &str, values: &[i128]) -> FilterExpr {
     }
 }
 
-/// Every item's three unique values and its `tessera_id`: the build's, from its source ids,
+/// Every item's three unique values and its `mosaica_id`: the build's, from its source ids,
 /// then whatever a case ingests.
 #[derive(Default)]
 struct Expected {
@@ -327,7 +327,7 @@ impl Expected {
     fn built(fx: &Fixture, engine: &Engine) -> Expected {
         let mut expected = Expected::default();
         for (source, entity) in source_to_new_map(&fx.root, "v00000") {
-            let id = engine.tessera_id_of(EntityId::new(entity)).unwrap().raw();
+            let id = engine.mosaica_id_of(EntityId::new(entity)).unwrap().raw();
             expected.add(id, &doi_of(source), gid_of(source), serial_of(source));
         }
         expected
@@ -435,7 +435,7 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
             .collect();
         let entities = ingest(engine, batch, rows);
         for (entity, (doi, gid, serial)) in entities.iter().zip(values) {
-            let id = engine.tessera_id_of(*entity).unwrap().raw();
+            let id = engine.mosaica_id_of(*entity).unwrap().raw();
             expected.add(id, &doi, gid, serial);
         }
         entities
@@ -463,7 +463,7 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
     // A deleted item names nothing, before and after the fold drops its entries.
     let deleted = first[0];
     engine.accept_change(deleted, ChangeOp::Delete).unwrap();
-    expected.remove(engine.tessera_id_of(deleted).unwrap().raw());
+    expected.remove(engine.mosaica_id_of(deleted).unwrap().raw());
     check_lookups(&engine, &expected, "after a delete");
     fold(&engine);
     check_lookups(&engine, &expected, "after a fold");
@@ -523,7 +523,7 @@ fn a_generation_from_before_a_coalesce_and_a_fold_still_answers_from_its_runs() 
     let values = ["10.held/a".to_string(), "10.held/b".to_string()];
     let table = mosaica_engine::AddressTable {
         rows: values.len(),
-        tessera_id: None,
+        mosaica_id: None,
         columns: vec![(
             "doi".to_string(),
             values
@@ -564,7 +564,7 @@ fn an_invisible_holder_answers_as_absent() {
         (0..N).find(|s| !subset_sees(*s)).unwrap(),
         (0..N).find(|s| subset_sees(*s)).unwrap(),
     );
-    let shown_id = engine.tessera_id_of(EntityId::new(map[&shown])).unwrap().raw();
+    let shown_id = engine.mosaica_id_of(EntityId::new(map[&shown])).unwrap().raw();
     let nobody = matching(&engine, &restricted, text_in("doi", &["10.nobody/x".to_string()]));
     assert!(nobody.is_empty());
     assert_eq!(
@@ -593,7 +593,7 @@ fn an_address_cell_is_checked_against_its_field_alone() {
     let engine = engine_over(&fx);
     let table = |columns: Vec<(&str, AddressValue)>| AddressTable {
         rows: 1,
-        tessera_id: None,
+        mosaica_id: None,
         columns: columns
             .into_iter()
             .map(|(name, cell)| (name.to_string(), vec![Some(cell)]))
@@ -702,9 +702,9 @@ fn an_ingest_setting_a_held_value_is_refused() {
     let edited = ingest(&engine, "again", vec![giving(5, "10.h/1", BIG * 4)]);
     let map = source_to_new_map(&fx.root, "v00000");
     assert_eq!(
-        engine.tessera_id_of(edited[0]).unwrap(),
-        engine.tessera_id_of(EntityId::new(map[&5])).unwrap(),
-        "the row edits the item it names, which keeps its tessera_id"
+        engine.mosaica_id_of(edited[0]).unwrap(),
+        engine.mosaica_id_of(EntityId::new(map[&5])).unwrap(),
+        "the row edits the item it names, which keeps its mosaica_id"
     );
     assert_eq!(holders(&engine, "10.h/1"), 1);
     // A row naming only the holder edits it.
@@ -714,8 +714,8 @@ fn an_ingest_setting_a_held_value_is_refused() {
         vec![row(&engine, "fresh", b"0", "10.h/1", BIG * 4 + 1, 2_004)],
     );
     assert_eq!(
-        engine.tessera_id_of(holder[0]).unwrap(),
-        engine.tessera_id_of(edited[0]).unwrap()
+        engine.mosaica_id_of(holder[0]).unwrap(),
+        engine.mosaica_id_of(edited[0]).unwrap()
     );
     assert_eq!(holders(&engine, "10.h/1"), 1);
     // Nulls never collide.
@@ -748,7 +748,7 @@ fn two_concurrent_batches_setting_one_value_are_one_accepted() {
     let named: BTreeSet<u64> = outcomes
         .iter()
         .filter_map(|o| o.as_ref().ok())
-        .map(|entities| engine.tessera_id_of(entities[0]).unwrap().raw())
+        .map(|entities| engine.mosaica_id_of(entities[0]).unwrap().raw())
         .collect();
     assert_eq!(
         named.len(),
@@ -982,7 +982,7 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
     );
     publish_buffered(&engine);
     let mut expected = Expected::built(&fx, &engine);
-    let early_id = engine.tessera_id_of(early[0]).unwrap().raw();
+    let early_id = engine.mosaica_id_of(early[0]).unwrap().raw();
     expected.add(early_id, "10.e/1", BIG * 9, 5_000);
     check_lookups(&engine, &expected, "declared at runtime");
     // The same items answer on both bundles, named by the values they hold.
@@ -1144,7 +1144,7 @@ fn a_value_arriving_mid_build_is_indexed() {
         if !flushed {
             publish_buffered(&engine);
         }
-        let id = engine.tessera_id_of(item).unwrap().raw();
+        let id = engine.mosaica_id_of(item).unwrap().raw();
         assert_eq!(
             matching(
                 &engine,
@@ -1167,7 +1167,7 @@ fn an_edit_of_a_holder_during_a_declaration_keeps_its_value_held() {
         let mut engine = Arc::new(engine_over(&fx));
         let doi = doi_of(4);
         let holder = EntityId::new(source_to_new_map(&fx.root, "v00000")[&4]);
-        let tid = engine.tessera_id_of(holder).unwrap();
+        let tid = engine.mosaica_id_of(holder).unwrap();
         let edit = move |engine: &Engine| {
             fill(
                 engine,
@@ -1199,7 +1199,7 @@ fn an_edit_of_a_holder_during_a_declaration_keeps_its_value_held() {
         }
         assert!(is_unique(&engine, "doi"), "{when}");
         assert_ne!(
-            engine.resolve_tessera_ids(&[tid]).unwrap()[0],
+            engine.resolve_mosaica_ids(&[tid]).unwrap()[0],
             Some(holder),
             "the edit moved the holder, {when}"
         );
@@ -1313,7 +1313,7 @@ fn removing_unique_keeps_the_values() {
 }
 
 /// Set one column's value on items that exist: an ingest batch naming no view, each row naming
-/// its item by `tessera_id` and carrying that column alone.
+/// its item by `mosaica_id` and carrying that column alone.
 fn fill(
     engine: &Engine,
     batch: &str,
@@ -1331,7 +1331,7 @@ fn fill(
             let mut scalars = vec![WalScalar::Null; declared.len()];
             scalars[at] = value;
             mosaica_engine::IngestRow {
-                tessera_id: Some(engine.tessera_id_of(entity).unwrap()),
+                mosaica_id: Some(engine.mosaica_id_of(entity).unwrap()),
                 labels: None,
                 position: None,
                 scalars,
@@ -1348,7 +1348,7 @@ fn fill(
             rows,
             artifacts: Default::default(),
             strict: true,
-            tessera_id_column: false,
+            mosaica_id_column: false,
         })
         .map(|_| ())
 }
@@ -1392,7 +1392,7 @@ fn a_values_fill_setting_a_held_value_is_refused() {
     );
     publish_buffered(&engine);
     let session = full(&engine);
-    let id = engine.tessera_id_of(entities[0]).unwrap().raw();
+    let id = engine.mosaica_id_of(entities[0]).unwrap().raw();
     assert_eq!(
         matching(&engine, &session, text_in("doi", &["10.f/1".to_string()])),
         BTreeSet::from([id])
@@ -1421,8 +1421,8 @@ fn a_declaration_between_a_batchs_check_and_its_admission_is_checked_again() {
         .expect("the row edits the item holding the value");
     let map = source_to_new_map(&fx.root, "v00000");
     assert_eq!(
-        engine.tessera_id_of(outcome[0]).unwrap(),
-        engine.tessera_id_of(EntityId::new(map[&4])).unwrap(),
+        engine.mosaica_id_of(outcome[0]).unwrap(),
+        engine.mosaica_id_of(EntityId::new(map[&4])).unwrap(),
         "the row names the item holding {doi}"
     );
     assert_eq!(holders(&engine, &doi), 1, "one item holds {doi}");
@@ -1485,7 +1485,7 @@ fn a_flush_in_flight_across_a_declaration_is_planned_again() {
     engine.set_flush_paused_for_test(false);
     publish_buffered(&engine);
     let session = full(&engine);
-    let id = engine.tessera_id_of(entities[0]).unwrap().raw();
+    let id = engine.mosaica_id_of(entities[0]).unwrap().raw();
     assert_eq!(
         matching(&engine, &session, text_in("doi", &["10.fl/1".to_string()])),
         BTreeSet::from([id])
@@ -1534,7 +1534,7 @@ fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
         )]
     )));
     publish_buffered(&engine);
-    let id = engine.tessera_id_of(first[0]).unwrap().raw();
+    let id = engine.mosaica_id_of(first[0]).unwrap().raw();
     assert_eq!(
         matching(&engine, &full(&engine), text_in("isbn", &["978-1".to_string()])),
         BTreeSet::from([id])

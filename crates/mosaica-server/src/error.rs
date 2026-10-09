@@ -2,7 +2,7 @@
 //! `{"error": code, "detail": string}`, with `retry_after_s` added on `backpressure`.
 //!
 //! No body carries an entity id, a term id, a bearer token, auth data or a server path; clients
-//! see `tessera_id` and nothing internal. Store, WAL and panic text is logged and never sent. A
+//! see `mosaica_id` and nothing internal. Store, WAL and panic text is logged and never sent. A
 //! refusal's own detail is sent only when it names nothing but the caller's request and the
 //! schema `/v1/meta` publishes.
 
@@ -387,11 +387,11 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         // missing subject or layer key is a 422 the caller fixes and resends. Neither took effect.
         // A vocabulary, or a value's title, held under another identity; as for attributes above.
         AcceptError::Exec(ExecError::VocabularyConflict { detail }) => ApiError::Conflict(detail),
-        // The detail names the values and the holders' `tessera_id`s, never an entity id.
+        // The detail names the values and the holders' `mosaica_id`s, never an entity id.
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
         // Reached only where the handler's one re-check was stale too.
         AcceptError::Exec(e @ ExecError::Stale) => ApiError::Conflict(e.to_string()),
-        // The detail names rows by position, values as sent and items by `tessera_id`.
+        // The detail names rows by position, values as sent and items by `mosaica_id`.
         AcceptError::Conflict(detail) => ApiError::Conflict(detail),
         AcceptError::Contract(detail) => ApiError::Contract(detail),
         // 404, as an unknown view is on every plane.

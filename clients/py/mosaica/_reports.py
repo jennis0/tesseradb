@@ -151,7 +151,7 @@ class CommitReport(Report):
       of the points an item of its own.
     - `refused`: the rows the build left out, one entry per file and reason: `source`, the file;
       `object`, the block that read it; `reason`, one of `names_no_item`, `names_two_items`,
-      `one_item_twice`, `one_value_twice` and `unknown_tessera_id`; `rows`, how many; and
+      `one_item_twice`, `one_value_twice` and `unknown_mosaica_id`; `rows`, how many; and
       `values`, up to ten of them as the file wrote them. Each is in the summary.
     """
 
@@ -210,7 +210,7 @@ class PagedReport(Summarised):
       is their total.
     - `artifacts_minted`, `memberships_joined`: annotations added and memberships joined.
     - `items_edited`: items already held that a row changed: a value, the label or a position.
-      An edited item keeps its `tessera_id`. Placing an item in an annotation changes the
+      An edited item keeps its `mosaica_id`. Placing an item in an annotation changes the
       annotation, not the item, and is counted in `memberships_joined`.
     - `values_bound`, `titles_set`: vocabulary values added and titles replaced.
     - `already_present`: parts the database already held, which changed nothing, rows naming an
@@ -225,12 +225,12 @@ class PagedReport(Summarised):
       being its position in the table inserted into `target`; a member is `{"layer", "level",
       "view", "key", "list", "member", "reason"}`, `member` being the row naming it as sent.
       `reason` is one of `names_no_item`, `names_two_items`, `one_item_twice`, `one_value_twice`
-      and `unknown_tessera_id`. `refused_by_reason` counts them.
+      and `unknown_mosaica_id`. `refused_by_reason` counts them.
     - `ignored_columns`: by layer, the fields of its member structs, and the columns of the
-      memberships its declaration writes, that name no item, being neither `tessera_id` nor a
+      memberships its declaration writes, that name no item, being neither `mosaica_id` nor a
       unique attribute's column: those the plan did not send, and any the server says it
       ignored. `check()` names those the plan leaves out.
-    - `tessera_ids`: the id given to each row sent, `None` for a refused row.
+    - `mosaica_ids`: the id given to each row sent, `None` for a refused row.
     - `artifact_ids`: the id given to each added annotation, by layer and then by
       `(level, view, key)`.
     - `replayed`: requests the server had already carried out, which added nothing.
@@ -259,7 +259,7 @@ class PagedReport(Summarised):
     refusals: list = field(default_factory=list)
     refused: list = field(default_factory=list)
     ignored_columns: dict = field(default_factory=dict)
-    tessera_ids: list = field(default_factory=list)
+    mosaica_ids: list = field(default_factory=list)
     replayed: list = field(default_factory=list)
     publication: int | None = None
     artifact_ids: dict = field(default_factory=dict)
@@ -358,8 +358,8 @@ class ChangeReport(Summarised):
     - `accepted`: how many were applied.
     - `refused`: each row the identity rule refused, `{"row", "reason"}`, `row` being its
       position in what was given, and `reason` one of `names_no_item`, `names_two_items` and
-      `unknown_tessera_id`. The other rows were applied. `refused_by_reason` counts them.
-    - `ignored_columns`: the columns given that name no item, being neither `tessera_id` nor a
+      `unknown_mosaica_id`. The other rows were applied. `refused_by_reason` counts them.
+    - `ignored_columns`: the columns given that name no item, being neither `mosaica_id` nor a
       unique attribute's column: those not sent, and any the server says it ignored.
     - `refusals`: each refused request, with its status and the server's answer. `ok` is `True`
       when there were none. Each is in the summary.

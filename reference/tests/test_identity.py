@@ -1,10 +1,10 @@
-"""Known-answer tests for the `tessera_id` bijection (Task 12, Step 1).
+"""Known-answer tests for the `mosaica_id` bijection (Task 12, Step 1).
 
-Every block in `reference/vectors/tessera_id.json` is asserted, and -- per the reviewer
+Every block in `reference/vectors/mosaica_id.json` is asserted, and -- per the reviewer
 flag recorded in the vectors file's own `notes.directions` (which only prose-scopes the
 both-directions rule to the `vectors` block) -- **both directions** are asserted for
-`inverse_only` and `secondary_key.vectors` too: forward(shard, entity) == tessera_id AND
-invert(tessera_id) == (shard, entity). This is valid because the construction is a *total*
+`inverse_only` and `secondary_key.vectors` too: forward(shard, entity) == mosaica_id AND
+invert(mosaica_id) == (shard, entity). This is valid because the construction is a *total*
 bijection over 2**64 (memo §1.7): `invert` never fails on a structurally valid u64, so
 `forward(*invert(x)) == x` must hold for every entry, `inverse_only` included.
 
@@ -24,7 +24,7 @@ from oracle import identity as ident
 from oracle import morton
 
 VECTORS_PATH = (
-    Path(__file__).resolve().parents[1] / "vectors" / "tessera_id.json"
+    Path(__file__).resolve().parents[1] / "vectors" / "mosaica_id.json"
 )
 
 
@@ -98,17 +98,17 @@ def test_main_vectors_both_directions(vectors, canonical_key):
     for case in cases:
         shard_id = case["shard_id"]
         entity_id = case["entity_id"]
-        tessera_id = _u(case["tessera_id"])
+        mosaica_id = _u(case["mosaica_id"])
 
         forward_got = ident.forward(canonical_key, shard_id, entity_id)
-        assert forward_got == tessera_id, (
+        assert forward_got == mosaica_id, (
             f"forward(shard={shard_id}, entity={entity_id}) = {forward_got:#x}, "
-            f"expected {tessera_id:#x}"
+            f"expected {mosaica_id:#x}"
         )
 
-        invert_got = ident.invert(canonical_key, tessera_id)
+        invert_got = ident.invert(canonical_key, mosaica_id)
         assert invert_got == (shard_id, entity_id), (
-            f"invert({tessera_id:#x}) = {invert_got}, expected ({shard_id}, {entity_id})"
+            f"invert({mosaica_id:#x}) = {invert_got}, expected ({shard_id}, {entity_id})"
         )
 
 
@@ -119,22 +119,22 @@ def test_inverse_only_both_directions(vectors, canonical_key):
     cases = vectors["inverse_only"]
     assert len(cases) == 6
     for case in cases:
-        tessera_id = _u(case["tessera_id"])
+        mosaica_id = _u(case["mosaica_id"])
         shard_id = case["shard_id"]
         entity_id = case["entity_id"]
 
-        invert_got = ident.invert(canonical_key, tessera_id)
+        invert_got = ident.invert(canonical_key, mosaica_id)
         assert invert_got == (shard_id, entity_id), (
-            f"invert({tessera_id:#x}) = {invert_got}, expected ({shard_id}, {entity_id})"
+            f"invert({mosaica_id:#x}) = {invert_got}, expected ({shard_id}, {entity_id})"
         )
 
         # Both directions: the construction is a total bijection over 2**64 (memo §1.7), so
-        # forward(*invert(x)) == x must hold even for an arbitrary tessera_id not drawn from
+        # forward(*invert(x)) == x must hold even for an arbitrary mosaica_id not drawn from
         # a forward-generated vector.
         forward_got = ident.forward(canonical_key, shard_id, entity_id)
-        assert forward_got == tessera_id, (
+        assert forward_got == mosaica_id, (
             f"forward(shard={shard_id}, entity={entity_id}) = {forward_got:#x}, "
-            f"expected {tessera_id:#x}"
+            f"expected {mosaica_id:#x}"
         )
 
 
@@ -152,18 +152,18 @@ def test_secondary_key_both_directions(vectors):
     for case in cases:
         shard_id = case["shard_id"]
         entity_id = case["entity_id"]
-        tessera_id = _u(case["tessera_id"])
+        mosaica_id = _u(case["mosaica_id"])
 
         forward_got = ident.forward(key, shard_id, entity_id)
-        assert forward_got == tessera_id
+        assert forward_got == mosaica_id
 
-        invert_got = ident.invert(key, tessera_id)
+        invert_got = ident.invert(key, mosaica_id)
         assert invert_got == (shard_id, entity_id)
 
 
 def test_secondary_key_disagrees_with_canonical_key(vectors, canonical_key):
     """A sanity cross-check: the same (shard, entity) under two different keys must produce
-    different tessera_ids, or the key isn't being used at all."""
+    different mosaica_ids, or the key isn't being used at all."""
     sk = vectors["secondary_key"]
     key2 = ident.IdentityKey.from_hex(sk["key"])
     assert canonical_key != key2
@@ -272,9 +272,9 @@ def test_forward_rejects_entity_above_u32_max(canonical_key):
         ident.forward(canonical_key, 0, 2**32)
 
 
-def test_priority_is_high_16_bits_of_tessera_id(vectors, canonical_key):
+def test_priority_is_high_16_bits_of_mosaica_id(vectors, canonical_key):
     case = vectors["vectors"][0]
-    tid = _u(case["tessera_id"])
+    tid = _u(case["mosaica_id"])
     assert ident.priority_of(tid) == (tid >> 48) & 0xFFFF
 
 
@@ -291,7 +291,7 @@ def test_no_collisions_over_a_dense_range(canonical_key):
 # --- Row-order re-derivation, on synthetic data ------------------------------------------
 #
 # These exercise the pieces -- `_entity_of_rows`'s permutation inversion and the
-# `(morton, tessera_id)` sort -- against synthetic data built in-process, so a failure points
+# `(morton, mosaica_id)` sort -- against synthetic data built in-process, so a failure points
 # at one function rather than at "the bundle". The end-to-end assertions against a **real**
 # fixture bundle are at the bottom of this file: they are what actually establishes that a
 # bundle's stored row order is the contract order, and they were missing while the fixture's
@@ -310,14 +310,14 @@ def test_entity_of_rows_inverts_permutation_for_touched_rows(canonical_key):
     assert got == {4: 1, 3: 2, 2: 3, 1: 4, 0: 5}
 
 
-def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
+def test_row_order_is_morton_then_mosaica_id_ascending(canonical_key):
     """The post-fold storage sort order (`docs/evidence/memos/2026-07-30-priority-as-identity-
-    prefix.md`, "The decision"): `(morton, tessera_id)` ascending, no further tiebreak.
-    `tessera_id` is already globally unique, so this needs no third key.
+    prefix.md`, "The decision"): `(morton, mosaica_id)` ascending, no further tiebreak.
+    `mosaica_id` is already globally unique, so this needs no third key.
 
     Finding 5 (task-5 review): the shipped re-derivation -- `bundle.row_order_from_geometry`,
     which `Bundle.derive_row_order` also calls -- is exercised here directly, computing
-    `tessera_id` from the permutation-derived `entity_id` via `forward` and `morton` from
+    `mosaica_id` from the permutation-derived `entity_id` via `forward` and `morton` from
     `(x, y)` via `morton_of`, rather than re-implementing the lexsort inline against
     pre-picked morton codes. Swapping `row_order_from_geometry`'s two `np.lexsort`
     arguments now breaks this test directly, instead of the test silently re-deriving the
@@ -349,24 +349,24 @@ def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
     entity_arr = np.array(entities, dtype=np.uint64)
 
     morton_codes = [morton.morton_of(x, y, extent) for x, y in zip(xs, ys)]
-    tessera_ids = [ident.forward(canonical_key, shard_id, e) for e in entities]
+    mosaica_ids = [ident.forward(canonical_key, shard_id, e) for e in entities]
 
     # Reference: Python's stable sort by the exact tuple the memo specifies, computed
     # independently of `row_order_from_geometry`.
     expected_order = sorted(
-        range(len(entities)), key=lambda i: (morton_codes[i], tessera_ids[i])
+        range(len(entities)), key=lambda i: (morton_codes[i], mosaica_ids[i])
     )
 
     got_order = row_order_from_geometry(canonical_key, shard_id, entity_arr, morton_codes)
     assert list(got_order) == expected_order
 
-    # And re-sorting entirely by tessera_id alone, once morton codes are fixed, agrees with
-    # sorting by (morton, priority, tessera_id-fallthrough) -- i.e. priority is genuinely a
+    # And re-sorting entirely by mosaica_id alone, once morton codes are fixed, agrees with
+    # sorting by (morton, priority, mosaica_id-fallthrough) -- i.e. priority is genuinely a
     # prefix and does not change the outcome once ties are broken by the full id.
-    priorities = [ident.priority_of(t) for t in tessera_ids]
+    priorities = [ident.priority_of(t) for t in mosaica_ids]
     expected_with_priority = sorted(
         range(len(entities)),
-        key=lambda i: (morton_codes[i], priorities[i], tessera_ids[i]),
+        key=lambda i: (morton_codes[i], priorities[i], mosaica_ids[i]),
     )
     assert expected_with_priority == expected_order
 
@@ -394,10 +394,10 @@ def fixture_bundle(bundle_root):
     return open_bundle_with_source(bundle_root, REPO_ROOT / DEFAULT_POINTS, DEFAULT_LIMIT)
 
 
-def test_fixture_bundle_rows_are_stored_in_morton_then_tessera_id_order(fixture_bundle):
+def test_fixture_bundle_rows_are_stored_in_morton_then_mosaica_id_order(fixture_bundle):
     """The storage sort order, re-derived from geometry and the permutation and compared against
-    the stored order. Deliberately independent of the stored `morton`/`tessera_id` columns
-    (finding 5): a build that emitted a wrong `tessera_id` and sorted consistently by its own
+    the stored order. Deliberately independent of the stored `morton`/`mosaica_id` columns
+    (finding 5): a build that emitted a wrong `mosaica_id` and sorted consistently by its own
     wrong values must fail this, not pass it."""
     import numpy as np
 
@@ -405,14 +405,14 @@ def test_fixture_bundle_rows_are_stored_in_morton_then_tessera_id_order(fixture_
     order = fixture_bundle.derive_row_order(view_id)
     expected = np.arange(len(order), dtype=order.dtype)
     assert np.array_equal(order, expected), (
-        "the bundle's stored rows are not in (morton, tessera_id) order; first divergence at "
+        "the bundle's stored rows are not in (morton, mosaica_id) order; first divergence at "
         f"row {int(np.flatnonzero(order != expected)[0])}"
     )
 
 
 def test_fixture_bundle_identity_column_agrees_with_the_key(fixture_bundle):
-    """`forward(key, shard, entity_of_row[r]) == tessera_id[r]`, where `entity_of_row` comes from
-    the permutation (key-independent) and `tessera_id` from the stored column. The only check
+    """`forward(key, shard, entity_of_row[r]) == mosaica_id[r]`, where `entity_of_row` comes from
+    the permutation (key-independent) and `mosaica_id` from the stored column. The only check
     that catches a key/column disagreement — and the one `test_byte_scan.py` cites."""
     view_id = fixture_bundle.segments_manifest["segments"][0]["view"]
     fixture_bundle.verify_identity_cross_check(view_id)

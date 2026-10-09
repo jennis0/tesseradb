@@ -83,7 +83,7 @@ class Page:
     view: str | None = None
     rows: int = 0
     #: The `(level, view, key)` of each artifact a publication carries, in the order its answer
-    #: names their `tessera_id`s.
+    #: names their `mosaica_id`s.
     artifacts: Sequence[tuple] = ()
     members: int = 0
     level: int = 0
@@ -719,7 +719,7 @@ class Planner:
                             "a member written as a plain value",
                             f"layer '{layer}', artifact '{row['key']}': member {member!r} names "
                             f"no column. Write each member as a struct whose fields are "
-                            f"tessera_id or a unique attribute",
+                            f"mosaica_id or a unique attribute",
                         )
                     )
                     return None
@@ -731,7 +731,7 @@ class Planner:
                 Finding(
                     "members that name items by no column",
                     f"layer '{layer}': its members carry no column to name items by{carried}. "
-                    f"Write each member as a struct whose fields are tessera_id or a unique "
+                    f"Write each member as a struct whose fields are mosaica_id or a unique "
                     f"attribute's column",
                 )
             )
@@ -1108,7 +1108,7 @@ def _artifact_rows(
 ) -> list[dict]:
     """One layer's inserted tables as artifact records: the key, its parts and its sets.
 
-    Every member is a row of `{column: value}` naming it by `tessera_id` and unique attributes: a
+    Every member is a row of `{column: value}` naming it by `mosaica_id` and unique attributes: a
     members table's row by the columns the insert carries of them, a member struct by its fields
     under the names `identifying` maps them to, and the declaration's own membership table
     `{attribute: [values]}` by its entries at one position. A struct field or declared column
@@ -1172,7 +1172,7 @@ def _artifact_rows(
 
 def _member_rows(members: Any, identifying: dict, ignored: dict) -> list:
     """A membership as member rows: the declaration's table `{attribute: [values]}` by position,
-    keeping `tessera_id` and the unique attributes, and a list of structs by each struct's fields
+    keeping `mosaica_id` and the unique attributes, and a list of structs by each struct's fields
     that `identifying` maps to them. What names no item is added to `ignored` by name. A plain
     value is kept as it is, for the plan to refuse."""
     if isinstance(members, dict):
@@ -1357,7 +1357,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.already_present += int(body.get("unchanged", 0))
         report.artifacts_minted += int(body.get("minted", 0))
         report.memberships_joined += int(body.get("joined", 0))
-        report.tessera_ids += body.get("tessera_ids", [])
+        report.mosaica_ids += body.get("mosaica_ids", [])
         report.clipped += int(body.get("clipped", 0))
         report.clamped += int(body.get("clamped", 0))
     elif page.kind == "values":
@@ -1372,7 +1372,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.without_content += int(body.get("without_content", 0))
         minted = report.artifact_ids.setdefault(page.name, {})
         for identity, one in zip(page.artifacts, body.get("artifacts", [])):
-            minted[identity] = one["tessera_id"]
+            minted[identity] = one["mosaica_id"]
     elif page.kind in ("attribute", "vocabulary"):
         # `existing: true` is the held-part arm of the fill rule: the name is there under this
         # identity and the request applied nothing but its values.
@@ -1478,8 +1478,8 @@ def leave(control: Control, layer: str, key: str, rows: Sequence[dict], columns:
 
 
 def _wire_column(name: str, column: Any) -> Any:
-    """A column as a row route takes it: `tessera_id` as decimal text, whatever integer type the
+    """A column as a row route takes it: `mosaica_id` as decimal text, whatever integer type the
     table held it in."""
-    if name == "tessera_id" and pa.types.is_integer(column.type):
+    if name == "mosaica_id" and pa.types.is_integer(column.type):
         return column.cast(pa.string())
     return column

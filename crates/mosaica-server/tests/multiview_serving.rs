@@ -186,7 +186,7 @@ async fn meta(served: &Served) -> Value {
 }
 
 /// `/v1/viewport` over the whole extent, at a zoom fine enough that two layouts do not collapse
-/// into one cell. Returns `(tessera_id, code)` per point.
+/// into one cell. Returns `(mosaica_id, code)` per point.
 async fn viewport(served: &Served, view: &str) -> reqwest::Response {
     served
         .server

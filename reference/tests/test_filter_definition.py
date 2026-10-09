@@ -330,7 +330,7 @@ def test_a_polygon_region_counts_a_point_on_an_edge_as_inside():
 
 
 def test_a_region_by_artifact_is_the_membership_the_principal_is_served():
-    """`region` by published artifact, by `tessera_id` (selection-operand §2).
+    """`region` by published artifact, by `mosaica_id` (selection-operand §2).
 
     Working: artifact 77's members are entities 1 and 3. An id nobody published — or one
     suppressed, or withheld by criterion — is an **empty operand**, matching nothing, exactly as

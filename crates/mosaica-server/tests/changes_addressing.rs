@@ -1,8 +1,8 @@
-//! `/control/changes` names each item in `match`, by its `tessera_id` and the values of unique
+//! `/control/changes` names each item in `match`, by its `mosaica_id` and the values of unique
 //! fields, under the identity rule: a change naming no item, or two, is refused, listed in the
 //! answer while the rest apply, or refusing the request under `strict=true`.
 //!
-//! A `tessera_id` is a keyed permutation of entity space, so a record carrying one would resolve
+//! A `mosaica_id` is a keyed permutation of entity space, so a record carrying one would resolve
 //! under whatever key the bundle holds at replay. It is inverted once, at admission, and the
 //! entity is what the write-ahead log keeps.
 
@@ -28,9 +28,9 @@ async fn visible(server: &TestServer, token: &str) -> u64 {
     tiles.iter().map(|(_, visible, _)| *visible).sum()
 }
 
-/// A `tessera_id` for an item the fixture actually carries — taken off a viewport response, which
-/// is exactly where a client gets one. `PointRow` is `(tessera_id, code)`.
-async fn a_drawn_tessera_id(server: &TestServer, token: &str) -> u64 {
+/// A `mosaica_id` for an item the fixture actually carries — taken off a viewport response, which
+/// is exactly where a client gets one. `PointRow` is `(mosaica_id, code)`.
+async fn a_drawn_mosaica_id(server: &TestServer, token: &str) -> u64 {
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -56,7 +56,7 @@ async fn post_changes(server: &TestServer, body: &serde_json::Value) -> reqwest:
         .unwrap()
 }
 
-/// Ingest one item holding no unique value and return the `tessera_id` the 200 carried: the only
+/// Ingest one item holding no unique value and return the `mosaica_id` the 200 carried: the only
 /// name that item has.
 async fn ingest_anonymous(server: &TestServer, batch_id: &str) -> u64 {
     let body = build_ingest_batch_optional(&[(None, 20.0, 20.0, "0")]);
@@ -86,19 +86,19 @@ async fn post_strict(server: &TestServer, body: &serde_json::Value) -> reqwest::
         .unwrap()
 }
 
-/// An item holding no unique value is suppressed and unsuppressed by its `tessera_id`.
+/// An item holding no unique value is suppressed and unsuppressed by its `mosaica_id`.
 #[tokio::test]
-async fn an_item_holding_no_unique_value_is_suppressible_by_tessera_id() {
+async fn an_item_holding_no_unique_value_is_suppressible_by_mosaica_id() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let _ = authorise(&server, &["0"]).await;
 
-    let tessera_id = ingest_anonymous(&server, "anon-1").await;
+    let mosaica_id = ingest_anonymous(&server, "anon-1").await;
 
     let resp = post_changes(
         &server,
         &serde_json::json!([
-            { "op": "suppress", "match": { "tessera_id": tessera_id.to_string() } },
+            { "op": "suppress", "match": { "mosaica_id": mosaica_id.to_string() } },
         ]),
     )
     .await;
@@ -113,7 +113,7 @@ async fn an_item_holding_no_unique_value_is_suppressible_by_tessera_id() {
     let resp = post_changes(
         &server,
         &serde_json::json!([
-            { "op": "unsuppress", "match": { "tessera_id": tessera_id.to_string() } },
+            { "op": "unsuppress", "match": { "mosaica_id": mosaica_id.to_string() } },
         ]),
     )
     .await;
@@ -124,23 +124,23 @@ async fn an_item_holding_no_unique_value_is_suppressible_by_tessera_id() {
     );
 }
 
-/// One request names items by a unique value, by a `tessera_id`, and by both agreeing.
+/// One request names items by a unique value, by a `mosaica_id`, and by both agreeing.
 #[tokio::test]
 async fn a_change_names_its_item_by_any_identifier_it_holds() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let token = token_for(&server, &["0"]).await;
 
-    let by_tessera = tessera_id_of(&server, 9);
-    let both = tessera_id_of(&server, 7);
+    let by_mosaica = mosaica_id_of(&server, 9);
+    let both = mosaica_id_of(&server, 7);
     let before = visible(&server, &token).await;
 
     let resp = post_changes(
         &server,
         &serde_json::json!([
             { "op": "suppress", "match": { "id": 5 } },
-            { "op": "suppress", "match": { "tessera_id": by_tessera.to_string() } },
-            { "op": "suppress", "match": { "id": "7", "tessera_id": both.to_string() } },
+            { "op": "suppress", "match": { "mosaica_id": by_mosaica.to_string() } },
+            { "op": "suppress", "match": { "id": "7", "mosaica_id": both.to_string() } },
         ]),
     )
     .await;
@@ -161,12 +161,12 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
     let server = serve(&tmp).await;
     let token = token_for(&server, &["0"]).await;
 
-    let three = tessera_id_of(&server, 3);
+    let three = mosaica_id_of(&server, 3);
     let request = serde_json::json!([
         { "op": "suppress", "match": { "id": 1, "name": "ignored", "weight": 2.5 } },
-        { "op": "suppress", "match": { "tessera_id": u64::MAX.to_string() } },
+        { "op": "suppress", "match": { "mosaica_id": u64::MAX.to_string() } },
         { "op": "suppress", "match": { "id": 999_999 } },
-        { "op": "suppress", "match": { "id": 2, "tessera_id": three.to_string() } },
+        { "op": "suppress", "match": { "id": 2, "mosaica_id": three.to_string() } },
         { "op": "suppress", "match": {} },
         { "op": "suppress", "match": { "id": null } },
     ]);
@@ -174,7 +174,7 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
 
     let first = serde_json::json!([request[0], request[1]]);
     let resp = post_strict(&server, &first).await;
-    assert_eq!(resp.status(), 404, "a tessera_id naming nothing");
+    assert_eq!(resp.status(), 404, "a mosaica_id naming nothing");
     let two = serde_json::json!([request[0], request[3]]);
     let resp = post_strict(&server, &two).await;
     assert_eq!(resp.status(), 409, "values naming two items");
@@ -195,7 +195,7 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
     assert_eq!(
         answer["refused"],
         serde_json::json!([
-            { "row": 1, "reason": "unknown_tessera_id" },
+            { "row": 1, "reason": "unknown_mosaica_id" },
             { "row": 2, "reason": "names_no_item" },
             { "row": 3, "reason": "names_two_items" },
             { "row": 4, "reason": "names_no_item" },
@@ -230,7 +230,7 @@ async fn a_malformed_change_request_is_refused_whole() {
         ),
         (
             "the old flat form",
-            serde_json::json!([{ "op": "suppress", "tessera_id": id.to_string() }]),
+            serde_json::json!([{ "op": "suppress", "mosaica_id": id.to_string() }]),
         ),
         (
             "no column that names items",
@@ -246,7 +246,7 @@ async fn a_malformed_change_request_is_refused_whole() {
         ),
         (
             "a bare number is what loses u64s past 2^53 in a browser",
-            serde_json::json!([{ "op": "suppress", "match": { "tessera_id": id } }]),
+            serde_json::json!([{ "op": "suppress", "match": { "mosaica_id": id } }]),
         ),
     ] {
         assert_eq!(
@@ -258,10 +258,10 @@ async fn a_malformed_change_request_is_refused_whole() {
     assert_eq!(visible(&server, &token).await, before);
 }
 
-/// A `tessera_id` never enters the WAL: the record carries the resolved entity, so a restart
+/// A `mosaica_id` never enters the WAL: the record carries the resolved entity, so a restart
 /// replays the deny to the same entity whatever key the bundle holds.
 #[tokio::test]
-async fn a_tessera_addressed_deny_replays_to_the_same_entity() {
+async fn a_mosaica_addressed_deny_replays_to_the_same_entity() {
     let tmp = TempDir::new().unwrap();
     let root = build_fixture(tmp.path(), N_ITEMS);
     let cache = tmp.path().join("cache");
@@ -272,12 +272,12 @@ async fn a_tessera_addressed_deny_replays_to_the_same_entity() {
         let auth = authorise(&server, &["0"]).await;
         let token = auth["token"].as_str().unwrap().to_string();
 
-        let id = a_drawn_tessera_id(&server, &token).await;
+        let id = a_drawn_mosaica_id(&server, &token).await;
         let before = visible(&server, &token).await;
         let resp = post_changes(
             &server,
             &serde_json::json!([
-                { "op": "suppress", "match": { "tessera_id": id.to_string() } },
+                { "op": "suppress", "match": { "mosaica_id": id.to_string() } },
             ]),
         )
         .await;

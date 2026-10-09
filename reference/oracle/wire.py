@@ -5,13 +5,13 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 1  tiles      (tile, visible, matched, served,      exactly one, first
                         highlighted)
     kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
-    kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order;
+    kind 3  points     (mosaica_id, code, ...scalars)         zero or more; concatenate in order;
                         a scalar with no value is null
     kind 4  trailer    JSON                                   exactly one, last
 
 and the `/v1/artifacts/viewport` body, the same framing with one kind and a trailer of its own:
 
-    kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  first, one with a null `tile` for the
+    kind 5  artifacts  (layer dict<u16,utf8>, mosaica_id,  first, one with a null `tile` for the
                         key, masked_count, the centroid      treed layers, absent where it holds
                         and box, content, parent_ids,        none; then exactly one per tile in
                         rung, matched, highlighted,          request order, empty where the tile
@@ -46,12 +46,12 @@ class Artifact(NamedTuple):
 
     Every field here is a fact about *this principal's* view of the artifact, and none is a fact
     about the artifact: `masked_count` is what they can see, and the geometry describes the members
-    they can see. Two principals disagreeing about one `tessera_id` is correct, and a comparator
+    they can see. Two principals disagreeing about one `mosaica_id` is correct, and a comparator
     that asserted agreement across principals would be asserting the bug.
     """
 
     layer: str
-    tessera_id: int
+    mosaica_id: int
     key: str | None
     masked_count: int
     centroid: tuple[float, float] | None
@@ -112,7 +112,7 @@ ARTIFACTS_TRAILER_KEYS = frozenset({"stream_us", "arrow_serialise_ns", "rows", "
 #: An artifacts frame's columns, in their fixed order.
 ARTIFACT_COLUMNS = (
     "layer",
-    "tessera_id",
+    "mosaica_id",
     "key",
     "masked_count",
     "centroid_x",
@@ -165,7 +165,7 @@ def decode_frames(data: bytes):
     """`(tiles, points, sub_cells, trailer)` — the full grammar-checked decode.
 
     - `tiles`: `(tile, visible, matched, served, highlighted)` per row.
-    - `points`: `(tessera_id, code)` per point, concatenated across every points frame in order.
+    - `points`: `(mosaica_id, code)` per point, concatenated across every points frame in order.
     - `sub_cells`: `(cell, count)` rows, or `None` when no kind-2 frame was present (underlay
       unrequested — distinct from `[]`, a present-but-empty frame; contracts §3.2's r12 rule).
     - `trailer`: the parsed JSON object, key set validated.
@@ -224,14 +224,14 @@ def decode_frames(data: bytes):
             )
         elif kind == FRAME_POINTS:
             for batch in _batches(payload):
-                # `tessera_id` (u64), not `handle` (u32): contracts r6 retires the per-session
+                # `mosaica_id` (u64), not `handle` (u32): contracts r6 retires the per-session
                 # handle from the viewer plane and puts the stable wire identity at the row. The
                 # oracle must not translate it — it is opaque here, and the differential compares
                 # point sets by position code precisely so that agreement never depends on either
                 # side interpreting an identifier.
                 #
                 # **`code` is absent under `point_rows: "highlight"`** — that projection is
-                # `(tessera_id, highlighted)` and nothing else (`highlight-and-hierarchy.md` §2),
+                # `(mosaica_id, highlighted)` and nothing else (`highlight-and-hierarchy.md` §2),
                 # the client joining the bits to points it already holds. The row *set* and the
                 # per-tile `served` split are identical under either projection, which is what the
                 # consistency checks below actually test, so this reads a `None` position rather
@@ -242,7 +242,7 @@ def decode_frames(data: bytes):
                     if "code" in names
                     else [None] * batch.num_rows
                 )
-                points.extend(zip(batch.column("tessera_id").to_pylist(), codes))
+                points.extend(zip(batch.column("mosaica_id").to_pylist(), codes))
         elif kind == FRAME_TRAILER:
             if trailer is not None:
                 raise ValueError("more than one trailer frame")
@@ -277,7 +277,7 @@ def decode_viewport_points(data: bytes):
     """The points stream as a `pyarrow.Table` — **every** column, not the two
     [`decode_viewport`] names.
 
-    [`decode_viewport`] projects `(tessera_id, code)` because that is all the differential
+    [`decode_viewport`] projects `(mosaica_id, code)` because that is all the differential
     compares. A declared scalar (contracts §2.6 — the fixture's `fx_key`, the handle→item join)
     arrives as an additional column, and a test that means to assert on it has to see the schema
     rather than a fixed projection. Returning the table rather than widening the tuple keeps
@@ -319,7 +319,7 @@ def _artifact_rows(payload: bytes) -> list[Artifact]:
 
     `masked_count` is what the *asking principal* can see, never the artifact's membership size,
     and the centroid and box are over the members they can see: two principals legitimately
-    disagree about one `tessera_id`. A `None` geometry is *this layer declares no such property,
+    disagree about one `mosaica_id`. A `None` geometry is *this layer declares no such property,
     or the request asked for none* — never *withheld*, since an artifact that cannot be served is
     absent whole. `layer` is dictionary-encoded; `to_pylist` resolves it.
     """
@@ -335,7 +335,7 @@ def _artifact_rows(payload: bytes) -> list[Artifact]:
                 rows.append(
                     Artifact(
                         layer=columns["layer"][row],
-                        tessera_id=columns["tessera_id"][row],
+                        mosaica_id=columns["mosaica_id"][row],
                         key=columns["key"][row],
                         masked_count=columns["masked_count"][row],
                         centroid=None if cx is None else (cx, columns["centroid_y"][row]),
@@ -418,12 +418,12 @@ def decode_viewport_artifacts(data: bytes) -> list[Artifact]:
     merged: dict[int, Artifact] = {}
     for _tile, rows in frames:
         for row in rows:
-            held = merged.get(row.tessera_id)
+            held = merged.get(row.mosaica_id)
             if held is None:
-                merged[row.tessera_id] = row._replace(tile=None)
+                merged[row.mosaica_id] = row._replace(tile=None)
                 continue
             either = lambda a, b: None if a is None or b is None else (a or b)  # noqa: E731
-            merged[row.tessera_id] = held._replace(
+            merged[row.mosaica_id] = held._replace(
                 matched=either(held.matched, row.matched),
                 highlighted=either(held.highlighted, row.highlighted),
             )

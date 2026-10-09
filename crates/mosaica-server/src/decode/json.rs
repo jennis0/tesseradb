@@ -210,18 +210,18 @@ fn fixed_column(
             Arc::new(builder.finish())
         }
         // A string, as on `/control/changes`: a JSON number loses a `u64` past 2^53 in JavaScript.
-        Fixed::TesseraId => {
+        Fixed::MosaicaId => {
             let mut builder = StringBuilder::new();
             for (row, record) in rows.iter().enumerate() {
-                match record.get("tessera_id") {
+                match record.get("mosaica_id") {
                     None | Some(Value::Null) => builder.append_null(),
                     Some(Value::String(text)) => builder.append_value(text),
                     Some(_) => {
                         return Err(refusal(
                             body_name,
                             row,
-                            "tessera_id",
-                            "is not a string; send the tessera_id as decimal digits in a string",
+                            "mosaica_id",
+                            "is not a string; send the mosaica_id as decimal digits in a string",
                         ))
                     }
                 }

@@ -187,12 +187,12 @@ async fn fixture(server: &TestServer, range: std::ops::Range<u64>, text: &str) -
 /// This route answers one artifact from its own verdict, so the number here is over the membership
 /// decision 0145 is about — and since the owner's ruling of 2026-09-18 the viewport row carries the
 /// same number, the substitution that used to stand between them having been withdrawn.
-async fn drill(server: &TestServer, terms: &[&str], tessera_id: &str) -> (u16, serde_json::Value) {
+async fn drill(server: &TestServer, terms: &[&str], mosaica_id: &str) -> (u16, serde_json::Value) {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
     let resp = server
         .client
-        .post(server.viewer_url(&format!("/v1/artifacts/{tessera_id}")))
+        .post(server.viewer_url(&format!("/v1/artifacts/{mosaica_id}")))
         .bearer_auth(token)
         .json(&json!({ "view": "s0" }))
         .send()
@@ -203,7 +203,7 @@ async fn drill(server: &TestServer, terms: &[&str], tessera_id: &str) -> (u16, s
 }
 
 fn id_of(body: &serde_json::Value, at: usize) -> String {
-    body["artifacts"][at]["tessera_id"]
+    body["artifacts"][at]["mosaica_id"]
         .as_str()
         .expect("a publication answers an identifier")
         .to_string()
@@ -501,7 +501,7 @@ async fn a_label_with_its_own_members_keeps_them() {
         assert_eq!(label.masked_count, count, "{key}");
         assert_eq!(
             label.target,
-            Some(cluster.tessera_id),
+            Some(cluster.mosaica_id),
             "{key}: the label names its cluster by the identifier this response served it under"
         );
     }
@@ -742,7 +742,7 @@ async fn a_built_label_set_with_no_members_is_served_over_its_clustering() {
     let live = id_of(&body, 0);
     let built = row(&built_rows(&server, &["0"]).await, BUILT_TOPICS, "l-0")
         .expect("the built label")
-        .tessera_id
+        .mosaica_id
         .to_string();
     for terms in [vec!["0"], vec!["1"], vec!["0", "1"]] {
         let (built_status, built_body) = drill(&server, &terms, &built).await;

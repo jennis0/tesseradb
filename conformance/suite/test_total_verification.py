@@ -101,23 +101,23 @@ def run(tmp_path_factory) -> SimpleNamespace:
         token = server.authorise([str(t) for t in PRINCIPALS[RECORDING_PRINCIPAL]])["token"]
         meta = server.meta(token)
 
-        # The establishing viewport: served ids for the battery, and the tessera→fx join every
-        # deny and every drill-down expectation needs (`tessera_id` is minted per build and never
+        # The establishing viewport: served ids for the battery, and the mosaica→fx join every
+        # deny and every drill-down expectation needs (`mosaica_id` is minted per build and never
         # persisted; `fx_key` is the identity that survives).
         raw = server.viewport(token, VIEW_ID, 3, BBOX, k=K, underlay_offset=2)
         points = wire.decode_viewport_points(raw)
-        fx_of_tessera = dict(
+        fx_of_mosaica = dict(
             zip(
-                points.column("tessera_id").to_pylist(),
+                points.column("mosaica_id").to_pylist(),
                 points.column("fx_key").to_pylist(),
             )
         )
         # Three items for the denies, and one the corpus gives no weight, so the drill-down is
         # checked against an absent rendered value.
-        served_ids = sorted(fx_of_tessera)
-        corpus = expected_items(SEED, fx_of_tessera.values())
+        served_ids = sorted(fx_of_mosaica)
+        corpus = expected_items(SEED, fx_of_mosaica.values())
         absent_id = next(
-            t for t in served_ids[3:] if corpus[fx_of_tessera[t]].fields["weight"] is None
+            t for t in served_ids[3:] if corpus[fx_of_mosaica[t]].fields["weight"] is None
         )
         item_ids = (*served_ids[:3], absent_id)
         battery = build_battery(
@@ -150,7 +150,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
         # The denies: suppress, delete, and suppress/unsuppress (module doc). Targets are battery
         # items, addressed by the unique field `id`, which is the item's `e` both in the built
         # files and in the ingest batch.
-        battery_fx = [fx_of_tessera[t] for t in item_ids]
+        battery_fx = [fx_of_mosaica[t] for t in item_ids]
         battery_expected = expected_items(SEED, battery_fx)
 
         def change(op: str, fx: int) -> None:
@@ -187,7 +187,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
             files=files,
             declaration=declaration,
             recorded=recorded,
-            fx_of_tessera=fx_of_tessera,
+            fx_of_mosaica=fx_of_mosaica,
             item_ids=item_ids,
             battery_fx=battery_fx,
             denied_fx=denied_fx,
@@ -220,7 +220,7 @@ def test_the_row_half_verifies_every_row_of_every_response(run):
         seed=SEED,
         declaration=run.declaration,
         denied_fx=run.denied_fx,
-        fx_of_tessera=run.fx_of_tessera,
+        fx_of_mosaica=run.fx_of_mosaica,
     )
     assert rows > 4_000, f"only {rows} rows verified — the battery has stopped serving points"
 
@@ -266,7 +266,7 @@ def test_the_deny_lane_is_where_the_recording_says_it_is(run):
     left no residue — its item answers 200 and the censuses that just passed did not subtract it.
     Write-path §5.4's two removal rules, kept apart on the served surface."""
     statuses = {
-        run.fx_of_tessera[q.tessera_id]: canon.payload["status"]
+        run.fx_of_mosaica[q.mosaica_id]: canon.payload["status"]
         for q, canon in run.recorded.items()
         if isinstance(q, Item)
     }
@@ -360,7 +360,7 @@ def test_negative_control_a_zero_for_an_absent_value_is_rejected(run):
     item = next(
         q
         for q in run.recorded
-        if isinstance(q, Item) and run.fx_of_tessera[q.tessera_id] == absent_fx
+        if isinstance(q, Item) and run.fx_of_mosaica[q.mosaica_id] == absent_fx
     )
     reasons = []
     check_item(
@@ -395,4 +395,4 @@ def test_the_points_tail_is_named_by_its_render_declaration(run):
     )
     table = streams_table(run.recorded[query].points)
     render_names = [c.name for c in run.declaration.render_columns()]
-    assert table.schema.names == ["tessera_id", "code", *render_names]
+    assert table.schema.names == ["mosaica_id", "code", *render_names]

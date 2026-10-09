@@ -1,15 +1,15 @@
 //! Which item each row of a batch names: the one rule the build and the service apply.
 //!
-//! A row names an item by the values that identify one: its `tessera_id` and each non-null value
+//! A row names an item by the values that identify one: its `mosaica_id` and each non-null value
 //! of a unique field. A row whose values name no item creates one, where its batch creates items.
 //! A row whose values name one item addresses it. A row whose values name two items is refused,
-//! and so is a `tessera_id` naming no live or suppressed item, since a new item is never given a
-//! `tessera_id` its caller chose. Within a batch, rows are decided against what was held before
+//! and so is a `mosaica_id` naming no live or suppressed item, since a new item is never given a
+//! `mosaica_id` its caller chose. Within a batch, rows are decided against what was held before
 //! it, so two rows naming one item, or setting one unique value, would each be decided without
 //! seeing the other: the first in row order is kept and the later ones are refused. Rows are
 //! decided in row order against the rows kept before them, so a refused row claims neither its
 //! item nor its values and never refuses a later row. Where two reasons apply to one row, the rule
-//! gives the first of: a `tessera_id` naming nothing, values naming two items, naming no item where
+//! gives the first of: a `mosaica_id` naming nothing, values naming two items, naming no item where
 //! the batch creates none, an item an earlier row names, a value an earlier row sets.
 //!
 //! A deleted item names nothing: its values may be given to a new item.
@@ -25,7 +25,7 @@
 //! access it cannot afford at 10⁹ rows.
 
 use rustc_hash::FxHashMap;
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 /// A unique field's value as its index keys it, widened to 128 bits. Two values of one field
 /// are equal exactly where their keys are.
@@ -34,7 +34,7 @@ pub type Key = u128;
 /// The values one row identifies an item by.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RowIdentity {
-    pub tessera_id: Option<TesseraId>,
+    pub mosaica_id: Option<MosaicaId>,
     /// `(declared position, key)` for each non-null value of a unique field the row carries.
     pub unique: Vec<(u16, Key)>,
 }
@@ -47,14 +47,14 @@ pub trait Holdings {
     /// `(position in keys, item)`.
     fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, Self::Error>;
 
-    /// For each `tessera_id`, the item it names.
-    fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, Self::Error>;
+    /// For each `mosaica_id`, the item it names.
+    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, Self::Error>;
 }
 
 /// What identified an item in a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Identifier {
-    TesseraId,
+    MosaicaId,
     /// The unique field at this declared position.
     Unique(u16),
 }
@@ -95,8 +95,8 @@ pub enum Refusal {
         row: usize,
         named: Vec<(Identifier, EntityId)>,
     },
-    /// A row's `tessera_id` names no live or suppressed item.
-    UnknownTesseraId { row: usize },
+    /// A row's `mosaica_id` names no live or suppressed item.
+    UnknownMosaicaId { row: usize },
     /// A row addresses an item and names none, in a batch that creates no items.
     NamesNoItem { row: usize },
     /// A later row names the item an earlier row names: `rows` is the kept row and the refused one.
@@ -111,7 +111,7 @@ impl Refusal {
     pub fn row(&self) -> usize {
         match self {
             Refusal::NamesTwo { row, .. }
-            | Refusal::UnknownTesseraId { row }
+            | Refusal::UnknownMosaicaId { row }
             | Refusal::NamesNoItem { row } => *row,
             Refusal::OneItemTwice { rows, .. } | Refusal::OneValueTwice { rows, .. } => rows[1],
         }
@@ -121,7 +121,7 @@ impl Refusal {
     /// other.
     fn stage(&self) -> u8 {
         match self {
-            Refusal::UnknownTesseraId { .. } => 0,
+            Refusal::UnknownMosaicaId { .. } => 0,
             Refusal::NamesTwo { .. } => 1,
             Refusal::NamesNoItem { .. } => 2,
             Refusal::OneItemTwice { .. } => 3,
@@ -130,7 +130,7 @@ impl Refusal {
     }
 
     pub const NAMES_TWO: &'static str = "names_two_items";
-    pub const UNKNOWN_TESSERA_ID: &'static str = "unknown_tessera_id";
+    pub const UNKNOWN_MOSAICA_ID: &'static str = "unknown_mosaica_id";
     pub const NAMES_NO_ITEM: &'static str = "names_no_item";
     pub const ONE_ITEM_TWICE: &'static str = "one_item_twice";
     pub const ONE_VALUE_TWICE: &'static str = "one_value_twice";
@@ -139,7 +139,7 @@ impl Refusal {
     pub fn kind(&self) -> Reason {
         match self {
             Refusal::NamesTwo { .. } => Reason::NamesTwo,
-            Refusal::UnknownTesseraId { .. } => Reason::UnknownTesseraId,
+            Refusal::UnknownMosaicaId { .. } => Reason::UnknownMosaicaId,
             Refusal::NamesNoItem { .. } => Reason::NamesNoItem,
             Refusal::OneItemTwice { .. } => Reason::OneItemTwice,
             Refusal::OneValueTwice { .. } => Reason::OneValueTwice,
@@ -159,7 +159,7 @@ impl Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Reason {
     NamesTwo,
-    UnknownTesseraId,
+    UnknownMosaicaId,
     NamesNoItem,
     OneItemTwice,
     OneValueTwice,
@@ -170,7 +170,7 @@ impl Reason {
     pub fn as_str(self) -> &'static str {
         match self {
             Reason::NamesTwo => Refusal::NAMES_TWO,
-            Reason::UnknownTesseraId => Refusal::UNKNOWN_TESSERA_ID,
+            Reason::UnknownMosaicaId => Refusal::UNKNOWN_MOSAICA_ID,
             Reason::NamesNoItem => Refusal::NAMES_NO_ITEM,
             Reason::OneItemTwice => Refusal::ONE_ITEM_TWICE,
             Reason::OneValueTwice => Refusal::ONE_VALUE_TWICE,
@@ -212,7 +212,7 @@ pub struct NoIdentifier;
 impl std::fmt::Display for NoIdentifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            "it has no column to name items by. Add a `tessera_id` column or a column of a \
+            "it has no column to name items by. Add a `mosaica_id` column or a column of a \
              field declared `unique`",
         )
     }
@@ -221,10 +221,10 @@ impl std::fmt::Display for NoIdentifier {
 /// Whether a batch that addresses existing items carries a column to address them by. A batch
 /// that creates items needs none: each row without an identifier is a new item.
 pub fn require_identifier(
-    tessera_id_column: bool,
+    mosaica_id_column: bool,
     unique_columns: usize,
 ) -> Result<(), NoIdentifier> {
-    match tessera_id_column || unique_columns > 0 {
+    match mosaica_id_column || unique_columns > 0 {
         true => Ok(()),
         false => Err(NoIdentifier),
     }
@@ -241,16 +241,16 @@ pub fn resolve<H: Holdings>(
     let mut found: Vec<(usize, (Identifier, EntityId))> = Vec::new();
     let mut verdicts: Vec<Option<Verdict>> = vec![None; rows.len()];
 
-    let mosaica: Vec<(usize, TesseraId)> = rows
+    let mosaica: Vec<(usize, MosaicaId)> = rows
         .iter()
         .enumerate()
-        .filter_map(|(at, row)| row.tessera_id.map(|id| (at, id)))
+        .filter_map(|(at, row)| row.mosaica_id.map(|id| (at, id)))
         .collect();
-    let ids: Vec<TesseraId> = mosaica.iter().map(|(_, id)| *id).collect();
-    for ((at, _), holder) in mosaica.iter().zip(holdings.tessera_holders(&ids)?) {
+    let ids: Vec<MosaicaId> = mosaica.iter().map(|(_, id)| *id).collect();
+    for ((at, _), holder) in mosaica.iter().zip(holdings.mosaica_holders(&ids)?) {
         match holder {
-            Some(entity) => found.push((*at, (Identifier::TesseraId, entity))),
-            None => verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownTesseraId { row: *at })),
+            Some(entity) => found.push((*at, (Identifier::MosaicaId, entity))),
+            None => verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownMosaicaId { row: *at })),
         }
     }
 
@@ -368,7 +368,7 @@ mod tests {
                 })
                 .collect())
         }
-        fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, ()> {
+        fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<EntityId>>, ()> {
             Ok(ids
                 .iter()
                 .map(|id| self.mosaica.get(&id.raw()).copied())
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn a_row_names_the_one_item_its_values_name() {
         let agreeing = RowIdentity {
-            tessera_id: Some(TesseraId::new(101)),
+            mosaica_id: Some(MosaicaId::new(101)),
             unique: vec![(0, 17), (1, 5)],
         };
         let rows = [
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn name_row_is_nothing_one_or_two() {
         assert_eq!(name_row(&[]), Named::Nothing);
-        let one = [(Identifier::TesseraId, e(3)), (Identifier::Unique(0), e(3))];
+        let one = [(Identifier::MosaicaId, e(3)), (Identifier::Unique(0), e(3))];
         assert_eq!(name_row(&one), Named::One(e(3)));
         let two = [(Identifier::Unique(0), e(3)), (Identifier::Unique(1), e(4))];
         assert_eq!(name_row(&two), Named::Two);
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn values_naming_two_items_refuse_the_row() {
         let row = RowIdentity {
-            tessera_id: Some(TesseraId::new(102)),
+            mosaica_id: Some(MosaicaId::new(102)),
             unique: vec![(0, 17)],
         };
         assert_eq!(
@@ -453,21 +453,21 @@ mod tests {
                 Verdict::Creates,
                 refused(Refusal::NamesTwo {
                     row: 1,
-                    named: vec![(Identifier::TesseraId, e(2)), (Identifier::Unique(0), e(1))],
+                    named: vec![(Identifier::MosaicaId, e(2)), (Identifier::Unique(0), e(1))],
                 })
             ]
         );
     }
 
     #[test]
-    fn a_tessera_id_naming_nothing_is_refused() {
+    fn a_mosaica_id_naming_nothing_is_refused() {
         let row = RowIdentity {
-            tessera_id: Some(TesseraId::new(7)),
+            mosaica_id: Some(MosaicaId::new(7)),
             ..RowIdentity::default()
         };
         assert_eq!(
             resolved(&[row], Batch::Creates),
-            vec![refused(Refusal::UnknownTesseraId { row: 0 })]
+            vec![refused(Refusal::UnknownMosaicaId { row: 0 })]
         );
     }
 
@@ -509,12 +509,12 @@ mod tests {
     /// given one value. Nulls are not values and never collide.
     #[test]
     fn the_first_of_two_rows_naming_one_item_or_setting_one_value_is_kept() {
-        let by_tessera = RowIdentity {
-            tessera_id: Some(TesseraId::new(101)),
+        let by_mosaica = RowIdentity {
+            mosaica_id: Some(MosaicaId::new(101)),
             ..RowIdentity::default()
         };
         assert_eq!(
-            resolved(&[by_unique(1, 5), by_tessera], Batch::Creates),
+            resolved(&[by_unique(1, 5), by_mosaica], Batch::Creates),
             vec![
                 Verdict::Names(e(1)),
                 refused(Refusal::OneItemTwice {
@@ -625,14 +625,14 @@ mod tests {
             by_unique(0, 50),
             by_unique(0, 50),
             RowIdentity {
-                tessera_id: Some(TesseraId::new(7)),
+                mosaica_id: Some(MosaicaId::new(7)),
                 ..RowIdentity::default()
             },
         ];
         let verdicts = resolved(&rows, Batch::Creates);
         assert_eq!(
             first_refusal(&verdicts),
-            Some(&Refusal::UnknownTesseraId { row: 2 })
+            Some(&Refusal::UnknownMosaicaId { row: 2 })
         );
     }
 }

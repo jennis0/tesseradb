@@ -527,7 +527,7 @@ def test_a_grouping_by_bins_that_cannot_be_served_is_refused(deployment):
 
 @pytest.fixture(scope="module")
 def identities(deployment) -> dict[int, int]:
-    """Each item's `tessera_id`, by its source id, read through `/v1/items` as `everyone`."""
+    """Each item's `mosaica_id`, by its source id, read through `/v1/items` as `everyone`."""
     token = deployment.server.authorise(list(fx.PRINCIPALS["everyone"]))["token"]
     body: dict = {"view": fx.WORLD, "fields": ["fx"], "order": "map"}
     out = {}
@@ -537,7 +537,7 @@ def identities(deployment) -> dict[int, int]:
         decoded = split_items_frames(resp.content)
         for records, _end in decoded.pages:
             for row in ipc.open_stream(io.BytesIO(records)).read_all().to_pylist():
-                out[row["fx"]] = int(row["tessera_id"])
+                out[row["fx"]] = int(row["mosaica_id"])
         if decoded.trailer["next"] is None:
             return out
         body["cursor"] = decoded.trailer["next"]
@@ -545,7 +545,7 @@ def identities(deployment) -> dict[int, int]:
 
 def sample_of(items: list[int], s: int, ids: dict[int, int]) -> list[int]:
     """The items the contract counts with sample size `s` where it samples: every item of a set
-    of at most `s`, and otherwise those whose `tessera_id` is below `floor(s * 2^64 / N)`."""
+    of at most `s`, and otherwise those whose `mosaica_id` is below `floor(s * 2^64 / N)`."""
     if len(items) <= s:
         return items
     cut = (s << 64) // len(items)

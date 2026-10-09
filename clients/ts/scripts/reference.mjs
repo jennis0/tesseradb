@@ -349,7 +349,7 @@ function eventsPage(events, elements) {
   const lines = [
     '# Events',
     '',
-    "Every event the elements fire, with its `detail`. Each is a `CustomEvent` that bubbles and is composed, so a host listens on the element or on any ancestor. A `tessera_id` crosses as a decimal string. `MosaicaEventDetails` in `@mosaicajs/components` types every `detail`.",
+    "Every event the elements fire, with its `detail`. Each is a `CustomEvent` that bubbles and is composed, so a host listens on the element or on any ancestor. A `mosaica_id` crosses as a decimal string. `MosaicaEventDetails` in `@mosaicajs/components` types every `detail`.",
     ''
   ];
   for (const [name, {detail, description}] of events) {

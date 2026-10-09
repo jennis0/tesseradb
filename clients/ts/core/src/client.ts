@@ -1052,19 +1052,19 @@ export class MosaicaClient {
   }
 
   /**
-   * `POST /v1/items/{tessera_id}`: one item's whole record. `fields` is keyed by column name, with
+   * `POST /v1/items/{mosaica_id}`: one item's whole record. `fields` is keyed by column name, with
    * a category given as its vocabulary key and a column the item has no value for left out.
    * `labels` is why this session sees the item: its labels read as one disjunction, each held term
    * among its operands and one satisfied clause of each conjunction among them, as label text, and
    * nothing else. A held term that appears only inside a conjunction is not listed. `views` and
    * `scoped` cover only the views this principal may reach.
    *
-   * @param tesseraId - The item's `tessera_id`, as a viewport result's `ids` carries it.
+   * @param mosaicaId - The item's `mosaica_id`, as a viewport result's `ids` carries it.
    * @throws {@link MosaicaError} when the server refuses: `404` both for an id that names nothing
    *   and for an item this principal may not see.
    */
-  async item(token: string, tesseraId: bigint, signal?: AbortSignal): Promise<ItemDetail> {
-    const response = await this.send(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
+  async item(token: string, mosaicaId: bigint, signal?: AbortSignal): Promise<ItemDetail> {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/items/${mosaicaId.toString()}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
       body: '{}',
@@ -1087,7 +1087,7 @@ export class MosaicaClient {
   }
 
   /**
-   * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key, masked count and geometry in a
+   * `POST /v1/artifacts/{mosaica_id}`: one artifact's layer, key, masked count and geometry in a
    * view. The count and the geometry are over the members this principal may see. Geometry is in
    * 32-bit grid units (see {@link GRID32}), and a geometry field is `null` where the layer declares
    * no such property.
@@ -1101,14 +1101,14 @@ export class MosaicaClient {
    */
   async artifact(
     token: string,
-    tesseraId: bigint,
+    mosaicaId: bigint,
     opts: {view: string; zoom?: number; signal?: AbortSignal}
   ): Promise<ArtifactDetail> {
     const body: Record<string, unknown> = {view: opts.view};
     // The depth the shape is drawn at, which the server simplifies it to. Left out, the whole
     // stored shape is served.
     if (opts.zoom !== undefined) body.zoom = Math.max(0, Math.min(16, Math.floor(opts.zoom)));
-    const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/${mosaicaId.toString()}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
       body: jsonBody(body),
@@ -1141,7 +1141,7 @@ export class MosaicaClient {
    * `POST /v1/artifacts/browse`: one page of a layer's hierarchy, read by parent and child links
    * whatever the map shows: its roots, one artifact's children with that artifact's parents, or a
    * search by name. Each row carries its masked count and, where `filters` is set, its matched
-   * count. Rows are ordered by count, highest first, then by `tessera_id`; the count is the matched
+   * count. Rows are ordered by count, highest first, then by `mosaica_id`; the count is the matched
    * one under `filters` and the masked one otherwise. Pass `next` back as `cursor` for the
    * following page; it is `null` on the last.
    *
@@ -1269,7 +1269,7 @@ export class MosaicaClient {
     const response = await this.send(`${this.opts.viewerUrl}/v1/${route}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      // A `tessera_id` travels as a decimal string.
+      // A `mosaica_id` travels as a decimal string.
       body: jsonBody(body),
       signal
     });
@@ -1288,7 +1288,7 @@ function wireGrouping(grouping: Grouping): object {
 
 /** One row of `POST /v1/artifacts/browse`, as the JSON carries it. */
 type RawBrowseRow = {
-  tessera_id: string;
+  mosaica_id: string;
   key?: string | null;
   name?: string | null;
   masked_count: number | string;
@@ -1303,7 +1303,7 @@ type RawBrowsePage = {artifacts?: RawBrowseRow[]; parents?: RawBrowseRow[]; next
 
 function browseRow(r: RawBrowseRow): BrowseRow {
   return {
-    tesseraId: BigInt(r.tessera_id),
+    mosaicaId: BigInt(r.mosaica_id),
     // Absent where the publisher supplied none and where this principal may not read the text.
     // The two look the same, as they do on the artifacts frame.
     key: r.key ?? null,

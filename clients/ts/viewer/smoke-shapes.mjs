@@ -75,9 +75,9 @@ const roster = async () =>
 const drawn = async () =>
   page.evaluate(() => {
     const p = window.__mosaicaProbe;
-    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {tesseraId: bigint; layer: string; box: number[] | null; rung: number; parentIds: bigint[]; maskedCount: bigint}[]; shapes: Map<bigint, number[][][]>}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {mosaicaId: bigint; layer: string; box: number[] | null; rung: number; parentIds: bigint[]; maskedCount: bigint}[]; shapes: Map<bigint, number[][][]>}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     const a = explorer?.store?.get('artifacts');
-    const served = (a?.served ?? []).map((x) => ({id: String(x.tesseraId), layer: x.layer, box: x.box, rung: x.rung, parents: x.parentIds.map((p) => String(p)), count: Number(x.maskedCount)}));
+    const served = (a?.served ?? []).map((x) => ({id: String(x.mosaicaId), layer: x.layer, box: x.box, rung: x.rung, parents: x.parentIds.map((p) => String(p)), count: Number(x.maskedCount)}));
     const shapes = Object.fromEntries([...(a?.shapes ?? new Map())].map(([id, parts]) => [String(id), parts]));
     // The camera's zoom, which is what `needShape` asks the vertex rule at; the probe's `depth`
     // is the request depth, which the driver picks per principal from what they can see.

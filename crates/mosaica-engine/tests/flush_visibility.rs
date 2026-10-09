@@ -141,7 +141,7 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
     assert_eq!(view.segments.len(), 2, "both segments mapped");
 
     // **The extent survives the restart, and nothing on disk carries it.** It is rebuilt from the
-    // flush segment's own `tessera_id` column by inverting the identity permutation
+    // flush segment's own `mosaica_id` column by inverting the identity permutation
     // (`SegmentExtent::rebuild`) — the segment is Morton-sorted, so §2.1's four scalars are not a
     // mapping, and this is what stands in for the file they would otherwise need.
     assert_eq!(
@@ -263,7 +263,7 @@ fn the_allocator_floor_comes_from_the_side_manifest() {
 ///
 /// **The viewport is tight around the ingested point on purpose.** At a whole-extent zoom the
 /// tile holds 10,001 visible rows against a cap of 200, so §7.2's threshold clause serves the 200
-/// smallest `tessera_id`s and one particular item is drawn only by luck — a test that asserted it
+/// smallest `mosaica_id`s and one particular item is drawn only by luck — a test that asserted it
 /// there would be asserting the identity permutation's arithmetic, not the union. Zoomed in, the
 /// tile's visible count is under the cap, `serves_all_visible` fires, and "is it drawn" is a
 /// question about the union and nothing else.
@@ -312,13 +312,13 @@ fn a_flushed_item_is_visible_in_a_viewport() {
     // §7.1's count is over the union of segments; the *point* appears only if selection spent the
     // tile's budget across the union too, and if the gather resolved a view-space row back to
     // the segment that owns it.
-    let tessera_id = reopened
-        .tessera_id_of(id)
+    let mosaica_id = reopened
+        .mosaica_id_of(id)
         .expect("the identity is computable");
     let point = out
         .points
         .iter()
-        .find(|(id, _)| *id == tessera_id)
+        .find(|(id, _)| *id == mosaica_id)
         .expect("the flushed item is drawn, not merely counted");
     // Round-trips through the flush's own quantisation: the Morton code deinterleaves back to the
     // cell the coordinates were quantised into, so a point gathered from the wrong segment's row

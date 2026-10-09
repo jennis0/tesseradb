@@ -201,7 +201,7 @@ def test_colours_chosen_in_the_map_come_up_and_are_read_in_a_later_cell(make):
     assert sorted(seen) == ["cluster_colours", "value_colours"]
 
 
-def test_colours_must_be_hex_and_clusters_named_by_tessera_id(make):
+def test_colours_must_be_hex_and_clusters_named_by_mosaica_id(make):
     m = make(token="t")
     for bad in ({"venue": {"nips": "red"}}, {"venue": "#112233"}, {"venue": {"nips": "#12345"}}):
         with pytest.raises(traitlets.TraitError):

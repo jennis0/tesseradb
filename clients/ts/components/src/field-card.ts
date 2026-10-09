@@ -743,7 +743,7 @@ export class MosaicaFieldCard extends MosaicaElement {
   /** The groupings counting `ids` of `layer` by name, leaving room for one more beside them. */
   private namedGroupings(layer: Layer, meta: Meta, ids: bigint[]): AggregateSpec['groupings'] {
     const level = this.levelOf(layer) ?? 0;
-    const rows = [...new Set(ids)].map((id) => ({tesseraId: id, rung: this.paths.rungOf(id) ?? level}));
+    const rows = [...new Set(ids)].map((id) => ({mosaicaId: id, rung: this.paths.rungOf(id) ?? level}));
     return rows.length === 0 ? [] : artifactGroupings(layer, rows, meta.selection, 'drawn').slice(0, meta.selection.maxAggregateGroupings - 1);
   }
 
@@ -1277,8 +1277,8 @@ export class MosaicaFieldCard extends MosaicaElement {
       own,
       current: () => clusterColour(s, layer, id, own),
       apply: (hex, final) => {
-        setClusterColours(s, layer, [{tesseraId: id, colour: hex}]);
-        if (final) emit(this, 'mosaica-clustercolour', {layer, changes: [{tesseraId: r.key, colour: hex}]});
+        setClusterColours(s, layer, [{mosaicaId: id, colour: hex}]);
+        if (final) emit(this, 'mosaica-clustercolour', {layer, changes: [{mosaicaId: r.key, colour: hex}]});
       },
       hold: () => holdColours(s)
     });

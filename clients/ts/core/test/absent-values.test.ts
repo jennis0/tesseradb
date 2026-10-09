@@ -74,7 +74,7 @@ function points(ids: bigint[], columns: {
   note: (string | null)[];
 }): Table {
   return new Table({
-    tessera_id: u64(ids),
+    mosaica_id: u64(ids),
     code: u64(ids.map(() => 0n)),
     heat: vectorFromArray(columns.heat, new Float32()),
     score: vectorFromArray(columns.score, new Int32()),

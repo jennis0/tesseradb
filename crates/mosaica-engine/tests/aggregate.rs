@@ -1604,7 +1604,7 @@ fn plant(
     fx: &Fx,
     name: &str,
     layout: mosaica_types::layer::ServingLayout,
-) -> BTreeMap<&'static str, mosaica_types::TesseraId> {
+) -> BTreeMap<&'static str, mosaica_types::MosaicaId> {
     let engine = &fx.engine;
     engine.register_layer(declaration(name, layout)).unwrap();
     let artifacts = planted()
@@ -1620,7 +1620,7 @@ fn plant(
         .collect()
 }
 
-fn layer(name: &str, pick: Pick<mosaica_types::TesseraId>) -> Grouping {
+fn layer(name: &str, pick: Pick<mosaica_types::MosaicaId>) -> Grouping {
     Grouping {
         by: Some(By::Layer {
             layer: name.to_string(),
@@ -1682,7 +1682,7 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
             let mut ranked: Vec<&str> = served.iter().copied().filter(|k| count(k) > 0).collect();
             ranked.sort_by(|a, b| count(b).cmp(&count(a)).then(ids[a].cmp(&ids[b])));
             let expected = |listed: &[&str],
-                            ids: &BTreeMap<&str, mosaica_types::TesseraId>,
+                            ids: &BTreeMap<&str, mosaica_types::MosaicaId>,
                             always: bool| {
                 let mut out: Vec<(String, Option<String>, u64)> = listed
                     .iter()
@@ -1739,8 +1739,8 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
                     "{name}, broad {broad}, {what}: named, the withheld one dropped"
                 );
                 let secret_id = ids["secret"];
-                let nothing = mosaica_types::TesseraId::new(secret_id.raw() ^ 0x5555);
-                let answer = |named: Vec<mosaica_types::TesseraId>| {
+                let nothing = mosaica_types::MosaicaId::new(secret_id.raw() ^ 0x5555);
+                let answer = |named: Vec<mosaica_types::MosaicaId>| {
                     let groupings = [layer(name, Pick::Named(named))];
                     let (collect, _) = respond(engine, &session, request(&groupings)).unwrap();
                     collect
@@ -2220,7 +2220,7 @@ fn artifact_cells_are_the_oracles() {
     }
 }
 
-/// Collects an artifacts read's `tessera_id` and `matched_count` columns.
+/// Collects an artifacts read's `mosaica_id` and `matched_count` columns.
 #[derive(Default)]
 struct Matched(BTreeMap<u64, u64>);
 
@@ -2239,7 +2239,7 @@ impl RecordsSink for Matched {
                 .unwrap()
                 .clone()
         };
-        let (ids, matched) = (column("tessera_id"), column("matched_count"));
+        let (ids, matched) = (column("mosaica_id"), column("matched_count"));
         for i in 0..batch.num_rows() {
             self.0.insert(ids.value(i), matched.value(i));
         }
@@ -2908,7 +2908,7 @@ fn plant_tree(
     name: &str,
     dag: bool,
     prune: bool,
-) -> BTreeMap<String, mosaica_types::TesseraId> {
+) -> BTreeMap<String, mosaica_types::MosaicaId> {
     use mosaica_types::layer::HierarchyKind;
     let mut tree = declaration(name, mosaica_types::layer::ServingLayout::ArtifactMajor);
     tree.layout = None;
@@ -2936,7 +2936,7 @@ fn plant_tree(
     nodes.into_iter().map(|(key, ..)| key).zip(ids).collect()
 }
 
-fn cut_layer(name: &str, pick: Pick<mosaica_types::TesseraId>, cut: Option<Cut>) -> Grouping {
+fn cut_layer(name: &str, pick: Pick<mosaica_types::MosaicaId>, cut: Option<Cut>) -> Grouping {
     Grouping {
         by: Some(By::Layer {
             layer: name.to_string(),

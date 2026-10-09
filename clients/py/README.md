@@ -168,7 +168,7 @@ insert it as a frame.
 
 ## How a row is named
 
-An item is named by its `tessera_id`, which the server hands back, or by its value of a unique
+An item is named by its `mosaica_id`, which the server hands back, or by its value of a unique
 attribute: one declared `unique=True`, a keyword, an integer or a timestamp, each of whose values
 at most one item holds. Every table names each row's item by the columns it carries of the unique
 attributes: the column of the attribute's name, or the one the insert's `columns=` names, as in
@@ -180,11 +180,11 @@ name on `/control/ingest`, and a row whose value names an item the database hold
 item.
 
 A row of a view's points naming no item, because its table carries no unique column or its values
-are null, is an item of its own, addressed by the `tessera_id` a pick or the ingest route hands
+are null, is an item of its own, addressed by the `mosaica_id` a pick or the ingest route hands
 back. A row of any other table must name an item: the build leaves out and reports each row that
 names none, names two items, or repeats an item or a value an earlier row of its file gave, and
 the first commit's report lists them under `refused`. A later commit's rows and members name their
-items the same way, by a `tessera_id` column and any unique columns in any mix, and its report
+items the same way, by a `mosaica_id` column and any unique columns in any mix, and its report
 lists what the server left out under `refused`.
 
 The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
@@ -233,7 +233,7 @@ db.commit()                                    # the report
 returns the report: rows accepted per view, artifacts minted, memberships joined, parts already
 present, refusals by row and part, and how long the wait for its publication took.
 
-A row names items by its `tessera_id` column and its columns of attributes declared unique. A row
+A row names items by its `mosaica_id` column and its columns of attributes declared unique. A row
 of points naming none creates an item. A row naming two items, or an item or a unique value an
 earlier row of its request names, is refused, and so is a row of values or a member naming no
 item: the server leaves it out and applies the rest. The report lists each under `refused`, a row
@@ -283,13 +283,13 @@ reports the finding and `commit()` raises with it, and neither drops or rewrites
 - a label insert whose clustering is neither held nor inserted;
 - a polygon inserted after the first commit as WKB, with both encodings: the build reads a
   `geometry` column as WKB and the publication route takes WKT text;
-- a member written as a plain value, or members carrying no `tessera_id` or unique column to name
+- a member written as a plain value, or members carrying no `mosaica_id` or unique column to name
   items by, with the struct to write instead;
 - an exclusion list longer than the publication route's bound, with the bound.
 
 `remove(items, strict=False)`, `suppress(items, strict=False)` and `unsuppress(items,
-strict=False)` take a list of `tessera_id`s, or a table (a pandas or polars data frame, a pyarrow
-table, or a dict of columns) whose columns are `tessera_id` and unique attributes, each row naming
+strict=False)` take a list of `mosaica_id`s, or a table (a pandas or polars data frame, a pyarrow
+table, or a dict of columns) whose columns are `mosaica_id` and unique attributes, each row naming
 one item. A unique attribute is read from the column an insert reads it from. A column that is
 neither is not sent, and the report names it in `ignored_columns`; a table with no other column is
 refused before anything is sent, as is a bare string, a list of dicts, or a dict whose columns
@@ -301,7 +301,7 @@ new item. `leave(layer, key, items, rank, strict=False)` shrinks a content's gen
 is the one set that may shrink, and names its items the same way.
 
 ```python
-db.remove([tessera_id])
+db.remove([mosaica_id])
 db.suppress({"entity_id": [17, 23]})
 db.unsuppress(frame[["entity_id"]])
 ```
@@ -386,12 +386,12 @@ just outside the box.
 in which each map tile carries at most `k` points and the zoom sets how many tiles there are. It
 holds fewer rows than the selection has items; `count()` is the number, and `items()` below
 reads every row. The result reads as a pyarrow table of
-`tessera_id`, `code` (the point's position on the view's grid) and the columns declared with
+`mosaica_id`, `code` (the point's position on the view's grid) and the columns declared with
 `render=True`, or only the rendered columns `point_rows` names, as in
 `point_rows=["venue"]`. A category column holds each value's key, as a dictionary column, and null for a
 value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `mosaica.counts` (`visible`, `matched`, `highlighted`
 and `served`, over the tiles the request touched), `mosaica.request` and `mosaica.trailer`.
-Each layer named in `layers` adds a `membership:<layer>` column: the `tessera_id` of the
+Each layer named in `layers` adds a `membership:<layer>` column: the `mosaica_id` of the
 annotation of that layer holding the point, or null. Beside the points it has `sub_cells`, finer
 counts that `underlay_offset` asks for, or `None`. The other keywords are sent as given: `tiles`,
 `highlight` (a second filter that marks points without changing which are drawn), `layers`,
@@ -451,7 +451,7 @@ for batch in db.items("s0", ["title"], page_rows=10_000, batches=True):
 `items(view, fields, ...)` returns every item the reader may see in a view, with the columns
 named, as one pyarrow table. The server answers a page at a time, several pages to a response,
 and ends each response with a cursor for the next. `items` asks for responses until no row
-remains and joins their pages. The columns are `tessera_id`, the fields in the order named, then
+remains and joins their pages. The columns are `mosaica_id`, the fields in the order named, then
 the `system_fields` asked for: `position` as `mosaica:x` and `mosaica:y`, in the view's
 coordinates, and `labels` as `mosaica:labels`. A unique attribute is a field like any other. A category column holds each value's key as a
 dictionary column, and a missing value is null. `filters` narrows the rows as `Selection.filter` does, and `keep_unmatched=True`
@@ -502,13 +502,13 @@ own; narrow the selection with `filter` instead. A selection holds no layer, so 
 
 ```python
 db.meta()                                     # the views, layers and columns, as a dictionary
-db.item(tessera_id)                           # one item's record: fields, labels, views
+db.item(mosaica_id)                           # one item's record: fields, labels, views
 db.categories("primary_category")             # every value of a category column, as a table
 db.categories("primary_category", prefix="cs")   # the values starting "cs", with item counts
 
 v = db.viewer(["cs.LG"])
 v.browse_artifacts("s0", "clusters/kmeans")   # a page of a layer's annotations
-v.artifact(tessera_id, "s0")                  # one annotation's record: its count and outline
+v.artifact(mosaica_id, "s0")                  # one annotation's record: its count and outline
 ```
 
 Each of these exists on `db` and on any reader, and answers as that reader.
@@ -526,7 +526,7 @@ combined. A column declared for a view group holds different values in each view
 
 `item()` returns `fields` by column name, `labels` (the item's labels that the reader also
 holds) and `views`. `lookup(view, field, values, fields=())` finds the items holding values of a
-unique attribute, as a table with their `tessera_id`s.
+unique attribute, as a table with their `mosaica_id`s.
 
 An annotation, or artifact, is one member of a layer: a cluster, a region, a node in a taxonomy.
 `browse_artifacts()` returns one page of a layer's annotations with `next` for the page after,
@@ -596,7 +596,7 @@ m
 `token` is the viewer token your deployment issued you — as any application's user holds one.
 `m.selected` in the next cell is the picked item's id, `m.region` the drawn selection with its
 counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.colour_by` or
-`m.bbox` redraws. Ids are decimal strings (a `tessera_id` is a `u64`). Marimo users: the widget's
+`m.bbox` redraws. Ids are decimal strings (a `mosaica_id` is a `u64`). Marimo users: the widget's
 `.value` re-runs a cell at every settle; `m.observe(fn, names="selected")` reacts to a pick alone.
 
 `budget` is how many points the map aims to draw on screen. Its default, `0`, leaves the map's own,

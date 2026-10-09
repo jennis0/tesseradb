@@ -96,7 +96,7 @@ impl Pattern {
 pub enum Columns {
     /// `morton`, `residual` — 8 B/row: the whole position, both halves.
     Pos,
-    /// `morton`, `residual`, `tessera_id` — 16 B/row. What the real viewport path reads, and the
+    /// `morton`, `residual`, `mosaica_id` — 16 B/row. What the real viewport path reads, and the
     /// widest set a segment carries: the `priority` column is cut (decision 0046), so the r21
     /// 18 B/row figure is historical and `full` is an alias of this set.
     PosId,
@@ -175,7 +175,7 @@ fn select(pattern: Pattern, visible: &[u32], k: usize, seed: u64) -> Vec<u32> {
 #[inline]
 fn gather(segment: &SegmentData, rows: &[u32], which: Columns) -> u64 {
     let columns = &segment.columns;
-    let ids = columns.tessera_id();
+    let ids = columns.mosaica_id();
     let cells = segment.morton.u32();
     let residuals = columns.residual();
     let mut acc = 0u64;

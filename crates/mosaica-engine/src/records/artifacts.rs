@@ -25,7 +25,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use croaring::Bitmap;
 use mosaica_types::layer::RegisteredLayer;
-use mosaica_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, MosaicaId};
 
 use super::columns::ViewFrame;
 use super::cursor::{ArtifactsCursor, Binding, LayerBinding, Route};
@@ -65,12 +65,12 @@ pub struct ArtifactsRequest<'a> {
     pub level: Option<u32>,
     /// Only artifacts naming this one among their parents. One this viewer is not served names
     /// nothing, exactly as one with no children.
-    pub parent: Option<TesseraId>,
+    pub parent: Option<MosaicaId>,
     /// Only artifacts whose key, or first served text content, contains this, case-insensitively.
     pub q: Option<&'a str>,
     /// Only the artifacts these identifiers name. One this viewer is not served, or that names
     /// nothing in the layer, has no row, and the two are one answer.
-    pub ids: Option<&'a [TesseraId]>,
+    pub ids: Option<&'a [MosaicaId]>,
     /// Only artifacts with a visible member matching this, and a `matched_count` column.
     pub filter: Option<FilterExpr>,
     /// Every served artifact under `filter`, those with no matching member included.
@@ -200,7 +200,7 @@ struct ArtifactsPager<'r> {
 /// One served artifact's row.
 #[derive(Default)]
 struct Row {
-    tessera_id: u64,
+    mosaica_id: u64,
     key: Option<String>,
     level: u32,
     parents: Vec<u64>,
@@ -218,7 +218,7 @@ struct Row {
 /// supplied content with any authored shape taken out of it.
 struct Served {
     entity: EntityId,
-    tessera_id: u64,
+    mosaica_id: u64,
     masked_count: u64,
     supplied: Supplied,
 }
@@ -266,10 +266,10 @@ impl Scope<'_> {
         };
         let supplied =
             read.content(self.engine, self.generation, self.layer, ordinal, entity, rank)?;
-        let tessera_id = self.tessera_id(entity)?;
+        let mosaica_id = self.mosaica_id(entity)?;
         Some(Served {
             entity,
-            tessera_id,
+            mosaica_id,
             masked_count,
             supplied,
         })
@@ -282,7 +282,7 @@ impl Scope<'_> {
             .expect("a level asked about is read")
     }
 
-    fn tessera_id(&self, entity: EntityId) -> Option<u64> {
+    fn mosaica_id(&self, entity: EntityId) -> Option<u64> {
         self.engine
             .identity_key
             .forward(self.shard, entity)
@@ -324,7 +324,7 @@ impl Scope<'_> {
     /// The identifier of the artifact `attachment` names, where it is served.
     fn target(&self, attachment: &mosaica_lifecycle::membership::Attachment) -> Option<u64> {
         self.served_target(attachment)?;
-        self.tessera_id(attachment.entity)
+        self.mosaica_id(attachment.entity)
     }
 
     /// Whether a served artifact passes `parent` and `q`: the narrowings that decide which served
@@ -497,7 +497,7 @@ impl Engine {
         generation: &Generation,
         layer: &RegisteredLayer,
         level: Option<u32>,
-        ids: &[TesseraId],
+        ids: &[MosaicaId],
     ) -> Vec<(u32, u32, EntityId)> {
         let shard = generation.bundle.manifest.identity.shard_id;
         let mut named: Vec<(u32, u32, EntityId)> = ids
@@ -519,7 +519,7 @@ impl Engine {
 }
 
 /// The digest an artifacts cursor under `ids` is bound to: the identifiers, sorted.
-fn ids_digest(ids: &[TesseraId]) -> [u8; 32] {
+fn ids_digest(ids: &[MosaicaId]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut sorted: Vec<u64> = ids.iter().map(|id| id.raw()).collect();
     sorted.sort_unstable();
@@ -754,7 +754,7 @@ impl ArtifactsPager<'_> {
     fn row(&self, scope: &Scope<'_>, level: u32, ordinal: u32, served: Served) -> Result<Row> {
         let read = scope.level(level);
         let mut row = Row {
-            tessera_id: served.tessera_id,
+            mosaica_id: served.mosaica_id,
             level,
             masked_count: served.masked_count,
             matched: scope.matched(level, ordinal),
@@ -777,7 +777,7 @@ impl ArtifactsPager<'_> {
                         .rows
                         .parents(ordinal)
                         .iter()
-                        .filter_map(|p| Some(scope.served(p.level, p.ordinal)?.tessera_id))
+                        .filter_map(|p| Some(scope.served(p.level, p.ordinal)?.mosaica_id))
                         .collect();
                     ids.sort_unstable();
                     ids.dedup();
@@ -858,7 +858,7 @@ impl ArtifactsPager<'_> {
         bytes
     }
 
-    /// The page's rows as one batch: `tessera_id`, the properties in the order named, then
+    /// The page's rows as one batch: `mosaica_id`, the properties in the order named, then
     /// `matched_count` under a filter.
     fn batch(&self, rows: &[Row]) -> Result<RecordBatch> {
         let mut fields: Vec<Field> = Vec::new();
@@ -868,8 +868,8 @@ impl ArtifactsPager<'_> {
             arrays.push(array);
         };
         push(
-            "tessera_id",
-            Arc::new(rows.iter().map(|r| r.tessera_id).collect::<arrow::array::UInt64Array>()),
+            "mosaica_id",
+            Arc::new(rows.iter().map(|r| r.mosaica_id).collect::<arrow::array::UInt64Array>()),
             false,
         );
         let f64s = |at: fn(&Row) -> Option<f64>| -> ArrayRef {
@@ -968,7 +968,7 @@ fn locate_in(
     engine: &Engine,
     generation: &Generation,
     layer: &RegisteredLayer,
-    id: TesseraId,
+    id: MosaicaId,
 ) -> Option<(u32, u32, EntityId)> {
     let (shard, entity) = engine.identity_key.invert(id);
     if shard != generation.bundle.manifest.identity.shard_id {

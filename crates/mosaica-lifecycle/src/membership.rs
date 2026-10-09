@@ -240,14 +240,14 @@ impl ArtifactShapes {
 
 /// One artifact as a caller offers it, before the engine has given it an ordinal or an entity.
 ///
-/// **Members are entities, resolved at admission.** A caller names them by `tessera_id` and the
+/// **Members are entities, resolved at admission.** A caller names them by `mosaica_id` and the
 /// control plane inverts them once, at the boundary, exactly as `/control/changes` does — so no
 /// blinded identifier reaches durable state (I10).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingArtifact {
     /// The caller's own name for this artifact. **Effectively mandatory for a layer another
     /// layer's edges point into**: an edge names its target, and at publish time the caller holds
-    /// no `tessera_id` for it.
+    /// no `mosaica_id` for it.
     pub key: Option<String>,
     /// The view this artifact belongs to, on a layer scoped to a group — **part of the identity,
     /// required at publish and never a fillable part** (`ingest.md` §1.5, `views.md` §3.5): keys
@@ -279,7 +279,7 @@ pub struct IncomingArtifact {
     /// The artifact this one exists only as an attachment to — a toponymy label on a cluster.
     ///
     /// **Named by the target's own key, because an ordinal is never disclosed.** A response
-    /// carries a `tessera_id` and never a position in a dense level (C8), so the caller holds no
+    /// carries a `mosaica_id` and never a position in a dense level (C8), so the caller holds no
     /// address for the target beyond the key they published it under.
     pub attached_to: Option<IncomingAttachment>,
     /// The parent artifacts in a hierarchical layer, each named by the parent's own key. Empty at
@@ -591,7 +591,7 @@ impl IncomingGrowth {
 /// What one fold's deletions took from one artifact — a row of the fold's report.
 ///
 /// **Addressed by the caller's own key where they supplied one**, because that is the name they can
-/// act on: a `tessera_id` is what a *viewer* holds, and the ordinal is an internal address that no
+/// act on: a `mosaica_id` is what a *viewer* holds, and the ordinal is an internal address that no
 /// response carries. A caller who published without a key gets the address and can still find the
 /// artifact by it on the control plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -922,11 +922,11 @@ type KeyIndex = BTreeMap<String, BTreeMap<u32, BTreeMap<Option<String>, BTreeMap
 /// One artifact's durable state, as the registry holds it.
 #[derive(Debug, Clone)]
 pub struct ArtifactRecord {
-    /// This artifact's own entity — its address for the deny lane, and what `tessera_id` blinds.
+    /// This artifact's own entity — its address for the deny lane, and what `mosaica_id` blinds.
     pub entity: EntityId,
     /// The caller's own key, if they supplied one. **Effectively mandatory for a layer another
     /// layer's edges point into**: an edge names its target, and at publish time the caller holds
-    /// no `tessera_id` for it.
+    /// no `mosaica_id` for it.
     pub key: Option<String>,
     /// The view this artifact belongs to, on a layer scoped to a group (`views.md` §3.5), and
     /// `None` on an entity-scoped layer. Part of the key's uniqueness scope: `ArtifactStore::keys`
@@ -1916,7 +1916,7 @@ impl ArtifactStore {
     /// never leaves, so it never needs putting back.
     ///
     /// **An ordinal naming no record adds nothing.** That is a hole — an artifact a fold retired —
-    /// and creating a record here would resurrect it under an identity a caller's `tessera_id`
+    /// and creating a record here would resurrect it under an identity a caller's `mosaica_id`
     /// still names. Nothing is counted for it either: the state is reachable and legitimate (a
     /// growth still in the log for an artifact this fold removed), so alarming on it would alarm on
     /// every restart after such a fold.
@@ -2590,7 +2590,7 @@ impl ArtifactStore {
                 .map(|(ordinal, slot)| {
                     // An empty blob is a hole: an artifact a fold or a view drop removed. It is
                     // written rather than packed around, because an ordinal is identity and closing
-                    // the gap would hand every later artifact its neighbour's `tessera_id`.
+                    // the gap would hand every later artifact its neighbour's `mosaica_id`.
                     let Some(record) = slot else {
                         return Vec::new();
                     };
@@ -2914,7 +2914,7 @@ impl ArtifactStore {
     /// bug rather than an untidiness: a level seeded only from the blobs that decoded ends *shorter*
     /// than the extent that was written, [`Self::next_ordinal`] regresses onto the hole, and the
     /// next publication is handed the ordinal — and therefore the entity, which is a function of it
-    /// — that the artifact this fold deleted was published under. Two artifacts, one `tessera_id`,
+    /// — that the artifact this fold deleted was published under. Two artifacts, one `mosaica_id`,
     /// with the second answering for the first.
     ///
     /// The extent's own `count` is the authority on how far a level reaches, so it is carried here

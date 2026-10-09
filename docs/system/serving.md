@@ -76,7 +76,7 @@ points before the rest of the answer has been computed.
 |---|---|---|
 | counts | visible, matched, served and highlighted counts for each tile that has anything visible; a tile the request named with nothing visible carries no row | exactly one, sent first |
 | density | a count for each of a tile's [finer cells](queries.md#the-viewport), where a request asked for them | one, only when asked for |
-| points | a chunk of the matched points from one or more tiles; where the request names layers, each point carries the `tessera_id` of its artifact in each, or a null | zero or more |
+| points | a chunk of the matched points from one or more tiles; where the request names layers, each point carries the `mosaica_id` of its artifact in each, or a null | zero or more |
 | trailer | how many points were served in total, marking the response complete | exactly one, sent last |
 
 A viewport response carries no artifacts. They have a route of their own, below.
@@ -295,7 +295,7 @@ Whether a held answer may still be shown at all depends on the identity key, car
 `x-mosaica-identity-key`. It is derived from the session's authorisation data, its visible set
 and the view, and changes when any of them does. The visible set's identity is keyed by the
 bundle, so the identity key also changes when the bundle is rebuilt, which gives every item a new
-`tessera_id`. It is not the key of the `tessera_id` permutation.
+`mosaica_id`. It is not the key of the `mosaica_id` permutation.
 
 Whether a held answer may still be declared to the server as something it can skip resending
 depends on the content key, carried as an `ETag`. It changes whenever the corpus has moved in a

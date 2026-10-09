@@ -139,7 +139,7 @@ fn publish(
     fx: &Fixture,
     engine: &Engine,
     sources: std::ops::Range<u64>,
-) -> mosaica_types::TesseraId {
+) -> mosaica_types::MosaicaId {
     engine.register_layer(declaration("clusters/a")).unwrap();
     let ids = engine
         .publish_artifacts(
@@ -1027,7 +1027,7 @@ fn ingest_into_view(
 
 /// **A join that restates a membership the artifact already holds appends nothing.**
 ///
-/// A second view of one item is a join: it names the item by its `tessera_id`, and its membership
+/// A second view of one item is a join: it names the item by its `mosaica_id`, and its membership
 /// column names the artifact that entity is already in. The growth that would be
 /// written for it adds no member, so it changes nothing — and a record that changes nothing still
 /// pins the log at itself until a fold rewrites the level, which is the one thing a pin costs.

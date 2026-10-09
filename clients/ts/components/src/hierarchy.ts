@@ -353,8 +353,8 @@ export class MosaicaHierarchy extends MosaicaElement {
 
   private node(row: BrowseRow, parentPath: string): Node {
     const name = artifactName(row);
-    if (name !== null) this.names.set(row.tesseraId, name);
-    return {row, path: `${parentPath}/${row.tesseraId}`, children: null, next: null, loading: false, refusal: null};
+    if (name !== null) this.names.set(row.mosaicaId, name);
+    return {row, path: `${parentPath}/${row.mosaicaId}`, children: null, next: null, loading: false, refusal: null};
   }
 
   /** What to call an artifact: its name where the walk has met one. */
@@ -367,7 +367,7 @@ export class MosaicaHierarchy extends MosaicaElement {
    * unchanged, so reopening it fetches nothing.
    */
   private async expand(node: Node, more = false): Promise<void> {
-    const request = this.page({parent: node.row.tesseraId, ...(more && node.next ? {cursor: node.next} : {})});
+    const request = this.page({parent: node.row.mosaicaId, ...(more && node.next ? {cursor: node.next} : {})});
     if (!request) return;
     const epoch = this.epoch;
     node.loading = true;
@@ -490,20 +490,20 @@ export class MosaicaHierarchy extends MosaicaElement {
 
   private renderNode(node: Node, depth: number, layer: Layer, filtered: boolean): unknown {
     const open = this.open.has(node.path);
-    const clauses = this.clausesOn(node.row.tesseraId);
+    const clauses = this.clausesOn(node.row.mosaicaId);
     const name = artifactName(node.row);
     // A `dag` node is drawn under each served parent; the row names the others.
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));
     const drawn = !isFilterLayer(layer);
     return html`<li>
-      <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.tesseraId)} data-clause=${clauses.length > 0 ? clauses.sort().join(' ') : nothing}>
+      <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.mosaicaId)} data-clause=${clauses.length > 0 ? clauses.sort().join(' ') : nothing}>
         <button part="expander" type="button" data-leaf=${node.row.childCount === 0 ? '' : nothing}
           aria-expanded=${open ? 'true' : 'false'}
           aria-label=${open ? `Collapse ${name ?? 'row'}` : `Expand ${name ?? 'row'}`}
           @click=${() => this.toggle(node)}>${icon(open ? 'chev' : 'chevr', 12)}</button>
         <button part="name" type="button" data-unnamed=${name === null ? '' : nothing}
           title="Highlight"
-          @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${name ?? UNNAMED}</button>
+          @click=${() => this.apply(node.row.mosaicaId, 'highlight')}>${name ?? UNNAMED}</button>
         <span part="counts">
           ${filtered && node.row.matchedCount !== null
             ? html`<mosaica-count part="count-matched" .masked=${masked(node.row.matchedCount)}></mosaica-count>/`
@@ -511,18 +511,18 @@ export class MosaicaHierarchy extends MosaicaElement {
         </span>
         ${clauses.map(
           (verb) => html`<button part="dismiss" type="button" data-verb=${verb} aria-label=${verb === 'highlight' ? `Stop highlighting ${name ?? UNNAMED}` : `Stop filtering to ${name ?? UNNAMED}`}
-            title=${verb === 'highlight' ? 'Stop highlighting' : 'Stop filtering'} @click=${() => this.apply(node.row.tesseraId, verb)}>${icon('close', 12)}</button>`
+            title=${verb === 'highlight' ? 'Stop highlighting' : 'Stop filtering'} @click=${() => this.apply(node.row.mosaicaId, verb)}>${icon('close', 12)}</button>`
         )}
         <span part="actions">
           <button part="highlight" type="button" data-verb="highlight" aria-pressed=${clauses.includes('highlight') ? 'true' : 'false'}
-            title="Highlight this" @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${icon('highlight', 13)}</button>
+            title="Highlight this" @click=${() => this.apply(node.row.mosaicaId, 'highlight')}>${icon('highlight', 13)}</button>
           <button part="filter" type="button" data-verb="filter" aria-pressed=${clauses.includes('filter') ? 'true' : 'false'}
-            title="Filter to this" @click=${() => this.apply(node.row.tesseraId, 'filter')}>${icon('filter', 13)}</button>
+            title="Filter to this" @click=${() => this.apply(node.row.mosaicaId, 'filter')}>${icon('filter', 13)}</button>
           ${
             // A filter layer draws nothing, so there is nothing to fit to.
             drawn
               ? html`<button part="fit" type="button" title="Fit the map to it"
-                  @click=${() => emit(this, 'mosaica-artifactfit', {id: idString(node.row.tesseraId)})}>${icon('fit', 13)}</button>`
+                  @click=${() => emit(this, 'mosaica-artifactfit', {id: idString(node.row.mosaicaId)})}>${icon('fit', 13)}</button>`
               : nothing
           }
         </span>

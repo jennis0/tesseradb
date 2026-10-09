@@ -521,7 +521,7 @@ fn check_one(fx: &Fixture, engine: &Engine, principal: &Principal, what: &str) -
                         assert_eq!(artifact.derived.centroid, walked.1, "{at}: the centroid");
                         assert_eq!(artifact.derived.bbox, walked.2, "{at}: the box");
                         let by_id = engine
-                            .artifact(&session, artifact.tessera_id, "s0", None)
+                            .artifact(&session, artifact.mosaica_id, "s0", None)
                             .unwrap()
                             .unwrap_or_else(|| panic!("{at}: the identifier route withholds it"));
                         assert_eq!(

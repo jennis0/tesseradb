@@ -290,7 +290,7 @@ def _no_points():
     """The points table of an answer that served none: the two columns every answer has."""
     import pyarrow as pa
 
-    return pa.table({"tessera_id": pa.array([], pa.uint64()), "code": pa.array([], pa.uint64())})
+    return pa.table({"mosaica_id": pa.array([], pa.uint64()), "code": pa.array([], pa.uint64())})
 
 
 def _no_artifacts():
@@ -302,7 +302,7 @@ def _no_artifacts():
     return pa.schema(
         [
             pa.field("layer", pa.dictionary(pa.uint16(), pa.string()), nullable=False),
-            pa.field("tessera_id", pa.uint64(), nullable=False),
+            pa.field("mosaica_id", pa.uint64(), nullable=False),
             ("key", pa.string()),
             pa.field("masked_count", pa.uint64(), nullable=False),
             ("centroid_x", pa.float64()),
@@ -388,9 +388,9 @@ class Sample:
     """The points a map draws at one zoom.
 
     It reads as its points table: `num_rows`, `column()`, `schema` and `to_pandas()` all reach
-    it, and `points` names it. The table holds `tessera_id`, `code` (the point's position, on a
+    it, and `points` names it. The table holds `mosaica_id`, `code` (the point's position, on a
     grid of 2^32 steps per axis across the view), every column declared with `render=True`, and a
-    `membership:<layer>` column for each layer the sample named: the `tessera_id` of the
+    `membership:<layer>` column for each layer the sample named: the `mosaica_id` of the
     annotation of that layer holding the point, or null. `Viewer.artifacts` with `ids=` reads
     those annotations, and `Viewer.viewport_artifacts` the annotations of each map tile.
 
@@ -591,9 +591,9 @@ class Selection:
         - `underlay_offset`: also count the items in tiles this many levels finer than `zoom`,
           returned as `sub_cells`.
         - `point_rows`: which columns each point carries. A list of rendered columns returns
-          `tessera_id`, `code` and those columns only, and the server reads no other; `[]` is
+          `mosaica_id`, `code` and those columns only, and the server reads no other; `[]` is
           position alone. Leave it out, or pass `"full"`, for every rendered column. `"highlight"`
-          returns each point as `tessera_id` and `highlighted` only, which is enough to update a
+          returns each point as `mosaica_id` and `highlighted` only, which is enough to update a
           highlight on points already held. Fetch the rest of an item with `items`.
         - `pin`: the `x-mosaica-pin` value from an earlier answer. The answer then says whether
           the data has changed since.
@@ -897,10 +897,10 @@ class Viewer:
         """
         return json.loads(self._request("GET", "/v1/meta", None))
 
-    def item(self, tessera_id: Any) -> dict:
+    def item(self, mosaica_id: Any) -> dict:
         """One item's full record, if this reader may see it.
 
-        - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
+        - `mosaica_id`: the item's id, as a sample's `mosaica_id` column or a map pick gives it.
 
         The record has `fields` (the item's values by column name, missing where it has none),
         `labels` (why this reader sees the item: its labels read as one disjunction, each held term
@@ -909,9 +909,9 @@ class Viewer:
         (the views this reader can find it in). An item this reader may not see is refused exactly as one that
         does not exist.
 
-            v.item(sample.column("tessera_id")[0].as_py())
+            v.item(sample.column("mosaica_id")[0].as_py())
         """
-        return json.loads(self._request("POST", f"/v1/items/{tessera_id}", {}))
+        return json.loads(self._request("POST", f"/v1/items/{mosaica_id}", {}))
 
     def items(
         self,
@@ -938,7 +938,7 @@ class Viewer:
 
         - `view`: the view to read, as `meta()` names it. An item with no position in it is not
           returned.
-        - `fields`: the declared columns to return, in this order. `[]` returns `tessera_id`
+        - `fields`: the declared columns to return, in this order. `[]` returns `mosaica_id`
           alone. A column declared for a view group, read under a view outside that group, is
           named `"<column>@<key>"` to say which of the group's views to read it in.
         - `system_fields`: any of `"position"`, the columns `mosaica:x` and `mosaica:y` in the
@@ -962,7 +962,7 @@ class Viewer:
         Each of these is sent only when given, so the server's own setting applies otherwise.
         `count` goes on the first request only, which is where the server takes it.
 
-        The columns are `tessera_id`, the fields in the order named, the system fields in the
+        The columns are `mosaica_id`, the fields in the order named, the system fields in the
         order named, then `mosaica:matched`. A column is present even where no item has a value,
         and a missing value is null. A category column holds each value's key, as a dictionary
         column. The table's schema metadata `mosaica.head` is the first response's head as JSON:
@@ -993,7 +993,7 @@ class Viewer:
 
     def lookup(self, view: str, field: str, values: Sequence[Any], fields: Sequence[str] = ()):
         """The items in `view` this reader may see that hold `values` in the unique column
-        `field`, as a pyarrow table with `tessera_id`, `field` and `fields`.
+        `field`, as a pyarrow table with `mosaica_id`, `field` and `fields`.
 
         A read of `items` filtered with `in`, which the column's unique index answers. A value no
         visible item holds has no row, whether nobody holds it or the holder is hidden from this
@@ -1037,10 +1037,10 @@ class Viewer:
           `"content"`, `"centroid"`, `"box"`, `"shape"` and `"slot"` (its palette slot under
           `palette_size`), in the order wanted.
         - `level`: only the artifacts at this level of a levelled layer.
-        - `parent`: only the children of this artifact, by its `tessera_id`.
+        - `parent`: only the children of this artifact, by its `mosaica_id`.
         - `q`: only the artifacts whose key or first text contains this, ignoring case. It cannot
           be combined with `parent`.
-        - `ids`: only the artifacts these `tessera_id`s name, such as the values of a sample's
+        - `ids`: only the artifacts these `mosaica_id`s name, such as the values of a sample's
           `membership:<layer>` column. One this reader is not served has no row, as one naming
           nothing does.
         - `filters`: only the artifacts with an item this reader may see that matches. Each row
@@ -1125,7 +1125,7 @@ class Viewer:
         - `on_tile`: a function called with each tile's rows as a pyarrow table, as they arrive.
 
         Every option is sent only when given, so the server's own setting applies otherwise. The
-        columns are `layer`, `tessera_id`, `key`, `masked_count`, `centroid_x`, `centroid_y`,
+        columns are `layer`, `mosaica_id`, `key`, `masked_count`, `centroid_x`, `centroid_y`,
         `box_min_x`, `box_min_y`, `box_max_x`, `box_max_y` (positions on the grid of 2^32 steps
         per axis that a sample's `code` uses), `content`, `parent_ids`, `rung` (the level),
         `matched`, `highlighted`, `target`, `tile` and `slot`. The schema metadata `mosaica.trailer` is
@@ -1202,7 +1202,7 @@ class Viewer:
         - `groupings`: one dictionary per table. `{}` is the size of the set. `"by"` groups the
           items by a category field, `{"field": name, "top": n}` or `{"field": name, "values":
           [key, ...]}`, or by the artifacts of one level of a layer, `{"layer": name, "level": k,
-          "top": n}` or `{"layer": name, "level": k, "artifacts": [tessera_id, ...]}`. On a
+          "top": n}` or `{"layer": name, "level": k, "artifacts": [mosaica_id, ...]}`. On a
           `nested` or `dag` layer, `top` needs `"cut": {"zoom": z, "bbox": [x0, y0, x1, y1],
           "budget": b}`, the map's tile depth (0 to 16), box and cluster budget (optional): the
           artifacts listed are those the map draws there, and where the layer was declared with
@@ -1218,7 +1218,7 @@ class Viewer:
           filters, in at most `n` bins. Sending a first answer's first `lower` and last `upper`
           back as the range, with the number of bins it returned, gives the same edges, except
           for a timestamp binned by months or years. With `"sample": s`, a set of more than `s`
-          items is counted over its items whose `tessera_id` is below one cut, `s / total` of the
+          items is counted over its items whose `mosaica_id` is below one cut, `s / total` of the
           identity range, about `s` of them, each count scaled to the set's `total`; default edges
           are the exact ones still. A set of at most `s` items is counted exactly, and so is one
           where `s` is more than about one item in 64 of the set. A histogram's table is always
@@ -1237,7 +1237,7 @@ class Viewer:
           and `lift`.
 
         A table's columns are, where they apply: `group` (`listed`, `rest` or `none`), `key` (a
-        category's key or an artifact's `tessera_id`), `title` (a category's title, or an artifact's
+        category's key or an artifact's `mosaica_id`), `title` (a category's title, or an artifact's
         name as `browse_artifacts` gives it), `slot` (with a layer, an artifact's palette slot
         under its `palette_size`, null without one and on the `rest` and `none` rows), `lower`
         and `upper` (a bin's edges:
@@ -1468,7 +1468,7 @@ class Viewer:
 
         - `view`, `layer`: the view and the layer to list.
         - `level`: list only this level of a layered hierarchy.
-        - `parent`: list the children of this annotation, by its `tessera_id`. Without it, and
+        - `parent`: list the children of this annotation, by its `mosaica_id`. Without it, and
           without `q`, the list is the top-level annotations.
         - `q`: list the annotations whose key or name contains this, ignoring case. It cannot
           be combined with `parent`.
@@ -1506,13 +1506,13 @@ class Viewer:
 
     def artifact(
         self,
-        tessera_id: Any,
+        mosaica_id: Any,
         view: str,
         zoom: Optional[int] = None,
     ) -> dict:
         """One annotation's record, if this reader may see it.
 
-        - `tessera_id`: the annotation's id, as `browse_artifacts` or a sample's `artifacts`
+        - `mosaica_id`: the annotation's id, as `browse_artifacts` or a sample's `artifacts`
           table gives it.
         - `view`: the view to read it in.
         - `zoom`: the zoom level to simplify its outline for. Without it the full outline comes
@@ -1522,12 +1522,12 @@ class Viewer:
         its layer computes them, `centroid`, `box` and `shape` in the view's grid coordinates,
         computed over those items alone. A property the layer does not compute is missing.
 
-            v.artifact(page["artifacts"][0]["tessera_id"], "papers")
+            v.artifact(page["artifacts"][0]["mosaica_id"], "papers")
         """
         request: dict = {"view": view}
         if zoom is not None:
             request["zoom"] = int(zoom)
-        return json.loads(self._request("POST", f"/v1/artifacts/{tessera_id}", request))
+        return json.loads(self._request("POST", f"/v1/artifacts/{mosaica_id}", request))
 
     def _views(self) -> list[dict]:
         return list(self.meta().get("views") or [])

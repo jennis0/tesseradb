@@ -284,7 +284,7 @@ fn source_of_entity(out: &Path) -> HashMap<u32, u64> {
         .collect()
 }
 
-/// The row → source id map: through `tessera_id` and the identity key's inverse to the entity, and
+/// The row → source id map: through `mosaica_id` and the identity key's inverse to the entity, and
 /// through the unique `id` column from there. **A row is not its entity and an entity is not its
 /// source id** (§11.1), so the values a row carries can only be checked against the item they
 /// belong to by going back through both.
@@ -292,10 +292,10 @@ fn source_of_row(out: &Path, columns: &ColumnsRef) -> Vec<u64> {
     let key = IdentityKey::from_hex(TEST_KEY_HEX).unwrap();
     let sources = source_of_entity(out);
     columns
-        .tessera_id()
+        .mosaica_id()
         .iter()
         .map(|&id| {
-            let (_, entity) = key.invert(mosaica_types::TesseraId::new(id));
+            let (_, entity) = key.invert(mosaica_types::MosaicaId::new(id));
             sources[&(entity.raw() as u32)]
         })
         .collect()

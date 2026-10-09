@@ -11,7 +11,7 @@ function client(): MosaicaClient {
 }
 
 const row = (id: string, masked: number, extra: Record<string, unknown> = {}) => ({
-  tessera_id: id,
+  mosaica_id: id,
   key: `k-${id}`,
   name: `n-${id}`,
   masked_count: masked,
@@ -43,7 +43,7 @@ describe('browse', () => {
     // `view` is required: a masked count is an intersection in row space, which is per view.
     expect(JSON.parse(init.body)).toEqual({view: 's0', layer: 'mesh/descriptors'});
     // A `u64` that a JSON number would round; the wire sends it as a string, and it is kept.
-    expect(page.artifacts[0]!.tesseraId).toBe(18_064_038_920_082_622_571n);
+    expect(page.artifacts[0]!.mosaicaId).toBe(18_064_038_920_082_622_571n);
     expect(page.artifacts[0]!.maskedCount).toBe(393_741n);
     // No filter was sent, so there is no matched count, rather than zero; no palette size, no slot.
     expect(page.artifacts[0]!.matchedCount).toBeNull();
@@ -62,7 +62,7 @@ describe('browse', () => {
       limit: 50,
       cursor: 'c1'
     });
-    expect(page.parents.map((p) => [p.tesseraId, p.childCount])).toEqual([[3n, 5]]);
+    expect(page.parents.map((p) => [p.mosaicaId, p.childCount])).toEqual([[3n, 5]]);
     expect(page.artifacts[0]!.childCount).toBe(0);
     expect(page.next).toBe('c2');
   });

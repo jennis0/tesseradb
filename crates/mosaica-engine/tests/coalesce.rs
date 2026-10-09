@@ -413,7 +413,7 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
         ingested
             .iter()
             .map(|entity| {
-                let id = engine.tessera_id_of(*entity).expect("an opaque id");
+                let id = engine.mosaica_id_of(*entity).expect("an opaque id");
                 engine
                     .item(&session, id)
                     .expect("the drill-down answers")
@@ -617,7 +617,7 @@ fn answers(engine: &Engine, bindings: &[(EntityId, u64)]) -> Answers {
                 bindings
                     .iter()
                     .map(|(entity, _)| {
-                        let id = engine.tessera_id_of(*entity).expect("an opaque id");
+                        let id = engine.mosaica_id_of(*entity).expect("an opaque id");
                         engine
                             .item(session, id)
                             .expect("the drill-down answers")
@@ -792,7 +792,7 @@ fn interleaved_answers(engine: &Engine, entities: &[EntityId]) -> Interleaved {
     let fields = entities
         .iter()
         .map(|entity| {
-            let id = engine.tessera_id_of(*entity).expect("an opaque id");
+            let id = engine.mosaica_id_of(*entity).expect("an opaque id");
             let item = engine.item(&session, id).expect("the drill-down answers");
             let mut fields: Vec<_> = item
                 .expect("the item is served")
