@@ -7,7 +7,7 @@ every change to the components — so a developer installing from a checkout nee
 hook is what runs it.
 
 What it runs, in ``clients/ts``: ``npm ci`` when ``node_modules`` is absent or older than the
-lockfile, then ``npm run bundle -w @mosaica/components``. ``npm ci`` is skipped when the install
+lockfile, then ``npm run bundle -w @mosaicajs/components``. ``npm ci`` is skipped when the install
 is current because it deletes and recreates ``node_modules`` every time — tens of seconds and
 hundreds of megabytes — and the gate runs this hook on every pass; the lockfile's mtime against
 ``node_modules/.package-lock.json`` is npm's own currency test.
@@ -50,8 +50,8 @@ def build_bundle(ts: Path, static: Path, *, run=subprocess.run, log=print) -> li
     if not npm_install_is_current(ts):
         log(f"mosaica: npm ci in {ts}")
         run([npm, "ci"], cwd=ts, check=True)
-    log(f"mosaica: npm run bundle -w @mosaica/components in {ts}")
-    run([npm, "run", "bundle", "-w", "@mosaica/components"], cwd=ts, check=True)
+    log(f"mosaica: npm run bundle -w @mosaicajs/components in {ts}")
+    run([npm, "run", "bundle", "-w", "@mosaicajs/components"], cwd=ts, check=True)
     dist = ts / "components" / "dist"
     static.mkdir(parents=True, exist_ok=True)
     copied = []

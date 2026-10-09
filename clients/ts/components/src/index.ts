@@ -1,10 +1,10 @@
 /**
  * The `mosaica-*` custom elements. Importing the root entry defines every element. A host that
- * wants one element imports its subpath, such as `@mosaica/components/count`. The map, the
+ * wants one element imports its subpath, such as `@mosaicajs/components/count`. The map, the
  * explorer, the field card, the field column, the colour editor and the artifact card import
- * `@mosaica/deck`, which depends on deck.gl; the other elements do not.
+ * `@mosaicajs/deck`, which depends on deck.gl; the other elements do not.
  *
- * @module @mosaica/components
+ * @module @mosaicajs/components
  */
 import './store-element.js';
 import './count.js';

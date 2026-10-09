@@ -273,7 +273,7 @@ class Map(anywidget.AnyWidget):
             raise RuntimeError(
                 "mosaica's bundle is missing. From PyPI: pip install 'mosaica[widget]' installs "
                 "it. From the checkout: pip install -e 'clients/py[widget]' builds it with Node, or "
-                "run `npm run bundle -w @mosaica/components` in clients/ts."
+                "run `npm run bundle -w @mosaicajs/components` in clients/ts."
             )
         self._token_source: TokenSource = token
         self._token: Optional[Token] = None

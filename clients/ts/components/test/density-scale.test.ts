@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {DENSITY_SETTLE_MS} from '@mosaica/deck';
+import {DENSITY_SETTLE_MS} from '@mosaicajs/deck';
 import '../src/explorer.js';
 import type {MosaicaMap} from '../src/map.js';
 import {aggregateEntry, answerAggregate, fakeStore, meta, mount, settle, status} from './fake-store.js';

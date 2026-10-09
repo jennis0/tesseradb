@@ -1,7 +1,7 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {CLUSTER_PREFIX, activeCount, artifactName, emptyDraft, isPopulated, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type FilterDraft, type Layer, type MemberClause, type Meta, type Store} from '@mosaica/client';
+import {CLUSTER_PREFIX, activeCount, artifactName, emptyDraft, isPopulated, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type FilterDraft, type Layer, type MemberClause, type Meta, type Store} from '@mosaicajs/client';
 import {OPERATOR_WORDS} from './filter.js';
 import {HeldAggregate} from './aggregate.js';
 import {MosaicaElement, UNNAMED, columnCaption, dateRangeText, countText, emit, keyTitle, shortCount} from './base.js';

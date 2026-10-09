@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useState} from 'react';
-import {useProjection, useMosaicaStore} from '@mosaica/react';
-import {MosaicaExplorer} from '@mosaica/react/components';
+import {useProjection, useMosaicaStore} from '@mosaicajs/react';
+import {MosaicaExplorer} from '@mosaicajs/react/components';
 import {ItemCard} from './ItemCard.js';
 
 /**

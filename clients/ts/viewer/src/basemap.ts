@@ -1,7 +1,7 @@
 import {BitmapLayer} from '@deck.gl/layers';
 import type {Layer} from '@deck.gl/core';
-import {WORLD_SIZE, type ViewInfo} from '@mosaica/client';
-import {basemapScheme} from '@mosaica/client/internal';
+import {WORLD_SIZE, type ViewInfo} from '@mosaicajs/client';
+import {basemapScheme} from '@mosaicajs/client/internal';
 
 /**
  * The viewer's basemap, built from what `/v1/meta` says the view is a picture of. `<mosaica-map>`

@@ -5,14 +5,14 @@ import {existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 
 const entries = {
-  '@mosaica/client': ['createStore', 'setWorkerFactory', 'MosaicaClient', 'RecordsRead', 'Control'],
-  '@mosaica/client/internal': ['compose', 'workerDecoder'],
-  '@mosaica/deck': ['MosaicaLayer', 'viewInputOf', 'resolvePick'],
-  '@mosaica/deck/internal': ['MarkSlab'],
-  '@mosaica/components': ['MosaicaExplorer', 'MosaicaMap', 'MosaicaStore', 'storeContext', 'tokens', 'PARTS'],
-  '@mosaica/components/count': ['MosaicaCount'],
-  '@mosaica/react': ['useMosaicaStore', 'useProjection'],
-  '@mosaica/react/components': ['MosaicaExplorer', 'MosaicaMap']
+  '@mosaicajs/client': ['createStore', 'setWorkerFactory', 'MosaicaClient', 'RecordsRead', 'Control'],
+  '@mosaicajs/client/internal': ['compose', 'workerDecoder'],
+  '@mosaicajs/deck': ['MosaicaLayer', 'viewInputOf', 'resolvePick'],
+  '@mosaicajs/deck/internal': ['MarkSlab'],
+  '@mosaicajs/components': ['MosaicaExplorer', 'MosaicaMap', 'MosaicaStore', 'storeContext', 'tokens', 'PARTS'],
+  '@mosaicajs/components/count': ['MosaicaCount'],
+  '@mosaicajs/react': ['useMosaicaStore', 'useProjection'],
+  '@mosaicajs/react/components': ['MosaicaExplorer', 'MosaicaMap']
 };
 
 let failed = 0;
@@ -37,7 +37,7 @@ for (const [specifier, names] of Object.entries(entries)) {
 }
 
 // The decoder loads its worker from a file beside it.
-const worker = fileURLToPath(new URL('./decode.worker.js', import.meta.resolve('@mosaica/client')));
+const worker = fileURLToPath(new URL('./decode.worker.js', import.meta.resolve('@mosaicajs/client')));
 if (!existsSync(worker)) {
   console.error(`smoke-dist: the decode worker is not at ${worker}`);
   failed++;

@@ -1,7 +1,7 @@
 import {ContextConsumer} from '@lit/context';
 import {LitElement, type PropertyValues} from 'lit';
 import {property} from 'lit/decorators.js';
-import {createStore, type SelectionShape, type Store, type TokenSupplier} from '@mosaica/client';
+import {createStore, type SelectionShape, type Store, type TokenSupplier} from '@mosaicajs/client';
 import type {SelectionShapeDetail, MosaicaEventDetails} from './events.js';
 import {storeContext} from './context.js';
 
@@ -50,7 +50,7 @@ export abstract class MosaicaElement extends LitElement {
   /**
    * A token supplier, used in place of `token`, which the store calls to renew the token before it
    * expires. Setting another function builds a new store, since a store serves one viewer (see
-   * `Store` in `@mosaica/client`), so a framework keeps the function stable across renders.
+   * `Store` in `@mosaicajs/client`), so a framework keeps the function stable across renders.
    */
   @property({attribute: false}) accessor authorise: TokenSupplier | null = null;
   /**

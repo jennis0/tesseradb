@@ -1,4 +1,4 @@
-import {artifactName, type BrowseRow, type Layer, type Store} from '@mosaica/client';
+import {artifactName, type BrowseRow, type Layer, type Store} from '@mosaicajs/client';
 import {isTree} from './aggregate.js';
 import {UNNAMED} from './base.js';
 

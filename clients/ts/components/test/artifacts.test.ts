@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection, type Layer} from '@mosaica/client';
-import {SessionArtifactTable, servedLineage, attachedTextOf} from '@mosaica/client/internal';
+import {type Artifact, type ArtifactsProjection, type Layer} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage, attachedTextOf} from '@mosaicajs/client/internal';
 import '../src/layer-picker.js';
 import '../src/artifact-card.js';
 import '../src/explorer.js';

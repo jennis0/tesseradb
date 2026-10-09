@@ -29,15 +29,15 @@ const outComponents = join(repo, 'docs/reference/components');
  */
 const UNDOCUMENTED_TYPES = new Set([
   // `ArtifactsProjection.status`, whose values its comment names.
-  '@mosaica/client:ArtifactChannelState',
+  '@mosaicajs/client:ArtifactChannelState',
   // `StoreOptions.replica`, whose four fields its comment describes.
-  '@mosaica/client:ReplicaOptions',
+  '@mosaicajs/client:ReplicaOptions',
   // `Store.subscribe`'s callback, `() => void`.
-  '@mosaica/client:Listener',
+  '@mosaicajs/client:Listener',
   // The props type `MosaicaLayer` is declared over, which adds `slab` for `<mosaica-map>`, and so
   // appears in its inherited constructor.
-  '@mosaica/deck:MosaicaLayerInternalProps',
-  '@mosaica/deck:MarkSlab'
+  '@mosaicajs/deck:MosaicaLayerInternalProps',
+  '@mosaicajs/deck:MarkSlab'
 ]);
 
 let failures = 0;
@@ -53,7 +53,7 @@ const elementClasses = elementClassesByTag();
 const app = await Application.bootstrapWithPlugins({
   options: join(clients, 'typedoc.json'),
   externalSymbolLinkMappings: {
-    '@mosaica/components': Object.fromEntries([...elementClasses].map(([cls, tag]) => [cls, `../../components/${tag}.md`]))
+    '@mosaicajs/components': Object.fromEntries([...elementClasses].map(([cls, tag]) => [cls, `../../components/${tag}.md`]))
   }
 });
 const project = await app.convert();
@@ -77,7 +77,7 @@ for (const file of markdownFiles(outTypescript)) {
 }
 
 for (const [target, users] of danglingReferences(app.serializer.projectToObject(project, normalizePath(clients)))) {
-  if (UNDOCUMENTED_TYPES.has(target) || (target.startsWith('@mosaica/components:') && elementClasses.has(target.split(':')[1]))) continue;
+  if (UNDOCUMENTED_TYPES.has(target) || (target.startsWith('@mosaicajs/components:') && elementClasses.has(target.split(':')[1]))) continue;
   fail(`${[...users].join(', ')} names ${target}, which the reference leaves out. Export and document it, or mark the member that names it @internal.`);
 }
 
@@ -161,7 +161,7 @@ function danglingReferences(json) {
     if (!node || typeof node !== 'object') return;
     const here = typeof node.name === 'string' && typeof node.kind === 'number' ? (path ? `${path}.${node.name}` : node.name) : path;
     const excluded = node.target === -1 || (typeof node.target === 'object' && node.target !== null);
-    if (node.type === 'reference' && excluded && !node.refersToTypeParameter && (node.package ?? '').startsWith('@mosaica/')) {
+    if (node.type === 'reference' && excluded && !node.refersToTypeParameter && (node.package ?? '').startsWith('@mosaicajs/')) {
       const key = `${node.package}:${node.name}`;
       if (!found.has(key)) found.set(key, new Set());
       found.get(key).add(here);
@@ -177,7 +177,7 @@ function subpaths(exportsMap) {
   const out = new Map();
   for (const [subpath, target] of Object.entries(exportsMap)) {
     const source = typeof target === 'object' ? target['mosaica-source'] : null;
-    if (source) out.set(source.replace(/^\.\//, ''), `@mosaica/components${subpath === '.' ? '' : subpath.slice(1)}`);
+    if (source) out.set(source.replace(/^\.\//, ''), `@mosaicajs/components${subpath === '.' ? '' : subpath.slice(1)}`);
   }
   return out;
 }
@@ -349,7 +349,7 @@ function eventsPage(events, elements) {
   const lines = [
     '# Events',
     '',
-    "Every event the elements fire, with its `detail`. Each is a `CustomEvent` that bubbles and is composed, so a host listens on the element or on any ancestor. A `tessera_id` crosses as a decimal string. `MosaicaEventDetails` in `@mosaica/components` types every `detail`.",
+    "Every event the elements fire, with its `detail`. Each is a `CustomEvent` that bubbles and is composed, so a host listens on the element or on any ancestor. A `tessera_id` crosses as a decimal string. `MosaicaEventDetails` in `@mosaicajs/components` types every `detail`.",
     ''
   ];
   for (const [name, {detail, description}] of events) {

@@ -1,4 +1,4 @@
-import {WORLD_SIZE} from '@mosaica/client';
+import {WORLD_SIZE} from '@mosaicajs/client';
 
 /**
  * A hand-rolled camera over the store's world space, the 512-unit square every band's positions

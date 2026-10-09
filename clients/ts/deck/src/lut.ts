@@ -1,6 +1,6 @@
 import type {Device, Texture} from '@luma.gl/core';
-import {NO_ORDINAL, type ArtifactsProjection, type ArtifactTableChange, type Rgba} from '@mosaica/client';
-import {NEUTRAL} from '@mosaica/client/internal';
+import {NO_ORDINAL, type ArtifactsProjection, type ArtifactTableChange, type Rgba} from '@mosaicajs/client';
+import {NEUTRAL} from '@mosaicajs/client/internal';
 
 /**
  * The lookup texture: one RGBA texel per session ordinal, read by the mark shader as

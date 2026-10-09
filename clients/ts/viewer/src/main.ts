@@ -1,8 +1,8 @@
-import '@mosaica/components';
-import type {MosaicaExplorer, MapProbe} from '@mosaica/components';
-import {DEFAULT_BUDGET, MosaicaClient, createStore, dataToWorldXY, type Store as DataStore} from '@mosaica/client';
-import {refusalOf} from '@mosaica/client/internal';
-import type {ViewInfo} from '@mosaica/client';
+import '@mosaicajs/components';
+import type {MosaicaExplorer, MapProbe} from '@mosaicajs/components';
+import {DEFAULT_BUDGET, MosaicaClient, createStore, dataToWorldXY, type Store as DataStore} from '@mosaicajs/client';
+import {refusalOf} from '@mosaicajs/client/internal';
+import type {ViewInfo} from '@mosaicajs/client';
 import {basemapLayer, coverFor, type BasemapCover, type Camera} from './basemap.js';
 import {loadDatasets, readConfig, type Dataset} from './config.js';
 import {esc} from './html.js';

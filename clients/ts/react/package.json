@@ -1,5 +1,5 @@
 {
-  "name": "@mosaica/react",
+  "name": "@mosaicajs/react",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -31,24 +31,24 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@mosaica/client": "^0.1.0"
+    "@mosaicajs/client": "^0.1.0"
   },
   "peerDependencies": {
     "@lit/react": "^1.0.0",
-    "@mosaica/components": "^0.1.0",
+    "@mosaicajs/components": "^0.1.0",
     "react": "^18.0.0 || ^19.0.0"
   },
   "peerDependenciesMeta": {
     "@lit/react": {
       "optional": true
     },
-    "@mosaica/components": {
+    "@mosaicajs/components": {
       "optional": true
     }
   },
   "devDependencies": {
     "@lit/react": "^1.0.8",
-    "@mosaica/components": "^0.1.0",
+    "@mosaicajs/components": "^0.1.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "happy-dom": "^20.0.0",

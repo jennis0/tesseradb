@@ -7,7 +7,7 @@
  * {@link DensityCounter} keeps the counts density is drawn from, and {@link resolvePick} reads a
  * pick.
  *
- * @module @mosaica/deck
+ * @module @mosaicajs/deck
  */
 export {MosaicaLayer, type MosaicaLayerProps, type LayerTimings} from './layer.js';
 export {

@@ -1,7 +1,7 @@
 import {act, createElement, createRef} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
-import {formatCount} from '@mosaica/client';
+import {formatCount} from '@mosaicajs/client';
 import {deep, fakeStore, settle, status} from '../../components/test/fake-store.js';
 import {MosaicaCount, MosaicaExplorer, MosaicaHierarchy, MosaicaItemCard, MosaicaKeyPicker, MosaicaStatus, MosaicaStore, MosaicaViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type StoreElement, type ViewPickerElement} from '../src/components.js';
 
@@ -24,7 +24,7 @@ afterEach(async () => {
   host.remove();
 });
 
-describe('@mosaica/react/components', () => {
+describe('@mosaicajs/react/components', () => {
   it('an object prop is set as a property and the element renders it', async () => {
     const ref = createRef<CountElement>();
     await act(async () => root.render(createElement(MosaicaCount, {ref, label: 'shown', count: {shown: 221, total: 1_994_089, exact: true}})));

@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {type ArtifactsProjection, type MarksProjection} from '@mosaica/client';
-import {SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
+import {type ArtifactsProjection, type MarksProjection} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import {band} from '../../core/test/support.js';
 import {MosaicaLayer, type MosaicaLayerInternalProps} from '../src/layer.js';
 import {DULL_COLOUR} from '../src/marks-layer.js';

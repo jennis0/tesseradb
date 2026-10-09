@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {tableFromArrays} from 'apache-arrow';
-import {WORLD_SIZE} from '@mosaica/client';
-import {mortonOfTile} from '@mosaica/client/internal';
+import {WORLD_SIZE} from '@mosaicajs/client';
+import {mortonOfTile} from '@mosaicajs/client/internal';
 import {binDensity, densityCellsOf, type DensityCell, type DensityCounts} from '../src/density.js';
 import {resolvePick} from '../src/pick.js';
 

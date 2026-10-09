@@ -80,7 +80,7 @@ export function createHandler(cfg) {
   };
   /** @param {import('node:http').ServerResponse} res */
   const unbuilt = (res) =>
-    json(res, 503, {error: `${join(cfg.bundleDir, 'mosaica-components.js')} is not built; run: npm run bundle -w @mosaica/components`});
+    json(res, 503, {error: `${join(cfg.bundleDir, 'mosaica-components.js')} is not built; run: npm run bundle -w @mosaicajs/components`});
   /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
   return async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');

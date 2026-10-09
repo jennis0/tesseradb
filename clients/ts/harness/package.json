@@ -1,5 +1,5 @@
 {
-  "name": "@mosaica/harness",
+  "name": "@mosaicajs/harness",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",

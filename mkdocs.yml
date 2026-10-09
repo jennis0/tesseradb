@@ -126,11 +126,11 @@ nav:
       # clients/ts/scripts/reference.mjs, which scripts/check-docs.sh runs before the build.
       - TypeScript client:
           - reference/typescript.md
-          - "@mosaica/client": reference/typescript/client.md
-          - "@mosaica/deck": reference/typescript/deck.md
-          - "@mosaica/components": reference/typescript/components.md
-          - "@mosaica/react": reference/typescript/react.md
-          - "@mosaica/react/components": reference/typescript/react/components.md
+          - "@mosaicajs/client": reference/typescript/client.md
+          - "@mosaicajs/deck": reference/typescript/deck.md
+          - "@mosaicajs/components": reference/typescript/components.md
+          - "@mosaicajs/react": reference/typescript/react.md
+          - "@mosaicajs/react/components": reference/typescript/react/components.md
       - Components:
           - reference/components.md
           - mosaica-explorer: reference/components/mosaica-explorer.md

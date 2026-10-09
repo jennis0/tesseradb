@@ -20,9 +20,9 @@ import {
   type Meta,
   type PaletteName,
   type Store
-} from '@mosaica/client';
-import {CATEGORY_PALETTES, RAMPS} from '@mosaica/deck';
-import {colourOfFraction, css as rgb, fractionOf, hexOf} from '@mosaica/deck/internal';
+} from '@mosaicajs/client';
+import {CATEGORY_PALETTES, RAMPS} from '@mosaicajs/deck';
+import {colourOfFraction, css as rgb, fractionOf, hexOf} from '@mosaicajs/deck/internal';
 import {HeldAggregate, artifactGroupings, countsByKey, levelOf, listedGroups, rankedGrouping} from './aggregate.js';
 import {MosaicaElement, UNNAMED, columnCaption, countText, dateRangeText, emit, idString, keyTitle, shortDateText} from './base.js';
 import {ColourPicker, pickerStyles} from './colour-picker.js';

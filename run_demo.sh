@@ -802,4 +802,4 @@ echo "To watch the replica: zoom in a few notches, then pan away and back."
 echo "To record a session for someone else: add &trace=1, press m when it feels wrong, download."
 echo "Add &prefetch=0 to turn look-ahead off, cache still on, for comparison."
 echo "The smoke scripts take the whole URL: --url '$VIEWER_URL'"
-npm run dev -w @mosaica/viewer
+npm run dev -w @mosaicajs/viewer

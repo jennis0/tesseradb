@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {composeFilters, type FilterExpr, type FilterOperandSet, type Store} from '@mosaica/client';
+import {composeFilters, type FilterExpr, type FilterOperandSet, type Store} from '@mosaicajs/client';
 import {draftOf, initialize, render, stateOf, type KernelMessage, type WidgetModel} from '../src/widget.js';
 import {fakeStore, settle, status, type FakeStore} from './fake-store.js';
 

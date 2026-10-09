@@ -1,6 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
-import {type Meta, type ViewInfo} from '@mosaica/client';
-import {stepView, viewLabel, viewsOfGroup} from '@mosaica/client/internal';
+import {type Meta, type ViewInfo} from '@mosaicajs/client';
+import {stepView, viewLabel, viewsOfGroup} from '@mosaicajs/client/internal';
 import {MosaicaElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';

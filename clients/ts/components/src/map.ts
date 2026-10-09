@@ -9,12 +9,12 @@ import {
   type MarksProjection,
   type Store,
   type SelectionShape
-} from '@mosaica/client';
-import {assertCompositionMatchesServed, chosenColour, hasValue} from '@mosaica/client/internal';
-import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DensityCounter, MosaicaLayer, densityCountAt, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@mosaica/deck';
-import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, drawnCells, encodingOf, encodingSignature, hoverAt, maxCount, type ContourShape} from '@mosaica/deck/internal';
-import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@mosaica/deck';
-import type {PaletteName, Quantisation, Rgba} from '@mosaica/client';
+} from '@mosaicajs/client';
+import {assertCompositionMatchesServed, chosenColour, hasValue} from '@mosaicajs/client/internal';
+import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DensityCounter, MosaicaLayer, densityCountAt, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@mosaicajs/deck';
+import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, drawnCells, encodingOf, encodingSignature, hoverAt, maxCount, type ContourShape} from '@mosaicajs/deck/internal';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@mosaicajs/deck';
+import type {PaletteName, Quantisation, Rgba} from '@mosaicajs/client';
 import {MosaicaElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf, type PanelState} from './states.js';

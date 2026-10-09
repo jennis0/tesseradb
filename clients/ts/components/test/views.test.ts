@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {Meta, Quantisation, ViewInfo, ViewMetadataValue} from '@mosaica/client';
+import type {Meta, Quantisation, ViewInfo, ViewMetadataValue} from '@mosaicajs/client';
 import '../src/view-picker.js';
 import '../src/key-picker.js';
 import '../src/item-card.js';

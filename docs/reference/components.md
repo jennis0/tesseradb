@@ -2,7 +2,7 @@
 
 # Components
 
-The `mosaica-*` custom elements, in the `@mosaica/components` package, built with Lit. Each element's page lists its attributes, properties, methods, events, slots, parts and CSS custom properties, generated from its source.
+The `mosaica-*` custom elements, in the `@mosaicajs/components` package, built with Lit. Each element's page lists its attributes, properties, methods, events, slots, parts and CSS custom properties, generated from its source.
 
 | Element | What it is |
 |---|---|
@@ -28,9 +28,9 @@ The `mosaica-*` custom elements, in the `@mosaica/components` package, built wit
 
 ## Loading the elements
 
-`import '@mosaica/components'` defines every element. Each element also has its own entry, such as `import '@mosaica/components/map'`, which defines that element and the elements it renders. The map, the explorer, the field card, the field column, the colour editor and the artifact card import `@mosaica/deck`, which depends on deck.gl; the other elements do not. `@deck.gl/aggregation-layers` is a peer dependency as well, which `@mosaica/deck` imports only when a map first draws density as hexagons or contours. A host's bundler puts it in a chunk of its own, which a page that never draws those does not load.
+`import '@mosaicajs/components'` defines every element. Each element also has its own entry, such as `import '@mosaicajs/components/map'`, which defines that element and the elements it renders. The map, the explorer, the field card, the field column, the colour editor and the artifact card import `@mosaicajs/deck`, which depends on deck.gl; the other elements do not. `@deck.gl/aggregation-layers` is a peer dependency as well, which `@mosaicajs/deck` imports only when a map first draws density as hexagons or contours. A host's bundler puts it in a chunk of its own, which a page that never draws those does not load.
 
-A page with no build step loads the single-file bundle, `mosaica-components.js`, which holds Lit, deck.gl, its aggregation layers and the decode worker. `npm run bundle -w @mosaica/components` in `clients/ts` writes it to `components/dist/` with its subresource-integrity hash in `mosaica-components.js.sri`:
+A page with no build step loads the single-file bundle, `mosaica-components.js`, which holds Lit, deck.gl, its aggregation layers and the decode worker. `npm run bundle -w @mosaicajs/components` in `clients/ts` writes it to `components/dist/` with its subresource-integrity hash in `mosaica-components.js.sri`:
 
 ```html
 <script type="module" src="./mosaica-components.js" integrity="sha384-..."></script>
@@ -52,4 +52,4 @@ With none, the element renders its detached state. An element that has built its
 
 Every event is a `CustomEvent` that bubbles and is composed, so a host listens on the element or on any ancestor, including one outside `<mosaica-explorer>`.
 
-An element's parts are styled with `::part()`. An element that renders another inside its shadow root forwards the inner element's parts under its name: through `<mosaica-explorer>`, the map's toolbar is `::part(map-controls)` and the item card's title is `::part(item-card-title)`. `PARTS` in `@mosaica/components` lists each element's parts, for a host that renders an element in its own shadow root and forwards them.
+An element's parts are styled with `::part()`. An element that renders another inside its shadow root forwards the inner element's parts under its name: through `<mosaica-explorer>`, the map's toolbar is `::part(map-controls)` and the item card's title is `::part(item-card-title)`. `PARTS` in `@mosaicajs/components` lists each element's parts, for a host that renders an element in its own shadow root and forwards them.

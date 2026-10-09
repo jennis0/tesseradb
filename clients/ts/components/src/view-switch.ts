@@ -1,9 +1,9 @@
-import type {Meta, Quantisation, Store} from '@mosaica/client';
+import type {Meta, Quantisation, Store} from '@mosaicajs/client';
 import {emit} from './base.js';
 
 /**
  * What the view and key pickers share: the frame comparison and the switch. The picker rules are
- * in `@mosaica/client`, so a host drawing its own picker gets the same answers.
+ * in `@mosaicajs/client`, so a host drawing its own picker gets the same answers.
  */
 
 /**

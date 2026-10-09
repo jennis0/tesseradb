@@ -1,7 +1,7 @@
 import {css} from 'lit';
-import type {DensityColours} from '@mosaica/deck';
+import type {DensityColours} from '@mosaicajs/deck';
 import type {MosaicaEventDetails} from './events.js';
-import {densityStops} from '@mosaica/deck/internal';
+import {densityStops} from '@mosaicajs/deck/internal';
 
 /**
  * What the display sections of the explorer's Layers popover share with the elements that render

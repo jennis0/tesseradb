@@ -1,8 +1,8 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {artifactName, withMember, withoutMember, type BrowseRow, type Layer, type MemberClause, type Refusal} from '@mosaica/client';
-import {refusalOf} from '@mosaica/client/internal';
+import {artifactName, withMember, withoutMember, type BrowseRow, type Layer, type MemberClause, type Refusal} from '@mosaicajs/client';
+import {refusalOf} from '@mosaicajs/client/internal';
 import {HeldAggregate, artifactGroupings, countsByKey} from './aggregate.js';
 import {MosaicaElement, UNNAMED, emit, idString} from './base.js';
 import {FloatingList} from './float.js';

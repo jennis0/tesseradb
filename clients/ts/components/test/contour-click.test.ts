@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection} from '@mosaica/client';
-import {GRID32_PER_WORLD_UNIT, SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
+import {type Artifact, type ArtifactsProjection} from '@mosaicajs/client';
+import {GRID32_PER_WORLD_UNIT, SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import '../src/map.js';
 import {fakeStore, mount, settle, status} from './fake-store.js';
 

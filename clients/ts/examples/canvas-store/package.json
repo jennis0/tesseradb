@@ -1,5 +1,5 @@
 {
-  "name": "@mosaica/example-canvas-store",
+  "name": "@mosaicajs/example-canvas-store",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mosaica/client": "*"
+    "@mosaicajs/client": "*"
   },
   "devDependencies": {
     "typescript": "^5.9.0",

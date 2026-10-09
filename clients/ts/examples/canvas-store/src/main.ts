@@ -1,4 +1,4 @@
-import {createStore, formatCount, formatMasked, type MarksProjection, type Store} from '@mosaica/client';
+import {createStore, formatCount, formatMasked, type MarksProjection, type Store} from '@mosaicajs/client';
 import {fitWorld, pan, toScreen, worldBox, zoomAt, type Camera} from './camera.js';
 
 /**

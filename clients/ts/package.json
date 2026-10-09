@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
-    "build": "npm run build -w @mosaica/client && npm run build -w @mosaica/deck && npm run build -w @mosaica/components && npm run build -w @mosaica/react",
+    "build": "npm run build -w @mosaicajs/client && npm run build -w @mosaicajs/deck && npm run build -w @mosaicajs/components && npm run build -w @mosaicajs/react",
     "typecheck": "npm run typecheck --workspaces --if-present && tsc -p scripts/tsconfig.json"
   },
   "devDependencies": {

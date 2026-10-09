@@ -1,13 +1,13 @@
 /**
  * React hooks for the headless store. {@link useMosaicaStore} creates a store for a component's
  * lifetime, and {@link useProjection} reads one of its projections and re-renders when it changes.
- * The React components for the elements are in the `@mosaica/react/components` entry. This
+ * The React components for the elements are in the `@mosaicajs/react/components` entry. This
  * entry imports neither Lit nor deck.gl.
  *
- * @module @mosaica/react
+ * @module @mosaicajs/react
  */
 import {useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore} from 'react';
-import {createStore, type ProjectionName, type Projections, type Store, type StoreOptions, type TokenSupplier} from '@mosaica/client';
+import {createStore, type ProjectionName, type Projections, type Store, type StoreOptions, type TokenSupplier} from '@mosaicajs/client';
 
 /** The options of {@link useMosaicaStore}: the options of {@link createStore}, with `authorise` read through a ref. */
 export type UseMosaicaStoreOptions = Omit<StoreOptions, 'authorise'> & {
@@ -69,4 +69,4 @@ export function useProjection<K extends ProjectionName>(store: Store | null, nam
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-export type {ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@mosaica/client';
+export type {ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@mosaicajs/client';

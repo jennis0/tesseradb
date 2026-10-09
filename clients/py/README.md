@@ -16,7 +16,7 @@ put a `mosaica` binary on `PATH` or name it with `MOSAICA_BIN` to make or serve 
 
 From this checkout, `pip install -e 'clients/py[widget]'` — the wheel's build hook
 (`hatch_build.py`) runs `npm ci` (when the install is stale) and `npm run bundle -w
-@mosaica/components` in `clients/ts` and copies the single-file bundle into
+@mosaicajs/components` in `clients/ts` and copies the single-file bundle into
 `mosaica/static/`, which is why a checkout install needs Node and a PyPI install does not.
 Nothing built is committed. `check.sh` is the package's half of the gate: the tests, and a wheel
 built and opened to prove the bundle is inside it.

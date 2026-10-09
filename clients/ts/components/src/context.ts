@@ -1,5 +1,5 @@
 import {createContext} from '@lit/context';
-import type {Store} from '@mosaica/client';
+import type {Store} from '@mosaicajs/client';
 
 /**
  * The Lit context the elements find their store by. `<mosaica-store>` and `<mosaica-explorer>`

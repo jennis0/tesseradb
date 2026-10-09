@@ -1,7 +1,7 @@
 import {Deck, OrthographicView} from '@deck.gl/core';
-import type {ArtifactsProjection, Band, LegendProjection, MarksProjection, Meta} from '@mosaica/client';
-import {SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
-import {MosaicaLayer, resolvePick} from '@mosaica/deck';
+import type {ArtifactsProjection, Band, LegendProjection, MarksProjection, Meta} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
+import {MosaicaLayer, resolvePick} from '@mosaicajs/deck';
 
 // Built by `rings.browser.ts` with Vite from the packages' sources. Two marks sized by `c`: one
 // with the value 10 at world (156, 256), one with no value at (356, 256), which draws as a ring. The

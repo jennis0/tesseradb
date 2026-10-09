@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {BrowseRow, Meta} from '@mosaica/client';
+import type {BrowseRow, Meta} from '@mosaicajs/client';
 import '../src/cluster-filter.js';
 import type {MosaicaClusterFilter} from '../src/cluster-filter.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, meta, mount, registered, settle, status} from './fake-store.js';

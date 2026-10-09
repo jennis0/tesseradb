@@ -1,6 +1,6 @@
 import {Deck, OrthographicView} from '@deck.gl/core';
-import {createStore, type Store} from '@mosaica/client';
-import {MosaicaLayer, viewInputOf} from '@mosaica/deck';
+import {createStore, type Store} from '@mosaicajs/client';
+import {MosaicaLayer, viewInputOf} from '@mosaicajs/deck';
 import {fitWorld, worldEdge, type ViewState} from './view.js';
 
 /**

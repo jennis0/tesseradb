@@ -1,4 +1,4 @@
-import {NO_ORDINAL, type ArtifactsProjection, type Band} from '@mosaica/client';
+import {NO_ORDINAL, type ArtifactsProjection, type Band} from '@mosaicajs/client';
 
 /**
  * What {@link resolvePick} found under the pointer, by `kind`:

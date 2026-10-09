@@ -2,7 +2,7 @@ import {act} from 'react';
 import {StrictMode, createElement, useState, type ReactNode} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import type {Projections, Store, StoreOptions} from '@mosaica/client';
+import type {Projections, Store, StoreOptions} from '@mosaicajs/client';
 import {fakeStore} from '../../components/test/fake-store.js';
 
 /**
@@ -10,8 +10,8 @@ import {fakeStore} from '../../components/test/fake-store.js';
  * builds is a fake with a counted `dispose`, and the network never enters.
  */
 const built: {options: StoreOptions; store: ReturnType<typeof fakeStore>; disposed: number}[] = [];
-vi.mock('@mosaica/client', async (importActual) => {
-  const actual = await importActual<typeof import('@mosaica/client')>();
+vi.mock('@mosaicajs/client', async (importActual) => {
+  const actual = await importActual<typeof import('@mosaicajs/client')>();
   return {
     ...actual,
     createStore: (options: StoreOptions) => {

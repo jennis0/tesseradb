@@ -4,7 +4,7 @@
  * `RecordsRead` is a bulk read of items or artifacts. The helpers build the filter drafts and
  * member clauses the store takes, say which layers it draws and colours by, and format its counts.
  *
- * @module @mosaica/client
+ * @module @mosaicajs/client
  */
 export {createStore, CLUSTER_PREFIX, DEFAULT_BUDGET, REGION_HELD_LIMIT, type Store} from './store.js';
 export type {

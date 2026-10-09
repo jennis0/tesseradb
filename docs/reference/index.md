@@ -9,5 +9,5 @@ These pages state what each interface accepts and returns.
 - [mosaica.toml](mosaica-toml.md): the deployment file, which says where the bundle is and how the server listens and bounds its work.
 - [corpus.toml](corpus-toml.md): the corpus declaration, which says what a build reads and what each view, vocabulary, attribute and layer is.
 - [Python client](python/index.md): the `mosaica` package.
-- [TypeScript client](typescript.md): the `@mosaica/client` package.
+- [TypeScript client](typescript.md): the `@mosaicajs/client` package.
 - [Components](components.md): the web components, their attributes, events and styling.

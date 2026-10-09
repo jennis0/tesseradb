@@ -11,10 +11,10 @@
  * an inline function does not build a new store on every render. To show the map to another
  * viewer, change `token` or `viewerUrl`, or give the component a new `key`.
  *
- * This entry imports `@mosaica/components`, and with it Lit and deck.gl. The hooks are in the
- * package root, `@mosaica/react`, which imports neither.
+ * This entry imports `@mosaicajs/components`, and with it Lit and deck.gl. The hooks are in the
+ * package root, `@mosaicajs/react`, which imports neither.
  *
- * @module @mosaica/react/components
+ * @module @mosaicajs/react/components
  */
 import {createComponent, type EventName} from '@lit/react';
 import * as React from 'react';
@@ -35,13 +35,13 @@ import {
   MosaicaStore as StoreElement,
   MosaicaViewPicker as ViewPickerElement,
   type MosaicaEventMap
-} from '@mosaica/components';
-import type {TokenSupplier} from '@mosaica/client';
+} from '@mosaicajs/components';
+import type {TokenSupplier} from '@mosaicajs/client';
 
 
 /**
  * The events the elements emit, by name, each a `CustomEvent` with its detail: `MosaicaEventMap`
- * from `@mosaica/components`.
+ * from `@mosaicajs/components`.
  */
 export type MosaicaEvents = MosaicaEventMap;
 

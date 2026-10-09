@@ -8,8 +8,8 @@
  * This file is also the notebook widget's `_esm`: anywidget takes the default export,
  * `{initialize, render}` from `widget.ts`.
  */
-import DecodeWorker from '@mosaica/client/decode.worker?worker&inline';
-import {setWorkerFactory} from '@mosaica/client';
+import DecodeWorker from '@mosaicajs/client/decode.worker?worker&inline';
+import {setWorkerFactory} from '@mosaicajs/client';
 
 setWorkerFactory(() => new DecodeWorker());
 

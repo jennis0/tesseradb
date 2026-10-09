@@ -31,7 +31,7 @@
  */
 import {Buffer as GpuBuffer} from '@luma.gl/core';
 import type {Device} from '@luma.gl/core';
-import type {Band, ScalarColumn} from '@mosaica/client';
+import type {Band, ScalarColumn} from '@mosaicajs/client';
 import {encodingSignature, writeColours, type Encoding} from './colour.js';
 import {NO_SIZE, sizeSignature, writeSizes, type SizeEncoding} from './size.js';
 

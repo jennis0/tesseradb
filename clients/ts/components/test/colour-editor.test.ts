@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {Meta} from '@mosaica/client';
+import type {Meta} from '@mosaicajs/client';
 import '../src/colour-editor.js';
 import type {MosaicaColourEditor} from '../src/colour-editor.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, meta, mount, registered, scalar, settle, status} from './fake-store.js';

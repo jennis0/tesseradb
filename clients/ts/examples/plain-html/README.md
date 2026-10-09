@@ -3,7 +3,7 @@
 One page with no build step. `index.html` loads the single-file bundle by relative path with its integrity hash, and mounts `<mosaica-explorer>` with a `viewer-url` and a `token`. `server.mjs` is the app server beside it: it serves the page and the bundle, mints tokens, and proxies the viewer routes.
 
 ```bash
-npm run bundle -w @mosaica/components    # writes components/dist/mosaica-components.js and its .sri
+npm run bundle -w @mosaicajs/components    # writes components/dist/mosaica-components.js and its .sri
 node server.mjs                            # http://localhost:5180
 ```
 

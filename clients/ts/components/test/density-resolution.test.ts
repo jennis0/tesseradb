@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import type {AggregateSpec} from '@mosaica/client';
-import {DENSITY_SETTLE_MS, cellDepth} from '@mosaica/deck';
+import type {AggregateSpec} from '@mosaicajs/client';
+import {DENSITY_SETTLE_MS, cellDepth} from '@mosaicajs/deck';
 import '../src/explorer.js';
 import type {MosaicaMap} from '../src/map.js';
 import {fakeStore, meta, mount, registered, settle, status, type FakeStore} from './fake-store.js';

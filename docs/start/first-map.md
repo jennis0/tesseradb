@@ -504,7 +504,7 @@ terminal for this.
 ```bash
 cd ~/mosaica/clients/ts
 npm ci
-npm run build -w @mosaica/components
+npm run build -w @mosaicajs/components
 ```
 
 ```

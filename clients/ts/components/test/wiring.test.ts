@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import type {Store, TokenSupplier} from '@mosaica/client';
+import type {Store, TokenSupplier} from '@mosaicajs/client';
 import '../src/store-element.js';
 import '../src/status.js';
 import {MosaicaStatus} from '../src/status.js';

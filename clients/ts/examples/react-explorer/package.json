@@ -1,18 +1,18 @@
 {
-  "name": "@mosaica/example-react-explorer",
+  "name": "@mosaicajs/example-react-explorer",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
-  "description": "C1 in React 19: the explorer through @mosaica/react's wrappers, with the item card replaced by a host component reading useProjection.",
+  "description": "C1 in React 19: the explorer through @mosaicajs/react's wrappers, with the item card replaced by a host component reading useProjection.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@mosaica/client": "*",
-    "@mosaica/components": "*",
-    "@mosaica/react": "*",
+    "@mosaicajs/client": "*",
+    "@mosaicajs/components": "*",
+    "@mosaicajs/react": "*",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

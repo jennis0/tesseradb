@@ -1,5 +1,5 @@
 import {css, html, nothing, type ReactiveController, type ReactiveElement, type TemplateResult} from 'lit';
-import {hexOf, lighter, rgbOfHex} from '@mosaica/deck/internal';
+import {hexOf, lighter, rgbOfHex} from '@mosaicajs/deck/internal';
 import {hsvOf, rgbOfHsv, type Hsv} from './hsv.js';
 
 /** The width of the hue knob, which its travel along the bar allows for. */

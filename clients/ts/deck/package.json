@@ -1,5 +1,5 @@
 {
-  "name": "@mosaica/deck",
+  "name": "@mosaicajs/deck",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -30,7 +30,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@mosaica/client": "0.1.0"
+    "@mosaicajs/client": "0.1.0"
   },
   "peerDependencies": {
     "@deck.gl/aggregation-layers": "^9.3.7",

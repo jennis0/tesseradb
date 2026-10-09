@@ -1,6 +1,6 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {type RegionProjection} from '@mosaica/client';
+import {type RegionProjection} from '@mosaicajs/client';
 import {MosaicaElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';

@@ -6,8 +6,8 @@
  * from this viewer's visible set. Size decides nothing about what is drawn: every served mark is
  * drawn, and one with no value draws at the smallest size, hollow.
  */
-import type {LegendProjection, Meta, ScalarColumn} from '@mosaica/client';
-import {numericValues, sizesPoints} from '@mosaica/client/internal';
+import type {LegendProjection, Meta, ScalarColumn} from '@mosaicajs/client';
+import {numericValues, sizesPoints} from '@mosaicajs/client/internal';
 import {fractionOf} from './colour.js';
 
 /**

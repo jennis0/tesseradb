@@ -1,7 +1,7 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {composeFilters, emptyDraft, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestionPage, type SuggestValue} from '@mosaica/client';
+import {composeFilters, emptyDraft, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestionPage, type SuggestValue} from '@mosaicajs/client';
 import {FloatingList} from './float.js';
 import {MosaicaElement, columnCaption, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';

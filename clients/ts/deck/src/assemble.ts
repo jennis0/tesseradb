@@ -5,8 +5,8 @@ import {
   type ScalarColumn,
   type ScalarValues,
   type StandInPiece
-} from '@mosaica/client';
-import {assertCompositionMatchesServed, compose, fold, type ReplicaFrame, type TileRect} from '@mosaica/client/internal';
+} from '@mosaicajs/client';
+import {assertCompositionMatchesServed, compose, fold, type ReplicaFrame, type TileRect} from '@mosaicajs/client/internal';
 
 /**
  * Materialising a core composition into the buffers one `ScatterplotLayer` draws. Core's

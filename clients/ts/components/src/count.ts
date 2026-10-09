@@ -1,6 +1,6 @@
 import {LitElement, css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {formatCount, formatMasked, type Count, type Masked} from '@mosaica/client';
+import {formatCount, formatMasked, type Count, type Masked} from '@mosaicajs/client';
 import {attachContextRoot, defineOnce} from './define.js';
 import {tokens} from './tokens.js';
 

@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {gridToWorldXY, type Artifact, type ArtifactsProjection, type Meta, type Shape} from '@mosaica/client';
-import {SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
+import {gridToWorldXY, type Artifact, type ArtifactsProjection, type Meta, type Shape} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import {contourShapes, focusOutlines, outlineOf} from '../src/layer.js';
 import {ringWithin, shapeContains} from '../src/contours.js';
 

@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import type {LegendProjection, MarksProjection, Meta, ScalarColumn} from '@mosaica/client';
+import type {LegendProjection, MarksProjection, Meta, ScalarColumn} from '@mosaicajs/client';
 import {band} from '../../core/test/support.js';
 import {MosaicaLayer, type MosaicaLayerInternalProps} from '../src/layer.js';
 import {MarkSlab} from '../src/slab.js';

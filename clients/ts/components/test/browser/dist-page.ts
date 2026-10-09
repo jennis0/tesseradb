@@ -1,4 +1,4 @@
-import {MosaicaExplorer} from '@mosaica/components';
+import {MosaicaExplorer} from '@mosaicajs/components';
 
 // Built by `dist.browser.ts` with Vite and no `mosaica-source` condition, so every package
 // resolves to its `dist/` build as it would for an installed consumer.

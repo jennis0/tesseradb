@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection, type Meta} from '@mosaica/client';
-import {SessionArtifactTable, attachedTextOf, servedLineage} from '@mosaica/client/internal';
+import {type Artifact, type ArtifactsProjection, type Meta} from '@mosaicajs/client';
+import {SessionArtifactTable, attachedTextOf, servedLineage} from '@mosaicajs/client/internal';
 import {LayerManager, OrthographicView, type Layer} from '@deck.gl/core';
 import {LABEL_CANDIDATE_CEILING, MosaicaLayer, frontier, labelBudget, labelCandidates, type MosaicaLayerInternalProps} from '../src/layer.js';
 import {fakeDevice} from './fake-device.js';

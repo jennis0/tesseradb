@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import type {LegendProjection, Meta, ScalarColumn} from '@mosaica/client';
+import type {LegendProjection, Meta, ScalarColumn} from '@mosaicajs/client';
 import {encodingOf} from '../src/layer.js';
 import {CATEGORY_PALETTES, DEFAULT_COLOURING, RAMPS, UNMAPPED, colourOfFraction, formatScalar, fractionOf, hexOf, rgbOfHex, valueAtFraction, writeColours, type CategoryPaletteName, type Encoding, type RampName, type Rgb} from '../src/colour.js';
 

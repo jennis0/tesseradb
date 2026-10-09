@@ -296,7 +296,7 @@ backoff or the server's `Retry-After` where that is longer, and a newer change c
 `selection.aggregate` sends the selection's filters and box as the request's `filters`, so every
 grouping's total is the selection's count.
 
-The map draws density from this route. `DensityCounter` in `@mosaica/deck` registers one
+The map draws density from this route. `DensityCounter` in `@mosaicajs/deck` registers one
 grouping of cells with the store, at the depth whose cells come nearest a chosen size on screen at
 the camera's zoom, over the viewport and a margin of a quarter of its width and height on each
 side. The registration is `highlighted`, so the counts are the highlighted items' under a
@@ -415,15 +415,15 @@ behind a proxy, so the page never holds it, is specified and not built.
 ## Where this is tested and where it lives
 
 The store, its driver, replica, presented frame, filter composition and artifact channel live in
-`@mosaica/client`. A drop-in map and its panels live in `@mosaica/components` as custom
-elements built on the store; a deck.gl binding lives in `@mosaica/deck`; React hooks and element
-wrappers live in `@mosaica/react`. The Python package `mosaica` embeds the same components
+`@mosaicajs/client`. A drop-in map and its panels live in `@mosaicajs/components` as custom
+elements built on the store; a deck.gl binding lives in `@mosaicajs/deck`; React hooks and element
+wrappers live in `@mosaicajs/react`. The Python package `mosaica` embeds the same components
 inside a notebook widget rather than reimplementing any of this in Python. An acceptance harness
 drives the built components against a running deployment and checks nine claims against rules 1
 to 5 and 7 through what is actually on screen, not through a transcript of what was sent. Rule 6
 is covered by unit tests; rules 8 to 12 are not screen-checkable and are not covered there.
 
-The bulk reads live in `@mosaica/client`'s `records` module, in the Python package's viewer
+The bulk reads live in `@mosaicajs/client`'s `records` module, in the Python package's viewer
 reader, and in the CLI's `records` module.
 
 ## Sources

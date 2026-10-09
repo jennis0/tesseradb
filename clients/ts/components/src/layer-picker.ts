@@ -1,5 +1,5 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
-import {isFilterLayer, layerEntries, type LayerEntry} from '@mosaica/client';
+import {isFilterLayer, layerEntries, type LayerEntry} from '@mosaicajs/client';
 import {MosaicaElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';

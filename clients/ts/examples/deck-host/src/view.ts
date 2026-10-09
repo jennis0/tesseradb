@@ -1,5 +1,5 @@
 import {PolygonLayer} from '@deck.gl/layers';
-import {MAX_DEPTH, WORLD_SIZE} from '@mosaica/client';
+import {MAX_DEPTH, WORLD_SIZE} from '@mosaicajs/client';
 
 /** The host's camera: a deck.gl `OrthographicView` view state over the 512-unit world square. */
 export type ViewState = {target: [number, number, number]; zoom: number; minZoom: number; maxZoom: number};

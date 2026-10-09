@@ -1,6 +1,6 @@
 # Capabilities
 
-Each row is a core capability and each column a surface; a cell names the route, function, method or command that performs it. The [HTTP API](http.md) reference describes every route named here. In the TypeScript client, `Control` in `@mosaica/client` calls the control-plane routes with the operator credential. The Python client writes only to a database it runs itself, made by `create` or `open`. The CLI declares and inserts only by building a new bundle, and reads from a running server with a session token.
+Each row is a core capability and each column a surface; a cell names the route, function, method or command that performs it. The [HTTP API](http.md) reference describes every route named here. In the TypeScript client, `Control` in `@mosaicajs/client` calls the control-plane routes with the operator credential. The Python client writes only to a database it runs itself, made by `create` or `open`. The CLI declares and inserts only by building a new bundle, and reads from a running server with a session token.
 
 | Capability | HTTP | TypeScript client | Python client | CLI |
 |---|---|---|---|---|

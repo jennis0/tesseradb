@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import type {BrowseRow, Layer, Meta} from '@mosaica/client';
+import type {BrowseRow, Layer, Meta} from '@mosaicajs/client';
 import '../src/hierarchy.js';
 import type {MosaicaHierarchy} from '../src/hierarchy.js';
 import {UNNAMED} from '../src/base.js';

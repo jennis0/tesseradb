@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {RegionProjection} from '@mosaica/client';
+import type {RegionProjection} from '@mosaicajs/client';
 import '../src/map.js';
 import {deep, fakeStore, meta, mount, settle, status} from './fake-store.js';
 

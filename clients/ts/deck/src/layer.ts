@@ -17,8 +17,8 @@ import {
   type Shape,
   type ShapeKind,
   type Store
-} from '@mosaica/client';
-import {NEUTRAL} from '@mosaica/client/internal';
+} from '@mosaicajs/client';
+import {NEUTRAL} from '@mosaicajs/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
@@ -721,7 +721,7 @@ export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
   return null;
 }
 
-/** The props `<mosaica-map>` also passes, through `@mosaica/deck/internal`. */
+/** The props `<mosaica-map>` also passes, through `@mosaicajs/deck/internal`. */
 export type MosaicaLayerInternalProps = MosaicaLayerProps & {
   /** The marks' GPU buffers. Unset, the layer makes and releases its own; a host's is attached and released by the host. */
   slab?: MarkSlab | null;

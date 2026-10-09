@@ -1,7 +1,7 @@
 import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@mosaica/client';
-import {SessionArtifactTable, mortonOfTile, servedLineage} from '@mosaica/client/internal';
+import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@mosaicajs/client';
+import {SessionArtifactTable, mortonOfTile, servedLineage} from '@mosaicajs/client/internal';
 import {band} from '../../core/test/support.js';
 import {contourThresholds, densityPosition, densityStops, type DensityCell, type DensityCounts, type DensityMode} from '../src/density.js';
 import {MosaicaLayer, loadAggregationLayers, type MosaicaLayerInternalProps} from '../src/layer.js';

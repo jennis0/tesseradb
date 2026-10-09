@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection, type Band} from '@mosaica/client';
-import {SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
+import {type Artifact, type ArtifactsProjection, type Band} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import {artifactOfMark} from '../src/pick.js';
 
 /** A hovered mark names the artifact it is a member of, through its ordinal and the table. */

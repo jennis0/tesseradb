@@ -1,6 +1,6 @@
 import {ContextProvider} from '@lit/context';
 import {css, html, nothing, type TemplateResult} from 'lit';
-import type {Store} from '@mosaica/client';
+import type {Store} from '@mosaicajs/client';
 import {MosaicaElement} from './base.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';

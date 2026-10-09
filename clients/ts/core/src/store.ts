@@ -74,7 +74,7 @@ export type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregatesPro
 export type ViewInput = {
   /**
    * `[x0, y0, x1, y1]` in the current view's data coordinates: what the canvas shows, which may be
-   * clamped to the view's extent, as `viewInputOf` in `@mosaica/deck` clamps it.
+   * clamped to the view's extent, as `viewInputOf` in `@mosaicajs/deck` clamps it.
    */
   bbox: [number, number, number, number];
   /**

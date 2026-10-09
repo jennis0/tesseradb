@@ -6,11 +6,11 @@ This directory holds the browser side of Mosaica: the client library, a deck.gl 
 
 | Directory | Package | What it is |
 |---|---|---|
-| `core/` | `@mosaica/client` | The headless store (`createStore`), the viewer and session client (`MosaicaClient`), the control-plane client (`Control`) and the bulk reads. No DOM. Depends on `apache-arrow` and `fzstd`. |
-| `deck/` | `@mosaica/deck` | `MosaicaLayer`, a deck.gl layer that draws a store, for a host with its own `Deck`. deck.gl and luma.gl are peer dependencies. |
-| `components/` | `@mosaica/components` | The `mosaica-*` custom elements, built with Lit, drawing through `@mosaica/deck`. One subpath per element, and a single-file bundle. |
-| `react/` | `@mosaica/react` | `useMosaicaStore` and `useProjection`. `@mosaica/react/components` wraps each element as a React component, behind optional peer dependencies, so the hooks alone pull in neither Lit nor deck.gl. |
-| `viewer/` | `@mosaica/viewer` | The demo: `<mosaica-explorer>` with dataset and principal pickers and measurement panels. Private. |
+| `core/` | `@mosaicajs/client` | The headless store (`createStore`), the viewer and session client (`MosaicaClient`), the control-plane client (`Control`) and the bulk reads. No DOM. Depends on `apache-arrow` and `fzstd`. |
+| `deck/` | `@mosaicajs/deck` | `MosaicaLayer`, a deck.gl layer that draws a store, for a host with its own `Deck`. deck.gl and luma.gl are peer dependencies. |
+| `components/` | `@mosaicajs/components` | The `mosaica-*` custom elements, built with Lit, drawing through `@mosaicajs/deck`. One subpath per element, and a single-file bundle. |
+| `react/` | `@mosaicajs/react` | `useMosaicaStore` and `useProjection`. `@mosaicajs/react/components` wraps each element as a React component, behind optional peer dependencies, so the hooks alone pull in neither Lit nor deck.gl. |
+| `viewer/` | `@mosaicajs/viewer` | The demo: `<mosaica-explorer>` with dataset and principal pickers and measurement panels. Private. |
 | `examples/` | | Four host pages, described below. |
 | `harness/` | | Checks the elements' behaviour in a browser against a running page. |
 | `wire-example/` | | Decodes a `/v1/viewport` body with `apache-arrow` and no Mosaica code. [Wire framing](../../docs/openapi/README.md) walks through it. |
@@ -18,7 +18,7 @@ This directory holds the browser side of Mosaica: the client library, a deck.gl 
 
 The packages depend on each other in one line: `components` on `deck`, and both on `client`. `react` depends on `client`, and on `components` only for its `/components` entry.
 
-`deck` and `components` also import `@mosaica/client/internal`, and `components` imports `@mosaica/deck/internal`. These entries hold what those packages share and a host does not use. They are not a public API and change without notice, so the packages that use them depend on an exact version of the package they import from.
+`deck` and `components` also import `@mosaicajs/client/internal`, and `components` imports `@mosaicajs/deck/internal`. These entries hold what those packages share and a host does not use. They are not a public API and change without notice, so the packages that use them depend on an exact version of the package they import from.
 
 None of the packages is published to npm.
 
@@ -104,7 +104,7 @@ The plain-HTML example's app server mints the tokens for all four, so start it a
 
 The elements are custom elements, so any framework can render them. Frameworks differ in how they set a property whose value is an object, and in whether they need telling that a tag is not one of their own components.
 
-Importing `@mosaica/components` defines every element. A subpath such as `@mosaica/components/count` defines one. The map, the explorer, the field card, the field column and the artifact card import `@mosaica/deck` and so pull in deck.gl; the other subpaths do not. An element rendered before its module has loaded is an unknown element until it upgrades, which shows as blank space. Defining an element needs the browser's `customElements`, so a server-rendered app imports the package on the client only.
+Importing `@mosaicajs/components` defines every element. A subpath such as `@mosaicajs/components/count` defines one. The map, the explorer, the field card, the field column and the artifact card import `@mosaicajs/deck` and so pull in deck.gl; the other subpaths do not. An element rendered before its module has loaded is an unknown element until it upgrades, which shows as blank space. Defining an element needs the browser's `customElements`, so a server-rendered app imports the package on the client only.
 
 An element takes its store from its `store` property, or else from the nearest `<mosaica-store>` or `<mosaica-explorer>` above it in the page. `<mosaica-map>`, `<mosaica-explorer>` and `<mosaica-store>` can also build their own from a `viewer-url` and a `token`, or an `authorise` function in place of the token. The component reference lists each element's attributes, properties and events.
 
@@ -117,15 +117,15 @@ The single-file bundle needs nothing else. Serve `mosaica-components.js` beside 
 <mosaica-explorer viewer-url="http://localhost:5180" token="..."></mosaica-explorer>
 ```
 
-A page that loads the packages' `dist/` modules without a bundler needs an import map for their dependencies. For `@mosaica/client` those are `apache-arrow` and `fzstd`, and Arrow's own imports `flatbuffers`, `tslib` and `json-with-bigint`. `components/test/browser/dist.browser.ts` builds such a page and lists the files each name maps to.
+A page that loads the packages' `dist/` modules without a bundler needs an import map for their dependencies. For `@mosaicajs/client` those are `apache-arrow` and `fzstd`, and Arrow's own imports `flatbuffers`, `tslib` and `json-with-bigint`. `components/test/browser/dist.browser.ts` builds such a page and lists the files each name maps to.
 
 ### A bundler and the decode worker
 
-The decoder makes its worker from `new URL('./decode.worker.js', import.meta.url)`. Vite and webpack follow that reference and emit the file. esbuild does not: copy `@mosaica/client/dist/decode.worker.js` beside the output, or install a factory with `setWorkerFactory(() => new Worker(...))` before the first store is made.
+The decoder makes its worker from `new URL('./decode.worker.js', import.meta.url)`. Vite and webpack follow that reference and emit the file. esbuild does not: copy `@mosaicajs/client/dist/decode.worker.js` beside the output, or install a factory with `setWorkerFactory(() => new Worker(...))` before the first store is made.
 
 ### React
 
-`@mosaica/react/components` sets object values as properties and turns each event into a handler prop, such as `onPick` for `mosaica-pick`. React 19 sets properties on custom elements itself, so there the raw tags also work; the wrappers add the types, and are needed on React 18. `useMosaicaStore` builds the store in an effect and disposes it in the cleanup, so StrictMode's double mount leaves no store running.
+`@mosaicajs/react/components` sets object values as properties and turns each event into a handler prop, such as `onPick` for `mosaica-pick`. React 19 sets properties on custom elements itself, so there the raw tags also work; the wrappers add the types, and are needed on React 18. `useMosaicaStore` builds the store in an effect and disposes it in the cleanup, so StrictMode's double mount leaves no store running.
 
 ### Vue
 

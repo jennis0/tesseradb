@@ -1,8 +1,8 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, OrthographicView, type Layer} from '@deck.gl/core';
 import {tableFromArrays} from 'apache-arrow';
-import {MosaicaError, createStore, type AggregateRequest, type AggregateResult, type MosaicaClient} from '@mosaica/client';
-import {mortonOfTile} from '@mosaica/client/internal';
+import {MosaicaError, createStore, type AggregateRequest, type AggregateResult, type MosaicaClient} from '@mosaicajs/client';
+import {mortonOfTile} from '@mosaicajs/client/internal';
 import {SELECTION, fakeClock, fakeScheduler, camera as cameraOver, meta, response, result as viewportResult, view} from '../../core/test/support.js';
 import {DENSITY_CELL_SIZES, DENSITY_SETTLE_MS, DensityCounter, cellDepth, resolutionStops, type DensityCamera} from '../src/density-counter.js';
 import {MosaicaLayer} from '../src/layer.js';

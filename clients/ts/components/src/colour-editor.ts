@@ -1,9 +1,9 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {CLUSTER_PREFIX, PALETTES, artifactColour, colourLayers, type AggregateSpec, type Layer, type Meta, type PaletteName, type Store} from '@mosaica/client';
-import {CATEGORY_PALETTES} from '@mosaica/deck';
-import {hexOf} from '@mosaica/deck/internal';
+import {CLUSTER_PREFIX, PALETTES, artifactColour, colourLayers, type AggregateSpec, type Layer, type Meta, type PaletteName, type Store} from '@mosaicajs/client';
+import {CATEGORY_PALETTES} from '@mosaicajs/deck';
+import {hexOf} from '@mosaicajs/deck/internal';
 import {HeldAggregate, artifactGroupings, isTree, levelOf, listedGroups, rankedGrouping, type GroupCount} from './aggregate.js';
 import {MosaicaElement, UNNAMED, columnCaption, countText, emit, idString, keyTitle} from './base.js';
 import {ColourPicker, pickerStyles, type PickerTarget} from './colour-picker.js';

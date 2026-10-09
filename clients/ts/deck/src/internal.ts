@@ -1,5 +1,5 @@
 /**
- * `@mosaica/deck/internal`: what `@mosaica/components` uses of this package beyond the root
+ * `@mosaicajs/deck/internal`: what `@mosaicajs/components` uses of this package beyond the root
  * entry. It is not a public API, and its exports change with the components.
  */
 export {clusterLayerOf, contourShapes, encodingOf, type MosaicaLayerInternalProps} from './layer.js';

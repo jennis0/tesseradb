@@ -46,7 +46,7 @@ def test_builds_and_copies_the_bundle_skipping_npm_ci_when_current(tmp_path, mon
     monkeypatch.setattr(hatch_build.shutil, "which", lambda name: "/usr/bin/npm")
     static = tmp_path / "py" / "mosaica" / "static"
     copied = hatch_build.build_bundle(ts, static, run=run, log=lambda m: None)
-    assert ran == [["run", "bundle", "-w", "@mosaica/components"]]
+    assert ran == [["run", "bundle", "-w", "@mosaicajs/components"]]
     assert [p.name for p in copied] == ["mosaica-components.js", "mosaica-components.js.sri"]
     assert (static / "mosaica-components.js").read_text() == "bundle"
 

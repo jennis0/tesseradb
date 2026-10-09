@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import type {Meta} from '@mosaica/client';
+import type {Meta} from '@mosaicajs/client';
 import '../src/map.js';
 import {fakeStore, mount, settle, status} from './fake-store.js';
 

@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {FilterDraft, FiltersProjection, Meta, Rgba} from '@mosaica/client';
+import type {FilterDraft, FiltersProjection, Meta, Rgba} from '@mosaicajs/client';
 import '../src/field-card.js';
 import type {MosaicaFieldCard} from '../src/field-card.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, meta, mount, registered, scalar, settle, status, type FakeStore} from './fake-store.js';

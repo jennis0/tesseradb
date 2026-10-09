@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {composeFilters, type FilterDraft} from '@mosaica/client';
+import {composeFilters, type FilterDraft} from '@mosaicajs/client';
 import '../src/status.js';
 import '../src/selection.js';
 import '../src/count.js';

@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection, type Composition} from '@mosaica/client';
-import {SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
+import {type Artifact, type ArtifactsProjection, type Composition} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import '../src/map.js';
 import type {MosaicaMap} from '../src/map.js';
 import {fakeStore, mount, settle, status, type FakeStore} from './fake-store.js';

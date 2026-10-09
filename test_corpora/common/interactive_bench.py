@@ -49,7 +49,7 @@ server, the first opening is whatever the server has already seen, and the resul
         [--core /path/to/clients/ts/core/dist/index.js] [--targets 0.01,0.25,1] [--per-tile 50] \\
         [--prefetch [--reference prefetch-off-run.json]]
 
-Build the TypeScript core first: `npm --prefix clients/ts run build -w @mosaica/client`.
+Build the TypeScript core first: `npm --prefix clients/ts run build -w @mosaicajs/client`.
 """
 
 from __future__ import annotations
@@ -665,7 +665,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not Path(args.core).is_file():
         ap.error(
-            f"{args.core} is missing; build it with `npm --prefix clients/ts run build -w @mosaica/client`"
+            f"{args.core} is missing; build it with `npm --prefix clients/ts run build -w @mosaicajs/client`"
         )
     if args.reopen and not args.start:
         ap.error("--reopen needs --start, since it restarts the server")

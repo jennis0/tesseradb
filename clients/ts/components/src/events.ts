@@ -1,5 +1,5 @@
-import type {ArtifactDetail, ClauseVerb, Count, FilterExpr, ItemDetail, Masked, PaletteName, RegionProjection, Refusal, SelectionShape} from '@mosaica/client';
-import type {CategoryPaletteName, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale} from '@mosaica/deck';
+import type {ArtifactDetail, ClauseVerb, Count, FilterExpr, ItemDetail, Masked, PaletteName, RegionProjection, Refusal, SelectionShape} from '@mosaicajs/client';
+import type {CategoryPaletteName, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale} from '@mosaicajs/deck';
 import type {PanelState} from './states.js';
 
 /** A selection shape as an event carries it: an artifact's `tessera_id` as a decimal string. */

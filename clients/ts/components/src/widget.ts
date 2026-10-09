@@ -11,9 +11,9 @@ import {
   type PaletteName,
   type Store,
   type TokenSupplier
-} from '@mosaica/client';
-import type {Sizing} from '@mosaica/deck';
-import {hexOf} from '@mosaica/deck/internal';
+} from '@mosaicajs/client';
+import type {Sizing} from '@mosaicajs/deck';
+import {hexOf} from '@mosaicajs/deck/internal';
 import {idString} from './base.js';
 import {colouringOf, setSizing, sizingOf} from './colouring.js';
 import type {MosaicaExplorer} from './explorer.js';

@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import type {Band, ScalarColumn} from '@mosaica/client';
+import type {Band, ScalarColumn} from '@mosaicajs/client';
 import {MarkSlab} from '../src/slab.js';
 import {UNIFORM, UNMAPPED, colourOfRank, type Encoding} from '../src/colour.js';
 

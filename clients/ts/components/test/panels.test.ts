@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {activeCount, type FilterDraft, type FiltersProjection, type Meta} from '@mosaica/client';
+import {activeCount, type FilterDraft, type FiltersProjection, type Meta} from '@mosaicajs/client';
 import '../src/item-card.js';
 import '../src/filter.js';
 import '../src/filter-panel.js';

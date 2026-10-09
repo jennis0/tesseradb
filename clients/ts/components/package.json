@@ -1,5 +1,5 @@
 {
-  "name": "@mosaica/components",
+  "name": "@mosaicajs/components",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -103,8 +103,8 @@
   },
   "dependencies": {
     "@lit/context": "^1.1.0",
-    "@mosaica/client": "0.1.0",
-    "@mosaica/deck": "0.1.0"
+    "@mosaicajs/client": "0.1.0",
+    "@mosaicajs/deck": "0.1.0"
   },
   "peerDependencies": {
     "@deck.gl/aggregation-layers": "^9.3.7",

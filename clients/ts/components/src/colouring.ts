@@ -1,7 +1,7 @@
-import type {Store} from '@mosaica/client';
-import {chosenColour} from '@mosaica/client/internal';
-import {DEFAULT_COLOURING, DEFAULT_SIZING, type Colouring, type Sizing} from '@mosaica/deck';
-import {UNMAPPED, colourOfRank, hexOf} from '@mosaica/deck/internal';
+import type {Store} from '@mosaicajs/client';
+import {chosenColour} from '@mosaicajs/client/internal';
+import {DEFAULT_COLOURING, DEFAULT_SIZING, type Colouring, type Sizing} from '@mosaicajs/deck';
+import {UNMAPPED, colourOfRank, hexOf} from '@mosaicajs/deck/internal';
 
 /**
  * The colour and size choices of every element reading one store: the palette, the ramp, the

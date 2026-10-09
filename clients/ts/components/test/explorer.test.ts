@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {Meta, RegionProjection} from '@mosaica/client';
+import type {Meta, RegionProjection} from '@mosaicajs/client';
 import '../src/explorer.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
 

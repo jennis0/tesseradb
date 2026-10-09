@@ -1,6 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
-import {type Meta} from '@mosaica/client';
-import {enterGroup, hasOneLayout, viewPickerEntries} from '@mosaica/client/internal';
+import {type Meta} from '@mosaicajs/client';
+import {enterGroup, hasOneLayout, viewPickerEntries} from '@mosaicajs/client/internal';
 import {MosaicaElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';

@@ -1,6 +1,6 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {NO_COUNT, NO_MASKED, type StatusProjection, type ViewProjection} from '@mosaica/client';
+import {NO_COUNT, NO_MASKED, type StatusProjection, type ViewProjection} from '@mosaicajs/client';
 import {MosaicaElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, showsContent, stateOf, type PanelState} from './states.js';

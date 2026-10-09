@@ -1,4 +1,4 @@
-import type {SubCell} from '@mosaica/client';
+import type {SubCell} from '@mosaicajs/client';
 
 /**
  * Rasterise a tile's masked sub-cell counts into an RGBA image for a `BitmapLayer`. The counts are
