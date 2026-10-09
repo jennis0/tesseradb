@@ -22,6 +22,6 @@ def test_a_server_given_a_taken_port_is_started_on_fresh_ones(
         server, proc = harness.spawn_server(catalogue_bundle_root, tmp_path)
         try:
             assert server.control_base != f"http://127.0.0.1:{taken}"
-            assert requests.get(f"{server.viewer_base}/healthz", timeout=5).status_code == 200
+            requests.get(f"{server.viewer_base}/healthz", timeout=5).raise_for_status()
         finally:
             harness.stop_server(proc)

@@ -956,18 +956,7 @@ theta_target_marks = {theta_target_marks}
     return config_path
 
 
-def spawn_server(bundle_root: Path, tmp_dir: Path, **options) -> tuple[Server, subprocess.Popen]:
-    """`_spawn_server_once`, started again on fresh ports while a port it was given is taken."""
-    for attempt in range(SPAWN_ATTEMPTS):
-        try:
-            return _spawn_server_once(bundle_root, tmp_dir, **options)
-        except PortTaken:
-            if attempt == SPAWN_ATTEMPTS - 1:
-                raise
-    raise AssertionError("unreachable")
-
-
-def _spawn_server_once(
+def spawn_server(
     bundle_root: Path,
     tmp_dir: Path,
     *,
@@ -997,57 +986,71 @@ def _spawn_server_once(
     cache_dir = cache_dir if cache_dir is not None else (tmp_dir / "cache")
     wal_path = wal_path if wal_path is not None else (tmp_dir / "wal.log")
 
-    viewer_port = free_port()
-    session_port = free_port()
-    control_port = free_port()
+    for attempt in range(SPAWN_ATTEMPTS):
+        viewer_port = free_port()
+        session_port = free_port()
+        control_port = free_port()
 
-    config_path = write_config(
-        tmp_dir,
-        bundle_root,
-        cache_dir,
-        wal_path,
-        viewer_port,
-        session_port,
-        control_port,
-        max_k=max_k,
-        k_max_marks=k_max_marks,
-        theta_target_marks=theta_target_marks,
-        max_underlay_cells=max_underlay_cells,
-        serve_extra=serve_extra,
-    )
+        config_path = write_config(
+            tmp_dir,
+            bundle_root,
+            cache_dir,
+            wal_path,
+            viewer_port,
+            session_port,
+            control_port,
+            max_k=max_k,
+            k_max_marks=k_max_marks,
+            theta_target_marks=theta_target_marks,
+            max_underlay_cells=max_underlay_cells,
+            serve_extra=serve_extra,
+        )
 
-    env = os.environ.copy()
-    env["MOSAICA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
-    if env_extra:
-        env.update(env_extra)
+        env = os.environ.copy()
+        env["MOSAICA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
+        if env_extra:
+            env.update(env_extra)
 
-    if log_path is not None:
-        log_file = open(log_path, "ab")
-        log_start = log_file.tell()
-        stdout_target = log_file
-        stderr_target = subprocess.STDOUT
-    else:
-        stdout_target = subprocess.PIPE
-        stderr_target = subprocess.STDOUT
+        if log_path is not None:
+            log_file = open(log_path, "ab")
+            log_start = log_file.tell()
+            stdout_target = log_file
+            stderr_target = subprocess.STDOUT
+        else:
+            log_start = 0
+            stdout_target = subprocess.PIPE
+            stderr_target = subprocess.STDOUT
 
-    proc = subprocess.Popen(
-        # `--deployment`, not `-c`: the configuration rework made `mosaica.toml` the one document
-        # both entry points read, and `serve` takes the same flag `build` does
-        # (`configuration.md` §3). The old spelling was refused at argument parsing, so every
-        # spawn here failed at startup rather than in a test's own assertion.
-        [str(CLI_BIN), "serve", "--deployment", str(config_path)],
-        cwd=REPO_ROOT,
-        env=env,
-        stdout=stdout_target,
-        stderr=stderr_target,
-    )
-    if log_path is not None:
-        log_file.close()  # the child inherited the fd; our handle can close now
+        proc = subprocess.Popen(
+            # `--deployment`, not `-c`: the configuration rework made `mosaica.toml` the one document
+            # both entry points read, and `serve` takes the same flag `build` does
+            # (`configuration.md` §3). The old spelling was refused at argument parsing, so every
+            # spawn here failed at startup rather than in a test's own assertion.
+            [str(CLI_BIN), "serve", "--deployment", str(config_path)],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=stdout_target,
+            stderr=stderr_target,
+        )
+        if log_path is not None:
+            log_file.close()  # the child inherited the fd; our handle can close now
 
-    srv = Server(viewer_port, session_port, control_port)
+        srv = Server(viewer_port, session_port, control_port)
+        try:
+            wait_healthy(proc, srv, log_path, log_start)
+        except PortTaken:
+            if attempt == SPAWN_ATTEMPTS - 1:
+                raise
+            continue
+        return srv, proc
+    raise AssertionError("unreachable")
 
+
+def wait_healthy(
+    proc: subprocess.Popen, srv: Server, log_path: Path | None, log_start: int
+) -> None:
+    """Wait up to 20 s for `proc` to answer `/healthz`; raise what it said if it exits first."""
     deadline = time.monotonic() + 20.0
-    up = False
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             extra = ""
@@ -1059,17 +1062,12 @@ def _spawn_server_once(
         try:
             resp = requests.get(f"{srv.viewer_base}/healthz", timeout=1)
             if resp.status_code == 200:
-                up = True
-                break
+                return
         except requests.exceptions.ConnectionError:
             pass
         time.sleep(0.1)
-
-    if not up:
-        proc.terminate()
-        raise RuntimeError("mosaica serve did not become healthy within 20s")
-
-    return srv, proc
+    proc.terminate()
+    raise RuntimeError("mosaica serve did not become healthy within 20s")
 
 
 def stop_server(proc: subprocess.Popen) -> None:
