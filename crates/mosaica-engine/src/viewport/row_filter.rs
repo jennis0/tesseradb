@@ -849,9 +849,9 @@ pub(crate) fn crossing_domain(
 /// for a layer whose membership is not an attribute predicate at all.
 pub(crate) fn predicate_vocabulary<'a>(
     generation: &'a crate::Generation,
-    declaration: &tessera_types::layer::LayerDeclaration,
-) -> Option<&'a tessera_store::vocabulary::VocabularyMinter> {
-    let tessera_types::layer::MembershipSource::Attribute(field) = &declaration.membership else {
+    declaration: &mosaica_types::layer::LayerDeclaration,
+) -> Option<&'a mosaica_store::vocabulary::VocabularyMinter> {
+    let mosaica_types::layer::MembershipSource::Attribute(field) = &declaration.membership else {
         return None;
     };
     let name = generation
@@ -871,19 +871,19 @@ pub(crate) fn predicate_vocabulary<'a>(
 /// Fail-closed: such a level is served with no membership, rather than every artifact being one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn predicate_source<'a>(
-    declaration: &tessera_types::layer::LayerDeclaration,
+    declaration: &mosaica_types::layer::LayerDeclaration,
     generation: &'a crate::Generation,
     view: &str,
-    view_data: &tessera_store::read::ViewData,
-    segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
+    view_data: &mosaica_store::read::ViewData,
+    segments: &'a [(&'a mosaica_store::read::SegmentData, u32)],
     code_of_key: &'a dyn Fn(&str) -> Option<u32>,
     shapes: &crate::shapes::ShapeStore,
-    store: &tessera_lifecycle::membership::ArtifactStore,
+    store: &mosaica_lifecycle::membership::ArtifactStore,
     level: u32,
 ) -> Option<crate::artifacts::PredicateSource<'a>> {
     match &declaration.membership {
-        tessera_types::layer::MembershipSource::Enumerated => None,
-        tessera_types::layer::MembershipSource::Attribute(field) => {
+        mosaica_types::layer::MembershipSource::Enumerated => None,
+        mosaica_types::layer::MembershipSource::Attribute(field) => {
             let values = generation.filter_columns.value_layers(field)?;
             Some(crate::artifacts::PredicateSource::Attribute(
                 crate::artifacts::AttributeSource {
@@ -893,7 +893,7 @@ pub(crate) fn predicate_source<'a>(
             ))
         }
         // A spatial layer with no `shape` holds no artifacts and has nothing to resolve.
-        tessera_types::layer::MembershipSource::Spatial => {
+        mosaica_types::layer::MembershipSource::Spatial => {
             declaration.shape?;
             let held = shapes.level(
                 view,
@@ -1074,7 +1074,7 @@ impl Engine {
         let members =
             |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, mask, resolved);
         let layers = |layer: &str| self.reaches_layer(served.session, layer);
-        let unique = |column: &str, keys: &[tessera_store::unique::UniqueKey]| {
+        let unique = |column: &str, keys: &[mosaica_store::unique::UniqueKey]| {
             unique_holders(served.generation, column, keys)
         };
         let resolvers = crate::filter::RowLeafResolvers {
@@ -1182,7 +1182,7 @@ impl Engine {
                     // decomposition.
                     Ok(entry) if entry.is_of(&canonical) => entry,
                     Ok(_) => Arc::new(build()),
-                    Err(tessera_cache::WaitEnded::Cancelled) => {
+                    Err(mosaica_cache::WaitEnded::Cancelled) => {
                         return Err(FilterError::RegionUnavailable(
                             "the request was cancelled while its region was being decomposed"
                                 .to_string(),
@@ -1190,7 +1190,7 @@ impl Engine {
                     }
                     // Building unretained rather than refusing: a second viewer's identical lasso
                     // must not 429.
-                    Err(tessera_cache::WaitEnded::Budget) => Arc::new(build()),
+                    Err(mosaica_cache::WaitEnded::Budget) => Arc::new(build()),
                 };
                 Ok(RegionRows {
                     rows: entry.rows_under(mask, segments),
@@ -1204,7 +1204,7 @@ impl Engine {
                 let rows = match gated {
                     Some(gated)
                         if gated.layer.declaration.drawn_shape()
-                            != Some(tessera_types::layer::DrawnShape::Authored) =>
+                            != Some(mosaica_types::layer::DrawnShape::Authored) =>
                     {
                         // `membership ∩ M_auth`, from whichever half of the form holds it — see
                         // [`crate::artifacts::ArtifactRows::visible_rows`].
@@ -1265,7 +1265,7 @@ pub(crate) struct ResolvedLeaves {
 pub(crate) fn unique_holders(
     generation: &Generation,
     column: &str,
-    keys: &[tessera_store::unique::UniqueKey],
+    keys: &[mosaica_store::unique::UniqueKey],
 ) -> std::result::Result<Vec<u32>, crate::filter::FilterError> {
     crate::unique::holders(generation, column, keys)
         .map(|found| found.into_iter().map(|(_, entity)| entity.raw() as u32).collect())
@@ -1295,7 +1295,7 @@ pub(crate) fn filter_refusal(e: crate::filter::FilterError) -> EngineError {
 /// and gather consecutive ranges, so neither one huge range nor a thousand slivers defeats the
 /// split.
 fn per_tile_crossing(
-    row_space: &tessera_store::permutation::RowSpace,
+    row_space: &mosaica_store::permutation::RowSpace,
     entities: &croaring::Bitmap,
     domain: &[Range<u32>],
     rows_in_ranges: u64,
@@ -1308,7 +1308,7 @@ fn per_tile_crossing(
 /// Returns one row image per input set, positionally. `None` where the row space declined to
 /// invert a row.
 fn per_tile_crossing_multi(
-    row_space: &tessera_store::permutation::RowSpace,
+    row_space: &mosaica_store::permutation::RowSpace,
     entity_sets: &[&croaring::Bitmap],
     domain: &[Range<u32>],
     rows_in_ranges: u64,
@@ -1406,13 +1406,13 @@ mod tests {
     fn row_space_over(
         dir: &std::path::Path,
         row_order: &[u32],
-    ) -> tessera_store::permutation::RowSpace {
-        use tessera_store::permutation::{Permutation, RowSpace};
-        use tessera_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
+    ) -> mosaica_store::permutation::RowSpace {
+        use mosaica_store::permutation::{Permutation, RowSpace};
+        use mosaica_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
 
         let perm_path = dir.join("permutation.bin");
         let entities: Vec<EntityId> = row_order.iter().map(|&e| EntityId::new(e as u64)).collect();
-        tessera_store::write::write_permutation(&perm_path, &entities, row_order.len() as u64)
+        mosaica_store::write::write_permutation(&perm_path, &entities, row_order.len() as u64)
             .expect("permutation writes");
         let table_path = dir.join(ROW_ENTITY_FILE);
         write_row_entity(&table_path, row_order).expect("table writes");
@@ -1489,7 +1489,7 @@ mod tests {
                     RowExpr::Leaf {
                         column: "band".to_string(),
                         family: Family::Category,
-                        operand: FilterOperand::Equals(tessera_types::AttrLocalId::new(1)),
+                        operand: FilterOperand::Equals(mosaica_types::AttrLocalId::new(1)),
                     },
                     RowExpr::Entity(croaring::Bitmap::new()),
                 ],
@@ -1523,7 +1523,7 @@ mod tests {
     /// `entity_of`'s `None` as "no entity", which would drop rows silently.
     #[test]
     fn a_row_space_without_a_table_declines_the_per_tile_route() {
-        use tessera_store::permutation::{Permutation, RowSpace};
+        use mosaica_store::permutation::{Permutation, RowSpace};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let perm_path = dir.path().join("permutation.bin");
@@ -1531,7 +1531,7 @@ mod tests {
             .iter()
             .map(|&e| EntityId::new(e))
             .collect();
-        tessera_store::write::write_permutation(&perm_path, &entities_in_order, 6)
+        mosaica_store::write::write_permutation(&perm_path, &entities_in_order, 6)
             .expect("permutation writes");
         let space = RowSpace::new(Arc::new(Permutation::load(&perm_path).expect("loads")), 6);
 

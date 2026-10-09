@@ -1,4 +1,4 @@
-//! **Two views' derived files are two files** (`tessera_store::derived::DerivedIndex`).
+//! **Two views' derived files are two files** (`mosaica_store::derived::DerivedIndex`).
 //!
 //! The build's artifact pass runs once per view, and every derived kind is named from a running
 //! index. An index that restarted per call named the second view's files after the first's: the
@@ -20,10 +20,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::{build, BuildArgs, ViewArgs};
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::{build, BuildArgs, ViewArgs};
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -169,7 +169,7 @@ content = { computed = ["centroid"] }
 "#;
 
 /// A row-major label column's header: magic, version, width, a pad byte, the row count, the
-/// ordinal count (`tessera_store::membership::pack_label_column`). The row count is what says
+/// ordinal count (`mosaica_store::membership::pack_label_column`). The row count is what says
 /// which view a column was projected over.
 fn column_rows(path: &Path) -> u32 {
     let bytes = std::fs::read(path).expect("a column the manifest names is on disk");
@@ -188,19 +188,19 @@ fn two_views_derived_files_do_not_collide() {
     write_cluster_members(&dir.join("clusters_members.parquet"));
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, CONFIG).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture declaration parses");
 
     let out = dir.join("bundle");
     let view = |name: &str, points: &str| ViewArgs {
         visibility: None,
         view_id: name.to_string(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: dir.join(points),
         point_fields: Default::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(dir.join("pairs.parquet")),
+        access: mosaica_build::config::AccessInput::relation(dir.join("pairs.parquet")),
     };
     build(&BuildArgs {
         views: vec![
@@ -210,7 +210,7 @@ fn two_views_derived_files_do_not_collide() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             dir.join("wide.parquet"),
             &config.schema,
         ),
@@ -261,7 +261,7 @@ fn two_views_derived_files_do_not_collide() {
     let containment: Vec<(&str, u32)> = manifest
         .derived_extents
         .iter()
-        .filter(|e| e.form == tessera_store::manifest::DerivedForm::Containment)
+        .filter(|e| e.form == mosaica_store::manifest::DerivedForm::Containment)
         .map(|e| (e.layer.as_str(), e.level))
         .collect();
     let mut once = containment.clone();
@@ -281,7 +281,7 @@ fn two_views_derived_files_do_not_collide() {
         .filter(|e| {
             matches!(
                 e.form,
-                tessera_store::manifest::DerivedForm::RowColumn { .. }
+                mosaica_store::manifest::DerivedForm::RowColumn { .. }
             )
         })
         .map(|e| {

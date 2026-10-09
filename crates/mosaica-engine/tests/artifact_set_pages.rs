@@ -26,14 +26,14 @@
 mod common;
 
 use common::*;
-use tessera_engine::Engine;
-use tessera_lifecycle::membership::IncomingContent;
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
-use tessera_types::layer::{
+use mosaica_engine::Engine;
+use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent, SuppliedRequirement,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const LAYER: &str = "topics/a";
 
@@ -48,7 +48,7 @@ fn label_layer(name: &str) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -122,7 +122,7 @@ fn page(
     fx: &Fixture,
     joining: impl IntoIterator<Item = u64>,
     leaving: impl IntoIterator<Item = u64>,
-) -> tessera_engine::GrownMembership {
+) -> mosaica_engine::GrownMembership {
     engine
         .grow_memberships(
             LAYER.into(),

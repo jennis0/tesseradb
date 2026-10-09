@@ -1,7 +1,7 @@
 //! Property tests for Morton interleaving and tile enumeration.
 
 use proptest::prelude::*;
-use tessera_spatial::{interleave, tiles_for_bbox, Bounds, Tile};
+use mosaica_spatial::{interleave, tiles_for_bbox, Bounds, Tile};
 
 /// Inverse of `interleave`: bit `2*i` of the code is bit `i` of x, bit `2*i+1` is bit `i` of y.
 fn deinterleave(code: u32) -> (u16, u16) {
@@ -57,7 +57,7 @@ proptest! {
         depth in 0u8..=8u8,
     ) {
         let e = full_extent();
-        let code = tessera_spatial::morton_of(px, py, &e).raw() as u64;
+        let code = mosaica_spatial::morton_of(px, py, &e).raw() as u64;
         let tiles = tiles_for_bbox([0.0, 0.0, 1.0, 1.0], depth, &e);
 
         let containing: Vec<&Tile> = tiles.iter()
@@ -94,5 +94,5 @@ proptest! {
 #[test]
 fn a_tile_prefix_interleaves_only_its_depth_bits() {
     // Column 0b101, row 0b011 at depth 3: y bits at the odd positions, x bits at the even.
-    assert_eq!(tessera_spatial::interleave_bits(0b101, 0b011, 3), 0b01_10_11);
+    assert_eq!(mosaica_spatial::interleave_bits(0b101, 0b011, 3), 0b01_10_11);
 }

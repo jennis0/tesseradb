@@ -18,7 +18,7 @@ import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, Artif
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
- * {@link TesseraClient.viewport} decodes them. Parts arrive in the order the server sent them, and
+ * {@link MosaicaClient.viewport} decodes them. Parts arrive in the order the server sent them, and
  * the next part is not handed over until a returned promise settles.
  *
  * Each part's `result` holds whole tiles: the counts of the tiles whose points it carries, and those
@@ -33,7 +33,7 @@ type Counts = Pick<ViewportCounts, 'tiles' | 'subCells'>;
 
 /**
  * Receives a `/v1/artifacts/viewport` response's frames, one at a time, as
- * {@link TesseraClient.viewportArtifacts} decodes them, in wire order, with the response's keys, so
+ * {@link MosaicaClient.viewportArtifacts} decodes them, in wire order, with the response's keys, so
  * a frame can be held under the right principal before the response resolves. The next frame is
  * not handed over until a returned promise settles.
  *
@@ -188,7 +188,7 @@ function tilesFor(tiles: readonly TileCounts[], from: number, rows: number): {ti
  *
  * @category HTTP client
  */
-export class TesseraError extends Error {
+export class MosaicaError extends Error {
   constructor(
     /** The HTTP status, such as `404` or `422`. */
     readonly status: number,
@@ -207,7 +207,7 @@ export class TesseraError extends Error {
     readonly retryAfterS: number | null = null
   ) {
     super(`${status} ${code}: ${detail}`);
-    this.name = 'TesseraError';
+    this.name = 'MosaicaError';
   }
 }
 
@@ -221,18 +221,18 @@ async function fail(response: Response): Promise<never> {
     detail = body.detail ?? detail;
     wait ??= body.retry_after_s === undefined ? null : String(body.retry_after_s);
   } catch {
-    // A body that is not JSON, such as a proxy's, still gives a TesseraError.
+    // A body that is not JSON, such as a proxy's, still gives a MosaicaError.
   }
   const seconds = wait === null ? NaN : Number(wait);
-  throw new TesseraError(response.status, code, detail, Number.isFinite(seconds) && seconds >= 0 ? seconds : null);
+  throw new MosaicaError(response.status, code, detail, Number.isFinite(seconds) && seconds >= 0 ? seconds : null);
 }
 
 /**
- * Where a {@link TesseraClient} sends its requests, and how.
+ * Where a {@link MosaicaClient} sends its requests, and how.
  *
  * @category HTTP client
  */
-export type TesseraClientOptions = {
+export type MosaicaClientOptions = {
   /** The viewer listener's base URL, without a trailing slash. Routes under `/v1/` are appended to it. */
   viewerUrl: string;
   /** The session listener's base URL, without a trailing slash. Routes under `/session/` are appended to it. */
@@ -256,7 +256,7 @@ export type TesseraClientOptions = {
   /**
    * Where responses are decoded. Defaults to a worker where one can be made, and this thread
    * otherwise, made at the first `viewport` call. A decoder passed here belongs to the host, which
-   * closes it; {@link TesseraClient.close} closes only a decoder the client built.
+   * closes it; {@link MosaicaClient.close} closes only a decoder the client built.
    */
   decoder?: Decoder;
   /** Used for every request in place of the global `fetch`. */
@@ -272,14 +272,14 @@ export type TesseraClientOptions = {
  * Calls the viewer and session routes, one method per route. It holds no cache or session state;
  * {@link createStore} holds those.
  *
- * A method rejects with {@link TesseraError} when the server refuses, and with the `fetch` error
+ * A method rejects with {@link MosaicaError} when the server refuses, and with the `fetch` error
  * when no server answers. On a viewer route, `401 bad-credential` for a token that worked before
  * and `403 expired-token` both mean the session has ended. Every count a viewer route returns is
  * over the items the token's session may see.
  *
  * @category HTTP client
  */
-export class TesseraClient {
+export class MosaicaClient {
   /**
    * Where responses are turned into typed arrays.
    *
@@ -288,7 +288,7 @@ export class TesseraClient {
    */
   private decoder: Decoder | null = null;
 
-  constructor(private readonly opts: TesseraClientOptions) {}
+  constructor(private readonly opts: MosaicaClientOptions) {}
 
   /**
    * One request, through the host's `fetch`, with the host's headers and then the route's own,
@@ -317,7 +317,7 @@ export class TesseraClient {
    *   or an OIDC access token.
    * @returns The session: `token` for the viewer methods and `logout`, and `expiresAt` in seconds
    *   since the Unix epoch.
-   * @throws {@link TesseraError} when the server refuses: `401` for every credential it does not
+   * @throws {@link MosaicaError} when the server refuses: `401` for every credential it does not
    *   accept, `403` where the principal does not hold `read`, `429` under load.
    */
   async login(credential: LoginCredential, signal?: AbortSignal): Promise<Login> {
@@ -341,7 +341,7 @@ export class TesseraClient {
   /**
    * `POST /v1/logout`: ends the session of `token`.
    *
-   * @throws {@link TesseraError} when the server refuses: `401` or `403` for a token whose session
+   * @throws {@link MosaicaError} when the server refuses: `401` or `403` for a token whose session
    *   has already ended.
    */
   async logout(token: string, signal?: AbortSignal): Promise<void> {
@@ -365,7 +365,7 @@ export class TesseraClient {
    * @returns The session: `token` for the viewer methods, `tokenId` for `revoke`, and `expiresAt`
    *   in seconds since the Unix epoch.
    * @throws `Error` when the options carry no `sessionCredential`.
-   * @throws {@link TesseraError} when the server refuses: `401` for a credential it does not
+   * @throws {@link MosaicaError} when the server refuses: `401` for a credential it does not
    *   accept, `403` where the key's principal does not hold `authorise-as`, the target does not
    *   hold `read`, or a key names `terms`, `404` where `principal` names no enabled principal,
    *   `422` for an access token it does not accept, `429` under load.
@@ -397,7 +397,7 @@ export class TesseraClient {
    * ends any session. An id naming no such live session is not refused.
    *
    * @throws `Error` when the options carry no `sessionCredential`.
-   * @throws {@link TesseraError} when the server refuses: `401` for a credential it does not
+   * @throws {@link MosaicaError} when the server refuses: `401` for a credential it does not
    *   accept, `403` where the key's principal does not hold `authorise-as`, `422` for a malformed
    *   request.
    */
@@ -426,7 +426,7 @@ export class TesseraClient {
    * and the layers this token's session may know of. The layers differ between principals, so a
    * result is not shared across tokens.
    *
-   * @throws {@link TesseraError} when the server refuses.
+   * @throws {@link MosaicaError} when the server refuses.
    * @throws `Error` when the body lacks a field this client requires, which means the server and
    *   the client are from different versions.
    */
@@ -546,7 +546,7 @@ export class TesseraClient {
    * `POST /v1/viewport`: for one region at one depth, each tile's counts and a sample of up to `k`
    * points per tile, each point tagged with the artifacts of the layers `layers` names. A field of `req` left unset is left out of the
    * body, so the server's default applies: `k` defaults to `selection.kMaxMarks` from
-   * {@link TesseraClient.meta}, and the server caps it at `selection.maxK`. `k = 0` asks for the
+   * {@link MosaicaClient.meta}, and the server caps it at `selection.maxK`. `k = 0` asks for the
    * counts alone, which decode on this thread.
    *
    * @param opts.signal - Aborts the request and the read of its body.
@@ -561,7 +561,7 @@ export class TesseraClient {
    *   `result` carries the same counts.
    * @returns The decoded result, the server's timings, the response's keys (`identityKey`,
    *   `contentKey`, `pin`, `stale`, `region`) and the body's size in `bytes`.
-   * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for a
+   * @throws {@link MosaicaError} when the server refuses: `404` for an unknown view, `422` for a
    *   malformed request, `429` under load.
    * @throws `Error` when the body is malformed or ends before its trailer. Parts already passed to
    *   `onPart` hold whole tiles and stay correct.
@@ -795,12 +795,12 @@ export class TesseraClient {
    *
    * @param opts.signal - Aborts the request and the read of its body.
    * @param opts.background - Decode on the decoder's background worker, as for
-   *   {@link TesseraClient.viewport}.
+   *   {@link MosaicaClient.viewport}.
    * @param opts.onTile - Receives each frame as it is decoded, in wire order, before the body has
    *   finished. A frame handed over is whole and correct even where the body later fails.
    * @returns Every frame, the response's keys (`identityKey`, `contentKey`, `pin`, `stale`,
    *   `region`), the server's timings and the body's size in `bytes`.
-   * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for a
+   * @throws {@link MosaicaError} when the server refuses: `404` for an unknown view, `422` for a
    *   malformed request or a `perTile` over `selection.maxArtifactsPerTile`, `429` under load.
    * @throws `Error` when the body is malformed or ends before its trailer.
    */
@@ -917,7 +917,7 @@ export class TesseraClient {
    * @param opts.limit - The page size when listing, capped at `selection.maxCategoryValues`, which
    *   is also the default.
    * @param opts.view - The view whose value set a group-scoped column answers from.
-   * @throws {@link TesseraError} when the server refuses: `404` for a column that is not a category,
+   * @throws {@link MosaicaError} when the server refuses: `404` for a column that is not a category,
    *   `422` for a malformed request such as `limit: 0` or a group-scoped column named with no view.
    */
   async categories(
@@ -970,13 +970,13 @@ export class TesseraClient {
    * `/v1/categories/{column}/suggest`: up to `limit` values of a category whose key, title or a
    * word start of either begins with `q`, compared after case folding. Values are ordered by the
    * matched text, and only values this principal may see are offered, as for
-   * {@link TesseraClient.categories}. The page echoes `q` as sent, so a caller can match a page to
+   * {@link MosaicaClient.categories}. The page echoes `q` as sent, so a caller can match a page to
    * its request. Without `filters` this is a `GET`; with it, a `POST` carrying the same fields.
    *
    * Every `429` the server answers is returned as `{status: 'shed', retryAfterS, detail}`
    * rather than thrown; {@link SuggestResult} lists the causes.
    *
-   * @param column - As for {@link TesseraClient.categories}.
+   * @param column - As for {@link MosaicaClient.categories}.
    * @param q - The text typed. Empty matches every value.
    * @param opts.limit - The page size, capped at `selection.maxSuggestions`, which is also the
    *   default.
@@ -986,7 +986,7 @@ export class TesseraClient {
    * @param opts.filters - The filter expression the viewport takes. Each count is then of the items
    *   in `view` that pass it. It changes nothing else: a value it excludes is offered with count
    *   `0`. Needs `view`.
-   * @throws {@link TesseraError} for any other refusal: `404` for a column that is not a category,
+   * @throws {@link MosaicaError} for any other refusal: `404` for a column that is not a category,
    *   `422` for a `q` over 256 bytes, `filters` without `view`, or a malformed request.
    */
   async suggest(
@@ -1060,7 +1060,7 @@ export class TesseraClient {
    * `scoped` cover only the views this principal may reach.
    *
    * @param tesseraId - The item's `tessera_id`, as a viewport result's `ids` carries it.
-   * @throws {@link TesseraError} when the server refuses: `404` both for an id that names nothing
+   * @throws {@link MosaicaError} when the server refuses: `404` both for an id that names nothing
    *   and for an item this principal may not see.
    */
   async item(token: string, tesseraId: bigint, signal?: AbortSignal): Promise<ItemDetail> {
@@ -1095,7 +1095,7 @@ export class TesseraClient {
    * @param opts.view - The view to count and place the artifact in.
    * @param opts.zoom - The depth to simplify the shape for, floored and clamped to 0 to 16. Left
    *   out, the whole stored shape is served.
-   * @throws {@link TesseraError} when the server refuses: one `404` alike for an id naming nothing,
+   * @throws {@link MosaicaError} when the server refuses: one `404` alike for an id naming nothing,
    *   a point, an artifact of a layer this principal cannot reach, a suppressed artifact and one
    *   below its layer's existence criterion.
    */
@@ -1148,7 +1148,7 @@ export class TesseraClient {
    * A parent is listed only where this principal is served both ends of the link. A `parent` this
    * principal is not served answers an empty page.
    *
-   * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for an
+   * @throws {@link MosaicaError} when the server refuses: `404` for an unknown view, `422` for an
    *   unknown layer, both `parent` and `q`, `limit: 0` or a malformed filter.
    */
   async browse(token: string, req: BrowseRequest, signal?: AbortSignal): Promise<BrowsePage> {
@@ -1186,7 +1186,7 @@ export class TesseraClient {
    * before it ended with, and without `count`, which the server takes only on a read's first
    * request.
    *
-   * @throws {@link TesseraError} when the server refuses the first request: `404` for an unknown
+   * @throws {@link MosaicaError} when the server refuses the first request: `404` for an unknown
    *   view, `422` for a request {@link ItemsRequest} says is refused or a malformed filter, and
    *   `429` past the bulk-read admission limit.
    */
@@ -1202,7 +1202,7 @@ export class TesseraClient {
    * `POST /v1/artifacts`: a bulk read of the artifacts of one layer this principal is served, as
    * {@link items} reads items.
    *
-   * @throws {@link TesseraError} when the server refuses the first request: `404` for an unknown
+   * @throws {@link MosaicaError} when the server refuses the first request: `404` for an unknown
    *   view, `422` for a request {@link ArtifactsRequest} says is refused or a malformed filter, and
    *   `429` past the bulk-read admission limit.
    */
@@ -1247,7 +1247,7 @@ export class TesseraClient {
    * @param options - `follow`: read the responses after the first. Defaults to `true`. With `false`
    *   the result holds the first response's pages, and {@link AggregateResult.next} is where the
    *   read continues, to be passed back as `cursor`.
-   * @throws {@link TesseraError} when the server refuses a request: `404` for an unknown view,
+   * @throws {@link MosaicaError} when the server refuses a request: `404` for an unknown view,
    *   `422` for a request the contract refuses, naming the limit where one is exceeded, and `429`
    *   under load.
    * @throws {@link PartialAggregate} for a body cut or ended without its trailer, holding the pages
@@ -1478,26 +1478,26 @@ type RawSuggest = {
 /** A viewport-shaped response's keys, from its headers. */
 function coordinatesOf(response: Response): Pick<ViewportResponse, 'identityKey' | 'contentKey' | 'pin' | 'stale' | 'region'> {
   return {
-    identityKey: response.headers.get('x-tessera-identity-key') ?? '',
+    identityKey: response.headers.get('x-mosaica-identity-key') ?? '',
     // The quotes are the entity-tag syntax and not part of the key.
     contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
-    pin: response.headers.get('x-tessera-pin'),
-    stale: response.headers.get('x-tessera-stale') === '1',
+    pin: response.headers.get('x-mosaica-pin'),
+    stale: response.headers.get('x-mosaica-stale') === '1',
     // Absent unless the request carried a region leaf.
-    region: parseRegionVerdict(response.headers.get('x-tessera-region'))
+    region: parseRegionVerdict(response.headers.get('x-mosaica-region'))
   };
 }
 
 /** The server's times from a viewport-shaped response's headers: to its first flush, not to its end. */
 function timingsOf(response: Response): Omit<ViewportResponse['timings'], 'stageNs'> {
   return {
-    serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
-    admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0)
+    serverUs: Number(response.headers.get('x-mosaica-server-us') ?? 0),
+    admissionUs: Number(response.headers.get('x-mosaica-admission-us') ?? 0)
   };
 }
 
-/** `{region}` where the response carries `x-tessera-region`, and nothing otherwise. */
+/** `{region}` where the response carries `x-mosaica-region`, and nothing otherwise. */
 function regionOf(response: Response): {region?: RegionVerdict} {
-  const region = parseRegionVerdict(response.headers.get('x-tessera-region'));
+  const region = parseRegionVerdict(response.headers.get('x-mosaica-region'));
   return region === null ? {} : {region};
 }

@@ -4,12 +4,12 @@ use std::sync::{Arc, OnceLock};
 
 use croaring::Bitmap;
 
-use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment};
-use tessera_lifecycle::wal::ParentRef;
-use tessera_access::Label;
-use tessera_types::layer::ServingLayout;
+use mosaica_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment};
+use mosaica_lifecycle::wal::ParentRef;
+use mosaica_access::Label;
+use mosaica_types::layer::ServingLayout;
 
-use tessera_store::permutation::RowSpace;
+use mosaica_store::permutation::RowSpace;
 
 use crate::compose::MaskedSet;
 use crate::containment::{ContainmentAnswers, ContainmentPartition};
@@ -611,7 +611,7 @@ impl MembershipRows {
     /// count, the `everywhere` fraction and the disjointness observation. Called once per level per
     /// fold. `row_count` is the view's base row space, which the `everywhere` test needs.
     pub fn shape(&self, row_count: u32) -> crate::layout::LevelShape {
-        tessera_store::derived::observe_shape(row_count, &|visit| {
+        mosaica_store::derived::observe_shape(row_count, &|visit| {
             for ordinal in 0..self.len() as u32 {
                 if let Some(rows) = self.get(ordinal) {
                     visit(ordinal, rows);
@@ -624,7 +624,7 @@ impl MembershipRows {
 /// A view's own key — the last component of its path — which is what an artifact of a
 /// group-scoped layer names: a group's several layouts over one key set draw the same artifact.
 pub(crate) fn view_key(view: &str) -> &str {
-    tessera_store::view_path_components(view)
+    mosaica_store::view_path_components(view)
         .last()
         .copied()
         .unwrap_or(view)
@@ -636,7 +636,7 @@ pub(crate) fn view_key(view: &str) -> &str {
 /// `None` for a hole, and for an artifact belonging to another view of the same group: putting
 /// such a record into this form would serve that view's key, its `tessera_id` and a live count to
 /// a principal of this one. The projecting routes reach the same rule through
-/// [`tessera_lifecycle::membership::ArtifactStore::level_in_view`], this test over a whole level.
+/// [`mosaica_lifecycle::membership::ArtifactStore::level_in_view`], this test over a whole level.
 pub(super) fn drawn_record<'a>(
     store: &'a ArtifactStore,
     layer: &str,
@@ -962,7 +962,7 @@ mod tests {
     use super::*;
     use crate::artifacts::test_support::*;
     use rustc_hash::FxHashSet;
-    use tessera_types::TermId;
+    use mosaica_types::TermId;
 
     /// Candidacy is a masked question. An artifact whose members are all in the tile but none in
     /// the viewer's mask is not a candidate — which is what the deleted bounding box got wrong.

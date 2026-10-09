@@ -41,15 +41,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use croaring::Bitmap;
-use tessera_engine::filter::{
+use mosaica_engine::filter::{
     candidate as compose_candidate, Endpoint, FilterColumns, FilterExpr, FilterOperand, Scalar,
 };
-use tessera_engine::{CategoryQuery, Engine, EngineConfig};
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::{AttrLocalId, EntityId, IdentityKey};
+use mosaica_engine::{CategoryQuery, Engine, EngineConfig};
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{AttrLocalId, EntityId, IdentityKey};
 
 const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 /// The scaled corpus stores Morton codes, so the build's Morton branch requires the identity
@@ -92,8 +92,8 @@ struct Args {
 
 fn args() -> Args {
     let mut a = Args {
-        data: PathBuf::from("/home/user/code/tessera/data/filter-lifecycle"),
-        work: PathBuf::from("/home/user/code/tessera/data/filter-lifecycle/work"),
+        data: PathBuf::from("/home/user/code/mosaica/data/filter-lifecycle"),
+        work: PathBuf::from("/home/user/code/mosaica/data/filter-lifecycle/work"),
         out: PathBuf::from("."),
         scale: "2422486".into(),
         limit: 2_422_486,
@@ -142,7 +142,7 @@ fn config() -> EngineConfig {
         max_underlay_offset: 4,
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
-        compute_threads: tessera_engine::default_compute_threads(),
+        compute_threads: mosaica_engine::default_compute_threads(),
         // Long, so every flush in this run is one the campaign asked for: a tick firing on its own
         // would put an unplanned extent in the middle of a measured stage.
         flush_max_age_secs: 3600,
@@ -151,7 +151,7 @@ fn config() -> EngineConfig {
         // measure a different buffer depth than the one the sweep set.
         flush_max_items: usize::MAX,
         max_merged_segment_bytes: None,
-        compaction: tessera_engine::CompactionSchedule::off(),
+        compaction: mosaica_engine::CompactionSchedule::off(),
     }
 }
 
@@ -712,16 +712,16 @@ fn main() {
         "secondary_category".to_string(),
         a.data.join("secondary_category.parquet"),
     );
-    let schema = tessera_build::config::Schema::parse(&a.data.join("schema.toml"), &values)
+    let schema = mosaica_build::config::Schema::parse(&a.data.join("schema.toml"), &values)
         .expect("the schema parses");
 
     log("building");
     let t = Instant::now();
-    tessera_build::build(&tessera_build::BuildArgs {
+    mosaica_build::build(&mosaica_build::BuildArgs {
         point_fields: Default::default(),
         corpus_fields: Default::default(),
         points: a.data.join("points.parquet"),
-        access: tessera_build::config::AccessInput::relation(PathBuf::from("/home/user/code/tessera/data/scaled/pairs/categories-subclass.pairs.parquet")),
+        access: mosaica_build::config::AccessInput::relation(PathBuf::from("/home/user/code/mosaica/data/scaled/pairs/categories-subclass.pairs.parquet")),
         out: bundle.clone(),
         extent: EXTENT,
         view_id: "s0".into(),
@@ -768,10 +768,10 @@ fn main() {
             let postings_bytes = std::fs::metadata(dir.join("postings.arrow"))
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let opened = tessera_filter::ValueColumn::open_dir(&dir, tessera_filter::Access::Mapped).expect("column opens");
+            let opened = mosaica_filter::ValueColumn::open_dir(&dir, mosaica_filter::Access::Mapped).expect("column opens");
             let after_values = rss_bytes();
             let postings = (postings_bytes > 0)
-                .then(|| tessera_filter::ColumnPostings::open_keyed(&dir.join("postings.arrow")));
+                .then(|| mosaica_filter::ColumnPostings::open_keyed(&dir.join("postings.arrow")));
             let after = rss_bytes();
             csv.row(format!(
                 "{},{column},{values},{postings_bytes},{},{}",
@@ -1345,7 +1345,7 @@ fn check_byte_identity(
     failures: &mut Vec<String>,
 ) {
     use arrow::buffer::ScalarBuffer;
-    use tessera_filter::{write_value_column, Codes};
+    use mosaica_filter::{write_value_column, Codes};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     for column in COLUMNS {
@@ -1512,7 +1512,7 @@ fn check_categories(
     stage: &str,
     limit: u32,
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     oc: &oracle::Oracle,
     map: &EntityMap,
     candidate: &Bitmap,

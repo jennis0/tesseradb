@@ -13,7 +13,7 @@ STRICT=(CLAUDE.md docs/README.md docs/index.md docs/system docs/start docs/guide
 # Files under a STRICT directory that are counted with LOOSE until they are rewritten.
 NOT_STRICT=(docs/guides/views.md)
 LOOSE=(README.md docs/openapi docs/guides/views.md docs/roadmap.md docs/outstanding.md docs/ingest-campaign.md)
-# The pages a user of Tessera reads, which USER_PATTERNS also apply to.
+# The pages a user of Mosaica reads, which USER_PATTERNS also apply to.
 USER_PAGES=(docs/index.md docs/start docs/guides docs/reference)
 
 PATTERNS=$(cat <<'EOF'

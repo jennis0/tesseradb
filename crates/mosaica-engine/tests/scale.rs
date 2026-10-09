@@ -16,7 +16,7 @@
 //! permutation** (the defect `tests/merge.rs` was rebuilt to remove), and every count it checks is
 //! small enough to be right by accident.
 //!
-//! `crates/tessera-bench/src/arms/ingest.rs` names the gap in its own words: what the ingest arms
+//! `crates/mosaica-bench/src/arms/ingest.rs` names the gap in its own words: what the ingest arms
 //! cannot show is "the steady state of a database that has been *running* and absorbing writes for
 //! a while". This is that test — the only one in the tree where the merge consumes segments of
 //! hundreds of thousands of rows, where entity space spans many Roaring containers, and where a
@@ -29,14 +29,14 @@
 //! Arrow rather than in anything this test is about:
 //!
 //! ```text
-//! cargo test -p tessera-engine --release --test scale -- --ignored --nocapture
+//! cargo test -p mosaica-engine --release --test scale -- --ignored --nocapture
 //! ```
 //!
 //! | variable | default | what it is |
 //! |---|---|---|
-//! | `TESSERA_SCALE_BASE` | 1,000,000 | items in the base build — the bundle ingest writes *into* |
-//! | `TESSERA_SCALE_ROUNDS` | 16 | ingest rounds, each ending in a flush |
-//! | `TESSERA_SCALE_BATCH` | 250,000 | items per round |
+//! | `MOSAICA_SCALE_BASE` | 1,000,000 | items in the base build — the bundle ingest writes *into* |
+//! | `MOSAICA_SCALE_ROUNDS` | 16 | ingest rounds, each ending in a flush |
+//! | `MOSAICA_SCALE_BATCH` | 250,000 | items per round |
 //!
 //! **Sixteen rounds is a threshold, not a round number.** The row-space merge selects every four
 //! extents and the entity-space coalesce every eight delta tiers, so a shorter run exercises the
@@ -104,9 +104,9 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, Session, ViewportRequest, WriteStage};
-use tessera_lifecycle::{ChangeOp, UnallocatedRow};
-use tessera_types::{EntityId, TesseraId};
+use mosaica_engine::{Engine, EngineConfig, Session, ViewportRequest, WriteStage};
+use mosaica_lifecycle::{ChangeOp, UnallocatedRow};
+use mosaica_types::{EntityId, TesseraId};
 
 const WAIT: Duration = Duration::from_secs(600);
 
@@ -175,7 +175,7 @@ fn scale_config(total: u64) -> EngineConfig {
         flush_max_items: usize::MAX,
         max_merged_segment_bytes: None,
         // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+        compaction: mosaica_engine::CompactionSchedule::off(),
         ..config_uncapped()
     }
 }
@@ -202,7 +202,7 @@ fn viewport_k(
     bbox: [f64; 4],
     zoom: u8,
     k: usize,
-) -> tessera_engine::viewport::ViewportOut {
+) -> mosaica_engine::viewport::ViewportOut {
     let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         match engine.viewport(session, ViewportRequest::new("s0", zoom, bbox, k)) {
@@ -224,7 +224,7 @@ fn viewport(
     session: &Session,
     bbox: [f64; 4],
     zoom: u8,
-) -> tessera_engine::viewport::ViewportOut {
+) -> mosaica_engine::viewport::ViewportOut {
     viewport_k(engine, session, bbox, zoom, 100_000)
 }
 
@@ -534,9 +534,9 @@ fn assert_identity(engine: &Engine, samples: &[Planted]) {
 #[test]
 #[ignore = "minutes, and wants a release build — see the module doc"]
 fn millions_of_ingested_rows_become_correctly_queryable() {
-    let base = env_usize("TESSERA_SCALE_BASE", 1_000_000) as u64;
-    let rounds = env_usize("TESSERA_SCALE_ROUNDS", 16);
-    let batch = env_usize("TESSERA_SCALE_BATCH", 250_000);
+    let base = env_usize("MOSAICA_SCALE_BASE", 1_000_000) as u64;
+    let rounds = env_usize("MOSAICA_SCALE_ROUNDS", 16);
+    let batch = env_usize("MOSAICA_SCALE_BATCH", 250_000);
     let total = base + (rounds * batch) as u64;
     eprintln!("scale: base={base} rounds={rounds} batch={batch} total={total}");
 
@@ -870,21 +870,21 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
 /// rather than failing — which is decision 0043's bounded 429 rather than the stampede it forbids.
 ///
 /// ```text
-/// cargo test -p tessera-engine --release --test scale -- --ignored --nocapture \
+/// cargo test -p mosaica-engine --release --test scale -- --ignored --nocapture \
 ///     the_flip_costs_what_the_resident_population_costs
 /// ```
 ///
 /// | variable | default | what it is |
 /// |---|---|---|
-/// | `TESSERA_P2_BASE` | 1,000,000 | items in the base build |
-/// | `TESSERA_P2_BATCH` | 250,000 | items ingested to force a publication |
-/// | `TESSERA_P2_SESSIONS` | 16 | resident sessions — the count a 2 GiB projection bound holds at 10⁹ |
+/// | `MOSAICA_P2_BASE` | 1,000,000 | items in the base build |
+/// | `MOSAICA_P2_BATCH` | 250,000 | items ingested to force a publication |
+/// | `MOSAICA_P2_SESSIONS` | 16 | resident sessions — the count a 2 GiB projection bound holds at 10⁹ |
 #[test]
 #[ignore = "minutes, and wants a release build — see the module doc"]
 fn the_flip_costs_what_the_resident_population_costs() {
-    let base = env_usize("TESSERA_P2_BASE", 1_000_000) as u64;
-    let batch = env_usize("TESSERA_P2_BATCH", 250_000);
-    let sessions = env_usize("TESSERA_P2_SESSIONS", 16);
+    let base = env_usize("MOSAICA_P2_BASE", 1_000_000) as u64;
+    let batch = env_usize("MOSAICA_P2_BATCH", 250_000);
+    let sessions = env_usize("MOSAICA_P2_SESSIONS", 16);
     // Sized for the retry loop below rather than for one round: this figure only sets θ's target
     // high enough to saturate it, so over-provisioning it costs nothing and under-provisioning it
     // would turn the assertions into statements about selection.
@@ -961,8 +961,8 @@ fn the_flip_costs_what_the_resident_population_costs() {
                             ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], SWEEP_K),
                         ) {
                             Ok(_) => return start.elapsed(),
-                            Err(tessera_engine::EngineError::ProjectionBuilding)
-                            | Err(tessera_engine::EngineError::FragmentBuilding) => {
+                            Err(mosaica_engine::EngineError::ProjectionBuilding)
+                            | Err(mosaica_engine::EngineError::FragmentBuilding) => {
                                 shed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 assert!(Instant::now() < deadline, "shed for ten minutes");
                                 std::thread::sleep(Duration::from_millis(5));
@@ -1237,21 +1237,21 @@ fn stream_bundle(
 ///
 /// **A bundle that fits in the host's page cache understates this, and it understates the term the
 /// probe exists to measure.** With everything resident there is no eviction, so what is left is
-/// device and memory bandwidth contention alone — the *smaller* half. `TESSERA_P3_BASE` therefore
+/// device and memory bandwidth contention alone — the *smaller* half. `MOSAICA_P3_BASE` therefore
 /// wants a bundle comfortably larger than free RAM before the figure is quoted as the fold's, and
 /// a run that does not reach that must say so rather than report a reassuring ratio. The probe
 /// prints the bundle's size so the reader can tell which regime it ran in.
 ///
 /// ```text
-/// TESSERA_P3_BASE=50000000 cargo test -p tessera-engine --release --test scale -- \
+/// MOSAICA_P3_BASE=50000000 cargo test -p mosaica-engine --release --test scale -- \
 ///     --ignored --nocapture a_streaming_read_of_the_whole_bundle_against_a_live_viewport
 /// ```
 #[test]
 #[ignore = "minutes, and wants a release build — see the module doc"]
 fn a_streaming_read_of_the_whole_bundle_against_a_live_viewport() {
-    let base = env_usize("TESSERA_P3_BASE", 2_000_000) as u64;
-    let batch = env_usize("TESSERA_P3_BATCH", 250_000);
-    let rounds = env_usize("TESSERA_P3_ROUNDS", 4);
+    let base = env_usize("MOSAICA_P3_BASE", 2_000_000) as u64;
+    let batch = env_usize("MOSAICA_P3_BATCH", 250_000);
+    let rounds = env_usize("MOSAICA_P3_ROUNDS", 4);
     let total = base + (rounds * batch) as u64;
     eprintln!("P3: base={base} rounds={rounds} batch={batch}");
 
@@ -1445,7 +1445,7 @@ fn vm_hwm() -> u64 {
 ///
 /// **Without this the figure is the fixture build's, not the fold's.** `build_fixture_n` runs
 /// in-process and is the largest allocation in the run, so a `VmHWM` read after it describes
-/// `tessera-build`. Resetting it just before the fold makes the mark mean "the highest this process
+/// `mosaica-build`. Resetting it just before the fold makes the mark mean "the highest this process
 /// reached *during the fold*", and the baseline is reported beside it so a reader can subtract.
 fn reset_peak_rss() -> bool {
     std::fs::write("/proc/self/clear_refs", b"5\n").is_ok()
@@ -1522,7 +1522,7 @@ impl RssSampler {
 /// not return arenas to the kernel, so a second fold in the same process peaks at whatever the
 /// first one reached whether or not it needed it — an artefact that reports *perfect* flatness for
 /// a fold with a corpus-sized `Vec` in it. The parent spawns [`P1_TEST`] once per size with
-/// `TESSERA_P1_SCALE` set, which is the arm each child takes; children write progress to stderr
+/// `MOSAICA_P1_SCALE` set, which is the arm each child takes; children write progress to stderr
 /// (inherited, so a long run is visible) and one `P1-RESULT` line to stdout, which the parent
 /// parses.
 ///
@@ -1541,21 +1541,21 @@ impl RssSampler {
 ///    corpus-sized has a coefficient that climbs, whatever the host.
 ///
 /// ```text
-/// cargo test -p tessera-engine --release --test scale -- --ignored --nocapture \
+/// cargo test -p mosaica-engine --release --test scale -- --ignored --nocapture \
 ///     a_fold_over_a_multi_segment_corpus_at_two_sizes
 /// ```
 ///
 /// | variable | default | what it is |
 /// |---|---|---|
-/// | `TESSERA_P1_SCALES` | `5000000,10000000` | the base sizes to fold, one child process each |
-/// | `TESSERA_P1_SCALE` | — | set by the parent; presence selects the single-size arm |
-/// | `TESSERA_P1_ROUNDS` | 4 | published ingest rounds before the fold, so it folds many segments |
-/// | `TESSERA_P1_BATCH` | base/20 | items per round |
-/// | `TESSERA_P1_DELETIONS` | 10,000 | entities deleted before the fold, so it has work to retire |
+/// | `MOSAICA_P1_SCALES` | `5000000,10000000` | the base sizes to fold, one child process each |
+/// | `MOSAICA_P1_SCALE` | — | set by the parent; presence selects the single-size arm |
+/// | `MOSAICA_P1_ROUNDS` | 4 | published ingest rounds before the fold, so it folds many segments |
+/// | `MOSAICA_P1_BATCH` | base/20 | items per round |
+/// | `MOSAICA_P1_DELETIONS` | 10,000 | entities deleted before the fold, so it has work to retire |
 #[test]
 #[ignore = "minutes, and wants a release build — see the module doc"]
 fn a_fold_over_a_multi_segment_corpus_at_two_sizes() {
-    match std::env::var("TESSERA_P1_SCALE")
+    match std::env::var("MOSAICA_P1_SCALE")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
     {
@@ -1581,14 +1581,14 @@ impl P1Result {
 
 /// The parent arm: one child process per size, then the coefficient across them.
 fn p1_across_scales() {
-    let scales: Vec<u64> = std::env::var("TESSERA_P1_SCALES")
+    let scales: Vec<u64> = std::env::var("MOSAICA_P1_SCALES")
         .unwrap_or_else(|_| "5000000,10000000".to_string())
         .split(',')
         .filter_map(|s| s.trim().parse::<u64>().ok())
         .collect();
     assert!(
         !scales.is_empty(),
-        "TESSERA_P1_SCALES parsed to nothing — it is a comma-separated list of row counts"
+        "MOSAICA_P1_SCALES parsed to nothing — it is a comma-separated list of row counts"
     );
     let exe = std::env::current_exe().expect("the test binary knows its own path");
     eprintln!(
@@ -1608,7 +1608,7 @@ fn p1_across_scales() {
                     "--nocapture",
                     "--test-threads=1",
                 ])
-                .env("TESSERA_P1_SCALE", base.to_string())
+                .env("MOSAICA_P1_SCALE", base.to_string())
                 // Inherited, so a fold that takes ten minutes says so as it goes; the result line
                 // is on stdout, which is piped.
                 .stderr(std::process::Stdio::inherit())
@@ -1740,9 +1740,9 @@ fn p1_across_scales() {
 
 /// The child arm: build a corpus, fold it, and print one machine-readable line.
 fn p1_one_scale(base: u64) {
-    let rounds = env_usize("TESSERA_P1_ROUNDS", 4);
-    let batch = env_usize("TESSERA_P1_BATCH", (base / 20).max(1) as usize);
-    let deletions = env_usize("TESSERA_P1_DELETIONS", 10_000);
+    let rounds = env_usize("MOSAICA_P1_ROUNDS", 4);
+    let batch = env_usize("MOSAICA_P1_BATCH", (base / 20).max(1) as usize);
+    let deletions = env_usize("MOSAICA_P1_DELETIONS", 10_000);
     // The deletion round is one more round on top, so its entity ids are known to this test.
     let total = base + ((rounds + 1) * batch) as u64;
     eprintln!("P1: base={base} rounds={rounds} batch={batch} deletions={deletions}");
@@ -2035,8 +2035,8 @@ const P4_TEST: &str = "a_live_viewport_against_a_real_fold_with_and_without_the_
 ///
 /// ```text
 /// systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 -- \
-///   env TESSERA_P4_BUNDLE=<prebuilt> TESSERA_P4_BASE=100000000 \
-///       TESSERA_P4_ROUNDS=2 TESSERA_P4_BATCH=500000 \
+///   env MOSAICA_P4_BUNDLE=<prebuilt> MOSAICA_P4_BASE=100000000 \
+///       MOSAICA_P4_ROUNDS=2 MOSAICA_P4_BATCH=500000 \
 ///   ./target/release/deps/scale-<hash> --exact <this test> --ignored --nocapture
 /// ```
 ///
@@ -2053,26 +2053,26 @@ const P4_TEST: &str = "a_live_viewport_against_a_real_fold_with_and_without_the_
 ///
 /// | variable | default | what it is |
 /// |---|---|---|
-/// | `TESSERA_P4_BASE` | 2,000,000 | items in the base build |
-/// | `TESSERA_P4_ROUNDS` | 4 | published ingest rounds, so the fold has several segments |
-/// | `TESSERA_P4_BUNDLE` | — | a prebuilt bundle to copy per arm instead of building one |
-/// | `TESSERA_P4_KEEP` | — | build a bundle at this path and stop, for `TESSERA_P4_BUNDLE` to use |
-/// | `TESSERA_P4_ADVICE` | — | set by the parent; presence selects the single-arm form |
+/// | `MOSAICA_P4_BASE` | 2,000,000 | items in the base build |
+/// | `MOSAICA_P4_ROUNDS` | 4 | published ingest rounds, so the fold has several segments |
+/// | `MOSAICA_P4_BUNDLE` | — | a prebuilt bundle to copy per arm instead of building one |
+/// | `MOSAICA_P4_KEEP` | — | build a bundle at this path and stop, for `MOSAICA_P4_BUNDLE` to use |
+/// | `MOSAICA_P4_ADVICE` | — | set by the parent; presence selects the single-arm form |
 ///
-/// # `TESSERA_P4_BUNDLE`, and why a capped run needs it
+/// # `MOSAICA_P4_BUNDLE`, and why a capped run needs it
 ///
 /// **A cgroup charges page cache to the cgroup**, so a build inside a tight cap thrashes and is
 /// killed — the write-heavy phase fills the limit with its own output's cache. Measured, not
 /// supposed: an 80M-row build inside a 3 GiB cap died before it published. So the build goes
-/// *outside* the cap (`TESSERA_P4_KEEP`) and the measurement goes inside, over a copy per arm. A
+/// *outside* the cap (`MOSAICA_P4_KEEP`) and the measurement goes inside, over a copy per arm. A
 /// copy rather than a shared directory because a fold consumes what it folds: it flips `CURRENT`
 /// and reclaims the prefix it superseded, so the second arm would open a bundle the first replaced.
 #[test]
 #[ignore = "minutes to hours, and wants a release build — see the module doc"]
 fn a_live_viewport_against_a_real_fold_with_and_without_the_advice() {
-    if let Ok(keep) = std::env::var("TESSERA_P4_KEEP") {
+    if let Ok(keep) = std::env::var("MOSAICA_P4_KEEP") {
         let keep = std::path::PathBuf::from(keep);
-        let base = env_usize("TESSERA_P4_BASE", 2_000_000) as u64;
+        let base = env_usize("MOSAICA_P4_BASE", 2_000_000) as u64;
         std::fs::create_dir_all(&keep).unwrap();
         let points = keep.with_extension("points.parquet");
         let pairs = keep.with_extension("pairs.parquet");
@@ -2080,13 +2080,13 @@ fn a_live_viewport_against_a_real_fold_with_and_without_the_advice() {
         let _ = std::fs::remove_file(&points);
         let _ = std::fs::remove_file(&pairs);
         eprintln!(
-            "P4: built {base} items at {} ({:.2} GiB) — now run the arms with TESSERA_P4_BUNDLE",
+            "P4: built {base} items at {} ({:.2} GiB) — now run the arms with MOSAICA_P4_BUNDLE",
             keep.display(),
             bundle_bytes(&keep) as f64 / (1u64 << 30) as f64
         );
         return;
     }
-    match std::env::var("TESSERA_P4_ADVICE").ok() {
+    match std::env::var("MOSAICA_P4_ADVICE").ok() {
         Some(arm) => p4_one_arm(arm == "on"),
         None => p4_across_arms(),
     }
@@ -2120,11 +2120,11 @@ fn p4_across_arms() {
                 "--nocapture",
                 "--test-threads=1",
             ])
-            .env("TESSERA_P4_ADVICE", arm)
+            .env("MOSAICA_P4_ADVICE", arm)
             // Inherited anyway; passed explicitly because a child that silently *built* its own
             // fixture instead of copying the prebuilt one is a run that measures a different
             // bundle and says nothing about it.
-            .envs(std::env::var("TESSERA_P4_BUNDLE").map(|v| ("TESSERA_P4_BUNDLE", v)))
+            .envs(std::env::var("MOSAICA_P4_BUNDLE").map(|v| ("MOSAICA_P4_BUNDLE", v)))
             .status()
             .expect("the child test binary runs");
         assert!(status.success(), "the {arm} arm failed");
@@ -2136,7 +2136,7 @@ fn p4_across_arms() {
     );
 }
 
-/// Copy a bundle tree — the whole of what `TESSERA_P4_BUNDLE` needs, and deliberately not a
+/// Copy a bundle tree — the whole of what `MOSAICA_P4_BUNDLE` needs, and deliberately not a
 /// dependency on `cp`.
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     // A worklist rather than recursion: a bundle tree is shallow, but a probe that aborts on a
@@ -2157,11 +2157,11 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 
 /// One arm: build or copy, warm a session, sweep quiet, sweep *during* a real fold, sweep quiet.
 fn p4_one_arm(advice: bool) {
-    let base = env_usize("TESSERA_P4_BASE", 2_000_000) as u64;
-    let rounds = env_usize("TESSERA_P4_ROUNDS", 4);
-    let batch = env_usize("TESSERA_P4_BATCH", (base / 20).max(1) as usize);
+    let base = env_usize("MOSAICA_P4_BASE", 2_000_000) as u64;
+    let rounds = env_usize("MOSAICA_P4_ROUNDS", 4);
+    let batch = env_usize("MOSAICA_P4_BATCH", (base / 20).max(1) as usize);
     let total = base + (rounds * batch) as u64;
-    tessera_store::read::set_streaming_advice_for_test(advice);
+    mosaica_store::read::set_streaming_advice_for_test(advice);
     eprintln!(
         "P4: base={base} rounds={rounds} batch={batch} MADV_SEQUENTIAL={}",
         if advice { "on" } else { "off" }
@@ -2169,7 +2169,7 @@ fn p4_one_arm(advice: bool) {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    match std::env::var("TESSERA_P4_BUNDLE") {
+    match std::env::var("MOSAICA_P4_BUNDLE") {
         Ok(prebuilt) => {
             let t = Instant::now();
             copy_tree(std::path::Path::new(&prebuilt), &root);

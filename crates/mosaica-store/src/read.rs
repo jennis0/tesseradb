@@ -2,9 +2,9 @@
 //! loader, and the tile lookup — `tile_ranges` for one tile, `tile_ranges_all` for the whole
 //! tile set of a viewport in one sweep.
 //!
-//! `tessera-store` never depends on `tessera-authz`, and this module has its own Arrow IPC
+//! `mosaica-store` never depends on `mosaica-authz`, and this module has its own Arrow IPC
 //! reader — `columns.arrow`'s schema (fixed-width primitive columns) differs from
-//! `tessera-authz::postings`'s single `LargeBinary` column, so the zero-copy technique (mmap →
+//! `mosaica-authz::postings`'s single `LargeBinary` column, so the zero-copy technique (mmap →
 //! `arrow::buffer::Buffer::from_custom_allocation` → decode without copying) is reused, not the
 //! code.
 
@@ -29,8 +29,8 @@ use arrow::record_batch::RecordBatch;
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
-use tessera_spatial::Tile;
-use tessera_types::{IdentityKey, BUNDLE_FORMAT};
+use mosaica_spatial::Tile;
+use mosaica_types::{IdentityKey, BUNDLE_FORMAT};
 
 use crate::error::{read_to_vec, Result, StoreError};
 use crate::manifest::{CurrentPointer, FileDigest, Honourability, Manifest, SegmentsManifest};
@@ -43,7 +43,7 @@ use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESEN
 /// engine's tile-lookup interface with it, already generalises to streamed segments.
 ///
 /// `row_space` is the built `permutation.bin` plus whatever extents flush has appended — see
-/// [`RowSpace`]. A bundle straight out of `tessera build` carries no extents, so it behaves
+/// [`RowSpace`]. A bundle straight out of `mosaica build` carries no extents, so it behaves
 /// exactly as the bare permutation did.
 ///
 /// **`Clone`, and the segments are behind `Arc`, because a generation is constructed
@@ -61,7 +61,7 @@ pub struct ViewData {
     /// [`Bundle::with_views`] is what it is for: a dropped key may be created again, and the
     /// recreated view is declared under the same id, so "is this view still declared" no longer
     /// tells the predecessor's row space from the successor's. This does.
-    pub incarnation: tessera_types::view::ViewIncarnation,
+    pub incarnation: mosaica_types::view::ViewIncarnation,
     /// This view's term images, mapped, or `None` where the side-manifest names none and where
     /// the file it names would not open ([`crate::term_images`]).
     ///
@@ -109,7 +109,7 @@ impl ViewData {
         &self,
         column: &str,
         entities: &croaring::Bitmap,
-        visit: &mut dyn FnMut(u32, tessera_types::scalar::ScalarValue),
+        visit: &mut dyn FnMut(u32, mosaica_types::scalar::ScalarValue),
     ) -> std::result::Result<(), String> {
         let segments = self
             .segments_by_row_base()
@@ -117,7 +117,7 @@ impl ViewData {
         let slices: Vec<Option<ScalarSlice<'_>>> =
             segments.iter().map(|(segment, _)| segment.columns.scalar(column)).collect();
         for entity in entities.iter() {
-            let Some(row) = self.row_space.row_of(tessera_types::EntityId::new(u64::from(entity)))
+            let Some(row) = self.row_space.row_of(mosaica_types::EntityId::new(u64::from(entity)))
             else {
                 continue;
             };
@@ -188,9 +188,9 @@ impl SegmentData {
     pub fn entity_of(
         &self,
         local: u32,
-        key: &tessera_types::IdentityKey,
+        key: &mosaica_types::IdentityKey,
         shard_id: u32,
-    ) -> Result<tessera_types::EntityId> {
+    ) -> Result<mosaica_types::EntityId> {
         self.entities.entity_of(
             local,
             self.columns.tessera_id()[local as usize],
@@ -383,7 +383,7 @@ impl Bundle {
     /// This bundle with one partition's side-manifest replaced and **nothing else touched** — no
     /// segment added, no extent collapsed, no row space rebuilt.
     ///
-    /// The entity-space coalesce publication's whole bundle edit (`tessera_engine::coalesce`): it
+    /// The entity-space coalesce publication's whole bundle edit (`mosaica_engine::coalesce`): it
     /// rewrites `deltas`, `dict_extents`, the extents and runs beside them and `files`, every one
     /// of which addresses entity space. A caller that needed row space to move would be using
     /// one of the two above, and the type is what keeps the two apart.
@@ -679,11 +679,11 @@ fn open_prefix(
         // live one; the rest are the fold's to reclaim and are not opened. `with_views` then
         // checks even that one against the roster and blanks the view if it disagrees, which is
         // where the *fail-closed* half lives: this pass has the manifest and not yet the log.
-        let mut newest: HashMap<&str, tessera_types::view::ViewIncarnation> = HashMap::new();
+        let mut newest: HashMap<&str, mosaica_types::view::ViewIncarnation> = HashMap::new();
         // The incarnation of each view's first listed segment, which is the one the view's
         // `permutation.bin` addresses. A key created again after a drop keeps its predecessor's
         // base listed first until a fold, and that base is not the new incarnation's.
-        let mut based: HashMap<&str, tessera_types::view::ViewIncarnation> = HashMap::new();
+        let mut based: HashMap<&str, mosaica_types::view::ViewIncarnation> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
             let seen = newest.entry(seg_desc.view.as_str()).or_default();
             *seen = (*seen).max(seg_desc.incarnation);
@@ -1560,17 +1560,17 @@ pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// side-manifest"), so a well-behaved bundle publisher never mutates a file after naming it in
 /// a digest-verified manifest. A concurrent adversarial rewrite between these two reads is the
 /// same class of hazard as any other mmap-of-a-file-another-process-can-touch situation in this
-/// codebase (see `tessera-authz`'s postings reader) — it is an operational/deployment concern
+/// codebase (see `mosaica-authz`'s postings reader) — it is an operational/deployment concern
 /// (read-only bundle storage, no writer with access to a serving replica's files), not one this
 /// module's checks can close from inside a single process.
 /// How much of a file is held in memory at once while hashing it (see `verify_files`). Matches
-/// `tessera-build`'s constant of the same name; the two crates share no dependency to share it
+/// `mosaica-build`'s constant of the same name; the two crates share no dependency to share it
 /// through.
 const DIGEST_CHUNK_BYTES: usize = 1 << 20;
 
 /// `true` if `rel` names a key run (`*.keys`, [`crate::key_index`]), which the open does not
 /// digest: each of its pages carries its own checksum, checked the first time the page is read, so
-/// a unique index is not read whole before its first lookup. `tessera verify --deep` digests it.
+/// a unique index is not read whole before its first lookup. `mosaica verify --deep` digests it.
 fn is_deferred(rel: &str) -> bool {
     rel.ends_with(".keys")
 }
@@ -1775,20 +1775,20 @@ impl MortonSlice {
 /// disk previously said: given a cell's row range, the identities below a threshold are a prefix
 /// of it, and the smallest identities of a tile are a merge of its cells' prefixes. Selection
 /// reads a bounded number of rows per cell instead of every visible row of the tile
-/// ([`crate::read`] has no opinion on that; see `tessera_engine::select`).
+/// ([`crate::read`] has no opinion on that; see `mosaica_engine::select`).
 ///
 /// Cell *i* covers rows `starts[i] .. starts[i + 1]`, the last ending at the segment's
 /// `row_count`. `starts[0]` is 0 in a segment with rows. The array is therefore the run-length
 /// index of `morton.u32`. Each cell's code, `morton[starts[i]]`, is stored beside it in
 /// `cell-codes.u32` ([`crate::bands::CellCodes`]), written by the same writer, so a tile's cells
-/// are found without reading the Morton column; `tessera verify --deep` checks the two agree.
+/// are found without reading the Morton column; `mosaica verify --deep` checks the two agree.
 ///
 /// # What holds the premise, and what a broken one would cost
 ///
 /// **Identities ascending within a cell is by construction, and it is not checked at open.** It is
 /// the row order itself, so every producer gets it from the sort it already does:
 /// [`crate::write::SegmentWriter::append`] debug-asserts the arriving key against the last, and
-/// the build's bounded assembly sorts each bucket by the same comparator. `tessera verify --deep`
+/// the build's bounded assembly sorts each bucket by the same comparator. `mosaica verify --deep`
 /// checks it in full, over both columns, along with the boundaries falling where the code changes.
 /// What this type checks at `load` is only what one column can answer: strictly ascending, opening
 /// at row 0, ending inside the segment. A whole-column identity pass at every open would cost the
@@ -1824,7 +1824,7 @@ impl CutIndex {
     /// selection binary-searches this array, so a non-ascending or out-of-range entry produces a
     /// wrong row range rather than an error. What the check cannot see from here is whether the
     /// boundaries fall where the Morton code actually changes — that needs both columns, and
-    /// `tessera verify --deep` is where it is made.
+    /// `mosaica verify --deep` is where it is made.
     pub fn load(path: &Path, row_count: u32) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -1936,8 +1936,8 @@ pub enum ScalarSlice<'a> {
 impl ScalarSlice<'_> {
     /// Row `local`'s slot as a value of the stored type, or `None` past the end. Presence is the
     /// caller's to ask.
-    pub fn value_at(&self, local: usize) -> Option<tessera_types::scalar::ScalarValue> {
-        use tessera_types::scalar::ScalarValue as V;
+    pub fn value_at(&self, local: usize) -> Option<mosaica_types::scalar::ScalarValue> {
+        use mosaica_types::scalar::ScalarValue as V;
         Some(match self {
             ScalarSlice::Bool(a) => {
                 (local < arrow::array::Array::len(*a)).then(|| V::Bool(a.value(local)))?
@@ -1961,8 +1961,8 @@ impl ScalarSlice<'_> {
     /// Row `local`'s slot as a number, where the column holds numbers and the slot exists:
     /// what a field's figures are tallied from. Presence is the caller's to ask.
     #[inline]
-    pub fn number_at(&self, local: usize) -> Option<tessera_types::scalar::Number> {
-        use tessera_types::scalar::Number;
+    pub fn number_at(&self, local: usize) -> Option<mosaica_types::scalar::Number> {
+        use mosaica_types::scalar::Number;
         let int = |x: i128| Some(Number::Int(x));
         match self {
             ScalarSlice::U8(s) => int(i128::from(*s.get(local)?)),
@@ -2035,7 +2035,7 @@ impl ColumnsRef {
             path: path.to_path_buf(),
             source,
         })?;
-        // SAFETY: identical justification to `tessera_authz::postings::PostingsReader::open`'s
+        // SAFETY: identical justification to `mosaica_authz::postings::PostingsReader::open`'s
         // mmap branch — `arc` outlives every `Buffer` built from it (captured as the buffer's
         // `Allocation`), the mapping is valid for `len` bytes for its whole lifetime, and
         // `memmap2::Mmap` never returns a null base pointer.
@@ -2127,7 +2127,7 @@ impl ColumnsRef {
 
     /// The low half of each row's 64-bit interleaved position. The high half is the row's cell
     /// code in `morton.u32`, so a whole position is `(morton[i] as u64) << 32 | residual[i]` —
-    /// see `tessera_spatial::split32`, which is what wrote it. No coordinate is stored: this is
+    /// see `mosaica_spatial::split32`, which is what wrote it. No coordinate is stored: this is
     /// the position in the grid's own units, and turning it back into coordinates needs the
     /// extent `MANIFEST.json` declares.
     pub fn residual(&self) -> &[u32] {
@@ -2326,7 +2326,7 @@ fn reject_nulls(
 
 /// Decode the (single, uncompressed, 8-byte-aligned) record batch of an Arrow IPC FILE held in
 /// `buffer`, zero-copy. Structurally the same footer/dictionary/block walk as
-/// `tessera_authz::postings::decode_single_batch`, generalised to any single-record-batch
+/// `mosaica_authz::postings::decode_single_batch`, generalised to any single-record-batch
 /// schema and hardened with two checks that file has no need of: `with_require_alignment(true)`
 /// (fail closed on a misaligned buffer rather than silently reallocating) and an explicit
 /// rejection of compressed batches (§ "no compression" in the task brief — decoding would
@@ -2435,7 +2435,7 @@ fn reject_if_compressed(path: &Path, data: &Buffer, meta_len: usize) -> Result<(
 }
 
 /// Validate a footer `Block`'s `(offset, bodyLength, metaDataLength)` against the file length,
-/// returning them as checked `usize`s (see `tessera_authz::postings::checked_block_range` for
+/// returning them as checked `usize`s (see `mosaica_authz::postings::checked_block_range` for
 /// the identical rationale: `Block`'s fields are `i64` in the flatbuffer schema, and
 /// `Buffer::slice_with_length` panics on out-of-bounds input rather than erroring).
 fn checked_block_range(
@@ -2584,7 +2584,7 @@ fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
 /// One lemma carries the whole thing: `partition_point(|c| c < t)` over an ascending column is
 /// **non-decreasing in `t`** — a larger threshold can only admit more codes. The cell codes
 /// ascend strictly: [`crate::bands::CellCodes::open`] refuses a file whose codes do not, and
-/// `tessera verify --deep` checks that each is its cell's Morton code.
+/// `mosaica verify --deep` checks that each is its cell's Morton code.
 ///
 /// [`gallop`]'s contract holds for any `from`, and equals the full-column search exactly when
 /// `from` is at or below the answer. This sweep establishes that in both places it calls it:

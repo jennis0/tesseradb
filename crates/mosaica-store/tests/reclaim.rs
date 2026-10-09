@@ -5,8 +5,8 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use tessera_store::manifest::CurrentPointer;
-use tessera_store::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix, StoreError};
+use mosaica_store::manifest::CurrentPointer;
+use mosaica_store::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix, StoreError};
 
 fn write_current(root: &Path, prefix: &str) {
     let current = CurrentPointer {

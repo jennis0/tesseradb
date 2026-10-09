@@ -17,22 +17,22 @@ use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::occupancy::{
+use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
+use mosaica_engine::compose::{compose, EffectiveMask};
+use mosaica_engine::occupancy::{
     occupied_tiles, occupied_tiles_ladder_with_precision, TileSketch, SKETCH_PRECISION,
 };
-use tessera_engine::projection::RowProjection;
-use tessera_engine::select::{
+use mosaica_engine::projection::RowProjection;
+use mosaica_engine::select::{
     cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
     SelectionParts, Threshold,
 };
-use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
-use tessera_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, TilerItem};
-use tessera_store::read::SegmentData;
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::{tile_ranges, Permutation, RowSpace};
-use tessera_types::{EntityId, TermId, TesseraId};
+use mosaica_lifecycle::{ChangeOp, IngestBuffer, Overlay};
+use mosaica_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, TilerItem};
+use mosaica_store::read::SegmentData;
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{tile_ranges, Permutation, RowSpace};
+use mosaica_types::{EntityId, TermId, TesseraId};
 
 const EXTENT: Bounds = Bounds {
     x_min: 0.0,
@@ -83,7 +83,7 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
         temp.path(),
         "seg0",
         items.len() as u32,
-        tessera_store::edited::RowEntities::Numbers,
+        mosaica_store::edited::RowEntities::Numbers,
     )
     .unwrap();
     Segment {
@@ -136,8 +136,8 @@ fn mask_over_with(
 
     let base = Arc::new(RowProjection::walk(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
-    let denied = tessera_engine::denied_rows_of(overlay, &perm);
-    let buffered = tessera_engine::buffered_rows_of(buffer, &perm);
+    let denied = mosaica_engine::denied_rows_of(overlay, &perm);
+    let buffered = mosaica_engine::buffered_rows_of(buffer, &perm);
     let mask = compose(&satisfied, overlay, buffer, base, &perm, &denied, Some(&buffered));
     (temp, mask)
 }
@@ -949,7 +949,7 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                     .step_by(11)
                 {
                     buffer.insert_row_with_terms(
-                        &tessera_lifecycle::WalRow {
+                        &mosaica_lifecycle::WalRow {
                             entity_id: EntityId::new(row as u64),
                             view: "s0".to_string(),
                             join: false,
@@ -1284,7 +1284,7 @@ fn the_occupied_tile_count_is_exact_with_a_composed_mask() {
     let vis: FxHashSet<u32> = visible.iter().copied().collect();
     for row in (0..n).filter(|r| !vis.contains(r)).step_by(5) {
         buffer.insert_row_with_terms(
-            &tessera_lifecycle::WalRow {
+            &mosaica_lifecycle::WalRow {
                 entity_id: EntityId::new(u64::from(row)),
                 view: "s0".to_string(),
                 join: false,
@@ -1944,7 +1944,7 @@ fn banded_tile(below_cut: u64, band_7: u64, band_6: u64) -> (Segment, Vec<u64>) 
 /// bands are read and fall short.
 #[test]
 fn the_band_route_widens_and_falls_through_as_the_definition_requires() {
-    use tessera_engine::bands::{select, BandAnswer};
+    use mosaica_engine::bands::{select, BandAnswer};
     let p = params(8, 100, Threshold::Cut(1u64 << 54));
     for (below_cut, band_7, band_6, expect) in [
         (1, 7, 20, "exact"),
@@ -1963,7 +1963,7 @@ fn the_band_route_widens_and_falls_through_as_the_definition_requires() {
 
         let mut reference = visible.clone();
         reference.sort_unstable();
-        let m = tessera_engine::select::served_count(below_cut, &p, matched);
+        let m = mosaica_engine::select::served_count(below_cut, &p, matched);
         assert_eq!(m, 8, "{expect}: the floor sets m");
         reference.truncate(m);
         let scan: Vec<u64> = Selection::of(&mask, &SelectionParts::new(&parts), &p, matched)

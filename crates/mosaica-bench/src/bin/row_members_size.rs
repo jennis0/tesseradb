@@ -3,7 +3,7 @@
 //!
 //! Reads label or list columns straight from a prefix (`row-column/*.tslb`, `*.tsll`), whose format
 //! does not move with the bundle's, so a bundle built at the previous format can be measured without
-//! rebuilding it. Each column is handed to `tessera_store::derived::project_row_members`, the one
+//! rebuilding it. Each column is handed to `mosaica_store::derived::project_row_members`, the one
 //! writer the build and the fold call, and its file is opened and indexed as the engine opens it.
 //!
 //! ```text
@@ -17,9 +17,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::Parser;
-use tessera_store::derived::{project_row_members, ColumnLabels};
-use tessera_store::membership::{LabelColumnPack, ListColumnPack};
-use tessera_store::row_members::RowMembersPack;
+use mosaica_store::derived::{project_row_members, ColumnLabels};
+use mosaica_store::membership::{LabelColumnPack, ListColumnPack};
+use mosaica_store::row_members::RowMembersPack;
 
 #[derive(Parser)]
 struct Args {
@@ -66,7 +66,7 @@ fn main() {
                 containers[2] += u64::from(s.n_bitset_containers);
             }
         }
-        let held = tessera_engine::row_members::LevelMembers::new(pack);
+        let held = mosaica_engine::row_members::LevelMembers::new(pack);
         let started = Instant::now();
         let probe = held.overlapping(0..=0);
         let index_secs = started.elapsed().as_secs_f64();

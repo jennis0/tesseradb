@@ -1,4 +1,4 @@
-//! `tessera-server`: the viewer, session and control planes, and the `tessera serve` entry point.
+//! `mosaica-server`: the viewer, session and control planes, and the `mosaica serve` entry point.
 //!
 //! [`prepare`] does everything that can fail before a listener is bound: it loads the config and
 //! opens the engine (bundle verification, WAL replay). [`run`] binds the three
@@ -33,9 +33,9 @@ use axum::serve::ListenerExt;
 
 use parking_lot::Mutex;
 
-use tessera_engine::{Engine, EngineConfig};
+use mosaica_engine::{Engine, EngineConfig};
 
-use tessera_config::{Config, ControlListen};
+use mosaica_config::{Config, ControlListen};
 use state::{AppState, ComputeGate, SessionRegistry};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -49,7 +49,7 @@ pub struct Prepared {
 /// Loads the config and opens the engine. A missing `[disclosure]` section, an unreadable bundle
 /// or a WAL that fails its CRC check returns `Err` here, before any socket is bound.
 pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
-    let config = tessera_config::load(config_path)?;
+    let config = mosaica_config::load(config_path)?;
     // Before the engine opens, and so before any thread that makes an arena exists: the cap
     // bounds arena creation and does nothing about arenas already made.
     memory::cap_arenas(config.compute_threads);
@@ -64,7 +64,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     for (what, declared, example) in [
         ("viewer", config.viewer_addr.is_some(), "127.0.0.1:8080"),
         ("session", config.session_addr.is_some(), "127.0.0.1:8081"),
-        ("control", config.control_listen.is_some(), "unix:/run/tessera/control.sock"),
+        ("control", config.control_listen.is_some(), "unix:/run/mosaica/control.sock"),
     ] {
         if !declared {
             return Err(format!(
@@ -109,7 +109,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // control plane can arm one.
     #[cfg(feature = "fault-injection")]
     let faults = {
-        let faults = Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new());
+        let faults = Arc::new(mosaica_lifecycle::faults::FaultSwitchboard::new());
         engine.start_write_executor_with_faults(config.ingest_queue_bound, Arc::clone(&faults))?;
         faults
     };
@@ -191,7 +191,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     tracing::info!(
         bulk_admission = config.bulk_admission,
         max_page_bytes = config.max_page_bytes,
-        bulk_read_memory_bytes = tessera_config::bulk_read_memory_bytes(&config),
+        bulk_read_memory_bytes = mosaica_config::bulk_read_memory_bytes(&config),
         "bulk reads may hold this much memory at once, within the process's memory cap"
     );
 
@@ -220,16 +220,16 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
 
 /// The environment variable that accepts a provider's `http://` JWKS URL to a host other than a
 /// loopback address, when set to `1`.
-pub const ALLOW_INSECURE_JWKS: &str = "TESSERA_ALLOW_INSECURE_JWKS";
+pub const ALLOW_INSECURE_JWKS: &str = "MOSAICA_ALLOW_INSECURE_JWKS";
 
 /// Opens the catalogue `[catalogue]` names, with the providers it declares. Refuses when the file
 /// names no directory, or the catalogue refuses to open.
-fn open_catalogue(config: &Config) -> Result<tessera_catalogue::Catalogue, BoxError> {
+fn open_catalogue(config: &Config) -> Result<mosaica_catalogue::Catalogue, BoxError> {
     let dir = config.catalogue_dir.as_ref().ok_or(
         "this deployment declares no catalogue; add `dir` under `[catalogue]`, such as \
          `dir = \"catalogue\"`",
     )?;
-    let options = tessera_catalogue::Options {
+    let options = mosaica_catalogue::Options {
         failed_attempt_limit: config.failed_attempt_limit,
         failed_attempt_window: std::time::Duration::from_secs(config.failed_attempt_window_secs),
         min_password_length: config.min_password_length,
@@ -237,7 +237,7 @@ fn open_catalogue(config: &Config) -> Result<tessera_catalogue::Catalogue, BoxEr
         config_providers: config
             .oidc_providers
             .iter()
-            .map(|p| tessera_catalogue::Provider {
+            .map(|p| mosaica_catalogue::Provider {
                 name: p.name.clone(),
                 issuer: p.issuer.clone(),
                 audience: p.audience.clone(),
@@ -245,7 +245,7 @@ fn open_catalogue(config: &Config) -> Result<tessera_catalogue::Catalogue, BoxEr
                 rules: p
                     .claim_rules
                     .iter()
-                    .map(|(claim, template)| tessera_catalogue::ClaimRule {
+                    .map(|(claim, template)| mosaica_catalogue::ClaimRule {
                         claim: claim.clone(),
                         template: template.clone(),
                     })
@@ -253,7 +253,7 @@ fn open_catalogue(config: &Config) -> Result<tessera_catalogue::Catalogue, BoxEr
                 role_mappings: p
                     .role_mappings
                     .iter()
-                    .map(|(claim, value, group)| tessera_catalogue::RoleMapping {
+                    .map(|(claim, value, group)| mosaica_catalogue::RoleMapping {
                         claim: claim.clone(),
                         value: value.clone(),
                         group: group.clone(),
@@ -261,9 +261,9 @@ fn open_catalogue(config: &Config) -> Result<tessera_catalogue::Catalogue, BoxEr
                     .collect(),
             })
             .collect(),
-        ..tessera_catalogue::Options::default()
+        ..mosaica_catalogue::Options::default()
     };
-    tessera_catalogue::Catalogue::open(dir, options)
+    mosaica_catalogue::Catalogue::open(dir, options)
         .map_err(|e| format!("the catalogue in {} cannot be opened: {e}", dir.display()).into())
 }
 

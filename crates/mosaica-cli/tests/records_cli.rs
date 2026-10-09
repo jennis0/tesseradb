@@ -1,4 +1,4 @@
-//! `tessera items` and `tessera artifacts` against a served bundle. What they write, read back
+//! `mosaica items` and `mosaica artifacts` against a served bundle. What they write, read back
 //! from Arrow IPC and from Parquet, equals the same read made over HTTP and decoded here. The
 //! requests they send are the arguments given. A read cut short or refused part of the way keeps
 //! its whole pages and names the cursor to read the rest with, and a read they cannot make or
@@ -23,7 +23,7 @@ use arrow::record_batch::RecordBatch;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use common::{deployment, tessera, Ports, Server, OPERATOR_CREDENTIAL};
+use common::{deployment, mosaica, Ports, Server, OPERATOR_CREDENTIAL};
 
 /// A served deployment, a token holding a hundred of its terms, and a proxy in front of it.
 struct Served {
@@ -199,11 +199,11 @@ fn forward(
 /// Where each frame of a whole body ends, with its kind.
 fn frame_ends(body: &[u8]) -> Vec<(u8, usize)> {
     let mut at = 0;
-    tessera_wire::split_frames(body)
+    mosaica_wire::split_frames(body)
         .unwrap()
         .into_iter()
         .map(|(kind, payload)| {
-            at += tessera_wire::FRAME_HEADER_BYTES + payload.len();
+            at += mosaica_wire::FRAME_HEADER_BYTES + payload.len();
             (kind, at)
         })
         .collect()
@@ -228,10 +228,10 @@ impl Served {
             let bytes = post(&format!("{}/v1/{route}", self.viewer), &self.token, &request);
             responses += 1;
             let mut trailer = None;
-            for (kind, payload) in tessera_wire::split_frames(&bytes).unwrap() {
+            for (kind, payload) in mosaica_wire::split_frames(&bytes).unwrap() {
                 match kind {
-                    tessera_wire::FRAME_RECORDS => pages.extend(decode_stream(payload)),
-                    tessera_wire::FRAME_TRAILER => {
+                    mosaica_wire::FRAME_RECORDS => pages.extend(decode_stream(payload)),
+                    mosaica_wire::FRAME_TRAILER => {
                         trailer = Some(serde_json::from_slice::<Value>(payload).unwrap())
                     }
                     _ => {}
@@ -245,9 +245,9 @@ impl Served {
         }
     }
 
-    /// `tessera <args> --server <the proxy> --token <the token>`.
+    /// `mosaica <args> --server <the proxy> --token <the token>`.
     fn run(&self, args: &[&str]) -> Run {
-        let mut command = tessera();
+        let mut command = mosaica();
         command
             .args(args)
             .args(["--server", &self.proxy.url, "--token", &self.token])
@@ -375,7 +375,7 @@ fn rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(RecordBatch::num_rows).sum()
 }
 
-/// `tessera items` over every kind of field, 97 rows to a page and `pages` to a response.
+/// `mosaica items` over every kind of field, 97 rows to a page and `pages` to a response.
 fn items_args(pages: &'static str) -> Vec<&'static str> {
     vec![
         "items",
@@ -472,7 +472,7 @@ fn a_read_goes_on_from_the_cursor_it_is_given() {
     let mut first = items_body(1);
     first["page_rows"] = 500.into();
     let bytes = post(&format!("{}/v1/items", served.viewer), &served.token, &first);
-    let frames = tessera_wire::split_frames(&bytes).unwrap();
+    let frames = mosaica_wire::split_frames(&bytes).unwrap();
     let trailer: Value = serde_json::from_slice(frames.last().unwrap().1).unwrap();
     let cursor = trailer["next"].as_str().unwrap();
 
@@ -528,7 +528,7 @@ fn count_goes_on_the_first_request_and_every_other_argument_on_each() {
     assert!(done.status.success(), "{}", done.stderr);
     let whole = plain(&whole);
     assert_eq!(plain(&read_output(&out)), whole);
-    let matched = whole.column_by_name("tessera:matched").unwrap();
+    let matched = whole.column_by_name("mosaica:matched").unwrap();
     let matched = matched.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
     assert!(matched.true_count() > 0 && matched.false_count() > 0);
 
@@ -694,9 +694,9 @@ fn a_read_that_finds_no_row_writes_its_columns_with_no_rows() {
 /// Cut 10 bytes into the frame after the second page end, exactly at the second page end, or
 /// after the third page but before its page end.
 const CUTS: [fn(&[u8]) -> usize; 3] = [
-    |body| end_of(body, tessera_wire::FRAME_PAGE_END, 2) + 10,
-    |body| end_of(body, tessera_wire::FRAME_PAGE_END, 2),
-    |body| end_of(body, tessera_wire::FRAME_RECORDS, 3),
+    |body| end_of(body, mosaica_wire::FRAME_PAGE_END, 2) + 10,
+    |body| end_of(body, mosaica_wire::FRAME_PAGE_END, 2),
+    |body| end_of(body, mosaica_wire::FRAME_RECORDS, 3),
 ];
 
 #[test]
@@ -735,7 +735,7 @@ fn a_read_cut_after_its_last_page_writes_every_row() {
     assert_eq!(responses, 1);
     for format in ["arrows", "parquet"] {
         let out = served.dir.path().join(format!("all.{format}"));
-        let last_page_end = |body: &[u8]| end_of(body, tessera_wire::FRAME_PAGE_END, 1);
+        let last_page_end = |body: &[u8]| end_of(body, mosaica_wire::FRAME_PAGE_END, 1);
         served.proxy.plan([Some(Step::Cut(last_page_end))]);
         let path = out.to_str().unwrap();
         let args = ["items", "--view", "s0", "--fields", "fx_key,bay", "--out", path];
@@ -775,14 +775,14 @@ fn a_read_without_a_token_sends_nothing_and_writes_nothing() {
     let served = serve();
     let out = served.dir.path().join("refused.parquet");
     let read = |token: Option<&str>| {
-        let mut command = tessera();
+        let mut command = mosaica();
         command
             .args(with_out(items_args("2"), &out))
             .args(["--server", &served.proxy.url])
-            .env_remove("TESSERA_TOKEN")
+            .env_remove("MOSAICA_TOKEN")
             .current_dir(served.dir.path());
         if let Some(token) = token {
-            command.env("TESSERA_TOKEN", token);
+            command.env("MOSAICA_TOKEN", token);
         }
         run(command, served.dir.path()).status
     };
@@ -837,7 +837,7 @@ fn the_format_is_named_or_refused_before_any_request() {
     assert!(rows(&read_parquet(&dir.join("named.PARQUET"))) > 0);
 }
 
-/// `tessera aggregate` writes the one table its grouping asks for, as the same read over HTTP
+/// `mosaica aggregate` writes the one table its grouping asks for, as the same read over HTTP
 /// gives it: a histogram, which is one page however small the pages asked for, a summary, and a
 /// breakdown, carried across responses from its cursor; and arguments that are not JSON send
 /// nothing.

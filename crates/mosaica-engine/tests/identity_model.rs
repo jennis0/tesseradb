@@ -44,16 +44,16 @@ use parquet::arrow::ArrowWriter;
 use proptest::prelude::*;
 
 use common::*;
-use tessera_engine::filter::{FilterExpr, FilterOperand, Scalar};
-use tessera_engine::{
+use mosaica_engine::filter::{FilterExpr, FilterOperand, Scalar};
+use mosaica_engine::{
     AcceptError, AttributeRequest, Engine, EngineConfig, IngestReceipt, IngestRequest, ScalarOut,
     Session, ViewportRequest,
 };
-use tessera_lifecycle::wal::WalScalar;
-use tessera_lifecycle::{ChangeOp, IngestRow};
-use tessera_spatial::tiler::ScalarType;
-use tessera_types::layer::LayerScope;
-use tessera_types::{EntityId, TesseraId};
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_lifecycle::{ChangeOp, IngestRow};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_types::layer::LayerScope;
+use mosaica_types::{EntityId, TesseraId};
 
 const VIEWS: [&str; 2] = ["s0", "s1"];
 /// The one key of the group `quarter`, whose view every built item is in beside [`VIEWS`].
@@ -327,27 +327,27 @@ fn fixture() -> Fixture {
     write_pairs(&pairs);
     let schema_path = tmp.path().join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+    let schema = mosaica_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the fixture schema parses")
         .schema;
-    let view_args = |view: &str, points: &Path| tessera_build::ViewArgs {
+    let view_args = |view: &str, points: &Path| mosaica_build::ViewArgs {
         visibility: None,
         view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: points.to_path_buf(),
         point_fields: Default::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        access: mosaica_build::config::AccessInput::relation(pairs.clone()),
     };
-    let scoped = |at: usize| tessera_build::ScopedColumnFamily {
-        attribute: tessera_build::config::Attribute {
+    let scoped = |at: usize| mosaica_build::ScopedColumnFamily {
+        attribute: mosaica_build::config::Attribute {
             name: SCOPED[at].to_string(),
             title: None,
             field: None,
             ty: [ScalarType::F32, ScalarType::Text][at],
             analyser: (at == 1)
-                .then(|| tessera_analyse::identity_of("unicode").expect("the analyser is carried")),
+                .then(|| mosaica_analyse::identity_of("unicode").expect("the analyser is carried")),
             vocabulary: None,
             value_set: None,
             index: true,
@@ -359,36 +359,36 @@ fn fixture() -> Fixture {
         source: None,
     };
     let e = extent();
-    tessera_build::build(&tessera_build::BuildArgs {
+    mosaica_build::build(&mosaica_build::BuildArgs {
         views: VIEWS
             .iter()
             .map(|view| view_args(view, &points))
             .chain([view_args(GROUP_VIEW, &group_points)])
             .collect(),
         anchor: 0,
-        groups: vec![tessera_build::GroupDescriptor {
+        groups: vec![mosaica_build::GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
             visibility: None,
             name: GROUP.0.to_string(),
             members_of: None,
-            views: vec![tessera_build::GroupViewDescriptor {
+            views: vec![mosaica_build::GroupViewDescriptor {
                 key: GROUP.1.to_string(),
                 visibility: None,
                 metadata: Default::default(),
             }],
-            quantisation: tessera_build::Quantisation {
+            quantisation: mosaica_build::Quantisation {
                 x_min: e.x_min,
                 x_max: e.x_max,
                 y_min: e.y_min,
                 y_max: e.y_max,
             },
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             metadata: Vec::new(),
             scoped_scalars: Vec::new(),
         }],
         scoped_attributes: vec![scoped(0), scoped(1)],
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.clone(),
         limit: None,
         strict: false,
@@ -1421,7 +1421,7 @@ impl Run {
             req.filter = filter.clone();
             match self.engine().viewport(session, req) {
                 Ok(out) => return out.points.iter().map(|(id, _)| id.raw()).collect(),
-                Err(tessera_engine::EngineError::ProjectionBuilding)
+                Err(mosaica_engine::EngineError::ProjectionBuilding)
                     if std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(Duration::from_millis(20));
@@ -1690,8 +1690,8 @@ impl Run {
                         (
                             view.to_string(),
                             (
-                                tessera_spatial::fixed32(*x, 0.0, 1000.0),
-                                tessera_spatial::fixed32(*y, 0.0, 1000.0),
+                                mosaica_spatial::fixed32(*x, 0.0, 1000.0),
+                                mosaica_spatial::fixed32(*y, 0.0, 1000.0),
                             ),
                         )
                     })
@@ -1779,8 +1779,8 @@ const CONTENT: &str = "a label";
 /// The built items the content is generated from.
 const CONTENT_SOURCES: [u64; 2] = [3, 6];
 
-fn label_layer() -> tessera_types::layer::LayerDeclaration {
-    use tessera_types::layer::{
+fn label_layer() -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::{
         ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
         MembershipSource, SuppliedContent, SuppliedRequirement,
     };
@@ -1816,8 +1816,8 @@ fn label_layer() -> tessera_types::layer::LayerDeclaration {
 /// Register the layer and publish its artifact over every built item, its content generated
 /// from [`CONTENT_SOURCES`], answering the content's items' `tessera_id`s.
 fn publish_content(engine: &Engine) -> BTreeSet<u64> {
-    use tessera_lifecycle::membership::IncomingContent;
-    use tessera_lifecycle::IncomingArtifact;
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::IncomingArtifact;
     engine
         .register_layer(label_layer())
         .expect("the layer registers");
@@ -2216,8 +2216,8 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     };
     let at = |x: f64, y: f64| {
         (
-            tessera_spatial::fixed32(x, 0.0, 1000.0),
-            tessera_spatial::fixed32(y, 0.0, 1000.0),
+            mosaica_spatial::fixed32(x, 0.0, 1000.0),
+            mosaica_spatial::fixed32(y, 0.0, 1000.0),
         )
     };
 
@@ -2255,7 +2255,7 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
         engine.write_executor_stats().merges > merges
     });
     assert_eq!(placed(&engine), both, "after a merge");
-    tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+    mosaica_build::verify_deep(&fx.root, &mosaica_build::VerifyOpts::default())
         .expect("the merged bundle verifies");
 
     fold(&engine);

@@ -23,13 +23,13 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use sha2::{Digest, Sha256};
 
-use tessera_build::error::BuildError;
-use tessera_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
-use tessera_spatial::Bounds;
-use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use tessera_store::manifest::{CurrentPointer, EntitySet, FileDigest, SegmentsManifest};
-use tessera_store::{write_segments_manifest, StoreError};
-use tessera_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
+use mosaica_build::error::BuildError;
+use mosaica_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
+use mosaica_spatial::Bounds;
+use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
+use mosaica_store::manifest::{CurrentPointer, EntitySet, FileDigest, SegmentsManifest};
+use mosaica_store::{write_segments_manifest, StoreError};
+use mosaica_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N_ITEMS: u64 = 48;
@@ -119,11 +119,11 @@ fn built_bundle_with(root: &Path, n: u64, score: Option<Score>) {
     write_pairs(&pairs, n);
     let (mut schema, mut attribute_sources) = common::id_attributes(&points);
     if let Some(score) = score {
-        schema.attributes.push(tessera_build::config::Attribute {
+        schema.attributes.push(mosaica_build::config::Attribute {
             field: None,
             name: "score".to_string(),
             title: None,
-            ty: tessera_spatial::tiler::ScalarType::I32,
+            ty: mosaica_spatial::tiler::ScalarType::I32,
             analyser: None,
             vocabulary: None,
             value_set: None,
@@ -131,18 +131,18 @@ fn built_bundle_with(root: &Path, n: u64, score: Option<Score>) {
             render: score == Score::Rendered,
             unique: false,
         });
-        attribute_sources = tessera_build::config::AttributeSource::over(&points, &schema);
+        attribute_sources = mosaica_build::config::AttributeSource::over(&points, &schema);
     }
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -173,7 +173,7 @@ fn flushed_bundle(root: &Path) {
     let out = root.join("bundle");
 
     let prefix_dir = out.join("v00000");
-    let manifest: tessera_store::manifest::Manifest = serde_json::from_slice(
+    let manifest: mosaica_store::manifest::Manifest = serde_json::from_slice(
         &fs::read(prefix_dir.join("MANIFEST.json")).expect("MANIFEST.json readable"),
     )
     .expect("MANIFEST.json parses");
@@ -227,7 +227,7 @@ fn flushed_bundle(root: &Path) {
     // seen — the state the pairs check must not refuse.
     let delta_rel = "partitions/default/views/s0/segments/flush-1/delta.arrow".to_string();
     let delta_path = prefix_dir.join(&delta_rel);
-    tessera_authz::write_delta_tier(
+    mosaica_authz::write_delta_tier(
         &delta_path,
         &[(TermId::new(3), vec![n as u32, n as u32 + 1])],
         SMALL_TERM_THRESHOLD_DEFAULT,
@@ -237,7 +237,7 @@ fn flushed_bundle(root: &Path) {
     let mut files: BTreeMap<String, FileDigest> = flush.files.clone();
     files.insert(
         delta_rel.clone(),
-        tessera_store::digest_of(&delta_path).expect("the tier digests"),
+        mosaica_store::digest_of(&delta_path).expect("the tier digests"),
     );
 
     let mut segments = seg0.segments.clone();
@@ -492,7 +492,7 @@ fn a_posting_past_the_high_water_is_refused() {
 
     let mut per_term = read_base_postings(&path);
     per_term[0].push(1_000_000); // far past the fixture's high water of N_ITEMS + 2
-    tessera_authz::write_postings(&path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT).unwrap();
+    mosaica_authz::write_postings(&path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT).unwrap();
     refresh_digest(&root, rel);
 
     expect_refusal(&root, "entity_id_high_water");
@@ -521,14 +521,14 @@ fn a_posting_with_a_duplicate_entity_is_refused() {
         .iter()
         .enumerate()
         .map(|(t, entities)| {
-            tessera_authz::encode_posting(t, entities, SMALL_TERM_THRESHOLD_DEFAULT).unwrap()
+            mosaica_authz::encode_posting(t, entities, SMALL_TERM_THRESHOLD_DEFAULT).unwrap()
         })
         .collect();
     let mut damaged = vec![0u8]; // tag 0: raw little-endian u32 array
     damaged.extend_from_slice(&first.to_le_bytes());
     damaged.extend_from_slice(&first.to_le_bytes());
     records[carried] = damaged;
-    tessera_authz::write_posting_records(&path, &records).unwrap();
+    mosaica_authz::write_posting_records(&path, &records).unwrap();
     refresh_digest(&root, rel);
 
     expect_refusal(&root, "strictly ascending");
@@ -586,7 +586,7 @@ fn a_pairs_file_missing_a_base_pair_is_refused() {
         .position(|entities| !entities.is_empty())
         .expect("some term has a posting");
     per_term[with_rows].pop();
-    let mut writer = tessera_store::PairsParquetWriter::create(&path).unwrap();
+    let mut writer = mosaica_store::PairsParquetWriter::create(&path).unwrap();
     for (t, entities) in per_term.iter().enumerate() {
         writer.push_run(t as u32, entities).unwrap();
     }
@@ -624,7 +624,7 @@ fn a_permutation_leaving_a_row_unclaimed_is_refused() {
 
     // `permutation.bin` is a 24-byte header, a `u32` per page of directory, zero padding to a
     // 4 KiB boundary, then the present pages of 2¹⁶ slots each (contracts R4;
-    // `tessera_store::permutation`). The fixture's bound is well under one page, so entity
+    // `mosaica_store::permutation`). The fixture's bound is well under one page, so entity
     // `ORPHANED`'s slot sits at the payload's start.
     const PAYLOAD: usize = 4096;
     const ROW_ABSENT: [u8; 4] = [0xff; 4];
@@ -671,16 +671,16 @@ fn a_source_binding_request_is_refused_until_the_contract_carries_the_field() {
 /// Decode the base postings back into per-term entity lists, so a damage test can rewrite the
 /// file with one surgical change.
 fn read_base_postings(path: &Path) -> Vec<Vec<u32>> {
-    let reader = tessera_authz::PostingsReader::open(path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(path, false).unwrap();
     (0..reader.term_count())
         .map(|t| match reader.posting_at(t).unwrap().unwrap() {
-            tessera_authz::PostingRef::Array(bytes) => bytes
+            mosaica_authz::PostingRef::Array(bytes) => bytes
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .map(|c| u32::from_le_bytes(*c))
                 .collect(),
-            tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
+            mosaica_authz::PostingRef::Roaring(view) => view.iter().collect(),
         })
         .collect()
 }
@@ -723,7 +723,7 @@ fn append_dict_extent_repeating_first_descriptor(root: &Path, k: usize) {
 #[test]
 fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
     use arrow::array::{Float32Array, StringArray};
-    use tessera_spatial::tiler::ScalarType;
+    use mosaica_spatial::tiler::ScalarType;
 
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path();
@@ -765,27 +765,27 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
     let pairs = dir.join("pairs.parquet");
     write_pairs(&pairs, N_ITEMS);
 
-    let view = |key: &str| tessera_build::ViewArgs {
+    let view = |key: &str| mosaica_build::ViewArgs {
         visibility: None,
         view_id: format!("quarter:{key}"),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: points.clone(),
         point_fields: Default::default(),
-        select: Some(tessera_build::config::ViewSelector {
+        select: Some(mosaica_build::config::ViewSelector {
             column: "quarter".to_string(),
             value: key.to_string(),
             keys: vec!["2026-Q1".to_string(), "2026-Q2".to_string()],
             view_id: format!("quarter:{key}"),
         }),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        access: mosaica_build::config::AccessInput::relation(pairs.clone()),
     };
     let out = dir.join("bundle");
     let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![view("2026-Q1"), view("2026-Q2")],
         anchor: 0,
-        groups: vec![tessera_build::GroupDescriptor {
+        groups: vec![mosaica_build::GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
             visibility: None,
@@ -793,24 +793,24 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
             members_of: None,
             views: ["2026-Q1", "2026-Q2"]
                 .into_iter()
-                .map(|key| tessera_build::GroupViewDescriptor {
+                .map(|key| mosaica_build::GroupViewDescriptor {
                     key: key.to_string(),
                     visibility: None,
                     metadata: Default::default(),
                 })
                 .collect(),
-            quantisation: tessera_build::Quantisation {
+            quantisation: mosaica_build::Quantisation {
                 x_min: extent().x_min,
                 x_max: extent().x_max,
                 y_min: extent().y_min,
                 y_max: extent().y_max,
             },
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             metadata: Vec::new(),
             scoped_scalars: Vec::new(),
         }],
-        scoped_attributes: vec![tessera_build::ScopedColumnFamily {
-            attribute: tessera_build::config::Attribute {
+        scoped_attributes: vec![mosaica_build::ScopedColumnFamily {
+            attribute: mosaica_build::config::Attribute {
                 name: "heat".to_string(),
                 title: None,
                 field: None,
@@ -969,12 +969,12 @@ fn a_cell_code_that_is_not_its_cells_is_refused() {
 
 /// A bundle large enough for a band to hold a row, band 6 holding about one row in 64, with
 /// `score` rendered, and its base segment's `bands.bin`.
-fn banded_bundle(temp: &tempfile::TempDir) -> (PathBuf, &'static str, tessera_store::bands::Bands) {
+fn banded_bundle(temp: &tempfile::TempDir) -> (PathBuf, &'static str, mosaica_store::bands::Bands) {
     const ROWS: u64 = 1_000;
     built_bundle(temp.path(), ROWS, true);
     let root = bundle_root(temp);
     let rel = "partitions/default/views/s0/segments/seg-0/bands.bin";
-    let bands = tessera_store::bands::Bands::open(
+    let bands = mosaica_store::bands::Bands::open(
         root.join("v00000").join(rel).parent().unwrap(),
         ROWS as u32,
     )
@@ -1025,7 +1025,7 @@ fn an_indexed_copy_that_is_not_its_items_value_is_refused() {
     verify_deep(&root, &VerifyOpts::default()).expect("the built bundle verifies");
     let rel = "partitions/default/views/s0/segments/seg-0/bands.bin";
     let path = root.join("v00000").join(rel);
-    let bands = tessera_store::bands::Bands::open(path.parent().unwrap(), ROWS as u32).unwrap();
+    let bands = mosaica_store::bands::Bands::open(path.parent().unwrap(), ROWS as u32).unwrap();
     assert_eq!(bands.indexed_names().collect::<Vec<_>>(), vec!["score"]);
     let at = bands.copy_range("score").expect("score is copied").start;
     drop(bands);

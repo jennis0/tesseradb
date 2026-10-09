@@ -2,7 +2,7 @@
 //! and the fail-closed read that returns them (`records-and-search.md` §3).
 //!
 //! This module owns the **byte format** — rows, blocks, the directory — and the reader. The block
-//! writer lives in `tessera-filter-write`, which is a separate crate for the codegen reason its own
+//! writer lives in `mosaica-filter-write`, which is a separate crate for the codegen reason its own
 //! module doc gives; keeping encode and decode *here*, in one module, is what keeps the layout a
 //! single fact rather than two transcriptions that could drift.
 //!
@@ -126,7 +126,7 @@
 //! file that fails its digest refuses at open), and decision 0142 leaves open whether that takes a
 //! leak-register row. [`RecordBlob::self_check`] walks the whole artefact — ranks, the rows tiling
 //! their block, block bounds, identities — for the conformance suite and for
-//! `tessera verify --deep`, neither of which can see addressing from the served surface
+//! `mosaica verify --deep`, neither of which can see addressing from the served surface
 //! (records §10).
 //!
 //! The has-row bitmap is serialised run-optimised, so the file's bytes are a function of the
@@ -275,8 +275,8 @@ pub struct RecordFieldRef<'a> {
 
 impl RecordValue {
     /// The value as a number, where it is one: every integer width, both floats and a timestamp.
-    pub fn number(&self) -> Option<tessera_types::scalar::Number> {
-        use tessera_types::scalar::Number;
+    pub fn number(&self) -> Option<mosaica_types::scalar::Number> {
+        use mosaica_types::scalar::Number;
         Some(match *self {
             RecordValue::U8(x) => Number::Int(i128::from(x)),
             RecordValue::U16(x) => Number::Int(i128::from(x)),
@@ -1034,7 +1034,7 @@ impl RecordBlob {
     /// tiling each block exactly, every row decoding inside its bounds — so a short, truncated or
     /// mis-addressed extent still refuses. The build makes the first of the two itself, against the
     /// same has-row files it streams once to decide which extent's row for a repeated entity wins
-    /// (`tessera-build`'s `extents::DuplicateMap`).
+    /// (`mosaica-build`'s `extents::DuplicateMap`).
     ///
     /// [`Self::hasrow`], [`Self::has_row`], [`Self::fields_of`], [`Self::for_each_row_in`] and
     /// [`Self::self_check`] all refuse on a blob opened this way — the four that address a row by
@@ -1057,7 +1057,7 @@ impl RecordBlob {
     ) -> Result<Self, RecordError> {
         let blocks = read_buffer(blocks_path, access)?;
         let directory = read_buffer(directory_path, access)?;
-        let batch = tessera_authz::decode_single_batch(
+        let batch = mosaica_authz::decode_single_batch(
             &directory,
             &format!("{}", directory_path.display()),
         )?;
@@ -1385,7 +1385,7 @@ impl RecordBlob {
         let mut bytes: Vec<u8> = Vec::new();
         // Ranks are carried along runs of the has-row bitmap rather than taken per entity: a rank
         // sums every container below it, which over a whole blob is quadratic.
-        for (lo, hi, first) in tessera_roaring::RankedRuns::new(hasrow, wanted) {
+        for (lo, hi, first) in mosaica_roaring::RankedRuns::new(hasrow, wanted) {
             for (entity, rank) in (lo..=hi).zip(first..) {
                 let rank = rank as u32;
                 let held = loaded.as_ref().is_some_and(|(_, header, _)| {

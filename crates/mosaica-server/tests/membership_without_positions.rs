@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
+use mosaica_build::{build, BuildArgs};
 
 /// The corpus. Small enough for a tick inside a test, wide enough that the eight keys
 /// below each hold several points and the masked count moves between principals.
@@ -163,10 +163,10 @@ fn build_side_as(
     write_pairs(&pairs, rows);
     std::fs::write(&config_path, format!("{VIEW_TOML}{layer}")).unwrap();
 
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture declaration parses");
     build(&BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.clone(),
             &config.schema,
         ),
@@ -201,8 +201,8 @@ async fn post_rows(server: &TestServer, batch_id: &str, body: Value) -> (u16, Va
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .json(&body)
         .send()
         .await
@@ -233,8 +233,8 @@ async fn post_rows_arrow(server: &TestServer, batch_id: &str, body: Vec<u8>) -> 
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -313,8 +313,8 @@ async fn post_ingest(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -549,14 +549,14 @@ async fn a_restated_page_appends_no_growth_record() {
     tick(&server).await;
 
     server.shutdown().await;
-    let wal = tessera_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
+    let wal = mosaica_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
     let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let growths = records
         .iter()
         .filter(|record| {
             matches!(
                 record,
-                tessera_lifecycle::wal::WalRecord::ArtifactGrow { .. }
+                mosaica_lifecycle::wal::WalRecord::ArtifactGrow { .. }
             )
         })
         .count();
@@ -626,12 +626,12 @@ async fn a_partly_restated_page_appends_only_the_new_members() {
     );
 
     server.shutdown().await;
-    let wal = tessera_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
+    let wal = mosaica_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
     let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
-    let growths: Vec<&Vec<tessera_lifecycle::wal::MembershipGrowth>> = records
+    let growths: Vec<&Vec<mosaica_lifecycle::wal::MembershipGrowth>> = records
         .iter()
         .filter_map(|record| match record {
-            tessera_lifecycle::wal::WalRecord::ArtifactGrow { growth, .. } => Some(growth),
+            mosaica_lifecycle::wal::WalRecord::ArtifactGrow { growth, .. } => Some(growth),
             _ => None,
         })
         .collect();
@@ -639,7 +639,7 @@ async fn a_partly_restated_page_appends_only_the_new_members() {
     let joining: Vec<u64> = growths[1]
         .iter()
         .map(|grown| {
-            tessera_lifecycle::membership::deserialise_members(&grown.joining)
+            mosaica_lifecycle::membership::deserialise_members(&grown.joining)
                 .expect("the delta decodes")
                 .cardinality()
         })

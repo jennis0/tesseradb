@@ -1,6 +1,6 @@
 //! **What a view's field tallies cost to derive as the corpus grows**: an entity's rank in the
 //! entity-terms layer, by croaring's own rank and by the block rank table the reader uses, and the
-//! whole tally pass of `tessera_store::field_tallies::derive` over every row.
+//! whole tally pass of `mosaica_store::field_tallies::derive` over every row.
 //!
 //! The corpus is synthetic: entities `0..n·7/6` less every seventh, so the has-row bitmap is bitset
 //! containers across its whole span; each entity carrying one or two of 64 keys, which makes about
@@ -15,9 +15,9 @@
 
 use std::time::Instant;
 
-use tessera_store::entity_terms::EntityTerms;
-use tessera_store::field_tallies::{derive, TallyField, TallySource};
-use tessera_types::scalar::Number;
+use mosaica_store::entity_terms::EntityTerms;
+use mosaica_store::field_tallies::{derive, TallyField, TallySource};
+use mosaica_types::scalar::Number;
 
 fn entity_of_row(row: u32) -> u32 {
     row + row / 6
@@ -44,7 +44,7 @@ fn main() {
         let dir = scratch.join(format!("terms-{rows}"));
         std::fs::create_dir_all(&dir).unwrap();
         let started = Instant::now();
-        let mut writer = tessera_store::EntityTermsWriter::create(&dir).unwrap();
+        let mut writer = mosaica_store::EntityTermsWriter::create(&dir).unwrap();
         let mut keys = Vec::new();
         for row in 0..rows {
             let entity = entity_of_row(row);
@@ -75,7 +75,7 @@ fn main() {
         }
         // As a writer leaves it: bitset containers, each holding its cardinality.
         dense.run_optimize();
-        let table = tessera_roaring::BlockRanks::of(&dense);
+        let table = mosaica_roaring::BlockRanks::of(&dense);
         let started = Instant::now();
         let ranked: u64 = probes
             .iter()

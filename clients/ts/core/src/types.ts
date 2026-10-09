@@ -1,17 +1,17 @@
 import type {Table} from 'apache-arrow';
 
 /**
- * A session minted on the session plane, as {@link TesseraClient.authorise} returns it.
+ * A session minted on the session plane, as {@link MosaicaClient.authorise} returns it.
  *
  * @category Requests and responses
  */
 export type Session = Login & {
-  /** The session's handle for {@link TesseraClient.revoke}. It is not a credential. */
+  /** The session's handle for {@link MosaicaClient.revoke}. It is not a credential. */
   tokenId: number;
 };
 
 /**
- * A session, as {@link TesseraClient.login} returns it.
+ * A session, as {@link MosaicaClient.login} returns it.
  *
  * @category Requests and responses
  */
@@ -27,7 +27,7 @@ export type Login = {
 };
 
 /**
- * The one credential {@link TesseraClient.login} sends.
+ * The one credential {@link MosaicaClient.login} sends.
  *
  * @category Requests and responses
  */
@@ -48,7 +48,7 @@ export type LoginCredential =
     };
 
 /**
- * Whom {@link TesseraClient.authorise} mints a session for.
+ * Whom {@link MosaicaClient.authorise} mints a session for.
  *
  * @category Requests and responses
  */
@@ -100,7 +100,7 @@ export type Quantisation = {
  * The storage type `/v1/meta` publishes for a declared column. `timestamp_us` is an `i64` of
  * microseconds since the Unix epoch. `keyword` is a short string matched exactly, and `text` is
  * prose searched by analysed words. Neither string type can be `render`, so neither arrives in a
- * viewport response; both are read with {@link TesseraClient.item}. `utf8` cannot be declared.
+ * viewport response; both are read with {@link MosaicaClient.item}. `utf8` cannot be declared.
  *
  * @category Meta
  */
@@ -125,7 +125,7 @@ export type ArrowType =
  * What makes an integer column a category. The points frame carries a category as a bare integer
  * code of the declared width, so this block is the only sign that a column is one. The codes are
  * drawn at random from the width and their numeric order means nothing, so a continuous colour
- * ramp over them is meaningless. {@link TesseraClient.categories} resolves a code to its value.
+ * ramp over them is meaningless. {@link MosaicaClient.categories} resolves a code to its value.
  *
  * @category Meta
  */
@@ -168,7 +168,7 @@ export type DeclaredScalar = {
    * under `pointRows: 'full'`, and under a list that names it. Only a `render` column can colour or
    * size points. A point with no value arrives as null, except in a category, where
    * it arrives as code `0`. A column with `render: false` may still be filterable (see
-   * {@link Meta.filterOperands}) and is returned by {@link TesseraClient.item}.
+   * {@link Meta.filterOperands}) and is returned by {@link MosaicaClient.item}.
    */
   render: boolean;
   /**
@@ -229,7 +229,7 @@ export type ScopedScalar = {
 
 /**
  * One column a request may filter on, and how. `family` says which control fits: a `category` has
- * a value set {@link TesseraClient.categories} lists, a `keyword` has none and takes typed text, a
+ * a value set {@link MosaicaClient.categories} lists, a `keyword` has none and takes typed text, a
  * `text` column is searched by words, and a `numeric` one by range.
  *
  * @category Meta
@@ -328,7 +328,7 @@ export type MemberOfOperand = {
 };
 
 /**
- * The `x-tessera-region` verdict on a response whose filter had a `region` leaf. `exact: true`
+ * The `x-mosaica-region` verdict on a response whose filter had a `region` leaf. `exact: true`
  * means each region's answer is exact for the shape against every point's stored position.
  * `exact: false` means a shape's boundary needed more than `selection.maxRegionCells` cells, so the
  * answer is exact for a cover of the shape (a superset) taken at depth `depth`. The verdict
@@ -530,7 +530,7 @@ export type ViewGroup = {
 };
 
 /**
- * `GET /v1/meta`, as {@link TesseraClient.meta} decodes it: the views, column schema, filterable
+ * `GET /v1/meta`, as {@link MosaicaClient.meta} decodes it: the views, column schema, filterable
  * columns, annotation layers and request limits. The lists are filtered to what this principal
  * may reach, so one principal's `Meta` must not be shown to another.
  *
@@ -574,10 +574,10 @@ export type Meta = {
     thetaTargetMarks: number;
     /** The largest `underlayOffset` a viewport request may ask for. */
     maxUnderlayOffset: number;
-    /** The largest `perTile` a {@link TesseraClient.viewportArtifacts} request may name. */
+    /** The largest `perTile` a {@link MosaicaClient.viewportArtifacts} request may name. */
     maxArtifactsPerTile: number;
     /**
-     * The page size, and the largest one, of {@link TesseraClient.categories}. A page shorter than
+     * The page size, and the largest one, of {@link MosaicaClient.categories}. A page shorter than
      * this means the value set ended.
      */
     maxCategoryValues: number;
@@ -588,11 +588,11 @@ export type Meta = {
      * refused: the answer is exact for a cover of the shape, and {@link RegionVerdict} says so.
      */
     maxRegionCells: number;
-    /** The page size, and the largest one, of {@link TesseraClient.browse}. */
+    /** The page size, and the largest one, of {@link MosaicaClient.browse}. */
     maxBrowseRows: number;
     /** The most vertices a published shape may have. */
     maxShapeVertices: number;
-    /** The default and the largest `limit` of {@link TesseraClient.suggest}. */
+    /** The default and the largest `limit` of {@link MosaicaClient.suggest}. */
     maxSuggestions: number;
     /** The most values one suggestion request examines before it stops and answers `more: true`. */
     maxSuggestionWalk: number;
@@ -608,7 +608,7 @@ export type Meta = {
      * compression. A single larger row is sent alone.
      */
     maxPageBytes: number;
-    /** The most groupings one {@link TesseraClient.aggregate} request may carry. */
+    /** The most groupings one {@link MosaicaClient.aggregate} request may carry. */
     maxAggregateGroupings: number;
     /** The largest `top` of an aggregate grouping. */
     maxAggregateTop: number;
@@ -706,12 +706,12 @@ export type SuggestPage = {
    * total`. Present only when the request set `counts: true`.
    */
   total?: number;
-  /** The verdict on the counts' `region` leaves (`x-tessera-region`), present only where the request's `filters` carried one and asked for counts. */
+  /** The verdict on the counts' `region` leaves (`x-mosaica-region`), present only where the request's `filters` carried one and asked for counts. */
   region?: RegionVerdict;
 };
 
 /**
- * The outcome of {@link TesseraClient.suggest}. `status: 'ok'` carries the page.
+ * The outcome of {@link MosaicaClient.suggest}. `status: 'ok'` carries the page.
  *
  * `status: 'shed'` is any `429` the server answered, returned rather than thrown: the
  * request was shed and may be sent again after `retryAfterS` seconds. `detail` is the server's
@@ -726,7 +726,7 @@ export type SuggestResult =
   | {status: 'shed'; retryAfterS: number; detail: string | null};
 
 /**
- * The body of `POST /v1/viewport`, as {@link TesseraClient.viewport} takes it. Send exactly one of
+ * The body of `POST /v1/viewport`, as {@link MosaicaClient.viewport} takes it. Send exactly one of
  * `bbox` and `tiles`; the server refuses both and neither. A field left unset is not sent, so the
  * server's default applies.
  *
@@ -798,7 +798,7 @@ export type ViewportRequest = {
    * The annotation layers whose artifacts tag the points: each named layer this principal reaches
    * adds a membership column ({@link ViewportResult.membership}). Omitted or `[]` is none; `'all'`
    * is every layer this principal reaches. A name it cannot reach is ignored, as an unknown name
-   * is. The artifacts themselves come from {@link TesseraClient.viewportArtifacts}.
+   * is. The artifacts themselves come from {@link MosaicaClient.viewportArtifacts}.
    */
   layers?: string[] | 'all';
   /**
@@ -816,7 +816,7 @@ export type ViewportRequest = {
 };
 
 /**
- * The body of `POST /v1/artifacts/viewport`, as {@link TesseraClient.viewportArtifacts} takes it:
+ * The body of `POST /v1/artifacts/viewport`, as {@link MosaicaClient.viewportArtifacts} takes it:
  * the artifacts of the named layers in each tile of a region. Send exactly one of `bbox` and
  * `tiles`. A field left unset is not sent, so the server's default applies.
  *
@@ -840,13 +840,13 @@ export type ViewportArtifactsRequest = {
   levels?: number[] | 'all';
   /**
    * The most artifacts one level serves in one tile, largest first. Required, and at most
-   * `selection.maxArtifactsPerTile` from {@link TesseraClient.meta}; over it the request is a `422`.
+   * `selection.maxArtifactsPerTile` from {@link MosaicaClient.meta}; over it the request is a `422`.
    */
   perTile: number;
   /**
    * Which declared geometry each artifact carries: any of `'centroid'` and `'box'`. Omitted is each
    * layer's declaration; an array is intersected with it, and `[]` is none. A shape is read by
-   * identifier with {@link TesseraClient.artifact}.
+   * identifier with {@link MosaicaClient.artifact}.
    */
   computed?: ComputedProperty[];
   /** Answered as each artifact's {@link Artifact.matched}, inside its tile. It changes nothing else. */
@@ -869,7 +869,7 @@ export type ViewportArtifactsRequest = {
 
 /**
  * The geometries an artifacts request may ask for. An artifact's drawn outline is read by
- * identifier, with {@link TesseraClient.artifact}.
+ * identifier, with {@link MosaicaClient.artifact}.
  *
  * @category Meta
  */
@@ -1044,7 +1044,7 @@ export type ViewportResult = {
    * One column per layer the request named that tags some point, keyed by layer name. For point
    * `i`, `index[i]` is `0` where the point is under no artifact of the layer this principal is
    * served, and otherwise `1 + d`, where `ids[d]` is the `tessera_id` of the deepest such artifact
-   * holding it. {@link TesseraClient.artifacts} with `ids` reads those artifacts.
+   * holding it. {@link MosaicaClient.artifacts} with `ids` reads those artifacts.
    */
   membership: Record<string, MembershipColumn>;
   /**
@@ -1124,11 +1124,11 @@ export type ScalarValues =
  */
 export type Timings = {
   /**
-   * Microseconds from admission to the server's first flush (`x-tessera-server-us`); `0` when the
+   * Microseconds from admission to the server's first flush (`x-mosaica-server-us`); `0` when the
    * header is absent. It does not cover the rest of the stream.
    */
   serverUs: number;
-  /** Microseconds the request waited for admission (`x-tessera-admission-us`); `0` when the header is absent. */
+  /** Microseconds the request waited for admission (`x-mosaica-admission-us`); `0` when the header is absent. */
   admissionUs: number;
   /**
    * Per-stage timings from the trailer's `stage_ns`, as numbers in its field order, or `null`
@@ -1187,7 +1187,7 @@ export type ViewportCounts = {
 export type CountsSink = (counts: ViewportCounts) => void;
 
 /**
- * A viewport response, as {@link TesseraClient.viewport} returns it.
+ * A viewport response, as {@link MosaicaClient.viewport} returns it.
  *
  * @category Requests and responses
  */
@@ -1200,7 +1200,7 @@ export type ViewportResponse = {
   /** The server's timings. */
   timings: Timings;
   /**
-   * The key held data is partitioned by (`x-tessera-identity-key`). It hashes the exact credential
+   * The key held data is partitioned by (`x-mosaica-identity-key`). It hashes the exact credential
    * bytes presented at authorisation, the identity of the principal's visible-set fragment, which a
    * compaction or a rebuilt bundle changes, and the view. Data held under one key must not be shown
    * under another, so a client drops what it holds when this changes.
@@ -1225,7 +1225,7 @@ export type ViewportResponse = {
    */
   layersAsked?: readonly string[] | 'all';
   /**
-   * The generation this response was answered from (`x-tessera-pin`, a JSON string). Send it back
+   * The generation this response was answered from (`x-mosaica-pin`, a JSON string). Send it back
    * as {@link ViewportRequest.stamp}; its only effect is {@link ViewportResponse.stale}. Until the
    * refresh after a flush reaches this session, it names the previous generation, and the flush's
    * new rows are not yet visible. Deletions and suppressions apply at once whatever it names.
@@ -1239,7 +1239,7 @@ export type ViewportResponse = {
    * `true`.
    */
   stale: boolean;
-  /** The verdict on the request's `region` leaves (`x-tessera-region`); `null` when the request carried none. */
+  /** The verdict on the request's `region` leaves (`x-mosaica-region`); `null` when the request carried none. */
   region: RegionVerdict | null;
   /** The size of the response body, in bytes. */
   bytes: number;
@@ -1247,7 +1247,7 @@ export type ViewportResponse = {
 
 /**
  * One artifacts frame of a `POST /v1/artifacts/viewport` response, handed to the `onTile` sink of
- * {@link TesseraClient.viewportArtifacts} as it arrives.
+ * {@link MosaicaClient.viewportArtifacts} as it arrives.
  *
  * @category Requests and responses
  */
@@ -1271,7 +1271,7 @@ export type ViewportArtifactsFrame = {
 };
 
 /**
- * A `POST /v1/artifacts/viewport` response, as {@link TesseraClient.viewportArtifacts} returns it.
+ * A `POST /v1/artifacts/viewport` response, as {@link MosaicaClient.viewportArtifacts} returns it.
  *
  * @category Requests and responses
  */
@@ -1295,7 +1295,7 @@ export type ViewportArtifactsResponse = {
 };
 
 /**
- * One item's record, as {@link TesseraClient.item} returns it.
+ * One item's record, as {@link MosaicaClient.item} returns it.
  *
  * @category Requests and responses
  */
@@ -1348,7 +1348,7 @@ export type ItemViewPosition = {
 };
 
 /**
- * One artifact opened by `tessera_id`, as {@link TesseraClient.artifact} returns it. Its count and
+ * One artifact opened by `tessera_id`, as {@link MosaicaClient.artifact} returns it. Its count and
  * geometry are those the viewport serves for the same artifact in the same view. It carries no
  * member list and no unmasked size.
  *
@@ -1377,7 +1377,7 @@ export type ArtifactDetail = {
 };
 
 /**
- * The body of `POST /v1/artifacts/browse`, as {@link TesseraClient.browse} takes it: a layer's
+ * The body of `POST /v1/artifacts/browse`, as {@link MosaicaClient.browse} takes it: a layer's
  * artifacts by lineage, independent of the map's viewport. It has three forms:
  *
  * - Roots, with neither `parent` nor `q`: the layer's artifacts with no served parent.
@@ -1479,12 +1479,12 @@ export type BrowsePage = {
 };
 
 /**
- * The body of `POST /v1/items`, which {@link TesseraClient.items} sends: every item this
+ * The body of `POST /v1/items`, which {@link MosaicaClient.items} sends: every item this
  * principal may see in `view` that matches `filters`. A field left unset is not sent, and the
  * server's default applies.
  *
  * The columns of each page are `tessera_id` (`uint64`), the named fields in the order named, the
- * system fields in the order named, then `tessera:matched` (`bool`) under `keepUnmatched`. Every
+ * system fields in the order named, then `mosaica:matched` (`bool`) under `keepUnmatched`. Every
  * named field is present whether or not an item carries a value, and an absent value is null. A
  * category field is a dictionary column of its keys, each page's dictionary holding only the keys
  * its rows carry.
@@ -1501,22 +1501,22 @@ export type ItemsRequest = {
    */
   fields: string[];
   /**
-   * System columns, after the fields, in this order. `position` is `tessera:x` and `tessera:y`
+   * System columns, after the fields, in this order. `position` is `mosaica:x` and `mosaica:y`
    * (`float64`) in the view's coordinates, so degrees on a geographic view. `labels` is
-   * `tessera:labels` (`list<utf8>`), the clauses of each item's labels that this principal
+   * `mosaica:labels` (`list<utf8>`), the clauses of each item's labels that this principal
    * satisfies, as the item card gives them.
    */
   systemFields?: ('position' | 'labels')[];
   /** The viewport's filter. Only the items matching it are returned, unless `keepUnmatched` is set. */
   filters?: FilterExpr;
   /**
-   * Every visible item, with a `tessera:matched` column, in place of the matching ones only.
+   * Every visible item, with a `mosaica:matched` column, in place of the matching ones only.
    * Without `filters` every row is marked matched.
    */
   keepUnmatched?: boolean;
   /**
    * Put {@link ItemsHead.visible} and {@link ItemsHead.matched} in the head. A `422` together with
-   * `cursor`. {@link TesseraClient.items} sends it on the read's first request only.
+   * `cursor`. {@link MosaicaClient.items} sends it on the read's first request only.
    */
   count?: boolean;
   /**
@@ -1540,7 +1540,7 @@ export type ItemsRequest = {
 };
 
 /**
- * The body of `POST /v1/artifacts`, which {@link TesseraClient.artifacts} sends: every artifact of
+ * The body of `POST /v1/artifacts`, which {@link MosaicaClient.artifacts} sends: every artifact of
  * `layer` this principal is served, ordered by level and then by publication order within the
  * level. A field left unset is not sent, and the server's default applies.
  *
@@ -1579,7 +1579,7 @@ export type ArtifactsRequest = {
   keepUnmatched?: boolean;
   /**
    * Put {@link ArtifactsHead.served} and {@link ArtifactsHead.matched} in the head. A `422`
-   * together with `cursor`. {@link TesseraClient.artifacts} sends it on the read's first request
+   * together with `cursor`. {@link MosaicaClient.artifacts} sends it on the read's first request
    * only.
    */
   count?: boolean;
@@ -1667,7 +1667,7 @@ export type RecordsTrailer = {
 };
 
 /**
- * The body of `POST /v1/aggregate`, which {@link TesseraClient.aggregate} sends: how the items this
+ * The body of `POST /v1/aggregate`, which {@link MosaicaClient.aggregate} sends: how the items this
  * principal may see in `view` are distributed, as one table of exact counts per grouping. A field
  * left unset is not sent, and the server's default applies.
  *
@@ -1723,7 +1723,7 @@ export type Grouping = {
  * gives each listed artifact this viewer's slot, as {@link Artifact.slot} does.
  *
  * On a `nested` or `dag` layer, `top` takes a `cut`, and is refused without one: the artifacts
- * listed are those the treed frame of {@link TesseraClient.viewportArtifacts} serves for the same
+ * listed are those the treed frame of {@link MosaicaClient.viewportArtifacts} serves for the same
  * view, zoom, bbox and budget, and on a layer declared with `prune_children: false` only those with
  * nothing drawn beneath them. A `cut` on any other layer is refused.
  *
@@ -1803,7 +1803,7 @@ export type AggregateCells = {
  * The columns are, in this order and each only where stated: `group` (`listed`, `rest` or `none`,
  * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null
  * on `rest` and `none`); `title` (a value's title, or an artifact's name as
- * {@link TesseraClient.browse} gives it, with `by`; null where there is none); `slot` (a layer's
+ * {@link MosaicaClient.browse} gives it, with `by`; null where there is none); `slot` (a layer's
  * artifact's palette slot, as {@link Artifact.slot} is, with `by` on a `layer` and null without its
  * `paletteSize` and on `rest` and `none`); in place of `key` and
  * `title` with `bins`, `lower` and `upper` (a bin's edges: a `bigint` on an integer field, a number
@@ -1850,7 +1850,7 @@ export type AggregateSample = {
 };
 
 /**
- * What {@link TesseraClient.aggregate} returns.
+ * What {@link MosaicaClient.aggregate} returns.
  *
  * @category Requests and responses
  */
@@ -1861,7 +1861,7 @@ export type AggregateResult = {
    * listed.
    */
   tables: AggregateTable[];
-  /** The `x-tessera-region` verdict, present where `filters` or `reference` carried a `region` leaf. */
+  /** The `x-mosaica-region` verdict, present where `filters` or `reference` carried a `region` leaf. */
   region: RegionVerdict | null;
   /**
    * Whether a page counted a different state of the corpus from the page before it, in any

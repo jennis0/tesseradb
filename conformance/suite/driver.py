@@ -3,7 +3,7 @@
 The driver walks a stage plan. Per stage, in order: record the battery, apply the stage, barrier,
 record again, check the recording delta against the stage's entitlement
 (`suite.entitlement.diff`). Everything here speaks `/v1/*` and `/control/*` against a spawned
-`tessera serve`, like any deployment — the in-process alternative cannot see the serialisation
+`mosaica serve`, like any deployment — the in-process alternative cannot see the serialisation
 layer, where half the compared surfaces only exist (§12 r4).
 
 ## Triggering, and why three stages are driven sideways
@@ -24,7 +24,7 @@ at the executor's tick. The driver therefore sequences by eligibility (§12.3):
   mis-attributed delta.
 
 ``serve.tier_width`` and ``serve.coalesce_width`` reach the engine's merge and coalesce policies
-through `tessera-config`. The config written below sets them only when a harness asks
+through `mosaica-config`. The config written below sets them only when a harness asks
 (`merge_tier_width`, `coalesce_width`); otherwise the defaults hold, four and eight, with a 16 MiB
 merge floor: merge eligibility is four same-tier segments, coalesce eligibility eight same-tier
 entries on each axis. The coalesce takes unique-index key runs four at a time under a 16 MiB floor
@@ -283,7 +283,7 @@ def _advise_out_of_page_cache(*roots: Path) -> None:
 #: oracle harness owns and builds with default features by rule — `ensure_cli_built`'s doc
 #: records the incident that rule comes from, and this path is that doc's "its own path".
 FAULTS_TARGET_DIR = REPO_ROOT / "target" / "faults"
-FAULTS_CLI_BIN = FAULTS_TARGET_DIR / "release" / "tessera"
+FAULTS_CLI_BIN = FAULTS_TARGET_DIR / "release" / "mosaica"
 
 
 def ensure_faults_cli_built() -> None:
@@ -301,7 +301,7 @@ def ensure_faults_cli_built() -> None:
             "build",
             "--release",
             "-p",
-            "tessera-cli",
+            "mosaica-cli",
             "--features",
             "fault-injection",
             "--target-dir",
@@ -370,7 +370,7 @@ token_max_lifetime = 3600
 viewer = "127.0.0.1:{viewer_port}"
 session = "127.0.0.1:{session_port}"
 control = "127.0.0.1:{control_port}"
-operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
+operator_credential_env = "MOSAICA_REFERENCE_OPERATOR_CRED"
 max_k = 1000000
 k_min = 2
 k_max_marks = 1000000
@@ -611,7 +611,7 @@ class SuiteHarness:
         return self.run_dir / "wal.log"
 
     def spawn(self, faults: bool = False) -> None:
-        """Start `tessera serve` on this harness's bundle, cache and WAL, and wait for health.
+        """Start `mosaica serve` on this harness's bundle, cache and WAL, and wait for health.
 
         Same paths across two calls is exactly the restart-on-same-state case — which is what the
         Load stage is. ``faults=True`` boots the faults build from its own target directory
@@ -631,7 +631,7 @@ class SuiteHarness:
             ensure_cli_built()
             binary = CLI_BIN
         viewer_port, session_port, control_port = free_port(), free_port(), free_port()
-        config_path = self.run_dir / "tessera.toml"
+        config_path = self.run_dir / "mosaica.toml"
         config_path.write_text(
             _suite_config(
                 self.bundle_root,
@@ -641,18 +641,18 @@ class SuiteHarness:
                 session_port,
                 control_port,
                 compute_threads=self.profile.compute_threads,
-                big_batches=os.environ.get("TESSERA_SUITE_BIG_BATCHES") == "1",
+                big_batches=os.environ.get("MOSAICA_SUITE_BIG_BATCHES") == "1",
                 automatic_folds=self.automatic_folds,
                 tier_width=self.merge_tier_width,
                 coalesce_width=self.coalesce_width,
             )
         )
         env = os.environ.copy()
-        env["TESSERA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
+        env["MOSAICA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
         argv = [str(binary), "serve", "--deployment", str(config_path)]
         if self.profile.memory_max is not None:
             self._reap_scope()  # a scope cannot be reused; a stale keeper must not outlive it
-            self._scope_unit = f"tessera-suite-{os.getpid()}-{next(_SCOPE_SEQ)}"
+            self._scope_unit = f"mosaica-suite-{os.getpid()}-{next(_SCOPE_SEQ)}"
             argv = [
                 "systemd-run",
                 "--user",
@@ -700,7 +700,7 @@ class SuiteHarness:
                 raw = self.log_path.read_bytes()[-8192:] if self.log_path.exists() else b""
                 output = raw.decode(errors="replace")
                 raise RuntimeError(
-                    f"tessera serve exited early ({self.proc.returncode}):\n{output}"
+                    f"mosaica serve exited early ({self.proc.returncode}):\n{output}"
                 )
             try:
                 if requests.get(f"{self.server.viewer_base}/healthz", timeout=1).status_code == 200:
@@ -710,7 +710,7 @@ class SuiteHarness:
             time.sleep(0.1)
         else:
             self.proc.terminate()
-            raise RuntimeError("tessera serve did not become healthy within 30s")
+            raise RuntimeError("mosaica serve did not become healthy within 30s")
 
     def stop(self) -> None:
         if self.proc is not None:
@@ -1014,7 +1014,7 @@ class Stage:
 
 
 class Build(Stage):
-    """`tessera build`'s bundle, opened by a fresh server — the establishing stage.
+    """`mosaica build`'s bundle, opened by a fresh server — the establishing stage.
 
     The battery cannot run before a server exists, so this is the one stage with no before-state:
     its recording *is* the baseline every later stage is judged against, and the driver skips its
@@ -1370,7 +1370,7 @@ class Killed(Stage):
     wrapper, and the entitlement algebra it already trusts does the work.
 
     The sequence: boot the faults build (decision 0071 — the seam pause sites exist in no other
-    binary, and it lives at its own target path so `target/release/tessera` stays the harness's
+    binary, and it lives at its own target path so `target/release/mosaica` stays the harness's
     default-features build), arm the site, provoke the stage, wait for the executor to
     demonstrably arrive, assert nothing published, SIGKILL, optionally discard what was not
     synced, then boot the ordinary build for the after-recording — the restarts book-ended inside

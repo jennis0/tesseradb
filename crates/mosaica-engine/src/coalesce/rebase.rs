@@ -1,4 +1,4 @@
-use tessera_store::manifest::{
+use mosaica_store::manifest::{
     AttrExtent, DictExtent, EntityTermsExtent, RecordExtent, SegmentsManifest, TextExtent,
 };
 
@@ -48,8 +48,8 @@ pub(crate) fn rebased(
     }
     for m in &completed.edited {
         let runs = match m.consumed.direction {
-            tessera_store::edited::Direction::ByNumber => &mut next.edited_items.by_number,
-            tessera_store::edited::Direction::ByEntity => &mut next.edited_items.by_entity,
+            mosaica_store::edited::Direction::ByNumber => &mut next.edited_items.by_number,
+            mosaica_store::edited::Direction::ByEntity => &mut next.edited_items.by_entity,
         };
         let at = contiguous(&runs.live, &m.consumed.runs, |rel| rel)?;
         runs.live.splice(at, m.output.iter().cloned());

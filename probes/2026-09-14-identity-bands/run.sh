@@ -41,8 +41,8 @@ conditions="${CONDITIONS:-cold,hot}"
 case "$rung" in
   */gbif) echo "refusing $rung: pass the rung-6 path deliberately, not as a default" >&2 ;;
 esac
-for prog in "$bin/tessera" "$bin/identity_bands_build" "$bin/identity_bands_probe"; do
-  [ -x "$prog" ] || { echo "missing $prog — build with: CARGO_TARGET_DIR=$tree/target nice -n 19 cargo build --release -j 6 -p tessera-cli -p tessera-bench" >&2; exit 1; }
+for prog in "$bin/mosaica" "$bin/identity_bands_build" "$bin/identity_bands_probe"; do
+  [ -x "$prog" ] || { echo "missing $prog — build with: CARGO_TARGET_DIR=$tree/target nice -n 19 cargo build --release -j 6 -p mosaica-cli -p mosaica-bench" >&2; exit 1; }
 done
 mkdir -p "$out"
 
@@ -60,7 +60,7 @@ fi
 
 # ---- 1. The bundle, rebuilt into the out directory with this tree's own binary.
 if [ ! -f "$out/bundle/CURRENT" ]; then
-  cat > "$out/tessera.toml" <<EOF
+  cat > "$out/mosaica.toml" <<EOF
 # Written by probes/2026-09-14-identity-bands/run.sh. The rung's own deployment file names a
 # bundle inside the rung and ports another session may be serving on; this one names a bundle,
 # cache and WAL under this run's own directory.
@@ -84,19 +84,19 @@ viewer  = "127.0.0.1:8241"
 session = "127.0.0.1:8242"
 control = "127.0.0.1:8243"
 max_k   = 5000
-session_credential_env  = "$(python3 - "$rung/tessera.toml" <<'PY'
+session_credential_env  = "$(python3 - "$rung/mosaica.toml" <<'PY'
 import re, sys
 print(re.search(r'session_credential_env\s*=\s*"([^"]+)"', open(sys.argv[1]).read()).group(1))
 PY
 )"
-operator_credential_env = "$(python3 - "$rung/tessera.toml" <<'PY'
+operator_credential_env = "$(python3 - "$rung/mosaica.toml" <<'PY'
 import re, sys
 print(re.search(r'operator_credential_env\s*=\s*"([^"]+)"', open(sys.argv[1]).read()).group(1))
 PY
 )"
 EOF
   echo "building $rung into $out/bundle"
-  nice -n 19 "$bin/tessera" build --deployment "$out/tessera.toml" --config "$rung/corpus.toml" \
+  nice -n 19 "$bin/mosaica" build --deployment "$out/mosaica.toml" --config "$rung/corpus.toml" \
     --no-oracle-pairs --memory-budget "$budget" > "$out/build.log" 2>&1 \
     || { echo "the build failed; see $out/build.log" >&2; tail -5 "$out/build.log" >&2; exit 1; }
   tail -2 "$out/build.log"
@@ -135,8 +135,8 @@ for principal in "${principals[@]}"; do
 done
 
 # ---- 4. The probe.
-export TESSERA_PROBE_COMMIT="$(git -C "$tree" rev-parse --short HEAD 2>/dev/null)"
-export TESSERA_PROBE_BOX="$(uname -sr) $(nproc) cores $(free -g | awk '/^Mem:/ {print $2}') GiB, cap $cap"
+export MOSAICA_PROBE_COMMIT="$(git -C "$tree" rev-parse --short HEAD 2>/dev/null)"
+export MOSAICA_PROBE_BOX="$(uname -sr) $(nproc) cores $(free -g | awk '/^Mem:/ {print $2}') GiB, cap $cap"
 systemd-run --user --scope --collect --quiet -p "MemoryMax=$cap" -p "MemorySwapMax=$swap" -- \
   nice -n 19 "$bin/identity_bands_probe" \
     --bundle "$out/bundle" --bands "$out/bands" "${args[@]}" \

@@ -1,7 +1,7 @@
 //! The sparse delta postings tier a flush publishes.
 
-use tessera_authz::{write_delta_tier, DeltaTier, PostingRef};
-use tessera_types::TermId;
+use mosaica_authz::{write_delta_tier, DeltaTier, PostingRef};
+use mosaica_types::TermId;
 
 fn tier(dir: &std::path::Path, name: &str, entries: &[(u32, &[u32])]) -> DeltaTier {
     let path = dir.join(name);

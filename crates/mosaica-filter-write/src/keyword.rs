@@ -38,7 +38,7 @@
 //! remap into one that is monotone, in range, and wrong, then shows the inherited guards passing
 //! over the same inputs and the recoloured column reading back another entity's key.
 //!
-//! **`tessera-authz`'s `coalesce_dict_extents` is not a template for this**, and the design's
+//! **`mosaica-authz`'s `coalesce_dict_extents` is not a template for this**, and the design's
 //! "same shape" reading of it was a review finding for exactly this reason: that merge is
 //! ordinal-*preserving* by construction, so it owes no content guard at all. Borrowing its
 //! assumptions here is the defect the guard exists to catch.
@@ -66,7 +66,7 @@
 //! bounds the pass transient (§5.2), since decoding un-elides exactly the shared prefixes the
 //! format exists to elide.
 //!
-//! The price is paid in decodes. [`tessera_filter::SortedDict`] offers a whole-file `walk` and a
+//! The price is paid in decodes. [`mosaica_filter::SortedDict`] offers a whole-file `walk` and a
 //! random `key_of`, and `walk` is push-driven, so N of them cannot be interleaved into an N-way
 //! merge; the cursor below therefore steps with `key_of`, which re-decodes its block from the
 //! restart each time and so costs `(K + 1) / 2` — 8.5 entry decodes per key at the shipped restart
@@ -88,10 +88,10 @@ use std::io::{self, BufWriter};
 use std::path::Path;
 
 use croaring::Bitmap;
-use tessera_filter::{Access, Codes, ColumnKind, SortedDict, SortedDictWriter, ValueColumn};
+use mosaica_filter::{Access, Codes, ColumnKind, SortedDict, SortedDictWriter, ValueColumn};
 
 use crate::{invalid, merge_order, write_merged};
-use tessera_roaring::RankedRuns;
+use mosaica_roaring::RankedRuns;
 
 /// A remap entry for an input key the rebuilt dictionary does not hold: its every carrier was
 /// blanked. Only the fold can produce one, and an entity that still reached such a key would be a
@@ -430,7 +430,7 @@ pub(crate) fn verify_remap(
 }
 
 /// A sequential reader over one dictionary's live keys, stepping with
-/// [`tessera_filter::SortedDict::key_of`].
+/// [`mosaica_filter::SortedDict::key_of`].
 ///
 /// The module doc argues the constant this costs and the spool that would buy it back. What the
 /// cursor gives in exchange is that N of them coexist, which `walk` — push-driven and without an
@@ -487,7 +487,7 @@ impl<'a> KeyCursor<'a> {
 mod tests {
     use super::*;
     use arrow::buffer::ScalarBuffer;
-    use tessera_filter::{write_sorted_dict, write_value_column, SortedDict};
+    use mosaica_filter::{write_sorted_dict, write_value_column, SortedDict};
 
     fn bitmap(entities: impl IntoIterator<Item = u32>) -> Bitmap {
         let mut b = Bitmap::new();

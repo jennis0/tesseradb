@@ -2,7 +2,7 @@
 phase, on gbif-64p. Needs a binary built with the temporary `TPROF` counters (see README.md),
 which print one line per request to the server's log.
 
-    python3 probes/2026-10-06-species-tiles/tile_phases.py <tessera> <bench run.json> <out.json>
+    python3 probes/2026-10-06-species-tiles/tile_phases.py <mosaica> <bench run.json> <out.json>
 
 The bench run file supplies the principals' terms and the dense region each is asked at, as
 `route_depths.py` on serving/stage5-bench uses it.
@@ -25,7 +25,7 @@ from test_corpora.common.deployment import Deployment, read_env_file, tomllib  #
 from test_corpora.common.serve_battery import frames  # noqa: E402
 
 DEPLOYMENT = Path(
-    os.environ.get("DEPLOYMENT", "/home/joe/code/tessera/data/ladder/gbif-64p/bench-stage5")
+    os.environ.get("DEPLOYMENT", "/home/joe/code/mosaica/data/ladder/gbif-64p/bench-stage5")
 )
 SCREEN = (1600, 900)
 PER_TILE = int(os.environ.get("PER_TILE", "50"))
@@ -60,7 +60,7 @@ def parse(line: str) -> dict:
 def main() -> int:
     binary, run_json, out = sys.argv[1:4]
     run = json.loads(Path(run_json).read_text())
-    settings = tomllib.loads((DEPLOYMENT / "tessera.toml").read_text())
+    settings = tomllib.loads((DEPLOYMENT / "mosaica.toml").read_text())
     serve = settings["serve"]
     ports = tuple(int(serve[k].rsplit(":", 1)[1]) for k in ("viewer", "session", "control"))
     bundle = (DEPLOYMENT / settings["bundle"]["path"]).resolve()

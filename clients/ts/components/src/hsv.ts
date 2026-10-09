@@ -1,4 +1,4 @@
-import type {Rgb} from '@tesseradb/deck';
+import type {Rgb} from '@mosaica/deck';
 
 /**
  * Hue, saturation and value, for the colour picker's custom area: hue in degrees from 0 to 360,

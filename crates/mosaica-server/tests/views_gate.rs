@@ -47,11 +47,11 @@ use std::path::Path;
 use arrow::array::{Float32Array, StringArray, UInt64Array};
 use common::*;
 use serde_json::{json, Value};
-use tessera_build::config::{AccessInput, AccessSource, Attribute, ValueSet};
-use tessera_build::{
+use mosaica_build::config::{AccessInput, AccessSource, Attribute, ValueSet};
+use mosaica_build::{
     build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily, ViewArgs,
 };
-use tessera_spatial::tiler::ScalarType;
+use mosaica_spatial::tiler::ScalarType;
 
 /// The item labels, one per entity and the **same in every view** — pass one unions an entity's
 /// label over every source and refuses a disagreement, and the label is the entity's rather than
@@ -280,7 +280,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 visibility: None,
                 views: roster(&QUARTERS.map(|(key, _, v)| (key, v))),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 scoped_scalars: Vec::new(),
             },
@@ -293,7 +293,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 visibility: Some(labels(&["finance"])),
                 views: roster(&SEALED.map(|(key, _)| (key, None))),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 scoped_scalars: Vec::new(),
             },
@@ -388,26 +388,26 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 family_views.clone(),
             ),
         ],
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             write_ids(dir, (0..30).chain(LEDGER)),
             &id_schema(),
         ),
-        schema: tessera_build::config::Schema {
+        schema: mosaica_build::config::Schema {
             attributes: id_schema().attributes,
             // The value set `mood`'s codes index. `public`, so the list is authored and
             // `/v1/categories` filters nothing — which is what makes the gate the *only* thing
             // that can withhold it from the outsider below.
             vocabularies: std::collections::HashMap::from([(
                 "mood".to_string(),
-                tessera_build::config::Vocabulary {
+                mosaica_build::config::Vocabulary {
                     name: "mood".to_string(),
                     title: None,
                     value_set: ValueSet::Closed,
                     width: ScalarType::U8,
-                    values: tessera_build::config::VocabularyMinter::declared(
+                    values: mosaica_build::config::VocabularyMinter::declared(
                         "mood",
-                        tessera_build::config::VocabularyKind::Declared,
-                        tessera_build::config::Visibility::Public,
+                        mosaica_build::config::VocabularyKind::Declared,
+                        mosaica_build::config::Visibility::Public,
                         ScalarType::U8,
                         &[],
                         MOODS.iter().zip(1..).map(|(key, code)| (*key, code)),
@@ -1015,10 +1015,10 @@ async fn points_schema(served: &Served, token: &str, view: &str) -> Vec<String> 
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200, "{view}");
     let bytes = resp.bytes().await.unwrap();
-    let frames = tessera_wire::split_frames(&bytes).expect("well-formed frames");
+    let frames = mosaica_wire::split_frames(&bytes).expect("well-formed frames");
     let mut names = Vec::new();
     for (kind, payload) in frames {
-        if kind != tessera_wire::FRAME_POINTS {
+        if kind != mosaica_wire::FRAME_POINTS {
             continue;
         }
         let reader = arrow::ipc::reader::StreamReader::try_new(
@@ -1399,7 +1399,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
                 visibility: Some(labels(&["finance"])),
                 views: roster(&[("s1", None), ("s2", Some(&["legal"]))]),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 scoped_scalars: Vec::new(),
             },
@@ -1414,7 +1414,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
                 visibility: None,
                 views: roster(&SEALED.map(|(key, _)| (key, None))),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 scoped_scalars: Vec::new(),
             },

@@ -10,11 +10,11 @@ use std::process::{Output, Stdio};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{deployment_with_control, tessera, Ports, Server, OPERATOR_CREDENTIAL};
+use common::{deployment_with_control, mosaica, Ports, Server, OPERATOR_CREDENTIAL};
 
-/// Runs `tessera` with `args`, the environment given, and `stdin` on its standard input.
+/// Runs `mosaica` with `args`, the environment given, and `stdin` on its standard input.
 fn run(args: &[&str], env: &[(&str, &str)], stdin: &str) -> Output {
-    let mut child = tessera()
+    let mut child = mosaica()
         .args(args)
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
@@ -44,7 +44,7 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
     deployment_with_control(dir.path(), &Ports::chosen(), &control);
     let (_server, bound) = Server::announced(dir.path());
     assert_eq!(bound.control, control);
-    let admin = [("TESSERA_CREDENTIAL", OPERATOR_CREDENTIAL)];
+    let admin = [("MOSAICA_CREDENTIAL", OPERATOR_CREDENTIAL)];
     let at = ["--control", control.as_str()];
     let admin_run = |args: &[&str], stdin: &str| {
         let mut all: Vec<&str> = args.to_vec();
@@ -85,7 +85,7 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
         "correct horse battery staple\n",
     ));
     let token = login["token"].as_str().unwrap();
-    let out = run(&["logout", "--server", &bound.viewer], &[("TESSERA_TOKEN", token)], "");
+    let out = run(&["logout", "--server", &bound.viewer], &[("MOSAICA_TOKEN", token)], "");
     assert!(out.status.success(), "{out:?}");
     let listed = answer(admin_run(&["session", "list", "--principal", "ann"], ""));
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 0);
@@ -101,7 +101,7 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
     answer(admin_run(&["grant", "--principal", "portal", "--permission", "authorise-as"], ""));
     let portal_key = answer(admin_run(&["key", "create", "portal"], ""));
     let portal_key = portal_key["key"].as_str().unwrap().to_owned();
-    let integrator = [("TESSERA_API_KEY", portal_key.as_str())];
+    let integrator = [("MOSAICA_API_KEY", portal_key.as_str())];
     let minted = answer(run(
         &["session", "authorise", "--session", &bound.session, "--principal", "ann"],
         &integrator,
@@ -129,10 +129,10 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
         "1",
     ];
     assert!(!run(&by_terms, &integrator, "").status.success());
-    let operator = [("TESSERA_API_KEY", OPERATOR_CREDENTIAL)];
+    let operator = [("MOSAICA_API_KEY", OPERATOR_CREDENTIAL)];
     let minted = answer(run(&by_terms, &operator, ""));
     let token = minted["token"].as_str().unwrap();
-    let out = run(&["logout", "--server", &bound.viewer], &[("TESSERA_TOKEN", token)], "");
+    let out = run(&["logout", "--server", &bound.viewer], &[("MOSAICA_TOKEN", token)], "");
     assert!(out.status.success(), "{out:?}");
 
     // The operator credential mints a session of its own that reads every item, which a key may
@@ -152,7 +152,7 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
             "--issuer",
             "https://login.example.org",
             "--audience",
-            "tessera",
+            "mosaica",
             "--jwks-url",
             "https://login.example.org/keys",
             "--claim-rule",
@@ -160,7 +160,7 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
             "{value}",
             "--role-mapping",
             "groups[*]",
-            "tessera-admins",
+            "mosaica-admins",
             "admins",
         ],
         "",

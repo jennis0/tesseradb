@@ -7,7 +7,7 @@
 //!
 //! # What is deliberately not here
 //!
-//! * **`load`** needs a booted `tessera serve`, N authorised sessions and server-side RSS/CPU
+//! * **`load`** needs a booted `mosaica serve`, N authorised sessions and server-side RSS/CPU
 //!   sampling. That orchestration lives in `scripts/bench_concurrency.py`, which reuses
 //!   `reference/oracle/harness.py`'s proven boot machinery; duplicating it in Rust would buy
 //!   nothing and would have to be kept in step.

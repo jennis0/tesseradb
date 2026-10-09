@@ -31,7 +31,7 @@
 //! the whole-map zoom the route exists for; a cut that admitted most identities would put the
 //! count's binary search on its slow end at every cell and measure a case no viewport asks for.
 //!
-//! Run with: `cargo run --release --example cell_route -p tessera-engine`
+//! Run with: `cargo run --release --example cell_route -p mosaica-engine`
 
 use std::collections::BinaryHeap;
 use std::hint::black_box;
@@ -43,19 +43,19 @@ use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::projection::RowProjection;
-use tessera_engine::select::{
+use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
+use mosaica_engine::compose::{compose, EffectiveMask};
+use mosaica_engine::projection::RowProjection;
+use mosaica_engine::select::{
     cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
     SelectionParts, Threshold, CELL_ROUTE_MIN_ROWS_PER_CELL,
 };
-use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
-use tessera_store::read::SegmentData;
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::{EntityId, TermId, TesseraId};
+use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
+use mosaica_store::read::SegmentData;
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::{EntityId, TermId, TesseraId};
 
 const ROWS: u32 = 1 << 20;
 const EXTENT: Bounds = Bounds {
@@ -253,7 +253,7 @@ fn segment_of(rows_per_cell: u32) -> Segment {
         temp.path(),
         "cell-route",
         ROWS,
-        tessera_store::edited::RowEntities::Numbers,
+        mosaica_store::edited::RowEntities::Numbers,
     )
     .unwrap();
     assert_eq!(
@@ -288,7 +288,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let overlay = Overlay::default();
     let buffer = IngestBuffer::default();
-    let denied = tessera_engine::denied_rows_of(&overlay, &perm);
+    let denied = mosaica_engine::denied_rows_of(&overlay, &perm);
     let mask = compose(&satisfied, &overlay, &buffer, base, &perm, &denied, Some(&[]));
     (temp, mask)
 }

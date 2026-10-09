@@ -5,7 +5,7 @@
 //! its grant covers the entity domain, by the split route, which unions the bundle's images of the
 //! terms it holds and then walks the residual and the extents, or by the complement route, a walk
 //! over the entities the grant does not hold subtracted from the base's row range
-//! (`tessera_engine::projection::RowProjection::new`). The chooser picks one from the principal's own
+//! (`mosaica_engine::projection::RowProjection::new`). The chooser picks one from the principal's own
 //! grant before any of them runs. What that buys is first-viewport time; what it must never cost
 //! is a row.
 //!
@@ -46,10 +46,10 @@ use croaring::Portable;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{Engine, EngineConfig, ProjectionRoute, ViewportRequest};
-use tessera_lifecycle::{ChangeOp, UnallocatedRow};
-use tessera_types::EntityId;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{Engine, EngineConfig, ProjectionRoute, ViewportRequest};
+use mosaica_lifecycle::{ChangeOp, UnallocatedRow};
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -241,20 +241,20 @@ fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
     write_pairs(pairs);
     let schema = id_schema();
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: VIEW.to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.to_path_buf(), &schema),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -331,12 +331,12 @@ impl Fixture {
 /// resident session's fragment after a publication, and every case here authorises the same
 /// credential several times over while the executor runs, so that answer is one a case can be
 /// given. A client retries; so does this, and any other error is the failure it looks like.
-fn authorise(engine: &Engine, credential: &[u8]) -> tessera_engine::Session {
+fn authorise(engine: &Engine, credential: &[u8]) -> mosaica_engine::Session {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match engine.authorise(credential) {
             Ok(session) => return session,
-            Err(tessera_engine::EngineError::FragmentBuilding) if Instant::now() < deadline => {
+            Err(mosaica_engine::EngineError::FragmentBuilding) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(error) => panic!("the credential must authorise: {error}"),
@@ -939,11 +939,11 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
     let engine = fixture.writer("runtime-view");
     let runtime_view = "runtime";
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: runtime_view.to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -1077,11 +1077,11 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
     let engine = fixture.writer("runtime-view-fold");
     let runtime_view = "runtime";
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: runtime_view.to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,

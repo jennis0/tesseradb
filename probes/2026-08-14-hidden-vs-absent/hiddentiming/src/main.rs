@@ -40,9 +40,9 @@ use std::io::{BufRead, BufReader};
 use std::time::Instant;
 
 use croaring::Bitmap;
-use tessera_engine::filter::{FilterColumns, FilterOperand};
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::DeclaredScalar;
+use mosaica_engine::filter::{FilterColumns, FilterOperand};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::manifest::DeclaredScalar;
 
 const COLUMN: &str = "abstract";
 const PARTITION: &str = "default";
@@ -112,7 +112,7 @@ fn main() {
 }
 
 fn run(abstracts: &[String]) {
-    let analyser = tessera_analyse::Analyser::new();
+    let analyser = mosaica_analyse::Analyser::new();
 
     // The index, through the shipped writers — the same two calls the batch build makes.
     let mut terms: BTreeMap<String, Vec<u32>> = BTreeMap::new();
@@ -135,16 +135,16 @@ fn run(abstracts: &[String]) {
         .join("attrs")
         .join(COLUMN);
     std::fs::create_dir_all(&column_dir).expect("the column directory");
-    tessera_filter::write_sorted_dict(
-        &column_dir.join(tessera_filter::DICT_FILE),
+    mosaica_filter::write_sorted_dict(
+        &column_dir.join(mosaica_filter::DICT_FILE),
         terms.keys().map(String::as_str),
     )
     .expect("the token dictionary writes");
     let per_term: Vec<Vec<u32>> = terms.values().cloned().collect();
-    tessera_authz::postings::write_postings(
+    mosaica_authz::postings::write_postings(
         &column_dir.join("postings.arrow"),
         &per_term,
-        tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+        mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT,
     )
     .expect("the token postings write");
 
@@ -154,11 +154,11 @@ fn run(abstracts: &[String]) {
     // deployment has, and the point of this harness is that the timed call is the shipped one.
     let record_dir = tmp.path().join("partitions").join(PARTITION).join("attrs/record");
     std::fs::create_dir_all(&record_dir).expect("the record directory");
-    tessera_filter_write::RecordBlobWriter::create(
-        &record_dir.join(tessera_filter::RECORD_BLOCKS_FILE),
-        &record_dir.join(tessera_filter::RECORD_HASROW_FILE),
-        &record_dir.join(tessera_filter::RECORD_DIRECTORY_FILE),
-        tessera_filter::RECORD_BLOCK_TARGET,
+    mosaica_filter_write::RecordBlobWriter::create(
+        &record_dir.join(mosaica_filter::RECORD_BLOCKS_FILE),
+        &record_dir.join(mosaica_filter::RECORD_HASROW_FILE),
+        &record_dir.join(mosaica_filter::RECORD_DIRECTORY_FILE),
+        mosaica_filter::RECORD_BLOCK_TARGET,
     )
     .expect("the record blob writer")
     .finish()
@@ -176,7 +176,7 @@ fn run(abstracts: &[String]) {
     }];
     // The reader takes the whole manifest and the partition's extent lists; this harness writes
     // one column's base and no extent, so the manifest carries the declaration alone.
-    let manifest: tessera_store::manifest::Manifest = serde_json::from_value(serde_json::json!({
+    let manifest: mosaica_store::manifest::Manifest = serde_json::from_value(serde_json::json!({
         "bundle_format": 1,
         "created_at": "1970-01-01T00:00:00Z",
         "data_plugin_hash": "probe",
@@ -200,7 +200,7 @@ fn run(abstracts: &[String]) {
         tmp.path(),
         PARTITION,
         &manifest,
-        tessera_engine::filter::PartitionExtents::default(),
+        mosaica_engine::filter::PartitionExtents::default(),
         &[],
         true,
     )

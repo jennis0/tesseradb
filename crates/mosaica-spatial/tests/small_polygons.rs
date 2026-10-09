@@ -6,8 +6,8 @@
 //! Membership is of a point's stored position, its `f32` coordinates quantised, not its source
 //! coordinates, and for both fixtures that quantisation moves the point across the edge.
 
-use tessera_spatial::morton::{fixed32, split32, Bounds};
-use tessera_spatial::shape::{contexts_at, read_wkt, Rect, ShapeF64, Space};
+use mosaica_spatial::morton::{fixed32, split32, Bounds};
+use mosaica_spatial::shape::{contexts_at, read_wkt, Rect, ShapeF64, Space};
 
 const E: Bounds = Bounds {
     x_min: 0.0,

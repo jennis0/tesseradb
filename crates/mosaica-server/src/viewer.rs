@@ -11,14 +11,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use tessera_types::{GenerationStamp, TesseraId};
-use tessera_wire::{
+use mosaica_types::{GenerationStamp, TesseraId};
+use mosaica_wire::{
     points_frame, points_highlight_frame, sub_cells_frame, tiles_frame, trailer_frame,
     ScalarColumn,
 };
 
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{
     CancelToken, LayerSelection, LevelSelection, SinkResult, ViewportHead, ViewportSink,
 };
 
@@ -71,7 +71,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     }
 }
 
-/// A generation stamp on the wire, in the viewport request body and the `x-tessera-pin` response
+/// A generation stamp on the wire, in the viewport request body and the `x-mosaica-pin` response
 /// header (the same JSON in both). The header names the generation the response was answered
 /// from; a presented stamp only sets the response's `stale` flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,8 +101,8 @@ impl From<&GenerationStamp> for PinDto {
 
 /// One roster metadata value on the wire: `{"type": …, "value": …}`. Written out rather than
 /// derived so the published shape lives here; a `timestamp_us` is microseconds since the epoch.
-fn metadata_value(value: &tessera_engine::ViewMetadataValue) -> serde_json::Value {
-    use tessera_engine::ViewMetadataValue as V;
+fn metadata_value(value: &mosaica_engine::ViewMetadataValue) -> serde_json::Value {
+    use mosaica_engine::ViewMetadataValue as V;
     let (tag, value) = match value {
         V::Bool(v) => ("bool", serde_json::json!(v)),
         V::Int(v) => ("int", serde_json::json!(v)),
@@ -117,7 +117,7 @@ fn metadata_value(value: &tessera_engine::ViewMetadataValue) -> serde_json::Valu
 /// and its visibility. `None` for a column with no vocabulary, or one naming a vocabulary the
 /// snapshot does not hold.
 fn category_block(
-    meta: &tessera_engine::EngineMeta,
+    meta: &mosaica_engine::EngineMeta,
     vocabulary: Option<&str>,
 ) -> Option<serde_json::Value> {
     let name = vocabulary?;
@@ -125,8 +125,8 @@ fn category_block(
     Some(serde_json::json!({
         "vocabulary": name,
         "kind": match vocabulary.kind() {
-            tessera_engine::VocabularyKind::Declared => "declared",
-            tessera_engine::VocabularyKind::Discovered => "discovered",
+            mosaica_engine::VocabularyKind::Declared => "declared",
+            mosaica_engine::VocabularyKind::Discovered => "discovered",
         },
         "visibility": vocabulary.visibility().as_str(),
     }))
@@ -196,7 +196,7 @@ async fn meta(
                 "arrow_type": s.arrow_type.arrow_type_name(),
                 "category": category_block(&meta, s.vocabulary.as_deref()),
                 // The `<name>/<version>` of the analyser that produced a `text` column's terms,
-                // null for other types. With it a client can reproduce the segmentation (`tessera
+                // null for other types. With it a client can reproduce the segmentation (`mosaica
                 // tokenise`) and tell "no match" from "segmented differently".
                 "analyser": s.analyser,
                 // `render`: a slot in every row of the hot column; `index`: an entity-space search
@@ -235,17 +235,17 @@ async fn meta(
         // Filterable columns (`filter::is_filterable`, as the viewport parse uses) with their
         // family's operators; `none_of` is refused over a `text` column, which this does not say.
         // A scoped entry must be pinned outside its group's views; unreachable groups are omitted.
-        "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
-            let family = tessera_engine::filter::Family::of(d);
+        "filter_operands": meta.declared_scalars.iter().filter(|d| mosaica_engine::filter::is_filterable(d)).map(|d| {
+            let family = mosaica_engine::filter::Family::of(d);
             serde_json::json!({
                 "column": d.name,
                 "family": family.as_str(),
                 // A unique column with no other filter home takes `eq` and `in` alone.
-                "operands": tessera_engine::filter::operands_of(d),
+                "operands": mosaica_engine::filter::operands_of(d),
             })
         }).chain(
-            meta.scoped_scalars.iter().filter(|f| tessera_engine::filter::scoped_is_filterable(f) && visible.contains_group(&f.group)).map(|f| {
-                let family = tessera_engine::filter::Family::of_scoped(f);
+            meta.scoped_scalars.iter().filter(|f| mosaica_engine::filter::scoped_is_filterable(f) && visible.contains_group(&f.group)).map(|f| {
+                let family = mosaica_engine::filter::Family::of_scoped(f);
                 serde_json::json!({
                     "column": f.name,
                     "family": family.as_str(),
@@ -279,7 +279,7 @@ async fn meta(
             // The vertex cap for publishing a shape.
             "max_shape_vertices": state.limits.max_shape_vertices,
             // The `region` leaf's bounds: over the vertex cap is a 422; over the cell cap the
-            // answer is a cover, reported in `x-tessera-region`, not a refusal.
+            // answer is a cover, reported in `x-mosaica-region`, not a refusal.
             "max_region_vertices": state.limits.max_region_vertices,
             "max_region_cells": state.limits.max_region_cells,
             // `POST /v1/artifacts/browse`'s page ceiling and default.
@@ -402,8 +402,8 @@ async fn categories(
     let page = state
         .blocking(move |state| {
             let query = match &codes {
-                Some(codes) => tessera_engine::CategoryQuery::Codes(codes),
-                None => tessera_engine::CategoryQuery::Page {
+                Some(codes) => mosaica_engine::CategoryQuery::Codes(codes),
+                None => mosaica_engine::CategoryQuery::Page {
                     after: after.as_deref(),
                     limit,
                 },
@@ -435,11 +435,11 @@ async fn categories(
 /// `{column}@{key}` pin; a view the session cannot reach is the unknown-view 404. Returns the
 /// resolved column and the resolved view, where the request named one.
 fn resolve_category_column<'m>(
-    meta: &'m tessera_engine::EngineMeta,
+    meta: &'m mosaica_engine::EngineMeta,
     column: &str,
     requested_view: Option<&str>,
-    visible: &tessera_engine::gate::VisibleViews,
-) -> Result<(String, Option<&'m tessera_engine::MetaView>), ApiError> {
+    visible: &mosaica_engine::gate::VisibleViews,
+) -> Result<(String, Option<&'m mosaica_engine::MetaView>), ApiError> {
     // `view` is resolved before the column, so an unknown or unreachable view is a 404 even for
     // an entity-scoped column.
     let resolved_view = match requested_view {
@@ -453,7 +453,7 @@ fn resolve_category_column<'m>(
     match field_column(meta, column, view, visible)? {
         FieldColumn::Resolved {
             column: resolved,
-            family: tessera_engine::filter::Family::Category,
+            family: mosaica_engine::filter::Family::Category,
             ..
         } => Ok((resolved, resolved_view)),
         // A non-category column gets the same 404 as no column at all.
@@ -472,7 +472,7 @@ pub(crate) enum FieldColumn {
     /// The column, the family its values are read by, and whether they are exact integers.
     Resolved {
         column: String,
-        family: tessera_engine::filter::Family,
+        family: mosaica_engine::filter::Family,
         integer: bool,
     },
     /// No column this principal can reach.
@@ -484,13 +484,13 @@ pub(crate) enum FieldColumn {
 /// The column `column` names under the resolved `view` (`""` for none), as a filter leaf resolves
 /// it. A scoped family's spelling that names a pin wrongly is refused.
 pub(crate) fn field_column(
-    meta: &tessera_engine::EngineMeta,
+    meta: &mosaica_engine::EngineMeta,
     column: &str,
     view: &str,
-    visible: &tessera_engine::gate::VisibleViews,
+    visible: &mosaica_engine::gate::VisibleViews,
 ) -> Result<FieldColumn, ApiError> {
     match meta.resolve_category_column(column, view, visible) {
-        tessera_engine::LeafColumn::Resolved {
+        mosaica_engine::LeafColumn::Resolved {
             column,
             family,
             integer,
@@ -500,14 +500,14 @@ pub(crate) fn field_column(
             family,
             integer,
         }),
-        tessera_engine::LeafColumn::Unpinned { group } => Ok(FieldColumn::Unpinned { group }),
-        tessera_engine::LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
+        mosaica_engine::LeafColumn::Unpinned { group } => Ok(FieldColumn::Unpinned { group }),
+        mosaica_engine::LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
             "unknown view '{pin}' of group '{group}'"
         ))),
-        tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
+        mosaica_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
             "'{column}' is not scoped to a view group; leave out the pin"
         ))),
-        tessera_engine::LeafColumn::Unknown => Ok(FieldColumn::Unknown),
+        mosaica_engine::LeafColumn::Unknown => Ok(FieldColumn::Unknown),
     }
 }
 
@@ -577,7 +577,7 @@ async fn suggest_filtered(
 
 async fn suggest_page(
     state: Arc<AppState>,
-    session: Arc<tessera_engine::Session>,
+    session: Arc<mosaica_engine::Session>,
     column: String,
     req: SuggestBody,
 ) -> Result<Response, ApiError> {
@@ -640,7 +640,7 @@ async fn suggest_page(
             .engine
             .suggest(
                 &session,
-                tessera_engine::SuggestRequest {
+                mosaica_engine::SuggestRequest {
                     column: &resolved,
                     view: view.as_deref(),
                     filter: filter.as_ref(),
@@ -693,7 +693,7 @@ async fn suggest_page(
     let mut response = axum::response::IntoResponse::into_response(Json(body));
     if let Some(verdict) = page.region {
         response.headers_mut().insert(
-            "x-tessera-region",
+            "x-mosaica-region",
             axum::http::HeaderValue::from_str(&verdict.header_value())
                 .expect("a region verdict is a valid header value"),
         );
@@ -792,12 +792,12 @@ pub(crate) struct AllLevels;
 impl<'de> Deserialize<'de> for AllLevels {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let word = String::deserialize(deserializer)?;
-        if word == tessera_types::layer::RESERVED_LAYER_SELECTION {
+        if word == mosaica_types::layer::RESERVED_LAYER_SELECTION {
             Ok(AllLevels)
         } else {
             Err(serde::de::Error::custom(format!(
                 "`levels` is a list of level numbers or the string \"{}\"; got \"{word}\"",
-                tessera_types::layer::RESERVED_LAYER_SELECTION
+                mosaica_types::layer::RESERVED_LAYER_SELECTION
             )))
         }
     }
@@ -810,12 +810,12 @@ pub(crate) struct AllLayers;
 impl<'de> Deserialize<'de> for AllLayers {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let word = String::deserialize(deserializer)?;
-        if word == tessera_types::layer::RESERVED_LAYER_SELECTION {
+        if word == mosaica_types::layer::RESERVED_LAYER_SELECTION {
             Ok(AllLayers)
         } else {
             Err(serde::de::Error::custom(format!(
                 "`layers` is a list of layer names or the string \"{}\"; got \"{word}\"",
-                tessera_types::layer::RESERVED_LAYER_SELECTION
+                mosaica_types::layer::RESERVED_LAYER_SELECTION
             )))
         }
     }
@@ -824,14 +824,14 @@ impl<'de> Deserialize<'de> for AllLayers {
 /// What the handler needs to build the `Response`, sent once when the engine's sweep completes.
 /// Errors before then travel the same way, so they keep their status codes.
 struct FirstFlush {
-    coordinates: tessera_engine::ViewCoordinates,
+    coordinates: mosaica_engine::ViewCoordinates,
     stamp: GenerationStamp,
     stale: bool,
-    /// The `x-tessera-region` verdict; `None` when the request had no region leaf.
-    region: Option<tessera_engine::RegionVerdict>,
+    /// The `x-mosaica-region` verdict; `None` when the request had no region leaf.
+    region: Option<mosaica_engine::RegionVerdict>,
     /// The tiles frame and, if requested, the sub-cells frame: the body's first bytes.
     first_frames: Vec<u8>,
-    /// Microseconds from admission to the first flush, sent as `x-tessera-server-us`. The
+    /// Microseconds from admission to the first flush, sent as `x-mosaica-server-us`. The
     /// trailer's `stream_us` covers the whole stream.
     server_us: u64,
 }
@@ -862,8 +862,8 @@ impl ViewportSink for WireSink {
 
     fn counts(
         &mut self,
-        tiles: &[tessera_engine::TileCount],
-        sub_cells: Option<&[tessera_engine::SubCellCount]>,
+        tiles: &[mosaica_engine::TileCount],
+        sub_cells: Option<&[mosaica_engine::SubCellCount]>,
     ) -> SinkResult {
         let serialise_start = Instant::now();
         let tile: Vec<u64> = tiles.iter().map(|t| t.tile).collect();
@@ -899,7 +899,7 @@ impl ViewportSink for WireSink {
         self.producer.open(first)
     }
 
-    fn points(&mut self, chunk: tessera_engine::PointColumns) -> SinkResult {
+    fn points(&mut self, chunk: mosaica_engine::PointColumns) -> SinkResult {
         let head = self.head.as_ref().expect("head precedes points");
         let serialise_start = Instant::now();
         // The engine's buffers go on the wire borrowed. Names zip with the chunk's columns by
@@ -940,9 +940,9 @@ impl ViewportSink for WireSink {
 /// What a request's filter expressions are parsed against: one `Engine::meta()` snapshot and the
 /// view the request names, whose frame and projection a `region` leaf is canonicalised in.
 pub(crate) struct FilterParser<'a> {
-    meta: &'a tessera_engine::EngineMeta,
-    view: &'a tessera_engine::MetaView,
-    visible: &'a tessera_engine::gate::VisibleViews,
+    meta: &'a mosaica_engine::EngineMeta,
+    view: &'a mosaica_engine::MetaView,
+    visible: &'a mosaica_engine::gate::VisibleViews,
     region: crate::filter_dto::RegionContext,
     /// Each category's vocabulary by the leaf's bare name, entity-scoped columns and group-scoped
     /// families alike. Names are unique across the two lists, so one map cannot answer two things.
@@ -951,9 +951,9 @@ pub(crate) struct FilterParser<'a> {
 
 impl<'a> FilterParser<'a> {
     pub(crate) fn new(
-        meta: &'a tessera_engine::EngineMeta,
-        view: &'a tessera_engine::MetaView,
-        visible: &'a tessera_engine::gate::VisibleViews,
+        meta: &'a mosaica_engine::EngineMeta,
+        view: &'a mosaica_engine::MetaView,
+        visible: &'a mosaica_engine::gate::VisibleViews,
         max_region_vertices: u64,
     ) -> Self {
         FilterParser {
@@ -972,7 +972,7 @@ impl<'a> FilterParser<'a> {
     pub(crate) fn parse(
         &self,
         value: &serde_json::Value,
-    ) -> Result<tessera_engine::filter::FilterExpr, ApiError> {
+    ) -> Result<mosaica_engine::filter::FilterExpr, ApiError> {
         let meta = self.meta;
         let vocab_of = self.vocab_of.get_or_init(|| {
             meta.declared_scalars
@@ -992,7 +992,7 @@ impl<'a> FilterParser<'a> {
                 // A scoped family's pin decides which column is read, never which value set the
                 // key is in, so it is dropped before the lookup.
                 let name = column
-                    .split_once(tessera_engine::filter::PIN)
+                    .split_once(mosaica_engine::filter::PIN)
                     .map_or(column, |(name, _)| name);
                 let vocabulary = vocab_of.get(name)?;
                 meta.vocabularies.get(vocabulary)?.code_of(key)
@@ -1007,7 +1007,7 @@ impl<'a> FilterParser<'a> {
 /// then sends frames; the permits release when `sink` drops at the end.
 fn run_viewport_stream(
     state: &AppState,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     req: ViewportReq,
     cancel: CancelToken,
     mut sink: WireSink,
@@ -1073,11 +1073,11 @@ fn run_viewport_stream(
     let levels = level_selection(req.levels.as_ref(), &level_numbers);
     // Omitted is `"full"`, and the projection is the opt-in.
     let point_rows = match &req.point_rows {
-        Some(PointRowsReq::Word(PointRowsWord::Highlight)) => tessera_engine::PointRows::Highlight,
-        Some(PointRowsReq::Word(PointRowsWord::Full)) | None => tessera_engine::PointRows::Full,
-        Some(PointRowsReq::Columns(names)) => tessera_engine::PointRows::Columns(names),
+        Some(PointRowsReq::Word(PointRowsWord::Highlight)) => mosaica_engine::PointRows::Highlight,
+        Some(PointRowsReq::Word(PointRowsWord::Full)) | None => mosaica_engine::PointRows::Full,
+        Some(PointRowsReq::Columns(names)) => mosaica_engine::PointRows::Columns(names),
     };
-    sink.highlight_rows = point_rows == tessera_engine::PointRows::Highlight;
+    sink.highlight_rows = point_rows == mosaica_engine::PointRows::Highlight;
     let mut request = ViewportRequest::new(&view_id, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
@@ -1102,7 +1102,7 @@ fn run_viewport_stream(
     match outcome {
         Ok(timings) => {
             // Exactly these keys; the conformance comparator checks them. `stream_us` includes
-            // client-paced waits, so it is not the server-cost figure (`x-tessera-server-us`).
+            // client-paced waits, so it is not the server-cost figure (`x-mosaica-server-us`).
             let mut trailer = serde_json::json!({
                 "stream_us": sink.start.elapsed().as_micros() as u64,
                 "arrow_serialise_ns": sink.arrow_serialise_ns,
@@ -1143,7 +1143,7 @@ fn run_viewport_stream(
                     "viewport stream SHED mid-body by the server — {}",
                     shed.detail()
                 );
-            } else if !matches!(e, tessera_engine::EngineError::Cancelled) {
+            } else if !matches!(e, mosaica_engine::EngineError::Cancelled) {
                 tracing::warn!(error = %e, "viewport stream aborted mid-body");
             }
             sink.producer.abort();
@@ -1197,7 +1197,7 @@ pub(crate) fn distinct_tiles(tiles: Option<Vec<u64>>) -> Option<Vec<u64>> {
 /// The caller's `layers` as the shed log names them.
 pub(crate) fn layers_named(layers: Option<&LayersReq>) -> String {
     match layers {
-        Some(LayersReq::All(_)) => tessera_types::layer::RESERVED_LAYER_SELECTION.to_string(),
+        Some(LayersReq::All(_)) => mosaica_types::layer::RESERVED_LAYER_SELECTION.to_string(),
         Some(LayersReq::Named(names)) => names.join(","),
         None => String::new(),
     }
@@ -1269,7 +1269,7 @@ async fn viewport(
     // `admission_timeout_ms`. `admission_us` is the queue wait.
     let (gate_permits, admission_us) = state.compute_gate.admit().await?;
 
-    // `x-tessera-server-us` runs from after admission to the first flush, so it excludes queueing
+    // `x-mosaica-server-us` runs from after admission to the first flush, so it excludes queueing
     // and client-paced sends (the trailer's `stream_us` has those). Blocking-pool scheduling
     // counts in it.
     let start = Instant::now();
@@ -1317,9 +1317,9 @@ async fn viewport(
         "etag",
         format!("\"{}\"", crate::stream::hex16(&first.coordinates.content_key)),
     )
-    .header("x-tessera-pin", pin_header)
+    .header("x-mosaica-pin", pin_header)
     // Always present, so a client reading only counts sees staleness without decoding a batch.
-    .header("x-tessera-stale", if first.stale { "1" } else { "0" });
+    .header("x-mosaica-stale", if first.stale { "1" } else { "0" });
 
     // Stage timings ride the trailer frame, since a header cannot follow the body it describes.
     Ok(response
@@ -1331,7 +1331,7 @@ async fn viewport(
 /// `bench-timing` feature. Per-tile durations are summed across sweep workers, so above the
 /// serial fallback they can exceed wall time.
 #[cfg(feature = "bench-timing")]
-fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
+fn stage_header(t: &mosaica_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
     // Append only: consumers read this CSV by position.
     Some(format!(
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
@@ -1367,7 +1367,7 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
 }
 
 #[cfg(not(feature = "bench-timing"))]
-fn stage_header(_t: &tessera_engine::StageTimings, _arrow_serialise_ns: u64) -> Option<String> {
+fn stage_header(_t: &mosaica_engine::StageTimings, _arrow_serialise_ns: u64) -> Option<String> {
     None
 }
 
@@ -1381,8 +1381,8 @@ macro_rules! scalar_families {
 }
 
 /// Borrows one of the engine's column-major gathered columns as the wire's view of it, uncopied.
-fn column_ref(buf: &tessera_engine::ColumnBuf) -> ScalarColumn<'_> {
-    use tessera_engine::ColumnBuf;
+fn column_ref(buf: &mosaica_engine::ColumnBuf) -> ScalarColumn<'_> {
+    use mosaica_engine::ColumnBuf;
     macro_rules! arms {
         ($($v:ident),* $(,)?) => {
             match buf {
@@ -1435,7 +1435,7 @@ struct ItemViewDto {
 /// failure (a 500) can arise only for an item the viewer can already see.
 fn run_item(
     state: &AppState,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     raw: u64,
 ) -> Result<ItemResp, ApiError> {
     let item = match state.engine.item(session, TesseraId::new(raw)) {
@@ -1487,12 +1487,12 @@ fn run_item(
 
 /// One drill-down value as JSON, every width as a number. Shared by record fields and scoped
 /// values so the two present a value alike.
-fn scalar_out_json(value: tessera_engine::ScalarOut) -> serde_json::Value {
+fn scalar_out_json(value: mosaica_engine::ScalarOut) -> serde_json::Value {
     macro_rules! arms {
         ($($v:ident),* $(,)?) => {
             match value {
-                $(tessera_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
-                tessera_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
+                $(mosaica_engine::ScalarOut::$v(v) => serde_json::json!(v),)*
+                mosaica_engine::ScalarOut::Utf8(v) => serde_json::json!(v),
             }
         };
     }
@@ -1606,7 +1606,7 @@ struct BrowseRowResp {
     slot: Option<u8>,
 }
 
-fn browse_row(row: tessera_engine::browse::BrowseRow) -> BrowseRowResp {
+fn browse_row(row: mosaica_engine::browse::BrowseRow) -> BrowseRowResp {
     BrowseRowResp {
         tessera_id: row.tessera_id.raw().to_string(),
         key: row.key,
@@ -1629,7 +1629,7 @@ async fn browse(
     ViewerSession(session): ViewerSession,
     ApiJson(req): ApiJson<BrowseReq>,
 ) -> Result<Response, ApiError> {
-    use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
+    use mosaica_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
     // `limit` clamps and `0` refuses, as on `/v1/categories`.
     if req.limit == Some(0) {
         return Err(ApiError::Contract(
@@ -1658,7 +1658,7 @@ async fn browse(
     };
     let palette_size = req
         .palette_size
-        .map(tessera_engine::check_palette_size)
+        .map(mosaica_engine::check_palette_size)
         .transpose()
         .map_err(crate::error::map_engine_error)?;
     let cursor = match &req.cursor {

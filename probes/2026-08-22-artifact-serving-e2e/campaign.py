@@ -2,8 +2,8 @@
 
 **Everything here goes through the real request path.** The scale investigation
 (`probes/2026-08-20-artifact-serving-scale/`) measured the design probe-side, in a bench binary
-that owned its own control flow; this drives `tessera serve` over HTTP, decodes the wire frames a
-client decodes, and compares the served artifact counts against `tessera corpus artifact-census`.
+that owned its own control flow; this drives `mosaica serve` over HTTP, decodes the wire frames a
+client decodes, and compares the served artifact counts against `mosaica corpus artifact-census`.
 The point of the exercise is that nothing between the socket and the store is stubbed.
 
 Offline measurement tooling is where Python is allowed (CLAUDE.md): this is a consumer of the
@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO_ROOT / "reference"))
 
 from oracle.wire import decode_frames  # noqa: E402
 
-CLI = REPO_ROOT / "target" / "release" / "tessera"
+CLI = REPO_ROOT / "target" / "release" / "mosaica"
 SESSION_CREDENTIAL = "campaign-session-credential"
 OPERATOR_CREDENTIAL = "campaign-operator-credential"
 
@@ -92,7 +92,7 @@ def require_disk(path: Path, want: int = DISK_FLOOR_BYTES) -> None:
 
 
 def materialise(work: Path, seed: int, n: int, terms_per_level: int) -> dict:
-    """`tessera corpus materialise` at one tier, with the wall clock and peak RSS recorded."""
+    """`mosaica corpus materialise` at one tier, with the wall clock and peak RSS recorded."""
     fixture = work / "fixture"
     require_disk(work)
     started = time.monotonic()
@@ -136,8 +136,8 @@ token_max_lifetime = 3600
 viewer  = "127.0.0.1:{viewer}"
 session = "127.0.0.1:{session}"
 control = "127.0.0.1:{control}"
-session_credential_env  = "TESSERA_CAMPAIGN_SESSION_CRED"
-operator_credential_env = "TESSERA_CAMPAIGN_OPERATOR_CRED"
+session_credential_env  = "MOSAICA_CAMPAIGN_SESSION_CRED"
+operator_credential_env = "MOSAICA_CAMPAIGN_OPERATOR_CRED"
 max_k = 1000000
 k_max_marks = 1000000
 theta_target_marks = 1099511627776
@@ -152,7 +152,7 @@ compaction_window_start = "off"
 def write_deployment(
     work: Path, ports: tuple[int, int, int], stream_deadline_ms: int = 60_000
 ) -> Path:
-    """The campaign's `tessera.toml`.
+    """The campaign's `mosaica.toml`.
 
     `stream_deadline_ms` is the shipped default (60 000) everywhere except the design-ceiling probe,
     which raises it and says so. At 9.8 million artifacts the cold row-form build takes 111 s and
@@ -162,15 +162,15 @@ def write_deployment(
     campaign uses the default, and the truncation is reported rather than configured away.
     """
     viewer, session, control = ports
-    path = work / "tessera.toml"
+    path = work / "mosaica.toml"
     # The WAL's directory has to exist before `serve` opens it — a missing parent is an io error
     # at boot, not a created path.
-    (work / ".tessera" / "cache").mkdir(parents=True, exist_ok=True)
+    (work / ".mosaica" / "cache").mkdir(parents=True, exist_ok=True)
     path.write_text(
         DEPLOYMENT_TOML.format(
             bundle=work / "bundle",
-            cache=work / ".tessera" / "cache",
-            wal=work / ".tessera" / "wal.log",
+            cache=work / ".mosaica" / "cache",
+            wal=work / ".mosaica" / "wal.log",
             schema=work / "fixture" / "campaign-config.toml",
             viewer=viewer,
             session=session,
@@ -182,11 +182,11 @@ def write_deployment(
 
 
 def build(work: Path) -> dict:
-    """`tessera build` over the campaign declaration, wall clock and peak RSS recorded."""
+    """`mosaica build` over the campaign declaration, wall clock and peak RSS recorded."""
     require_disk(work)
     started = time.monotonic()
     out = run(
-        ["/usr/bin/time", "-f", "BUILD_TIME %e %M", str(CLI), "build", "--deployment", str(work / "tessera.toml")],
+        ["/usr/bin/time", "-f", "BUILD_TIME %e %M", str(CLI), "build", "--deployment", str(work / "mosaica.toml")],
         cwd=work,
     )
     return {"seconds": time.monotonic() - started, "stdout": out}
@@ -218,12 +218,12 @@ class Server:
 
     def spawn(self, timeout: float = 600.0) -> None:
         env = os.environ.copy()
-        env["TESSERA_CAMPAIGN_SESSION_CRED"] = SESSION_CREDENTIAL
-        env["TESSERA_CAMPAIGN_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
+        env["MOSAICA_CAMPAIGN_SESSION_CRED"] = SESSION_CREDENTIAL
+        env["MOSAICA_CAMPAIGN_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
         self.log = self.work / "server.log"
         handle = self.log.open("ab")
         self.proc = subprocess.Popen(
-            [str(CLI), "serve", "--deployment", str(self.work / "tessera.toml")],
+            [str(CLI), "serve", "--deployment", str(self.work / "mosaica.toml")],
             cwd=self.work,
             env=env,
             stdout=handle,
@@ -233,7 +233,7 @@ class Server:
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
                 tail = self.log.read_bytes()[-8192:].decode(errors="replace")
-                raise RuntimeError(f"tessera serve exited {self.proc.returncode}:\n{tail}")
+                raise RuntimeError(f"mosaica serve exited {self.proc.returncode}:\n{tail}")
             try:
                 if requests.get(f"{self.viewer_base}/healthz", timeout=2).status_code == 200:
                     return
@@ -241,7 +241,7 @@ class Server:
                 pass
             time.sleep(0.2)
         self.proc.terminate()
-        raise RuntimeError("tessera serve did not become healthy in time")
+        raise RuntimeError("mosaica serve did not become healthy in time")
 
     def stop(self) -> None:
         if self.proc is not None:
@@ -394,16 +394,16 @@ def viewport_request(
     if r.status_code != 200:
         raise RuntimeError(f"/v1/viewport {r.status_code}: {raw[:500]!r}")
     if not decode:
-        return elapsed, len(raw), [], {"server_us": int(r.headers.get("x-tessera-server-us", 0) or 0)}
+        return elapsed, len(raw), [], {"server_us": int(r.headers.get("x-mosaica-server-us", 0) or 0)}
     _tiles, _points, _sub, artifacts, trailer = decode_frames(raw)
     # The server's own two clocks, so a client-side figure can be decomposed rather than argued
-    # about: `x-tessera-server-us` is post-admission to first-flush-ready, the trailer's
+    # about: `x-mosaica-server-us` is post-admission to first-flush-ready, the trailer's
     # `stream_us` is the whole stream, and `arrow_serialise_ns` is what the encoding cost inside
     # it. At a hundred thousand artifacts the body is eleven megabytes, and a latency that did not
     # say how much of itself was encoding would not be comparable with a probe that encoded
     # nothing.
     trailer = dict(trailer or {})
-    trailer["server_us"] = int(r.headers.get("x-tessera-server-us", 0) or 0)
+    trailer["server_us"] = int(r.headers.get("x-mosaica-server-us", 0) or 0)
     return elapsed, len(raw), artifacts or [], trailer
 
 
@@ -438,11 +438,11 @@ def artifact_census(
 ) -> dict[int, int]:
     """The generator's closed-form census as a `{artifact ordinal: masked count}` map.
 
-    **Through `artifact_campaign_census`, not `tessera corpus artifact-census`**, and the reason is
+    **Through `artifact_campaign_census`, not `mosaica corpus artifact-census`**, and the reason is
     the process boundary rather than the census: the verb takes its principal as one argv string,
     and Linux caps a single argument at 128 KB, so every grant above about 13 000 terms is
     `Argument list too long`. The campaign's broad principals hold 131 072. The bench arm reads the
-    grant from a file and calls the same `tessera-corpus` methods the verb calls.
+    grant from a file and calls the same `mosaica-corpus` methods the verb calls.
     """
     import pyarrow.ipc as ipc
 

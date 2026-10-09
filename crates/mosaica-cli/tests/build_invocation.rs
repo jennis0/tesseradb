@@ -1,12 +1,12 @@
-//! What `tessera build` is invoked as, through the real binary.
+//! What `mosaica build` is invoked as, through the real binary.
 //!
-//! **The whole of it is `tessera build`.** `tessera.toml` — found by walking up from the working
+//! **The whole of it is `mosaica build`.** `mosaica.toml` — found by walking up from the working
 //! directory — says where the corpus declaration is and where the bundle goes; the declaration
 //! says where the corpus is and what frame it is quantised against; the environment carries the
 //! identity key. Every flag is an override or a performance knob, and this file is where that
 //! claim is checked against the binary rather than against the parsers underneath it.
 //!
-//! `tessera-build`'s own tests cover the declaration rules. What is here is the *invocation*: the
+//! `mosaica-build`'s own tests cover the declaration rules. What is here is the *invocation*: the
 //! deployment file and its refusal when there is none, the environment key and its `.env`, the
 //! `--file` override, and the flags that no longer exist.
 
@@ -21,20 +21,20 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 const N: u64 = 64;
 
-fn tessera() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tessera"))
+fn mosaica() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }
 
 /// A whole project, laid out as a deployment is: the two documents, the two sources beside them,
 /// and nothing absolute anywhere.
 fn project(dir: &Path) {
     std::fs::write(
-        dir.join("tessera.toml"),
+        dir.join("mosaica.toml"),
         r#"
 [bundle]
 path  = "bundles/corpus"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [disclosure]
 token_max_lifetime = 3600
@@ -103,14 +103,14 @@ fn write_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-/// `tessera build` from `cwd`, with the identity key in the environment and nothing else.
+/// `mosaica build` from `cwd`, with the identity key in the environment and nothing else.
 fn build_in(cwd: &Path, args: &[&str]) -> Output {
-    tessera()
+    mosaica()
         .arg("build")
         .args(args)
         .current_dir(cwd)
         .output()
-        .expect("failed to run tessera")
+        .expect("failed to run mosaica")
 }
 
 fn stderr(output: &Output) -> String {
@@ -135,18 +135,18 @@ fn refusal(cwd: &Path, args: &[&str]) -> String {
 // The target invocation
 // -------------------------------------------------------------------------------------------
 
-/// **`tessera build`, and nothing else.** No `--config`, no `--out`, no `--extent`, no `--view`,
-/// no `--file`, no key on the command line — and the bundle lands where `tessera.toml` says a
+/// **`mosaica build`, and nothing else.** No `--config`, no `--out`, no `--extent`, no `--view`,
+/// no `--file`, no key on the command line — and the bundle lands where `mosaica.toml` says a
 /// server would open it.
 #[test]
-fn the_whole_invocation_is_tessera_build() {
+fn the_whole_invocation_is_mosaica_build() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
     let output = build_in(tmp.path(), &[]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
         tmp.path().join("bundles/corpus/CURRENT").is_file(),
-        "the bundle must land at tessera.toml's own bundle.path"
+        "the bundle must land at mosaica.toml's own bundle.path"
     );
 }
 
@@ -182,17 +182,17 @@ fn the_deployment_config_is_found_by_walking_up() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
         tmp.path().join("bundles/corpus/CURRENT").is_file(),
-        "every path in tessera.toml resolves against tessera.toml, not against the shell's cwd"
+        "every path in mosaica.toml resolves against mosaica.toml, not against the shell's cwd"
     );
 }
 
-/// **A missing `tessera.toml` is a refusal naming what to create**, never a set of defaults: every
+/// **A missing `mosaica.toml` is a refusal naming what to create**, never a set of defaults: every
 /// path in it is a decision, and a guessed one is a build writing where nobody asked.
 #[test]
 fn a_missing_deployment_config_names_what_to_create() {
     let tmp = tempfile::tempdir().unwrap();
     let stderr = refusal(tmp.path(), &[]);
-    assert!(stderr.contains("no tessera.toml found"), "{stderr}");
+    assert!(stderr.contains("no mosaica.toml found"), "{stderr}");
     for expected in [
         "[bundle]",
         "[build]",
@@ -216,7 +216,7 @@ fn the_deployment_config_can_be_named_outright() {
         elsewhere.path(),
         &[
             "--deployment",
-            tmp.path().join("tessera.toml").to_str().unwrap(),
+            tmp.path().join("mosaica.toml").to_str().unwrap(),
         ],
     );
     assert!(output.status.success(), "{}", stderr(&output));
@@ -344,11 +344,11 @@ fn every_declared_view_is_materialised() {
     assert!(out.contains("view s0: 64 row(s)"), "{out}");
     assert!(out.contains("view s1: 64 row(s)"), "{out}");
     // And the bundle it wrote opens, with both row spaces in it.
-    let verified = tessera()
+    let verified = mosaica()
         .arg("verify")
         .arg(tmp.path().join("bundles/corpus"))
         .output()
-        .expect("failed to run tessera verify");
+        .expect("failed to run mosaica verify");
     let verified = stdout(&verified);
     assert!(verified.contains("2 view(s)"), "{verified}");
 }
@@ -730,9 +730,9 @@ fn the_schema_path_comes_from_the_deployment_config() {
     let stderr = refusal(tmp.path(), &[]);
     assert!(stderr.contains("schema.toml"), "{stderr}");
 
-    let deployment = std::fs::read_to_string(tmp.path().join("tessera.toml")).unwrap();
+    let deployment = std::fs::read_to_string(tmp.path().join("mosaica.toml")).unwrap();
     std::fs::write(
-        tmp.path().join("tessera.toml"),
+        tmp.path().join("mosaica.toml"),
         format!("{deployment}\n[build]\nschema = \"corpus-declaration.toml\"\n"),
     )
     .unwrap();

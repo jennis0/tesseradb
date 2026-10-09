@@ -13,7 +13,7 @@ The interface between the two tracks is fixed in
 README at merge.
 
 ```bash
-export TESSERA_LADDER="$PWD/data/ladder"
+export MOSAICA_LADDER="$PWD/data/ladder"
 P=~/venvs/projection/bin/python
 
 $P -m test_corpora.treeoflife.stage       # metadata.parquet: scan (share), then combine (local)

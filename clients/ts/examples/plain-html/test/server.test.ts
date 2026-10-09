@@ -10,7 +10,7 @@ import {createHandler} from '../server.mjs';
  * and never to the page, the principal is the user's, and the proxy forwards the six
  * headers a replica is keyed by (client-obligations rule 10) along with a streamed body.
  */
-const SIX = ['etag', 'x-tessera-identity-key', 'x-tessera-pin', 'x-tessera-stale', 'x-tessera-server-us', 'x-tessera-admission-us'];
+const SIX = ['etag', 'x-mosaica-identity-key', 'x-mosaica-pin', 'x-mosaica-stale', 'x-mosaica-server-us', 'x-mosaica-admission-us'];
 
 let upstream: Server;
 let app: Server;
@@ -37,9 +37,9 @@ beforeAll(async () => {
     });
   });
   const port = await listen(upstream);
-  const dist = await mkdtemp(join(tmpdir(), 'tessera-plain-'));
-  await writeFile(join(dist, 'tessera-components.js'), 'export {};');
-  await writeFile(join(dist, 'tessera-components.js.sri'), 'sha384-FAKE\n');
+  const dist = await mkdtemp(join(tmpdir(), 'mosaica-plain-'));
+  await writeFile(join(dist, 'mosaica-components.js'), 'export {};');
+  await writeFile(join(dist, 'mosaica-components.js.sri'), 'sha384-FAKE\n');
   const handler = createHandler({
     sessionUrl: `http://127.0.0.1:${port}`,
     viewerUrl: `http://127.0.0.1:${port}`,
@@ -88,8 +88,8 @@ describe('server.mjs', () => {
     const page = await (await fetch(`${base}/`)).text();
     expect(page).toContain('integrity="sha384-FAKE"');
     expect(page).not.toContain('__SRI__');
-    expect(page).toContain("createElement('tessera-explorer')");
-    expect(await (await fetch(`${base}/tessera-components.js`)).text()).toBe('export {};');
+    expect(page).toContain("createElement('mosaica-explorer')");
+    expect(await (await fetch(`${base}/mosaica-components.js`)).text()).toBe('export {};');
   });
 
   it('starts without a built bundle, answering 503 for the page and the bundle and serving tokens', async () => {
@@ -98,13 +98,13 @@ describe('server.mjs', () => {
       viewerUrl: 'http://127.0.0.1:1',
       apiKey: 'the-secret',
       users: {},
-      bundleDir: join(tmpdir(), 'tessera-plain-absent')
+      bundleDir: join(tmpdir(), 'mosaica-plain-absent')
     });
     const bare = createServer((req, res) => void handler(req, res));
     const at = `http://127.0.0.1:${await listen(bare)}`;
     try {
       expect((await fetch(`${at}/`)).status).toBe(503);
-      expect((await fetch(`${at}/tessera-components.js`)).status).toBe(503);
+      expect((await fetch(`${at}/mosaica-components.js`)).status).toBe(503);
       expect((await fetch(`${at}/users`)).status).toBe(200);
     } finally {
       bare.close();

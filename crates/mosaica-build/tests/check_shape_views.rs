@@ -1,4 +1,4 @@
-//! **What `tessera check` sizes a shape layer over** — the views a build would materialise, a
+//! **What `mosaica check` sizes a shape layer over** — the views a build would materialise, a
 //! layer naming a whole group included (`views.md` §2, §3.5; decision 0111).
 //!
 //! A layer's `views` list may name a `[[view_group]]`, which draws it on every view of that group.
@@ -8,8 +8,8 @@
 
 use std::path::Path;
 
-use tessera_build::config::Config;
-use tessera_build::shapes::check_reports;
+use mosaica_build::config::Config;
+use mosaica_build::shapes::check_reports;
 
 /// A plain unprojected view whose frame is the group's, a projected one, and a two-view group.
 /// The layer block is the caller's, appended as written.

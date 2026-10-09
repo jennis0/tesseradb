@@ -21,12 +21,12 @@
 //! — the key's binding, and the vocabulary's width, kind, visibility and `reserved` — is a `409`
 //! on a difference, because each is baked into rows or into what ingest may say.
 
-use tessera_lifecycle::wal::{DeclaredVocabularyValue, VocabularyDeclaration};
-use tessera_lifecycle::{DeclaredValue, ExecError, VocabularyRequest};
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::declaration::{check_value_keys, check_vocabulary};
-use tessera_store::manifest::{Manifest, ManifestVocabulary, ManifestVocabularyValue};
-use tessera_store::vocabulary::{Vocabularies, VocabularyMinter};
+use mosaica_lifecycle::wal::{DeclaredVocabularyValue, VocabularyDeclaration};
+use mosaica_lifecycle::{DeclaredValue, ExecError, VocabularyRequest};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::declaration::{check_value_keys, check_vocabulary};
+use mosaica_store::manifest::{Manifest, ManifestVocabulary, ManifestVocabularyValue};
+use mosaica_store::vocabulary::{Vocabularies, VocabularyMinter};
 
 /// The vocabularies declared at a running service and not yet written into a `MANIFEST.json` by a
 /// fold, in declaration order: the segments manifest's `vocabularies` list, held live. Written
@@ -85,7 +85,7 @@ impl RuntimeVocabularies {
 /// A minter's bindings as a manifest value list, ascending by key and carrying each title — the
 /// shape a publication writes and a reopen seeds from.
 ///
-/// `tessera_store::vocabulary::values_of` drops titles, because the extension list it feeds
+/// `mosaica_store::vocabulary::values_of` drops titles, because the extension list it feeds
 /// carries only what a *mint* produced. A runtime declaration's values are authored, so the title
 /// travels with the binding or the name a client draws is lost at the next restart.
 pub(crate) fn values_with_titles(minter: &VocabularyMinter) -> Vec<ManifestVocabularyValue> {

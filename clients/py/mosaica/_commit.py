@@ -264,7 +264,7 @@ class Planner:
     def _declarations(self, document: dict) -> None:
         """The runtime `PUT`s for every block this database does not carry yet.
 
-        The bodies come from `tessera check --payloads` over the SDK's own declaration, so the
+        The bodies come from `mosaica check --payloads` over the SDK's own declaration, so the
         mapping from a block to a request body is the binary's and not a second one in Python. The
         one body it does not carry is a group's roster record, which is a request rather than a
         declaration: the SDK builds it from the roster it was given.
@@ -547,7 +547,7 @@ class Planner:
 
         A group-scoped family and a scoped layer are paged per view: the insert's `view=` column
         says which view each row's value belongs to, and the page carries that view in
-        `x-tessera-view`, without which no family may be named.
+        `x-mosaica-view`, without which no family may be named.
         """
         for insert in self._for("attribute", "values"):
             block = _block(document, "attribute", insert.target)

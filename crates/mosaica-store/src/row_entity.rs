@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 
-use tessera_types::{EntityId, RowId};
+use mosaica_types::{EntityId, RowId};
 
 use crate::error::{Result, StoreError};
 

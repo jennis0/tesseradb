@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use croaring::{Bitmap, BitmapView, Portable};
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 /// Withdraw every content of one record whose generating set names a member this fold retired
 /// ([decision 0135](../../../docs/decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)).
@@ -110,7 +110,7 @@ pub enum FillOutcome {
 ///
 /// A shape is declared once and resolved per view, because each view quantises in its own frame:
 /// the canonical form is grid units, so the same boundary is a different byte sequence in each
-/// view it is drawn in. What travels here is the engine's own encoding (`tessera_spatial::shape`,
+/// view it is drawn in. What travels here is the engine's own encoding (`mosaica_spatial::shape`,
 /// `Shape::encode`): the reader that decodes it is the one that resolves it, and this crate holds
 /// the pair `(view, bytes)` exactly as it holds a membership's Roaring bytes — addressed, never
 /// arithmetic on.
@@ -373,7 +373,7 @@ fn bitmap_of_sorted(entities: &[u32]) -> Bitmap {
 
 impl IncomingContent {
     /// Builds one from resolved entities — the constructor exists for
-    /// [`IncomingArtifact::from_entities`]'s reason: `tessera-server` names a set without being
+    /// [`IncomingArtifact::from_entities`]'s reason: `mosaica-server` names a set without being
     /// able to do arithmetic on one.
     pub fn new(values: Vec<String>, generated_from: impl IntoIterator<Item = EntityId>) -> Self {
         IncomingContent {
@@ -386,7 +386,7 @@ impl IncomingContent {
 impl IncomingArtifact {
     /// Builds one from resolved entities.
     ///
-    /// **The constructor exists so the bitmap type stays inside this crate.** `tessera-server`
+    /// **The constructor exists so the bitmap type stays inside this crate.** `mosaica-server`
     /// assembles these from a resolved batch and carries no Roaring dependency — a layering
     /// `check-layers.sh` holds, and one worth holding: the request plane should be able to name a
     /// membership without being able to do arithmetic on one.
@@ -942,10 +942,10 @@ pub struct ArtifactRecord {
     /// keeps two views' keys apart across a fold.
     pub view: Option<String>,
     /// The incarnation of `view` this artifact was published under, and
-    /// [`tessera_types::view::DECLARED_INCARNATION`] where `view` is `None`. A view dropped and
+    /// [`mosaica_types::view::DECLARED_INCARNATION`] where `view` is `None`. A view dropped and
     /// created again under the same key is a new incarnation, and none of the old one's artifacts
     /// belong to it ([`ArtifactStore::retire_dead_views`]).
-    pub incarnation: tessera_types::view::ViewIncarnation,
+    pub incarnation: mosaica_types::view::ViewIncarnation,
     /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
     /// mapping of the bytes that carry it (see [`Members`]).
     pub members: Members,
@@ -1111,7 +1111,7 @@ pub struct ArtifactStore {
     /// `shape` declares one, and `None` everywhere else.
     ///
     /// **Beside the records rather than inside them, on [`ArtifactRecords`]' own split**
-    /// (`tessera_engine::artifacts`): the two halves are read at different cadences. A record is
+    /// (`mosaica_engine::artifacts`): the two halves are read at different cadences. A record is
     /// dereferenced on every verdict; a shape is read **once per level per publication**, by the
     /// pass that decomposes it and holds the decomposition, and never by a verdict at all. Keeping
     /// it out of the record keeps the type every serving path walks the same shape it was.
@@ -2712,7 +2712,7 @@ impl ArtifactStore {
     /// changed.
     pub fn retire_dead_views(
         &mut self,
-        live: impl Fn(&str, &str, tessera_types::view::ViewIncarnation) -> bool,
+        live: impl Fn(&str, &str, mosaica_types::view::ViewIncarnation) -> bool,
     ) -> Vec<(String, u32)> {
         let dead: Vec<(String, u32, u32)> = self
             .levels
@@ -3010,7 +3010,7 @@ impl ArtifactStore {
 ///                                | u32 LE shape_len | canonical shape bytes
 /// ```
 ///
-/// The canonical shape bytes are `tessera_spatial::shape`'s own encoding (`polygon-membership.md`
+/// The canonical shape bytes are `mosaica_spatial::shape`'s own encoding (`polygon-membership.md`
 /// §6.6 — tag 1 a box, 2 a conic, 4 a polygon), held here opaquely; tag 3 is the per-view wrapper
 /// and is this blob's, which is why the shape module leaves it unused.
 ///
@@ -3042,7 +3042,7 @@ impl ArtifactStore {
 /// one JSON string per artifact in a document parsed at every open — the entry-count problem the
 /// packing exists to solve, in another guise.
 ///
-/// `tessera-store` holds this as an opaque blob and addresses it by ordinal. **That split is the
+/// `mosaica-store` holds this as an opaque blob and addresses it by ordinal. **That split is the
 /// layering**: the store owns which bytes belong to which artifact, this crate owns what the bytes
 /// mean, and the bitmap library stays on one side of the boundary.
 pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) -> Vec<u8> {
@@ -3242,7 +3242,7 @@ pub fn decode_record(
         return None;
     }
     let (view, incarnation) = if view_len == 0 {
-        (None, tessera_types::view::DECLARED_INCARNATION)
+        (None, mosaica_types::view::DECLARED_INCARNATION)
     } else {
         let view = std::str::from_utf8(take(view_len)?).ok()?.to_string();
         (Some(view), u64::from_le_bytes(take(8)?.try_into().ok()?))
@@ -4089,7 +4089,7 @@ mod tests {
     }
 
     /// **The shape the 5×10⁷ tier refused, pinned** — `probes/2026-08-22-artifact-serving-e2e/`
-    /// finding 3: `tessera build` stopped with *"1 membership(s) of generator/treed did not survive
+    /// finding 3: `mosaica build` stopped with *"1 membership(s) of generator/treed did not survive
     /// their own encoding"*, a bitmap failing its own `Portable` round trip in the process that
     /// wrote it.
     ///

@@ -2,9 +2,9 @@ use std::path::Path;
 
 use croaring::Bitmap;
 
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::{AttrExtent, DeclaredScalar, ScopedScalar};
-use tessera_types::view::ViewIncarnation;
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::manifest::{AttrExtent, DeclaredScalar, ScopedScalar};
+use mosaica_types::view::ViewIncarnation;
 
 use crate::flush::{failed, remove_spool_on_error, MaintenanceFailed};
 
@@ -61,7 +61,7 @@ fn column_jobs(
                 continue;
             };
             jobs.push(ColumnJob {
-                rel: tessera_store::scoped_column_rel(
+                rel: mosaica_store::scoped_column_rel(
                     &plan.partition,
                     &family.name,
                     view,
@@ -103,15 +103,15 @@ pub(super) fn fold_text_columns(
         let mut layers = Vec::new();
         if job.has_base {
             layers.push((
-                tessera_filter::SortedDict::open_dir(
+                mosaica_filter::SortedDict::open_dir(
                     &from_dir,
-                    tessera_filter::Access::MappedSequential,
+                    mosaica_filter::Access::MappedSequential,
                 )
                 .map_err(failed("pass 4a (text: the base dictionary)"))?,
-                tessera_filter::ColumnPostings::open(&from_dir.join("postings.arrow"), true)
+                mosaica_filter::ColumnPostings::open(&from_dir.join("postings.arrow"), true)
                     .map_err(failed("pass 4a (text: the base postings)"))?,
             ));
-            out.read(&from_dir, [tessera_filter::DICT_FILE, "postings.arrow"]);
+            out.read(&from_dir, [mosaica_filter::DICT_FILE, "postings.arrow"]);
         }
         for extent in plan
             .text_extents
@@ -119,12 +119,12 @@ pub(super) fn fold_text_columns(
             .filter(|e| job.holds(&e.column, e.view.as_deref(), e.incarnation))
         {
             layers.push((
-                tessera_filter::SortedDict::open(
+                mosaica_filter::SortedDict::open(
                     &ctx.from_prefix_dir.join(&extent.dict),
-                    tessera_filter::Access::MappedSequential,
+                    mosaica_filter::Access::MappedSequential,
                 )
                 .map_err(failed("pass 4a (text: an extent's dictionary)"))?,
-                tessera_filter::ColumnPostings::open(
+                mosaica_filter::ColumnPostings::open(
                     &ctx.from_prefix_dir.join(&extent.postings),
                     true,
                 )
@@ -132,22 +132,22 @@ pub(super) fn fold_text_columns(
             ));
             out.read(&ctx.from_prefix_dir, extent.files());
         }
-        let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
+        let dict_rel = format!("{column_rel}/{}", mosaica_filter::DICT_FILE);
         let postings_rel = format!("{column_rel}/postings.arrow");
         let dict_path = ctx.to_prefix_dir.join(&dict_rel);
         let postings_path = ctx.to_prefix_dir.join(&postings_rel);
         let spool_path = to_dir.join("postings.spool");
 
-        let inputs: Vec<tessera_filter_write::TextLayerRef<'_>> = layers
+        let inputs: Vec<mosaica_filter_write::TextLayerRef<'_>> = layers
             .iter()
-            .map(|(dict, postings)| tessera_filter_write::TextLayerRef {
+            .map(|(dict, postings)| mosaica_filter_write::TextLayerRef {
                 dict,
                 postings,
                 present: None,
             })
             .collect();
         remove_spool_on_error(
-            tessera_filter_write::merge_text_layers(
+            mosaica_filter_write::merge_text_layers(
                 &inputs,
                 &plan.tombstones,
                 &dict_path,
@@ -178,17 +178,17 @@ fn fold_scoped_prose(
     let unreadable = |e: &dyn std::fmt::Display| {
         MaintenanceFailed(format!("pass 4a (text: the prose of '{}'): {e}", job.name))
     };
-    let prose_rel = format!("{}/{}", job.rel, tessera_store::manifest::SCOPED_PROSE_DIR);
+    let prose_rel = format!("{}/{}", job.rel, mosaica_store::manifest::SCOPED_PROSE_DIR);
     let names = [
-        tessera_filter::RECORD_BLOCKS_FILE,
-        tessera_filter::RECORD_HASROW_FILE,
-        tessera_filter::RECORD_DIRECTORY_FILE,
+        mosaica_filter::RECORD_BLOCKS_FILE,
+        mosaica_filter::RECORD_HASROW_FILE,
+        mosaica_filter::RECORD_DIRECTORY_FILE,
     ];
     let mut layers = Vec::new();
     if job.has_base {
         let from = ctx.from_prefix_dir.join(&prose_rel);
         layers.push(
-            tessera_filter::RecordBlob::open_dir(&from, tessera_filter::Access::MappedSequential)
+            mosaica_filter::RecordBlob::open_dir(&from, mosaica_filter::Access::MappedSequential)
                 .map_err(|e| unreadable(&e))?,
         );
         out.read(&from, names);
@@ -205,11 +205,11 @@ fn fold_scoped_prose(
             )));
         };
         layers.push(
-            tessera_filter::RecordBlob::open(
+            mosaica_filter::RecordBlob::open(
                 &ctx.from_prefix_dir.join(&prose.blocks),
                 &ctx.from_prefix_dir.join(&prose.hasrow),
                 &ctx.from_prefix_dir.join(&prose.directory),
-                tessera_filter::Access::MappedSequential,
+                mosaica_filter::Access::MappedSequential,
             )
             .map_err(|e| unreadable(&e))?,
         );
@@ -218,14 +218,14 @@ fn fold_scoped_prose(
     std::fs::create_dir_all(&to).map_err(|e| unreadable(&e))?;
     let paths = names.map(|name| to.join(name));
     match layers.is_empty() {
-        true => tessera_filter_write::write_prose(&paths[0], &paths[1], &paths[2], []),
-        false => tessera_filter_write::fold_record_blob(
+        true => mosaica_filter_write::write_prose(&paths[0], &paths[1], &paths[2], []),
+        false => mosaica_filter_write::fold_record_blob(
             &layers.iter().collect::<Vec<_>>(),
             &plan.tombstones,
             &paths[0],
             &paths[1],
             &paths[2],
-            tessera_filter::RECORD_BLOCK_TARGET,
+            mosaica_filter::RECORD_BLOCK_TARGET,
         ),
     }
     .map_err(|e| unreadable(&e))?;
@@ -277,37 +277,37 @@ fn fold_value_column(
     let mut opened = Vec::new();
     if job.has_base {
         opened.push(
-            tessera_filter::ValueColumn::open_dir(
+            mosaica_filter::ValueColumn::open_dir(
                 &from_dir,
-                tessera_filter::Access::MappedSequential,
+                mosaica_filter::Access::MappedSequential,
             )
             .map_err(failed("pass 4a (attributes: the base column)"))?,
         );
         out.read(
             &from_dir,
-            [tessera_filter::VALUES_FILE, tessera_filter::PRESENCE_FILE],
+            [mosaica_filter::VALUES_FILE, mosaica_filter::PRESENCE_FILE],
         );
     }
     for extent in &extents {
         opened.push(
-            tessera_filter::open_extent(
+            mosaica_filter::open_extent(
                 &ctx.from_prefix_dir.join(&extent.values),
                 &ctx.from_prefix_dir.join(&extent.presence),
-                tessera_filter::Access::MappedSequential,
+                mosaica_filter::Access::MappedSequential,
             )
             .map_err(failed("pass 4a (attributes: an extent)"))?,
         );
         out.read(&ctx.from_prefix_dir, [&extent.values, &extent.presence]);
     }
-    let layers: Vec<&tessera_filter::ValueColumn> = opened.iter().collect();
+    let layers: Vec<&mosaica_filter::ValueColumn> = opened.iter().collect();
     // Empty unless the column is a keyword; empty selects the generic fold below.
-    let mut keyword_dicts: Vec<tessera_filter::SortedDict> = Vec::new();
-    if job.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+    let mut keyword_dicts: Vec<mosaica_filter::SortedDict> = Vec::new();
+    if job.arrow_type == mosaica_spatial::tiler::ScalarType::Keyword {
         if job.has_base {
             keyword_dicts.push(
-                tessera_filter::SortedDict::open_dir(
+                mosaica_filter::SortedDict::open_dir(
                     &from_dir,
-                    tessera_filter::Access::MappedSequential,
+                    mosaica_filter::Access::MappedSequential,
                 )
                 .map_err(failed("pass 4a (attributes: the base dictionary)"))?,
             );
@@ -321,18 +321,18 @@ fn fold_value_column(
                 )));
             };
             keyword_dicts.push(
-                tessera_filter::SortedDict::open(
+                mosaica_filter::SortedDict::open(
                     &ctx.from_prefix_dir.join(dict_rel),
-                    tessera_filter::Access::MappedSequential,
+                    mosaica_filter::Access::MappedSequential,
                 )
                 .map_err(failed("pass 4a (attributes: an extent dictionary)"))?,
             );
         }
     }
 
-    let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
-    let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
-    let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
+    let values_rel = format!("{column_rel}/{}", mosaica_filter::VALUES_FILE);
+    let presence_rel = format!("{column_rel}/{}", mosaica_filter::PRESENCE_FILE);
+    let dict_rel = format!("{column_rel}/{}", mosaica_filter::DICT_FILE);
     let values_path = ctx.to_prefix_dir.join(&values_rel);
     let presence_path = ctx.to_prefix_dir.join(&presence_rel);
     let dict_path = ctx.to_prefix_dir.join(&dict_rel);
@@ -348,14 +348,14 @@ fn fold_value_column(
             column_kind_of(job.arrow_type, job.postings),
         )
         .map_err(failed("pass 4a (attributes: an empty base)"))?;
-        if job.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+        if job.arrow_type == mosaica_spatial::tiler::ScalarType::Keyword {
             write_empty_dictionary(&dict_path)
                 .map_err(failed("pass 4a (attributes: an empty dictionary)"))?;
             out.wrote(dict_rel, dict_path.clone());
         }
         true
     } else if keyword_dicts.is_empty() {
-        tessera_filter_write::fold_value_column(
+        mosaica_filter_write::fold_value_column(
             &layers,
             &plan.tombstones,
             bound,
@@ -364,12 +364,12 @@ fn fold_value_column(
         )
         .map_err(failed("pass 4a (attributes: the merge)"))?
     } else {
-        let keyword_layers: Vec<tessera_filter_write::KeywordLayer<'_>> = layers
+        let keyword_layers: Vec<mosaica_filter_write::KeywordLayer<'_>> = layers
             .iter()
             .zip(keyword_dicts.iter())
-            .map(|(values, dict)| tessera_filter_write::KeywordLayer { values, dict })
+            .map(|(values, dict)| mosaica_filter_write::KeywordLayer { values, dict })
             .collect();
-        let partial = tessera_filter_write::fold_keyword_column(
+        let partial = mosaica_filter_write::fold_keyword_column(
             &keyword_layers,
             &plan.tombstones,
             bound,
@@ -390,19 +390,19 @@ fn fold_value_column(
         return Ok(());
     }
     // No sequential hint: the banded emit scans the folded column once per band.
-    let folded = tessera_filter::ValueColumn::open(
+    let folded = mosaica_filter::ValueColumn::open(
         &values_path,
         partial.then_some(presence_path.as_path()),
-        tessera_filter::Access::Mapped,
+        mosaica_filter::Access::Mapped,
     )
     .map_err(failed("pass 4a (attributes: reopening the folded column)"))?;
     let postings_rel = format!("{column_rel}/postings.arrow");
     let postings_path = ctx.to_prefix_dir.join(&postings_rel);
-    tessera_filter_write::write_category_postings(
+    mosaica_filter_write::write_category_postings(
         &postings_path,
         &job.name,
         &folded,
-        tessera_filter_write::POSTINGS_BAND_ROWS,
+        mosaica_filter_write::POSTINGS_BAND_ROWS,
     )
     .map_err(failed("pass 4a (attributes: the postings rebuild)"))?;
     out.wrote(postings_rel, postings_path);
@@ -443,59 +443,59 @@ pub(super) fn fold_record_blob(
         let mut opened = Vec::with_capacity(plan.record_extents.len() + 1);
         if based_blob_resident {
             opened.push(
-                tessera_filter::RecordBlob::open_dir(
+                mosaica_filter::RecordBlob::open_dir(
                     &from_dir,
-                    tessera_filter::Access::MappedSequential,
+                    mosaica_filter::Access::MappedSequential,
                 )
                 .map_err(failed("pass 4a (record blob: the base)"))?,
             );
             out.read(
                 &from_dir,
                 [
-                    tessera_filter::RECORD_BLOCKS_FILE,
-                    tessera_filter::RECORD_HASROW_FILE,
-                    tessera_filter::RECORD_DIRECTORY_FILE,
+                    mosaica_filter::RECORD_BLOCKS_FILE,
+                    mosaica_filter::RECORD_HASROW_FILE,
+                    mosaica_filter::RECORD_DIRECTORY_FILE,
                 ],
             );
         }
         for extent in &plan.record_extents {
             opened.push(
-                tessera_filter::RecordBlob::open(
+                mosaica_filter::RecordBlob::open(
                     &ctx.from_prefix_dir.join(&extent.blocks),
                     &ctx.from_prefix_dir.join(&extent.hasrow),
                     &ctx.from_prefix_dir.join(&extent.directory),
-                    tessera_filter::Access::MappedSequential,
+                    mosaica_filter::Access::MappedSequential,
                 )
                 .map_err(failed("pass 4a (record blob: an extent)"))?,
             );
             out.read(&ctx.from_prefix_dir, extent.files());
         }
-        let layers: Vec<&tessera_filter::RecordBlob> = opened.iter().collect();
+        let layers: Vec<&mosaica_filter::RecordBlob> = opened.iter().collect();
 
-        let blocks_rel = format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE);
-        let hasrow_rel = format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE);
-        let directory_rel = format!("{record_rel}/{}", tessera_filter::RECORD_DIRECTORY_FILE);
+        let blocks_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_BLOCKS_FILE);
+        let hasrow_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_HASROW_FILE);
+        let directory_rel = format!("{record_rel}/{}", mosaica_filter::RECORD_DIRECTORY_FILE);
         let blocks_path = ctx.to_prefix_dir.join(&blocks_rel);
         let hasrow_path = ctx.to_prefix_dir.join(&hasrow_rel);
         let directory_path = ctx.to_prefix_dir.join(&directory_rel);
         if layers.is_empty() {
             // An empty base, so the reopen finds a blob.
-            tessera_filter_write::RecordBlobWriter::create(
+            mosaica_filter_write::RecordBlobWriter::create(
                 &blocks_path,
                 &hasrow_path,
                 &directory_path,
-                tessera_filter::RECORD_BLOCK_TARGET,
+                mosaica_filter::RECORD_BLOCK_TARGET,
             )
             .and_then(|writer| writer.finish())
             .map_err(failed("pass 4a (record blob: an empty base)"))?;
         } else {
-            tessera_filter_write::fold_record_blob(
+            mosaica_filter_write::fold_record_blob(
                 &layers,
                 &plan.tombstones,
                 &blocks_path,
                 &hasrow_path,
                 &directory_path,
-                tessera_filter::RECORD_BLOCK_TARGET,
+                mosaica_filter::RECORD_BLOCK_TARGET,
             )
             .map_err(failed("pass 4a (record blob: the rewrite)"))?;
         }
@@ -522,7 +522,7 @@ pub(super) fn fold_entity_terms(
     let terms_rel = format!(
         "partitions/{}/{}",
         plan.partition,
-        tessera_store::ENTITY_TERMS_DIR
+        mosaica_store::ENTITY_TERMS_DIR
     );
     let from_dir = ctx.from_prefix_dir.join(&terms_rel);
     let to_dir = ctx.to_prefix_dir.join(&terms_rel);
@@ -530,7 +530,7 @@ pub(super) fn fold_entity_terms(
 
     let mut extent_paths = Vec::with_capacity(plan.entity_terms_extents.len());
     for extent in &plan.entity_terms_extents {
-        extent_paths.push(tessera_store::EntityTermsExtentPaths {
+        extent_paths.push(mosaica_store::EntityTermsExtentPaths {
             hasrow: ctx.from_prefix_dir.join(&extent.hasrow),
             offsets: ctx.from_prefix_dir.join(&extent.offsets),
             terms: ctx.from_prefix_dir.join(&extent.terms),
@@ -541,15 +541,15 @@ pub(super) fn fold_entity_terms(
     out.read(
         &from_dir,
         [
-            tessera_store::ENTITY_TERMS_HASROW_FILE,
-            tessera_store::ENTITY_TERMS_OFFSETS_FILE,
-            tessera_store::ENTITY_TERMS_TERMS_FILE,
-            tessera_store::ENTITY_TERMS_BASES_FILE,
+            mosaica_store::ENTITY_TERMS_HASROW_FILE,
+            mosaica_store::ENTITY_TERMS_OFFSETS_FILE,
+            mosaica_store::ENTITY_TERMS_TERMS_FILE,
+            mosaica_store::ENTITY_TERMS_BASES_FILE,
         ],
     );
-    let layers = tessera_store::EntityTermsStack::open(Some(&from_dir), &extent_paths)
+    let layers = mosaica_store::EntityTermsStack::open(Some(&from_dir), &extent_paths)
         .map_err(failed("pass 4c (entity terms: the layers)"))?;
-    let mut writer = tessera_store::EntityTermsWriter::create(&to_dir)
+    let mut writer = mosaica_store::EntityTermsWriter::create(&to_dir)
         .map_err(failed("pass 4c (entity terms: the rewrite)"))?;
     // Ascending, the order the writer requires.
     layers
@@ -577,22 +577,22 @@ pub(super) fn fold_entity_terms(
 fn write_empty_value_column(
     values_path: &Path,
     presence_path: &Path,
-    kind: tessera_filter::ColumnKind,
+    kind: mosaica_filter::ColumnKind,
 ) -> std::io::Result<()> {
-    tessera_filter::ValueColumnWriter::create(values_path, presence_path, kind)?
+    mosaica_filter::ValueColumnWriter::create(values_path, presence_path, kind)?
         .finish(Some(&Bitmap::new()))
 }
 
 fn write_empty_dictionary(dict_path: &Path) -> std::io::Result<()> {
     let file = std::io::BufWriter::new(std::fs::File::create(dict_path)?);
-    tessera_filter::SortedDictWriter::new(file)
+    mosaica_filter::SortedDictWriter::new(file)
         .and_then(|writer| writer.finish())
         .map(|_| ())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-fn column_kind_of(arrow_type: ScalarType, category: bool) -> tessera_filter::ColumnKind {
-    use tessera_filter::ColumnKind;
+fn column_kind_of(arrow_type: ScalarType, category: bool) -> mosaica_filter::ColumnKind {
+    use mosaica_filter::ColumnKind;
     if arrow_type == ScalarType::Keyword {
         return ColumnKind::U32;
     }

@@ -2,7 +2,7 @@
 //! what that item stores, and the rows that write something submitted to the write executor.
 //!
 //! The handler reads one generation for the whole batch, off the executor thread. It resolves
-//! every row through [`tessera_lifecycle::resolve`], then reads what each named item stores, in
+//! every row through [`mosaica_lifecycle::resolve`], then reads what each named item stores, in
 //! ascending entity order, and decides the row:
 //!
 //! - a row the rule refuses writes nothing, and the receipt names it with its reason; a strict
@@ -27,14 +27,14 @@
 use std::collections::BTreeMap;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_lifecycle::resolve::{self, Identifier, Key, Reason, Refusal, RowIdentity};
-use tessera_lifecycle::{
+use mosaica_lifecycle::resolve::{self, Identifier, Key, Reason, Refusal, RowIdentity};
+use mosaica_lifecycle::{
     BatchArtifacts, ExecError, IngestRow, RowOutcome, RowReceipt, Slot, UnallocatedEdit,
     UnallocatedRow, WalScalar,
 };
-use tessera_store::manifest::DeclaredScalar;
-use tessera_store::unique::{key_of, value_text, KeyKind, UniqueKey};
-use tessera_types::{EntityId, TermId, TesseraId};
+use mosaica_store::manifest::DeclaredScalar;
+use mosaica_store::unique::{key_of, value_text, KeyKind, UniqueKey};
+use mosaica_types::{EntityId, TermId, TesseraId};
 
 use crate::engine::Engine;
 use crate::write::joined::{self, BlobRow};
@@ -84,7 +84,7 @@ pub struct IngestReceipt {
     /// acceptance's, and every count is zero, since this request changed nothing.
     pub replayed: bool,
     /// The rows that created an item indexed under more than
-    /// [`tessera_authz::MAX_KEYS_PER_ITEM`] keys, by position in the request. They are stored all
+    /// [`mosaica_authz::MAX_KEYS_PER_ITEM`] keys, by position in the request. They are stored all
     /// the same.
     pub over_bound: Vec<usize>,
 }
@@ -137,12 +137,12 @@ pub(crate) struct Planned {
     pub(crate) keys: Vec<(u16, u128)>,
     pub(crate) artifacts: BatchArtifacts,
     /// The request rows creating or editing an item indexed under more keys than
-    /// [`tessera_authz::MAX_KEYS_PER_ITEM`].
+    /// [`mosaica_authz::MAX_KEYS_PER_ITEM`].
     pub(crate) over_bound: Vec<u32>,
 }
 
 /// The keys row `at`'s labels index its item under, by the rule a build applies to its access
-/// column ([`tessera_authz::index_keys`]).
+/// column ([`mosaica_authz::index_keys`]).
 fn index_keys(at: usize, labels: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, AcceptError> {
     let texts = labels
         .iter()
@@ -153,7 +153,7 @@ fn index_keys(at: usize, labels: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, AcceptError
                 "row {at}, access: a label is not UTF-8; write each label as UTF-8 text"
             ))
         })?;
-    tessera_authz::index_keys(texts)
+    mosaica_authz::index_keys(texts)
         .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))
 }
 
@@ -246,7 +246,7 @@ impl Engine {
                 let Some(view) = view else {
                     return Err(AcceptError::Contract(format!(
                         "row {index} carries coordinates and the batch names no view; name the \
-                         view in x-tessera-view"
+                         view in x-mosaica-view"
                     )));
                 };
                 if !view.quantisation.contains(x, y) {
@@ -281,7 +281,7 @@ impl Engine {
         // A batch that only addresses items needs a column to address them by, as a build's
         // attribute file does.
         if !creates && !request.rows.is_empty() {
-            let tessera = request.tessera_id_column
+            let mosaica = request.tessera_id_column
                 || request.rows.iter().any(|row| row.tessera_id.is_some());
             let unique = declared.iter().enumerate().any(|(at, d)| {
                 d.unique
@@ -290,7 +290,7 @@ impl Engine {
                         .iter()
                         .any(|row| at < row.scalars.len() && !row.omitted.contains(&at))
             });
-            resolve::require_identifier(tessera, usize::from(unique)).map_err(|e| {
+            resolve::require_identifier(mosaica, usize::from(unique)).map_err(|e| {
                 AcceptError::Contract(format!(
                     "this batch creates no item, since no row carries a position, so its rows \
                      address items, and {e}"
@@ -489,7 +489,7 @@ impl Engine {
             }
         }
 
-        let bound = tessera_authz::MAX_KEYS_PER_ITEM;
+        let bound = mosaica_authz::MAX_KEYS_PER_ITEM;
         let mut over_bound = Vec::new();
         let live = self.write.live();
         for (row, at) in rows.iter_mut().zip(&written_from) {
@@ -744,8 +744,8 @@ impl Engine {
             .stored_position(generation, entity, view)?
             .map(|(fx, fy)| {
                 (
-                    tessera_spatial::unfixed32(fx, q.x_min, q.x_max),
-                    tessera_spatial::unfixed32(fy, q.y_min, q.y_max),
+                    mosaica_spatial::unfixed32(fx, q.x_min, q.x_max),
+                    mosaica_spatial::unfixed32(fy, q.y_min, q.y_max),
                 )
             }))
     }
@@ -784,7 +784,7 @@ impl Engine {
         entity: EntityId,
         view: Option<&crate::viewport::MetaView>,
         owner_view: Option<&str>,
-        scoped_families: &[tessera_store::manifest::ScopedScalar],
+        scoped_families: &[mosaica_store::manifest::ScopedScalar],
         stored: &Stored,
     ) -> Result<Decided, AcceptError> {
         let row = &request.rows[at];
@@ -957,7 +957,7 @@ impl Engine {
         request: &IngestRequest,
         order: &[(EntityId, usize)],
         whole: bool,
-    ) -> Result<Option<FxHashMap<EntityId, Vec<tessera_filter::RecordField>>>, AcceptError> {
+    ) -> Result<Option<FxHashMap<EntityId, Vec<mosaica_filter::RecordField>>>, AcceptError> {
         let manifest = &generation.bundle.manifest;
         let resident: Vec<usize> = manifest
             .declared_scalars
@@ -1021,8 +1021,8 @@ impl Engine {
             let found = crate::viewport::segment_row_of(&view.id, view_data, entity)
                 .map_err(|e| AcceptError::Unreadable(e.to_string()))?;
             if let Some((segment, local)) = found {
-                return Ok(Some(tessera_spatial::unsplit32(
-                    tessera_types::MortonCode::new(segment.morton.u32()[local]),
+                return Ok(Some(mosaica_spatial::unsplit32(
+                    mosaica_types::MortonCode::new(segment.morton.u32()[local]),
                     segment.columns.residual()[local],
                 )));
             }
@@ -1057,7 +1057,7 @@ impl Engine {
                     .iter()
                     .filter_map(|at| position.get(at).copied())
                     .collect();
-                (!rows.is_empty()).then(|| tessera_lifecycle::BatchMembership {
+                (!rows.is_empty()).then(|| mosaica_lifecycle::BatchMembership {
                     rows,
                     ..membership.clone()
                 })
@@ -1144,7 +1144,7 @@ impl Engine {
 /// What a batch's named items store, read once for the whole batch rather than per row.
 struct Stored {
     /// Each named item's record-blob row, where a row carries a column stored there.
-    blobs: Option<FxHashMap<EntityId, Vec<tessera_filter::RecordField>>>,
+    blobs: Option<FxHashMap<EntityId, Vec<mosaica_filter::RecordField>>>,
     /// The rows whose membership columns name an artifact that does not hold their item.
     not_members: FxHashMap<usize, String>,
 }
@@ -1174,10 +1174,10 @@ fn carried_keys(declared: &[DeclaredScalar], row: &IngestRow) -> Vec<(u16, Key)>
 }
 
 /// A position in a view's frame, as its segment stores it.
-fn fixed(q: tessera_store::manifest::Quantisation, x: f64, y: f64) -> (u32, u32) {
+fn fixed(q: mosaica_store::manifest::Quantisation, x: f64, y: f64) -> (u32, u32) {
     (
-        tessera_spatial::fixed32(x, q.x_min, q.x_max),
-        tessera_spatial::fixed32(y, q.y_min, q.y_max),
+        mosaica_spatial::fixed32(x, q.x_min, q.x_max),
+        mosaica_spatial::fixed32(y, q.y_min, q.y_max),
     )
 }
 
@@ -1188,7 +1188,7 @@ fn scoped_against_held(
     generation: &Generation,
     entity: EntityId,
     row: &IngestRow,
-    families: &[tessera_store::manifest::ScopedScalar],
+    families: &[mosaica_store::manifest::ScopedScalar],
     owner_view: &str,
     adding: bool,
 ) -> Result<Option<Vec<usize>>, AcceptError> {

@@ -2,7 +2,7 @@ use super::*;
 
 /// The bundle's declared scalar tail: render columns only.
 pub(crate) fn scalar_schema_of(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
 ) -> Vec<(String, ScalarType)> {
     // A filter-only column has no row slot; including one here makes `gather_scalars` refuse the
     // build's own segment for correctly omitting it.
@@ -15,7 +15,7 @@ pub(crate) fn scalar_schema_of(
 /// The columns every segment's bands copy beside the render tail: the indexed numbers and
 /// timestamps that are not drawn.
 pub(crate) fn band_schema_of(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
 ) -> Vec<(String, ScalarType)> {
     manifest
         .band_scalars()
@@ -29,16 +29,16 @@ pub(crate) fn band_schema_of(
 /// empty. The ingest boundary, the commit window and the flush all take this one derivation, so a
 /// row's positional tail is built and read against the same list.
 pub(crate) fn scoped_families_by_view(
-    manifest: &tessera_store::manifest::Manifest,
-) -> FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> {
-    let mut out: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
+    manifest: &mosaica_store::manifest::Manifest,
+) -> FxHashMap<String, Vec<mosaica_store::manifest::ScopedScalar>> {
+    let mut out: FxHashMap<String, Vec<mosaica_store::manifest::ScopedScalar>> =
         FxHashMap::default();
     for group in &manifest.groups {
         for view in &group.views {
             let id = format!(
                 "{}{}{}",
                 group.name,
-                tessera_store::GROUP_SEPARATOR,
+                mosaica_store::GROUP_SEPARATOR,
                 view.key
             );
             let families = scoped_families_of_view(manifest, &id);
@@ -56,12 +56,12 @@ pub(crate) fn scoped_families_by_view(
 /// In the owning group's manifest order, the order a row's `scoped` list is positional against.
 /// Empty for a plain view, for a view whose key the owner does not carry, or a group with none.
 pub(crate) fn scoped_families_of_view<'a>(
-    manifest: &'a tessera_store::manifest::Manifest,
+    manifest: &'a mosaica_store::manifest::Manifest,
     view: &str,
-) -> &'a [tessera_store::manifest::ScopedScalar] {
-    pub(in crate::write) const NONE: &[tessera_store::manifest::ScopedScalar] = &[];
+) -> &'a [mosaica_store::manifest::ScopedScalar] {
+    pub(in crate::write) const NONE: &[mosaica_store::manifest::ScopedScalar] = &[];
     let owner = scoped_owner_view_of(manifest, view);
-    let Some((owner_group, key)) = owner.split_once(tessera_store::GROUP_SEPARATOR) else {
+    let Some((owner_group, key)) = owner.split_once(mosaica_store::GROUP_SEPARATOR) else {
         return NONE;
     };
     let Some(group) = manifest.groups.iter().find(|g| g.name == owner_group) else {
@@ -80,10 +80,10 @@ pub(crate) fn scoped_families_of_view<'a>(
 /// A sharing group's view resolves to the owner's, so a row written through either lands under the
 /// same column name.
 pub(crate) fn scoped_owner_view_of(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
     view: &str,
 ) -> String {
-    let Some((group, key)) = view.split_once(tessera_store::GROUP_SEPARATOR) else {
+    let Some((group, key)) = view.split_once(mosaica_store::GROUP_SEPARATOR) else {
         return view.to_string();
     };
     let owner = manifest
@@ -92,7 +92,7 @@ pub(crate) fn scoped_owner_view_of(
         .find(|g| g.name == group)
         .and_then(|g| g.members_of.as_deref())
         .unwrap_or(group);
-    format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR)
+    format!("{owner}{}{key}", mosaica_store::GROUP_SEPARATOR)
 }
 
 /// One view's writer schema: the bundle-wide render tail, then the group-scoped render lanes.
@@ -101,7 +101,7 @@ pub(crate) fn scoped_owner_view_of(
 /// drops the per-family lanes and a served value reads back as the type's zero. No gate here: a
 /// writer has no principal.
 pub(crate) fn view_scalar_schema_of(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
     view: &str,
 ) -> Vec<(String, ScalarType)> {
     let mut schema = scalar_schema_of(manifest);
@@ -114,7 +114,7 @@ pub(crate) fn view_scalar_schema_of(
 }
 
 /// The columns of one view's writer schema an input segment may lawfully lack, for a merge or a
-/// fold of segments written before them (`tessera_store::segment_cursor::gather_scalars`): the
+/// fold of segments written before them (`mosaica_store::segment_cursor::gather_scalars`): the
 /// group-scoped render lanes, which begin at `entity_scoped` in the schema, and the entity-scoped
 /// columns declared at a running service and not yet folded. Every other column of the schema is
 /// one every input holds, and one missing is a torn segment.
@@ -140,7 +140,7 @@ pub(crate) fn lawful_absences(
 /// the first difference. A `visibility = "derived"` category is included whether or not it is
 /// declared filterable, so `/v1/categories` can still offer values from it.
 pub(crate) fn filter_schema_of(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
 ) -> Vec<crate::flush::FilterColumnSpec> {
     manifest
         .declared_scalars
@@ -163,11 +163,11 @@ pub(crate) fn filter_schema_of(
 /// Refuses rather than defaults when the binary does not carry the recorded analyser: a match
 /// query would otherwise answer from whichever layer holds the entity, with no error.
 pub(crate) fn text_schema_of(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
 ) -> Result<Vec<crate::flush::TextColumnSpec>, crate::flush::MaintenanceFailed> {
     let mut out = Vec::new();
     for (index, d) in manifest.declared_scalars.iter().enumerate() {
-        if d.arrow_type != tessera_spatial::tiler::ScalarType::Text || !d.index {
+        if d.arrow_type != mosaica_spatial::tiler::ScalarType::Text || !d.index {
             continue;
         }
         let identity = d.analyser.as_deref().ok_or_else(|| {
@@ -176,7 +176,7 @@ pub(crate) fn text_schema_of(
                 d.name
             ))
         })?;
-        let analyser = tessera_analyse::analyser_with_identity(identity).ok_or_else(|| {
+        let analyser = mosaica_analyse::analyser_with_identity(identity).ok_or_else(|| {
             crate::flush::MaintenanceFailed(format!(
                 "column '{}' was indexed by analyser '{identity}', which this binary does not \
                      carry. A flush cannot extend an index whose terms it cannot reproduce.",
@@ -195,15 +195,15 @@ pub(crate) fn text_schema_of(
 /// The analyser a group-scoped `text` family's terms were produced by
 /// ([`text_schema_of`]'s resolution, over a family's declaration).
 pub(in crate::write) fn analyser_of(
-    family: &tessera_store::manifest::ScopedScalar,
-) -> Result<tessera_analyse::Analyser, crate::flush::MaintenanceFailed> {
+    family: &mosaica_store::manifest::ScopedScalar,
+) -> Result<mosaica_analyse::Analyser, crate::flush::MaintenanceFailed> {
     let identity = family.analyser.as_deref().ok_or_else(|| {
         crate::flush::MaintenanceFailed(format!(
             "the scoped column family '{}' is text but the manifest records no analyser identity",
             family.name
         ))
     })?;
-    tessera_analyse::analyser_with_identity(identity).ok_or_else(|| {
+    mosaica_analyse::analyser_with_identity(identity).ok_or_else(|| {
         crate::flush::MaintenanceFailed(format!(
             "the scoped column family '{}' was indexed by analyser '{identity}', which this \
                  binary does not carry. A flush cannot extend an index whose terms it cannot \
@@ -219,7 +219,7 @@ pub(in crate::write) fn analyser_of(
 /// and the filter schema must partition `declared_scalars` identically, or a column none of them
 /// claims is acknowledged and then lost.
 pub(crate) fn record_schema_of(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
 ) -> Vec<crate::flush::RecordColumnSpec> {
     manifest
         .declared_scalars
@@ -251,7 +251,7 @@ pub(in crate::write) fn scalar_code(scalar: &WalScalar) -> Option<u32> {
 #[cfg(test)]
 mod segment_schema_tests {
     use super::*;
-    use tessera_store::manifest::DeclaredScalar;
+    use mosaica_store::manifest::DeclaredScalar;
 
     /// A segment's writer schema is the render columns; this guards the line that makes it so.
     ///
@@ -259,13 +259,13 @@ mod segment_schema_tests {
     /// predicate would pass even if the production filter were wrong.
     #[test]
     pub(in crate::write) fn a_segments_writer_schema_omits_filter_only_columns() {
-        let manifest = tessera_store::manifest::Manifest {
+        let manifest = mosaica_store::manifest::Manifest {
             bundle_format: 3,
             created_at: String::new(),
             vocabularies: vec![],
             small_term_threshold: 32,
             entity_id_high_water: 0,
-            identity: tessera_store::manifest::IdentityDescriptor {
+            identity: mosaica_store::manifest::IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),
                 rounds: 1,
                 key: "0123456789abcdef0123456789abcdef".to_string(),

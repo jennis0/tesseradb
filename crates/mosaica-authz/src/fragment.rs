@@ -20,18 +20,18 @@ use std::sync::Arc;
 use croaring::{Bitmap, BitmapView, Frozen};
 use sha2::{Digest, Sha256};
 
-use tessera_types::TermId;
+use mosaica_types::TermId;
 
 use crate::postings::{invalid_data, union_postings, PostingRef, PostingsReader};
-use tessera_cache::{
+use mosaica_cache::{
     Cancel, CacheWeight, SingleFlightCache, SingleFlightError, WaitEnded, WaitingBuildError,
 };
 use crate::tier::DeltaTier;
 
 /// The in-memory tier's operator gauges, re-exported so [`FragmentCache::stats`]'s return type
-/// is nameable at this path. A server-plane caller uses `tessera_engine::FragmentCacheStats`,
-/// which re-exports this one: `tessera-server` may not depend on `tessera-authz`.
-pub use tessera_cache::CacheStats;
+/// is nameable at this path. A server-plane caller uses `mosaica_engine::FragmentCacheStats`,
+/// which re-exports this one: `mosaica-server` may not depend on `mosaica-authz`.
+pub use mosaica_cache::CacheStats;
 
 /// Union the postings of every term in `terms` into one bitmap: this is the authorisation
 /// decision. `terms` and the returned bitmap are entity-space, never row-space.
@@ -498,7 +498,7 @@ impl FragmentCache {
     ///
     /// The in-memory tier's byte bound is not a constructor argument; it arrives through
     /// [`Self::set_memory_bound`]. A cache built this way is unbounded, which is correct for
-    /// tests and benches; `tessera_server::prepare` makes sure a server never gets one.
+    /// tests and benches; `mosaica_server::prepare` makes sure a server never gets one.
     pub fn new(dir: &Path, bundle_identity: [u8; 32], rule_hash: [u8; 32]) -> Self {
         FragmentCache {
             dir: dir.to_path_buf(),

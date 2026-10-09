@@ -21,7 +21,7 @@
 //! Streaming cannot be done by appending record batches: the reader decodes a **single** batch and
 //! refuses a second (`read_values`), because it borrows its values from the batch's buffers rather
 //! than copying them, and concatenating is the copy that construction exists to avoid. So this is
-//! the repo's spool-then-assemble discipline — [`tessera_authz::PostingsSpool`]'s, applied to this
+//! the repo's spool-then-assemble discipline — [`mosaica_authz::PostingsSpool`]'s, applied to this
 //! format: values are spooled to a temporary file as they arrive, only the running count is held,
 //! and `finish` memory-maps the spool as the array's own buffer and writes the one record batch
 //! from it. The bytes are the bytes [`write_value_column`] would have written, which
@@ -153,7 +153,7 @@ fn check_presence(values: usize, presence: Option<&Bitmap>) -> io::Result<()> {
 ///
 /// Byte-identity between the whole-column path and the streaming one requires this to be literally
 /// the same code rather than two copies that could drift — the same argument
-/// [`tessera_authz::PostingsSpool`] and `write_posting_records` share their own writer under.
+/// [`mosaica_authz::PostingsSpool`] and `write_posting_records` share their own writer under.
 /// The column carries no validity buffer on either path: a value column's absences live in the
 /// presence bitmap, and a spurious all-valid buffer would change the file's bytes.
 fn write_value_array(path: &Path, array: ArrayRef, ty: DataType) -> io::Result<()> {

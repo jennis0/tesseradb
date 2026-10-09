@@ -26,7 +26,7 @@
 //! never from `dict.len()` upward: a downward-from-`u32::MAX` extension id can never collide with
 //! a *future* dictionary ordinal the way an upward one could. An upward scheme's "unsatisfiable"
 //! property was prose-only and silently broken by growth: extension id `N == dict.len()` at
-//! replay time is exactly the ordinal the *next* `tessera build` would assign to some unrelated,
+//! replay time is exactly the ordinal the *next* `mosaica build` would assign to some unrelated,
 //! real descriptor; if the overlay/buffer ever survived a bundle swap without a fresh replay
 //! against the new dictionary — nothing does that today, and nothing in this module guarantees
 //! nothing ever will — a stale extension-tagged entity would silently start
@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use tessera_authz::Dict;
-use tessera_types::{EntityId, TermId};
+use mosaica_authz::Dict;
+use mosaica_types::{EntityId, TermId};
 
 use crate::wal::{WalRow, WalScalar};
 
@@ -68,7 +68,7 @@ impl std::fmt::Debug for DescriptorResolver<'_> {
 }
 
 /// Extension ids count down from here — see this module's doc for why the top of the range,
-/// never `dict.len()` upward. [`tessera_authz::MAX_DISTINCT_TERMS`]
+/// never `dict.len()` upward. [`mosaica_authz::MAX_DISTINCT_TERMS`]
 /// (200,000,000) is the largest a real dictionary is sized for; this leaves a margin of roughly
 /// 4.09 billion ids between the highest extension id ever handed out in a single session and the
 /// highest ordinal a dictionary could plausibly reach, so exhausting it would require an
@@ -77,9 +77,9 @@ impl std::fmt::Debug for DescriptorResolver<'_> {
 const EXTENSION_ID_START: u32 = u32::MAX;
 
 /// Compile-time guarantee that the extension range starts strictly above
-/// [`tessera_authz::MAX_DISTINCT_TERMS`] — a real dictionary is never sized to reach
+/// [`mosaica_authz::MAX_DISTINCT_TERMS`] — a real dictionary is never sized to reach
 /// anywhere near this range, so an extension id can never be mistaken for one.
-const _: () = assert!(EXTENSION_ID_START as u64 > tessera_authz::MAX_DISTINCT_TERMS);
+const _: () = assert!(EXTENSION_ID_START as u64 > mosaica_authz::MAX_DISTINCT_TERMS);
 
 impl<'a> DescriptorResolver<'a> {
     pub fn new(dict: &'a Dict) -> Self {
@@ -138,7 +138,7 @@ impl<'a> DescriptorResolver<'a> {
     }
 
     /// Extract this resolver's mutable extension state, detaching it from `dict`'s borrow so it
-    /// can be stored (e.g. behind a `Mutex`, in `tessera-engine`'s `Engine`) and later resumed.
+    /// can be stored (e.g. behind a `Mutex`, in `mosaica-engine`'s `Engine`) and later resumed.
     pub fn into_state(self) -> (FxHashMap<Vec<u8>, TermId>, u32) {
         (self.extension, self.next_extension_id)
     }
@@ -197,7 +197,7 @@ pub struct BufferedItem {
 /// `Clone` because the live `/control/ingest` acceptance path builds the
 /// next generation's buffer by cloning the current one and inserting the newly-accepted rows,
 /// rather than mutating shared state in place — the immutable-snapshot-behind-`ArcSwap` design
-/// (see `tessera_engine::Generation`'s doc) requires every generation's buffer to be a distinct,
+/// (see `mosaica_engine::Generation`'s doc) requires every generation's buffer to be a distinct,
 /// never-mutated-after-publication value.
 #[derive(Debug, Default, Clone)]
 pub struct IngestBuffer {
@@ -503,7 +503,7 @@ mod tests {
 
     fn dict_with(descriptors: &[&[u8]]) -> (Dict, TempDir) {
         let temp = TempDir::new().unwrap();
-        let mut writer = tessera_authz::DictWriter::new(temp.path());
+        let mut writer = mosaica_authz::DictWriter::new(temp.path());
         for d in descriptors {
             writer.intern(d);
         }
@@ -577,10 +577,10 @@ mod tests {
 
     /// Extension ids must never be able to collide with a dictionary ordinal,
     /// however large the dictionary grows — encoded as a property over dictionaries up to
-    /// [`tessera_authz::MAX_DISTINCT_TERMS`], far below where extension ids start.
+    /// [`mosaica_authz::MAX_DISTINCT_TERMS`], far below where extension ids start.
     #[test]
     fn extension_ids_never_collide_with_a_dictionary_sized_up_to_the_declared_bound() {
-        const MAX_DISTINCT_TERMS: u32 = tessera_authz::MAX_DISTINCT_TERMS as u32;
+        const MAX_DISTINCT_TERMS: u32 = mosaica_authz::MAX_DISTINCT_TERMS as u32;
 
         // The compile-time assertion next to `EXTENSION_ID_START`'s definition already proves
         // `EXTENSION_ID_START > MAX_DISTINCT_TERMS` unconditionally; a real dictionary this large

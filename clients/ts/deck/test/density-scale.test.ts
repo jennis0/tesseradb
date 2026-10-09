@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {WORLD_SIZE} from '@tesseradb/client';
+import {WORLD_SIZE} from '@mosaica/client';
 import {DEFAULT_DENSITY_SCALE, densityCountAt, densityPosition} from '../src/index.js';
 import {binDensity, contourThresholds, densityPaint, densitySteps, densityStops, drawnCells, filterDensity, gridImage, maxCount, type DensityCell, type DensityCounts} from '../src/density.js';
 import {rampAt} from '../src/colour.js';

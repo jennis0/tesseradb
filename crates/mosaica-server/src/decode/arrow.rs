@@ -1,15 +1,15 @@
 use arrow::array::{Array, UInt32Array};
 use arrow::record_batch::RecordBatch;
-use tessera_engine::coordinates;
-use tessera_engine::member_key;
-use tessera_engine::scalar_column::{self, ScalarColumn};
-use tessera_engine::shapes::Bounds;
-use tessera_engine::utf8::{Utf8Column, Utf8Values};
-use tessera_engine::vocabulary::{code_value, Resolved};
-use tessera_engine::{absent_scalar, DeclaredScalar, Projection, ScopedScalar, Vocabularies};
-use tessera_lifecycle::{BatchArtifacts, WalScalar};
-use tessera_types::layer::LayerDeclaration;
-use tessera_types::TesseraId;
+use mosaica_engine::coordinates;
+use mosaica_engine::member_key;
+use mosaica_engine::scalar_column::{self, ScalarColumn};
+use mosaica_engine::shapes::Bounds;
+use mosaica_engine::utf8::{Utf8Column, Utf8Values};
+use mosaica_engine::vocabulary::{code_value, Resolved};
+use mosaica_engine::{absent_scalar, DeclaredScalar, Projection, ScopedScalar, Vocabularies};
+use mosaica_lifecycle::{BatchArtifacts, WalScalar};
+use mosaica_types::layer::LayerDeclaration;
+use mosaica_types::TesseraId;
 
 use super::json::JsonColumns;
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
@@ -341,8 +341,8 @@ pub(crate) fn parse_ingest_batch(
         // names.
         let offset = items.len();
 
-        let tessera = tessera_id_col(body_name, &batch)?;
-        tessera_id_column |= tessera.is_some();
+        let mosaica = tessera_id_col(body_name, &batch)?;
+        tessera_id_column |= mosaica.is_some();
         let has_column = |name: &str| batch.column_by_name(name).is_some();
         let (x, y) = match &frame {
             None => {
@@ -352,7 +352,7 @@ pub(crate) fn parse_ingest_batch(
                 {
                     return Err(DecodeError(format!(
                         "ingest body: column '{name}' is a coordinate and this batch names no \
-                         view to place it in; name the view in x-tessera-view"
+                         view to place it in; name the view in x-mosaica-view"
                     )));
                 }
                 (None, None)
@@ -440,7 +440,7 @@ pub(crate) fn parse_ingest_batch(
             for (d, cells) in scoped_declared.iter().zip(&scoped_cells) {
                 scoped_values.push(value_of(cells, i, d)?);
             }
-            let tessera_id = match &tessera {
+            let tessera_id = match &mosaica {
                 Some(arr) if !arr.is_null(i) => {
                     Some(parse_tessera_id(body_name, offset + i, arr.value(i))?)
                 }
@@ -523,11 +523,11 @@ pub(crate) fn labels_col<'a>(
     body_name: &str,
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<Option<tessera_engine::access_column::AccessBatch<'a>>, DecodeError> {
+) -> Result<Option<mosaica_engine::access_column::AccessBatch<'a>>, DecodeError> {
     let Some(column) = batch.column_by_name(name) else {
         return Ok(None);
     };
-    tessera_engine::access_column::read_access_column(column, name)
+    mosaica_engine::access_column::read_access_column(column, name)
         .map(Some)
         .map_err(|detail| DecodeError(format!("{body_name}: {detail}")))
 }
@@ -539,7 +539,7 @@ mod category_wire {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
-    use tessera_engine::{DeclaredScalar, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE};
+    use mosaica_engine::{DeclaredScalar, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE};
 
     const CODE_OPS: u32 = 4711;
     const EXTENT: Bounds = Bounds {
@@ -578,12 +578,12 @@ mod category_wire {
 
     fn vocabularies_of(kind: VocabularyKind) -> Vocabularies {
         Vocabularies::seed(
-            &[tessera_engine::ManifestVocabulary {
+            &[mosaica_engine::ManifestVocabulary {
                 name: "departments".to_string(),
                 kind,
-                visibility: tessera_engine::Visibility::Derived,
-                width: tessera_engine::ScalarType::U16,
-                values: vec![tessera_engine::ManifestVocabularyValue {
+                visibility: mosaica_engine::Visibility::Derived,
+                width: mosaica_engine::ScalarType::U16,
+                values: vec![mosaica_engine::ManifestVocabularyValue {
                     key: "ops".to_string(),
                     code: CODE_OPS,
                     title: None,
@@ -650,7 +650,7 @@ mod category_wire {
     }
 
     /// No layer is registered, so every column here is a scalar or a refusal.
-    fn no_layers(_: &str) -> Option<tessera_types::layer::LayerDeclaration> {
+    fn no_layers(_: &str) -> Option<mosaica_types::layer::LayerDeclaration> {
         None
     }
 

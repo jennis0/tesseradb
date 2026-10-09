@@ -18,9 +18,9 @@
 //! walk: one with a lineage, where the cut and the budget decide what is served, and one depending
 //! on a layer the same request names, whose artifact goes when its target is not served.
 
-use tessera_store::bands::BandLabels;
-use tessera_store::membership::{LabelColumnPack, ROW_COLUMN_HOLE};
-use tessera_types::layer::RegisteredLayer;
+use mosaica_store::bands::BandLabels;
+use mosaica_store::membership::{LabelColumnPack, ROW_COLUMN_HOLE};
+use mosaica_types::layer::RegisteredLayer;
 
 use super::*;
 use crate::artifacts::{ArtifactRows, ArtifactView};
@@ -195,7 +195,7 @@ impl Engine {
         served: &ServedView<'_>,
         mask: &EffectiveMask,
         req: &ViewportRequest<'_>,
-        dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+        dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
         registered: &RegisteredLayer,
         points: &[TaggedPoint],
     ) -> Result<Vec<Option<u64>>> {
@@ -254,7 +254,7 @@ impl Engine {
             // counts are read only where the criterion needs more than the member in hand.
             let needs_counts = !matches!(
                 declaration.require_member_visibility,
-                None | Some(tessera_types::layer::ExistenceCriterion::Count(0 | 1))
+                None | Some(mosaica_types::layer::ExistenceCriterion::Count(0 | 1))
             );
             let counts = match needs_counts {
                 false => None,

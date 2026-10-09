@@ -17,13 +17,13 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Attribute, Schema};
-use tessera_build::{build, BuildArgs};
-use tessera_filter::{Access, RecordBlob, RecordValue, SortedDict};
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::config::{Attribute, Schema};
+use mosaica_build::{build, BuildArgs};
+use mosaica_filter::{Access, RecordBlob, RecordValue, SortedDict};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::IdentityKey;
 
 mod common;
 
@@ -121,10 +121,10 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: Bounds {
                 x_min: 0.0,
                 x_max: 1000.0,
@@ -134,12 +134,12 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
         out,
         limit: None,
         strict: false,
@@ -183,7 +183,7 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
     let mut terms = Vec::new();
     dict.walk(|_, key| terms.push(key.to_string())).unwrap();
     let mut expected: Vec<String> = (0..N)
-        .flat_map(|e| tessera_analyse::Analyser::new().tokens(&prose_of(e)))
+        .flat_map(|e| mosaica_analyse::Analyser::new().tokens(&prose_of(e)))
         .collect();
     expected.sort();
     expected.dedup();
@@ -195,7 +195,7 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
 
     // --- entity space: a term's posting names exactly the entities whose prose carries it.
     let postings =
-        tessera_authz::postings::PostingsReader::open(&column_dir.join("postings.arrow"), false)
+        mosaica_authz::postings::PostingsReader::open(&column_dir.join("postings.arrow"), false)
             .expect("the postings open");
     assert_eq!(postings.term_count(), terms.len() as u32);
     let source_of = common::entities_of(&out, "id", 0..N);
@@ -206,18 +206,18 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
             .expect("a readable posting")
             .expect("the term has one");
         let mut got: Vec<u32> = match posting {
-            tessera_authz::postings::PostingRef::Array(bytes) => bytes
+            mosaica_authz::postings::PostingRef::Array(bytes) => bytes
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .map(|c| u32::from_le_bytes(*c))
                 .collect(),
-            tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
+            mosaica_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
         };
         got.sort_unstable();
         let mut want: Vec<u32> = (0..N)
             .filter(|&e| {
-                tessera_analyse::Analyser::new()
+                mosaica_analyse::Analyser::new()
                     .tokens(&prose_of(e))
                     .iter()
                     .any(|t| t == probe)
@@ -243,11 +243,11 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
         assert_eq!(
             fields,
             vec![
-                tessera_filter::RecordField {
+                mosaica_filter::RecordField {
                     tag: 0,
                     value: RecordValue::Utf8(prose_of(source)),
                 },
-                tessera_filter::RecordField {
+                mosaica_filter::RecordField {
                     tag: 1,
                     value: RecordValue::U64(source),
                 },
@@ -265,7 +265,7 @@ fn an_unindexed_text_column_has_the_blob_row_and_no_index() {
     let out = dir.path().join("bundle");
     let column_dir = partition_dir(&out).join("attrs").join("abstract");
     assert!(
-        !column_dir.join(tessera_filter::DICT_FILE).exists(),
+        !column_dir.join(mosaica_filter::DICT_FILE).exists(),
         "an unindexed text column wrote a dictionary"
     );
     assert!(
@@ -282,11 +282,11 @@ fn an_unindexed_text_column_has_the_blob_row_and_no_index() {
     assert_eq!(
         blob.fields_of(source_of[&5]).unwrap(),
         Some(vec![
-            tessera_filter::RecordField {
+            mosaica_filter::RecordField {
                 tag: 0,
                 value: RecordValue::Utf8(prose_of(5)),
             },
-            tessera_filter::RecordField {
+            mosaica_filter::RecordField {
                 tag: 1,
                 value: RecordValue::U64(5),
             },
@@ -327,7 +327,7 @@ fn the_manifest_records_the_analyser_identity_per_column() {
 /// at least m of n — both answered from the postings, both intersected with the candidate.
 #[test]
 fn match_and_minimum_should_match_answer_from_the_index() {
-    use tessera_engine::filter::FilterOperand;
+    use mosaica_engine::filter::FilterOperand;
 
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
@@ -338,7 +338,7 @@ fn match_and_minimum_should_match_answer_from_the_index() {
     // A helper predicting the answer from the fixture's own values, which is the oracle's relation:
     // what the corpus was *given*, upstream of what the build stored.
     let expected = |predicate: &dyn Fn(&[String]) -> bool| -> Vec<u32> {
-        let analyser = tessera_analyse::Analyser::new();
+        let analyser = mosaica_analyse::Analyser::new();
         let mut out: Vec<u32> = (0..N)
             .filter(|&e| predicate(&analyser.tokens(&prose_of(e))))
             .map(|e| source_of[&e])
@@ -412,7 +412,7 @@ fn match_and_minimum_should_match_answer_from_the_index() {
 /// the end, where it could be forgotten.
 #[test]
 fn match_never_answers_outside_the_candidate() {
-    use tessera_engine::filter::FilterOperand;
+    use mosaica_engine::filter::FilterOperand;
 
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
@@ -446,10 +446,10 @@ fn match_never_answers_outside_the_candidate() {
     );
 }
 
-fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
+fn open_columns(out: &Path) -> mosaica_engine::filter::FilterColumns {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
-    tessera_engine::filter::FilterColumns::open(
+    mosaica_engine::filter::FilterColumns::open(
         &out.join(current_prefix(out)),
         &phash,
         &bundle.manifest,
@@ -474,7 +474,7 @@ fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
 /// repeated-word case then answers the conjunction).
 #[test]
 fn a_minimum_above_the_query_s_token_count_matches_nothing() {
-    use tessera_engine::filter::FilterOperand;
+    use mosaica_engine::filter::FilterOperand;
 
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
@@ -532,7 +532,7 @@ fn a_minimum_above_the_query_s_token_count_matches_nothing() {
 /// negation widens past what the column knows, which is the direction that discloses).
 #[test]
 fn a_negation_over_a_text_column_is_refused() {
-    use tessera_engine::filter::{FilterExpr, FilterOperand};
+    use mosaica_engine::filter::{FilterExpr, FilterOperand};
 
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
@@ -596,7 +596,7 @@ fn a_negation_over_a_text_column_is_refused() {
 /// off-by-one window (a phrase at the very start or end of a document is missed).
 #[test]
 fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
-    use tessera_engine::filter::FilterOperand;
+    use mosaica_engine::filter::FilterOperand;
 
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
@@ -617,7 +617,7 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
     // The oracle: the corpus's own prose, analysed and searched for the word sequence. Upstream of
     // anything the build stored, which is the relation every assertion in this file checks against.
     let saying = |words: &[&str]| -> Vec<u64> {
-        let a = tessera_analyse::Analyser::new();
+        let a = mosaica_analyse::Analyser::new();
         let want: Vec<String> = words.iter().map(|w| w.to_string()).collect();
         (0..N)
             .filter(|e| {
@@ -723,7 +723,7 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
 /// together.
 #[test]
 fn a_phrase_never_answers_or_reads_outside_the_candidate() {
-    use tessera_engine::filter::FilterOperand;
+    use mosaica_engine::filter::FilterOperand;
 
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");

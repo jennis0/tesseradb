@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {WORLD_SIZE, type Quantisation} from '@tesseradb/client';
+import {WORLD_SIZE, type Quantisation} from '@mosaica/client';
 import {viewInputOf} from '../src/camera.js';
 
 /** A store's frame and its world-to-data conversion, over the given extent or none. */

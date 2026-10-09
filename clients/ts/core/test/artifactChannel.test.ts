@@ -8,7 +8,7 @@ import {
   type ArtifactChannelState
 } from '../src/artifactChannel.js';
 import {SessionArtifactTable} from '../src/artifactTable.js';
-import {TesseraClient, type TileSink} from '../src/client.js';
+import {MosaicaClient, type TileSink} from '../src/client.js';
 import {GRID32, WORLD_SIZE, mortonOfTile} from '../src/coords.js';
 import type {Artifact, Layer, Quantisation, ViewportArtifactsRequest} from '../src/types.js';
 import {artifact, layer, manualClock, settle, tileAnswers} from './support.js';
@@ -31,10 +31,10 @@ const FLAT = [layer('clusters/x')];
 function fakeClient(rowsFor: (tile: bigint, req: ViewportArtifactsRequest) => Artifact[] = (tile) => [cluster(tile + 100n)], keys = () => ({identityKey: 'ik', contentKey: 'ck'}), treed?: (req: ViewportArtifactsRequest) => Artifact[]) {
   const viewportArtifacts = vi.fn(tileAnswers(rowsFor, keys, treed));
   const artifacts = vi.fn();
-  return {client: {viewportArtifacts, artifacts} as unknown as TesseraClient, viewportArtifacts, artifacts};
+  return {client: {viewportArtifacts, artifacts} as unknown as MosaicaClient, viewportArtifacts, artifacts};
 }
 
-function channel(client: TesseraClient, over: Partial<ArtifactChannelOptions> = {}) {
+function channel(client: MosaicaClient, over: Partial<ArtifactChannelOptions> = {}) {
   const clock = manualClock();
   const states: ArtifactChannelState[] = [];
   const table = new SessionArtifactTable();
@@ -363,7 +363,7 @@ describe('the idle prefetch', () => {
       }
       return {frames: [], timings: {serverUs: 0, admissionUs: 0, stageNs: null}, ...k, pin: k.contentKey, stale: false, region: null, bytes: 0};
     });
-    const client = {viewportArtifacts, artifacts: vi.fn()} as unknown as TesseraClient;
+    const client = {viewportArtifacts, artifacts: vi.fn()} as unknown as MosaicaClient;
     const {ch, clock, table} = channel(client, {prefetch: true});
     channelRef = ch;
     ch.setLayer('clusters/x');

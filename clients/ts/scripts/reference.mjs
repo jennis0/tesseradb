@@ -29,15 +29,15 @@ const outComponents = join(repo, 'docs/reference/components');
  */
 const UNDOCUMENTED_TYPES = new Set([
   // `ArtifactsProjection.status`, whose values its comment names.
-  '@tesseradb/client:ArtifactChannelState',
+  '@mosaica/client:ArtifactChannelState',
   // `StoreOptions.replica`, whose four fields its comment describes.
-  '@tesseradb/client:ReplicaOptions',
+  '@mosaica/client:ReplicaOptions',
   // `Store.subscribe`'s callback, `() => void`.
-  '@tesseradb/client:Listener',
-  // The props type `TesseraLayer` is declared over, which adds `slab` for `<tessera-map>`, and so
+  '@mosaica/client:Listener',
+  // The props type `MosaicaLayer` is declared over, which adds `slab` for `<mosaica-map>`, and so
   // appears in its inherited constructor.
-  '@tesseradb/deck:TesseraLayerInternalProps',
-  '@tesseradb/deck:MarkSlab'
+  '@mosaica/deck:MosaicaLayerInternalProps',
+  '@mosaica/deck:MarkSlab'
 ]);
 
 let failures = 0;
@@ -53,7 +53,7 @@ const elementClasses = elementClassesByTag();
 const app = await Application.bootstrapWithPlugins({
   options: join(clients, 'typedoc.json'),
   externalSymbolLinkMappings: {
-    '@tesseradb/components': Object.fromEntries([...elementClasses].map(([cls, tag]) => [cls, `../../components/${tag}.md`]))
+    '@mosaica/components': Object.fromEntries([...elementClasses].map(([cls, tag]) => [cls, `../../components/${tag}.md`]))
   }
 });
 const project = await app.convert();
@@ -77,7 +77,7 @@ for (const file of markdownFiles(outTypescript)) {
 }
 
 for (const [target, users] of danglingReferences(app.serializer.projectToObject(project, normalizePath(clients)))) {
-  if (UNDOCUMENTED_TYPES.has(target) || (target.startsWith('@tesseradb/components:') && elementClasses.has(target.split(':')[1]))) continue;
+  if (UNDOCUMENTED_TYPES.has(target) || (target.startsWith('@mosaica/components:') && elementClasses.has(target.split(':')[1]))) continue;
   fail(`${[...users].join(', ')} names ${target}, which the reference leaves out. Export and document it, or mark the member that names it @internal.`);
 }
 
@@ -161,7 +161,7 @@ function danglingReferences(json) {
     if (!node || typeof node !== 'object') return;
     const here = typeof node.name === 'string' && typeof node.kind === 'number' ? (path ? `${path}.${node.name}` : node.name) : path;
     const excluded = node.target === -1 || (typeof node.target === 'object' && node.target !== null);
-    if (node.type === 'reference' && excluded && !node.refersToTypeParameter && (node.package ?? '').startsWith('@tesseradb/')) {
+    if (node.type === 'reference' && excluded && !node.refersToTypeParameter && (node.package ?? '').startsWith('@mosaica/')) {
       const key = `${node.package}:${node.name}`;
       if (!found.has(key)) found.set(key, new Set());
       found.get(key).add(here);
@@ -176,8 +176,8 @@ function danglingReferences(json) {
 function subpaths(exportsMap) {
   const out = new Map();
   for (const [subpath, target] of Object.entries(exportsMap)) {
-    const source = typeof target === 'object' ? target['tessera-source'] : null;
-    if (source) out.set(source.replace(/^\.\//, ''), `@tesseradb/components${subpath === '.' ? '' : subpath.slice(1)}`);
+    const source = typeof target === 'object' ? target['mosaica-source'] : null;
+    if (source) out.set(source.replace(/^\.\//, ''), `@mosaica/components${subpath === '.' ? '' : subpath.slice(1)}`);
   }
   return out;
 }
@@ -187,19 +187,19 @@ function publicMembers(element) {
   return (element.members ?? []).filter((m) => !m.privacy && !m.static && m.name !== 'styles');
 }
 
-/** Each event's `detail` type and description, from `TesseraEventDetails`. */
+/** Each event's `detail` type and description, from `MosaicaEventDetails`. */
 function eventDetails(file) {
   const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
   const out = new Map();
   source.forEachChild((node) => {
-    if (!ts.isTypeAliasDeclaration(node) || node.name.text !== 'TesseraEventDetails' || !ts.isTypeLiteralNode(node.type)) return;
+    if (!ts.isTypeAliasDeclaration(node) || node.name.text !== 'MosaicaEventDetails' || !ts.isTypeLiteralNode(node.type)) return;
     for (const member of node.type.members) {
       if (!ts.isPropertySignature(member) || !member.type) continue;
       const name = member.name.getText(source).replace(/^'|'$/g, '');
       out.set(name, {detail: oneLine(member.type.getText(source)), description: commentText(member)});
     }
   });
-  if (out.size === 0) fail('found no events in TesseraEventDetails.');
+  if (out.size === 0) fail('found no events in MosaicaEventDetails.');
   return out;
 }
 
@@ -229,10 +229,10 @@ function themeTokens(file, elements) {
   return out;
 }
 
-/** `var(--tessera-name, default)` in some CSS, as name to default. */
+/** `var(--mosaica-name, default)` in some CSS, as name to default. */
 function varDefaults(text) {
   const out = new Map();
-  for (const match of text.matchAll(/var\(\s*(--tessera-[a-z0-9-]+)\s*,/g)) {
+  for (const match of text.matchAll(/var\(\s*(--mosaica-[a-z0-9-]+)\s*,/g)) {
     let depth = 1;
     let i = match.index + match[0].length;
     const start = i;
@@ -281,7 +281,7 @@ function tokenNamesInCode(dir) {
   const names = new Set();
   for (const file of readdirSync(dir)) {
     if (!file.endsWith('.ts')) continue;
-    for (const match of readFileSync(join(dir, file), 'utf8').matchAll(/(?:var\(|setProperty\(')\s*(--tessera-[a-z0-9]+(?:-[a-z0-9]+)*)/g)) names.add(match[1]);
+    for (const match of readFileSync(join(dir, file), 'utf8').matchAll(/(?:var\(|setProperty\(')\s*(--mosaica-[a-z0-9]+(?:-[a-z0-9]+)*)/g)) names.add(match[1]);
   }
   return names;
 }
@@ -349,7 +349,7 @@ function eventsPage(events, elements) {
   const lines = [
     '# Events',
     '',
-    "Every event the elements fire, with its `detail`. Each is a `CustomEvent` that bubbles and is composed, so a host listens on the element or on any ancestor. A `tessera_id` crosses as a decimal string. `TesseraEventDetails` in `@tesseradb/components` types every `detail`.",
+    "Every event the elements fire, with its `detail`. Each is a `CustomEvent` that bubbles and is composed, so a host listens on the element or on any ancestor. A `tessera_id` crosses as a decimal string. `MosaicaEventDetails` in `@mosaica/components` types every `detail`.",
     ''
   ];
   for (const [name, {detail, description}] of events) {
@@ -371,7 +371,7 @@ function tokensPage(tokens) {
   const lines = [
     '# Theme tokens',
     '',
-    "The elements take their colours, fonts, corner radius and shadow from these CSS custom properties, and the map its height and the spacing of its corners; other spacing is fixed. Set one on an element or on any ancestor, such as `:root` or an enclosing `<tessera-explorer>`, and the elements inside take it. Where none is set, the default below applies. A colour has a light and a dark default, chosen by the `color-scheme` the element inherits from the page.",
+    "The elements take their colours, fonts, corner radius and shadow from these CSS custom properties, and the map its height and the spacing of its corners; other spacing is fixed. Set one on an element or on any ancestor, such as `:root` or an enclosing `<mosaica-explorer>`, and the elements inside take it. Where none is set, the default below applies. A colour has a light and a dark default, chosen by the `color-scheme` the element inherits from the page.",
     '',
     '## Colours',
     '',
@@ -426,7 +426,7 @@ function tagText(tag) {
 function splitTag(text) {
   const match = /^\s*(--[a-z0-9-]+)\s*-\s*([\s\S]*)$/.exec(text);
   if (!match) {
-    fail(`cannot read the @cssprop tag "${text}"; write it as \`@cssprop --tessera-name - What it sets.\``);
+    fail(`cannot read the @cssprop tag "${text}"; write it as \`@cssprop --mosaica-name - What it sets.\``);
     return {name: text.trim(), description: ''};
   }
   return {name: match[1], description: oneLine(match[2])};

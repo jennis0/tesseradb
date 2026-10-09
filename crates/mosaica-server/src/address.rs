@@ -1,16 +1,16 @@
 //! Rows that address items: a change's `match`, and the member tables of a publication or a
 //! growth. Each row names an item by a `tessera_id` column and a column for each unique field,
 //! and every row of a request is resolved in one call, by the identity rule
-//! ([`tessera_engine::Engine::name_items`]). A row naming no item, or naming two, is refused:
+//! ([`mosaica_engine::Engine::name_items`]). A row naming no item, or naming two, is refused:
 //! listed in the answer with its reason while the rest apply, or, in a strict request, refusing
 //! the request whole. A column that is neither `tessera_id` nor a unique field names nothing and
 //! is ignored, as a build ignores it, and the answer names it.
 
 use std::collections::BTreeMap;
 
-use tessera_engine::{AddressTable, AddressValue};
-use tessera_lifecycle::resolve::{Reason, Verdict};
-use tessera_types::{EntityId, TesseraId};
+use mosaica_engine::{AddressTable, AddressValue};
+use mosaica_lifecycle::resolve::{Reason, Verdict};
+use mosaica_types::{EntityId, TesseraId};
 
 use crate::error::{map_engine_error, ApiError};
 use crate::state::AppState;

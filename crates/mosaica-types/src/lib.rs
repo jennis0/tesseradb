@@ -72,7 +72,7 @@ define_id_newtype!(TermId, u32);
 // close the descriptor collision; only separate types close the call-site one.
 //
 // This is also why the shared format takes a bare `u32` rather than either newtype
-// (`tessera_authz::PostingsReader::posting_at`): typing it in one crate's newtype would force the
+// (`mosaica_authz::PostingsReader::posting_at`): typing it in one crate's newtype would force the
 // other to convert at every call, reintroducing the crossing as boilerplate.
 define_id_newtype!(AttrLocalId, u32);
 define_id_newtype!(Priority, u16);
@@ -121,7 +121,7 @@ pub struct GenerationStamp {
 // makes a bundle at 3 refuse at open rather than open as `none`.
 // 5: an artifact record carries its parents as a list — a `dag` layer's child may name several
 // (`dag-hierarchies.md` §7, decision 0117) — in the record blob's hand-rolled encoding
-// (`tessera_lifecycle::membership`, decision 0077) and in the WAL row. The blob at 4 carried a
+// (`mosaica_lifecycle::membership`, decision 0077) and in the WAL row. The blob at 4 carried a
 // one-byte tag and one parent, so a reader at 5 would decode its first two bytes as a count and
 // read parents out of the shape bytes that follow; the number is what stops it opening.
 // 6: every `views` entry and every `groups` entry carries `point_default`, the view's declared
@@ -161,7 +161,7 @@ pub struct GenerationStamp {
 // 12: a partition holds one term-image file per view, named by the side-manifest's
 // `term_image_extents` and digested with everything else: every authorisation term's base posting
 // projected into that view's row space, which a session unions instead of walking its permutation
-// (`tessera_store::term_images`). An 11 bundle names no such file, and its side-manifest has no
+// (`mosaica_store::term_images`). An 11 bundle names no such file, and its side-manifest has no
 // field to name one in, so a reader at 12 refuses it at the manifest rather than serving every
 // session by the walk with nothing saying why.
 // 13: a term-image table entry records the base posting's entity count beside the image's row

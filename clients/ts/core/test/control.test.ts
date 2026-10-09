@@ -174,8 +174,8 @@ describe('each route', () => {
       expect(sent[0]!.headers).toEqual({
         authorization: 'Bearer op-cred',
         'content-type': 'application/vnd.apache.arrow.stream',
-        'x-tessera-batch-id': 'page-0',
-        'x-tessera-view': 's0'
+        'x-mosaica-batch-id': 'page-0',
+        'x-mosaica-view': 's0'
       });
       expect(answer.batch).toBe('page-0');
       expect(answer.body).toEqual({created: 4});
@@ -185,9 +185,9 @@ describe('each route', () => {
       const sent = recording({status: 200, body: {}});
       const first = await control[route](rows);
       const second = await control[route](rows);
-      expect(sent[0]!.headers).not.toHaveProperty('x-tessera-view');
+      expect(sent[0]!.headers).not.toHaveProperty('x-mosaica-view');
       expect(first.batch).not.toBe(second.batch);
-      expect(sent.map((s) => s.headers['x-tessera-batch-id'])).toEqual([first.batch, second.batch]);
+      expect(sent.map((s) => s.headers['x-mosaica-batch-id'])).toEqual([first.batch, second.batch]);
     });
   }
 });
@@ -205,7 +205,7 @@ describe('an answer', () => {
     const answer = await pending;
     expect(answer).toMatchObject({status: 200, ok: true, attempts: 3, body: {created: 4}});
     expect(sent.map((s) => s.body)).toEqual([rows, rows, rows]);
-    expect(new Set(sent.map((s) => s.headers['x-tessera-batch-id']))).toEqual(new Set([answer.batch]));
+    expect(new Set(sent.map((s) => s.headers['x-mosaica-batch-id']))).toEqual(new Set([answer.batch]));
   });
 
   it('takes the body’s retry_after_s where a 429 has no header', async () => {
@@ -226,7 +226,7 @@ describe('an answer', () => {
     const answer = await pending;
     expect(answer).toMatchObject({status: 429, ok: false, attempts: MAX_ATTEMPTS, body: {error: 'backpressure'}});
     expect(sent).toHaveLength(MAX_ATTEMPTS);
-    expect(new Set(sent.map((s) => s.headers['x-tessera-batch-id'])).size).toBe(1);
+    expect(new Set(sent.map((s) => s.headers['x-mosaica-batch-id'])).size).toBe(1);
   });
 
   for (const [asked, waited] of [

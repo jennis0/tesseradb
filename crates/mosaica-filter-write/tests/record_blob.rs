@@ -13,11 +13,11 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use croaring::{Bitmap, Portable};
 
-use tessera_filter::{
+use mosaica_filter::{
     Access, RecordBlob, RecordError, RecordField, RecordFieldRef, RecordValue, RECORD_BLOCKS_FILE,
     RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
-use tessera_filter_write::RecordBlobWriter;
+use mosaica_filter_write::RecordBlobWriter;
 
 struct Paths {
     blocks: PathBuf,
@@ -716,7 +716,7 @@ fn a_missing_file_refuses_at_open() {
 /// refuses the whole stack rather than downgrading to the layers that opened.
 #[test]
 fn a_stack_of_disjoint_layers_answers_each_from_its_own() {
-    use tessera_filter::{RecordExtentPaths, RecordStack};
+    use mosaica_filter::{RecordExtentPaths, RecordStack};
 
     let dir = tempfile::tempdir().expect("tempdir");
     // Base: ranks 0..8 (entities 3,10,17,...). Extents: two flushes over higher entities that

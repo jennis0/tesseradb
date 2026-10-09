@@ -1,4 +1,4 @@
-//! The two browser seams. See `tessera_server::cors`.
+//! The two browser seams. See `mosaica_server::cors`.
 //!
 //! `serve.dev_cors_origins` is the development affordance: it covers the viewer *and* session
 //! planes, because a browser on a laptop may call `/session/authorise` with an `authorise-as` API key
@@ -32,12 +32,12 @@ const PRODUCTION_ORIGIN: &str = "https://app.example";
 /// §6), without which every region count renders inexact.
 const EXPOSED: [&str; 7] = [
     "etag",
-    "x-tessera-identity-key",
-    "x-tessera-stale",
-    "x-tessera-pin",
-    "x-tessera-server-us",
-    "x-tessera-admission-us",
-    "x-tessera-region",
+    "x-mosaica-identity-key",
+    "x-mosaica-stale",
+    "x-mosaica-pin",
+    "x-mosaica-server-us",
+    "x-mosaica-admission-us",
+    "x-mosaica-region",
 ];
 
 /// Serve a copy of the standard fixture, with the CORS lists as given.
@@ -134,7 +134,7 @@ async fn a_configured_dev_origin_round_trips_with_the_exposed_headers() {
 
     // Without these, `fetch` hides the headers from the page — the timing headers read as "the
     // server emits no timings", and the delta-serving coordinates read as a server that cannot be
-    // replicated against at all. `x-tessera-stage-ns` is retired (contracts §3.2 r26 — the stage
+    // replicated against at all. `x-mosaica-stage-ns` is retired (contracts §3.2 r26 — the stage
     // breakdown rides the trailer frame, in-body and outside CORS's reach) and must NOT reappear.
     let exposed = exposed_headers(&resp);
     for header in EXPOSED {
@@ -144,7 +144,7 @@ async fn a_configured_dev_origin_round_trips_with_the_exposed_headers() {
         );
     }
     assert!(
-        !exposed.contains("x-tessera-stage-ns"),
+        !exposed.contains("x-mosaica-stage-ns"),
         "the retired stage header must not be resurrected in the expose list: {exposed}"
     );
 }
@@ -584,14 +584,14 @@ async fn the_control_plane_never_carries_a_layer() {
 
 // ---- Parse -------------------------------------------------------------------------------------
 
-/// A wildcard is refused where an operator would actually write one: in `tessera.toml`, through
+/// A wildcard is refused where an operator would actually write one: in `mosaica.toml`, through
 /// `config::load`. Enumerated or absent is decision 0102's whole shape, and the alternative to a
 /// refusal is a server that starts, reports nothing, and serves no CORS to the operator who asked
 /// for all of it.
 #[test]
 fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
     let tmp = TempDir::new().unwrap();
-    std::env::set_var("TESSERA_TEST_CORS_OPERATOR", OPERATOR_CREDENTIAL);
+    std::env::set_var("MOSAICA_TEST_CORS_OPERATOR", OPERATOR_CREDENTIAL);
 
     let write = |extra: &str| {
         let text = format!(
@@ -606,17 +606,17 @@ fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
             viewer = "127.0.0.1:7407"
             session = "127.0.0.1:7408"
             control = "127.0.0.1:7409"
-            operator_credential_env = "TESSERA_TEST_CORS_OPERATOR"
+            operator_credential_env = "MOSAICA_TEST_CORS_OPERATOR"
             {extra}
             "#
         );
-        let path = tmp.path().join("tessera.toml");
+        let path = tmp.path().join("mosaica.toml");
         std::fs::write(&path, text).unwrap();
         path
     };
 
     let path = write("cors_origins = [\"*\"]");
-    let err = tessera_config::load(&path).expect_err("a wildcard must refuse to start");
+    let err = mosaica_config::load(&path).expect_err("a wildcard must refuse to start");
     let message = err.to_string();
     assert!(
         message.contains("cors_origins") && message.contains('*'),
@@ -624,7 +624,7 @@ fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
     );
 
     let path = write("dev_cors_origins = [\"*\"]");
-    let err = tessera_config::load(&path).expect_err("a wildcard must refuse to start");
+    let err = mosaica_config::load(&path).expect_err("a wildcard must refuse to start");
     assert!(
         err.to_string().contains("dev_cors_origins"),
         "the development list is enumerated on the same terms: {err}"
@@ -633,6 +633,6 @@ fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
     // The same file with named origins loads, so the test above is about the wildcard and not
     // about the fixture being wrong.
     let path = write("cors_origins = [\"https://app.example\"]");
-    let config = tessera_config::load(&path).expect("named origins must load");
+    let config = mosaica_config::load(&path).expect("named origins must load");
     assert_eq!(config.cors_origins, vec!["https://app.example"]);
 }

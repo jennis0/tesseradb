@@ -19,7 +19,7 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::json;
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation};
+use mosaica_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation};
 
 /// The group's two views. **q1 draws the whole corpus and q2 its first half**, so a per-view
 /// answer — the complement of an exclusion, above all — is a different number in each and a
@@ -50,7 +50,7 @@ fn build_group(
     let gate = |slot: usize| (gate_first_view && slot == 0).then(|| vec!["1".to_string()]);
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ITEMS);
-    let mut views: Vec<tessera_build::ViewArgs> = KEYS
+    let mut views: Vec<mosaica_build::ViewArgs> = KEYS
         .iter()
         .enumerate()
         .map(|(slot, key)| {
@@ -59,7 +59,7 @@ fn build_group(
             let place = |e: u64| (((e * 7) % 900) as f64 + offset, ((e * 11) % 900) as f64);
             let ids: Vec<u64> = (0..IN_VIEW[slot]).collect();
             write_points(&points, &ids, place, Vec::new());
-            tessera_build::ViewArgs {
+            mosaica_build::ViewArgs {
                 visibility: gate(slot),
                 ..view_args(
                     &format!("quarter:{key}"),
@@ -91,7 +91,7 @@ fn build_group(
             members_of: members_of.map(str::to_string),
             scoped_scalars: Vec::new(),
             quantisation: frame,
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             metadata: Vec::new(),
             views: vec![GroupViewDescriptor {
                 key: "q2".to_string(),
@@ -111,7 +111,7 @@ fn build_group(
             members_of: None,
             scoped_scalars: Vec::new(),
             quantisation: frame,
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             metadata: Vec::new(),
             views: KEYS
                 .iter()
@@ -1049,8 +1049,8 @@ async fn ingest_right_of_the_shape(server: &TestServer, view: &str, batch_id: &s
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&rows))
         .send()

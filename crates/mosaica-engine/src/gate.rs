@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use rustc_hash::FxHashSet;
-use tessera_store::manifest::Manifest;
+use mosaica_store::manifest::Manifest;
 
 /// The views and the groups one session may reach (`views.md` §6) — resolved at authorise and
 /// never re-evaluated within the session.
@@ -47,7 +47,7 @@ pub struct VisibleViews {
 
 /// The probe made for a name that resolved to no view at all, so that the set lookup happens on
 /// **both** outcomes and a gate-failed name and a never-declared one cost the same work. A view id
-/// is never empty — `tessera_types::view::check_view_key` refuses it at every door — so this
+/// is never empty — `mosaica_types::view::check_view_key` refuses it at every door — so this
 /// probes the set and cannot hit.
 pub(crate) const NO_SUCH_VIEW: &str = "";
 
@@ -94,7 +94,7 @@ pub(crate) fn resolve<'m>(
         let Some(labels) = labels else { return true };
         *memo
             .entry(labels)
-            .or_insert_with(|| tessera_access::admits(labels, &held))
+            .or_insert_with(|| mosaica_access::admits(labels, &held))
     };
 
     let mut groups: FxHashSet<String> = FxHashSet::default();
@@ -112,7 +112,7 @@ pub(crate) fn resolve<'m>(
                 format!(
                     "{}{}{}",
                     group.name,
-                    tessera_store::GROUP_SEPARATOR,
+                    mosaica_store::GROUP_SEPARATOR,
                     view.key
                 ),
                 group.name.as_str(),

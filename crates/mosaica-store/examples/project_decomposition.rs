@@ -38,16 +38,16 @@
 //!   stays in L2 while the write cursors stay in L1.
 //! - **F — E, emitting containers directly.** Same first pass; the second hands croaring finished
 //!   containers in the portable format instead of re-expanding them to `u32` for `add_many`. The
-//!   encoder here **mirrors `tessera-filter::pack::Sink`**, which already does exactly this in the
+//!   encoder here **mirrors `mosaica-filter::pack::Sink`**, which already does exactly this in the
 //!   filter write path and carries the reviewability argument for it. Landing F means lifting that
-//!   module to a crate `tessera-store` may depend on — not writing a second encoder.
+//!   module to a crate `mosaica-store` may depend on — not writing a second encoder.
 //!
 //! Also measured: what the kernel is told about the 4 GB slot mapping. It is the one large mapping
 //! in the tree carrying no `madvise` at all.
 //!
 //! Run:
 //! ```text
-//! cargo run --release --example project_decomposition -p tessera-store -- \
+//! cargo run --release --example project_decomposition -p mosaica-store -- \
 //!     [--entities N] [--grant F] [--shape scattered|identity] [--reps N] [--dir PATH]
 //! ```
 //! At 10⁹ the permutation file is 4 GB on disk and mapped; the process peaks around 11 GB.
@@ -60,11 +60,11 @@ use croaring::{Bitmap, Portable};
 use memmap2::Mmap;
 use rayon::prelude::*;
 
-use tessera_store::write::PermutationWriter;
-use tessera_store::Permutation;
-use tessera_types::{EntityId, ROW_ABSENT};
+use mosaica_store::write::PermutationWriter;
+use mosaica_store::Permutation;
+use mosaica_types::{EntityId, ROW_ABSENT};
 
-/// `permutation.bin`'s header: `"TSPM"` ‖ u16 version ‖ u16 reserved ‖ u64 bound (R4).
+/// `permutation.bin`'s header: `"MSPM"` ‖ u16 version ‖ u16 reserved ‖ u64 bound (R4).
 const HEADER_LEN: usize = 16;
 const DEFAULT_ENTITIES: u64 = 1_000_000_000;
 const DEFAULT_GRANT: f64 = 0.25;
@@ -494,7 +494,7 @@ fn fused_bucketed(slots: &[u32], mask: &Bitmap, row_bound: u32) -> Bitmap {
     out
 }
 
-/// Mirror of `tessera-filter::pack::Sink` — the portable-format encoder that already exists in the
+/// Mirror of `mosaica-filter::pack::Sink` — the portable-format encoder that already exists in the
 /// filter write path, reproduced here only because it is `pub(crate)` there.
 ///
 /// Faithful to it in the two places that decide correctness: the payload encoding is chosen from
@@ -590,7 +590,7 @@ impl Sink {
 fn fused_packed_shared(slots: &[u32], mask: &Bitmap, row_bound: u32) -> Bitmap {
     let buckets = bucketise(slots, mask, row_bound);
     let mut stamp = vec![0u64; (1usize << BUCKET_SHIFT) / 64];
-    let mut sink = tessera_roaring::Sink::new();
+    let mut sink = mosaica_roaring::Sink::new();
     for (b, rows) in buckets.iter().enumerate() {
         if rows.is_empty() {
             continue;
@@ -726,7 +726,7 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
     let dir = PathBuf::from(
-        arg(&args, "--dir").unwrap_or_else(|| "/tmp/tessera-project-decomp".to_string()),
+        arg(&args, "--dir").unwrap_or_else(|| "/tmp/mosaica-project-decomp".to_string()),
     );
     std::fs::create_dir_all(&dir).expect("the probe directory");
 

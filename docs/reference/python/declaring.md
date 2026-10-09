@@ -4,52 +4,52 @@ Declaring says what a database holds: its views, columns, vocabularies and annot
 
 ## Database
 
-::: tesseradb._database.Database.declare_view
+::: mosaica._database.Database.declare_view
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declare_view_group
+::: mosaica._database.Database.declare_view_group
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declare_attribute
+::: mosaica._database.Database.declare_attribute
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declare_unique
+::: mosaica._database.Database.declare_unique
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declare_vocabulary
+::: mosaica._database.Database.declare_vocabulary
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declare_columns
+::: mosaica._database.Database.declare_columns
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declare_layer
+::: mosaica._database.Database.declare_layer
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declare_labels
+::: mosaica._database.Database.declare_labels
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declare
+::: mosaica._database.Database.declare
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.declaration
+::: mosaica._database.Database.declaration
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.write
+::: mosaica._database.Database.write
     options:
       heading_level: 3
 
-::: tesseradb._reports.Declared
+::: mosaica._reports.Declared
     options:
       show_bases: false
 
-::: tesseradb._columns.DeclaredColumn
+::: mosaica._columns.DeclaredColumn

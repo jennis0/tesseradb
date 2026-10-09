@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {tableToIPC, Table} from 'apache-arrow';
-import {TesseraClient} from '../src/client.js';
+import {MosaicaClient} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {inlineDecoder} from '../src/decoder.js';
 import type {ViewportCounts, ViewportPart} from '../src/types.js';
@@ -63,12 +63,12 @@ function bodyBytes(stageNs?: string, subCells = false): Uint8Array {
   ]);
 }
 
-const HEADERS = {etag: '"c1"', 'x-tessera-identity-key': 'i1'};
+const HEADERS = {etag: '"c1"', 'x-mosaica-identity-key': 'i1'};
 
 const client = () =>
-  new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()});
+  new MosaicaClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()});
 
-const ask = (c: TesseraClient, onPart: (p: ViewportPart) => void, signal?: AbortSignal) =>
+const ask = (c: MosaicaClient, onPart: (p: ViewportPart) => void, signal?: AbortSignal) =>
   c.viewport('tok', {view: 's0', zoom: 4, k: 100}, {signal, onPart});
 
 afterEach(() => vi.unstubAllGlobals());

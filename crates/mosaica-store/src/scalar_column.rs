@@ -26,7 +26,7 @@ use arrow::array::{
 };
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, TimeUnit};
-use tessera_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_spatial::tiler::{ScalarType, ScalarValue};
 
 use crate::utf8::{is_utf8, Utf8Values};
 

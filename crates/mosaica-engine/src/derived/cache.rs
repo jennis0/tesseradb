@@ -1,7 +1,7 @@
 //! The derived-geometry cache: one artifact's centroid, box and hull, held per principal.
 //!
 //! The mechanism, the byte bound, LRU eviction, the per-entry floor and the single-flight slot, is
-//! [`tessera_cache::SingleFlightCache`]. What lives here is the key, the weight and the pruners.
+//! [`mosaica_cache::SingleFlightCache`]. What lives here is the key, the weight and the pruners.
 //!
 //! A derived property is a function of `membership ∩ M_auth` and of nothing else, so every term of
 //! the key is a reason that visible set or the artifact's membership moved: `token_id`, since a
@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use tessera_cache::{CacheWeight, SingleFlightCache};
+use mosaica_cache::{CacheWeight, SingleFlightCache};
 
 use crate::derived::{ComputedProperty, DerivedContent};
 
@@ -280,7 +280,7 @@ mod tests {
         cache.prune_token(1);
         let stats = cache.stats();
         assert_eq!(stats.entries, 1);
-        assert_eq!(stats.resident_bytes, tessera_cache::PER_ENTRY_FLOOR_BYTES);
+        assert_eq!(stats.resident_bytes, mosaica_cache::PER_ENTRY_FLOOR_BYTES);
     }
 
     /// A second caller arriving while a key is being derived derives its own rather than waiting.

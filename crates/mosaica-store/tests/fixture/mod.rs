@@ -14,17 +14,17 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use tessera_spatial::fixed32;
-use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_store::manifest::{
+use mosaica_spatial::fixed32;
+use mosaica_spatial::tiler::{sort_batch, TilerItem};
+use mosaica_store::manifest::{
     CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
-use tessera_store::permutation::SegmentExtent;
-use tessera_store::read::SegmentData;
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::{write_flush_segment, Bundle, FlushInput, FlushRow};
-use tessera_types::{EntityId, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_store::permutation::SegmentExtent;
+use mosaica_store::read::SegmentData;
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{write_flush_segment, Bundle, FlushInput, FlushRow};
+use mosaica_types::{EntityId, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 pub const PARTITION: &str = "default";
 pub const VIEW: &str = "main";
@@ -84,7 +84,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         format!("partitions/{PARTITION}/views/{VIEW}/permutation.bin"),
         file_digest(&view_dir.join("permutation.bin")),
     );
-    for name in tessera_store::SEGMENT_FILES {
+    for name in mosaica_store::SEGMENT_FILES {
         files.insert(
             format!("partitions/{PARTITION}/views/{VIEW}/segments/seg0/{name}"),
             file_digest(&seg_dir.join(name)),
@@ -117,7 +117,7 @@ pub fn build_bundle(root: &Path, n: u64) {
     .expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: tessera_types::BUNDLE_FORMAT,
+        bundle_format: mosaica_types::BUNDLE_FORMAT,
         created_at: "2026-08-02T00:00:00Z".to_string(),
         declared_scalars: vec![],
         vocabularies: vec![],
@@ -143,7 +143,7 @@ pub fn build_bundle(root: &Path, n: u64) {
                 y_min: 0.0,
                 y_max: 1.0,
             },
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: PARTITION.to_string(),
@@ -227,7 +227,7 @@ pub fn flush_segment(
         &seg_dir,
         &seg_id,
         out.segment.row_count,
-        tessera_store::edited::RowEntities::Numbers,
+        mosaica_store::edited::RowEntities::Numbers,
     )
     .expect("the flushed segment opens");
     (segment, out.extent)

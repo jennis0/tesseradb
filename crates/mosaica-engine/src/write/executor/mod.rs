@@ -69,7 +69,7 @@ pub(super) struct Executor {
     /// What every accepted write since the last tick did to each level's row forms.
     pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
     #[cfg(feature = "fault-injection")]
-    pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
+    pub(super) faults: Option<Arc<mosaica_lifecycle::faults::FaultSwitchboard>>,
 }
 
 /// Why a tick fired: `due` is the period or the buffered-row count, `period_due` the period alone.
@@ -419,14 +419,14 @@ impl Executor {
             .record_apply(started.elapsed().as_nanos() as u64);
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
-            faults.record(tessera_lifecycle::faults::Step::Swap);
+            faults.record(mosaica_lifecycle::faults::Step::Swap);
         }
     }
 
     /// Reach an armed pause site, if any; a no-op outside fault-injection builds.
     #[cfg(feature = "fault-injection")]
     pub(super) fn pause_point(&self, site: PauseSiteArg) {
-        use tessera_lifecycle::faults::PauseAction;
+        use mosaica_lifecycle::faults::PauseAction;
         let Some(faults) = &self.faults else { return };
         match faults.pause_point(site) {
             None | Some(PauseAction::Stall) => {}
@@ -440,10 +440,10 @@ impl Executor {
     pub(super) fn pause_point(&self, _site: PauseSiteArg) {}
 }
 
-/// So call sites read the same in both builds: [`tessera_lifecycle::faults::PauseSite`] here, a
+/// So call sites read the same in both builds: [`mosaica_lifecycle::faults::PauseSite`] here, a
 /// stand-in in a shipped build.
 #[cfg(feature = "fault-injection")]
-pub(super) type PauseSiteArg = tessera_lifecycle::faults::PauseSite;
+pub(super) type PauseSiteArg = mosaica_lifecycle::faults::PauseSite;
 
 #[cfg(not(feature = "fault-injection"))]
 #[derive(Debug, Clone, Copy)]

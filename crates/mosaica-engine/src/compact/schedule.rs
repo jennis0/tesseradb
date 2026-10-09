@@ -10,7 +10,7 @@ pub struct CompactionSchedule {
     /// Wraps past midnight. Zero never opens the window and a day or more never closes it.
     pub window_secs: u32,
     pub window_min_segments: usize,
-    /// Must sit above `window_min_segments` where both are set; `tessera-server` refuses
+    /// Must sit above `window_min_segments` where both are set; `mosaica-server` refuses
     /// otherwise.
     pub max_segments: Option<usize>,
     pub after_deletions: Option<u64>,
@@ -21,7 +21,7 @@ pub struct CompactionSchedule {
 }
 
 impl CompactionSchedule {
-    /// Every route off. `tessera-server` applies its own defaults.
+    /// Every route off. `mosaica-server` applies its own defaults.
     pub fn off() -> Self {
         CompactionSchedule {
             min_interval_secs: 0,

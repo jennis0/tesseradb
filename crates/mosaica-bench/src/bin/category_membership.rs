@@ -34,11 +34,11 @@
 //! shape. Composition adds an `andnot` per generation rather than per value, so it does not move
 //! the conclusion, but these figures are a floor.
 //!
-//! Self-contained, like its sibling bins: `tessera-bench` has no lib target, so the three helpers
+//! Self-contained, like its sibling bins: `mosaica-bench` has no lib target, so the three helpers
 //! it would otherwise borrow from `corpus`/`metrics`/`postings` are inlined below.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin category_membership -- <bundle root> [column]
+//! cargo run --release -p mosaica-bench --bin category_membership -- <bundle root> [column]
 //! ```
 
 use std::collections::BTreeMap;
@@ -47,13 +47,13 @@ use std::time::Instant;
 
 use croaring::{Bitmap, Portable};
 
-use tessera_authz::{PostingRef, PostingsReader};
-use tessera_store::manifest::Manifest;
-use tessera_store::permutation::Permutation;
-use tessera_store::read::{ColumnsRef, ScalarSlice};
-use tessera_types::{EntityId, TermId};
+use mosaica_authz::{PostingRef, PostingsReader};
+use mosaica_store::manifest::Manifest;
+use mosaica_store::permutation::Permutation;
+use mosaica_store::read::{ColumnsRef, ScalarSlice};
+use mosaica_types::{EntityId, TermId};
 
-/// One term's postings as an owned bitmap — `tessera_bench::postings::to_bitmap`, inlined.
+/// One term's postings as an owned bitmap — `mosaica_bench::postings::to_bitmap`, inlined.
 /// The tag-0 path copies, so this is setup-only and never appears in a timed loop.
 fn to_bitmap(postings: &PostingsReader, term: TermId) -> Bitmap {
     let Some(posting) = postings.posting(term).expect("posting") else {
@@ -76,7 +76,7 @@ fn to_bitmap(postings: &PostingsReader, term: TermId) -> Bitmap {
     }
 }
 
-/// Containers a bitmap touches — `tessera_bench::metrics::containers`, inlined. Roaring iteration
+/// Containers a bitmap touches — `mosaica_bench::metrics::containers`, inlined. Roaring iteration
 /// is ascending, so a change in the high half is a new container and no set is needed.
 fn containers(bitmap: &Bitmap) -> u64 {
     let mut count = 0u64;

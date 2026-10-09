@@ -1,10 +1,10 @@
 //! `PairsParquetWriter::push_iter` and the wiring between compaction's term sweep
-//! (`tessera_authz::term_sweep`, pass 2) and `terms/pairs.parquet` (contracts §2.4).
+//! (`mosaica_authz::term_sweep`, pass 2) and `terms/pairs.parquet` (contracts §2.4).
 //!
-//! The sweep itself — the union, the subtraction, the tag boundary — is `tessera-authz`'s to test
-//! (`crates/tessera-authz/tests/term_sweep.rs`); this file covers only what could not be tested
+//! The sweep itself — the union, the subtraction, the tag boundary — is `mosaica-authz`'s to test
+//! (`crates/mosaica-authz/tests/term_sweep.rs`); this file covers only what could not be tested
 //! there: the two things that live on this side of the crate boundary because this crate holds the
-//! Parquet writer and `tessera-authz` may not depend on it (`scripts/check-layers.sh`).
+//! Parquet writer and `mosaica-authz` may not depend on it (`scripts/check-layers.sh`).
 
 use std::fs::File;
 use std::path::Path;
@@ -15,12 +15,12 @@ use arrow::record_batch::RecordBatch;
 use croaring::Bitmap;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use tessera_authz::{
+use mosaica_authz::{
     sweep_term_postings, write_delta_tier, write_postings, DeltaTier, PostingRef, PostingsReader,
     PostingsSpool,
 };
-use tessera_store::PairsParquetWriter;
-use tessera_types::TermId;
+use mosaica_store::PairsParquetWriter;
+use mosaica_types::TermId;
 
 const THRESHOLD: u32 = 4;
 

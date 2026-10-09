@@ -5,21 +5,21 @@
 //! root.
 //!
 //! Engine-level rather than over HTTP, for `artifact_filter_bit.rs`'s reason: the subject is what
-//! is computed inside the trust boundary; the wire's column shapes are `tessera-server`'s tests.
+//! is computed inside the trust boundary; the wire's column shapes are `mosaica-server`'s tests.
 
 mod common;
 
 use std::collections::BTreeMap;
 
 use common::*;
-use tessera_corpus::Corpus;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportArtifactsRequest};
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_corpus::Corpus;
+use mosaica_engine::{ArtifactOut, Engine, LayerSelection, ViewportArtifactsRequest};
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, LevelDeclaration,
     MembershipSource,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const N: u64 = 3_000;
 const SEED: u64 = 0x5EED;
@@ -37,7 +37,7 @@ fn declaration(name: &str, kind: HierarchyKind, prune_children: bool) -> LayerDe
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind,

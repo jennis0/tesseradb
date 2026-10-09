@@ -31,7 +31,7 @@
 
 use std::collections::BTreeMap;
 
-use tessera_types::view::{
+use mosaica_types::view::{
     check_view_key, CreatedView, DeadIncarnation, GroupMetadataField, ViewIncarnation,
     ViewMetadataType, ViewMetadataValue, DECLARED_INCARNATION,
 };
@@ -334,7 +334,7 @@ impl ViewRoster {
         &self,
         group: &str,
         key: &str,
-        deleted: Vec<tessera_types::EntityId>,
+        deleted: Vec<mosaica_types::EntityId>,
     ) -> Result<WalRecord, RosterError> {
         let Some(incarnation) = self.incarnation_of(group, key) else {
             // A dropped key and a key that never existed are the same answer, and deliberately:

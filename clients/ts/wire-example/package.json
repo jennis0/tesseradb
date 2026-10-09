@@ -1,5 +1,5 @@
 {
-  "name": "@tesseradb/wire-example",
+  "name": "@mosaica/wire-example",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",

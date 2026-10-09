@@ -9,9 +9,9 @@
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use tessera_store::manifest::Visibility;
-use tessera_store::read::ScalarSlice;
-use tessera_store::vocabulary::ABSENT_CODE;
+use mosaica_store::manifest::Visibility;
+use mosaica_store::read::ScalarSlice;
+use mosaica_store::vocabulary::ABSENT_CODE;
 
 use super::set::{Cx, Set};
 use super::table::{Groups, Key};
@@ -328,7 +328,7 @@ fn sizes(codes: &[u32], set: &Counts, reference: Option<&Counts>) -> Vec<(u64, u
 /// without the column count as no value.
 fn tally_rows(
     set: CellSet<'_>,
-    segments: &[(&tessera_store::read::SegmentData, u32)],
+    segments: &[(&mosaica_store::read::SegmentData, u32)],
     column: &str,
 ) -> Counts {
     let pieces = pieces(segments);
@@ -376,7 +376,7 @@ fn tally_rows(
 /// The view's rows cut into pieces of at most [`PIECE_ROWS`], each within one segment: the segment's
 /// position in `segments`, and the piece's rows in view row space.
 pub(super) fn pieces(
-    segments: &[(&tessera_store::read::SegmentData, u32)],
+    segments: &[(&mosaica_store::read::SegmentData, u32)],
 ) -> Vec<(usize, std::ops::Range<u32>)> {
     segments
         .iter()

@@ -1,15 +1,15 @@
-//! `docs/reference/tessera-toml.md`, rendered from the doc comments in `lib.rs`.
+//! `docs/reference/mosaica-toml.md`, rendered from the doc comments in `lib.rs`.
 //!
 //! The page is committed so the documentation site builds without cargo. The first test below
 //! renders it again and fails when the committed copy differs. After changing a key or its doc
 //! comment, regenerate the page with:
 //!
 //! ```text
-//! TESSERA_WRITE_CONFIG_REFERENCE=1 cargo test -p tessera-config config_reference
+//! MOSAICA_WRITE_CONFIG_REFERENCE=1 cargo test -p mosaica-config config_reference
 //! ```
 //!
 //! Each table of the file is a field of `RawConfig`, and each row a field of that table's struct,
-//! described by its doc comment as `tessera_docgen` reads one. The other tests hold the page to
+//! described by its doc comment as `mosaica_docgen` reads one. The other tests hold the page to
 //! `parse`: it lists exactly the keys `parse` accepts, each default it writes as a TOML value
 //! parses to the same `Config` as leaving the key out, and each key it calls required is refused
 //! when absent.
@@ -17,12 +17,12 @@
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-use tessera_docgen::{Doc, Key, Source, TABLE_HEADER};
+use mosaica_docgen::{Doc, Key, Source, TABLE_HEADER};
 
 use super::*;
 
 const REGENERATE: &str =
-    "TESSERA_WRITE_CONFIG_REFERENCE=1 cargo test -p tessera-config config_reference";
+    "MOSAICA_WRITE_CONFIG_REFERENCE=1 cargo test -p mosaica-config config_reference";
 
 /// The smallest file `parse` accepts.
 const MINIMAL: &str = "\
@@ -75,10 +75,10 @@ fn render() -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "<!-- Generated from crates/tessera-config/src/lib.rs. Edit the doc comments there, then \
+        "<!-- Generated from crates/mosaica-config/src/lib.rs. Edit the doc comments there, then \
          run: {REGENERATE} -->\n"
     );
-    out.push_str("# tessera.toml\n\n");
+    out.push_str("# mosaica.toml\n\n");
     let _ = writeln!(out, "{}", intro.markdown());
     let mut problems = Vec::new();
     for section in &sections {
@@ -151,10 +151,10 @@ fn refusal(text: &str) -> String {
 
 #[test]
 fn config_reference_matches_the_source() {
-    tessera_docgen::check_page(
-        Path::new(&crate_file("../../docs/reference/tessera-toml.md")),
+    mosaica_docgen::check_page(
+        Path::new(&crate_file("../../docs/reference/mosaica-toml.md")),
         &render(),
-        "TESSERA_WRITE_CONFIG_REFERENCE",
+        "MOSAICA_WRITE_CONFIG_REFERENCE",
         REGENERATE,
     );
 }
@@ -164,14 +164,14 @@ fn the_reference_lists_the_keys_parse_accepts() {
     let (_, sections) = sections();
     let mut tables: Vec<String> = sections.iter().map(|s| s.name.clone()).collect();
     tables.sort();
-    let accepted = tessera_docgen::accepted_keys(&refusal(&format!("nonesuch = 1\n{MINIMAL}")));
+    let accepted = mosaica_docgen::accepted_keys(&refusal(&format!("nonesuch = 1\n{MINIMAL}")));
     assert_eq!(accepted, Some(tables), "the file's tables");
 
     for section in &sections {
         let probe = with_line(MINIMAL, &section.name, "nonesuch = 1");
         let mut keys: Vec<String> = section.keys.iter().map(|k| k.name.clone()).collect();
         keys.sort();
-        let accepted = tessera_docgen::accepted_keys(&refusal(&probe));
+        let accepted = mosaica_docgen::accepted_keys(&refusal(&probe));
         assert_eq!(accepted, Some(keys), "[{}]", section.name);
     }
 }
@@ -247,7 +247,7 @@ fn each_default_stated_in_words_is_the_one_parse_applies() {
     assert_eq!(config.compute_queue, 8 * cpus, "compute_queue");
     assert_eq!(config.artifact_admission, cpus, "artifact_admission");
     assert_eq!(config.max_merged_segment_bytes, None);
-    let merge_cap = tessera_engine::DEFAULT_MAX_MERGED_SEGMENT_BYTES.to_string();
+    let merge_cap = mosaica_engine::DEFAULT_MAX_MERGED_SEGMENT_BYTES.to_string();
     assert!(
         key("serve", "max_merged_segment_bytes")
             .default_column()
@@ -258,7 +258,7 @@ fn each_default_stated_in_words_is_the_one_parse_applies() {
     assert_eq!(followed.compaction.after_deletions, Some(7));
 
     // Stated in descriptions, and held to the code here too.
-    let shape_cap = tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES.to_string();
+    let shape_cap = mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES.to_string();
     assert!(
         key("serve", "max_shape_vertices")
             .description()

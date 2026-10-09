@@ -640,7 +640,7 @@ pub(crate) type MappedU32 = MappedArray<u32>;
 ///
 /// What stays behind is what only a build has: [`boundaries_from_histogram`] and the Morton
 /// routing above it, for a key no engine partitions on.
-pub(crate) use tessera_store::partition::{
+pub(crate) use mosaica_store::partition::{
     boundaries_uniform, mix64, partition_buffer_bytes, read_bucket, Partition, PartitionStore,
     SPILL_BUF_BYTES,
     SpillReceipt, SpillWriter, PARTITION_BUCKETS, PARTITION_BUCKET_RECORDS,
@@ -659,7 +659,7 @@ fn pack_pair(term: u32, entity: u32) -> u64 {
 /// Owns `<out>/.build-tmp/` for the duration of one build.
 ///
 /// **A pre-existing `.build-tmp/` is deleted at creation, not adopted.** The directory is
-/// exclusively build-owned transient state: nothing but a running `tessera build` ever writes
+/// exclusively build-owned transient state: nothing but a running `mosaica build` ever writes
 /// there, no manifest ever names a file inside it, and its contents are meaningless outside
 /// the run that wrote them (their receipts live only in that process's memory). So a directory
 /// found at creation can only be the leavings of a previous build that died without cleanup —

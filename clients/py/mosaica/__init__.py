@@ -1,13 +1,13 @@
-"""Tessera's Python package: read a Tessera database, map it in a notebook, and make one.
+"""Mosaica's Python package: read a Mosaica database, map it in a notebook, and make one.
 
 `connect` reads a database someone else runs, with a token from `login`, from `authorise`, or
 from its operator. `Control` writes to one and manages its principals, credentials, groups,
 grants, OIDC providers and sessions. `create` makes one in a directory from data frames and
 files, and `open` reopens one. Every table the package returns is a pyarrow table, whose
-`.to_pandas()` gives a pandas DataFrame where pandas is installed. `pip install tesseradb[widget]`
+`.to_pandas()` gives a pandas DataFrame where pandas is installed. `pip install mosaica[widget]`
 adds the notebook map, `Map`.
 
-`Map`, `create`, `open` and `Database` are loaded when first used, so `import tesseradb` works
+`Map`, `create`, `open` and `Database` are loaded when first used, so `import mosaica` works
 without anywidget or pyarrow.
 """
 
@@ -50,7 +50,7 @@ def __getattr__(name: str):
             from .widget import Map
         except ImportError as e:
             raise ImportError(
-                "tesseradb.Map needs the widget extra: pip install 'tesseradb[widget]'"
+                "mosaica.Map needs the widget extra: pip install 'mosaica[widget]'"
             ) from e
         return Map
     if name in _SDK:

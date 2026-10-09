@@ -31,7 +31,7 @@ TERMS_PER_LEVEL = 65_536
 #: layer mints one artifact per distinct value. One layer, ten million artifacts, over a corpus a
 #: hundred times smaller than the one that would otherwise be needed.
 #:
-#: It has **no census**: nothing in `tessera-corpus` states this relation, so the ceiling probe
+#: It has **no census**: nothing in `mosaica-corpus` states this relation, so the ceiling probe
 #: reports latency and residency and claims nothing about correctness. That is why it is a separate
 #: build rather than a sixth layer on the tier bundles — a layer with no oracle should not sit
 #: beside five that have one.
@@ -52,7 +52,7 @@ require_member_visibility = "none"
 def drop_layer_blocks(config: str, names: list[str]) -> str:
     """Remove named `[[layer]]` blocks from a declaration.
 
-    **Why a tier would want this.** `tessera build` at 2.5×10⁸ points over the whole generator
+    **Why a tier would want this.** `mosaica build` at 2.5×10⁸ points over the whole generator
     declaration reaches ~44–47 GB resident and is OOM-killed on a 47 GB box, and it does so whether
     the memory budget is auto-derived or set explicitly to 12 GB — the flag does not bound the peak
     (the README's finding 4). The two arms that carry almost all of the member rows are
@@ -120,7 +120,7 @@ def main() -> None:
     ap.add_argument(
         "--memory-budget",
         default=None,
-        help="`tessera build --memory-budget`, e.g. `12g`. **Needed above about 10^8 points on a "
+        help="`mosaica build --memory-budget`, e.g. `12g`. **Needed above about 10^8 points on a "
              "47 GB box**: the automatic derivation takes 80%% of MemAvailable and models the "
              "batch loop's own structures, and at 2.5x10^8 over this declaration the real peak ran "
              "past it — the build was OOM-killed at 47.3 GB after 24 minutes with no budget given.",
@@ -187,7 +187,7 @@ def main() -> None:
     C.write_deployment(work, ports)
 
     build_argv = ["/usr/bin/time", "-f", "%e %M", str(C.CLI), "build",
-                  "--deployment", str(work / "tessera.toml")]
+                  "--deployment", str(work / "mosaica.toml")]
     if args.memory_budget:
         build_argv += ["--memory-budget", args.memory_budget]
     proc = subprocess.run(

@@ -1,7 +1,7 @@
 use croaring::Bitmap;
-use tessera_spatial::morton::unsplit32;
-use tessera_store::read::SegmentData;
-use tessera_types::MortonCode;
+use mosaica_spatial::morton::unsplit32;
+use mosaica_store::read::SegmentData;
+use mosaica_types::MortonCode;
 
 /// One segment's positions over its stretch of the view's rows: `[row_base, row_base + len)`,
 /// where `len` is the shorter of its two position columns, cut short at the next segment's base.

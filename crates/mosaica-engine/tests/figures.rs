@@ -26,16 +26,16 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::{AccessInput, AccessSource};
-use tessera_build::BuildArgs;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, Session};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth, UnallocatedRow};
-use tessera_types::layer::{
+use mosaica_build::config::{AccessInput, AccessSource};
+use mosaica_build::BuildArgs;
+use mosaica_engine::{ArtifactOut, Engine, LayerSelection, Session};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth, UnallocatedRow};
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const N: u64 = 1_200;
 /// A partition: item `e` is in artifact `e % 24`, served from a label column.
@@ -207,7 +207,7 @@ fn declaration(name: &str, layout: ServingLayout) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: Some(ExistenceCriterion::Count(1)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -266,10 +266,10 @@ impl Fixture {
         write_points(&points, corpus);
         let schema = id_schema();
         let args = BuildArgs {
-            views: vec![tessera_build::ViewArgs {
+            views: vec![mosaica_build::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 extent: extent(),
                 points: points.clone(),
                 point_fields: Default::default(),
@@ -282,7 +282,7 @@ impl Fixture {
             anchor: 0,
             groups: Vec::new(),
             scoped_attributes: Vec::new(),
-            attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+            attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
             out: root.clone(),
             limit: None,
             strict: false,
@@ -297,7 +297,7 @@ impl Fixture {
             band_rows: None,
             schema,
         };
-        tessera_build::build(&args).expect("the corpus builds");
+        mosaica_build::build(&args).expect("the corpus builds");
         let entity: BTreeMap<u64, EntityId> = source_to_new_map(&root, "v00000")
             .into_iter()
             .map(|(s, e)| (s, EntityId::new(e)))
@@ -471,7 +471,7 @@ fn served(engine: &Engine, session: &Session) -> Vec<ArtifactOut> {
     engine
         .viewport_artifacts(
             session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(&[FLAT, LIST])),
         )
         .expect("a viewport naming the layers")
@@ -835,7 +835,7 @@ fn a_restart_reads_the_counts_and_the_denied_labels_back() {
         check(&fx, &engine, "before the restart");
         // The writes are off the request path; they are all on disk once the worker has run them.
         engine.figures_settled_for_test();
-        let dir = fx.cache.join(tessera_engine::figures::FIGURES_DIR);
+        let dir = fx.cache.join(mosaica_engine::figures::FIGURES_DIR);
         assert!(files_under(&dir, "counts") >= 2 * fx.corpus.principals().len());
         assert!(files_under(&dir, "denied") >= 2);
     }

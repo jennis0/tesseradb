@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest';
-import type {TesseraClient} from '../src/client.js';
+import type {MosaicaClient} from '../src/client.js';
 import {tileRectOfBbox} from '../src/budget.js';
 import {WORLD_SIZE, dataToWorldXY, mortonOfTile, tileXY} from '../src/coords.js';
 import {createStore, type Store} from '../src/store.js';
@@ -36,7 +36,7 @@ async function shown(reply: (req: Asked) => ViewportResponse | Promise<ViewportR
   const clock = fakeClock();
   const scheduler = fakeScheduler();
   const viewport = vi.fn(async (_t: string, req: Asked) => ({...(await reply(req)), region: null}));
-  const client = {meta: async () => META, viewport, viewportArtifacts: async () => ({}), close: () => {}} as unknown as TesseraClient;
+  const client = {meta: async () => META, viewport, viewportArtifacts: async () => ({}), close: () => {}} as unknown as MosaicaClient;
   const store = createStore({viewerUrl: 'http://v', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs, ...(cacheBytes === undefined ? {} : {cacheBytes})}});
   await clock.advance(1);
   store.setView(camera(Q, [0, 0, 100, 200], 400, 400));

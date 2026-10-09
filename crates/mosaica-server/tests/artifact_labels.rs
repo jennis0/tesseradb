@@ -199,10 +199,10 @@ async fn viewport_bytes(server: &TestServer, token: &str, body: serde_json::Valu
 /// The tile route's answer to the same request, without the trailer, which carries timings.
 async fn artifacts_bytes(server: &TestServer, token: &str, body: serde_json::Value) -> Vec<u8> {
     let bytes = artifacts_raw(server, token, body).await;
-    let frames = tessera_wire::split_frames(&bytes).unwrap();
+    let frames = mosaica_wire::split_frames(&bytes).unwrap();
     let (trailer, _) = frames.split_last().unwrap();
-    assert_eq!(trailer.0, tessera_wire::FRAME_TRAILER);
-    bytes[..bytes.len() - tessera_wire::FRAME_HEADER_BYTES - trailer.1.len()].to_vec()
+    assert_eq!(trailer.0, mosaica_wire::FRAME_TRAILER);
+    bytes[..bytes.len() - mosaica_wire::FRAME_HEADER_BYTES - trailer.1.len()].to_vec()
 }
 
 async fn json_post(
@@ -844,10 +844,10 @@ fn build_config(
     write_teams(&dir.join("teams.parquet"), spelling, padded);
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, toml).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .map_err(|e| e.to_string())?;
-    let args = tessera_build::BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(
+    let args = mosaica_build::BuildArgs {
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.clone(),
             &config.schema,
         ),
@@ -859,7 +859,7 @@ fn build_config(
             vec![view_args("s0", &points, AccessInput::relation(pairs))],
         )
     };
-    tessera_build::build(&args).map(|_| ()).map_err(|e| e.to_string())
+    mosaica_build::build(&args).map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Keys and masked counts served to one principal, per layer.
@@ -1198,7 +1198,7 @@ hierarchy                 = {{ kind = "flat", prune_children = false }}
     with_members(dir.path(), &["declared", "declared"]).expect("declared keys only");
 }
 
-/// `tessera check` refuses a label column its source does not carry, and one that holds no
+/// `mosaica check` refuses a label column its source does not carry, and one that holds no
 /// strings, and passes each spelling the build reads.
 #[test]
 fn check_refuses_an_absent_or_non_text_label_column() {
@@ -1208,8 +1208,8 @@ fn check_refuses_an_absent_or_non_text_label_column() {
         write_teams(&dir.path().join("teams.parquet"), spelling, false);
         let path = dir.path().join("config.toml");
         std::fs::write(&path, built_config(field, false)).unwrap();
-        let config = tessera_build::config::Config::parse(&path, &Default::default()).unwrap();
-        tessera_build::check::check(&config).is_clean()
+        let config = mosaica_build::config::Config::parse(&path, &Default::default()).unwrap();
+        mosaica_build::check::check(&config).is_clean()
     };
     assert!(!checked(Spelling::List, "squad"));
     assert!(!checked(Spelling::Numbers, "team"));
@@ -1231,7 +1231,7 @@ async fn a_label_that_is_not_an_expression_is_refused_rather_than_stored_as_none
     build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
-    let engine = tessera_engine::Engine::open(
+    let engine = mosaica_engine::Engine::open(
         &tmp.path().join("bundle"),
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),

@@ -1,5 +1,5 @@
 //! The masked viewport query, end to end over a ~10k-item synthetic bundle built through
-//! `tessera-build`'s library API.
+//! `mosaica-build`'s library API.
 //!
 //! Every item carries `ALL_TERM` ("0"); every third item (`source_id % 3 == 0`) additionally
 //! carries `SUBSET_TERM` ("1"). Most tests below query at `zoom = 0`, where `tiles_for_bbox`
@@ -21,12 +21,12 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use tessera_engine::select::{decode_tier, DecodeTier};
-use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
-use tessera_engine::{CancelToken, Engine, EngineConfig, EngineError, ViewportOut};
-use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use tessera_spatial::{morton_of, tiles_for_bbox};
-use tessera_store::read::open_bundle;
+use mosaica_engine::select::{decode_tier, DecodeTier};
+use mosaica_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
+use mosaica_engine::{CancelToken, Engine, EngineConfig, EngineError, ViewportOut};
+use mosaica_lifecycle::wal::{ChangeOp, Wal, WalRecord};
+use mosaica_spatial::{morton_of, tiles_for_bbox};
+use mosaica_store::read::open_bundle;
 
 use common::*;
 
@@ -166,7 +166,7 @@ fn c_zero_term_session_sees_nothing() {
     // universal grant.
     assert_eq!(
         *session.satisfied_for_test(),
-        [tessera_authz::PUBLIC_TERM].into_iter().collect(),
+        [mosaica_authz::PUBLIC_TERM].into_iter().collect(),
         "zero-term credential grants nothing but the reserved label"
     );
 
@@ -459,7 +459,7 @@ fn no_visible_tile_is_ever_served_empty() {
 /// non-degenerate zoom (4: a 16x16 tile grid) and a bbox covering roughly one quadrant of the
 /// extent, then cross-checks the engine's per-tile counts against an independent brute-force
 /// oracle: each item's own `(x, y)` quantised to a Morton code and shifted to a zoom-4 tile
-/// prefix by hand (the same public `tessera_spatial` functions the engine itself calls, but
+/// prefix by hand (the same public `mosaica_spatial` functions the engine itself calls, but
 /// grouped independently of `tile_ranges`/`count_range`) — an off-by-one in either would show up
 /// here even though it passes at zoom 0.
 #[test]
@@ -540,7 +540,7 @@ fn tile_counts_match_brute_force_at_a_non_degenerate_zoom_and_bbox_subset() {
 /// points are a flat concatenation in exactly that order.**
 ///
 /// `Engine::viewport` resolves every tile's row range in one bounded sweep
-/// (`tessera_store::tile_ranges_all`), and that sweep visits tiles in ascending Morton code
+/// (`mosaica_store::tile_ranges_all`), and that sweep visits tiles in ascending Morton code
 /// order, which `tiles_for_bbox`'s `(ty outer, tx inner)` enumeration is *not*. If the sweep's
 /// order ever leaked into the response, this test is what catches it: both `ViewportOut.tiles`
 /// and the point concatenation the wire format splits by the `served` column depend on the
@@ -581,7 +581,7 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
     let mut expected_prefixes: Vec<u64> = Vec::new();
     let mut expected_points: Vec<u64> = Vec::new();
     for tile in &tiles {
-        let range = tessera_store::tile_ranges(segment, tile);
+        let range = mosaica_store::tile_ranges(segment, tile);
         if range.is_empty() {
             continue;
         }
@@ -890,7 +890,7 @@ fn the_tile_count_estimate_is_exact() {
             [700.0, 800.0, 250.0, 300.0],
         ] {
             assert_eq!(
-                tessera_spatial::tiles_for_bbox_count(bbox, zoom, &e),
+                mosaica_spatial::tiles_for_bbox_count(bbox, zoom, &e),
                 tiles_for_bbox(bbox, zoom, &e).len() as u64,
                 "zoom {zoom}, bbox {bbox:?}"
             );
@@ -1235,20 +1235,20 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
         for offset in 1..=3u8 {
             let sub_depth = parent_depth + offset;
             for parent_prefix in 0..(1u64 << (2 * parent_depth as u32)) {
-                let parent = tessera_spatial::Tile {
+                let parent = mosaica_spatial::Tile {
                     prefix: parent_prefix,
                     depth: parent_depth,
                 };
-                let parent_range = tessera_store::tile_ranges(segment, &parent);
+                let parent_range = mosaica_store::tile_ranges(segment, &parent);
                 let first = parent_prefix << (2 * offset as u32);
                 for i in 0..(1u64 << (2 * offset as u32)) {
-                    let sub = tessera_spatial::Tile {
+                    let sub = mosaica_spatial::Tile {
                         prefix: first + i,
                         depth: sub_depth,
                     };
                     assert_eq!(
-                        tessera_store::tile_ranges_within(segment, &sub, parent_range.clone()),
-                        tessera_store::tile_ranges(segment, &sub),
+                        mosaica_store::tile_ranges_within(segment, &sub, parent_range.clone()),
+                        mosaica_store::tile_ranges(segment, &sub),
                         "parent {parent_prefix}@{parent_depth}, sub {}@{sub_depth}",
                         first + i
                     );
@@ -1262,7 +1262,7 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
 // Concurrency — D-G's slot-state single-flight over the row-projection cache (F4)
 // ---------------------------------------------------------------------------------------------
 //
-// F4 (`tessera-bench/src/arms/load.rs:34-76`): the previous cache ran `RowProjection::new` —
+// F4 (`mosaica-bench/src/arms/load.rs:34-76`): the previous cache ran `RowProjection::new` —
 // seconds at 10⁹ rows — *inside* the map lock on a miss, so distinct sessions' first viewports
 // serialised behind one global mutex. D-G replaces the cache value with a slot-state map
 // (`Building` | `Ready`), and the map lock is now held only for the O(1) state transition. A
@@ -1271,7 +1271,7 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
 // serialise, and same-key callers serialising is what single-flight is.
 //
 // The state machine itself (waiting, the wake paths, panic safety) is proven deterministically —
-// no sleeps, no timing slack — by `tessera-cache`'s unit tests, which control a build's start and
+// no sleeps, no timing slack — by `mosaica-cache`'s unit tests, which control a build's start and
 // finish with channels because the map is directly reachable there. The tests below instead exercise the real, public `Engine::viewport` path
 // end to end, which cannot inject a pause into `RowProjection::new`; they use a large enough
 // synthetic fixture that a cold build takes tens of milliseconds even unoptimised, well above OS
@@ -1354,7 +1354,7 @@ fn concurrent_same_key_viewports_are_all_served_off_one_build() {
 /// One session's row-projection build does not block another session's first viewport. The first
 /// session's build is held open inside the build, and the second session's first viewport must
 /// finish while it is held. A lock held across the build, in the cache or in the request path
-/// around it, leaves the second viewport waiting. `tessera-bench`'s load arm measures the
+/// around it, leaves the second viewport waiting. `mosaica-bench`'s load arm measures the
 /// throughput this protects.
 #[test]
 fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
@@ -1759,7 +1759,7 @@ fn rows_in_ranges_is_mask_independent() {
 // test is not worth what it costs. The second test instead
 // proves interruption indirectly and robustly: it compares the wall-clock time of a genuinely
 // interrupted run against this same run's own baseline for the full (uncancelled) sweep,
-// following the self-scaling wall-clock-ratio pattern this file and `tessera-server`'s test suite
+// following the self-scaling wall-clock-ratio pattern this file and `mosaica-server`'s test suite
 // already use elsewhere (e.g. `distinct_key_first_viewports_overlap_instead_of_serialising`
 // above) rather than a fixed wall-clock bet. Which exact checkpoint caught the cancellation is
 // left to code review of the call sites above; both tests only assert the externally-observable
@@ -1769,7 +1769,7 @@ fn rows_in_ranges_is_mask_independent() {
 /// D-C: a config wide enough to let a many-tile, high-fan-out §3.3 underlay request through
 /// `Engine::viewport`'s own bounds checks — used only by the timing test below to engineer a
 /// multi-tile sweep long enough to interrupt mid-flight. Same cost-model trick
-/// `tessera-server`'s own slow-viewport test fixtures use: each sub-cell costs one small binary
+/// `mosaica-server`'s own slow-viewport test fixtures use: each sub-cell costs one small binary
 /// search plus one bitmap range-count, independent of corpus size, so slowness is engineered via
 /// fan-out rather than growing `N_ITEMS`.
 fn config_for_slow_multi_tile_sweep() -> EngineConfig {
@@ -2153,29 +2153,29 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_below_the_serial
 /// batch `ViewportOut` and against the sink contract (head, then counts, then points).
 #[derive(Default)]
 struct RecordingSink {
-    head: Option<tessera_engine::ViewportHead>,
+    head: Option<mosaica_engine::ViewportHead>,
     counts: Option<(
-        Vec<tessera_engine::TileCount>,
-        Option<Vec<tessera_engine::SubCellCount>>,
+        Vec<mosaica_engine::TileCount>,
+        Option<Vec<mosaica_engine::SubCellCount>>,
     )>,
-    chunks: Vec<tessera_engine::PointColumns>,
+    chunks: Vec<mosaica_engine::PointColumns>,
     /// When `Some(n)`, the nth callback overall refuses with `SinkClosed`.
     refuse_at: Option<usize>,
     calls: usize,
 }
 
 impl RecordingSink {
-    fn step(&mut self) -> tessera_engine::SinkResult {
+    fn step(&mut self) -> mosaica_engine::SinkResult {
         self.calls += 1;
         if self.refuse_at == Some(self.calls) {
-            return Err(tessera_engine::SinkClosed);
+            return Err(mosaica_engine::SinkClosed);
         }
         Ok(())
     }
 }
 
-impl tessera_engine::ViewportSink for RecordingSink {
-    fn head(&mut self, head: tessera_engine::ViewportHead) -> tessera_engine::SinkResult {
+impl mosaica_engine::ViewportSink for RecordingSink {
+    fn head(&mut self, head: mosaica_engine::ViewportHead) -> mosaica_engine::SinkResult {
         assert!(self.head.is_none(), "head is delivered exactly once, first");
         assert!(self.counts.is_none() && self.chunks.is_empty());
         self.head = Some(head);
@@ -2184,9 +2184,9 @@ impl tessera_engine::ViewportSink for RecordingSink {
 
     fn counts(
         &mut self,
-        tiles: &[tessera_engine::TileCount],
-        sub_cells: Option<&[tessera_engine::SubCellCount]>,
-    ) -> tessera_engine::SinkResult {
+        tiles: &[mosaica_engine::TileCount],
+        sub_cells: Option<&[mosaica_engine::SubCellCount]>,
+    ) -> mosaica_engine::SinkResult {
         assert!(self.head.is_some(), "head precedes counts");
         assert!(self.counts.is_none(), "counts is delivered exactly once");
         assert!(self.chunks.is_empty(), "every count precedes every point");
@@ -2194,7 +2194,7 @@ impl tessera_engine::ViewportSink for RecordingSink {
         self.step()
     }
 
-    fn points(&mut self, chunk: tessera_engine::PointColumns) -> tessera_engine::SinkResult {
+    fn points(&mut self, chunk: mosaica_engine::PointColumns) -> mosaica_engine::SinkResult {
         assert!(self.counts.is_some(), "counts precede points");
         assert!(!chunk.is_empty(), "never called with an empty chunk");
         self.chunks.push(chunk);

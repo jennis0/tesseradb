@@ -30,14 +30,14 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::{extent, open_engine, open_engine_publishing, test_key, wait_until};
-use tessera_engine::{
+use mosaica_engine::{
     Engine, IngestRequest, ItemsRequest, PageEnd, RecordsHead, RecordsLimits, RecordsSink,
     Session, SinkResult,
 };
-use tessera_lifecycle::{ChangeOp, IngestRow};
-use tessera_types::TesseraId;
-use tessera_build::config::{AccessInput, AccessSource};
-use tessera_build::{build, BuildArgs};
+use mosaica_lifecycle::{ChangeOp, IngestRow};
+use mosaica_types::TesseraId;
+use mosaica_build::config::{AccessInput, AccessSource};
+use mosaica_build::{build, BuildArgs};
 
 /// Five points, one per shape a row can take: two terms, null, empty, a term needing a trim, and
 /// one term.
@@ -107,10 +107,10 @@ fn write_points(path: &Path, access: impl Fn(u64) -> Option<Vec<&'static str>>) 
 
 fn args(points: &Path, out: &Path, default: Option<&str>) -> BuildArgs {
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
@@ -620,7 +620,7 @@ fn rows(engine: &Engine, session: &Session) -> Vec<(TesseraId, Vec<String>)> {
     for batch in &pages.0 {
         let ids = batch.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
         let labels = batch
-            .column_by_name("tessera:labels")
+            .column_by_name("mosaica:labels")
             .and_then(|c| c.as_any().downcast_ref::<ListArray>())
             .expect("a labels column");
         for (row, &id) in ids.values().iter().enumerate() {

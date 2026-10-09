@@ -1,13 +1,13 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {TesseraClient, TesseraError} from '../src/client.js';
+import {MosaicaClient, MosaicaError} from '../src/client.js';
 
 /**
  * `POST /v1/artifacts/browse` as this client speaks it: the three forms, the decimal-string
  * identifiers, and the two counts.
  */
 
-function client(): TesseraClient {
-  return new TesseraClient({viewerUrl: 'http://v', sessionUrl: 'http://s'});
+function client(): MosaicaClient {
+  return new MosaicaClient({viewerUrl: 'http://v', sessionUrl: 'http://s'});
 }
 
 const row = (id: string, masked: number, extra: Record<string, unknown> = {}) => ({
@@ -91,8 +91,8 @@ describe('browse', () => {
     expect(page.parents[0]!.slot).toBe(0);
   });
 
-  it('throws a TesseraError on a refusal, like every other verb', async () => {
+  it('throws a MosaicaError on a refusal, like every other verb', async () => {
     answering({error: 'unknown_layer', detail: 'no such layer'}, false);
-    await expect(client().browse('tok', {view: 's0', layer: 'nope'})).rejects.toThrow(TesseraError);
+    await expect(client().browse('tok', {view: 's0', layer: 'nope'})).rejects.toThrow(MosaicaError);
   });
 });

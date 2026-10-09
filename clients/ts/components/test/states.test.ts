@@ -1,16 +1,16 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {composeFilters, type FilterDraft} from '@tesseradb/client';
+import {composeFilters, type FilterDraft} from '@mosaica/client';
 import '../src/status.js';
 import '../src/selection.js';
 import '../src/count.js';
-import type {TesseraStatus} from '../src/status.js';
+import type {MosaicaStatus} from '../src/status.js';
 import {stateOf} from '../src/states.js';
 import {deep, deepAll, fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
  * Every panel state through `part="state"`, on the strip and on a panel: only `shown` renders a
  * count, a stale view renders none and offers refresh, a refusal renders as one, and an expiry
- * fires `tessera-expired`.
+ * fires `mosaica-expired`.
  */
 
 afterEach(() => {
@@ -44,7 +44,7 @@ describe('stateOf maps status onto the eight states exactly as the table says', 
   });
 });
 
-describe('<tessera-status> renders every state through part="state"', () => {
+describe('<mosaica-status> renders every state through part="state"', () => {
   // `count`: figures are rendered, current or greyed out. `action`: the one button the state offers.
   const cases: [string, Parameters<typeof status>[0] | null, {count: boolean; action: string | null}][] = [
     ['detached', null, {count: false, action: null}],
@@ -58,8 +58,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
   ];
   for (const [name, over, want] of cases) {
     it(`renders ${name}`, async () => {
-      const host = await mount('<tessera-status></tessera-status>');
-      const el = host.querySelector('tessera-status') as TesseraStatus;
+      const host = await mount('<mosaica-status></mosaica-status>');
+      const el = host.querySelector('mosaica-status') as MosaicaStatus;
       if (over) {
         const store = fakeStore({status: status(over), view});
         el.store = store;
@@ -81,8 +81,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
   it('renders no count from a view with no answer, in any state', async () => {
     const empty = {...view, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, highlighted: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}, inView: null};
     for (const over of [{status: 'loading'}, {status: 'retrying'}, {status: 'refused', refusal: {code: 'x', detail: ''}}, {status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}, {status: 'shown'}] as const) {
-      const host = await mount('<tessera-status></tessera-status>');
-      (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status(over), view: empty});
+      const host = await mount('<mosaica-status></mosaica-status>');
+      (host.querySelector('mosaica-status') as MosaicaStatus).store = fakeStore({status: status(over), view: empty});
       await settle(host);
       expect(deepAll(host, '[part="count"]').filter((c) => c.getAttribute('data-empty') === 'false'), over.status).toHaveLength(0);
       host.remove();
@@ -90,8 +90,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
   });
 
   it('names up to date and updating through the dot’s accessible name, so the strip keeps its width through a pan, and every other state in words beside a dot', async () => {
-    const host = await mount('<tessera-status></tessera-status>');
-    const el = host.querySelector('tessera-status') as TesseraStatus;
+    const host = await mount('<mosaica-status></mosaica-status>');
+    const el = host.querySelector('mosaica-status') as MosaicaStatus;
     const store = fakeStore({status: status({sessionWarm: true}), view});
     el.store = store;
     await settle(host);
@@ -114,8 +114,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
   });
 
   it('shows the matched count out of the visible count, then the shown count', async () => {
-    const host = await mount('<tessera-status></tessera-status>');
-    (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view});
+    const host = await mount('<mosaica-status></mosaica-status>');
+    (host.querySelector('mosaica-status') as MosaicaStatus).store = fakeStore({status: status({}), view});
     await settle(host);
     const counts = deepAll(host, '[part="count"]');
     expect(counts.map((c) => c.textContent)).toEqual(['3,210', '12,040', '500']);
@@ -124,8 +124,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
   });
 
   it('shortens the figures and drops the shown count when compact', async () => {
-    const host = await mount('<tessera-status compact></tessera-status>');
-    (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view: {...view, inView: {...view.inView, matched: {value: 16_822_190, exact: true}, visible: {value: 21_406_522, exact: true}}}});
+    const host = await mount('<mosaica-status compact></mosaica-status>');
+    (host.querySelector('mosaica-status') as MosaicaStatus).store = fakeStore({status: status({}), view: {...view, inView: {...view.inView, matched: {value: 16_822_190, exact: true}, visible: {value: 21_406_522, exact: true}}}});
     await settle(host);
     expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['16.8M', '21.4M']);
     expect(deep(host, '[part="count-shown"]')).toBeNull();
@@ -137,8 +137,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
    * of M", M being the matched count.
    */
   it('adds the highlight’s own count only where a highlight was asked', async () => {
-    const host = await mount('<tessera-status></tessera-status>');
-    const el = host.querySelector('tessera-status') as TesseraStatus;
+    const host = await mount('<mosaica-status></mosaica-status>');
+    const el = host.querySelector('mosaica-status') as MosaicaStatus;
     el.store = fakeStore({status: status({}), view});
     await settle(host);
     expect(deep(host, '[part="count-highlighted"]')).toBeNull();
@@ -159,8 +159,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
   });
 
   it('retries a refused view and signs in again on expiry through the host’s renewal', async () => {
-    const host = await mount('<tessera-status></tessera-status>');
-    const el = host.querySelector('tessera-status') as TesseraStatus;
+    const host = await mount('<mosaica-status></mosaica-status>');
+    const el = host.querySelector('mosaica-status') as MosaicaStatus;
     const store = fakeStore({status: status({status: 'refused', refusal: {code: 'unauthorised', detail: ''}}), view});
     el.store = store;
     await settle(host);
@@ -174,14 +174,14 @@ describe('<tessera-status> renders every state through part="state"', () => {
     expect(renewed).toBe(1);
   });
 
-  it('fires tessera-expired once, composed, on the expired transition', async () => {
-    const host = await mount('<div><tessera-status></tessera-status></div>');
-    const el = host.querySelector('tessera-status') as TesseraStatus;
+  it('fires mosaica-expired once, composed, on the expired transition', async () => {
+    const host = await mount('<div><mosaica-status></mosaica-status></div>');
+    const el = host.querySelector('mosaica-status') as MosaicaStatus;
     const store = fakeStore({status: status({}), view});
     el.store = store;
     await settle(host);
     const fired: Event[] = [];
-    document.body.addEventListener('tessera-expired', (e) => fired.push(e));
+    document.body.addEventListener('mosaica-expired', (e) => fired.push(e));
     store.set('status', status({status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}));
     await settle(host);
     store.set('status', status({status: 'refused', refusal: {code: 'expired-token', detail: 'again'}, expired: true}));
@@ -191,20 +191,20 @@ describe('<tessera-status> renders every state through part="state"', () => {
   });
 
   it('the refresh control calls refresh() on the store', async () => {
-    const host = await mount('<tessera-status></tessera-status>');
+    const host = await mount('<mosaica-status></mosaica-status>');
     const store = fakeStore({status: status({stale: true}), view});
-    (host.querySelector('tessera-status') as TesseraStatus).store = store;
+    (host.querySelector('mosaica-status') as MosaicaStatus).store = store;
     await settle(host);
     (deep(host, '[part="refresh"]') as HTMLButtonElement).click();
     expect(store.calls.some((c) => c.name === 'refresh')).toBe(true);
   });
 });
 
-describe('<tessera-selection> — a panel renders the states the same way', () => {
+describe('<mosaica-selection> — a panel renders the states the same way', () => {
   it('is detached with no region, counting while loading, refused as a refusal, and inexact when the answer is a cover', async () => {
-    const host = await mount('<tessera-selection></tessera-selection>');
+    const host = await mount('<mosaica-selection></mosaica-selection>');
     const store = fakeStore({status: status({}), view});
-    const el = host.querySelector('tessera-selection')!;
+    const el = host.querySelector('mosaica-selection')!;
     (el as unknown as {store: unknown}).store = store;
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('detached');

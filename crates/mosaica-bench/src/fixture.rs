@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Default fixture root, matching `scripts/bench_build_fixtures.sh`.
-pub const DEFAULT_FIXTURES: &str = "/tmp/tessera-bench/fixtures";
+pub const DEFAULT_FIXTURES: &str = "/tmp/mosaica-bench/fixtures";
 
-/// `CURRENT`'s on-disk shape. Mirrors `tessera_store`'s private `CurrentPointer`; only `prefix`
+/// `CURRENT`'s on-disk shape. Mirrors `mosaica_store`'s private `CurrentPointer`; only `prefix`
 /// is needed here, since `open_bundle` does the digest verification for anything that opens the
 /// bundle properly.
 #[derive(Debug, Deserialize)]
@@ -64,7 +64,7 @@ pub fn discover(root: &Path) -> std::io::Result<Vec<Fixture>> {
                 continue;
             }
             // `CURRENT` is JSON (`{"prefix": ..., "manifest_digest": ...}`), matching
-            // `tessera_store::read::open_bundle`'s `CurrentPointer`. Parsing it as a bare string
+            // `mosaica_store::read::open_bundle`'s `CurrentPointer`. Parsing it as a bare string
             // yields `{` as the prefix and every subsequent path silently misses.
             let Ok(pointer) = serde_json::from_slice::<CurrentPointer>(&std::fs::read(&current)?)
             else {
@@ -216,7 +216,7 @@ mod tests {
 
     fn tempdir() -> PathBuf {
         let base = std::env::temp_dir().join(format!(
-            "tessera-bench-test-{}-{:?}",
+            "mosaica-bench-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

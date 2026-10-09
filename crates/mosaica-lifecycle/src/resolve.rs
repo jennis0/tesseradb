@@ -25,7 +25,7 @@
 //! access it cannot afford at 10⁹ rows.
 
 use rustc_hash::FxHashMap;
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, TesseraId};
 
 /// A unique field's value as its index keys it, widened to 128 bits. Two values of one field
 /// are equal exactly where their keys are.
@@ -241,13 +241,13 @@ pub fn resolve<H: Holdings>(
     let mut found: Vec<(usize, (Identifier, EntityId))> = Vec::new();
     let mut verdicts: Vec<Option<Verdict>> = vec![None; rows.len()];
 
-    let tessera: Vec<(usize, TesseraId)> = rows
+    let mosaica: Vec<(usize, TesseraId)> = rows
         .iter()
         .enumerate()
         .filter_map(|(at, row)| row.tessera_id.map(|id| (at, id)))
         .collect();
-    let ids: Vec<TesseraId> = tessera.iter().map(|(_, id)| *id).collect();
-    for ((at, _), holder) in tessera.iter().zip(holdings.tessera_holders(&ids)?) {
+    let ids: Vec<TesseraId> = mosaica.iter().map(|(_, id)| *id).collect();
+    for ((at, _), holder) in mosaica.iter().zip(holdings.tessera_holders(&ids)?) {
         match holder {
             Some(entity) => found.push((*at, (Identifier::TesseraId, entity))),
             None => verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownTesseraId { row: *at })),
@@ -349,11 +349,11 @@ pub fn first_refusal(verdicts: &[Verdict]) -> Option<&Refusal> {
 mod tests {
     use super::*;
 
-    /// Holdings over fixed maps: `unique[(field, key)]` and `tessera[id]`.
+    /// Holdings over fixed maps: `unique[(field, key)]` and `mosaica[id]`.
     #[derive(Default)]
     struct Held {
         unique: FxHashMap<(u16, Key), Vec<EntityId>>,
-        tessera: FxHashMap<u64, EntityId>,
+        mosaica: FxHashMap<u64, EntityId>,
     }
 
     impl Holdings for Held {
@@ -371,7 +371,7 @@ mod tests {
         fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, ()> {
             Ok(ids
                 .iter()
-                .map(|id| self.tessera.get(&id.raw()).copied())
+                .map(|id| self.mosaica.get(&id.raw()).copied())
                 .collect())
         }
     }
@@ -385,8 +385,8 @@ mod tests {
         held.unique.insert((0, 17), vec![e(1)]);
         held.unique.insert((0, 18), vec![e(2)]);
         held.unique.insert((1, 5), vec![e(1)]);
-        held.tessera.insert(101, e(1));
-        held.tessera.insert(102, e(2));
+        held.mosaica.insert(101, e(1));
+        held.mosaica.insert(102, e(2));
         held
     }
 

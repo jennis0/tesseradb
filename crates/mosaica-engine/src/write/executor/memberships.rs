@@ -20,14 +20,14 @@ pub(super) fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
 
 /// What a joining set is subtracted against. `restating` is `None` where any row could be.
 pub(super) struct HeldMembers<'a> {
-    pub(super) store: &'a tessera_lifecycle::ArtifactStore,
+    pub(super) store: &'a mosaica_lifecycle::ArtifactStore,
     pub(super) restating: Option<&'a croaring::Bitmap>,
 }
 
 /// The entities of a window's join rows and of the items it places in artifacts in place: the
 /// only rows that can restate a membership.
 pub(super) fn joining_entities<W>(
-    closed: &[tessera_lifecycle::ClosedEntry<W>],
+    closed: &[mosaica_lifecycle::ClosedEntry<W>],
 ) -> croaring::Bitmap {
     let mut restating = croaring::Bitmap::new();
     for entry in closed {
@@ -55,7 +55,7 @@ fn row_not_carried(layer: &str, row: u32) -> String {
 /// The joins both write doors' resolved memberships declared, as one bitmap per `(layer, level,
 /// ordinal)` less what the artifact already holds. A key with no ordinal was minted at this commit.
 pub(super) fn grouped_growth<'a>(
-    sources: impl Iterator<Item = &'a [tessera_lifecycle::ResolvedMembership]>,
+    sources: impl Iterator<Item = &'a [mosaica_lifecycle::ResolvedMembership]>,
     entity_of: EntityOfRow<'_>,
     held: Option<HeldMembers<'_>>,
 ) -> Result<Vec<(WalRecord, usize)>, String> {
@@ -101,7 +101,7 @@ pub(super) fn grouped_growth<'a>(
             let joins = ordinals
                 .iter()
                 .map(|(ordinal, joining)| (*ordinal, joining));
-            tessera_lifecycle::membership::growth_record(layer, level, joins)
+            mosaica_lifecycle::membership::growth_record(layer, level, joins)
                 .map(|record| (record, index))
         })
         .collect())
@@ -111,8 +111,8 @@ pub(super) fn grouped_growth<'a>(
 /// counted for the first entry naming the pair. A key the close mints holds nothing yet. `store`
 /// is read only where a row can restate a membership, which `restating` says.
 pub(super) fn joined_per_entry<W>(
-    closed: &[tessera_lifecycle::ClosedEntry<W>],
-    store: Option<&tessera_lifecycle::ArtifactStore>,
+    closed: &[mosaica_lifecycle::ClosedEntry<W>],
+    store: Option<&mosaica_lifecycle::ArtifactStore>,
 ) -> Vec<u64> {
     use std::collections::BTreeMap;
     let mut seen: BTreeMap<(&str, u32, Option<&str>, &str), croaring::Bitmap> = BTreeMap::new();
@@ -155,7 +155,7 @@ pub(super) fn joined_per_entry<W>(
 /// The artifacts both write doors' resolved memberships named and no artifact holds, one per
 /// `(layer, level, key)`. Two sources naming one unknown key mint once and both join it.
 pub(super) fn grouped_mints<'a>(
-    sources: impl Iterator<Item = &'a [tessera_lifecycle::ResolvedMembership]>,
+    sources: impl Iterator<Item = &'a [mosaica_lifecycle::ResolvedMembership]>,
     entity_of: EntityOfRow<'_>,
 ) -> Result<MintPlan, String> {
     let mut wanted: MintPlan = std::collections::BTreeMap::new();
@@ -187,7 +187,7 @@ pub(super) fn grouped_mints<'a>(
 /// The growth records one closed window owes, in the order to append them. The entities are
 /// `entity_ids[row]`, the assignment this window just made.
 pub(super) fn growth_records<W>(
-    closed: &[tessera_lifecycle::ClosedEntry<W>],
+    closed: &[mosaica_lifecycle::ClosedEntry<W>],
     held: Option<HeldMembers<'_>>,
 ) -> Result<Vec<(WalRecord, usize)>, String> {
     grouped_growth(
@@ -201,13 +201,13 @@ pub(super) fn growth_records<W>(
 /// has neither. Minting happens at the close, not admission, so [`Executor::prepare_mints`]
 /// re-resolves the plan against the store in case a publication landed since.
 pub(super) fn mint_plan<W>(
-    closed: &[tessera_lifecycle::ClosedEntry<W>],
-) -> Result<Option<(MintPlan, Vec<tessera_lifecycle::BatchEdge>)>, String> {
+    closed: &[mosaica_lifecycle::ClosedEntry<W>],
+) -> Result<Option<(MintPlan, Vec<mosaica_lifecycle::BatchEdge>)>, String> {
     let wanted = grouped_mints(
         closed.iter().map(|entry| entry.memberships.as_slice()),
         &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
     )?;
-    let edges: Vec<tessera_lifecycle::BatchEdge> =
+    let edges: Vec<mosaica_lifecycle::BatchEdge> =
         closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
     if wanted.is_empty() && edges.is_empty() {
         return Ok(None);
@@ -226,7 +226,7 @@ pub(super) type MintPlan = std::collections::BTreeMap<MintKey, (usize, croaring:
 /// rather than minting a second one: writes the ordinals found back onto the memberships, so
 /// `growth_records` carries them as ordinary joins.
 pub(super) fn settle_resolved_ordinals(
-    memberships: &mut [tessera_lifecycle::ResolvedMembership],
+    memberships: &mut [mosaica_lifecycle::ResolvedMembership],
     resolved: &std::collections::BTreeMap<MintKey, u32>,
 ) {
     if resolved.is_empty() {
@@ -264,7 +264,7 @@ type MintAt<'a> = (&'a str, u32, Option<&'a str>, &'a str);
 /// the child's own level, since one key can legitimately sit at two levels with a different parent
 /// at each.
 pub(super) fn parent_of_each_child(
-    edges: &[tessera_lifecycle::BatchEdge],
+    edges: &[mosaica_lifecycle::BatchEdge],
 ) -> Result<std::collections::BTreeMap<MintAt<'_>, &str>, String> {
     let mut claimed: std::collections::BTreeMap<MintAt<'_>, &str> = Default::default();
     for edge in edges {
@@ -293,11 +293,11 @@ impl Executor {
     /// refuses the whole batch without effect.
     pub(super) fn resolve_memberships(
         &self,
-        artifacts: &tessera_lifecycle::BatchArtifacts,
+        artifacts: &mosaica_lifecycle::BatchArtifacts,
     ) -> Result<
         (
-            Vec<tessera_lifecycle::ResolvedMembership>,
-            Vec<tessera_lifecycle::BatchEdge>,
+            Vec<mosaica_lifecycle::ResolvedMembership>,
+            Vec<mosaica_lifecycle::BatchEdge>,
         ),
         String,
     > {
@@ -305,7 +305,7 @@ impl Executor {
             return Ok((Vec::new(), Vec::new()));
         }
         self.live.with_publication_state(|registry, store, _| {
-            let memberships: Vec<tessera_lifecycle::ResolvedMembership> = artifacts
+            let memberships: Vec<mosaica_lifecycle::ResolvedMembership> = artifacts
                 .memberships
                 .iter()
                 .map(|join| {
@@ -317,7 +317,7 @@ impl Executor {
                             &join.key,
                             store,
                         )
-                        .map(|ordinal| tessera_lifecycle::ResolvedMembership {
+                        .map(|ordinal| mosaica_lifecycle::ResolvedMembership {
                             layer: join.layer.clone(),
                             level: join.level,
                             view: join.view.clone(),
@@ -351,12 +351,12 @@ impl Executor {
                     minting.contains(&(layer, edge.level, view, edge.child.as_str())),
                     &|key| anywhere.contains(&(layer, view, key)),
                 ) {
-                    Ok(tessera_lifecycle::EdgeCheck::Agrees) => {}
+                    Ok(mosaica_lifecycle::EdgeCheck::Agrees) => {}
                     // Carried to the close: on the publication that creates the child, or as a
                     // fill on a child that exists without a parent.
                     Ok(
-                        tessera_lifecycle::EdgeCheck::Mints
-                        | tessera_lifecycle::EdgeCheck::Records,
+                        mosaica_lifecycle::EdgeCheck::Mints
+                        | mosaica_lifecycle::EdgeCheck::Records,
                     ) => settling.push(edge.clone()),
                     Err(e) => return Err(e.to_string()),
                 }
@@ -375,7 +375,7 @@ impl Executor {
         rows: impl Iterator<Item = &'a [WalScalar]> + Clone,
         vocabularies: &Vocabularies,
     ) -> Result<Vec<WalRecord>, String> {
-        use tessera_types::layer::attribute_value_key;
+        use mosaica_types::layer::attribute_value_key;
 
         let generation = self.generation.load();
         let declared = &generation.bundle.manifest.declared_scalars;
@@ -402,7 +402,7 @@ impl Executor {
                 };
                 // Code 0 is category code space's reserved absent sentinel, unlike a plain
                 // integer column.
-                if vocabulary.is_some() && code == tessera_store::vocabulary::ABSENT_CODE {
+                if vocabulary.is_some() && code == mosaica_store::vocabulary::ABSENT_CODE {
                     continue;
                 }
                 wanted.insert(attribute_value_key(
@@ -440,7 +440,7 @@ impl Executor {
     /// carried the join.
     pub(super) fn mint_records(
         &mut self,
-        closed: &mut [tessera_lifecycle::ClosedEntry<Reply<Ingested>>],
+        closed: &mut [mosaica_lifecycle::ClosedEntry<Reply<Ingested>>],
     ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
         let mut minted_per_entry = vec![0u64; closed.len()];
         let Some((wanted, edges)) = mint_plan(closed)? else {
@@ -469,7 +469,7 @@ impl Executor {
     pub(super) fn prepare_mints(
         &self,
         wanted: &MintPlan,
-        edges: &[tessera_lifecycle::BatchEdge],
+        edges: &[mosaica_lifecycle::BatchEdge],
     ) -> Result<PreparedMints, String> {
         use std::collections::BTreeMap;
         let served = self.generation.load_full();
@@ -498,9 +498,9 @@ impl Executor {
             let mut assigned: BTreeMap<MintAt<'_>, u32> = BTreeMap::new();
             let mut records = Vec::new();
             for ((layer, level, view), keys) in &to_mint {
-                let incoming: Vec<tessera_lifecycle::IncomingArtifact> = keys
+                let incoming: Vec<mosaica_lifecycle::IncomingArtifact> = keys
                     .iter()
-                    .map(|(key, members)| tessera_lifecycle::IncomingArtifact {
+                    .map(|(key, members)| mosaica_lifecycle::IncomingArtifact {
                         key: Some((*key).to_string()),
                         view: view.map(str::to_string),
                         members: (*members).clone(),
@@ -519,7 +519,7 @@ impl Executor {
                 let pending = |key: &str| {
                     let coarser = level.checked_sub(1)?;
                     assigned.get(&(*layer, coarser, *view, key)).map(|ordinal| {
-                        tessera_lifecycle::wal::ParentRef {
+                        mosaica_lifecycle::wal::ParentRef {
                             level: coarser,
                             ordinal: *ordinal,
                         }
@@ -552,7 +552,7 @@ impl Executor {
             // nothing prepared here is in the store yet.
             let mut window_edges: BTreeMap<
                 &str,
-                BTreeMap<tessera_lifecycle::wal::ParentRef, Vec<tessera_lifecycle::wal::ParentRef>>,
+                BTreeMap<mosaica_lifecycle::wal::ParentRef, Vec<mosaica_lifecycle::wal::ParentRef>>,
             > = BTreeMap::new();
             for record in &records {
                 let WalRecord::ArtifactPublish {
@@ -567,7 +567,7 @@ impl Executor {
                 let held = window_edges.entry(layer.as_str()).or_default();
                 for artifact in artifacts.iter().filter(|a| !a.parents.is_empty()) {
                     held.insert(
-                        tessera_lifecycle::wal::ParentRef {
+                        mosaica_lifecycle::wal::ParentRef {
                             level: *level,
                             ordinal: artifact.ordinal,
                         },
@@ -588,7 +588,7 @@ impl Executor {
                         .find(|((layer, _, in_view, held), _)| {
                             *layer == edge.layer && *in_view == view && *held == key
                         })
-                        .map(|((_, level, _, _), ordinal)| tessera_lifecycle::wal::ParentRef {
+                        .map(|((_, level, _, _), ordinal)| mosaica_lifecycle::wal::ParentRef {
                             level: *level,
                             ordinal: *ordinal,
                         })
@@ -655,18 +655,18 @@ impl Executor {
                         continue;
                     }
                     let Some(joining) =
-                        tessera_lifecycle::membership::deserialise_members(&grown.joining)
+                        mosaica_lifecycle::membership::deserialise_members(&grown.joining)
                     else {
                         continue;
                     };
                     match grown.set {
-                        tessera_lifecycle::wal::GrownSet::Membership => {
+                        mosaica_lifecycle::wal::GrownSet::Membership => {
                             joins.push((grown.ordinal, joining))
                         }
-                        tessera_lifecycle::wal::GrownSet::GeneratingSet { rank, cardinality } => {
+                        mosaica_lifecycle::wal::GrownSet::GeneratingSet { rank, cardinality } => {
                             // A leave re-derives the operator whole: a union cannot express one.
                             let leaves =
-                                tessera_lifecycle::membership::deserialise_leaving(&grown.leaving)
+                                mosaica_lifecycle::membership::deserialise_leaving(&grown.leaving)
                                     .is_none_or(|leaving| !leaving.is_empty());
                             pages.push(crate::artifacts::SetPage {
                                 ordinal: grown.ordinal,

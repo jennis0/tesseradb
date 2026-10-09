@@ -11,7 +11,7 @@
 #
 # ARENA and EXTENTS are this branch's binary with `build` calling `pipeline::build` with
 # `ExtentRoute::Arena` and `ExtentRoute::Extents` rather than `Derived`; DERIVED is it unmodified.
-# All three must be named so `ps -o comm=` reads `tessera` in them: the sampler refuses a pid whose
+# All three must be named so `ps -o comm=` reads `mosaica` in them: the sampler refuses a pid whose
 # command is not the build.
 #
 # SLICES is the row-group counts to slice and time, CAPS the MemoryMax values for part two and
@@ -34,7 +34,7 @@ mkdir -p "$work"
 # running, and that is what this prints.
 foreign() {
   ps -eo pcpu,comm --no-headers --sort=-pcpu \
-    | awk '$1 > 20 && $2 !~ /claude|tessera|python3/ {printf "%s@%s%% ", $2, $1}'
+    | awk '$1 > 20 && $2 !~ /claude|mosaica|python3/ {printf "%s@%s%% ", $2, $1}'
 }
 
 for g in $slices; do
@@ -78,7 +78,7 @@ for cap in $caps; do
     printf '%-6s %-8s cap=%-5s before=[%s] ' "${cap_slice}m" "$which" "$cap" "$(foreign)"
     start=$(date +%s.%N)
     systemd-run --user --scope --quiet -p MemoryMax="$cap" -p MemorySwapMax=0 -- \
-      "$binary" build --deployment "$corpus/tessera.toml" --config "$corpus/corpus.toml" \
+      "$binary" build --deployment "$corpus/mosaica.toml" --config "$corpus/corpus.toml" \
         --out "$out/bundle" --memory-budget "$cap_budget" --no-oracle-pairs \
         --stage-timings --stage-timings-json "$out/stages.json" > "$out/out.log" 2>&1
     code=$?
@@ -100,11 +100,11 @@ for g in $slices; do
   out="$work/fc-${g}m"
   rm -rf "$out"; mkdir -p "$out"
   set -a; . "$work/gbif-${g}m/.env"; set +a
-  "$derived" build --deployment "$work/gbif-${g}m/tessera.toml" \
+  "$derived" build --deployment "$work/gbif-${g}m/mosaica.toml" \
     --config "$work/gbif-${g}m/corpus.toml" --out "$out/bundle" > "$out/out.log" 2>&1 &
   pid=$!
   case "$(ps -o comm= -p "$pid" 2>/dev/null)" in
-    *tessera*) ;;
+    *mosaica*) ;;
     *) kill "$pid" 2>/dev/null; echo "the pid is not the build" >&2; continue ;;
   esac
   while kill -0 "$pid" 2>/dev/null; do

@@ -8,10 +8,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::Projection;
-use tessera_types::layer::{RegisteredLayer, ServingLayout};
-use tessera_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::Projection;
+use mosaica_types::layer::{RegisteredLayer, ServingLayout};
+use mosaica_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
 
@@ -134,7 +134,7 @@ impl DeclaredScalar {
     /// **expected** type, where expected is a function of the manifest declaration alone" — never
     /// on wire equalling storage — so the split leaves it intact.
     ///
-    /// **Here rather than transcribed at the caller.** `tessera-server` sees engine API types only
+    /// **Here rather than transcribed at the caller.** `mosaica-server` sees engine API types only
     /// (SA §3, enforced by `check-layers.sh`), so ingest validation once carried a second copy of
     /// the type table — and the copies disagreed, one spelling `uint64` where the other spelt
     /// `u64`. Neither had run against a non-empty declaration, so nothing caught it. A second copy
@@ -243,10 +243,10 @@ pub struct ManifestVocabulary {
     pub reserved: Vec<u32>,
 }
 
-/// The two vocabulary discriminants are defined in `tessera-types` so the WAL's
+/// The two vocabulary discriminants are defined in `mosaica-types` so the WAL's
 /// `VocabularyDeclare` record (`ingest.md` §1.3, T5) and this manifest read one type; re-exported
 /// here so every reader of the manifest keeps its path.
-pub use tessera_types::vocabulary::{Visibility, VocabularyKind};
+pub use mosaica_types::vocabulary::{Visibility, VocabularyKind};
 
 /// One value of a vocabulary: its stable opaque key, its pinned code, and its presentation.
 ///
@@ -295,7 +295,7 @@ impl Quantisation {
 pub fn identity_key_fingerprint(key_hex: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(b"tessera-identity-key-fingerprint-v1\0");
+    hasher.update(b"mosaica-identity-key-fingerprint-v1\0");
     hasher.update(key_hex.as_bytes());
     let digest = hasher.finalize();
     let mut out = String::from("fp:");
@@ -668,10 +668,10 @@ pub struct GroupViewDescriptor {
     pub metadata: BTreeMap<String, ViewMetadataValue>,
 }
 
-/// The roster's own types live in `tessera-types`, because the WAL record that makes a create
-/// durable travels through `tessera-lifecycle`, which does not depend on this crate
-/// (`tessera_types::view`). Re-exported here so a manifest reader still names one module.
-pub use tessera_types::view::{
+/// The roster's own types live in `mosaica-types`, because the WAL record that makes a create
+/// durable travels through `mosaica-lifecycle`, which does not depend on this crate
+/// (`mosaica_types::view`). Re-exported here so a manifest reader still names one module.
+pub use mosaica_types::view::{
     CreatedView, DeadIncarnation, GroupMetadataField, ViewIncarnation, ViewMetadataType,
     ViewMetadataValue, DECLARED_INCARNATION,
 };
@@ -1839,7 +1839,7 @@ impl DerivedForm {
 
 /// One entry of `term_image_extents`: one `(partition, view)`'s term images — every
 /// authorisation term's base posting projected into that view's row space
-/// (`tessera_store::term_images`).
+/// (`mosaica_store::term_images`).
 ///
 /// One file per view rather than one per term: the table is dense over term ids, so a term with no
 /// image still reports the size the route chooser prices its walk from.
@@ -2086,7 +2086,7 @@ pub struct SegmentsManifest {
     /// would leave its files on disc for ever.
     pub dead_view_incarnations: Vec<DeadIncarnation>,
     /// Every packed membership extent this partition holds — see [`MembershipExtent`]. Empty in a
-    /// bundle straight out of `tessera build`, which registers no layers and publishes no artifacts.
+    /// bundle straight out of `mosaica build`, which registers no layers and publishes no artifacts.
     ///
     /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest omitting it
     /// is malformed, not artifact-free. The two are indistinguishable under a default and only one of
@@ -2152,7 +2152,7 @@ pub struct SegmentsManifest {
     #[serde(default)]
     pub dict_extents: Vec<DictExtent>,
     /// Every filter-column extent this partition holds — see [`AttrExtent`]. Empty in a bundle
-    /// straight out of `tessera build`, whose value columns cover every entity it knows about.
+    /// straight out of `mosaica build`, whose value columns cover every entity it knows about.
     ///
     /// **Not in [`HONOURED_STATE`], for the reason `dict_extents` is not:**
     /// that list gates *state a reader might not be able to act on*, and this landed with the code
@@ -2161,7 +2161,7 @@ pub struct SegmentsManifest {
     /// version of this reader for which ignoring it is a posture.
     pub attr_extents: Vec<AttrExtent>,
     /// Every record-blob extent this partition holds — see [`RecordExtent`]. Empty in a bundle
-    /// straight out of `tessera build`, whose base blob (`attrs/record/*`) covers every entity
+    /// straight out of `mosaica build`, whose base blob (`attrs/record/*`) covers every entity
     /// it knows about. Ordered oldest-first, like [`SegmentsManifest::attr_extents`]; the layers
     /// are disjoint in entity space (**I9**), so order only decides which layer answers first.
     ///
@@ -2169,7 +2169,7 @@ pub struct SegmentsManifest {
     /// omits it is malformed, not extent-free.
     pub record_extents: Vec<RecordExtent>,
     /// Every entity→term transpose extent this partition holds — see [`EntityTermsExtent`].
-    /// Empty in a bundle straight out of `tessera build`, whose base layer
+    /// Empty in a bundle straight out of `mosaica build`, whose base layer
     /// (`entities/terms/*`) covers every entity it knows about. Oldest first, and disjoint in
     /// entity space (**I9**), so order decides only which layer answers first.
     ///
@@ -2201,7 +2201,7 @@ pub struct SegmentsManifest {
     /// fold has removed.
     pub edited_items: EditedItemsRuns,
     /// The entity ids a fold freed that the allocator issues before its high-water, as of this
-    /// publication (`tessera_lifecycle::alloc`). Ids that do not decode are read as none, which
+    /// publication (`mosaica_lifecycle::alloc`). Ids that do not decode are read as none, which
     /// issues nothing twice.
     pub free_entities: EntitySet,
     /// Freed entity ids the allocator holds back until the log keeps no record older than the
@@ -2216,7 +2216,7 @@ pub struct SegmentsManifest {
     #[serde(default)]
     pub deny: EntitySet,
     /// Category bindings minted since the last build or fold — see [`VocabularyExtension`]. Empty
-    /// in a bundle straight out of `tessera build`, and emptied again by every fold.
+    /// in a bundle straight out of `mosaica build`, and emptied again by every fold.
     #[serde(default)]
     pub vocabulary_extensions: Vec<VocabularyExtension>,
     pub files: BTreeMap<String, FileDigest>,
@@ -2325,7 +2325,7 @@ impl SegmentsManifest {
         SegmentsManifest {
             watermark: 0,
             entity_id_high_water: 0,
-            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+            entity_id_low_water: mosaica_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             layer_registry_version: 0,
@@ -2367,7 +2367,7 @@ impl SegmentsManifest {
     /// [`Self::honourability`]'s single job, so that "carries a deny" and "may be stepped past"
     /// cannot drift apart at a call site.
     ///
-    /// Empty is the ordinary case: a bundle straight out of `tessera build` carries none of
+    /// Empty is the ordinary case: a bundle straight out of `mosaica build` carries none of
     /// these, so the guard is invisible until something writes them.
     /// The deny-disposition fields this manifest carries, **regardless of what this reader
     /// honours**.
@@ -2639,7 +2639,7 @@ mod tests {
         assert!(serde_json::from_slice::<SegmentsManifest>(&without).is_err());
     }
 
-    /// The guard must be invisible on the shape `tessera build` writes, or every bundle in the
+    /// The guard must be invisible on the shape `mosaica build` writes, or every bundle in the
     /// project stops opening.
     #[test]
     fn a_manifest_with_no_state_carries_nothing_unhonourable() {
@@ -2810,7 +2810,7 @@ mod tests {
 
     fn bare_manifest() -> Manifest {
         Manifest {
-            bundle_format: tessera_types::BUNDLE_FORMAT,
+            bundle_format: mosaica_types::BUNDLE_FORMAT,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             declared_scalars: Vec::new(),
             vocabularies: Vec::new(),

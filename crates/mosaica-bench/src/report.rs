@@ -3,7 +3,7 @@
 //! **`work` is a mandatory field, not an `Option`.** That is the single most important design
 //! decision in this module, and it is a direct response to `probes/optimisations.md` §0: *"any
 //! benchmark that varies cardinality while holding container structure constant will mislead;
-//! the ratios that matter come from varying shape."* The cost model throughout Tessera is
+//! the ratios that matter come from varying shape."* The cost model throughout Mosaica is
 //! O(containers touched), not O(cardinality), so a latency without a container count beside it
 //! cannot distinguish a regression from a workload shift. Making the field non-optional means a
 //! new arm cannot forget it — it will not compile.
@@ -167,7 +167,7 @@ impl Timing {
     }
 }
 
-/// Per-stage nanoseconds, mirroring `tessera_engine::StageTimings` plus the server-owned
+/// Per-stage nanoseconds, mirroring `mosaica_engine::StageTimings` plus the server-owned
 /// serialise step. Shares its field order with the viewport trailer's `stage_ns`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stages {
@@ -202,7 +202,7 @@ pub struct Stages {
 }
 
 impl Stages {
-    pub fn from_engine(t: &tessera_engine::StageTimings, clock_lap_ns: u64) -> Self {
+    pub fn from_engine(t: &mosaica_engine::StageTimings, clock_lap_ns: u64) -> Self {
         Stages {
             generation_resolve_ns: t.generation_resolve_ns,
             stamp_compare_ns: t.stamp_compare_ns,

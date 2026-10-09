@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest';
-import {TesseraError} from '../src/client.js';
+import {MosaicaError} from '../src/client.js';
 import {HeldRecords, HeldShapes} from '../src/held.js';
 import type {Shape} from '../src/types.js';
 import {settle} from './support.js';
@@ -69,7 +69,7 @@ describe('shapes across a change of principal', () => {
 describe('the record a hover names', () => {
   it('asks for a record once, shares a request in flight, holds a refusal as none, and asks again after a forget', async () => {
     const fetch = vi.fn(async (id: bigint) => {
-      if (id === 404n) throw new TesseraError(404, 'not-found', 'no such item');
+      if (id === 404n) throw new MosaicaError(404, 'not-found', 'no such item');
       return {title: `paper ${id}`};
     });
     const part = new HeldRecords(fetch);

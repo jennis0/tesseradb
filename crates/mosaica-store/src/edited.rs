@@ -492,7 +492,7 @@ impl RowEntities {
     pub fn moved<'a>(
         &'a self,
         tessera_ids: &'a [u64],
-        key: &'a tessera_types::IdentityKey,
+        key: &'a mosaica_types::IdentityKey,
     ) -> Box<dyn Iterator<Item = (u32, u32)> + 'a> {
         match self {
             RowEntities::Numbers => Box::new(std::iter::empty()),
@@ -501,7 +501,7 @@ impl RowEntities {
                 Box::new((0..tessera_ids.len() as u32).filter_map(move |row| {
                     let entity = self.recorded(row)?;
                     let (_, number) =
-                        key.invert(tessera_types::TesseraId::new(tessera_ids[row as usize]));
+                        key.invert(mosaica_types::TesseraId::new(tessera_ids[row as usize]));
                     (u64::from(entity) != number.raw()).then_some((row, entity))
                 }))
             }
@@ -515,7 +515,7 @@ impl RowEntities {
             RowEntities::Numbers => None,
             RowEntities::Listed(rows) => rows.entity_of(row),
             RowEntities::Table(table) => table
-                .entity_of(tessera_types::RowId::new(row))
+                .entity_of(mosaica_types::RowId::new(row))
                 .map(|entity| entity.raw() as u32),
         }
     }
@@ -526,11 +526,11 @@ impl RowEntities {
         &self,
         row: u32,
         tessera_id: u64,
-        key: &tessera_types::IdentityKey,
+        key: &mosaica_types::IdentityKey,
         shard_id: u32,
         seg_id: &str,
-    ) -> Result<tessera_types::EntityId> {
-        let (shard, number) = key.invert(tessera_types::TesseraId::new(tessera_id));
+    ) -> Result<mosaica_types::EntityId> {
+        let (shard, number) = key.invert(mosaica_types::TesseraId::new(tessera_id));
         if shard != shard_id {
             return Err(StoreError::MalformedBundle {
                 detail: format!(
@@ -542,10 +542,10 @@ impl RowEntities {
         Ok(match self {
             RowEntities::Numbers => number,
             RowEntities::Listed(rows) => rows.entity_of(row).map_or(number, |entity| {
-                tessera_types::EntityId::new(u64::from(entity))
+                mosaica_types::EntityId::new(u64::from(entity))
             }),
             RowEntities::Table(table) => table
-                .entity_of(tessera_types::RowId::new(row))
+                .entity_of(mosaica_types::RowId::new(row))
                 .ok_or_else(|| StoreError::MalformedBundle {
                     detail: format!(
                         "segment '{seg_id}': row {row} lies past its view's row-to-entity file"
@@ -633,20 +633,20 @@ mod tests {
         assert!(write_edited_rows(tmp.path(), &[(1, 90), (4, 91)]).unwrap());
         let rows = EditedRows::open(tmp.path(), true).unwrap();
         assert_eq!(rows.iter().collect::<Vec<_>>(), vec![(1, 90), (4, 91)]);
-        let key = tessera_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
+        let key = mosaica_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
         let tid = |n: u64| {
-            key.forward(0, tessera_types::EntityId::new(n))
+            key.forward(0, mosaica_types::EntityId::new(n))
                 .unwrap()
                 .raw()
         };
         let rows = RowEntities::Listed(Arc::new(rows));
         assert_eq!(
             rows.entity_of(4, tid(5), &key, 0, "s").unwrap(),
-            tessera_types::EntityId::new(91)
+            mosaica_types::EntityId::new(91)
         );
         assert_eq!(
             rows.entity_of(2, tid(5), &key, 0, "s").unwrap(),
-            tessera_types::EntityId::new(5)
+            mosaica_types::EntityId::new(5)
         );
     }
 }

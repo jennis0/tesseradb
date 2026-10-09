@@ -14,7 +14,7 @@
 //! machine shared with other work, the minima are the figures to compare.
 //!
 //! ```text
-//! cargo bench -p tessera-engine --bench render_gather
+//! cargo bench -p mosaica-engine --bench render_gather
 //! ```
 
 use std::fs::File;
@@ -28,12 +28,12 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
-use tessera_build::config::{AttributeSource, Config};
-use tessera_build::{build, BuildArgs, ViewArgs};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_spatial::{Bounds, Projection};
-use tessera_types::IdentityKey;
+use mosaica_build::config::{AttributeSource, Config};
+use mosaica_build::{build, BuildArgs, ViewArgs};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_spatial::{Bounds, Projection};
+use mosaica_types::IdentityKey;
 
 const N: u64 = 1_000_000;
 const COLUMNS: [&str; 4] = ["a", "b", "c", "d"];
@@ -121,7 +121,7 @@ fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -155,14 +155,14 @@ fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )
     .unwrap()

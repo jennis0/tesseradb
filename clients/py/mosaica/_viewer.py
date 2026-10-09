@@ -1,4 +1,4 @@
-"""Reading a Tessera database over HTTP: the reader, the selection and the answers they give.
+"""Reading a Mosaica database over HTTP: the reader, the selection and the answers they give.
 
 A `Viewer` is a server address and a way to get a token. It holds no copy of the data: every
 answer is a request the server checks against the token, so a local database and a hosted one are
@@ -242,7 +242,7 @@ class Batches:
     def read_all(self):
         """The pages not yet taken, as one `pyarrow.Table`.
 
-        Its schema metadata `tessera.head` is `head` as JSON. A read that returns no row is a
+        Its schema metadata `mosaica.head` is `head` as JSON. A read that returns no row is a
         table of no rows with the read's columns. A `PartialRead` carries the rows read before it
         as its `rows`, or `None` where no page had arrived.
         """
@@ -264,7 +264,7 @@ class Batches:
         import pyarrow as pa
 
         table = pa.Table.from_batches(batches).unify_dictionaries()
-        return table.replace_schema_metadata({"tessera.head": json.dumps(self.head)})
+        return table.replace_schema_metadata({"mosaica.head": json.dumps(self.head)})
 
     def to_pandas(self, **options):
         """The pages not yet taken, as one pandas DataFrame; `options` go to pyarrow's
@@ -402,10 +402,10 @@ class Sample:
 
     The points are a sample thinned for drawing. `k` caps how many each map tile carries, so
     the table is smaller than the set it was drawn from. The table's schema metadata says by how
-    much: `tessera.counts` holds `visible` (the items this reader may see in the tiles the
+    much: `mosaica.counts` holds `visible` (the items this reader may see in the tiles the
     request touched), `matched` (those that also match the filter), `highlighted` (those that
-    also match the highlight) and `served` (the rows in this table). `tessera.request` is the
-    request that was sent, and `tessera.trailer` the server's closing summary.
+    also match the highlight) and `served` (the rows in this table). `mosaica.request` is the
+    request that was sent, and `mosaica.trailer` the server's closing summary.
     """
 
     def __init__(self, points, sub_cells=None):
@@ -595,7 +595,7 @@ class Selection:
           position alone. Leave it out, or pass `"full"`, for every rendered column. `"highlight"`
           returns each point as `tessera_id` and `highlighted` only, which is enough to update a
           highlight on points already held. Fetch the rest of an item with `items`.
-        - `pin`: the `x-tessera-pin` value from an earlier answer. The answer then says whether
+        - `pin`: the `x-mosaica-pin` value from an earlier answer. The answer then says whether
           the data has changed since.
         - `on_counts`: a function called once with the per-tile counts as a pyarrow table, and
           the `sub_cells` table or `None`, as soon as they arrive. The server sends them before
@@ -664,9 +664,9 @@ class Selection:
         return Sample(
             points.replace_schema_metadata(
                 {
-                    "tessera.counts": json.dumps(_tile_counts(tiles)),
-                    "tessera.trailer": json.dumps(trailer),
-                    "tessera.request": json.dumps(request),
+                    "mosaica.counts": json.dumps(_tile_counts(tiles)),
+                    "mosaica.trailer": json.dumps(trailer),
+                    "mosaica.request": json.dumps(request),
                 }
             ),
             sub_cells,
@@ -786,7 +786,7 @@ class Selection:
 
 
 class Viewer:
-    """A reader of one Tessera database: an address and a token that says what it may see.
+    """A reader of one Mosaica database: an address and a token that says what it may see.
 
     A reader holds a set of access terms: those granted to the principal it reads as, or those the
     operator named for it. Each item carries access labels, expressions over terms such as
@@ -941,13 +941,13 @@ class Viewer:
         - `fields`: the declared columns to return, in this order. `[]` returns `tessera_id`
           alone. A column declared for a view group, read under a view outside that group, is
           named `"<column>@<key>"` to say which of the group's views to read it in.
-        - `system_fields`: any of `"position"`, the columns `tessera:x` and `tessera:y` in the
+        - `system_fields`: any of `"position"`, the columns `mosaica:x` and `mosaica:y` in the
           view's coordinates (degrees for a geographic view), and `"labels"`, the column
-          `tessera:labels` holding, for each item, the clauses of its labels that this reader
+          `mosaica:labels` holding, for each item, the clauses of its labels that this reader
           satisfies, as `item` gives them.
         - `filters`: a filter expression, as `Selection.filter` takes one. Only the items that
           match are returned.
-        - `keep_unmatched`: return every item, with a `tessera:matched` column saying whether it
+        - `keep_unmatched`: return every item, with a `mosaica:matched` column saying whether it
           matches `filters`.
         - `count`: also count the items this reader may see in the view, `visible`, and those
           that match, `matched`. The counts are in the head.
@@ -963,9 +963,9 @@ class Viewer:
         `count` goes on the first request only, which is where the server takes it.
 
         The columns are `tessera_id`, the fields in the order named, the system fields in the
-        order named, then `tessera:matched`. A column is present even where no item has a value,
+        order named, then `mosaica:matched`. A column is present even where no item has a value,
         and a missing value is null. A category column holds each value's key, as a dictionary
-        column. The table's schema metadata `tessera.head` is the first response's head as JSON:
+        column. The table's schema metadata `mosaica.head` is the first response's head as JSON:
         `page_rows`, the page size used, `order`, the order used, and the counts under `count`.
         A read that returns no row is a table of no rows with these columns.
 
@@ -1121,15 +1121,15 @@ class Viewer:
           index of its colour, chosen so that annotations drawn beside each other differ, and
           the same at any zoom, box, budget or filter. Without it `slot` is null. A size outside
           2 to 32 is refused.
-        - `pin`: the `x-tessera-pin` value from an earlier answer.
+        - `pin`: the `x-mosaica-pin` value from an earlier answer.
         - `on_tile`: a function called with each tile's rows as a pyarrow table, as they arrive.
 
         Every option is sent only when given, so the server's own setting applies otherwise. The
         columns are `layer`, `tessera_id`, `key`, `masked_count`, `centroid_x`, `centroid_y`,
         `box_min_x`, `box_min_y`, `box_max_x`, `box_max_y` (positions on the grid of 2^32 steps
         per axis that a sample's `code` uses), `content`, `parent_ids`, `rung` (the level),
-        `matched`, `highlighted`, `target`, `tile` and `slot`. The schema metadata `tessera.trailer` is
-        the server's closing summary and `tessera.request` the request sent.
+        `matched`, `highlighted`, `target`, `tile` and `slot`. The schema metadata `mosaica.trailer` is
+        the server's closing summary and `mosaica.request` the request sent.
 
             v.viewport_artifacts("papers", 2, per_tile=20, layers=["topics"]).to_pandas()
         """
@@ -1177,7 +1177,7 @@ class Viewer:
             )
         joined = pa.concat_tables(tables) if tables else _no_artifacts()
         return joined.replace_schema_metadata(
-            {"tessera.trailer": json.dumps(trailer), "tessera.request": json.dumps(request)}
+            {"mosaica.trailer": json.dumps(trailer), "mosaica.request": json.dumps(request)}
         )
 
     def _bulk_read(self, route: str, request: dict, given: dict, batches: bool):
@@ -1245,14 +1245,14 @@ class Viewer:
         whose range has a fractional bound and a UTC timestamp on a timestamp field; a bin holds
         `lower` up to but not including `upper`, and the last bin also holds its `upper`), `cell`
         (the cell's Morton prefix), `count`, `reference_count` and `lift`. Its schema metadata
-        `tessera.head` is the table's figures as JSON: `grouping`, `total` (the items in the set),
+        `mosaica.head` is the table's figures as JSON: `grouping`, `total` (the items in the set),
         `reference_total` with a reference, `groups` (the groups in the set before the cut to
         `top` or the names given) with `"by"` other than a summary, and with a `"sample"` the
         object `sample`: `sampled` (whether any count is scaled), `items` (the set's items
         counted) and, with a reference, `reference_items`. A summary's table has its own
         columns, named above; its `min` and `max` are typed as a histogram's edges on the field.
-        `tessera.recomposed` is `"true"` where a page counted a different state of the database
-        from the page before it, and `tessera.region` is the server's region verdict where a
+        `mosaica.recomposed` is `"true"` where a page counted a different state of the database
+        from the page before it, and `mosaica.region` is the server's region verdict where a
         filter had a `region` leaf.
 
         The server answers a page at a time, and each response ends with a cursor for the next.
@@ -1286,11 +1286,11 @@ class Viewer:
             for grouping in sorted(pages):
                 figures = {k: v for k, v in heads[grouping].items() if k != "resumed"}
                 metadata = {
-                    "tessera.head": json.dumps(figures),
-                    "tessera.recomposed": "true" if recomposed else "false",
+                    "mosaica.head": json.dumps(figures),
+                    "mosaica.recomposed": "true" if recomposed else "false",
                 }
                 if region is not None:
-                    metadata["tessera.region"] = region
+                    metadata["mosaica.region"] = region
                 table = pa.Table.from_batches(pages[grouping]).unify_dictionaries()
                 tables.append(table.replace_schema_metadata(metadata))
             return tables
@@ -1317,7 +1317,7 @@ class Viewer:
                     raise stopped(str(refused)) from None
             table, pending, trailer, carried = None, None, None, [0, 0]
             with response:
-                region = region or response.headers.get("x-tessera-region")
+                region = region or response.headers.get("x-mosaica-region")
                 for kind, payload in _frames(response):
                     if kind == FRAME_TABLE_HEAD:
                         head = json.loads(payload)
@@ -1371,8 +1371,8 @@ class Viewer:
           this text, ignoring case. The rows then also have `count`, the number of
           items this reader may see that carry the value. The server returns at most its
           `max_suggestions` setting of such values; the table's schema metadata
-          `tessera.more` is `"true"` when more matched than were returned, and
-          `tessera.total` is the number of items the counts are taken over, so a count divided
+          `mosaica.more` is `"true"` when more matched than were returned, and
+          `mosaica.total` is the number of items the counts are taken over, so a count divided
           by it is the value's share.
         - `view`: the view to read the column in. A column declared for a view group holds
           different values in each of the group's views, so it needs this.
@@ -1438,7 +1438,7 @@ class Viewer:
                 page = json.loads(self._request("POST", path + "/suggest", body))
             more = "true" if page.get("more") else "false"
             return table(page["values"], counted=True).replace_schema_metadata(
-                {"tessera.more": more, "tessera.total": str(page["total"])}
+                {"mosaica.more": more, "mosaica.total": str(page["total"])}
             )
         values: list = []
         while True:
@@ -1604,7 +1604,7 @@ class Viewer:
 
 
 def connect(url: str, token: TokenSource) -> Viewer:
-    """A reader of a Tessera database someone else runs.
+    """A reader of a Mosaica database someone else runs.
 
     - `url`: the address of its viewer plane, where readers read.
     - `token`: the token its operator issued you, as a string, a `Token`, or a function that
@@ -1612,8 +1612,8 @@ def connect(url: str, token: TokenSource) -> Viewer:
 
     The reader can read and map what the token's terms admit.
 
-        v = tesseradb.connect("https://maps.example/viewer", token=my_token)
+        v = mosaica.connect("https://maps.example/viewer", token=my_token)
         v.view("papers").count()
-        v = tesseradb.connect(url, lambda: tesseradb.login(url, api_key=my_key))
+        v = mosaica.connect(url, lambda: mosaica.login(url, api_key=my_key))
     """
     return Viewer(url, token)

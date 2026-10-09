@@ -18,7 +18,7 @@
 //!
 //! - **R**, the reference: `Engine::viewport`, the shipped path, gather included.
 //! - **B**, the band route, evaluated here against the builder's files and **the engine's own
-//!   composed mask, cut, tile ranges and [`SelectParams`]** ([`tessera_engine::Engine::composed_mask`]).
+//!   composed mask, cut, tile ranges and [`SelectParams`]** ([`mosaica_engine::Engine::composed_mask`]).
 //!   Sharing those inputs is what makes the comparison one of two evaluations rather than two
 //!   transcriptions. Per tile, B asserts its served identity set against R's; a disagreement is
 //!   recorded with the tile and the first differing identity and the run continues.
@@ -33,7 +33,7 @@
 //! what the structure costs, not a lower one.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin identity_bands_probe -- \
+//! cargo run --release -p mosaica-bench --bin identity_bands_probe -- \
 //!     --bundle <bundle> --bands <builder out> --principal p100=US,AU,... --out results.json
 //! ```
 
@@ -55,13 +55,13 @@ use croaring::Bitmap;
 use memmap2::Mmap;
 use serde_json::{json, Value};
 
-use tessera_engine::occupancy::occupied_tiles_ladder;
-use tessera_engine::select::{served_count, SelectParams, Threshold};
-use tessera_engine::viewport::{segments_with_row_bases, ViewportRequest};
-use tessera_engine::{compose::EffectiveMask, Engine, EngineConfig};
-use tessera_spatial::{tiles_for_bbox, Bounds, Tile};
-use tessera_store::read::{open_bundle, SegmentData};
-use tessera_store::tile_ranges_all;
+use mosaica_engine::occupancy::occupied_tiles_ladder;
+use mosaica_engine::select::{served_count, SelectParams, Threshold};
+use mosaica_engine::viewport::{segments_with_row_bases, ViewportRequest};
+use mosaica_engine::{compose::EffectiveMask, Engine, EngineConfig};
+use mosaica_spatial::{tiles_for_bbox, Bounds, Tile};
+use mosaica_store::read::{open_bundle, SegmentData};
+use mosaica_store::tile_ranges_all;
 
 /// Server defaults, so the reference arm measures a deployment somebody runs (`arms::viewport`,
 /// and `viewport_sweep` beside this).
@@ -69,7 +69,7 @@ const K_MAX_MARKS: usize = 500;
 const THETA_TARGET: u64 = 16;
 const MAX_K: usize = 5_000;
 const K_MIN: usize = 2;
-/// `tessera-server`'s own default (`config.rs`). **`EngineConfig` validates nothing here** — the
+/// `mosaica-server`'s own default (`config.rs`). **`EngineConfig` validates nothing here** — the
 /// field is a plain `usize` and the refusal is per request, against the tile count the request
 /// demands — so this is the deployment's ceiling rather than a limit the type imposes. At this
 /// value a whole-extent request is served to depth 9 (4⁹ = 262,144 tiles) and refused at 10.
@@ -1339,7 +1339,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bands = Bands::open(&args.bands)?;
 
-    let tmp = std::env::temp_dir().join(format!("tessera-identity-bands-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("mosaica-identity-bands-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let engine = Engine::open(
@@ -1355,14 +1355,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: MAX_TILES_PER_REQUEST,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
 
@@ -1370,7 +1370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     struct Principal {
         name: String,
         terms: Vec<String>,
-        session: tessera_engine::Session,
+        session: mosaica_engine::Session,
         mask: EffectiveMask,
         visible_total: u64,
         ladder: Vec<u64>,
@@ -1758,7 +1758,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "k_max_marks": K_MAX_MARKS,
             "theta_target_marks": THETA_TARGET,
             "max_tiles_per_request": MAX_TILES_PER_REQUEST,
-            "compute_threads": tessera_engine::default_compute_threads(),
+            "compute_threads": mosaica_engine::default_compute_threads(),
         },
         "view": view_id,
         "row_count": segment.row_count,
@@ -1768,8 +1768,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|(z, tile, visible)| json!({"z": z, "tile": tile.prefix, "visible_widest": visible}))
             .collect::<Vec<_>>(),
         "widest_principal": principals[widest].name,
-        "commit": std::env::var("TESSERA_PROBE_COMMIT").unwrap_or_default(),
-        "box": std::env::var("TESSERA_PROBE_BOX").unwrap_or_default(),
+        "commit": std::env::var("MOSAICA_PROBE_COMMIT").unwrap_or_default(),
+        "box": std::env::var("MOSAICA_PROBE_BOX").unwrap_or_default(),
         "disagreeing_tiles": disagreeing_tiles,
         "principals": results,
     });
@@ -1813,7 +1813,7 @@ fn merge(a: Value, b: Value) -> Value {
 }
 
 /// The reference arm's own figures: what it returned and what its stages cost.
-fn r_detail(out: &tessera_engine::ViewportOut) -> Value {
+fn r_detail(out: &mosaica_engine::ViewportOut) -> Value {
     let t = &out.timings;
     json!({
         "points": out.points.len(),

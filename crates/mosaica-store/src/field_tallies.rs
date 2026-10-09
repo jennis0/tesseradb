@@ -13,7 +13,7 @@
 //!
 //! # The format
 //!
-//! Little-endian, after the magic `TSFT0002`:
+//! Little-endian, after the magic `MSFT0003`:
 //!
 //! ```text
 //! fields   u32 F, then per field: name length u16, name, float u8
@@ -34,7 +34,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use rayon::prelude::*;
-use tessera_types::scalar::{Number, ScalarType};
+use mosaica_types::scalar::{Number, ScalarType};
 
 pub use crate::exact_sum::{CompactSum, ExactSum, Trimmed};
 use crate::manifest::DeclaredScalar;
@@ -44,7 +44,7 @@ use crate::render_presence::RenderPresence;
 /// The file's name in a view's directory.
 pub const FIELD_TALLIES_FILE: &str = "field-tallies.bin";
 
-const MAGIC: &[u8; 8] = b"TSFT0002";
+const MAGIC: &[u8; 8] = b"MSFT0003";
 
 /// How many of the most extreme values a tally keeps on each side.
 pub const RESERVE: usize = 8;
@@ -553,7 +553,7 @@ pub fn derive_view(
         crate::entity_terms::EntityTerms::open_dir(&partition_dir.join(crate::ENTITY_TERMS_DIR))?;
     let row_of = |entity: u32| {
         permutation
-            .row_of(tessera_types::EntityId::new(u64::from(entity)))
+            .row_of(mosaica_types::EntityId::new(u64::from(entity)))
             .map(|row| row.raw())
             .filter(|&row| row < base_rows)
     };

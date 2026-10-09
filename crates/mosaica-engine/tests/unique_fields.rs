@@ -25,13 +25,13 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_engine::filter::{FilterExpr, FilterOperand, Scalar};
-use tessera_engine::{AcceptError, AttributeRequest, Engine, EngineConfig, Session, ViewportRequest};
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::WalScalar;
-use tessera_lifecycle::{ChangeOp, ExecError};
-use tessera_types::layer::LayerScope;
-use tessera_types::EntityId;
+use mosaica_engine::filter::{FilterExpr, FilterOperand, Scalar};
+use mosaica_engine::{AcceptError, AttributeRequest, Engine, EngineConfig, Session, ViewportRequest};
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_lifecycle::{ChangeOp, ExecError};
+use mosaica_types::layer::LayerScope;
+use mosaica_types::EntityId;
 
 const N: u64 = 90;
 const VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -146,28 +146,28 @@ fn fixture_of(unique: bool, views: &[&str]) -> Fixture {
         false => SCHEMA_TOML.replace("unique = true\n", ""),
     };
     std::fs::write(&schema_path, toml).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+    let schema = mosaica_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the fixture schema parses")
         .schema;
     let schema = with_id(schema);
-    tessera_build::build(&tessera_build::BuildArgs {
+    mosaica_build::build(&mosaica_build::BuildArgs {
         views: views
             .iter()
-            .map(|view| tessera_build::ViewArgs {
+            .map(|view| mosaica_build::ViewArgs {
                 visibility: None,
                 view_id: view.to_string(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 extent: extent(),
                 points: points.clone(),
                 point_fields: Default::default(),
                 select: None,
-                access: tessera_build::config::AccessInput::relation(pairs.clone()),
+                access: mosaica_build::config::AccessInput::relation(pairs.clone()),
             })
             .collect(),
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.clone(),
         limit: None,
         strict: false,
@@ -521,14 +521,14 @@ fn a_generation_from_before_a_coalesce_and_a_fold_still_answers_from_its_runs() 
     fold(&engine);
 
     let values = ["10.held/a".to_string(), "10.held/b".to_string()];
-    let table = tessera_engine::AddressTable {
+    let table = mosaica_engine::AddressTable {
         rows: values.len(),
         tessera_id: None,
         columns: vec![(
             "doi".to_string(),
             values
                 .iter()
-                .map(|v| Some(tessera_engine::AddressValue::Text(v.clone())))
+                .map(|v| Some(mosaica_engine::AddressValue::Text(v.clone())))
                 .collect(),
         )],
     };
@@ -539,8 +539,8 @@ fn a_generation_from_before_a_coalesce_and_a_fold_still_answers_from_its_runs() 
     assert_eq!(
         found,
         vec![
-            tessera_lifecycle::resolve::Verdict::Names(a[0]),
-            tessera_lifecycle::resolve::Verdict::Names(b[0])
+            mosaica_lifecycle::resolve::Verdict::Names(a[0]),
+            mosaica_lifecycle::resolve::Verdict::Names(b[0])
         ]
     );
 
@@ -588,7 +588,7 @@ fn an_invisible_holder_answers_as_absent() {
 /// ignored whatever it holds.
 #[test]
 fn an_address_cell_is_checked_against_its_field_alone() {
-    use tessera_engine::{AddressTable, AddressValue};
+    use mosaica_engine::{AddressTable, AddressValue};
     let fx = fixture();
     let engine = engine_over(&fx);
     let table = |columns: Vec<(&str, AddressValue)>| AddressTable {
@@ -612,7 +612,7 @@ fn an_address_cell_is_checked_against_its_field_alone() {
     ] {
         let refused = engine.name_items(&table(columns));
         assert!(
-            matches!(refused, Err(tessera_engine::EngineError::AddressMalformed(_))),
+            matches!(refused, Err(mosaica_engine::EngineError::AddressMalformed(_))),
             "{what}: {refused:?}"
         );
     }
@@ -626,7 +626,7 @@ fn an_address_cell_is_checked_against_its_field_alone() {
         .expect("columns naming nothing are ignored");
     assert_eq!(
         named.verdicts,
-        vec![tessera_lifecycle::resolve::Verdict::Names(built(&engine, 4))]
+        vec![mosaica_lifecycle::resolve::Verdict::Names(built(&engine, 4))]
     );
     assert_eq!(named.ignored, ["score", "flags", "rank"]);
 }
@@ -881,11 +881,11 @@ fn a_join_keeps_its_value_when_the_view_holding_its_own_row_is_dropped_before_it
     let fx = fixture();
     let engine = engine_over(&fx);
     engine
-        .create_view_group(tessera_lifecycle::wal::ViewGroupDeclaration {
+        .create_view_group(mosaica_lifecycle::wal::ViewGroupDeclaration {
             name: "quarter".to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -997,7 +997,7 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
     };
     assert_eq!(items(&built, &expected_built), items(&engine, &expected));
     assert_eq!(items(&engine, &expected), asked.iter().cloned().collect());
-    let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+    let verified = mosaica_build::verify_deep(&fx.root, &mosaica_build::VerifyOpts::default())
         .expect("the runtime-declared indexes agree with their columns");
     assert!(verified.unique_entries >= 3 * N, "every declared index was checked");
 
@@ -1024,7 +1024,7 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
     fold(&engine);
     let engine = restart(&fx, engine);
     check_lookups(&engine, &expected, "declared at runtime, after a fold and a restart");
-    let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+    let verified = mosaica_build::verify_deep(&fx.root, &mosaica_build::VerifyOpts::default())
         .expect("the folded indexes agree with their columns");
     assert!(verified.unique_entries >= 3 * N, "every folded index was checked");
 }
@@ -1271,7 +1271,7 @@ fn a_declaration_and_a_fold_wait_for_each_other() {
 
     let engine = restart(&fx, Arc::try_unwrap(engine).ok().expect("one holder"));
     check_lookups(&engine, &expected, "declared across two folds, after a restart");
-    let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+    let verified = mosaica_build::verify_deep(&fx.root, &mosaica_build::VerifyOpts::default())
         .expect("the indexes agree with their columns");
     assert!(verified.unique_entries >= 3 * N);
 }
@@ -1330,7 +1330,7 @@ fn fill(
         .map(|(entity, value)| {
             let mut scalars = vec![WalScalar::Null; declared.len()];
             scalars[at] = value;
-            tessera_engine::IngestRow {
+            mosaica_engine::IngestRow {
                 tessera_id: Some(engine.tessera_id_of(entity).unwrap()),
                 labels: None,
                 position: None,
@@ -1341,7 +1341,7 @@ fn fill(
         })
         .collect();
     engine
-        .ingest(tessera_engine::IngestRequest {
+        .ingest(mosaica_engine::IngestRequest {
             batch_id: batch.to_string(),
             body_hash: hash_of(batch),
             view: None,

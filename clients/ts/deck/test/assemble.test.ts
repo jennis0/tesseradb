@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
-import {type Band} from '@tesseradb/client';
-import {bandsOfResult, mortonOfTile, type ReplicaFrame} from '@tesseradb/client/internal';
-import type {ScalarColumn, ViewportResult} from '@tesseradb/client';
+import {type Band} from '@mosaica/client';
+import {bandsOfResult, mortonOfTile, type ReplicaFrame} from '@mosaica/client/internal';
+import type {ScalarColumn, ViewportResult} from '@mosaica/client';
 import {band as heldBand, refused} from '../../core/test/support.js';
 import {
   assemble,

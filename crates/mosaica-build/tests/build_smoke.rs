@@ -16,10 +16,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::{build, signature_sort_key, BuildArgs};
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::{IdentityKey, TermId};
+use mosaica_build::{build, signature_sort_key, BuildArgs};
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{IdentityKey, TermId};
 
 mod common;
 
@@ -89,7 +89,7 @@ fn write_points(path: &Path) {
 fn source_morton(e: u64) -> u64 {
     let cx = ((e * 613) % 65536) as u16;
     let cy = ((e * 977) % 65536) as u16;
-    tessera_spatial::interleave(cx, cy).raw() as u64
+    mosaica_spatial::interleave(cx, cy).raw() as u64
 }
 
 /// A points file in the shape the probe corpus uses: `entity_id` + `morton`, no coordinates.
@@ -154,7 +154,7 @@ fn read_arrow_ipc(path: &Path) -> Vec<RecordBatch> {
 }
 
 fn posting_entities(path: &Path, term: TermId) -> BTreeSet<u64> {
-    use tessera_authz::{PostingRef, PostingsReader};
+    use mosaica_authz::{PostingRef, PostingsReader};
     let reader = PostingsReader::open(path, false).unwrap();
     let out = match reader
         .posting(term)
@@ -187,15 +187,15 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     let (schema, attribute_sources) = common::id_attributes(&points);
 
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -220,7 +220,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     // ---- (a) manifests present, digests verify (open_bundle is the read protocol) ----------
     let bundle = open_bundle(&out).expect("open_bundle must verify the freshly built bundle");
-    assert_eq!(bundle.manifest.bundle_format, tessera_types::BUNDLE_FORMAT);
+    assert_eq!(bundle.manifest.bundle_format, mosaica_types::BUNDLE_FORMAT);
     assert_eq!(bundle.manifest.entity_id_high_water, N_ITEMS);
     assert_eq!(bundle.manifest.small_term_threshold, 32);
     assert_eq!(bundle.manifest.partitions.len(), 1);
@@ -284,14 +284,14 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/views/s0/segments/seg-0/columns.arrow",
         "partitions/default/views/s0/segments/seg-0/morton.u32",
         // The Morton column's run-length index, which selection walks per cell
-        // (`tessera_store::read::CutIndex`).
+        // (`mosaica_store::read::CutIndex`).
         "partitions/default/views/s0/segments/seg-0/cuts.u32",
-        // Each cell's code, and the identity bands (`tessera_store::bands`).
+        // Each cell's code, and the identity bands (`mosaica_store::bands`).
         "partitions/default/views/s0/segments/seg-0/cell-codes.u32",
         "partitions/default/views/s0/segments/seg-0/bands.bin",
-        // The view's term images (`tessera_store::term_images`), one file per view with rows.
+        // The view's term images (`mosaica_store::term_images`), one file per view with rows.
         "partitions/default/term-images/term-images-000000-000.timg",
-        // The view's field tallies (`tessera_store::field_tallies`).
+        // The view's field tallies (`mosaica_store::field_tallies`).
         "partitions/default/views/s0/field-tallies.bin",
     ] {
         assert!(
@@ -332,7 +332,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     // Rebuild each item's signature in *term-id* space by reading the dictionary and the
     // source relation, then check items sharing a signature occupy one contiguous ID range.
     let dict =
-        tessera_authz::Dict::load(&[out.join(prefix).join("dictionary/terms-0.dict")]).unwrap();
+        mosaica_authz::Dict::load(&[out.join(prefix).join("dictionary/terms-0.dict")]).unwrap();
     let mut sig_of_new: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
     for e in 0..N_ITEMS {
         let terms: Vec<TermId> = synth_terms(e)
@@ -373,7 +373,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     // ---- (c) postings row count == dictionary length ------------------------------------
     let postings_path = pdir.join("terms/postings.arrow");
-    let reader = tessera_authz::PostingsReader::open(&postings_path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&postings_path, false).unwrap();
     assert_eq!(reader.term_count(), dict.len());
     assert_eq!(dict.len() as u64, report.terms);
 
@@ -465,7 +465,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     for e in 0..N_ITEMS {
         let row = view
             .row_space
-            .row_of(tessera_types::EntityId::new(e))
+            .row_of(mosaica_types::EntityId::new(e))
             .expect("every entity has a row");
         assert!(rows.insert(row.raw()), "row {} assigned twice", row.raw());
     }
@@ -482,15 +482,15 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_pairs(&pairs);
     let (schema, attribute_sources) = common::id_attributes(&points);
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -532,15 +532,15 @@ fn an_empty_selection_builds_an_empty_bundle() {
     let out = tmp.path().join("bundle");
     let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -582,15 +582,15 @@ fn morton_input_requires_the_identity_extent() {
     let (schema, attribute_sources) = common::id_attributes(&points);
 
     let args = |extent| BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent,
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -638,15 +638,15 @@ fn morton_input_requires_the_identity_extent() {
     let out = tmp.path().join("bundle-ok");
     let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: identity,
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -695,15 +695,15 @@ fn build_rejects_an_unsafe_view_id() {
     write_pairs(&pairs);
     let (schema, attribute_sources) = common::id_attributes(&points);
     assert!(build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "../escape".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -749,15 +749,15 @@ fn limit_filters_the_source_entity_id_prefix() {
     let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -814,18 +814,18 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
     w.write(&batch).unwrap();
     w.close().unwrap();
     let (mut schema, attribute_sources) = common::id_attributes(&points);
-    schema.attributes[0].ty = tessera_spatial::tiler::ScalarType::I64;
+    schema.attributes[0].ty = mosaica_spatial::tiler::ScalarType::I64;
 
     let report = build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -849,7 +849,7 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
     assert_eq!(report.items, 100, "ids 0 to 99 are below the limit");
 }
 
-/// `tessera verify` re-derives every row's `tessera_id` from `(identity.key, identity.shard_id,
+/// `mosaica verify` re-derives every row's `tessera_id` from `(identity.key, identity.shard_id,
 /// entity_id)` and fails if a single row disagrees (contracts §2.6 r6). A freshly built bundle
 /// must verify clean.
 #[test]
@@ -863,15 +863,15 @@ fn verify_accepts_a_freshly_built_bundle() {
     let (schema, attribute_sources) = common::id_attributes(&points);
 
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -893,12 +893,12 @@ fn verify_accepts_a_freshly_built_bundle() {
     })
     .unwrap();
 
-    let report = tessera_build::verify(&out).expect("a freshly built bundle must verify");
+    let report = mosaica_build::verify(&out).expect("a freshly built bundle must verify");
     assert_eq!(report.rows, N_ITEMS);
     assert_eq!(report.entity_id_high_water, N_ITEMS);
 }
 
-/// Contracts §2.6 r6: "`tessera verify` checks the whole column against" the key. Corrupts one
+/// Contracts §2.6 r6: "`mosaica verify` checks the whole column against" the key. Corrupts one
 /// row's stored `tessera_id` (keeping every digest self-consistent, so the failure is the
 /// identity check itself and not an earlier digest-mismatch error) and asserts `verify` refuses.
 #[test]
@@ -914,15 +914,15 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -1013,10 +1013,10 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     )
     .unwrap();
 
-    let err = tessera_build::verify(&out)
+    let err = mosaica_build::verify(&out)
         .expect_err("a corrupted tessera_id column must fail verification");
     assert!(
-        matches!(err, tessera_build::BuildError::Invalid(_)),
+        matches!(err, mosaica_build::BuildError::Invalid(_)),
         "expected BuildError::Invalid, got {err:?}"
     );
     assert!(
@@ -1033,13 +1033,13 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
 /// test fails. That is the whole precision claim, stated as a fixture rather than as prose.
 #[test]
 fn morton_plus_residual_recovers_sub_cell_position() {
-    use tessera_build::input::{read_points, IDENTITY_EXTENT};
+    use mosaica_build::input::{read_points, IDENTITY_EXTENT};
 
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("points.parquet");
 
     // One cell, four corners of it: residual interleaves (rx, ry) with x on the even bits.
-    let cell = tessera_spatial::interleave(1234, 5678).raw() as u64;
+    let cell = mosaica_spatial::interleave(1234, 5678).raw() as u64;
     let residual_of = |rx: u32, ry: u32| -> u64 {
         let spread = |v: u32| {
             let mut x = v as u64;
@@ -1078,8 +1078,8 @@ fn morton_plus_residual_recovers_sub_cell_position() {
 
     let fields = Default::default();
     let mut rows = read_points(
-        tessera_build::input::Source::every_row(&points, &fields),
-        tessera_spatial::Projection::None,
+        mosaica_build::input::Source::every_row(&points, &fields),
+        mosaica_spatial::Projection::None,
         &IDENTITY_EXTENT,
     )
     .unwrap();
@@ -1106,7 +1106,7 @@ fn morton_plus_residual_recovers_sub_cell_position() {
 /// file does not hold would be the defect.
 #[test]
 fn bare_morton_widens_with_a_zero_residual() {
-    use tessera_build::input::{read_points, IDENTITY_EXTENT};
+    use mosaica_build::input::{read_points, IDENTITY_EXTENT};
 
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("points.parquet");
@@ -1114,8 +1114,8 @@ fn bare_morton_widens_with_a_zero_residual() {
 
     let fields = Default::default();
     let rows = read_points(
-        tessera_build::input::Source::every_row(&points, &fields),
-        tessera_spatial::Projection::None,
+        mosaica_build::input::Source::every_row(&points, &fields),
+        mosaica_spatial::Projection::None,
         &IDENTITY_EXTENT,
     )
     .unwrap();
@@ -1226,15 +1226,15 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         let (schema, attribute_sources) = common::id_attributes(&points);
 
         let args = BuildArgs {
-            views: vec![tessera_build::ViewArgs {
+            views: vec![mosaica_build::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),
-                projection: tessera_spatial::Projection::None,
-                extent: tessera_build::input::IDENTITY_EXTENT,
+                projection: mosaica_spatial::Projection::None,
+                extent: mosaica_build::input::IDENTITY_EXTENT,
                 points,
                 point_fields: Default::default(),
                 select: None,
-                access: tessera_build::config::AccessInput::relation(pairs),
+                access: mosaica_build::config::AccessInput::relation(pairs),
             }],
             anchor: 0,
             groups: Vec::new(),
@@ -1255,7 +1255,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
             schema,
         };
         let report = if linear {
-            tessera_build::build_in_memory(&args)
+            mosaica_build::build_in_memory(&args)
         } else {
             build(&args)
         }

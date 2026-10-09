@@ -1,4 +1,4 @@
-//! `tessera verify --deep` — the structural verifier's deep mode (correctness-suite §11, §12.4).
+//! `mosaica verify --deep` — the structural verifier's deep mode (correctness-suite §11, §12.4).
 //!
 //! [`verify_deep`] runs the whole of [`crate::verify`] — the read protocol, bijectivity over the
 //! full row space, the identity column — and then one linear pass over the structures identity says
@@ -33,7 +33,7 @@
 //! ⊘ **At rest only, for now.** This resolves `CURRENT` through `open_bundle`, so a fold flipping
 //! `CURRENT` mid-pass could swap the prefix under it. §12.4's answer — name the prefix once and
 //! never re-read `CURRENT`, with a vanishing file reported as a race rather than a defect — needs
-//! `tessera-store`'s named-prefix open made public, which has not happened. Until it has, point
+//! `mosaica-store`'s named-prefix open made public, which has not happened. Until it has, point
 //! this at a bundle no live engine is publishing into.
 
 use std::collections::HashSet;
@@ -43,10 +43,10 @@ use std::path::{Path, PathBuf};
 use arrow::array::{Array, UInt32Array, UInt64Array};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
-use tessera_authz::{DeltaTier, PostingRef, PostingsReader};
-use tessera_store::manifest::{Manifest, SegmentsManifest};
+use mosaica_authz::{DeltaTier, PostingRef, PostingsReader};
+use mosaica_store::manifest::{Manifest, SegmentsManifest};
 
-use tessera_types::{IdentityKey, TesseraId};
+use mosaica_types::{IdentityKey, TesseraId};
 
 use crate::error::{BuildError, Result};
 use crate::VerifyReport;
@@ -198,22 +198,22 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
 fn check_edited_items(
     prefix_dir: &Path,
     phash: &str,
-    manifest: &tessera_store::manifest::Manifest,
-    partition: &tessera_store::read::PartitionData,
+    manifest: &mosaica_store::manifest::Manifest,
+    partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
     let runs = &partition.manifest.edited_items;
-    let unreadable = |e: tessera_store::StoreError| {
+    let unreadable = |e: mosaica_store::StoreError| {
         BuildError::Invalid(format!("partition {phash}: the edited items' runs: {e}"))
     };
-    let forward: BTreeSet<(u32, u32)> = tessera_store::edited::entries(&runs.by_number, prefix_dir)
+    let forward: BTreeSet<(u32, u32)> = mosaica_store::edited::entries(&runs.by_number, prefix_dir)
         .map_err(unreadable)?
         .into_iter()
         .collect();
     let mut number_of: BTreeMap<u32, u32> = BTreeMap::new();
     for (entity, number) in
-        tessera_store::edited::entries(&runs.by_entity, prefix_dir).map_err(unreadable)?
+        mosaica_store::edited::entries(&runs.by_entity, prefix_dir).map_err(unreadable)?
     {
         if let Some(held) = number_of.insert(entity, number) {
             if held != number {
@@ -249,7 +249,7 @@ fn check_edited_items(
         !deleted.contains(entity)
             && partition.views.values().any(|data| {
                 data.row_space
-                    .row_of(tessera_types::EntityId::new(u64::from(entity)))
+                    .row_of(mosaica_types::EntityId::new(u64::from(entity)))
                     .is_some()
             })
     };
@@ -305,7 +305,7 @@ fn check_edited_items(
 /// **Every unique index agrees with its column, and no key names two live entities.**
 ///
 /// Each run is digested against the manifest, since the open-time sweep defers key runs to their
-/// pages' own checksums, and checked page by page ([`tessera_store::key_index::verify_run`]).
+/// pages' own checksums, and checked page by page ([`mosaica_store::key_index::verify_run`]).
 /// The runs are then merged, the manifest's tombstoned entities dropped, into one sorted stream,
 /// and the column's values for every entity not tombstoned are sorted into another through the
 /// same spill; the two must be equal entry for entry, and no key may carry two entities. The
@@ -316,15 +316,15 @@ fn check_unique_indexes(
     prefix_dir: &Path,
     phash: &str,
     manifest: &Manifest,
-    partition: &tessera_store::read::PartitionData,
+    partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    use tessera_store::unique::{key_of, KeyKind, UniqueSpill};
+    use mosaica_store::unique::{key_of, KeyKind, UniqueSpill};
     let partition_manifest = &partition.manifest;
     if partition_manifest.unique_indexes.is_empty() {
         return Ok(());
     }
-    let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+    let store = |e: mosaica_store::StoreError| BuildError::Invalid(e.to_string());
     // The schema as served: the build's columns and those declared at a running service.
     let served = manifest.with_attributes(&partition_manifest.attributes, &[]);
     let tombstones = partition_manifest
@@ -371,7 +371,7 @@ fn check_unique_indexes(
                     "{rel}: bytes do not match the manifest digest"
                 )));
             }
-            let checked = tessera_store::key_index::verify_run(&path)
+            let checked = mosaica_store::key_index::verify_run(&path)
                 .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))?;
             let width = if kind == KeyKind::Keyword { 16 } else { 8 };
             if checked.key_width != width {
@@ -389,7 +389,7 @@ fn check_unique_indexes(
         let budget = crate::pipeline::detect_memory_budget();
         let spill_bytes = crate::unique_index::spill_budget(budget, budget);
         let mut spill = UniqueSpill::create(kind, scratch.path(), spill_bytes).map_err(store)?;
-        let mut push = |entity: u32, value: &tessera_spatial::ScalarValue| -> Result<()> {
+        let mut push = |entity: u32, value: &mosaica_spatial::ScalarValue| -> Result<()> {
             if entity >= bound || tombstones.contains(entity) {
                 return Ok(());
             }
@@ -401,15 +401,15 @@ fn check_unique_indexes(
         if homes_value {
             let layers = value_layers(prefix_dir, phash, manifest, partition_manifest, declared)?;
             let mut scratch_bytes = Vec::new();
-            let mut keyed = |dict: &tessera_filter::SortedDict, ordinal: u32| {
+            let mut keyed = |dict: &mosaica_filter::SortedDict, ordinal: u32| {
                 dict.key_of(ordinal, &mut scratch_bytes)
-                    .map(|key| tessera_spatial::ScalarValue::Utf8(key.to_string()))
+                    .map(|key| mosaica_spatial::ScalarValue::Utf8(key.to_string()))
                     .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))
             };
             for (values, dict) in &layers {
                 let present = values.present();
                 values.for_each_record_value_in(&present, |entity, value| {
-                    use tessera_filter::RecordValue as RV;
+                    use mosaica_filter::RecordValue as RV;
                     let value = match (dict, value) {
                         (None, value) => record_as_scalar(value),
                         (Some(dict), RV::U8(o)) => keyed(dict, u32::from(o))?,
@@ -451,23 +451,23 @@ fn check_unique_indexes(
             }
         } else {
             let record_dir = prefix_dir.join("partitions").join(phash).join("attrs").join("record");
-            let base_rel = format!("partitions/{phash}/attrs/record/{}", tessera_filter::RECORD_BLOCKS_FILE);
+            let base_rel = format!("partitions/{phash}/attrs/record/{}", mosaica_filter::RECORD_BLOCKS_FILE);
             let base = manifest.files.contains_key(&base_rel).then_some(record_dir.as_path());
-            let extents: Vec<tessera_filter::RecordExtentPaths> = partition_manifest
+            let extents: Vec<mosaica_filter::RecordExtentPaths> = partition_manifest
                 .record_extents
                 .iter()
                 .map(|e| {
-                    Ok(tessera_filter::RecordExtentPaths {
+                    Ok(mosaica_filter::RecordExtentPaths {
                         blocks: join_rel(prefix_dir, &e.blocks)?,
                         hasrow: join_rel(prefix_dir, &e.hasrow)?,
                         directory: join_rel(prefix_dir, &e.directory)?,
                     })
                 })
                 .collect::<Result<_>>()?;
-            let stack = tessera_filter::RecordStack::open(
+            let stack = mosaica_filter::RecordStack::open(
                 base,
                 &extents,
-                tessera_filter::Access::MappedSequential,
+                mosaica_filter::Access::MappedSequential,
             )
             .map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
             let mut wanted = croaring::Bitmap::new();
@@ -478,7 +478,7 @@ fn check_unique_indexes(
                     if let Err(e) = push(entity, &record_as_scalar(field.value)) {
                         failed = Some(e);
                         // Ends the walk; the error returned is `failed`.
-                        return Err(tessera_filter::RecordError::Malformed(String::new()));
+                        return Err(mosaica_filter::RecordError::Malformed(String::new()));
                     }
                 }
                 Ok(())
@@ -503,7 +503,7 @@ fn check_unique_indexes(
             )));
         }
         let compared =
-            tessera_store::unique::compare_unique_runs(kind, &inputs, &tombstones, &column_side)
+            mosaica_store::unique::compare_unique_runs(kind, &inputs, &tombstones, &column_side)
                 .map_err(store)?;
         if let Some((key, one, other)) = compared.shared_key {
             return Err(BuildError::Invalid(format!(
@@ -530,18 +530,18 @@ fn value_layers(
     phash: &str,
     manifest: &Manifest,
     partition_manifest: &SegmentsManifest,
-    declared: &tessera_store::manifest::DeclaredScalar,
-) -> Result<Vec<(tessera_filter::ValueColumn, Option<tessera_filter::SortedDict>)>> {
+    declared: &mosaica_store::manifest::DeclaredScalar,
+) -> Result<Vec<(mosaica_filter::ValueColumn, Option<mosaica_filter::SortedDict>)>> {
     let attribute = &declared.name;
     let dir = prefix_dir.join("partitions").join(phash).join("attrs").join(attribute);
-    let access = tessera_filter::Access::MappedSequential;
+    let access = mosaica_filter::Access::MappedSequential;
     let mut layers = Vec::new();
-    let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", tessera_filter::VALUES_FILE);
+    let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", mosaica_filter::VALUES_FILE);
     if manifest.files.contains_key(&base_rel) {
-        let values = tessera_filter::ValueColumn::open_dir(&dir, access)
+        let values = mosaica_filter::ValueColumn::open_dir(&dir, access)
             .map_err(|e| BuildError::io(&dir, e))?;
-        let dict = (declared.arrow_type == tessera_spatial::ScalarType::Keyword)
-            .then(|| tessera_filter::SortedDict::open_dir(&dir, access))
+        let dict = (declared.arrow_type == mosaica_spatial::ScalarType::Keyword)
+            .then(|| mosaica_filter::SortedDict::open_dir(&dir, access))
             .transpose()
             .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))?;
         layers.push((values, dict));
@@ -551,7 +551,7 @@ fn value_layers(
         .iter()
         .filter(|e| &e.column == attribute && e.view.is_none())
     {
-        let values = tessera_filter::open_extent(
+        let values = mosaica_filter::open_extent(
             &join_rel(prefix_dir, &extent.values)?,
             &join_rel(prefix_dir, &extent.presence)?,
             access,
@@ -562,7 +562,7 @@ fn value_layers(
             .as_ref()
             .map(|rel| {
                 join_rel(prefix_dir, rel).and_then(|path| {
-                    tessera_filter::SortedDict::open(&path, access)
+                    mosaica_filter::SortedDict::open(&path, access)
                         .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))
                 })
             })
@@ -573,9 +573,9 @@ fn value_layers(
 }
 
 /// A stored value at the shape the unique key derivation and the band copies take.
-fn record_as_scalar(value: tessera_filter::RecordValue) -> tessera_spatial::ScalarValue {
-    use tessera_filter::RecordValue as RV;
-    use tessera_spatial::ScalarValue as SV;
+fn record_as_scalar(value: mosaica_filter::RecordValue) -> mosaica_spatial::ScalarValue {
+    use mosaica_filter::RecordValue as RV;
+    use mosaica_spatial::ScalarValue as SV;
     match value {
         RV::U8(x) => SV::U8(x),
         RV::U16(x) => SV::U16(x),
@@ -607,13 +607,13 @@ fn record_as_scalar(value: tessera_filter::RecordValue) -> tessera_spatial::Scal
 ///
 /// The open has already refused a `cuts.u32` that is not strictly ascending, that starts anywhere
 /// but row 0, or whose last cell begins past the segment
-/// ([`tessera_store::read::CutIndex::load`]); what needs both columns is checked here.
+/// ([`mosaica_store::read::CutIndex::load`]); what needs both columns is checked here.
 ///
 /// One forward pass over `morton.u32` and the identity column, holding a row index and the
 /// previous row's two values.
 fn check_cut_index(
     phash: &str,
-    partition: &tessera_store::read::PartitionData,
+    partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     let mut views: Vec<_> = partition.views.iter().collect();
@@ -683,19 +683,19 @@ fn check_cut_index(
 
 /// A file whose bytes disagree with what they were derived from, named by its path.
 fn disagrees(path: PathBuf, reason: String) -> BuildError {
-    BuildError::Store(tessera_store::StoreError::FileVerificationFailed { path, reason })
+    BuildError::Store(mosaica_store::StoreError::FileVerificationFailed { path, reason })
 }
 
 /// **Every segment's bands are its rows, and its cell codes its cells.** Each band holds exactly
 /// the rows whose identity has that many leading zero bits, in row order, with the row's own
 /// identity, code and residual, a copy of each render column's value, and a copy of each indexed
 /// column's value of the row's entity; each cell code is the Morton code of the cell's first row
-/// ([`tessera_store::bands`]). A refusal names the file.
+/// ([`mosaica_store::bands`]). A refusal names the file.
 fn check_bands(
     prefix_dir: &Path,
     phash: &str,
     manifest: &Manifest,
-    partition: &tessera_store::read::PartitionData,
+    partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     // The schema as served, and each copied column's value layers, opened once.
@@ -721,7 +721,7 @@ fn check_bands(
     views.sort_by(|a, b| a.0.cmp(b.0));
     for (view, data) in views {
         for segment in &data.segments {
-            let dir = tessera_store::view_path(&prefix_dir.join("partitions").join(phash), view)
+            let dir = mosaica_store::view_path(&prefix_dir.join("partitions").join(phash), view)
                 .join("segments")
                 .join(&segment.seg_id);
             let codes = segment.morton.u32();
@@ -733,11 +733,11 @@ fn check_bands(
                 .collect();
             if segment.cell_codes.codes() != expected.as_slice() {
                 return Err(disagrees(
-                    dir.join(tessera_store::bands::CELL_CODES_FILE),
+                    dir.join(mosaica_store::bands::CELL_CODES_FILE),
                     "a cell code is not its cell's Morton code".to_string(),
                 ));
             }
-            let bands_file = dir.join(tessera_store::bands::BANDS_FILE);
+            let bands_file = dir.join(mosaica_store::bands::BANDS_FILE);
             segment
                 .bands
                 .check_against(codes, &segment.columns)
@@ -757,7 +757,7 @@ fn check_bands(
             let ids = segment.columns.tessera_id();
             let mut entity_of: std::collections::HashMap<u32, u32> = Default::default();
             let mut wanted = croaring::Bitmap::new();
-            let span = segment.bands.band(tessera_store::bands::FIRST_BAND);
+            let span = segment.bands.band(mosaica_store::bands::FIRST_BAND);
             for &row in &segment.bands.rows()[span] {
                 let entity = segment
                     .entities
@@ -786,16 +786,16 @@ fn check_bands(
                     // Written before the column was declared: the column is read by entity.
                     continue;
                 }
-                let mut values: std::collections::HashMap<u32, tessera_spatial::ScalarValue> =
+                let mut values: std::collections::HashMap<u32, mosaica_spatial::ScalarValue> =
                     Default::default();
                 for (layer, _) in layers {
                     layer.for_each_record_value_in(&wanted, |entity, value| {
                         // A value column stores a timestamp as its `i64`.
                         let value = match (declared.arrow_type, record_as_scalar(value)) {
                             (
-                                tessera_spatial::ScalarType::TimestampUs,
-                                tessera_spatial::ScalarValue::I64(t),
-                            ) => tessera_spatial::ScalarValue::TimestampUs(t),
+                                mosaica_spatial::ScalarType::TimestampUs,
+                                mosaica_spatial::ScalarValue::I64(t),
+                            ) => mosaica_spatial::ScalarValue::TimestampUs(t),
                             (_, value) => value,
                         };
                         values.insert(entity, value);
@@ -810,7 +810,7 @@ fn check_bands(
                             values
                                 .get(entity)
                                 .cloned()
-                                .unwrap_or(tessera_spatial::ScalarValue::Null)
+                                .unwrap_or(mosaica_spatial::ScalarValue::Null)
                         })
                     })
                     .map_err(|reason| disagrees(bands_file.clone(), reason))?;
@@ -829,11 +829,11 @@ fn check_bands(
 /// refusal names the file: the copy, or the column that has none.
 fn check_band_labels(
     prefix_dir: &Path,
-    partition: &tessera_store::read::PartitionData,
+    partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    use tessera_store::manifest::{DerivedExtent, DerivedForm};
-    use tessera_types::layer::ServingLayout;
+    use mosaica_store::manifest::{DerivedExtent, DerivedForm};
+    use mosaica_types::layer::ServingLayout;
     let extents = &partition.manifest.derived_extents;
     let current = |e: &DerivedExtent| {
         partition
@@ -892,9 +892,9 @@ fn check_band_labels(
                 )
             })?;
         let labels =
-            tessera_store::membership::LabelColumnPack::open(&prefix_dir.join(&column.path))
+            mosaica_store::membership::LabelColumnPack::open(&prefix_dir.join(&column.path))
                 .map_err(BuildError::Store)?;
-        let copied = tessera_store::bands::BandLabels::open(&path, &segment.bands)
+        let copied = mosaica_store::bands::BandLabels::open(&path, &segment.bands)
             .map_err(|e| disagrees(path.clone(), e.to_string()))?;
         for (e, &row) in segment.bands.rows().iter().enumerate() {
             if copied.label(e) != labels.label(row as usize) {
@@ -920,11 +920,11 @@ fn check_band_labels(
 fn check_row_members(
     root: &Path,
     prefix_dir: &Path,
-    partition: &tessera_store::read::PartitionData,
+    partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    use tessera_store::manifest::DerivedForm;
-    use tessera_store::row_members::RowMembersPack;
+    use mosaica_store::manifest::DerivedForm;
+    use mosaica_store::row_members::RowMembersPack;
     let extents = &partition.manifest.derived_extents;
     for members in extents.iter().filter(|e| e.form == DerivedForm::RowMembers) {
         if !extents
@@ -960,7 +960,7 @@ fn check_row_members(
         };
         let members_path = prefix_dir.join(&members.path);
         let stored = RowMembersPack::open(&members_path).map_err(BuildError::Store)?;
-        let fresh_path = tessera_store::derived::stage_row_members(&column_path, layout, scratch)
+        let fresh_path = mosaica_store::derived::stage_row_members(&column_path, layout, scratch)
             .map_err(BuildError::Store)?;
         let fresh = RowMembersPack::open(&fresh_path);
         let _ = fs::remove_file(&fresh_path);
@@ -1022,9 +1022,9 @@ fn check_row_members(
 /// in `MANIFEST.files`, which is contracts §2.2's own division: that map covers what existed at
 /// build time and `SEGMENTS-<n>.files` covers what has appeared since.
 fn check_scoped_render_lanes(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
     phash: &str,
-    partition: &tessera_store::read::PartitionData,
+    partition: &mosaica_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     let families: Vec<_> = manifest
@@ -1043,7 +1043,7 @@ fn check_scoped_render_lanes(
         let Some((group, key)) = manifest.groups.iter().find_map(|g| {
             let key = view_id
                 .strip_prefix(g.name.as_str())?
-                .strip_prefix(tessera_store::GROUP_SEPARATOR)?;
+                .strip_prefix(mosaica_store::GROUP_SEPARATOR)?;
             g.views
                 .iter()
                 .any(|v| v.key == key)
@@ -1062,7 +1062,7 @@ fn check_scoped_render_lanes(
             .filter(|f| {
                 f.group == owner
                     && f.views
-                        .contains(&format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR))
+                        .contains(&format!("{owner}{}{key}", mosaica_store::GROUP_SEPARATOR))
             })
             .collect();
         if owed.is_empty() {
@@ -1073,7 +1073,7 @@ fn check_scoped_render_lanes(
             // build laid it down (contracts §2.2).
             let rel = format!(
                 "partitions/{phash}/{}/segments/{}/columns.arrow",
-                tessera_store::view_rel(view_id),
+                mosaica_store::view_rel(view_id),
                 segment.seg_id
             );
             if owner != group && !manifest.files.contains_key(&rel) {
@@ -1099,7 +1099,7 @@ fn check_scoped_render_lanes(
 
 /// Join a manifest-supplied, forward-slash relative path onto the prefix directory, refusing
 /// anything that could escape it — the same rule the read protocol applies, restated here because
-/// its implementation is private to `tessera-store`.
+/// its implementation is private to `mosaica-store`.
 fn join_rel(prefix_dir: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') {
         return Err(BuildError::Invalid(format!(
@@ -1324,7 +1324,7 @@ impl PairsCursor {
 /// path refuses that per request; without this pass nothing reports it offline, so a defect would
 /// first be seen by a viewer receiving someone else's record.
 ///
-/// The walk is [`tessera_filter::RecordBlob::for_each_row`], which is the reader's own self-check
+/// The walk is [`mosaica_filter::RecordBlob::for_each_row`], which is the reader's own self-check
 /// and not a transcription of it: a verifier with its own idea of the format would agree with a
 /// blob the reader refuses, or refuse one it serves.
 ///
@@ -1342,7 +1342,7 @@ fn check_record_blobs(
 ) -> Result<()> {
     let base_rel = format!(
         "partitions/{phash}/attrs/record/{}",
-        tessera_filter::RECORD_BLOCKS_FILE
+        mosaica_filter::RECORD_BLOCKS_FILE
     );
     let mut layers: Vec<(String, PathBuf, PathBuf, PathBuf)> = Vec::new();
     if manifest.files.contains_key(&base_rel) {
@@ -1353,9 +1353,9 @@ fn check_record_blobs(
             .join("record");
         layers.push((
             format!("partitions/{phash}/attrs/record"),
-            dir.join(tessera_filter::RECORD_BLOCKS_FILE),
-            dir.join(tessera_filter::RECORD_HASROW_FILE),
-            dir.join(tessera_filter::RECORD_DIRECTORY_FILE),
+            dir.join(mosaica_filter::RECORD_BLOCKS_FILE),
+            dir.join(mosaica_filter::RECORD_HASROW_FILE),
+            dir.join(mosaica_filter::RECORD_DIRECTORY_FILE),
         ));
     }
     for extent in partition_manifest
@@ -1382,11 +1382,11 @@ fn check_record_blobs(
         // hint reaches `directory.arrow` as well — it is decoded at open and then read in block
         // order, so the most a drop-behind costs there is one re-fault of a file whose size is a
         // handful of bytes per block.
-        let blob = tessera_filter::RecordBlob::open(
+        let blob = mosaica_filter::RecordBlob::open(
             &blocks,
             &hasrow,
             &directory,
-            tessera_filter::Access::MappedSequential,
+            mosaica_filter::Access::MappedSequential,
         )
         .map_err(|e| BuildError::Invalid(format!("{name}: {e}")))?;
         let mut rows = 0u64;

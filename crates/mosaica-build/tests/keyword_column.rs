@@ -2,7 +2,7 @@
 //! values, and a `u32` ordinal per present entity naming a position in it
 //! (`records-and-search.md` §4.3, §7).
 //!
-//! Read back through the readers that will serve them — `tessera_filter::SortedDict` and
+//! Read back through the readers that will serve them — `mosaica_filter::SortedDict` and
 //! `ValueColumn` — rather than by re-decoding the files here, for `filter_postings.rs`'s reason: a
 //! test that reimplemented the format would agree with itself. What these assert that no unit test
 //! can is the **pair**: the ordinal at an entity's slot, resolved against the dictionary written
@@ -18,12 +18,12 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Config, Schema};
-use tessera_build::{build, BuildArgs};
-use tessera_filter::{Access, Codes, SortedDict, ValueColumn, DICT_FILE};
-use tessera_spatial::Bounds;
-use tessera_store::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::config::{Config, Schema};
+use mosaica_build::{build, BuildArgs};
+use mosaica_filter::{Access, Codes, SortedDict, ValueColumn, DICT_FILE};
+use mosaica_spatial::Bounds;
+use mosaica_store::open_bundle;
+use mosaica_types::IdentityKey;
 
 mod common;
 
@@ -120,20 +120,20 @@ fn parse_schema(text: &str) -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     let schema = common::with_id(schema);
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
@@ -397,9 +397,9 @@ fn the_manifest_records_the_declared_type() {
 }
 
 /// **An indexed key that is unique per row is reported, and a repeating one is not**
-/// (`tessera_build::unique_key`). `arxiv_id` is distinct on every item that carries one and `doi`
+/// (`mosaica_build::unique_key`). `arxiv_id` is distinct on every item that carries one and `doi`
 /// takes three values, so the build's report names the first and says nothing emphatic about the
-/// second; `tessera verify` reads the same figures back from the bundle. Never a refusal: the
+/// second; `mosaica verify` reads the same figures back from the bundle. Never a refusal: the
 /// build succeeds either way.
 #[test]
 fn an_indexed_unique_key_is_warned_about_at_build_and_verify_and_a_repeating_one_is_not() {
@@ -417,7 +417,7 @@ fn an_indexed_unique_key_is_warned_about_at_build_and_verify_and_a_repeating_one
     ))
     .expect("the build succeeds");
 
-    let by_name = |name: &str| -> tessera_build::KeywordCardinality {
+    let by_name = |name: &str| -> mosaica_build::KeywordCardinality {
         report
             .keyword_cardinalities
             .iter()
@@ -454,7 +454,7 @@ fn an_indexed_unique_key_is_warned_about_at_build_and_verify_and_a_repeating_one
     assert_eq!(arxiv.index_bytes, on_disk);
     assert!(arxiv.index_bytes < report.bundle_bytes);
 
-    let verified = tessera_build::verify(&out).expect("the bundle verifies");
+    let verified = mosaica_build::verify(&out).expect("the bundle verifies");
     assert_eq!(verified.keyword_cardinalities, report.keyword_cardinalities);
     assert_eq!(verified.bundle_bytes, report.bundle_bytes);
 }

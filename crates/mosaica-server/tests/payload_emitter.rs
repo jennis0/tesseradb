@@ -1,12 +1,12 @@
-//! **`tessera check --payloads`, posted** (`python-sdk.md` §6.2 step 1, §11.2 C; decision 0139):
+//! **`mosaica check --payloads`, posted** (`python-sdk.md` §6.2 step 1, §11.2 C; decision 0139):
 //! every body the emitter produces goes to the route it names, over a running service, and is
 //! taken.
 //!
 //! **This is the test that makes the emitter a contract rather than a shape.** The bodies are
-//! assembled in `tessera_build::config::control_payloads` from the parsed declaration; whether
+//! assembled in `mosaica_build::config::control_payloads` from the parsed declaration; whether
 //! they are *payloads* is a question only the routes can answer, and a `deny_unknown_fields` body
 //! that gained a key or lost one answers it with a 422 here. The per-key assertions — what is
-//! dropped, what is kept — are `tessera-build`'s own `config::payload_tests`.
+//! dropped, what is kept — are `mosaica-build`'s own `config::payload_tests`.
 
 mod common;
 
@@ -116,13 +116,13 @@ source = "members"
 "#;
 
 /// The emitted object over [`DECLARATION`] — the binary's own serialisation, reached through the
-/// same function `tessera check --payloads` calls.
+/// same function `mosaica check --payloads` calls.
 fn payloads(dir: &Path, declaration: &str) -> Value {
     let path = dir.join("declaration.toml");
     std::fs::write(&path, declaration).unwrap();
-    let config = tessera_build::config::Config::parse(&path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&path, &Default::default())
         .expect("the declaration should compile");
-    tessera_build::config::control_payloads(&config)
+    mosaica_build::config::control_payloads(&config)
 }
 
 async fn put(served: &Served, path: &str, body: &Value) -> (u16, Value) {

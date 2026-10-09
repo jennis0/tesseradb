@@ -1,6 +1,6 @@
 use croaring::Bitmap;
-use tessera_filter::{resolve_union, RecordValue};
-use tessera_types::AttrLocalId;
+use mosaica_filter::{resolve_union, RecordValue};
+use mosaica_types::AttrLocalId;
 
 use super::{ColumnLayers, FilterColumns, Route, TextLayer};
 use crate::filter::declared::Placement;
@@ -9,7 +9,7 @@ use crate::filter::expr::{
     FilterExpr, FilterOperand, RoutedFilter, RowExpr, RowLeafResolvers, UniqueResolver,
     MEMBER_OF_COLUMN, REGION_COLUMN,
 };
-use tessera_store::unique::{key_of_integer, UniqueKey};
+use mosaica_store::unique::{key_of_integer, UniqueKey};
 use crate::filter::scan::text::{contains_phrase, text_match};
 use crate::filter::scan::{scan, scan_layer};
 
@@ -83,7 +83,7 @@ impl FilterColumns {
         name: &str,
         declared_index: usize,
         text: &[TextLayer],
-        analyser: &tessera_analyse::Analyser,
+        analyser: &mosaica_analyse::Analyser,
         operand: &FilterOperand,
         candidate: &Bitmap,
     ) -> Result<Bitmap, FilterError> {
@@ -388,7 +388,7 @@ impl FilterColumns {
         &self,
         name: &str,
         declared_index: usize,
-        analyser: &tessera_analyse::Analyser,
+        analyser: &mosaica_analyse::Analyser,
         phrase: &[String],
         survivors: Bitmap,
         candidate: &Bitmap,

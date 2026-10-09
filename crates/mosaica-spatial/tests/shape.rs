@@ -7,8 +7,8 @@
 //! and random positions, dense near the boundary, where the tie rules live.
 
 use proptest::prelude::*;
-use tessera_spatial::morton::{split32, Bounds, Tile};
-use tessera_spatial::shape::{
+use mosaica_spatial::morton::{split32, Bounds, Tile};
+use mosaica_spatial::shape::{
     read_wkt, Decomposition, PolyCtx, PreparedShape, Rect, Shape, ShapeF64, Space,
 };
 
@@ -76,7 +76,7 @@ fn probes(shape: &Shape, seed: u64) -> Vec<(u32, u32)> {
         s ^= s << 17;
         s
     };
-    let b = shape.bounds().unwrap_or(tessera_spatial::shape::Bbox {
+    let b = shape.bounds().unwrap_or(mosaica_spatial::shape::Bbox {
         min_x: 0,
         min_y: 0,
         max_x: u32::MAX,
@@ -412,7 +412,7 @@ fn a_wkt_polygon_with_a_hole_excludes_the_hole_through_the_descent() {
     let prepared = shape.prepared();
     let d = prepared.decompose(None);
     let look = Lookup::new(&d);
-    let q = |v: f64| tessera_spatial::fixed32(v, 0.0, 1_000_000.0);
+    let q = |v: f64| mosaica_spatial::fixed32(v, 0.0, 1_000_000.0);
     assert!(look.contains(&prepared, (q(200_000.0), q(200_000.0))));
     assert!(!look.contains(&prepared, (q(500_000.0), q(500_000.0))));
     assert!(look.contains(&prepared, (q(400_000.0), q(500_000.0)))); // on the hole's edge

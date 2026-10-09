@@ -20,9 +20,9 @@ use std::path::Path;
 use serde_json::json;
 use tempfile::TempDir;
 
-use tessera_build::config::{Config, Fields};
-use tessera_build::{build, BuildArgs};
-use tessera_spatial::Projection;
+use mosaica_build::config::{Config, Fields};
+use mosaica_build::{build, BuildArgs};
+use mosaica_spatial::Projection;
 
 use common::*;
 
@@ -143,7 +143,7 @@ fn build_projected(out: &Path, tmp: &Path) -> Config {
         ..with_id(
             build_args(
                 out,
-                vec![tessera_build::ViewArgs {
+                vec![mosaica_build::ViewArgs {
                     projection: Projection::WebMercator,
                     extent: world_frame(),
                     point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),

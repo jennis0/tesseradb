@@ -63,9 +63,9 @@
 //! filter naming an invisible value, and the same precedent contracts §3.2 sets for an unmatched
 //! token.
 
-use tessera_analyse::SuggestionField;
-use tessera_store::manifest::{Visibility, VocabularyKind};
-use tessera_store::vocabulary::ABSENT_CODE;
+use mosaica_analyse::SuggestionField;
+use mosaica_store::manifest::{Visibility, VocabularyKind};
+use mosaica_store::vocabulary::ABSENT_CODE;
 
 use crate::error::{EngineError, Result};
 use crate::session::Session;
@@ -79,7 +79,7 @@ use crate::Engine;
 #[derive(Debug, Clone)]
 pub struct CategoryColumn {
     /// The declared column name, which is also its identifier in `/v1/categories/{column}`.
-    /// Unique bundle-wide — `tessera_build::config` refuses a duplicate — and restricted to a
+    /// Unique bundle-wide — `mosaica_build::config` refuses a duplicate — and restricted to a
     /// path-safe character set for that reason.
     pub column: String,
     pub vocabulary: String,
@@ -133,7 +133,7 @@ pub struct CategoryPage {
 /// `index`-or-`render` licence (`scoped_is_filterable`) decides both, so a name that resolves to
 /// nothing here is the `None` an undeclared column gets.
 pub(crate) fn vocabulary_of(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
     column: &str,
 ) -> Option<String> {
     if let Some(scalar) = manifest.declared_scalars.iter().find(|s| s.name == column) {
@@ -666,7 +666,7 @@ impl Engine {
             }
         };
 
-        let fold = tessera_analyse::SuggestionFold::new();
+        let fold = mosaica_analyse::SuggestionFold::new();
         let unreadable = |e: std::io::Error| EngineError::SuggestionUnavailable {
             column: column.to_string(),
             detail: e.to_string(),
@@ -766,8 +766,8 @@ impl Engine {
 /// Visit `(entity, code)` for each buffered row holding a value in `column`, as
 /// [`buffered_values`] finds them.
 pub(crate) fn buffered_codes(
-    manifest: &tessera_store::manifest::Manifest,
-    buffer: &tessera_lifecycle::IngestBuffer,
+    manifest: &mosaica_store::manifest::Manifest,
+    buffer: &mosaica_lifecycle::IngestBuffer,
     column: &str,
     visit: &mut dyn FnMut(u32, u32),
 ) {
@@ -785,13 +785,13 @@ pub(crate) fn buffered_codes(
 /// column holds. The rows a flush writes into the column's next extent. A row with no value in
 /// the column visits `Null`.
 pub(crate) fn buffered_values(
-    manifest: &tessera_store::manifest::Manifest,
-    buffer: &tessera_lifecycle::IngestBuffer,
+    manifest: &mosaica_store::manifest::Manifest,
+    buffer: &mosaica_lifecycle::IngestBuffer,
     column: &str,
-    visit: &mut dyn FnMut(u32, &tessera_lifecycle::WalScalar),
+    visit: &mut dyn FnMut(u32, &mosaica_lifecycle::WalScalar),
 ) {
     use crate::flush::{buffered_value, BufferedPlace};
-    let mut emit = |entity: &tessera_types::EntityId, item, place| {
+    let mut emit = |entity: &mosaica_types::EntityId, item, place| {
         let entity = u32::try_from(entity.raw()).expect("entity ids are bounded by the allocator");
         visit(entity, buffered_value(item, place));
     };

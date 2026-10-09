@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
 use memchr::memmem;
-use tessera_filter::{CodeSet, SortedDict, SortedDictWriter, DEFAULT_RESTART_INTERVAL};
+use mosaica_filter::{CodeSet, SortedDict, SortedDictWriter, DEFAULT_RESTART_INTERVAL};
 
 /// Needle lengths swept. The fence's claim is that the shipped walk's cost rises with this number
 /// and the decode's does not, so it is the axis that separates the two.

@@ -9,13 +9,13 @@
 mod common;
 
 use common::*;
-use tessera_engine::{Engine, LayerSelection, ViewportRequest};
-use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
-use tessera_types::layer::{
+use mosaica_engine::{Engine, LayerSelection, ViewportRequest};
+use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, TesseraId};
 
 fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
     LayerDeclaration {
@@ -26,7 +26,7 @@ fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclar
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -209,7 +209,7 @@ fn a_cluster_outside_the_viewport_is_not_a_candidate() {
     let whole = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .unwrap()
         .artifacts();
@@ -219,7 +219,7 @@ fn a_cluster_outside_the_viewport_is_not_a_candidate() {
     let nowhere = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .tiles(Some(&[])),
         )
         .unwrap()
@@ -360,7 +360,7 @@ fn the_layer_selector_narrows_and_never_widens() {
         engine
             .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(layers),
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(layers),
             )
             .unwrap()
             .artifacts()
@@ -494,7 +494,7 @@ fn a_withheld_compact_cluster_has_its_count_recovered_from_the_underlay() {
     let served = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 1, QUADRANT, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 1, QUADRANT, usize::MAX),
         )
         .expect("the artifacts over the cluster's own quadrant")
         .artifacts();

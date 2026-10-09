@@ -35,7 +35,7 @@
 //! at its own cut.
 //!
 //! The items below a cut are band `band_below(cut)` of each segment's identity bands
-//! ([`tessera_store::bands`]) intersected with the set. Each piece of rows is read either from the
+//! ([`mosaica_store::bands`]) intersected with the set. Each piece of rows is read either from the
 //! band, a set lookup per entry, or by scanning the set's rows' identities, whichever its counts,
 //! known before reading, say costs less. Both read the same items, so the choice changes only the
 //! time a piece takes. A banded entry's value is read from the band's copy of the column. A
@@ -48,10 +48,10 @@
 //! The head then says the set was not sampled, and counts `N` items.
 
 use rayon::prelude::*;
-use tessera_filter::RecordValue;
-use tessera_lifecycle::WalScalar;
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::read::ScalarSlice;
+use mosaica_filter::RecordValue;
+use mosaica_lifecycle::WalScalar;
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::read::ScalarSlice;
 
 use super::set::{Cx, Set};
 use super::table::{Edge, Groups, Key};
@@ -321,8 +321,8 @@ impl Bins {
         if let Some((lower, upper)) = self.range {
             return Ok(match self.kind {
                 Kind::Float => Edges::Floats(equal_floats(
-                    tessera_filter::as_f64(lower),
-                    tessera_filter::as_f64(upper),
+                    mosaica_filter::as_f64(lower),
+                    mosaica_filter::as_f64(upper),
                     n,
                 )),
                 kind => Edges::Ints(kind.clamp(equal_ints(int_of(lower), int_of(upper), n))),
@@ -588,7 +588,7 @@ impl Numbers {
             .filter_columns
             .value_layers(&self.column)
             .expect("a held field has value layers");
-        let layers: Vec<&tessera_filter::ValueColumn> =
+        let layers: Vec<&mosaica_filter::ValueColumn> =
             layers.base().into_iter().chain(layers.extents()).collect();
         let end = entities.maximum().map_or(0, |last| u64::from(last) + 1);
         let (mut tally, mut valued) = (0..end.div_ceil(ENTITY_PIECE))
@@ -638,7 +638,7 @@ impl Numbers {
     fn pass_rows<K: Num, T: Tally<K>>(
         &self,
         set: CellSet<'_>,
-        segments: &[(&tessera_store::read::SegmentData, u32)],
+        segments: &[(&mosaica_store::read::SegmentData, u32)],
         empty: impl Fn() -> T + Sync + Send,
     ) -> (T, u64) {
         let column = self.column.as_str();
@@ -719,7 +719,7 @@ impl SamplePlan {
     /// band or by scanning, whichever its band entries times [`BAND_ENTRY_ROWS`] and its members
     /// say costs less; the two read the same items.
     fn of(cx: &Cx<'_>, members: &CellSet<'_>, cut: u64) -> Option<SamplePlan> {
-        let band = tessera_store::bands::band_below(cut)?;
+        let band = mosaica_store::bands::band_below(cut)?;
         let segments = cx.segments();
         let pieces = pieces(segments)
             .into_par_iter()
@@ -974,7 +974,7 @@ impl Reader<'_> {
             let mut placed = Vec::with_capacity(side.len());
             for mut kept in side.drain(..) {
                 let row = row_space
-                    .row_of(tessera_types::EntityId::new(u64::from(kept.1)))
+                    .row_of(mosaica_types::EntityId::new(u64::from(kept.1)))
                     .ok_or_else(|| {
                         EngineError::Malformed(format!(
                             "an entity read from view '{}' has no row there",
@@ -1034,7 +1034,7 @@ impl<K: Num> Tally<K> for Histogram<'_, K> {
 pub(super) fn below(lower: Scalar, upper: Scalar) -> bool {
     match (lower, upper) {
         (Scalar::Int(a), Scalar::Int(b)) => a < b,
-        (a, b) => tessera_filter::as_f64(a) < tessera_filter::as_f64(b),
+        (a, b) => mosaica_filter::as_f64(a) < mosaica_filter::as_f64(b),
     }
 }
 

@@ -328,7 +328,7 @@ fn published_layers(dir: &std::path::Path) -> Vec<String> {
 /// publication is awaited before the pause is armed. Armed earlier, the pause parks the executor
 /// on the drop's publication, and the registration of c is never accepted.
 async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(String, u64)>, Vec<(String, u64)>) {
-    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+    use mosaica_lifecycle::faults::{PauseAction, PauseSite};
     let tmp = TempDir::new().unwrap();
     let (server, faults) = serve_with_faults(&tmp).await;
     register(&server, declaration("clusters/a", None)).await;
@@ -1147,10 +1147,10 @@ async fn the_drill_down_carries_the_hull_the_tiles_do_not() {
 /// The kind-5 frames' schema column names, read raw — for the assertions about which columns
 /// exist, which the row decoder papers over.
 fn artifact_schema_names(body: &[u8]) -> Vec<Vec<String>> {
-    tessera_wire::split_frames(body)
+    mosaica_wire::split_frames(body)
         .expect("well-formed frame sequence")
         .iter()
-        .filter(|(kind, _)| *kind == tessera_wire::FRAME_ARTIFACTS)
+        .filter(|(kind, _)| *kind == mosaica_wire::FRAME_ARTIFACTS)
         .map(|(_, payload)| {
             let reader = arrow::ipc::reader::StreamReader::try_new(
                 std::io::Cursor::new(payload.to_vec()),

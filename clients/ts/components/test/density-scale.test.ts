@@ -1,7 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {DENSITY_SETTLE_MS} from '@tesseradb/deck';
+import {DENSITY_SETTLE_MS} from '@mosaica/deck';
 import '../src/explorer.js';
-import type {TesseraMap} from '../src/map.js';
+import type {MosaicaMap} from '../src/map.js';
 import {aggregateEntry, answerAggregate, fakeStore, meta, mount, settle, status} from './fake-store.js';
 
 /**
@@ -10,31 +10,31 @@ import {aggregateEntry, answerAggregate, fakeStore, meta, mount, settle, status}
  */
 
 /** A map 1000 × 800 px, fitted, so its camera has rested somewhere the counter can ask about. */
-function sized(map: TesseraMap): void {
+function sized(map: MosaicaMap): void {
   Object.defineProperty(map, 'clientWidth', {configurable: true, value: 1000});
   Object.defineProperty(map, 'clientHeight', {configurable: true, value: 800});
   map.fit();
 }
 
 /** The figures under the density key's ramp, left to right. */
-const keyFigures = (map: TesseraMap) => [...map.shadowRoot!.querySelectorAll('[part="density-key"] .ends > span')].map((s) => s.textContent);
+const keyFigures = (map: MosaicaMap) => [...map.shadowRoot!.querySelectorAll('[part="density-key"] .ends > span')].map((s) => s.textContent);
 
 describe('density scale', () => {
   beforeEach(() => vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']}));
   afterEach(() => vi.useRealTimers());
 
   it('is log on the map and the explorer unless set', async () => {
-    const host = await mount('<tessera-map></tessera-map><tessera-explorer></tessera-explorer><tessera-map density-scale="linear"></tessera-map>');
+    const host = await mount('<mosaica-map></mosaica-map><mosaica-explorer></mosaica-explorer><mosaica-map density-scale="linear"></mosaica-map>');
     const [plain, , set] = [...host.children] as (HTMLElement & {densityScale: string})[];
     expect(plain!.densityScale).toBe('log');
-    expect((host.querySelector('tessera-explorer') as HTMLElement & {densityScale: string}).densityScale).toBe('log');
+    expect((host.querySelector('mosaica-explorer') as HTMLElement & {densityScale: string}).densityScale).toBe('log');
     expect(set!.densityScale).toBe('linear');
   });
 
   /** A map drawing a grid without points, its counter answered with `counts` once the camera has rested. */
   async function keyed(counts: number[], scale = '') {
-    const host = await mount(`<tessera-map density="grid" no-points ${scale ? `density-scale="${scale}"` : ''}></tessera-map>`);
-    const map = host.querySelector('tessera-map') as TesseraMap;
+    const host = await mount(`<mosaica-map density="grid" no-points ${scale ? `density-scale="${scale}"` : ''}></mosaica-map>`);
+    const map = host.querySelector('mosaica-map') as MosaicaMap;
     const store = fakeStore({meta: meta(), status: status({})});
     map.store = store;
     await settle(host);
@@ -67,8 +67,8 @@ describe('density scale', () => {
 
   it('takes an unknown scale as log, in the key and in the explorer’s choice', async () => {
     expect(keyFigures((await keyed([1, 99], 'cubic')).map)).toEqual(['0', '9', '99']);
-    const host = await mount('<tessera-explorer density="grid" density-scale="cubic"></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    const host = await mount('<mosaica-explorer density="grid" density-scale="cubic"></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown};
     el.store = fakeStore({meta: meta(), status: status({})});
     await settle(host);
     const shadow = el.shadowRoot!;
@@ -82,14 +82,14 @@ describe('density scale', () => {
   });
 
   it('sets the scale from the Scale choice under Resolution, passes it to the map and reports it', async () => {
-    const host = await mount('<tessera-explorer density="hex"></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; densityScale: string};
+    const host = await mount('<mosaica-explorer density="hex"></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown; densityScale: string};
     el.store = fakeStore({meta: meta(), status: status({})});
     await settle(host);
     const shadow = el.shadowRoot!;
-    const map = shadow.querySelector('tessera-map') as TesseraMap;
+    const map = shadow.querySelector('mosaica-map') as MosaicaMap;
     const seen: {densityScale: string; density: string}[] = [];
-    host.addEventListener('tessera-displaychange', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-displaychange', (e) => seen.push((e as CustomEvent).detail));
     shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
     await settle(host);
     const choice = (scale: string) => shadow.querySelector<HTMLButtonElement>(`[part="density-scale"] [data-scale="${scale}"]`)!;
@@ -120,10 +120,10 @@ describe('density scale', () => {
   });
 
   it('passes a host’s density-scale to its map', async () => {
-    const host = await mount('<tessera-explorer density="grid" density-scale="linear"></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    const host = await mount('<mosaica-explorer density="grid" density-scale="linear"></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown};
     el.store = fakeStore({meta: meta(), status: status({})});
     await settle(host);
-    expect((el.shadowRoot!.querySelector('tessera-map') as TesseraMap).densityScale).toBe('linear');
+    expect((el.shadowRoot!.querySelector('mosaica-map') as MosaicaMap).densityScale).toBe('linear');
   });
 });

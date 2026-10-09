@@ -7,7 +7,7 @@
 //! column's bytes go straight to a spool file beside the output, and the single record batch
 //! contracts §2.6 requires is assembled at [`SegmentWriter::finish`] with the spools
 //! memory-mapped as its values buffers. That is `PostingsSpool`'s discipline
-//! (`tessera_authz::postings`), for the same reason — the compaction fold's pass 1 streams the
+//! (`mosaica_authz::postings`), for the same reason — the compaction fold's pass 1 streams the
 //! whole corpus through here and may not materialise it (compaction §3), and merge's measured
 //! **4.4–4.9× peak over its inputs' bytes** (`probes/2026-08-04-maintenance-memory/`) is what
 //! forced `max_merged_segment_bytes` to stay where decision 0049 left it.
@@ -39,18 +39,18 @@ use arrow::datatypes::{ArrowNativeType, DataType, Field, Schema, TimeUnit};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 
-use tessera_spatial::split32;
-use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
-use tessera_types::{EntityId, TesseraId};
+use mosaica_spatial::split32;
+use mosaica_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
+use mosaica_types::{EntityId, TesseraId};
 
 use crate::permutation::{
     pages_for, payload_start, PAGE_ABSENT, PAGE_BYTES, PAGE_ENTRIES, PAGE_SHIFT,
 };
 
-const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
-/// Version 2 is the paged form; version 1 was the flat array it replaced, and a reader refuses it
-/// on this field alone (`crate::permutation`).
-const PERMUTATION_VERSION: u16 = 2;
+const PERMUTATION_MAGIC: &[u8; 4] = b"MSPM";
+/// The paged form. Version 1 was the flat array it replaced, and a reader refuses it on this field
+/// alone (`crate::permutation`).
+const PERMUTATION_VERSION: u16 = 3;
 const PERMUTATION_ABSENT: u32 = 0xFFFF_FFFF;
 
 /// The header's width, from the one module that defines the layout.
@@ -65,7 +65,7 @@ const PERMUTATION_MAX_BOUND: u64 = 1 << 32;
 /// `morton.u32` (raw little-endian `u32` codes, no header) into `dir`.
 ///
 /// `items` and `codes` must already be in row order (i.e. the output of
-/// [`tessera_spatial::tiler::sort_batch`]) and the same length; row *i*'s Morton code is
+/// [`mosaica_spatial::tiler::sort_batch`]) and the same length; row *i*'s Morton code is
 /// `codes[i]`. `scalar_schema` declares the name and Arrow type of each item's leading
 /// `scalars`, in the order they appear in `TilerItem::scalars`, and `indexed` those of the values
 /// after them, which the bands copy and `columns.arrow` does not hold.

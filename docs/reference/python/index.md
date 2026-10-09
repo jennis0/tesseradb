@@ -1,10 +1,10 @@
 # Python client
 
-The `tesseradb` package reads a Tessera database over HTTP, maps it in a notebook, and makes a database in a directory from data frames and files. Every table it returns is a pyarrow table. The `widget` extra, `tesseradb[widget]`, adds the notebook map.
+The `mosaica` package reads a Mosaica database over HTTP, maps it in a notebook, and makes a database in a directory from data frames and files. Every table it returns is a pyarrow table. The `widget` extra, `mosaica[widget]`, adds the notebook map.
 
-`Map`, `create`, `open` and `Database` are loaded when first used, so `import tesseradb` works without anywidget or pyarrow.
+`Map`, `create`, `open` and `Database` are loaded when first used, so `import mosaica` works without anywidget or pyarrow.
 
-These are the names `tesseradb` exports:
+These are the names `mosaica` exports:
 
 | Name | What it is | Page |
 |---|---|---|

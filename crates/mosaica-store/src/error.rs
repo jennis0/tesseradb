@@ -1,4 +1,4 @@
-//! `tessera-store`'s error type. Every failure mode in the read protocol (digest mismatch,
+//! `mosaica-store`'s error type. Every failure mode in the read protocol (digest mismatch,
 //! unsupported `bundle_format`, no verifying `SEGMENTS-<n>.json`, malformed Arrow, malformed
 //! `permutation.bin`) is a variant here — the read protocol is fail-closed (shared-context
 //! constraint 3): any of these turns bundle open into a hard error, never a partial `Bundle`.
@@ -7,7 +7,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-/// `tessera-store`'s result alias.
+/// `mosaica-store`'s result alias.
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 #[derive(Debug)]

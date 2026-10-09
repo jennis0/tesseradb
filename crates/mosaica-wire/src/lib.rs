@@ -1,6 +1,6 @@
 //! The framed Arrow payloads of the viewer plane.
 //!
-//! Identities reach this crate as `tessera_id: u64` columns. It depends on no other Tessera
+//! Identities reach this crate as `tessera_id: u64` columns. It depends on no other Mosaica
 //! crate, so it cannot name an entity id or the identity key; `scripts/check-layers.sh` holds
 //! that.
 

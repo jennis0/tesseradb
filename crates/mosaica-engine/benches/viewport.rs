@@ -1,13 +1,13 @@
 //! Criterion micro-benches at 2.4M items — the regression gate ahead of the
 //! 10⁹ exit measurement (`scripts/bench_p99.py`, run once, out of scope for `cargo bench`).
 //!
-//! Reuses `/tmp/tessera-2m4` (built by `tessera-bench`'s `viewport_latency` binary, or rebuilt
+//! Reuses `/tmp/mosaica-2m4` (built by `mosaica-bench`'s `viewport_latency` binary, or rebuilt
 //! here if missing — shared-context 2.4M is the "validate" scale; 10⁹ is exit-only). The
 //! builder below is a second copy of that binary's: `scripts/check-layers.sh` keeps
-//! `tessera-bench` a leaf, so nothing — including this bench — may depend on it.
+//! `mosaica-bench` a leaf, so nothing — including this bench — may depend on it.
 //!
 //! Four groups:
-//! 1. `fragment_build` — `tessera_authz::build_fragment` directly against the real postings, for
+//! 1. `fragment_build` — `mosaica_authz::build_fragment` directly against the real postings, for
 //!    w ∈ {10², 10⁴} terms (the build path itself, not `Engine::authorise`'s cache wrapper —
 //!    `FragmentCache::get_or_build` memoises by (terms, auth hash), which would only measure the
 //!    cache hit on iterations after the first).
@@ -27,20 +27,20 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use tempfile::TempDir;
 
-use tessera_authz::{build_fragment, FragmentCache, PostingsReader};
-use tessera_build::{build, BuildArgs};
-use tessera_engine::compose::compose;
-use tessera_engine::projection::RowProjection;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::{IdentityKey, TermId};
+use mosaica_authz::{build_fragment, FragmentCache, PostingsReader};
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::compose::compose;
+use mosaica_engine::projection::RowProjection;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{IdentityKey, TermId};
 
 const ITEM_LIMIT: u64 = 2_422_486;
 
-/// The same fixed, non-degenerate test key `tests/viewport.rs` and `tessera-build`'s own fixture
+/// The same fixed, non-degenerate test key `tests/viewport.rs` and `mosaica-build`'s own fixture
 /// tests use — arbitrary here (this bench never inverts a `tessera_id`), but a real key all the
 /// same, since `IdentityKey::from_hex` refuses degenerate ones.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -67,19 +67,19 @@ fn workspace_root() -> PathBuf {
 }
 
 fn ensure_bundle() -> PathBuf {
-    let bundle_root = PathBuf::from("/tmp/tessera-2m4");
+    let bundle_root = PathBuf::from("/tmp/mosaica-2m4");
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
-            views: vec![tessera_build::ViewArgs {
+            views: vec![mosaica_build::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 extent: extent(),
                 points: root.join("data/scaled/geometry.parquet"),
                 point_fields: Default::default(),
                 select: None,
-                access: tessera_build::config::AccessInput::relation(
+                access: mosaica_build::config::AccessInput::relation(
                     root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
                 ),
             }],
@@ -152,8 +152,8 @@ fn bench_compose(c: &mut Criterion) {
     let buffer = IngestBuffer::new();
     // Derived once, outside the timed loop, exactly as a publication derives it: the deny half of
     // composition is one `andnot` inside the loop whatever the deny depth, which is the point.
-    let denied = tessera_engine::denied_rows_of(&overlay, &view.row_space);
-    let buffered = tessera_engine::buffered_rows_of(&buffer, &view.row_space);
+    let denied = mosaica_engine::denied_rows_of(&overlay, &view.row_space);
+    let buffered = mosaica_engine::buffered_rows_of(&buffer, &view.row_space);
 
     c.bench_function("compose", |b| {
         b.iter(|| {
@@ -197,7 +197,7 @@ fn bench_viewport(c: &mut Criterion) {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
             // what bounds the window close's O(buffered) copy. Nothing here reaches it.
@@ -207,7 +207,7 @@ fn bench_viewport(c: &mut Criterion) {
             segment_floor_bytes: None,
             coalesce_width: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )
     .expect("engine should open the 2.4M bundle");

@@ -37,7 +37,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use croaring::Bitmap;
-use tessera_filter::{Codes, ValueColumn};
+use mosaica_filter::{Codes, ValueColumn};
 
 #[inline]
 fn splitmix(x: u64) -> u64 {
@@ -101,7 +101,7 @@ fn for_each_run(bitmap: &Bitmap, mut f: impl FnMut(u32, u32)) {
     }
 }
 
-/// The shipped `byte_contains`, transcribed from `tessera-filter/src/values.rs` so the `full` arm
+/// The shipped `byte_contains`, transcribed from `mosaica-filter/src/values.rs` so the `full` arm
 /// runs the same algorithm the shipped scan runs.
 #[inline]
 fn byte_contains(haystack: &[u8], needle: &[u8]) -> bool {

@@ -1,6 +1,6 @@
 //! Rotation end to end: a published flush reclaims the log, and nothing acked is lost doing it.
 //!
-//! `tessera-lifecycle`'s `rotation.rs` pins the sequence's own properties — oldest-first deletion,
+//! `mosaica-lifecycle`'s `rotation.rs` pins the sequence's own properties — oldest-first deletion,
 //! the gap refusal, the position chain. What needs a whole engine is the two things the ordering
 //! exists for, because both need a flush to have happened: that a row acked while a flush was in
 //! flight survives the rotation that follows it, and that a suppression outlives the reclamation of
@@ -11,11 +11,11 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::Engine;
-use tessera_lifecycle::command::UnallocatedRow;
+use mosaica_engine::Engine;
+use mosaica_lifecycle::command::UnallocatedRow;
 
-use tessera_lifecycle::ChangeOp;
-use tessera_types::EntityId;
+use mosaica_lifecycle::ChangeOp;
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -92,7 +92,7 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
     // The reopened engine must find the second row somewhere — buffered from a surviving WAL
     // member, or already flushed into a segment. What it must not be is nowhere.
     let reopened = engine_at(tmp.path(), &root, 3600);
-    let bundle = tessera_store::open_bundle(&root).expect("the bundle opens");
+    let bundle = mosaica_store::open_bundle(&root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     let has_geometry = partition.views["s0"].row_space.row_of(second).is_some();
     assert!(
@@ -183,7 +183,7 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
         !generation.buffer.contains(deleted),
         "a reclaimed row must reconstruct nothing — the entity is forgotten (decision 0047)"
     );
-    let bundle = tessera_store::open_bundle(&root).expect("the bundle opens");
+    let bundle = mosaica_store::open_bundle(&root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     assert!(
         partition.views["s0"].row_space.row_of(deleted).is_none(),
@@ -220,11 +220,11 @@ fn ingest_into(engine: &Engine, batch: &str, item: Option<EntityId>, view: &str)
 /// A second plain view, so an item can hold a row in two of them.
 fn create_second_view(engine: &Engine) {
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: "s1".to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,

@@ -5,7 +5,7 @@
 //! produce.
 //!
 //! The single-flight state machine, the eviction rules and the counted choke point live in
-//! `tessera-cache` and are argued there. What lives here is specific to projections: the key, the
+//! `mosaica-cache` and are argued there. What lives here is specific to projections: the key, the
 //! weight function, the two pruners' safety argument, and the arithmetic an operator needs to size
 //! a box.
 //!
@@ -27,11 +27,11 @@ use std::sync::Arc;
 use croaring::Portable;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use tessera_authz::FrozenFragment;
+use mosaica_authz::FrozenFragment;
 
 use crate::cancel::CancelToken;
 use crate::projection::RowProjection;
-use tessera_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
+use mosaica_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 
 /// `(token_id, view, segments_version)` — the row-projection cache's key (shared-context
 /// constraint 8). `token_id` rather than the token string so the cache never has to hash or
@@ -93,14 +93,14 @@ pub(crate) struct RowProjectionKey {
 /// A losing arrival's outcome: another caller is already building this key, and this call did not
 /// wait for it. Carries nothing — the caller only needs to know to retry.
 ///
-/// Distinct from `tessera_cache::Building` so the wrapper's callers depend on this module's
+/// Distinct from `mosaica_cache::Building` so the wrapper's callers depend on this module's
 /// contract rather than on the generic cache's.
 #[derive(Debug)]
 pub(crate) struct CacheBusy;
 
 /// Why a waiting caller ([`RowProjectionCache::get_or_derive_waiting`]) gave up: the wait budget
-/// expired, or the client disconnected. Distinct from `tessera_cache::WaitEnded` for the reason
-/// [`CacheBusy`] is distinct from `tessera_cache::Building`.
+/// expired, or the client disconnected. Distinct from `mosaica_cache::WaitEnded` for the reason
+/// [`CacheBusy`] is distinct from `mosaica_cache::Building`.
 #[derive(Debug)]
 pub(crate) enum CacheWaitEnded {
     Budget,
@@ -132,7 +132,7 @@ pub(crate) enum Peek {
 ///
 /// **What the refresh needs to produce the next one**, so a background pass needs no session
 /// registry — the engine has none, sessions being values the server holds. `grant` is what the
-/// [`tessera_authz::FragmentCache`] is asked with; `auth_data_hash` is a digest of the
+/// [`mosaica_authz::FragmentCache`] is asked with; `auth_data_hash` is a digest of the
 /// credential, never the credential.
 pub(crate) struct SessionGeometry {
     /// The fragment `projection` was taken over — never the live one, unless they coincide.
@@ -140,7 +140,7 @@ pub(crate) struct SessionGeometry {
     pub(crate) projection: Arc<RowProjection>,
     /// What the fragment is the union of, the fragment cache's key component. A `read-all`
     /// session's is every key, so the refresh rebuilds it from the keys the generation carries.
-    pub(crate) grant: tessera_authz::Grant,
+    pub(crate) grant: mosaica_authz::Grant,
     /// `sha256(auth_data)`, part of the mask identity.
     pub(crate) auth_data_hash: [u8; 32],
 }
@@ -171,7 +171,7 @@ impl CacheWeight for RowProjection {
     /// container is converted only where the run form is smaller — so the 125.12 MB above stays an
     /// upper bound at that coverage, and an entry that runs well is charged what it costs.
     ///
-    /// The floor applied on top of this (`tessera_cache::PER_ENTRY_FLOOR_BYTES`) is what stops the
+    /// The floor applied on top of this (`mosaica_cache::PER_ENTRY_FLOOR_BYTES`) is what stops the
     /// *opposite* error — a bound that charges a near-empty projection its true handful of bytes
     /// bounds no number of entries.
     fn cache_weight_bytes(&self) -> u64 {
@@ -308,9 +308,9 @@ impl RowProjectionCache {
     /// and nothing else.
     pub(crate) fn peek(&self, key: &RowProjectionKey) -> Peek {
         match self.inner.peek(key) {
-            tessera_cache::Peek::Ready(value) => Peek::Ready(value),
-            tessera_cache::Peek::Building => Peek::Building,
-            tessera_cache::Peek::Absent => Peek::Absent,
+            mosaica_cache::Peek::Ready(value) => Peek::Ready(value),
+            mosaica_cache::Peek::Building => Peek::Building,
+            mosaica_cache::Peek::Absent => Peek::Absent,
         }
     }
 
@@ -410,7 +410,7 @@ impl RowProjectionCache {
     /// they reach the 3600 s default lifetime and are refused. The registry sweeps those out on the
     /// next authorisation and hands their token ids to [`Engine::prune_tokens`], which is this
     /// removal in its batched form, so an expired session's entries go the same way a revoked
-    /// one's do (`tessera_server::state::SessionRegistry`). What the byte bound is left to reclaim
+    /// one's do (`mosaica_server::state::SessionRegistry`). What the byte bound is left to reclaim
     /// is the residue between sweeps, bounded at `2 × live` sessions.
     ///
     /// # Cost, stated rather than argued
@@ -429,7 +429,7 @@ impl RowProjectionCache {
     /// `spawn_blocking`, so a batch of expired sessions costs one pass on a blocking thread rather
     /// than `victims` passes on the thread answering requests. A
     /// secondary `token_id → keys` index would make the pass O(victims); it is declined here
-    /// because a second index is a second bijection to keep in step — the failure `tessera-cache`'s
+    /// because a second index is a second bijection to keep in step — the failure `mosaica-cache`'s
     /// rule 1 exists to prevent — and the exposure above does not justify it.
     pub(crate) fn prune_token(&self, token_id: u64) -> usize {
         self.inner.retain_keys(|key| key.token_id != token_id)
@@ -438,7 +438,7 @@ impl RowProjectionCache {
     /// The same removal for a set of sessions, in **one** pass.
     ///
     /// The expiry sweep drops a batch — up to `2 × live` sessions at once
-    /// (`tessera_server::state::SessionRegistry`) — and a loop over [`Self::prune_token`] would
+    /// (`mosaica_server::state::SessionRegistry`) — and a loop over [`Self::prune_token`] would
     /// take this cache's mutex once per session and walk every surviving key each time. One pass
     /// with a set membership test is the same work for one session and O(n) rather than
     /// O(n × victims) for a batch, which is what keeps the sweep's cost off the request path's

@@ -1,16 +1,16 @@
 [package]
-name = "tessera-corpus"
+name = "mosaica-corpus"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
 
 # The correctness suite's generator. `scripts/check-layers.sh` enforces the dependency rule:
-# tessera-types and tessera-spatial and nothing else in the workspace. A generator that can read
+# mosaica-types and mosaica-spatial and nothing else in the workspace. A generator that can read
 # an artefact stops being an independent statement of the corpus and becomes a transcription of
 # the thing it checks.
 [dependencies]
-tessera-types = { path = "../tessera-types" }
-tessera-spatial = { path = "../tessera-spatial" }
+mosaica-types = { path = "../mosaica-types" }
+mosaica-spatial = { path = "../mosaica-spatial" }
 arrow = { workspace = true }
 parquet = { workspace = true }
 

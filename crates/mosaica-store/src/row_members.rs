@@ -11,7 +11,7 @@
 //! # The format
 //!
 //! ```text
-//! header   := magic "TSRM" | u16 version | u16 ranges a covering holds at most
+//! header   := magic "MSRM" | u16 version | u16 ranges a covering holds at most
 //!             | u32 ordinals | u32 rows | u64 ranges | u64 payload_at | u64 ranges_at
 //!             | u64 file_len | zero padding to 64 bytes
 //! table    := ordinals × (u64 offset into the payload | u32 length | u32 members)
@@ -44,8 +44,8 @@ use memmap2::Mmap;
 
 use crate::error::{Result, StoreError};
 
-const MAGIC: &[u8; 4] = b"TSRM";
-const VERSION: u16 = 1;
+const MAGIC: &[u8; 4] = b"MSRM";
+const VERSION: u16 = 2;
 const HEADER_LEN: usize = 64;
 const ENTRY_LEN: usize = 16;
 /// CRoaring's frozen deserialiser needs 32-byte alignment, and a mapping is page-aligned.
@@ -242,7 +242,7 @@ impl RowMembersPack {
             ));
         }
         if &map[0..4] != MAGIC {
-            return Err(malformed(path, "the magic is not TSRM"));
+            return Err(malformed(path, "the magic is not MSRM"));
         }
         let version = u16::from_le_bytes([map[4], map[5]]);
         if version != VERSION {

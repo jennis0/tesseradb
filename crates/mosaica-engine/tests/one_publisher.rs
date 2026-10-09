@@ -7,7 +7,7 @@
 //! — and a lost publication leaves the **live** generation on the pin drain list, where a later
 //! prune evicts projections still in use.
 
-use tessera_engine::PublishGeometryError;
+use mosaica_engine::PublishGeometryError;
 
 /// The rule `scripts/check-layers.sh` enforces, asserted from inside the crate too, because a grep
 /// is one `#[allow]` — or one deleted line of shell — away from being argued with.
@@ -69,4 +69,4 @@ fn an_engine_without_a_write_executor_cannot_publish() {
 }
 
 mod common;
-use tessera_engine::GeometryPublication;
+use mosaica_engine::GeometryPublication;

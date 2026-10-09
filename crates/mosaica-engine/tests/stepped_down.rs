@@ -16,9 +16,9 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{AcceptError, Engine, EngineConfig};
-use tessera_lifecycle::wal::{Wal, WalRecord, WalRow};
-use tessera_lifecycle::UnallocatedRow;
+use mosaica_engine::{AcceptError, Engine, EngineConfig};
+use mosaica_lifecycle::wal::{Wal, WalRecord, WalRow};
+use mosaica_lifecycle::UnallocatedRow;
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -64,7 +64,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
             batch_id: "pre-existing".to_string(),
             body_hash: [1u8; 32],
             rows: vec![WalRow {
-                entity_id: tessera_types::EntityId::new(N_ITEMS),
+                entity_id: mosaica_types::EntityId::new(N_ITEMS),
                 view: "s0".to_string(),
                 join: false,
                 descriptors: vec![b"0".to_vec()],
@@ -91,7 +91,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config()
         },
     )
@@ -134,8 +134,8 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
     let entity = source_to_new_map(&root, &engine.generation().prefix)[&5];
     engine
         .accept_change(
-            tessera_types::EntityId::new(entity),
-            tessera_lifecycle::ChangeOp::Suppress,
+            mosaica_types::EntityId::new(entity),
+            mosaica_lifecycle::ChangeOp::Suppress,
         )
         .expect("denies are never gated on step-down");
 }

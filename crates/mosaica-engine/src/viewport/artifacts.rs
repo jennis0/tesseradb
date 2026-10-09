@@ -6,7 +6,7 @@ use super::*;
 /// with the request, never unioned: asking for a name is not a way to learn it.
 pub(super) fn requested_layers(
     selection: LayerSelection<'_>,
-    reachable: &tessera_lifecycle::ResolvedLayers,
+    reachable: &mosaica_lifecycle::ResolvedLayers,
 ) -> Vec<String> {
     match selection {
         LayerSelection::Named(list) => list
@@ -21,7 +21,7 @@ pub(super) fn requested_layers(
 /// Whether one level of one layer is answered for.
 pub(crate) fn level_is_selected(
     selection: LevelSelection<'_>,
-    declared: &[tessera_types::layer::LevelDeclaration],
+    declared: &[mosaica_types::layer::LevelDeclaration],
     level: u32,
     zoom: u8,
 ) -> bool {
@@ -57,12 +57,12 @@ pub(crate) fn level_is_selected(
 /// content, whose slot is left blank. `None` where the layer authors no shape or the slot does not
 /// read as one.
 fn take_authored_shapes(
-    declaration: &tessera_types::layer::LayerDeclaration,
+    declaration: &mosaica_types::layer::LayerDeclaration,
     content: &mut [String],
-) -> Option<tessera_lifecycle::membership::ArtifactShapes> {
+) -> Option<mosaica_lifecycle::membership::ArtifactShapes> {
     let (slot, _) = declaration.authored_shape()?;
     let text = content.get_mut(slot)?;
-    let shapes = tessera_lifecycle::membership::ArtifactShapes::from_content_text(text);
+    let shapes = mosaica_lifecycle::membership::ArtifactShapes::from_content_text(text);
     text.clear();
     shapes
 }
@@ -71,7 +71,7 @@ fn take_authored_shapes(
 /// shape's slot blank, and the shapes taken from that slot.
 pub(crate) struct Supplied {
     pub(crate) values: Vec<String>,
-    pub(crate) authored: Option<tessera_lifecycle::membership::ArtifactShapes>,
+    pub(crate) authored: Option<mosaica_lifecycle::membership::ArtifactShapes>,
     /// Where the layer's authored shape sits among the values, where it authors one.
     shape_slot: Option<usize>,
 }
@@ -100,11 +100,11 @@ pub(crate) type Rings = Vec<Vec<Vec<[u32; 2]>>>;
 /// One view's authored shape as rings for the wire; `None` where the artifact authored none for
 /// `view` or its bytes do not decode.
 pub(crate) fn authored_rings(
-    shapes: &tessera_lifecycle::membership::ArtifactShapes,
+    shapes: &mosaica_lifecycle::membership::ArtifactShapes,
     view: &str,
     zoom: Option<u8>,
 ) -> Option<Rings> {
-    let shape = tessera_spatial::shape::Shape::decode(shapes.for_view(view)?).ok()?;
+    let shape = mosaica_spatial::shape::Shape::decode(shapes.for_view(view)?).ok()?;
     Some(crate::shapes::served_rings(&shape, zoom))
 }
 
@@ -121,8 +121,8 @@ pub(super) struct GatedArtifact {
     pub(super) name: String,
     pub(super) level: u32,
     pub(super) ordinal: u32,
-    pub(super) entity: tessera_types::EntityId,
-    pub(super) layer: tessera_types::layer::RegisteredLayer,
+    pub(super) entity: mosaica_types::EntityId,
+    pub(super) layer: mosaica_types::layer::RegisteredLayer,
     pub(super) rows: Arc<crate::artifacts::ArtifactRows>,
     pub(super) masked_count: u64,
     pub(super) rank: Option<u32>,
@@ -140,7 +140,7 @@ pub(super) struct GatedArtifact {
 pub(crate) struct DependencyContext<'a> {
     served: &'a ServedView<'a>,
     mask: &'a crate::compose::EffectiveMask,
-    reachable: &'a tessera_lifecycle::ResolvedLayers,
+    reachable: &'a mosaica_lifecycle::ResolvedLayers,
     /// Each target layer's label test for this viewer, settled once per request: a named default
     /// is evaluated once rather than once per candidate.
     labels: std::cell::RefCell<rustc_hash::FxHashMap<String, crate::artifacts::LabelGate<'a>>>,
@@ -172,7 +172,7 @@ impl<'a> DependencyContext<'a> {
     pub(crate) fn new(
         served: &'a ServedView<'a>,
         mask: &'a crate::compose::EffectiveMask,
-        reachable: &'a tessera_lifecycle::ResolvedLayers,
+        reachable: &'a mosaica_lifecycle::ResolvedLayers,
     ) -> Self {
         DependencyContext {
             served,
@@ -215,7 +215,7 @@ impl Engine {
         let source = generation.partition_source();
         // Views this bundle carries, each with the partition that carries it. A view two
         // partitions carry errors on the request path, so it is left unwarmed here.
-        let mut views: std::collections::BTreeMap<&str, Option<&tessera_store::read::ViewData>> =
+        let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
             std::collections::BTreeMap::new();
         for partition in generation.bundle.partitions.values() {
             for (name, data) in &partition.views {
@@ -643,12 +643,12 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn drawn_shape(
         &self,
-        declaration: &tessera_types::layer::LayerDeclaration,
+        declaration: &mosaica_types::layer::LayerDeclaration,
         view: &str,
         layer: &str,
         level: u32,
         ordinal: u32,
-        authored: Option<&tessera_lifecycle::membership::ArtifactShapes>,
+        authored: Option<&mosaica_lifecycle::membership::ArtifactShapes>,
         derived: &mut crate::derived::DerivedContent,
         zoom: Option<u8>,
     ) {
@@ -696,7 +696,7 @@ impl Engine {
     pub(crate) fn supplied_content(
         &self,
         generation: &crate::Generation,
-        declaration: &tessera_types::layer::LayerDeclaration,
+        declaration: &mosaica_types::layer::LayerDeclaration,
         level: u32,
         ordinal: u32,
         entity: EntityId,
@@ -799,7 +799,7 @@ impl Engine {
                         .iter()
                         .find(|f| f.tag == tag)
                         .and_then(|f| match &f.value {
-                            tessera_filter::RecordValue::Utf8(text) => Some(text.as_str()),
+                            mosaica_filter::RecordValue::Utf8(text) => Some(text.as_str()),
                             _ => None,
                         })
                 })
@@ -820,7 +820,7 @@ impl Engine {
     fn dependency_served(
         &self,
         ctx: &DependencyContext<'_>,
-        attachment: &tessera_lifecycle::membership::Attachment,
+        attachment: &mosaica_lifecycle::membership::Attachment,
         depth: u32,
     ) -> bool {
         if depth == 0 {
@@ -899,7 +899,7 @@ impl Engine {
         let Some(counts) = ctx.held(counts) else {
             return false;
         };
-        let nested = |a: &tessera_lifecycle::membership::Attachment| {
+        let nested = |a: &mosaica_lifecycle::membership::Attachment| {
             self.dependency_served(ctx, a, depth - 1)
         };
         // Lazily and load-bearing: runs once per candidate, so settling a whole expression table
@@ -934,7 +934,7 @@ impl Engine {
     pub(crate) fn dependency_gate<'a>(
         &'a self,
         ctx: &'a DependencyContext<'a>,
-    ) -> impl Fn(&tessera_lifecycle::membership::Attachment) -> bool + 'a {
+    ) -> impl Fn(&mosaica_lifecycle::membership::Attachment) -> bool + 'a {
         move |attachment| self.dependency_served(ctx, attachment, DEPENDENCY_CHAIN_MAX)
     }
 
@@ -960,7 +960,7 @@ impl Engine {
         ask: &ArtifactAsk<'_>,
         names: Vec<String>,
         in_request: &std::collections::BTreeSet<String>,
-        dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+        dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Settled> {
         if names.is_empty() {
             return Ok(Settled::default());
@@ -984,7 +984,7 @@ impl Engine {
         mask: &crate::compose::EffectiveMask,
         names: Vec<String>,
         sets: &ViewportSets<'_>,
-        dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+        dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Walked> {
         let pass = ArtifactPass::new(served, ask, mask, dependency_served);
 
@@ -1100,8 +1100,8 @@ impl Engine {
     pub(crate) fn level_form(
         &self,
         served: &ServedView<'_>,
-        registered: &tessera_types::layer::RegisteredLayer,
-        vocabulary: Option<&tessera_store::vocabulary::VocabularyMinter>,
+        registered: &mosaica_types::layer::RegisteredLayer,
+        vocabulary: Option<&mosaica_store::vocabulary::VocabularyMinter>,
         source: &crate::containment::PartitionSource<'_>,
         level: u32,
     ) -> ((Arc<crate::artifacts::ArtifactRows>, u64), u64) {
@@ -1150,7 +1150,7 @@ impl Engine {
         &self,
         layer: &'a LayerPass<'a>,
         level: u32,
-        runs: &'a tessera_types::layer::ReservedRuns,
+        runs: &'a mosaica_types::layer::ReservedRuns,
     ) -> Result<LevelPass<'a>> {
         let (pass, served) = (layer.pass, layer.pass.served);
         let ((rows, level_version), lineage_version) = self.level_form(
@@ -1234,7 +1234,7 @@ impl Engine {
         bbox: [f64; 4],
         budget: Option<u32>,
         layer: &str,
-        dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+        dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
         cancel: &Option<CancelToken>,
     ) -> Result<Option<DrawnCut>> {
         let tiles_req = ViewportRequest::new(served.name, zoom, bbox, 0).cancel(cancel.clone());
@@ -1349,7 +1349,7 @@ impl Engine {
     /// lineage is empty here.
     pub(crate) fn level_lineage(
         &self,
-        layer: &tessera_types::layer::RegisteredLayer,
+        layer: &mosaica_types::layer::RegisteredLayer,
         number: u32,
         lineage_version: u64,
         rows: &crate::artifacts::ArtifactRows,
@@ -1611,7 +1611,7 @@ pub(super) struct ArtifactPass<'a> {
     /// The viewer's composed mask, which every verdict and every derived property reads.
     pub(super) mask: &'a crate::compose::EffectiveMask,
     /// The dependency prerequisite, closed over this request's state.
-    pub(super) dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+    pub(super) dependency_served: &'a dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     pub(super) locator: crate::derived::RowLocator<'a>,
     /// The postings, which are the generation's, not any layer's.
     pub(super) source: crate::containment::PartitionSource<'a>,
@@ -1623,7 +1623,7 @@ impl<'a> ArtifactPass<'a> {
         served: &'a ServedView<'a>,
         ask: &'a ArtifactAsk<'a>,
         mask: &'a crate::compose::EffectiveMask,
-        dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+        dependency_served: &'a dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     ) -> Self {
         ArtifactPass {
             served,
@@ -1642,12 +1642,12 @@ impl<'a> ArtifactPass<'a> {
 pub(super) struct LayerPass<'a> {
     pub(super) pass: &'a ArtifactPass<'a>,
     pub(super) name: String,
-    pub(super) registered: tessera_types::layer::RegisteredLayer,
+    pub(super) registered: mosaica_types::layer::RegisteredLayer,
     /// The derived properties this layer declares **and** this request asked for.
     declared_derived: Vec<crate::derived::ComputedProperty>,
     /// The predicate's inputs, resolved per level: per-level for a spatial layer, nothing for a
     /// stored-membership one.
-    vocabulary: Option<&'a tessera_store::vocabulary::VocabularyMinter>,
+    vocabulary: Option<&'a mosaica_store::vocabulary::VocabularyMinter>,
 }
 
 /// One level of one layer, as [`Engine::level_pass`] settles it: the values the gate, the cut and
@@ -1656,7 +1656,7 @@ pub(super) struct LevelPass<'a> {
     pub(super) layer: &'a LayerPass<'a>,
     pub(super) level: u32,
     /// The level's reserved entity runs — ordinal to entity.
-    pub(super) runs: &'a tessera_types::layer::ReservedRuns,
+    pub(super) runs: &'a mosaica_types::layer::ReservedRuns,
     /// This view's row form of the level's membership, and the version it is of.
     pub(super) rows: Arc<crate::artifacts::ArtifactRows>,
     level_version: u64,
@@ -1875,12 +1875,12 @@ pub(super) fn settle_response(
 /// Whether a layer's kind holds a lineage the cut climbs and the rung is counted over —
 /// `Some(dag)` for roll-up kinds, `None` for flat and levelled kinds, whose edges are
 /// containment information rather than a ladder to coarsen along.
-pub(super) fn lineage_kind(kind: tessera_types::layer::HierarchyKind) -> Option<bool> {
+pub(super) fn lineage_kind(kind: mosaica_types::layer::HierarchyKind) -> Option<bool> {
     match kind {
-        tessera_types::layer::HierarchyKind::Nested => Some(false),
+        mosaica_types::layer::HierarchyKind::Nested => Some(false),
         // A `dag` layer is `nested` with several parents: the cut reads every depth's count
         // rather than bisecting.
-        tessera_types::layer::HierarchyKind::Dag => Some(true),
+        mosaica_types::layer::HierarchyKind::Dag => Some(true),
         _ => None,
     }
 }

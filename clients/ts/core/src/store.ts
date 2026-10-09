@@ -3,7 +3,7 @@ import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
 import {tileRectOfBbox, type DepthChoice} from './budget.js';
-import {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
+import {MosaicaClient, MosaicaError, type MosaicaClientOptions} from './client.js';
 import {ArtifactColours} from './colours.js';
 import type {Composition} from './compose.js';
 import {dataToWorldXY, gridToWorld, MAX_DEPTH, rectToRequestBbox, WORLD_SIZE} from './coords.js';
@@ -74,7 +74,7 @@ export type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregatesPro
 export type ViewInput = {
   /**
    * `[x0, y0, x1, y1]` in the current view's data coordinates: what the canvas shows, which may be
-   * clamped to the view's extent, as `viewInputOf` in `@tesseradb/deck` clamps it.
+   * clamped to the view's extent, as `viewInputOf` in `@mosaica/deck` clamps it.
    */
   bbox: [number, number, number, number];
   /**
@@ -173,16 +173,16 @@ export type StoreOptions = {
    */
   meta?: Meta;
   /**
-   * A {@link TesseraClient} to send requests through, such as one the host shares across stores.
+   * A {@link MosaicaClient} to send requests through, such as one the host shares across stores.
    * Defaults to one built from `viewerUrl` and `clientOptions`. A client passed here belongs to the
    * host, which closes it; {@link Store.dispose} closes only a client the store built.
    */
-  client?: TesseraClient;
+  client?: MosaicaClient;
   /**
    * Options for the client the store builds, such as `headers`, `fetch` or `decoder`. Ignored where
    * `client` is given. The store calls no session route, so `sessionUrl` may be `''`.
    */
-  clientOptions?: Omit<TesseraClientOptions, 'viewerUrl'>;
+  clientOptions?: Omit<MosaicaClientOptions, 'viewerUrl'>;
   /** Measurements the projections do not carry, for a demo's instrument panels. @internal */
   instruments?: {
     onFrame?(info: {plan: {choice: DepthChoice}; timings: Timings | null; bytes: number; held: number; fetched: number; calibration: {mTarget: number; visibleInView: number | undefined}; replica: {bytes: number; points: number; bands: number}}): void;
@@ -601,7 +601,7 @@ export interface Store {
    * @param req - The page to ask for. `filters` defaults to {@link Store.requestFilters}, so the
    *   tree counts what the map counts; pass `null` for unfiltered counts. `view` defaults to the
    *   current view.
-   * @throws {@link TesseraError} where the server refuses the request, such as `422` for an unknown
+   * @throws {@link MosaicaError} where the server refuses the request, such as `422` for an unknown
    *   layer, or where the store's read of `/v1/meta` was refused.
    */
   browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage>;
@@ -888,7 +888,7 @@ export function createStore(options: StoreOptions): Store {
   const ownsClient = !options.client;
   const client =
     options.client ??
-    new TesseraClient({viewerUrl: options.viewerUrl, sessionUrl: '', ...options.clientOptions});
+    new MosaicaClient({viewerUrl: options.viewerUrl, sessionUrl: '', ...options.clientOptions});
 
   const table = new SessionArtifactTable();
 
@@ -1309,7 +1309,7 @@ export function createStore(options: StoreOptions): Store {
       const response = await client.viewport(tok, {view, zoom: 0, bbox: rectToRequestBbox({x0: 0, y0: 0, x1: 0, y1: 0}, 0, q), k: 0, layers: []});
       if (!disposed && views.current === current) admit(view, response.identityKey, tok);
     } catch (error) {
-      if (disposed || tok === null || unconfirmed !== tok || !(error instanceof TesseraError)) return;
+      if (disposed || tok === null || unconfirmed !== tok || !(error instanceof MosaicaError)) return;
       if (error.status === 429 || error.status === 503 || tokens.isExpiry(refusalOf(error))) return;
       forgetAnswers();
     }

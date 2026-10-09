@@ -18,10 +18,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::{build, BuildArgs, ViewArgs};
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::{EntityId, IdentityKey};
+use mosaica_build::{build, BuildArgs, ViewArgs};
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{EntityId, IdentityKey};
 
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -35,9 +35,9 @@ const ENTITIES: u64 = 36;
 
 /// The same frame as [`extent`], in the manifest's own shape — every view of a group shares one
 /// (`views.md` §3.1), which is what the group's own copy records.
-fn group_frame() -> tessera_store::manifest::Quantisation {
+fn group_frame() -> mosaica_store::manifest::Quantisation {
     let e = extent();
-    tessera_store::manifest::Quantisation {
+    mosaica_store::manifest::Quantisation {
         x_min: e.x_min,
         x_max: e.x_max,
         y_min: e.y_min,
@@ -112,12 +112,12 @@ fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
     ViewArgs {
         visibility: None,
         view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: points.to_path_buf(),
         point_fields: Default::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
     }
 }
 
@@ -141,7 +141,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         // `world` is the declared anchor: within a signature group, ids are ordered by the Morton
         // code an item holds *there* (decision 0112).
         anchor: 0,
-        groups: vec![tessera_store::manifest::GroupDescriptor {
+        groups: vec![mosaica_store::manifest::GroupDescriptor {
             title: None,
             name: "quarter".to_string(),
             members_of: None,
@@ -149,9 +149,9 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
             visibility: None,
             scoped_scalars: Vec::new(),
             quantisation: group_frame(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             metadata: Vec::new(),
-            views: vec![tessera_store::manifest::GroupViewDescriptor {
+            views: vec![mosaica_store::manifest::GroupViewDescriptor {
                 key: "2026-Q2".to_string(),
                 visibility: None,
                 metadata: Default::default(),
@@ -285,13 +285,13 @@ fn a_label_that_disagrees_between_views_refuses() {
     let field_view = |view: &str, points: &Path| ViewArgs {
         visibility: None,
         view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: points.to_path_buf(),
         point_fields: Default::default(),
         select: None,
-        access: tessera_build::config::AccessInput {
-            source: tessera_build::config::AccessSource::Field("access".to_string()),
+        access: mosaica_build::config::AccessInput {
+            source: mosaica_build::config::AccessSource::Field("access".to_string()),
             default: Some("public".to_string()),
         },
     };
@@ -469,8 +469,8 @@ fn write_discriminated(path: &Path, blocks: &[(&str, std::ops::Range<u64>)]) {
 }
 
 /// The roster the manifest publishes for the form B group these tests build.
-fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
-    tessera_store::manifest::GroupDescriptor {
+fn alt_group(keys: &[&str]) -> mosaica_store::manifest::GroupDescriptor {
+    mosaica_store::manifest::GroupDescriptor {
         title: None,
         name: "quarter_alt".to_string(),
         members_of: None,
@@ -478,11 +478,11 @@ fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
         visibility: None,
         scoped_scalars: Vec::new(),
         quantisation: group_frame(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         metadata: Vec::new(),
         views: keys
             .iter()
-            .map(|key| tessera_store::manifest::GroupViewDescriptor {
+            .map(|key| mosaica_store::manifest::GroupViewDescriptor {
                 key: (*key).to_string(),
                 visibility: None,
                 metadata: Default::default(),
@@ -493,7 +493,7 @@ fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
 
 fn selected_view(view: &str, key: &str, points: &Path, pairs: &Path) -> ViewArgs {
     ViewArgs {
-        select: Some(tessera_build::config::ViewSelector {
+        select: Some(mosaica_build::config::ViewSelector {
             column: "quarter".to_string(),
             value: key.to_string(),
             keys: vec!["2026-Q2".to_string(), "2026-Q3".to_string()],
@@ -509,7 +509,7 @@ fn selected_view(view: &str, key: &str, points: &Path, pairs: &Path) -> ViewArgs
 /// declaration.
 #[test]
 fn an_auto_frame_over_a_group_fits_every_views_source() {
-    use tessera_build::config::{frame_of, Extent, FrameSource};
+    use mosaica_build::config::{frame_of, Extent, FrameSource};
 
     let dir = tempfile::tempdir().unwrap();
     let q2 = dir.path().join("q2.parquet");
@@ -528,14 +528,14 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
 
     let group = frame_of(
         "view group 'quarter'",
-        tessera_spatial::Projection::None,
+        mosaica_spatial::Projection::None,
         &Extent::Auto { margin: 0.0 },
         &[of(q2), of(q3)],
     )
     .expect("one frame over both sources");
     let alone = frame_of(
         "view 'quarter:2026-Q2'",
-        tessera_spatial::Projection::None,
+        mosaica_spatial::Projection::None,
         &Extent::Auto { margin: 0.0 },
         &[of(q2)],
     )
@@ -543,9 +543,9 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
 
     // The group's box holds both views' data; the single view's does not hold the other's.
     for path in [q2, q3] {
-        let rows = tessera_build::input::read_points(
-            tessera_build::input::Source::every_row(path, &fields),
-            tessera_spatial::Projection::None,
+        let rows = mosaica_build::input::read_points(
+            mosaica_build::input::Source::every_row(path, &fields),
+            mosaica_spatial::Projection::None,
             &group.extent,
         )
         .expect("points read");
@@ -558,7 +558,7 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         alone.extent
     );
     // Nothing clamps: the box was fitted to every row it will place.
-    let tessera_build::input::PointSurvey::Coordinates(survey) = &group.survey else {
+    let mosaica_build::input::PointSurvey::Coordinates(survey) = &group.survey else {
         panic!("the group's sources carry coordinates");
     };
     assert_eq!(survey.clamped, 0);
@@ -623,7 +623,7 @@ fields = { key = "quarter" }
 "#,
     )
     .unwrap();
-    let config = tessera_build::config::Config::parse(&config, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config, &Default::default())
         .expect("the declaration parses");
     let registry = config.build_views().expect("the roster enumerates");
 
@@ -635,13 +635,13 @@ fields = { key = "quarter" }
     assert_eq!(group.key, "2026-Q3", "the roster's own order is the registry's");
     assert_eq!(
         group.metadata.get("label"),
-        Some(&tessera_build::config::MetadataValue::Text(
+        Some(&mosaica_build::config::MetadataValue::Text(
             "Q3 2026".to_string()
         ))
     );
     assert_eq!(
         group.metadata.get("starts"),
-        Some(&tessera_build::config::MetadataValue::TimestampUs(1))
+        Some(&mosaica_build::config::MetadataValue::TimestampUs(1))
     );
     // Every view's points are the group's one file, selected by its key, and the selection
     // carries the whole roster so a stray key can be refused naming it.
@@ -709,7 +709,7 @@ fields = { key = "quarter" }
 "#,
         )
         .unwrap();
-        let config = tessera_build::config::Config::parse(&config, &Default::default())
+        let config = mosaica_build::config::Config::parse(&config, &Default::default())
             .expect("the declaration parses");
         let registry = config.build_views();
         if !fits {
@@ -719,7 +719,7 @@ fields = { key = "quarter" }
         let registry = registry.expect("a value that fits is read");
         assert_eq!(
             registry[1].group.as_ref().unwrap().metadata.get("tier"),
-            Some(&tessera_build::config::MetadataValue::Int(tier))
+            Some(&mosaica_build::config::MetadataValue::Int(tier))
         );
     }
 }
@@ -794,7 +794,7 @@ fields = { key = "quarter" }
 "#,
     )
     .unwrap();
-    let config = tessera_build::config::Config::parse(&config, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config, &Default::default())
         .expect("the declaration parses");
     let registry = config.build_views().expect("the roster enumerates");
     let gate_of = |i: usize| registry[i].visibility.clone();
@@ -886,7 +886,7 @@ fields = { key = "quarter" }
 "#,
     )
     .unwrap();
-    let config = tessera_build::config::Config::parse(&config, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config, &Default::default())
         .expect("the declaration parses");
     let registry = config.build_views().expect("the registry compiles");
     let view = |id: &str| registry.iter().find(|v| v.id == id).expect(id);
@@ -960,7 +960,7 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
 #[test]
 fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
     use arrow::array::{Float32Array, StringArray};
-    use tessera_spatial::tiler::ScalarType;
+    use mosaica_spatial::tiler::ScalarType;
 
     let dir = tempfile::tempdir().unwrap();
     // Q2 holds 0..24 and Q3 12..36, and a row's sentiment is null on every third entity — so the
@@ -1007,7 +1007,7 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
     write_pairs(&pairs);
     let out = dir.path().join("bundle");
 
-    let sentiment = tessera_build::config::Attribute {
+    let sentiment = mosaica_build::config::Attribute {
         name: "sentiment".to_string(),
         title: None,
         field: None,
@@ -1027,7 +1027,7 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         ],
         anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
-        scoped_attributes: vec![tessera_build::ScopedColumnFamily {
+        scoped_attributes: vec![mosaica_build::ScopedColumnFamily {
             attribute: sentiment,
             group: "quarter_alt".to_string(),
             views: vec![0, 1],
@@ -1073,7 +1073,7 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
             present,
             "{key}'s presence is its own rows' values"
         );
-        // Every file the build wrote is digested, which is what `tessera verify` walks.
+        // Every file the build wrote is digested, which is what `mosaica verify` walks.
         for path in [&values, &presence] {
             let rel = path
                 .strip_prefix(out.join("v00000"))
@@ -1116,7 +1116,7 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
 }
 
 /// **A sparse view stores the pages it occupies, not the entity space it is bounded by**
-/// (`views.md` §8; the paged `permutation.bin`, `tessera_store::permutation`).
+/// (`views.md` §8; the paged `permutation.bin`, `mosaica_store::permutation`).
 ///
 /// The cost this test is about only exists above 2¹⁶ entities — a page covers that many
 /// consecutive ids, so every other fixture in this repository fits in one page and would show a
@@ -1179,7 +1179,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
             view_args("quarter:2026-Q2", &sparse_points, &pairs),
         ],
         anchor: 0,
-        groups: vec![tessera_store::manifest::GroupDescriptor {
+        groups: vec![mosaica_store::manifest::GroupDescriptor {
             title: None,
             name: "quarter".to_string(),
             members_of: None,
@@ -1187,9 +1187,9 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
             visibility: None,
             scoped_scalars: Vec::new(),
             quantisation: group_frame(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             metadata: Vec::new(),
-            views: vec![tessera_store::manifest::GroupViewDescriptor {
+            views: vec![mosaica_store::manifest::GroupViewDescriptor {
                 key: "2026-Q2".to_string(),
                 visibility: None,
                 metadata: Default::default(),

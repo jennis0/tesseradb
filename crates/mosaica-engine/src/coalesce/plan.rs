@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use tessera_store::manifest::{
+use mosaica_store::manifest::{
     DictExtent, EntityTermsExtent, FileDigest, RecordExtent, SegmentsManifest,
 };
-use tessera_store::merge::size_tier;
+use mosaica_store::merge::size_tier;
 
 use super::{CoalescePlan, CoalescePolicy, ColumnExtent, ColumnWindow, WindowKey};
 
@@ -15,7 +15,7 @@ pub(crate) fn plan_coalesce(
     manifest: &SegmentsManifest,
     build_files: &BTreeMap<String, FileDigest>,
     policy: CoalescePolicy,
-    is_live: &dyn Fn(&str, tessera_types::view::ViewIncarnation) -> bool,
+    is_live: &dyn Fn(&str, mosaica_types::view::ViewIncarnation) -> bool,
 ) -> Option<CoalescePlan> {
     // A file neither manifest digests makes its entry ineligible.
     let size_of = |rel: &str| -> Option<u64> {
@@ -93,8 +93,8 @@ pub(crate) fn plan_coalesce(
 
     // A lookup reads every live run of both directions of the edited-items map too.
     for (direction, runs) in [
-        (tessera_store::edited::Direction::ByNumber, &manifest.edited_items.by_number),
-        (tessera_store::edited::Direction::ByEntity, &manifest.edited_items.by_entity),
+        (mosaica_store::edited::Direction::ByNumber, &manifest.edited_items.by_number),
+        (mosaica_store::edited::Direction::ByEntity, &manifest.edited_items.by_entity),
     ] {
         if let Some(window) =
             select_window(&runs.live, policy.run_width, runs_policy, |rel| size_of(rel))
@@ -164,7 +164,7 @@ fn widest_window<T>(
 fn column_windows<E: ColumnExtent + Clone>(
     entries: &[E],
     policy: CoalescePolicy,
-    is_live: &dyn Fn(&str, tessera_types::view::ViewIncarnation) -> bool,
+    is_live: &dyn Fn(&str, mosaica_types::view::ViewIncarnation) -> bool,
     size_of: impl Fn(&E) -> Option<u64>,
 ) -> Vec<ColumnWindow<E>> {
     let mut by_column: BTreeMap<WindowKey<'_>, Vec<&E>> = BTreeMap::new();

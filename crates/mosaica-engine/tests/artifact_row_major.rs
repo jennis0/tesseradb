@@ -25,16 +25,16 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine};
-use tessera_lifecycle::membership::IncomingContent;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{ArtifactOut, Engine};
+use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const FLAT: &str = "clusters/flat";
 const TREED: &str = "clusters/treed";
@@ -64,7 +64,7 @@ fn declaration(
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind,
@@ -82,10 +82,10 @@ fn declaration(
             // layer declares none, so both states — a layer with contents and a layer without — are
             // in the sweep.
             supplied: if name == FLAT {
-                vec![tessera_types::layer::SuppliedContent {
+                vec![mosaica_types::layer::SuppliedContent {
                     name: "label".into(),
                     ty: "text".into(),
-                    require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+                    require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
                 }]
             } else {
                 Vec::new()
@@ -134,7 +134,7 @@ impl Fixture {
         engine
     }
 
-    fn open_with(&self, config: tessera_engine::EngineConfig) -> Engine {
+    fn open_with(&self, config: mosaica_engine::EngineConfig) -> Engine {
         let mut engine = Engine::open(
             &self.root,
             &self.cache,
@@ -243,7 +243,7 @@ fn sweep(engine: &Engine) -> Vec<(usize, usize, Vec<Served>)> {
             let response = engine
                 .viewport_artifacts(
                     &session,
-                    tessera_engine::ViewportArtifactsRequest::new("s0", 0, *bbox, usize::MAX),
+                    mosaica_engine::ViewportArtifactsRequest::new("s0", 0, *bbox, usize::MAX),
                 )
                 .expect("a viewport")
                 .artifacts();
@@ -426,7 +426,7 @@ fn ingest_points(engine: &Engine, batch: &str, n: u64) -> Vec<EntityId> {
             } else {
                 vec![b"0".to_vec()]
             };
-            tessera_lifecycle::UnallocatedRow {
+            mosaica_lifecycle::UnallocatedRow {
                 view: "s0".to_string(),
                 join: None,
                 terms: engine.resolve_terms(&descriptors),
@@ -550,7 +550,7 @@ fn the_two_layouts_answer_identically() {
             let fresh = ingest_points(engine, "past-the-fold", 40);
             tick(engine);
             let growth = |key: &str, members: &[EntityId]| {
-                tessera_lifecycle::IncomingGrowth::from_entities(key.into(), members.to_vec())
+                mosaica_lifecycle::IncomingGrowth::from_entities(key.into(), members.to_vec())
             };
             engine
                 .grow_memberships(FLAT.into(), 0, vec![growth("p3", &fresh[..20])])
@@ -609,7 +609,7 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
             let response = engine
                 .viewport_artifacts(
                     &session,
-                    tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+                    mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
                 )
                 .expect("a viewport")
                 .artifacts();
@@ -726,13 +726,13 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         .partitions
         .values()
         .flat_map(|p| p.manifest.derived_extents.iter().cloned())
-        .filter(|e| matches!(e.form, tessera_store::manifest::DerivedForm::RowColumn { .. }))
+        .filter(|e| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. }))
         .collect();
     assert_eq!(extents.len(), fx.row_column_files(&engine).len());
     for extent in &extents {
         assert_eq!(
             extent.form,
-            tessera_store::manifest::DerivedForm::RowColumn {
+            mosaica_store::manifest::DerivedForm::RowColumn {
                 layout: ServingLayout::RowMajorLabel
             }
         );
@@ -794,7 +794,7 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         let response = reopened
             .viewport_artifacts(
                 &looking,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
             )
             .expect("a viewport")
             .artifacts();
@@ -835,7 +835,7 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
         engine
             .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
             )
             .expect("a viewport")
             .artifacts()
@@ -903,7 +903,7 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
         .grow_memberships(
             FLAT.into(),
             0,
-            vec![tessera_lifecycle::IncomingGrowth::from_entities(
+            vec![mosaica_lifecycle::IncomingGrowth::from_entities(
                 "p0".into(),
                 fx.members(8_000..8_500),
             )],
@@ -968,7 +968,7 @@ fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
     let response = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
         .artifacts();
@@ -1280,7 +1280,7 @@ fn a_level_that_holds_no_rows_takes_every_write_through_its_column() {
         let served = engine
             .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
             )
             .expect("a viewport")
             .artifacts();
@@ -1291,8 +1291,8 @@ fn a_level_that_holds_no_rows_takes_every_write_through_its_column() {
                     .viewport(
                         &session,
                         ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize).filter(
-                            tessera_engine::filter::FilterExpr::Region(
-                                tessera_engine::filter::RegionLeaf::Artifact(artifact.tessera_id),
+                            mosaica_engine::filter::FilterExpr::Region(
+                                mosaica_engine::filter::RegionLeaf::Artifact(artifact.tessera_id),
                             ),
                         ),
                     )
@@ -1512,7 +1512,7 @@ fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
             .grow_memberships(
                 FLAT.into(),
                 0,
-                vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                vec![mosaica_lifecycle::IncomingGrowth::from_entities(
                     "p0".into(),
                     fx.members(0..500),
                 )],
@@ -1557,11 +1557,11 @@ fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
 
 /// Every artifact of the flat layer one session is served over the whole map: its count and its
 /// derived geometry, by key.
-fn flat_served(engine: &Engine, session: &tessera_engine::Session) -> BTreeMap<Option<String>, Served> {
+fn flat_served(engine: &Engine, session: &mosaica_engine::Session) -> BTreeMap<Option<String>, Served> {
     let response = engine
         .viewport_artifacts(
             session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport")
         .artifacts();
@@ -1681,7 +1681,7 @@ fn concurrent_requests_with_one_term_set_wait_for_one_build() {
 #[test]
 fn a_points_request_does_not_wait_for_a_count_build() {
     let fx = fixture();
-    let engine = std::sync::Arc::new(fx.open_with(tessera_engine::EngineConfig {
+    let engine = std::sync::Arc::new(fx.open_with(mosaica_engine::EngineConfig {
         compute_threads: 1,
         ..config()
     }));
@@ -1694,12 +1694,12 @@ fn a_points_request_does_not_wait_for_a_count_build() {
     // Every points request takes the pool rather than the calling thread.
     engine.set_serial_fallback_max_rows_for_test(0);
     let session = std::sync::Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
-    let points = |engine: &Engine, session: &tessera_engine::Session| {
+    let points = |engine: &Engine, session: &mosaica_engine::Session| {
         engine
             .viewport(
                 session,
                 ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
-                    .layers(tessera_engine::viewport::LayerSelection::Named(&[])),
+                    .layers(mosaica_engine::viewport::LayerSelection::Named(&[])),
             )
             .expect("a points viewport")
             .points
@@ -1793,13 +1793,13 @@ fn a_build_in_flight_at_a_suppression_is_corrected_for_it() {
 /// give way.
 fn artifacts_only(
     engine: &Engine,
-    session: &tessera_engine::Session,
-    cancel: Option<tessera_engine::CancelToken>,
-) -> Result<usize, tessera_engine::EngineError> {
+    session: &mosaica_engine::Session,
+    cancel: Option<mosaica_engine::CancelToken>,
+) -> Result<usize, mosaica_engine::EngineError> {
     engine
         .viewport_artifacts(
             session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .cancel(cancel),
         )
         .map(|response| response.artifacts().len())
@@ -1808,7 +1808,7 @@ fn artifacts_only(
 /// A points request with no layers, held in its drawing span by the test hook, on its own thread.
 fn held_drawing(
     engine: &std::sync::Arc<Engine>,
-    session: &std::sync::Arc<tessera_engine::Session>,
+    session: &std::sync::Arc<mosaica_engine::Session>,
 ) -> std::thread::JoinHandle<usize> {
     engine.hold_next_drawing_for_test();
     let drawer = {
@@ -1818,7 +1818,7 @@ fn held_drawing(
                 .viewport(
                     &session,
                     ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
-                        .layers(tessera_engine::viewport::LayerSelection::Named(&[])),
+                        .layers(mosaica_engine::viewport::LayerSelection::Named(&[])),
                 )
                 .expect("a points viewport")
                 .points
@@ -1879,7 +1879,7 @@ fn a_build_whose_callers_have_gone_stops() {
     let session = std::sync::Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
     let drawer = held_drawing(&engine, &session);
 
-    let gone = tessera_engine::CancelToken::new();
+    let gone = mosaica_engine::CancelToken::new();
     let (done, finished) = std::sync::mpsc::channel();
     let builder = {
         let (engine, session, gone) = (
@@ -1901,7 +1901,7 @@ fn a_build_whose_callers_have_gone_stops() {
     builder.join().unwrap();
     assert!(drawer.join().unwrap() > 0);
     assert!(
-        matches!(answered, Ok(Err(tessera_engine::EngineError::Cancelled))),
+        matches!(answered, Ok(Err(mosaica_engine::EngineError::Cancelled))),
         "the abandoned build went on giving way: {answered:?}"
     );
     assert_eq!(held, 0, "a stopped build holds nothing");
@@ -1910,21 +1910,21 @@ fn a_build_whose_callers_have_gone_stops() {
 /// A sink whose counts frame blocks until the test lets it go, as a client that stops reading.
 struct StalledSink(std::sync::mpsc::Receiver<()>);
 
-impl tessera_engine::ViewportSink for StalledSink {
-    fn head(&mut self, _: tessera_engine::ViewportHead) -> tessera_engine::SinkResult {
+impl mosaica_engine::ViewportSink for StalledSink {
+    fn head(&mut self, _: mosaica_engine::ViewportHead) -> mosaica_engine::SinkResult {
         Ok(())
     }
 
     fn counts(
         &mut self,
-        _: &[tessera_engine::TileCount],
-        _: Option<&[tessera_engine::SubCellCount]>,
-    ) -> tessera_engine::SinkResult {
+        _: &[mosaica_engine::TileCount],
+        _: Option<&[mosaica_engine::SubCellCount]>,
+    ) -> mosaica_engine::SinkResult {
         let _ = self.0.recv();
         Ok(())
     }
 
-    fn points(&mut self, _: tessera_engine::PointColumns) -> tessera_engine::SinkResult {
+    fn points(&mut self, _: mosaica_engine::PointColumns) -> mosaica_engine::SinkResult {
         Ok(())
     }
 }
@@ -1950,7 +1950,7 @@ fn a_stalled_stream_holds_no_build() {
                 .viewport_stream(
                     &session,
                     ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
-                        .layers(tessera_engine::viewport::LayerSelection::Named(&[])),
+                        .layers(mosaica_engine::viewport::LayerSelection::Named(&[])),
                     1 << 20,
                     &mut StalledSink(stalled),
                 )

@@ -9,9 +9,9 @@ use super::*;
 #[derive(Clone)]
 pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) body_hash: [u8; 32],
-    pub(in crate::write) receipt: Vec<tessera_lifecycle::RowReceipt>,
+    pub(in crate::write) receipt: Vec<mosaica_lifecycle::RowReceipt>,
     /// Where the record carrying this batch lies in the log. The index is a cache of the WAL
-    /// ([`tessera_lifecycle::batch_identity`]), so an entry outlives its record only until the
+    /// ([`mosaica_lifecycle::batch_identity`]), so an entry outlives its record only until the
     /// rotation that deletes the member holding it. `Executor::rotate_wal` forgets everything
     /// below [`ExecutorWal::retained_from`], which is the horizon a restart would rebuild.
     pub(in crate::write) wal_pos: u64,
@@ -27,7 +27,7 @@ pub(in crate::write) type ResolverState = (FxHashMap<Vec<u8>, TermId>, u32);
 
 /// The layer registry as a side-manifest carries it, with the allocator's row-less mark.
 pub(in crate::write) struct RegistryForPublication {
-    pub layers: Vec<tessera_types::layer::RegisteredLayer>,
+    pub layers: Vec<mosaica_types::layer::RegisteredLayer>,
     pub tombstones: Vec<String>,
     /// The registry's version counter.
     pub version: u64,
@@ -58,7 +58,7 @@ pub(crate) struct LiveState {
     /// The view roster, on the registry's contract: written only by the executor, a create is a
     /// WAL append followed by an apply, on the one thread that also holds the allocator. Read by
     /// the request path, which resolves a view id against the manifest the roster made.
-    pub(in crate::write) roster: Mutex<tessera_lifecycle::ViewRoster>,
+    pub(in crate::write) roster: Mutex<mosaica_lifecycle::ViewRoster>,
     /// The attribute columns declared while the service runs and not yet folded into a
     /// `MANIFEST.json`, on the roster's contract: written only by the executor (a declaration
     /// is a WAL append followed by an apply) and read at every side-manifest publication, which is
@@ -86,19 +86,19 @@ impl LiveState {
     pub(crate) fn allocator_freed(
         &self,
     ) -> (
-        tessera_store::manifest::EntitySet,
-        Vec<tessera_store::manifest::HeldEntities>,
+        mosaica_store::manifest::EntitySet,
+        Vec<mosaica_store::manifest::HeldEntities>,
     ) {
         let alloc = lock_recover(&self.allocator);
         let held = alloc
             .held()
             .iter()
-            .map(|(position, ids)| tessera_store::manifest::HeldEntities {
+            .map(|(position, ids)| mosaica_store::manifest::HeldEntities {
                 position: *position,
-                entities: tessera_store::manifest::EntitySet::of(ids),
+                entities: mosaica_store::manifest::EntitySet::of(ids),
             })
             .collect();
-        (tessera_store::manifest::EntitySet::of(alloc.free()), held)
+        (mosaica_store::manifest::EntitySet::of(alloc.free()), held)
     }
 
     /// Runs `f` with both the registry and the allocator held, in that lock order.
@@ -151,13 +151,13 @@ impl LiveState {
     /// Everything not yet in a manifest, packed and ready. See [`ArtifactStore::unpublished`].
     pub(in crate::write) fn unpublished_memberships(
         &self,
-    ) -> Vec<tessera_lifecycle::membership::PendingExtent> {
+    ) -> Vec<mosaica_lifecycle::membership::PendingExtent> {
         lock_recover(&self.artifacts).unpublished()
     }
 
     /// The supplied content of every artifact not yet in a manifest. See
-    /// [`tessera_lifecycle::membership::ArtifactStore::unpublished_content`].
-    pub(in crate::write) fn unpublished_content(&self) -> Vec<(tessera_types::EntityId, Vec<(u16, String)>)> {
+    /// [`mosaica_lifecycle::membership::ArtifactStore::unpublished_content`].
+    pub(in crate::write) fn unpublished_content(&self) -> Vec<(mosaica_types::EntityId, Vec<(u16, String)>)> {
         lock_recover(&self.artifacts).unpublished_content()
     }
 
@@ -178,7 +178,7 @@ impl LiveState {
     }
 
     /// Record that the content extent carrying every pending content fill is named by a durable
-    /// manifest. See [`tessera_lifecycle::membership::ArtifactStore::mark_content_published`].
+    /// manifest. See [`mosaica_lifecycle::membership::ArtifactStore::mark_content_published`].
     ///
     /// Called from the overlay publication, not the fold: the fold carries content extents
     /// forward unchanged, so a fill pending at a fold is still pending after it.
@@ -187,7 +187,7 @@ impl LiveState {
     }
 
     /// Release the log from every growth the fold's whole rewrite has just made durable. See
-    /// [`tessera_lifecycle::membership::ArtifactStore::mark_growth_packed`].
+    /// [`mosaica_lifecycle::membership::ArtifactStore::mark_growth_packed`].
     ///
     /// Called from the fold only: `mark_memberships_published` covers only the tail above each
     /// level's high-water, and a growth lands below it.
@@ -208,13 +208,13 @@ impl LiveState {
     pub(in crate::write) fn rehouse_memberships(
         &self,
         prefix_dir: &std::path::Path,
-        extents: &[tessera_store::manifest::MembershipExtent],
+        extents: &[mosaica_store::manifest::MembershipExtent],
     ) -> (u64, u64) {
         let mut artifacts = lock_recover(&self.artifacts);
         let (mut rehoused, mut kept) = (0u64, 0u64);
         for extent in extents {
             let path = prefix_dir.join(&extent.path);
-            let pack = match tessera_store::membership::MembershipPack::open(&path) {
+            let pack = match mosaica_store::membership::MembershipPack::open(&path) {
                 Ok(pack) => Arc::new(pack),
                 Err(error) => {
                     tracing::error!(
@@ -238,7 +238,7 @@ impl LiveState {
                 // (`Engine::open`). `blob` is a slice of `pack`'s read-only mapping and `owner` is
                 // that same pack, held by every `Members` the mapping produces.
                 let mapped =
-                    unsafe { tessera_lifecycle::membership::mapped_members(blob, owner.clone()) };
+                    unsafe { mosaica_lifecycle::membership::mapped_members(blob, owner.clone()) };
                 let took = match mapped {
                     // `MembershipPack::iter` answers the absolute ordinal, which is what the
                     // store addresses by.
@@ -276,7 +276,7 @@ impl LiveState {
     pub(crate) fn resolve_layers(
         &self,
         admits: impl Fn(&str) -> bool,
-    ) -> tessera_lifecycle::ResolvedLayers {
+    ) -> mosaica_lifecycle::ResolvedLayers {
         lock_recover(&self.registry).resolve_for(admits)
     }
 
@@ -287,7 +287,7 @@ impl LiveState {
 
     /// Every registered layer, as the registry holds it: the declarations, never a decision. The
     /// caller applies the gate; this has no principal to resolve against.
-    pub(crate) fn registered_layers(&self) -> Vec<tessera_types::layer::RegisteredLayer> {
+    pub(crate) fn registered_layers(&self) -> Vec<mosaica_types::layer::RegisteredLayer> {
         lock_recover(&self.registry).snapshot().0
     }
 
@@ -296,7 +296,7 @@ impl LiveState {
     pub(crate) fn registered_layer(
         &self,
         name: &str,
-    ) -> Option<tessera_types::layer::RegisteredLayer> {
+    ) -> Option<mosaica_types::layer::RegisteredLayer> {
         lock_recover(&self.registry).get(name).cloned()
     }
 
@@ -320,7 +320,7 @@ impl LiveState {
         registry
             .iter()
             .filter_map(|(name, registered)| {
-                let tessera_types::layer::MembershipSource::Attribute(field) =
+                let mosaica_types::layer::MembershipSource::Attribute(field) =
                     &registered.declaration.membership
                 else {
                     return None;
@@ -339,13 +339,13 @@ impl LiveState {
         &self,
         layer: &str,
         level: u32,
-        layout: tessera_types::layer::ServingLayout,
+        layout: mosaica_types::layer::ServingLayout,
     ) -> bool {
         lock_recover(&self.registry).set_layout(layer, level, layout)
     }
 
     /// Run `f` with the roster held: the create and drop preparations, and nothing else.
-    pub(in crate::write) fn with_roster<R>(&self, f: impl FnOnce(&mut tessera_lifecycle::ViewRoster) -> R) -> R {
+    pub(in crate::write) fn with_roster<R>(&self, f: impl FnOnce(&mut mosaica_lifecycle::ViewRoster) -> R) -> R {
         let mut roster = lock_recover(&self.roster);
         f(&mut roster)
     }
@@ -365,8 +365,8 @@ impl LiveState {
     pub(in crate::write) fn attributes_for_publication(
         &self,
     ) -> (
-        Vec<tessera_store::manifest::DeclaredScalar>,
-        Vec<tessera_store::manifest::ScopedScalar>,
+        Vec<mosaica_store::manifest::DeclaredScalar>,
+        Vec<mosaica_store::manifest::ScopedScalar>,
     ) {
         lock_recover(&self.attributes).snapshot()
     }
@@ -387,7 +387,7 @@ impl LiveState {
     pub(in crate::write) fn vocabularies_for_publication(
         &self,
         vocabularies: &Vocabularies,
-    ) -> Vec<tessera_store::manifest::ManifestVocabulary> {
+    ) -> Vec<mosaica_store::manifest::ManifestVocabulary> {
         lock_recover(&self.vocabularies).snapshot(vocabularies)
     }
 
@@ -406,8 +406,8 @@ impl LiveState {
     pub(in crate::write) fn view_declarations_for_publication(
         &self,
     ) -> (
-        Vec<tessera_store::manifest::GroupDescriptor>,
-        Vec<tessera_store::manifest::ViewDescriptor>,
+        Vec<mosaica_store::manifest::GroupDescriptor>,
+        Vec<mosaica_store::manifest::ViewDescriptor>,
     ) {
         lock_recover(&self.view_declarations).snapshot()
     }
@@ -417,8 +417,8 @@ impl LiveState {
     pub(in crate::write) fn roster_for_publication(
         &self,
     ) -> (
-        Vec<tessera_types::view::CreatedView>,
-        Vec<tessera_types::view::DeadIncarnation>,
+        Vec<mosaica_types::view::CreatedView>,
+        Vec<mosaica_types::view::DeadIncarnation>,
     ) {
         lock_recover(&self.roster).snapshot()
     }
@@ -441,7 +441,7 @@ impl LiveState {
     pub(crate) fn accepted_batch(
         &self,
         batch_id: &str,
-    ) -> Option<([u8; 32], Vec<tessera_lifecycle::RowReceipt>)> {
+    ) -> Option<([u8; 32], Vec<mosaica_lifecycle::RowReceipt>)> {
         lock_recover(&self.accepted_batches)
             .get(batch_id)
             .map(|held| (held.body_hash, held.receipt.clone()))
@@ -494,13 +494,13 @@ impl LiveState {
 
     /// Index one accepted batch, at the position of the record that carries it.
     ///
-    /// The three arguments are [`tessera_lifecycle::BatchIdentity`]'s three fields plus that
+    /// The three arguments are [`mosaica_lifecycle::BatchIdentity`]'s three fields plus that
     /// position.
     pub(in crate::write) fn record_accepted_batch(
         &self,
         batch_id: String,
         body_hash: [u8; 32],
-        receipt: Vec<tessera_lifecycle::RowReceipt>,
+        receipt: Vec<mosaica_lifecycle::RowReceipt>,
         wal_pos: u64,
     ) {
         lock_recover(&self.accepted_batches).insert(

@@ -2,13 +2,13 @@ import {ContextProvider} from '@lit/context';
 import {css, html, nothing, svg, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import type {ArtifactDetail, ItemDetail, PaletteName, Store} from '@tesseradb/client';
-import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import {CATEGORY_PALETTES, DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, RAMPS, cellDepth, nearestStop} from '@tesseradb/deck';
-import {CLUSTER_PREFIX, PALETTES, WORLD_SIZE, activeCount, artifactName, colourLayers, emptyDraft} from '@tesseradb/client';
-import {hasOneLayout, sizesPoints} from '@tesseradb/client/internal';
-import {DENSITY_COLOUR_TITLES, colourOfFraction, css as rgb, hexOf} from '@tesseradb/deck/internal';
-import {TesseraElement, columnCaption, emit, shortCount} from './base.js';
+import type {ArtifactDetail, ItemDetail, PaletteName, Store} from '@mosaica/client';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@mosaica/deck';
+import {CATEGORY_PALETTES, DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, RAMPS, cellDepth, nearestStop} from '@mosaica/deck';
+import {CLUSTER_PREFIX, PALETTES, WORLD_SIZE, activeCount, artifactName, colourLayers, emptyDraft} from '@mosaica/client';
+import {hasOneLayout, sizesPoints} from '@mosaica/client/internal';
+import {DENSITY_COLOUR_TITLES, colourOfFraction, css as rgb, hexOf} from '@mosaica/deck/internal';
+import {MosaicaElement, columnCaption, emit, shortCount} from './base.js';
 import {placeCallout, type Rect, type Side} from './callout.js';
 import {colouringOf, setColouring, sizingOf, watchChoices} from './colouring.js';
 import {densityGradient, displayStyles, radioKeys, type DisplaySettings} from './display.js';
@@ -17,7 +17,7 @@ import {attachContextRoot, defineOnce} from './define.js';
 import {icon, type IconName} from './icons.js';
 import {exportparts, forwarded} from './parts.js';
 import {sameFrame} from './view-switch.js';
-import {drawnDensityColours, drawnDensityScale, type TesseraMap} from './map.js';
+import {drawnDensityColours, drawnDensityScale, type MosaicaMap} from './map.js';
 import {chrome, tokens} from './tokens.js';
 import './map.js';
 import './status.js';
@@ -29,7 +29,7 @@ import './view-picker.js';
 import './key-picker.js';
 import './artifact-card.js';
 import './colour-editor.js';
-import type {TesseraColourEditor} from './colour-editor.js';
+import type {MosaicaColourEditor} from './colour-editor.js';
 
 /** Every part of every element the explorer renders, forwarded. */
 const FORWARD = {
@@ -118,9 +118,9 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * under it, else the view's name alone. A view's name that is only its id is left out. With
  * several views the view's name is the view choice.
  *
- * The left holds the heading and the field column (`<tessera-filter-panel>`): what the cards count,
+ * The left holds the heading and the field column (`<mosaica-filter-panel>`): what the cards count,
  * In view or Highlighted beside All matching, the clauses applied as chips with Clear all, one
- * `<tessera-field-card>` per field, and Add field. `layout="docked"` puts them in a sidebar left of
+ * `<mosaica-field-card>` per field, and Add field. `layout="docked"` puts them in a sidebar left of
  * the map; `layout="overlay"` puts them in a card over the map's top-left, which scrolls inside
  * itself when tall. The map's tools sit at the top-left of the map, right of the card in the
  * overlay layout, with a Layers button beneath them. The status strip sits in the map's
@@ -150,7 +150,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * the rendered category and number columns; then for a layer or a category the palette, and for a
  * number the ramp, Linear or Log and Reverse, unless `hide-palettes` is set. A layer's palette is
  * the store's (`Store.setPalette`), whose size the clusters' slots are served for. While the
- * points are coloured by a category or a layer, Edit colours opens `<tessera-colour-editor>` over
+ * points are coloured by a category or a layer, Edit colours opens `<mosaica-colour-editor>` over
  * the page, listing the values or the clusters drawn (at the level coloured, on a levelled layer)
  * with their colours to choose and reset, in an order that holds through a pan or a filter. A field card's paint button chooses Colour by too. Density: how density is drawn, at what resolution, in which
  * colours and how strongly. Layers: the layer picker. The display settings are the explorer's properties of
@@ -168,7 +168,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * Every event its elements fire bubbles out of it, since each is composed.
  *
  * @summary The map and every panel, in a default layout.
- * @tagname tessera-explorer
+ * @tagname mosaica-explorer
  * @category Elements
  * @slot toolbar - Replaces the view picker and the key picker.
  * @slot layers - Replaces the layer picker, in the Layers popover.
@@ -178,33 +178,33 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @slot status - Replaces the status strip drawn on the map.
  * @slot tooltip - Replaces the map's hover tooltip.
  * @slot top-right - Content in the map's top-right corner, above the selection's card.
- * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The map's camera moved.
- * @fires {CustomEvent<TesseraEventDetails['tessera-pick']>} tessera-pick - A point was clicked, and again with its record.
- * @fires {CustomEvent<TesseraEventDetails['tessera-miss']>} tessera-miss - A click on the map found nothing; the explorer closes the card that is not pinned and drops the selection.
- * @fires {CustomEvent<TesseraEventDetails['tessera-hover']>} tessera-hover - The pointer moved over a point.
- * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An artifact was opened and its drill-down arrived.
- * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - A selection was drawn, changed or cleared, or its counts arrived.
- * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The layers chosen changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - Colour by changed, in the Layers popover or by a card's paint button.
- * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The level a layer is coloured and labelled at changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-displaychange']>} tessera-displaychange - A setting in the Points or Density section changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-sizechange']>} tessera-sizechange - Size by, the size range or the scale changed in the Points section.
- * @fires {CustomEvent<TesseraEventDetails['tessera-budgetchange']>} tessera-budgetchange - Most points was let go at a new number.
- * @fires {CustomEvent<TesseraEventDetails['tessera-clusterbudgetchange']>} tessera-clusterbudgetchange - Most clusters was let go at a new number.
- * @fires {CustomEvent<TesseraEventDetails['tessera-fold']>} tessera-fold - A field card was folded to one line or opened.
- * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - Colours were chosen or reset for values of a category, on a field card or in Edit colours.
- * @fires {CustomEvent<TesseraEventDetails['tessera-clustercolour']>} tessera-clustercolour - Colours were chosen or reset for clusters of a layer, on a field card or in Edit colours.
- * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette, the ramp, its scale or its direction was chosen in the Colour section.
- * @fires {CustomEvent<TesseraEventDetails['tessera-clusterpalettechange']>} tessera-clusterpalettechange - A palette was chosen for a layer's clusters in the Colour section.
- * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - The session expired.
- * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A field card or chip changed a clause.
- * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A `member_of` clause was put on or taken off.
- * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit was pressed on the artifact card; the explorer fits its map to the artifact.
- * @fires {CustomEvent<TesseraEventDetails['tessera-open']>} tessera-open - Open was pressed on the item card.
- * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - A card's close button was pressed; the explorer closes the card and drops the selection it shows.
- * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view changed through the view or key picker.
- * @fires {CustomEvent<TesseraEventDetails['tessera-viewfollow']>} tessera-viewfollow - A view chip on the item card was pressed; the explorer switches to that view and centres on the item.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-viewchange']>} mosaica-viewchange - The map's camera moved.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-pick']>} mosaica-pick - A point was clicked, and again with its record.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-miss']>} mosaica-miss - A click on the map found nothing; the explorer closes the card that is not pinned and drops the selection.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-hover']>} mosaica-hover - The pointer moved over a point.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-artifactopen']>} mosaica-artifactopen - An artifact was opened and its drill-down arrived.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-selectchange']>} mosaica-selectchange - A selection was drawn, changed or cleared, or its counts arrived.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-layerchange']>} mosaica-layerchange - The layers chosen changed.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-colourchange']>} mosaica-colourchange - Colour by changed, in the Layers popover or by a card's paint button.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-levelchange']>} mosaica-levelchange - The level a layer is coloured and labelled at changed.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-displaychange']>} mosaica-displaychange - A setting in the Points or Density section changed.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-sizechange']>} mosaica-sizechange - Size by, the size range or the scale changed in the Points section.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-budgetchange']>} mosaica-budgetchange - Most points was let go at a new number.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clusterbudgetchange']>} mosaica-clusterbudgetchange - Most clusters was let go at a new number.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-fold']>} mosaica-fold - A field card was folded to one line or opened.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-valuecolour']>} mosaica-valuecolour - Colours were chosen or reset for values of a category, on a field card or in Edit colours.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clustercolour']>} mosaica-clustercolour - Colours were chosen or reset for clusters of a layer, on a field card or in Edit colours.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-palettechange']>} mosaica-palettechange - The palette, the ramp, its scale or its direction was chosen in the Colour section.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clusterpalettechange']>} mosaica-clusterpalettechange - A palette was chosen for a layer's clusters in the Colour section.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-statechange']>} mosaica-statechange - The status strip's panel state changed.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-expired']>} mosaica-expired - The session expired.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-filterchange']>} mosaica-filterchange - A field card or chip changed a clause.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clausechange']>} mosaica-clausechange - A `member_of` clause was put on or taken off.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-artifactfit']>} mosaica-artifactfit - Fit was pressed on the artifact card; the explorer fits its map to the artifact.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-open']>} mosaica-open - Open was pressed on the item card.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-close']>} mosaica-close - A card's close button was pressed; the explorer closes the card and drops the selection it shows.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-viewswitch']>} mosaica-viewswitch - The view changed through the view or key picker.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-viewfollow']>} mosaica-viewfollow - A view chip on the item card was pressed; the explorer switches to that view and centres on the item.
  * @csspart frame - The explorer's grid.
  * @csspart sidebar - The sidebar, in the docked layout.
  * @csspart panel - The card over the map's top-left, in the overlay layout and in a container
@@ -272,24 +272,24 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart sheet - The open sheet, in the narrow layout.
  * @csspart strip-row - The full-width status strip, in the narrow layout.
  * @csspart tabs - The tab bar, in the narrow layout.
- * @csspart map-<part> - A part of the inner `<tessera-map>`, such as `map-controls`.
- * @csspart status-<part> - A part of an inner `<tessera-status>`.
- * @csspart view-picker-<part> - A part of the inner `<tessera-view-picker>`.
- * @csspart key-picker-<part> - A part of the inner `<tessera-key-picker>`.
- * @csspart layer-picker-<part> - A part of the inner `<tessera-layer-picker>`.
- * @csspart filter-panel-<part> - A part of the inner `<tessera-filter-panel>`.
- * @csspart field-card-<part> - A part of a `<tessera-field-card>` in the field column.
- * @csspart filter-<part> - A part of a `<tessera-filter>` search box on a card.
- * @csspart cluster-filter-<part> - A part of a `<tessera-cluster-filter>` search box on a card.
- * @csspart selection-<part> - A part of the inner `<tessera-selection>`.
- * @csspart item-card-<part> - A part of the inner `<tessera-item-card>`, such as `item-card-title`.
- * @csspart artifact-card-<part> - A part of the inner `<tessera-artifact-card>`.
- * @csspart colour-editor-<part> - A part of the inner `<tessera-colour-editor>`, such as
+ * @csspart map-<part> - A part of the inner `<mosaica-map>`, such as `map-controls`.
+ * @csspart status-<part> - A part of an inner `<mosaica-status>`.
+ * @csspart view-picker-<part> - A part of the inner `<mosaica-view-picker>`.
+ * @csspart key-picker-<part> - A part of the inner `<mosaica-key-picker>`.
+ * @csspart layer-picker-<part> - A part of the inner `<mosaica-layer-picker>`.
+ * @csspart filter-panel-<part> - A part of the inner `<mosaica-filter-panel>`.
+ * @csspart field-card-<part> - A part of a `<mosaica-field-card>` in the field column.
+ * @csspart filter-<part> - A part of a `<mosaica-filter>` search box on a card.
+ * @csspart cluster-filter-<part> - A part of a `<mosaica-cluster-filter>` search box on a card.
+ * @csspart selection-<part> - A part of the inner `<mosaica-selection>`.
+ * @csspart item-card-<part> - A part of the inner `<mosaica-item-card>`, such as `item-card-title`.
+ * @csspart artifact-card-<part> - A part of the inner `<mosaica-artifact-card>`.
+ * @csspart colour-editor-<part> - A part of the inner `<mosaica-colour-editor>`, such as
  *   `colour-editor-dialog`.
- * @cssprop --tessera-explorer-height - The explorer's height.
- * @cssprop --tessera-sidebar-width - The width of the docked sidebar and of the card over the map.
+ * @cssprop --mosaica-explorer-height - The explorer's height.
+ * @cssprop --mosaica-sidebar-width - The width of the docked sidebar and of the card over the map.
  */
-export class TesseraExplorer extends TesseraElement {
+export class MosaicaExplorer extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -299,15 +299,15 @@ export class TesseraExplorer extends TesseraElement {
         display: block;
         container-type: inline-size;
         container-name: explorer;
-        background: var(--_tessera-map-bg);
-        height: var(--tessera-explorer-height, 100%);
+        background: var(--_mosaica-map-bg);
+        height: var(--mosaica-explorer-height, 100%);
         min-height: 320px;
-        --_panel-width: var(--tessera-sidebar-width, 340px);
+        --_panel-width: var(--mosaica-sidebar-width, 340px);
         --_right-width: 320px;
       }
       /* The compact form's corners are nearer the edges. */
       :host([data-compact]) {
-        --_tessera-space-base: 12px;
+        --_mosaica-space-base: 12px;
       }
       [part='frame'] {
         position: relative;
@@ -321,9 +321,9 @@ export class TesseraExplorer extends TesseraElement {
         grid-template-columns: var(--_panel-width) minmax(0, 1fr);
       }
       [part='frame'].compact {
-        --_panel-width: min(var(--tessera-sidebar-width, 340px), 264px);
+        --_panel-width: min(var(--mosaica-sidebar-width, 340px), 264px);
         --_right-width: 272px;
-        --_tessera-tool-size: 30px;
+        --_mosaica-tool-size: 30px;
       }
       .stage {
         position: relative;
@@ -332,66 +332,66 @@ export class TesseraExplorer extends TesseraElement {
         container-type: size;
         container-name: stage;
       }
-      tessera-map,
-      ::slotted(tessera-map) {
+      mosaica-map,
+      ::slotted(mosaica-map) {
         height: 100%;
         min-height: 320px;
       }
       /* What the map draws at its top-left, its tools or a region's tag, sits right of the card; in
          the narrow layout there is no card. */
       @container explorer (width > 720px) {
-        .floating tessera-map {
-          --tessera-map-inset-left: calc(var(--_panel-width) + var(--_tessera-space));
+        .floating mosaica-map {
+          --mosaica-map-inset-left: calc(var(--_panel-width) + var(--_mosaica-space));
         }
       }
       [part='sidebar'] {
         display: flex;
         flex-direction: column;
         overflow-y: auto;
-        border-right: 1px solid var(--_tessera-line);
-        background: var(--_tessera-surface);
-        --_tessera-panel-rule: var(--_tessera-line);
+        border-right: 1px solid var(--_mosaica-line);
+        background: var(--_mosaica-surface);
+        --_mosaica-panel-rule: var(--_mosaica-line);
       }
       [part='sidebar'] .head {
-        border-bottom-color: var(--_tessera-line);
+        border-bottom-color: var(--_mosaica-line);
       }
       /* The card over the map: the sidebar folded up. */
       [part='panel'] {
         position: absolute;
         z-index: 1;
-        top: var(--_tessera-space);
-        left: var(--_tessera-space);
+        top: var(--_mosaica-space);
+        left: var(--_mosaica-space);
         width: var(--_panel-width);
-        max-height: calc(100% - 2 * var(--_tessera-space));
+        max-height: calc(100% - 2 * var(--_mosaica-space));
         display: flex;
         flex-direction: column;
         overflow-y: auto;
-        --_tessera-panel-padding: 12px 14px 14px;
+        --_mosaica-panel-padding: 12px 14px 14px;
       }
-      [part='panel'] tessera-filter-panel,
-      [part='sidebar'] tessera-filter-panel {
-        --_tessera-panel-inline: 14px;
+      [part='panel'] mosaica-filter-panel,
+      [part='sidebar'] mosaica-filter-panel {
+        --_mosaica-panel-inline: 14px;
       }
       .compact [part='panel'] {
-        --_tessera-panel-padding: 10px 12px;
+        --_mosaica-panel-padding: 10px 12px;
       }
-      .compact [part='panel'] tessera-filter-panel {
-        --_tessera-panel-inline: 12px;
+      .compact [part='panel'] mosaica-filter-panel {
+        --_mosaica-panel-inline: 12px;
       }
       /* Room beneath for the tools and the Layers button in the bottom-left corner. */
       .compact [part='panel'] {
-        max-height: calc(100% - 2 * var(--_tessera-space) - 200px);
+        max-height: calc(100% - 2 * var(--_mosaica-space) - 200px);
       }
       /* A typeahead in the card opens over what sits below it, and the card scrolls to show it. */
-      [part='panel'] tessera-filter-panel,
-      [part='sidebar'] tessera-filter-panel {
+      [part='panel'] mosaica-filter-panel,
+      [part='sidebar'] mosaica-filter-panel {
         position: relative;
       }
       .card {
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        box-shadow: var(--_tessera-shadow);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
+        box-shadow: var(--_mosaica-shadow);
       }
       /* Each section keeps its height, so a long column scrolls rather than squeezing its last section. */
       [part='sidebar'] > *,
@@ -443,20 +443,20 @@ export class TesseraExplorer extends TesseraElement {
       }
       .sub {
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       .sub .pickers {
         gap: 2px;
       }
-      .sub tessera-view-picker::part(field) {
+      .sub mosaica-view-picker::part(field) {
         font-size: 12px;
         font-weight: 400;
         line-height: 1.45;
       }
-      .compact tessera-view-picker::part(field) {
+      .compact mosaica-view-picker::part(field) {
         font-size: 13px;
       }
-      .compact .sub tessera-view-picker::part(field) {
+      .compact .sub mosaica-view-picker::part(field) {
         font-size: 12px;
       }
 
@@ -468,23 +468,23 @@ export class TesseraExplorer extends TesseraElement {
       }
       .layers .group {
         padding: 3px;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        box-shadow: var(--_tessera-shadow);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
+        box-shadow: var(--_mosaica-shadow);
       }
       [part='layers-toggle'] {
         position: relative;
-        width: var(--_tessera-tool-size, 32px);
-        height: var(--_tessera-tool-size, 32px);
+        width: var(--_mosaica-tool-size, 32px);
+        height: var(--_mosaica-tool-size, 32px);
         display: grid;
         place-items: center;
-        border-radius: var(--_tessera-radius-control);
-        color: color-mix(in srgb, var(--_tessera-ink) 82%, var(--_tessera-surface));
+        border-radius: var(--_mosaica-radius-control);
+        color: color-mix(in srgb, var(--_mosaica-ink) 82%, var(--_mosaica-surface));
       }
       [part='layers-toggle']:hover,
       [part='layers-toggle'][aria-expanded='true'] {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part='layers-toggle'] .on {
         position: absolute;
@@ -493,22 +493,22 @@ export class TesseraExplorer extends TesseraElement {
         width: 6px;
         height: 6px;
         border-radius: 50%;
-        background: var(--_tessera-accent);
+        background: var(--_mosaica-accent);
       }
       [part='layers-popover'] {
         position: absolute;
         top: 0;
         left: calc(100% + 8px);
         width: 320px;
-        max-height: min(560px, calc(100cqh - 2 * var(--_tessera-space)));
+        max-height: min(560px, calc(100cqh - 2 * var(--_mosaica-space)));
         overflow-y: auto;
         box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
       }
-      [part='layers-popover'] tessera-layer-picker,
-      [part='sheet'] tessera-layer-picker {
+      [part='layers-popover'] mosaica-layer-picker,
+      [part='sheet'] mosaica-layer-picker {
         display: block;
-        border-top: 1px solid var(--_tessera-line-2);
-        --_tessera-panel-padding: 12px 14px 14px;
+        border-top: 1px solid var(--_mosaica-line-2);
+        --_mosaica-panel-padding: 12px 14px 14px;
       }
       .compact [part='layers-popover'] {
         top: auto;
@@ -516,7 +516,7 @@ export class TesseraExplorer extends TesseraElement {
       }
       [part='detail'],
       [part='selection-card'] {
-        --_tessera-panel-padding: 12px 14px;
+        --_mosaica-panel-padding: 12px 14px;
         width: var(--_right-width);
         max-width: 100%;
         min-height: 0;
@@ -540,12 +540,12 @@ export class TesseraExplorer extends TesseraElement {
         height: 100%;
       }
       [part='leaders'] line {
-        stroke: var(--_tessera-ink);
+        stroke: var(--_mosaica-ink);
         stroke-width: 1.5;
       }
       [part='leaders'] circle {
-        fill: var(--_tessera-surface);
-        stroke: var(--_tessera-ink);
+        fill: var(--_mosaica-surface);
+        stroke: var(--_mosaica-ink);
         stroke-width: 1.5;
       }
       [part~='callout'] {
@@ -555,11 +555,11 @@ export class TesseraExplorer extends TesseraElement {
         width: 300px;
         pointer-events: auto;
         box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
-        --_tessera-panel-padding: 12px 14px 10px;
-        --_tessera-panel-inline: 14px;
-        --_tessera-panel-rule: transparent;
-        --_tessera-key-width: 104px;
-        --_tessera-field-gap: 4px 10px;
+        --_mosaica-panel-padding: 12px 14px 10px;
+        --_mosaica-panel-inline: 14px;
+        --_mosaica-panel-rule: transparent;
+        --_mosaica-key-width: 104px;
+        --_mosaica-field-gap: 4px 10px;
         font-size: 12px;
         overflow-y: auto;
         user-select: none;
@@ -577,14 +577,14 @@ export class TesseraExplorer extends TesseraElement {
         display: grid;
         place-items: center;
         border-radius: 5px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='pin']:hover {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part='pin'][aria-pressed='true'] {
-        background: var(--_tessera-surface-3);
-        color: var(--_tessera-ink);
+        background: var(--_mosaica-surface-3);
+        color: var(--_mosaica-ink);
       }
       /* The selection keeps its heading, counts and actions; only its list of marks scrolls, so the
          detail card under it stays on screen. */
@@ -592,26 +592,26 @@ export class TesseraExplorer extends TesseraElement {
         flex: none;
         overflow: visible;
       }
-      [part='selection-card'] tessera-selection::part(items) {
+      [part='selection-card'] mosaica-selection::part(items) {
         max-height: min(144px, 18cqh);
         overflow-y: auto;
       }
-      .compact [part='detail'] tessera-item-card,
-      .compact [part='detail'] tessera-artifact-card {
+      .compact [part='detail'] mosaica-item-card,
+      .compact [part='detail'] mosaica-artifact-card {
         font-size: 12px;
       }
       .compact [part='detail'] {
-        --_tessera-panel-padding: 12px 12px 10px;
-        --_tessera-title-size: 14px;
-        --_tessera-key-width: 104px;
-        --_tessera-field-gap: 4px 10px;
+        --_mosaica-panel-padding: 12px 12px 10px;
+        --_mosaica-title-size: 14px;
+        --_mosaica-key-width: 104px;
+        --_mosaica-field-gap: 4px 10px;
       }
       .right {
         display: flex;
         flex-direction: column;
         align-items: flex-end;
-        gap: calc(var(--_tessera-space) / 2);
-        max-height: calc(100cqh - 2 * var(--_tessera-space) - 48px);
+        gap: calc(var(--_mosaica-space) / 2);
+        max-height: calc(100cqh - 2 * var(--_mosaica-space) - 48px);
         pointer-events: none;
       }
       .right > * {
@@ -640,8 +640,8 @@ export class TesseraExplorer extends TesseraElement {
           display: flex;
           height: 56px;
           padding: 0 8px env(safe-area-inset-bottom, 0px);
-          border-top: 1px solid var(--_tessera-line);
-          background: var(--_tessera-surface);
+          border-top: 1px solid var(--_mosaica-line);
+          background: var(--_mosaica-surface);
         }
         [part='tabs'] button {
           flex: 1 1 0;
@@ -651,12 +651,12 @@ export class TesseraExplorer extends TesseraElement {
           align-items: center;
           justify-content: center;
           gap: 4px;
-          color: var(--_tessera-ink-2);
+          color: var(--_mosaica-ink-2);
           font-size: 11px;
           font-weight: 500;
         }
         [part='tabs'] button[aria-selected='true'] {
-          color: var(--_tessera-ink);
+          color: var(--_mosaica-ink);
           font-weight: 600;
         }
         [part='sheet'] {
@@ -666,10 +666,10 @@ export class TesseraExplorer extends TesseraElement {
           bottom: 56px;
           max-height: 70%;
           overflow-y: auto;
-          background: var(--_tessera-surface);
-          border-top: 1px solid var(--_tessera-line);
+          background: var(--_mosaica-surface);
+          border-top: 1px solid var(--_mosaica-line);
           border-radius: 12px 12px 0 0;
-          box-shadow: var(--_tessera-shadow);
+          box-shadow: var(--_mosaica-shadow);
           z-index: 6;
         }
         /* The sheet takes focus as it opens so a keyboard lands in it; that is not a focus to show. */
@@ -682,8 +682,8 @@ export class TesseraExplorer extends TesseraElement {
           display: flex;
           gap: 10px;
           padding: 10px 16px;
-          border-top: 1px solid var(--_tessera-line-2);
-          background: var(--_tessera-surface);
+          border-top: 1px solid var(--_mosaica-line-2);
+          background: var(--_mosaica-surface);
         }
         .sheet-footer .btn {
           height: 44px;
@@ -699,16 +699,16 @@ export class TesseraExplorer extends TesseraElement {
           width: 36px;
           height: 4px;
           border-radius: 2px;
-          background: var(--_tessera-line);
+          background: var(--_mosaica-line);
           margin: 8px auto 0;
         }
         [part='strip-row'] {
           display: block;
         }
-        [part='strip-row'] tessera-status {
+        [part='strip-row'] mosaica-status {
           display: block;
         }
-        [part='strip-row'] tessera-status::part(strip) {
+        [part='strip-row'] mosaica-status::part(strip) {
           display: flex;
           width: 100%;
           box-shadow: none;
@@ -937,9 +937,9 @@ export class TesseraExplorer extends TesseraElement {
     super.dispose();
   }
 
-  /** The `<tessera-map>` the explorer renders, for a host that calls `fit`, `fitTo` or `select`. */
-  get map(): TesseraMap | null {
-    return this.renderRoot?.querySelector<TesseraMap>('tessera-map') ?? null;
+  /** The `<mosaica-map>` the explorer renders, for a host that calls `fit`, `fitTo` or `select`. */
+  get map(): MosaicaMap | null {
+    return this.renderRoot?.querySelector<MosaicaMap>('mosaica-map') ?? null;
   }
 
   private has(panel: Panel): boolean {
@@ -950,7 +950,7 @@ export class TesseraExplorer extends TesseraElement {
   private onOutside = (e: PointerEvent): void => {
     const path = e.composedPath();
     const group = this.renderRoot.querySelector('.layers');
-    const editor = this.renderRoot.querySelector('tessera-colour-editor');
+    const editor = this.renderRoot.querySelector('mosaica-colour-editor');
     if (group && !path.includes(group) && !(editor && path.includes(editor))) this.closeLayers();
   };
 
@@ -986,7 +986,7 @@ export class TesseraExplorer extends TesseraElement {
     // The pickers draw nothing for a one-view bundle, so their row is hidden there unless the host
     // filled the slot. The slot is always rendered, so its slotchange keeps `toolbarFilled` current.
     const pickersShown = this.toolbarFilled || (meta !== null && !hasOneLayout(meta));
-    const pickers = html`<div class="pickers" ?hidden=${!pickersShown}><slot name="toolbar" @slotchange=${this.onToolbarSlot}><tessera-view-picker exportparts=${FORWARD['view-picker']}></tessera-view-picker><tessera-key-picker exportparts=${FORWARD['key-picker']}></tessera-key-picker></slot></div>`;
+    const pickers = html`<div class="pickers" ?hidden=${!pickersShown}><slot name="toolbar" @slotchange=${this.onToolbarSlot}><mosaica-view-picker exportparts=${FORWARD['view-picker']}></mosaica-view-picker><mosaica-key-picker exportparts=${FORWARD['key-picker']}></mosaica-key-picker></slot></div>`;
     // The heading names what is shown: the dataset's title over the view's name, or the view's
     // name alone. With one view the name is text; with several it is the view choice.
     const shown = meta?.views.find((v) => v.id === s?.get('view').id) ?? (meta?.views.length === 1 ? meta.views[0] : undefined);
@@ -997,9 +997,9 @@ export class TesseraExplorer extends TesseraElement {
       ? html`<div class="names"><span part="dataset-title" class="title">${this.datasetTitle}</span><div class="sub">${pickers}${viewText('')}</div></div>`
       : html`<div class="names">${pickers}${viewText('title')}</div>`;
     const named = pickersShown || viewName !== '' || this.datasetTitle !== '';
-    const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
-    const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing} ?compact=${compact || narrow} .clusterLevel=${level}></tessera-filter-panel></slot>`;
-    const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><tessera-selection exportparts=${FORWARD.selection}></tessera-selection></slot>` : nothing;
+    const layersPanel = html`<slot name="layers"><mosaica-layer-picker exportparts=${FORWARD['layer-picker']}></mosaica-layer-picker></slot>`;
+    const filters = html`<slot name="filters"><mosaica-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing} ?compact=${compact || narrow} .clusterLevel=${level}></mosaica-filter-panel></slot>`;
+    const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><mosaica-selection exportparts=${FORWARD.selection}></mosaica-selection></slot>` : nothing;
     const selectionCard = selectionPanel === nothing ? nothing : html`<div part="selection-card" class="card">${selectionPanel}</div>`;
     const head = html`<div class="head" ?hidden=${!named}>${names}</div>`;
 
@@ -1064,14 +1064,14 @@ export class TesseraExplorer extends TesseraElement {
     // The tooltip slot is forwarded only when the host supplied one: a slot assigned another slot
     // counts as filled even when that slot is empty, which would hide the map's own tooltip.
     return html`<div part="frame" class=${`${floating ? 'floating' : 'docked'}${compact ? ' compact' : ''}`}
-      @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}
-      @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}
-      @tessera-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)}
-      @tessera-close=${(e: Event) => this.closeDetail(e)}>
+      @mosaica-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}
+      @mosaica-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}
+      @mosaica-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)}
+      @mosaica-close=${(e: Event) => this.closeDetail(e)}>
       ${floating || narrow ? nothing : docked}
       <div class="stage">
         ${floating && !narrow ? panel : nothing}
-        <tessera-map
+        <mosaica-map
           exportparts=${FORWARD.map}
           colour-by=${this.colourBy || nothing}
           layers=${this.layers || nothing}
@@ -1102,33 +1102,33 @@ export class TesseraExplorer extends TesseraElement {
           .rampReverse=${this.rampReverse}
           .valueColours=${this.valueColours}
           .clusterColours=${this.clusterColours}
-          @tessera-viewchange=${() => this.onCamera()}
-          @tessera-pick=${() => this.requestUpdate()}
-          @tessera-miss=${() => this.onMiss()}
+          @mosaica-viewchange=${() => this.onCamera()}
+          @mosaica-pick=${() => this.requestUpdate()}
+          @mosaica-miss=${() => this.onMiss()}
           @keydown=${this.onMapKey}
           @click=${() => this.requestUpdate()}
         >
           ${narrow ? nothing : layersButton}
           ${narrow ? nothing : right}
-          ${narrow ? nothing : html`<div slot="bottom-right" class="in-map-strip"><slot name="status"><tessera-status exportparts=${FORWARD.status} ?compact=${compact}></tessera-status></slot></div>`}
+          ${narrow ? nothing : html`<div slot="bottom-right" class="in-map-strip"><slot name="status"><mosaica-status exportparts=${FORWARD.status} ?compact=${compact}></mosaica-status></slot></div>`}
           ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
-        </tessera-map>
+        </mosaica-map>
         ${narrow ? nothing : this.callouts(this.has('detail') && hasDetail ? anchor : null, detail)}
       </div>
       ${this.sheet && sheetBody !== nothing
         ? html`<div part="sheet" id="sheet" role="dialog" aria-labelledby=${`tab-${this.sheet}`} tabindex="-1" @keydown=${this.onSheetKey}>${sheetBody}</div>`
         : nothing}
-      <div part="strip-row"><tessera-status exportparts=${FORWARD.status}></tessera-status></div>
+      <div part="strip-row"><mosaica-status exportparts=${FORWARD.status}></mosaica-status></div>
       <div part="tabs" role="tablist" aria-label="Explorer panels" @keydown=${this.onTabKey}>${tabs.map(tab)}</div>
-      <tessera-colour-editor exportparts=${FORWARD['colour-editor']} field=${s?.get('legend').colourBy ?? ''} .level=${level}></tessera-colour-editor>
+      <mosaica-colour-editor exportparts=${FORWARD['colour-editor']} field=${s?.get('legend').colourBy ?? ''} .level=${level}></mosaica-colour-editor>
     </div>`;
   }
 
   /** The item or artifact card for what is selected, or the host's in the `detail` slot. */
   private liveCard(showArtifact: boolean, pin: TemplateResult | typeof nothing = nothing): TemplateResult {
     return html`<slot name="detail">${showArtifact
-      ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}>${pin}</tessera-artifact-card>`
-      : html`<tessera-item-card exportparts=${FORWARD['item-card']} compact title-field=${this.titleField || nothing} subtitle-field=${this.subtitleField || nothing} .pick=${this.map?.lastPick ?? null}>${pin}</tessera-item-card>`}</slot>`;
+      ? html`<mosaica-artifact-card exportparts=${FORWARD['artifact-card']}>${pin}</mosaica-artifact-card>`
+      : html`<mosaica-item-card exportparts=${FORWARD['item-card']} compact title-field=${this.titleField || nothing} subtitle-field=${this.subtitleField || nothing} .pick=${this.map?.lastPick ?? null}>${pin}</mosaica-item-card>`}</slot>`;
   }
 
   /** Whether the card for the selection is the artifact card: the artifact, or its refusal, changed last. */
@@ -1211,8 +1211,8 @@ export class TesseraExplorer extends TesseraElement {
         const unpin = pinButton(true, () => (this.pinned = this.pinned.filter((q) => q.key !== p.key)));
         const body =
           p.kind === 'item'
-            ? html`<tessera-item-card exportparts=${FORWARD['item-card']} compact .item=${p.item} title-field=${this.titleField || nothing} subtitle-field=${this.subtitleField || nothing}>${unpin}</tessera-item-card>`
-            : html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']} .artifact=${p.artifact}>${unpin}</tessera-artifact-card>`;
+            ? html`<mosaica-item-card exportparts=${FORWARD['item-card']} compact .item=${p.item} title-field=${this.titleField || nothing} subtitle-field=${this.subtitleField || nothing}>${unpin}</mosaica-item-card>`
+            : html`<mosaica-artifact-card exportparts=${FORWARD['artifact-card']} .artifact=${p.artifact}>${unpin}</mosaica-artifact-card>`;
         return {key: p.key, world: p.world, body, pinned: true, name: this.cardName(p.key)};
       });
     if (anchor && !(live && this.pinned.some((p) => p.key === live && p.view === view))) {
@@ -1545,7 +1545,7 @@ export class TesseraExplorer extends TesseraElement {
     const s = this.resolvedStore;
     if (!s || budget === s.budget) return;
     s.setBudget(budget);
-    emit(this, 'tessera-budgetchange', {budget});
+    emit(this, 'mosaica-budgetchange', {budget});
     this.requestUpdate();
   }
 
@@ -1556,7 +1556,7 @@ export class TesseraExplorer extends TesseraElement {
     if (!s || budget === s.clusterBudget) return;
     s.setClusterBudget(budget);
     this.clusterBudget = budget;
-    emit(this, 'tessera-clusterbudgetchange', {budget});
+    emit(this, 'mosaica-clusterbudgetchange', {budget});
   }
 
   /**
@@ -1605,7 +1605,7 @@ export class TesseraExplorer extends TesseraElement {
         <span>Colour by</span>${choice('colour', `Colour by: ${byName}`, html`<span class="t">${byName}</span>`)}
         ${palettes}${ramps}
       </div>
-      <button part="edit-colours" class="btn small edit-colours" type="button" aria-haspopup="dialog" ?disabled=${!editable || !meta} @click=${() => this.renderRoot.querySelector<TesseraColourEditor>('tessera-colour-editor')?.show()}>Edit colours…</button>
+      <button part="edit-colours" class="btn small edit-colours" type="button" aria-haspopup="dialog" ?disabled=${!editable || !meta} @click=${() => this.renderRoot.querySelector<MosaicaColourEditor>('mosaica-colour-editor')?.show()}>Edit colours…</button>
     </section>`;
   }
 
@@ -1635,10 +1635,10 @@ export class TesseraExplorer extends TesseraElement {
     const at = value.lastIndexOf('@');
     const colourBy = value === '' ? null : at > 0 ? value.slice(0, at) : value;
     s.setColourBy(colourBy);
-    emit(this, 'tessera-colourchange', {colourBy});
+    emit(this, 'mosaica-colourchange', {colourBy});
     if (at > 0) {
       this.level = Number(value.slice(at + 1));
-      emit(this, 'tessera-levelchange', {level: this.level});
+      emit(this, 'mosaica-levelchange', {level: this.level});
     }
   }
 
@@ -1648,7 +1648,7 @@ export class TesseraExplorer extends TesseraElement {
     if (!s) return;
     s.setPalette(palette);
     this.palette = palette;
-    emit(this, 'tessera-clusterpalettechange', {palette});
+    emit(this, 'mosaica-clusterpalettechange', {palette});
   }
 
   /** Change the palette, the ramp, its scale or its direction, and report all four. */
@@ -1657,7 +1657,7 @@ export class TesseraExplorer extends TesseraElement {
     if (!s) return;
     setColouring(s, patch);
     const {palette, ramp, scale, reverse} = colouringOf(s);
-    emit(this, 'tessera-palettechange', {palette, ramp, scale, reverse});
+    emit(this, 'mosaica-palettechange', {palette, ramp, scale, reverse});
     this.requestUpdate();
   }
 
@@ -1903,7 +1903,7 @@ export class TesseraExplorer extends TesseraElement {
     if (patch.min !== undefined) this.sizeMin = patch.min;
     if (patch.max !== undefined) this.sizeMax = patch.max;
     if (patch.scale !== undefined) this.sizeScale = patch.scale;
-    emit(this, 'tessera-sizechange', {
+    emit(this, 'mosaica-sizechange', {
       sizeBy: patch.sizeBy !== undefined ? patch.sizeBy : this.sizedBy,
       min: patch.min ?? now.min,
       max: patch.max ?? now.max,
@@ -1924,7 +1924,7 @@ export class TesseraExplorer extends TesseraElement {
     if (patch.densityStrength !== undefined) this.densityStrength = patch.densityStrength;
     if (patch.densityResolution !== undefined) this.densityResolution = patch.densityResolution;
     if (patch.densityScale !== undefined) this.densityScale = patch.densityScale;
-    emit(this, 'tessera-displaychange', this.display);
+    emit(this, 'mosaica-displaychange', this.display);
   }
 
   /** Escape closes the Layers popover and returns focus to its button. */
@@ -2081,10 +2081,10 @@ export class TesseraExplorer extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-explorer', TesseraExplorer);
+defineOnce('mosaica-explorer', MosaicaExplorer);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-explorer': TesseraExplorer;
+    'mosaica-explorer': MosaicaExplorer;
   }
 }

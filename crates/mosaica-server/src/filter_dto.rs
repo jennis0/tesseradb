@@ -13,15 +13,15 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use tessera_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, RegionLeaf, Scalar};
-use tessera_engine::LeafColumn;
-use tessera_engine::shapes::{Bounds, CanonError, Projection, ShapeF64, ShapeSpace};
-use tessera_types::{AttrLocalId, TesseraId};
+use mosaica_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, RegionLeaf, Scalar};
+use mosaica_engine::LeafColumn;
+use mosaica_engine::shapes::{Bounds, CanonError, Projection, ShapeF64, ShapeSpace};
+use mosaica_types::{AttrLocalId, TesseraId};
 
 use crate::error::ApiError;
 
 /// The engine's code for a value that does not resolve; no row carries it.
-use tessera_engine::filter::UNRESOLVABLE_VALUE as UNRESOLVABLE_ID;
+use mosaica_engine::filter::UNRESOLVABLE_VALUE as UNRESOLVABLE_ID;
 const UNRESOLVABLE: u32 = UNRESOLVABLE_ID.raw();
 
 /// What a `region` leaf is canonicalised against: the request's view's extent, the projection
@@ -34,7 +34,7 @@ pub struct RegionContext {
 }
 
 /// A view's quantisation extent, as the shape canonicaliser takes it.
-pub fn view_extent(view: &tessera_engine::MetaView) -> Bounds {
+pub fn view_extent(view: &mosaica_engine::MetaView) -> Bounds {
     let q = view.quantisation;
     Bounds {
         x_min: q.x_min,
@@ -91,7 +91,7 @@ fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<Resolved, ApiError> {
         ))),
         LeafColumn::PinOnUnscoped { column } => Err(bad(format!(
             "'{column}' is not scoped to a view group; leave out '@{}'",
-            leaf.split_once(tessera_engine::filter::PIN).map_or("", |(_, pin)| pin)
+            leaf.split_once(mosaica_engine::filter::PIN).map_or("", |(_, pin)| pin)
         ))),
     }
 }
@@ -151,8 +151,8 @@ pub fn parse(
             })
         }
         // Reserved words come before any column; the build refuses columns with these names.
-        tessera_engine::filter::REGION_COLUMN => Ok(FilterExpr::Region(parse_region(body, region)?)),
-        tessera_engine::filter::MEMBER_OF_COLUMN => Ok(FilterExpr::MemberOf(parse_member_of(body)?)),
+        mosaica_engine::filter::REGION_COLUMN => Ok(FilterExpr::Region(parse_region(body, region)?)),
+        mosaica_engine::filter::MEMBER_OF_COLUMN => Ok(FilterExpr::MemberOf(parse_member_of(body)?)),
         leaf => {
             let resolved = resolve_leaf(leaf, column_of(leaf))?;
             let operand = parse_operand(leaf, &resolved, body, resolve)?;
@@ -168,7 +168,7 @@ pub fn parse(
 /// A `member_of` leaf's body: `{layer: <name>, artifact: <tessera_id>}`. Only the shape is
 /// checked: the engine checks the layer against the principal's reachable layers, and an artifact
 /// the principal cannot see is an empty operand.
-fn parse_member_of(body: &Value) -> Result<tessera_engine::filter::MemberOfLeaf, ApiError> {
+fn parse_member_of(body: &Value) -> Result<mosaica_engine::filter::MemberOfLeaf, ApiError> {
     let obj = body
         .as_object()
         .ok_or_else(|| bad("`member_of` takes an object with `layer` and `artifact`"))?;
@@ -184,7 +184,7 @@ fn parse_member_of(body: &Value) -> Result<tessera_engine::filter::MemberOfLeaf,
         .and_then(Value::as_str)
         .ok_or_else(|| bad("`member_of.layer` is the name of a layer, as a string"))?;
     let artifact = tessera_id(obj.get("artifact"), "member_of.artifact")?;
-    Ok(tessera_engine::filter::MemberOfLeaf {
+    Ok(mosaica_engine::filter::MemberOfLeaf {
         layer: layer.to_string(),
         artifact,
     })
@@ -613,7 +613,7 @@ fn text_value(column: &str, op: &str, value: &Value) -> Result<String, ApiError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_engine::filter::PIN;
+    use mosaica_engine::filter::PIN;
 
     /// A resolver standing in for the engine's: `department` a category, `title` and `submitter`
     /// keywords, `score` numeric, and `sentiment` scoped to group `quarter`, so it must be pinned.
@@ -945,7 +945,7 @@ mod tests {
     }
 
     /// `none_of` parses like the other combinators. The engine enforces its one-column rule,
-    /// tested in `tessera-engine/tests/filtering.rs`.
+    /// tested in `mosaica-engine/tests/filtering.rs`.
     #[test]
     fn none_of_parses_as_a_combinator() {
         let expr = parse_str(r#"{"none_of": [{"department": {"eq": "eng"}}]}"#).unwrap();

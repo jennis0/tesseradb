@@ -1,6 +1,6 @@
 //! Which columns a request names, and where each is read from.
 
-use tessera_spatial::tiler::ScalarType;
+use mosaica_spatial::tiler::ScalarType;
 
 use super::{RecordsOrder, RecordsRefused};
 use crate::error::{EngineError, Result};
@@ -137,7 +137,7 @@ fn resolve_field(
         }),
         Resolution::UnknownPin { group, pin } => Err(EngineError::UnknownView(format!(
             "{group}{}{pin}",
-            tessera_store::GROUP_SEPARATOR
+            mosaica_store::GROUP_SEPARATOR
         ))),
         Resolution::PinOnUnscoped { column } => refused(RecordsRefused::PinOnUnscoped(column)),
         Resolution::Unknown => refused(RecordsRefused::UnknownField(spelling.to_string())),

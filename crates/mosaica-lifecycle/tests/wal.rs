@@ -8,7 +8,7 @@ use std::path::Path;
 
 use tempfile::tempdir;
 
-use tessera_lifecycle::wal::{ChangeOp, Wal, WalError, WalRecord, HEADER_LEN};
+use mosaica_lifecycle::wal::{ChangeOp, Wal, WalError, WalRecord, HEADER_LEN};
 
 /// The log is a **sequence** of member files, so `wal.log` is a base name and never a file: the
 /// first member is `wal-000001.log`, with its own `wal-000001.sync` sidecar. These tests reach past
@@ -23,7 +23,7 @@ fn sidecar(base: &Path, n: u64) -> std::path::PathBuf {
 
 fn sample_record(tag: u8) -> WalRecord {
     WalRecord::ChangeBatch {
-            changes: vec![(tessera_types::EntityId::new(tag as u64), ChangeOp::Delete)],
+            changes: vec![(mosaica_types::EntityId::new(tag as u64), ChangeOp::Delete)],
         }
 }
 
@@ -62,7 +62,7 @@ fn read_sync_offset(sync_path: &Path) -> u64 {
     u64::from_le_bytes(b)
 }
 
-fn expect_corruption(result: tessera_lifecycle::wal::Result<Wal>) {
+fn expect_corruption(result: mosaica_lifecycle::wal::Result<Wal>) {
     match result {
         Err(WalError::WalCorruption) => {}
         Err(other) => panic!("expected WalCorruption, got a different error: {other}"),
@@ -600,8 +600,8 @@ fn a_repair_offered_the_wrong_records_refuses() {
 #[test]
 fn an_injected_failure_is_indistinguishable_from_a_real_one() {
     use std::sync::Arc;
-    use tessera_lifecycle::faults::{FaultSwitchboard, WalMeter};
-    use tessera_lifecycle::wal::ExecutorWal;
+    use mosaica_lifecycle::faults::{FaultSwitchboard, WalMeter};
+    use mosaica_lifecycle::wal::ExecutorWal;
 
     let dir = tempdir().unwrap();
     let wal = Wal::open(dir.path().join("wal.log")).unwrap();
@@ -649,7 +649,7 @@ fn an_injected_failure_is_indistinguishable_from_a_real_one() {
 /// The retry sequence, through the injected arm: a repair fails while a failure is still armed and
 /// succeeds once the arming runs out.
 ///
-/// This is what lets `tessera-engine`'s deny-lane tests distinguish recovery from exhaustion by
+/// This is what lets `mosaica-engine`'s deny-lane tests distinguish recovery from exhaustion by
 /// arming a count. Without it the switchboard could clear its poison on the first repair attempt —
 /// making every armed count beyond the first inert, and turning the exhaustion tests green while
 /// they measured recovery.
@@ -657,8 +657,8 @@ fn an_injected_failure_is_indistinguishable_from_a_real_one() {
 #[test]
 fn an_injected_sync_failure_is_repaired_only_once_the_arming_runs_out() {
     use std::sync::Arc;
-    use tessera_lifecycle::faults::{FaultSwitchboard, WalMeter};
-    use tessera_lifecycle::wal::ExecutorWal;
+    use mosaica_lifecycle::faults::{FaultSwitchboard, WalMeter};
+    use mosaica_lifecycle::wal::ExecutorWal;
 
     let dir = tempdir().unwrap();
     let wal = Wal::open(dir.path().join("wal.log")).unwrap();
@@ -695,8 +695,8 @@ fn an_injected_sync_failure_is_repaired_only_once_the_arming_runs_out() {
 #[test]
 fn an_injected_append_failure_is_not_repairable() {
     use std::sync::Arc;
-    use tessera_lifecycle::faults::{FaultSwitchboard, WalMeter};
-    use tessera_lifecycle::wal::ExecutorWal;
+    use mosaica_lifecycle::faults::{FaultSwitchboard, WalMeter};
+    use mosaica_lifecycle::wal::ExecutorWal;
 
     let dir = tempdir().unwrap();
     let wal = Wal::open(dir.path().join("wal.log")).unwrap();
@@ -743,8 +743,8 @@ fn an_injected_append_failure_is_not_repairable() {
 #[test]
 fn an_injected_append_failure_follows_the_real_sequence() {
     use std::sync::Arc;
-    use tessera_lifecycle::faults::{FaultSwitchboard, WalMeter};
-    use tessera_lifecycle::wal::ExecutorWal;
+    use mosaica_lifecycle::faults::{FaultSwitchboard, WalMeter};
+    use mosaica_lifecycle::wal::ExecutorWal;
 
     let dir = tempdir().unwrap();
     let wal = Wal::open(dir.path().join("wal.log")).unwrap();
@@ -821,7 +821,7 @@ extern "C" {
 fn the_sync_offset_is_published_only_after_the_sync_that_makes_it_true() {
     use std::sync::Arc;
     use std::time::Duration;
-    use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+    use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
 
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");

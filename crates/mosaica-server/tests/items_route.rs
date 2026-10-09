@@ -17,7 +17,7 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_server::state::{ComputeGate, ServeLimits};
+use mosaica_server::state::{ComputeGate, ServeLimits};
 
 const SCHEMA_TOML: &str = r#"
 [[vocabulary]]
@@ -206,7 +206,7 @@ async fn viewport_counts(server: &TestServer, token: &str, filters: Option<&Valu
 }
 
 /// Both permits of `gate`, once the request before has let them go.
-async fn hold(gate: &ComputeGate) -> tessera_server::state::GatePermits {
+async fn hold(gate: &ComputeGate) -> mosaica_server::state::GatePermits {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match gate.admit().await {
@@ -264,7 +264,7 @@ async fn a_full_read_returns_every_visible_row_once_in_either_order() {
 }
 
 /// **The columns are the ones asked for, in the order asked for**: `tessera_id`, the named fields,
-/// the system fields, then `tessera:matched` under `keep_unmatched`, which then returns every
+/// the system fields, then `mosaica:matched` under `keep_unmatched`, which then returns every
 /// visible row.
 #[tokio::test]
 async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
@@ -300,10 +300,10 @@ async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
             "archive",
             "year",
             "score",
-            "tessera:labels",
-            "tessera:x",
-            "tessera:y",
-            "tessera:matched",
+            "mosaica:labels",
+            "mosaica:x",
+            "mosaica:y",
+            "mosaica:matched",
         ]
     );
     let mut rows = 0u64;
@@ -312,7 +312,7 @@ async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
         for (batch, _) in &response.pages {
             rows += batch.num_rows() as u64;
             let flags = batch
-                .column_by_name("tessera:matched")
+                .column_by_name("mosaica:matched")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<arrow::array::BooleanArray>()
@@ -413,9 +413,9 @@ async fn count_puts_the_viewports_counts_in_the_head() {
     )
     .await;
     assert_eq!(resp.status().as_u16(), 200);
-    let items_identity = resp.headers()["x-tessera-identity-key"].clone();
-    assert_eq!(resp.headers()["x-tessera-region"], "exact");
-    for header in ["x-tessera-server-us", "x-tessera-admission-us"] {
+    let items_identity = resp.headers()["x-mosaica-identity-key"].clone();
+    assert_eq!(resp.headers()["x-mosaica-region"], "exact");
+    for header in ["x-mosaica-server-us", "x-mosaica-admission-us"] {
         assert!(resp.headers()[header]
             .to_str()
             .unwrap()
@@ -435,11 +435,11 @@ async fn count_puts_the_viewports_counts_in_the_head() {
         .send()
         .await
         .unwrap();
-    assert_eq!(viewport.headers()["x-tessera-identity-key"], items_identity);
+    assert_eq!(viewport.headers()["x-mosaica-identity-key"], items_identity);
 
     // No counts unless asked, and no region header without a region leaf.
     let resp = post_items(&f.server, &token, &json!({ "view": "s0", "fields": [], "pages": 1 })).await;
-    assert!(resp.headers().get("x-tessera-region").is_none());
+    assert!(resp.headers().get("x-mosaica-region").is_none());
     let decoded = decode_records(&resp.bytes().await.unwrap());
     assert!(decoded.head.get("visible").is_none() && decoded.head.get("matched").is_none());
 }

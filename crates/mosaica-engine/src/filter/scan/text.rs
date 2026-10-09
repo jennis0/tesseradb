@@ -1,6 +1,6 @@
 use croaring::Bitmap;
-use tessera_filter::{ColumnPostings, SortedDict};
-use tessera_types::AttrLocalId;
+use mosaica_filter::{ColumnPostings, SortedDict};
+use mosaica_types::AttrLocalId;
 
 /// Does `document`'s token sequence contain `phrase`'s contiguously and in order?
 ///

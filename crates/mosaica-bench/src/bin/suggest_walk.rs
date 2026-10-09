@@ -3,7 +3,7 @@
 //!
 //! The design's §6.2 figures were measured on the *probe's* routes: a `Bitmap::intersect` against a
 //! mapped view, and a `SortedDict` prefix range, timed separately. What ships is
-//! `tessera_engine::suggest::walk` over `SuggestIndex` and `ColumnPostings::intersects`, and this
+//! `mosaica_engine::suggest::walk` over `SuggestIndex` and `ColumnPostings::intersects`, and this
 //! measures that — the same function `Engine::suggest` calls, with the gate supplied as a closure
 //! rather than composed from a session. So a regression in the walk shows here; a regression in the
 //! gate does not.
@@ -43,7 +43,7 @@
 //! the index, and the values under it span the whole membership range.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin suggest_walk -- \
+//! cargo run --release -p mosaica-bench --bin suggest_walk -- \
 //!     [--values 1000000] [--entities 100000000] [--repeats 200] [--decomp]
 //! ```
 
@@ -54,10 +54,10 @@ use croaring::Bitmap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_authz::PostingRef;
-use tessera_engine::suggest::{walk, SuggestIndex, SuggestValue, VocabularySuggest, WalkBudget};
-use tessera_filter::{Access, ColumnPostings, ValueColumn};
-use tessera_types::AttrLocalId;
+use mosaica_authz::PostingRef;
+use mosaica_engine::suggest::{walk, SuggestIndex, SuggestValue, VocabularySuggest, WalkBudget};
+use mosaica_filter::{Access, ColumnPostings, ValueColumn};
+use mosaica_types::AttrLocalId;
 
 /// The two-letter tags keys are drawn from, so a one-character prefix covers ~1/26 of the index.
 fn tag(i: usize) -> String {
@@ -124,7 +124,7 @@ fn write_postings(
     }
     entries.sort_by_key(|(code, _)| *code);
     entries.dedup_by_key(|(code, _)| *code);
-    tessera_authz::write_delta_tier_at(path, &entries, 32)?;
+    mosaica_authz::write_delta_tier_at(path, &entries, 32)?;
     // The base tier's code array, in the order the reader binary-searches it — kept so the
     // decomposition below can price that search on its own.
     Ok(entries.into_iter().map(|(code, _)| code).collect())
@@ -267,17 +267,17 @@ fn main() {
     let codes: Vec<u32> = (0..extent_len)
         .map(|e| values[e as usize % values.len()].code)
         .collect();
-    tessera_filter::write_value_column(
+    mosaica_filter::write_value_column(
         &extent_values,
         &extent_presence,
-        &tessera_filter::Codes::U32(codes.into()),
+        &mosaica_filter::Codes::U32(codes.into()),
         None,
     )
     .expect("the extent writes");
     let extent = ValueColumn::open(&extent_values, None, Access::Mapped).expect("it opens");
 
     let live = VocabularySuggest::new(std::sync::Arc::new(index));
-    let fold = tessera_analyse::SuggestionFold::new();
+    let fold = mosaica_analyse::SuggestionFold::new();
 
     if decomp {
         decomposition(&live, &fold, &postings, &record_codes, entities, values_n);
@@ -473,7 +473,7 @@ fn main() {
 /// containers the candidate cannot meet).
 fn decomposition(
     live: &VocabularySuggest,
-    fold: &tessera_analyse::SuggestionFold,
+    fold: &mosaica_analyse::SuggestionFold,
     postings: &ColumnPostings,
     record_codes: &[u32],
     entities: u32,
@@ -732,7 +732,7 @@ fn decomposition(
 /// shape the design's own arm 3 measured.
 fn set_route(
     live: &VocabularySuggest,
-    fold: &tessera_analyse::SuggestionFold,
+    fold: &mosaica_analyse::SuggestionFold,
     postings: &ColumnPostings,
     dir: &std::path::Path,
     values: &[SuggestValue],
@@ -744,10 +744,10 @@ fn set_route(
     let codes: Vec<u32> = (0..entities)
         .map(|e| values[e as usize % values.len()].code)
         .collect();
-    tessera_filter::write_value_column(
+    mosaica_filter::write_value_column(
         &values_path,
         &presence_path,
-        &tessera_filter::Codes::U32(codes.into()),
+        &mosaica_filter::Codes::U32(codes.into()),
         None,
     )
     .expect("the value column writes");
@@ -776,7 +776,7 @@ fn set_route(
             let cand = candidate(entities, fraction, contiguous);
 
             let started = Instant::now();
-            let set = tessera_engine::suggest_set::sweep(
+            let set = mosaica_engine::suggest_set::sweep(
                 std::iter::once(&column),
                 &cand,
                 live.base().as_ref(),

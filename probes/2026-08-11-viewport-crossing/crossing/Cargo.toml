@@ -11,7 +11,7 @@ edition = "2021"
 croaring = "2"
 # The **real** Feistel, not a model of it. Route B's per-row cost is dominated by the inversion,
 # so measuring a stand-in would measure the stand-in.
-tessera-types = { path = "../../../crates/tessera-types" }
+mosaica-types = { path = "../../../crates/mosaica-types" }
 
 [profile.release]
 opt-level = 3

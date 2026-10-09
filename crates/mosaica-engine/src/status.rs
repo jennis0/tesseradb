@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tessera_types::TermId;
+use mosaica_types::TermId;
 
 use crate::engine::Engine;
 use crate::Generation;
@@ -37,7 +37,7 @@ pub(crate) struct ServeCounters {
 
 /// One (partition, view)'s live segment count — [`Engine::live_segment_counts`]'s element, and
 /// what `/control/status` publishes under `segments`. Defined here, not re-exported from
-/// `tessera-store`, since `tessera-server` may not depend on that crate.
+/// `mosaica-store`, since `mosaica-server` may not depend on that crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewSegments {
     pub partition: String,
@@ -68,7 +68,7 @@ pub struct GenerationStatus {
     pub live_rows: u64,
     pub overlay_depth: usize,
     pub retirable_deletions: u64,
-    pub fragment_cache: tessera_authz::fragment::CacheStats,
+    pub fragment_cache: mosaica_authz::fragment::CacheStats,
     pub fragment_cache_rebuilds: u64,
 }
 
@@ -211,7 +211,7 @@ impl Engine {
         &self,
         layer: &str,
         level: u32,
-    ) -> Option<tessera_types::layer::ServingLayout> {
+    ) -> Option<mosaica_types::layer::ServingLayout> {
         self.write
             .live()
             .registered_layer(layer)
@@ -219,7 +219,7 @@ impl Engine {
     }
 
     /// Bound both caches; the only route by which the two config keys reach them. Called by
-    /// `tessera_server::prepare` after it validates both figures.
+    /// `mosaica_server::prepare` after it validates both figures.
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
         self.row_projection_cache
             .set_bound_bytes(row_projection_bytes);
@@ -260,13 +260,13 @@ impl Engine {
     }
 
     /// The region cache's gauges, beside the row-projection cache's.
-    pub fn region_cache_stats(&self) -> tessera_cache::CacheStats {
+    pub fn region_cache_stats(&self) -> mosaica_cache::CacheStats {
         self.region_cache.stats()
     }
 
     /// The occupancy memo's gauges, one entry per `(session, view, depth, generation)` rung.
     /// `evictions` rising is the memo removing rungs taken against a superseded generation.
-    pub fn occupancy_cache_stats(&self) -> tessera_cache::CacheStats {
+    pub fn occupancy_cache_stats(&self) -> mosaica_cache::CacheStats {
         self.occupancy.stats()
     }
 
@@ -287,7 +287,7 @@ impl Engine {
 
     /// The row count at which a commit window closes (`ingest.commit_window_max_items`, which
     /// counts rows). `usize::MAX` here is unbounded, not "off". `0` is clamped to `1` rather than
-    /// treated as "close at zero rows"; `tessera-server`'s config refuses it outright.
+    /// treated as "close at zero rows"; `mosaica-server`'s config refuses it outright.
     pub fn set_commit_window_max_rows(&self, rows: usize) {
         self.write.health().set_commit_window_max_rows(rows);
     }
@@ -296,7 +296,7 @@ impl Engine {
     ///
     /// Checked here as well as on every later deny apply: a WAL replay builds an overlay before
     /// any executor exists, so a node restarting above the limit would otherwise start with the
-    /// alarm counter at zero. `usize::MAX` disables the alarm; `tessera-server`'s config refuses
+    /// alarm counter at zero. `usize::MAX` disables the alarm; `mosaica-server`'s config refuses
     /// `0`.
     pub fn set_overlay_soft_limit(&self, limit: usize) {
         self.write.health().set_overlay_soft_limit(limit);
@@ -349,16 +349,16 @@ impl Engine {
 
     /// The row-projection cache's operator gauges, published as `projection_cache`. The fragment
     /// tier's twin is [`Self::fragment_cache_stats`].
-    pub fn row_projection_cache_stats(&self) -> tessera_cache::CacheStats {
+    pub fn row_projection_cache_stats(&self) -> mosaica_cache::CacheStats {
         self.row_projection_cache.stats()
     }
 
-    /// The fragment cache's operator gauges. `tessera_engine::FragmentCacheStats` is the name a
-    /// caller outside this crate should use, since `tessera-server` may not depend on
-    /// `tessera-authz`. This and the three methods below expose only `stats`, `evict`,
+    /// The fragment cache's operator gauges. `mosaica_engine::FragmentCacheStats` is the name a
+    /// caller outside this crate should use, since `mosaica-server` may not depend on
+    /// `mosaica-authz`. This and the three methods below expose only `stats`, `evict`,
     /// `canonical_key_for` and `rebuild_count`, not the whole cache: `FragmentCache::set_memory_bound`
     /// would silently undo the bound [`Self::set_cache_bounds`]'s validated caller sets.
-    pub fn fragment_cache_stats(&self) -> tessera_authz::fragment::CacheStats {
+    pub fn fragment_cache_stats(&self) -> mosaica_authz::fragment::CacheStats {
         self.generation.load().fragments.stats()
     }
 
@@ -477,7 +477,7 @@ impl Engine {
     /// lost a source. Unmasked, on the operator credential only: no viewer-facing route may carry
     /// these numbers. The durable copy is `reports/fold-<prefix>.json` in the bundle root; no HTTP
     /// route serves this yet.
-    pub fn last_fold_report(&self) -> Vec<tessera_lifecycle::membership::Degradation> {
+    pub fn last_fold_report(&self) -> Vec<mosaica_lifecycle::membership::Degradation> {
         self.write.health().last_fold_report()
     }
 

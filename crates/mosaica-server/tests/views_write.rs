@@ -2,7 +2,7 @@
 //! create operation, the drop, and what each does to the roster, to the row space and to a
 //! restart.
 //!
-//! What is at stake here is not that a *declaration* becomes row spaces — `tessera-build`'s own
+//! What is at stake here is not that a *declaration* becomes row spaces — `mosaica-build`'s own
 //! tests cover that — but the half above it, which has three ways of being wrong while every
 //! build test passes:
 //!
@@ -32,7 +32,7 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::{
+use mosaica_build::{
     build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewArgs,
     ViewMetadataType, ViewMetadataValue,
 };
@@ -133,7 +133,7 @@ render = true
             + ID_ATTRIBUTE,
     )
     .unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
@@ -146,7 +146,7 @@ render = true
                 name: "quarter".to_string(),
                 members_of: None,
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: vec![
                     GroupMetadataField {
                         name: "label".to_string(),
@@ -169,12 +169,12 @@ render = true
                 name: "quarter_map".to_string(),
                 members_of: Some("quarter".to_string()),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 views: roster(false),
             },
         ],
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             dir.join("world.parquet"),
             &config.schema,
         ),
@@ -305,8 +305,8 @@ async fn ingest(
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -322,8 +322,8 @@ async fn ingest_json(served: &Served, batch_id: &str, view: &str, rows: Value) -
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .json(&rows)
         .send()
         .await
@@ -1233,7 +1233,7 @@ render = true
             + "source = \"world\"\n",
     )
     .unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the declaration parses");
     let registry = config.build_views().expect("the roster is minted");
     let anchor = config
@@ -1249,7 +1249,7 @@ render = true
             points: view.source.clone().expect("every view names its points"),
             point_fields: view.fields.clone(),
             select: view.select.clone(),
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         })
         .collect();
     let groups = config.group_registry(&registry, &views);
@@ -1257,7 +1257,7 @@ render = true
     build(&BuildArgs {
         anchor,
         groups,
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             dir.join("world.parquet"),
             &config.schema,
         ),
@@ -1407,7 +1407,7 @@ fn segment_views(prefix_dir: &Path) -> Vec<String> {
 }
 
 /// Every directory under `root` whose path names `view_id`'s own two components — the shape
-/// `tessera_store::view_rel` lays a group's view down in, `views/<group>/<key>`.
+/// `mosaica_store::view_rel` lays a group's view down in, `views/<group>/<key>`.
 fn view_dirs(root: &Path, group: &str, key: &str) -> Vec<std::path::PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>, want: &Path) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1696,7 +1696,7 @@ fn build_families(dir: &Path) {
     write_families_points(&q1_points, "quarter:2026-Q1", Q1);
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, format!("{FAMILIES_SCHEMA}{ID_ATTRIBUTE}")).unwrap();
-    let config = tessera_build::config::Config::parse(&schema_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the families declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
@@ -1708,7 +1708,7 @@ fn build_families(dir: &Path) {
             name: "quarter".to_string(),
             members_of: None,
             quantisation: group_frame(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             metadata: Vec::new(),
             views: vec![GroupViewDescriptor {
                 key: "2026-Q1".to_string(),
@@ -1716,7 +1716,7 @@ fn build_families(dir: &Path) {
                 metadata: Default::default(),
             }],
         }],
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             world_points.clone(),
             &config.schema,
         ),
@@ -1799,8 +1799,8 @@ async fn families_ingest(
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(families_batch(id, x, y, a))
         .send()

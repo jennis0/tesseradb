@@ -2,15 +2,15 @@
 //! `(key, entity)` entries under `partitions/<p>/entities/unique/<attribute>/`.
 //!
 //! Each column's values are pushed through a bucketed spill sort under a share of the build's
-//! memory budget ([`tessera_store::unique::UniqueSpill`]), which reports every key more than one
+//! memory budget ([`mosaica_store::unique::UniqueSpill`]), which reports every key more than one
 //! entity holds as it writes. The identity rule has refused every row that would give an item a
 //! value another holds ([`crate::ids`]), so a key held twice here is a fault in the build and
 //! refuses it.
 
 use std::path::{Path, PathBuf};
 
-use tessera_spatial::ScalarValue;
-use tessera_store::unique::{index_dir_rel, key_of, KeyKind, UniqueKey, UniqueSpill, WrittenUniqueRun};
+use mosaica_spatial::ScalarValue;
+use mosaica_store::unique::{index_dir_rel, key_of, KeyKind, UniqueKey, UniqueSpill, WrittenUniqueRun};
 
 use crate::column::EntityColumn;
 use crate::config::{Attribute, Schema};
@@ -33,7 +33,7 @@ pub(crate) enum UniqueSource<'a> {
     /// A string column the join spilled as record-blob extents.
     Extents(&'a crate::extents::OpenExtents),
     /// The linear build's items in entity order, and the column's position in their scalars.
-    Items(&'a [tessera_spatial::TilerItem], usize),
+    Items(&'a [mosaica_spatial::TilerItem], usize),
 }
 
 impl UniqueSource<'_> {
@@ -115,7 +115,7 @@ pub(crate) fn write_unique_indexes<'a>(
             ))
         })?;
         let source = source_of(column);
-        let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+        let store = |e: mosaica_store::StoreError| BuildError::Invalid(e.to_string());
         let mut spill = UniqueSpill::create(kind, scratch, spill_bytes).map_err(store)?;
         source.walk(attribute, &mut |entity, key, _| spill.push(key, entity).map_err(store))?;
         let dir = prefix_dir.join(index_dir_rel(partition, &attribute.name));
@@ -136,7 +136,7 @@ pub(crate) fn write_unique_indexes<'a>(
             )));
         }
         let paths: Vec<PathBuf> = runs.iter().map(|run| run.path.clone()).collect();
-        tessera_store::fsync_written(&paths).map_err(store)?;
+        mosaica_store::fsync_written(&paths).map_err(store)?;
         out.push((attribute.name.clone(), runs));
     }
     Ok(out)

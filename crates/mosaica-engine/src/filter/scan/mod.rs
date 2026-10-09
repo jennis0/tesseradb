@@ -2,7 +2,7 @@ pub(in crate::filter) mod keyword;
 pub(in crate::filter) mod text;
 
 use croaring::Bitmap;
-use tessera_filter::ValueColumn;
+use mosaica_filter::ValueColumn;
 
 use self::keyword::scan_keyword;
 use crate::filter::columns::Layer;

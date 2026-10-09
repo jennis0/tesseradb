@@ -63,13 +63,13 @@ use std::time::Instant;
 use croaring::Bitmap;
 use rayon::prelude::*;
 
-use tessera_engine::artifacts::ArtifactRows;
-use tessera_engine::compose::MaskedSet;
-use tessera_lifecycle::membership::{ArtifactRecord, ContentSet};
-use tessera_spatial::morton::{tiles_for_bbox, Bounds};
-use tessera_store::permutation::{Permutation, RowSpace};
-use tessera_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
-use tessera_types::{EntityId, RowId};
+use mosaica_engine::artifacts::ArtifactRows;
+use mosaica_engine::compose::MaskedSet;
+use mosaica_lifecycle::membership::{ArtifactRecord, ContentSet};
+use mosaica_spatial::morton::{tiles_for_bbox, Bounds};
+use mosaica_store::permutation::{Permutation, RowSpace};
+use mosaica_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
+use mosaica_types::{EntityId, RowId};
 
 /// A deterministic 64-bit stream — the same population on every run, so two runs compare.
 struct Rng(u64);
@@ -147,7 +147,7 @@ impl Arm {
 /// bare bitmap would measure a third of the arithmetic the serving path does. `minus` and `plus`
 /// are small here exactly as they are in a running system — the deny lane is not a second corpus.
 ///
-/// [`EffectiveMask`]: tessera_engine::compose::EffectiveMask
+/// [`EffectiveMask`]: mosaica_engine::compose::EffectiveMask
 struct ComposedMask {
     base: Bitmap,
     minus: Bitmap,
@@ -619,7 +619,7 @@ fn row_space(dir: &std::path::Path, rows: u32) -> (RowSpace, Vec<u32>, Vec<u32>)
 
     let perm_path = dir.join("permutation.bin");
     let entities: Vec<EntityId> = row_order.iter().map(|&e| EntityId::new(e as u64)).collect();
-    tessera_store::write::write_permutation(&perm_path, &entities, rows as u64)
+    mosaica_store::write::write_permutation(&perm_path, &entities, rows as u64)
         .expect("permutation writes");
     drop(entities);
     let table_path = dir.join(ROW_ENTITY_FILE);
@@ -668,7 +668,7 @@ struct Held<'a> {
     index: &'a TileIndex,
     contains: &'a ContainmentGroups,
     lists: &'a ListColumn,
-    lineage: &'a tessera_engine::cut::Lineage,
+    lineage: &'a mosaica_engine::cut::Lineage,
     row_count: u32,
     artifacts: usize,
 }
@@ -677,9 +677,9 @@ struct Held<'a> {
 ///
 /// A thousand is the order `annotation-representation.md` §2.0.0 puts a request's artifact ceiling
 /// at, and the order the cut probe uses.
-fn frontier(lineage: &tessera_engine::cut::Lineage, candidates: &[u32]) -> (f64, usize) {
+fn frontier(lineage: &mosaica_engine::cut::Lineage, candidates: &[u32]) -> (f64, usize) {
     let start = Instant::now();
-    let served = tessera_engine::cut::cut(lineage, candidates, Some(BUDGET as u32), true);
+    let served = mosaica_engine::cut::cut(lineage, candidates, Some(BUDGET as u32), true);
     (start.elapsed().as_secs_f64() * 1e6, served.len())
 }
 
@@ -689,7 +689,7 @@ const BUDGET: usize = 1_000;
 
 /// The containment test's verdict, called through the shipped entry point.
 fn contained(rows: &ArtifactRows, ordinal: u32, mask: &ComposedMask) -> bool {
-    rows.satisfied_rank(ordinal, mask, true) != tessera_engine::artifacts::Containment::Unsatisfied
+    rows.satisfied_rank(ordinal, mask, true) != mosaica_engine::artifacts::Containment::Unsatisfied
 }
 
 /// **Route A — the shipped loop.** Every ordinal tested for candidacy, then the survivors counted
@@ -1222,7 +1222,7 @@ fn assert_containment_partition(
         .filter(|&o| {
             let theirs = contains.rank_for(o, &sat);
             let ours = match rows.satisfied_rank(o, mask, true) {
-                tessera_engine::artifacts::Containment::Satisfied(i) => Some(i),
+                mosaica_engine::artifacts::Containment::Satisfied(i) => Some(i),
                 _ => None,
             };
             theirs != ours
@@ -1288,7 +1288,7 @@ fn assert_same_answer(held: &Held, tiles: &Bitmap, mask: &ComposedMask, holds: u
         .filter(|&o| {
             rows.intersects(o, tiles, mask)
                 && rows.satisfied_rank(o, mask, true)
-                    != tessera_engine::artifacts::Containment::Unsatisfied
+                    != mosaica_engine::artifacts::Containment::Unsatisfied
         })
         .collect();
     let oracle: Bitmap = shipped_verdict.iter().copied().collect();
@@ -1325,7 +1325,7 @@ fn assert_same_answer(held: &Held, tiles: &Bitmap, mask: &ComposedMask, holds: u
     if strict {
         for &o in shipped_verdict.iter().take(BUDGET) {
             let ours = match rows.satisfied_rank(o, mask, true) {
-                tessera_engine::artifacts::Containment::Satisfied(i) => Some(i),
+                mosaica_engine::artifacts::Containment::Satisfied(i) => Some(i),
                 _ => None,
             };
             assert_eq!(
@@ -2080,7 +2080,7 @@ fn expression_census(args: &[String], sets: usize) {
 }
 
 fn main() {
-    let dir = std::env::temp_dir().join(format!("tessera-serving-scale-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("mosaica-serving-scale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a working directory");
 
     let args: Vec<String> = std::env::args().collect();
@@ -2221,7 +2221,7 @@ fn main() {
                     };
                     let values = vec![format!("a label, rank {rank}")];
                     ContentSet {
-                        digest: tessera_lifecycle::membership::content_digest(&values),
+                        digest: mosaica_lifecycle::membership::content_digest(&values),
                         values: Some(values),
                         cardinality: generated_from.cardinality(),
                         generated_from,
@@ -2377,7 +2377,7 @@ fn main() {
     // membership sits near its *own* ordinal. A real nested layer is the opposite: a parent's
     // membership **contains** its children's, so a parent is in view whenever any child is, and the
     // root is in view always. The `nested` arm is that correction.
-    let lineage = tessera_engine::cut::Lineage::new(
+    let lineage = mosaica_engine::cut::Lineage::new(
         (0..artifacts as u32).map(|o| (o, (o > 0).then(|| (o - 1) / 3))),
     );
 

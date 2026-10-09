@@ -60,7 +60,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tessera_authz::FragmentCacheError;
+use mosaica_authz::FragmentCacheError;
 
 use crate::cache::{RowProjectionCache, RowProjectionKey, SessionGeometry};
 use crate::Generation;
@@ -339,8 +339,8 @@ mod tests {
             prefix,
             segments_version,
             0,
-            tessera_lifecycle::Overlay::new(),
-            tessera_lifecycle::IngestBuffer::new(),
+            mosaica_lifecycle::Overlay::new(),
+            mosaica_lifecycle::IngestBuffer::new(),
         )
     }
 

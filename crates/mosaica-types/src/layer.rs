@@ -94,7 +94,7 @@ pub enum MembershipSource {
 /// **The label/list split follows from the membership**, not from a preference: a level whose
 /// memberships are disjoint has exactly one label per row, and one whose memberships overlap does
 /// not. A level pinned [`RowMajorLabel`](ServingLayout::RowMajorLabel) whose memberships turn out to
-/// overlap is composed **artifact-major**, loudly — see `tessera_engine::layout`.
+/// overlap is composed **artifact-major**, loudly — see `mosaica_engine::layout`.
 ///
 /// **A spatial level takes one of the same three forms.** Its membership is resolved from the
 /// shapes when a segment is published (`polygon-membership.md` §6.3), and the output is a per-row
@@ -819,7 +819,7 @@ pub fn attribute_value_key(code: u32, vocabulary_key: Option<&str>) -> String {
 /// usefully name.
 ///
 /// **Sixteen, because that is where the code space ends.** A Morton code interleaves two 16-bit
-/// cell coordinates (`tessera_spatial::interleave_bits`), so a depth-16 tile is one cell and a
+/// cell coordinates (`mosaica_spatial::interleave_bits`), so a depth-16 tile is one cell and a
 /// deeper one names a subdivision the geometry cannot express.
 pub const MAX_TILE_DEPTH: u32 = 16;
 
@@ -1342,7 +1342,7 @@ impl LayerDeclaration {
         //
         // A **gap** between two levels' ranges is not refused — a declaration may legitimately have
         // no level for some band — but the build prints every range beside its level so a gap is
-        // visible rather than inferred (`tessera_build::artifact_pass::report`).
+        // visible rather than inferred (`mosaica_build::artifact_pass::report`).
         for level in &self.levels {
             if let Some((lo, hi)) = level.zoom {
                 if lo > hi || lo > MAX_TILE_DEPTH {
@@ -1458,11 +1458,11 @@ impl LayerDeclaration {
             return refuse("`artifact_visibility.field`");
         }
         let label = |key: &str, word: &str| {
-            tessera_access::declared_label(key, word).map_err(DeclarationError::Label)
+            mosaica_access::declared_label(key, word).map_err(DeclarationError::Label)
         };
         if let Some(visibility) = &self.visibility {
             let visibility = label("visibility", visibility)?;
-            self.visibility = (!tessera_access::is_public(&visibility)).then_some(visibility);
+            self.visibility = (!mosaica_access::is_public(&visibility)).then_some(visibility);
         }
         if let MemberDefault::Label(default) = &self.artifact_visibility.default {
             self.artifact_visibility.default =

@@ -42,7 +42,7 @@
 //!
 //! Run (always through the bench slot — `scripts/bench-slot.sh`):
 //! ```text
-//! cargo run --release --example tile_axis_sweep -p tessera-engine --features bench-timing \
+//! cargo run --release --example tile_axis_sweep -p mosaica-engine --features bench-timing \
 //!   -- --bundle data/bench-fixtures/1e8 [--sparse] [--reps N] [--max-tiles N] [--contiguity-only]
 //!      [--target-coverage FRACTION]
 //! ```
@@ -53,10 +53,10 @@ use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
 use rand::SeedableRng;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig, RowProjection};
-use tessera_spatial::{tiles_for_bbox, Bounds};
-use tessera_store::{open_bundle, tile_ranges_all, Bundle};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig, RowProjection};
+use mosaica_spatial::{tiles_for_bbox, Bounds};
+use mosaica_store::{open_bundle, tile_ranges_all, Bundle};
 
 const REPS: usize = 25;
 const WARMUP: usize = 3;
@@ -123,7 +123,7 @@ fn all_descriptors(bundle_root: &Path) -> Vec<String> {
 }
 
 /// `calibration_sweep`'s `--dense` grant, which is the bench's own `GrantShape::Random`
-/// construction (`tessera_bench::corpus::build_grant`) — the realistic one.
+/// construction (`mosaica_bench::corpus::build_grant`) — the realistic one.
 /// Duplicated rather than imported for the same layering reason `calibration_sweep` duplicates it.
 fn random_grant(all: &[String], w: usize, seed: u64) -> Vec<String> {
     use rand::seq::SliceRandom;
@@ -146,9 +146,9 @@ fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
 /// Roaring containers a bitmap spans — the count of distinct high 16 bits among its values.
 ///
 /// **The cost model's unit** ("O(containers touched), not O(cardinality)"). Transcribed from
-/// `tessera_bench::metrics::containers`, which is the canonical implementation and itself mirrors
+/// `mosaica_bench::metrics::containers`, which is the canonical implementation and itself mirrors
 /// the probes' `containers(bm) = len(unique(asarray(bm) >> 16))`; duplicated here for the
-/// same layering reason `random_grant` above is duplicated — `tessera-bench` is a binary crate
+/// same layering reason `random_grant` above is duplicated — `mosaica-bench` is a binary crate
 /// above this one and nothing may depend on it (`scripts/check-layers.sh`).
 fn containers(bitmap: &Bitmap) -> u64 {
     let mut count = 0u64;
@@ -166,7 +166,7 @@ fn containers(bitmap: &Bitmap) -> u64 {
 /// Mean run length of set bits over the `1/(1−p)` expectation for a uniformly random set of the
 /// same density — `probes/results.md` §5's quantity, so a figure here is directly comparable with
 /// that table. 1.00 means no clustering beyond chance. Transcribed from
-/// `tessera_bench::metrics::run_ratio` for the same layering reason as `containers` above.
+/// `mosaica_bench::metrics::run_ratio` for the same layering reason as `containers` above.
 fn run_ratio(bitmap: &Bitmap, universe: u64) -> f64 {
     let cardinality = bitmap.cardinality();
     if cardinality == 0 || universe == 0 {
@@ -318,7 +318,7 @@ fn main() {
         max_underlay_offset: 4,
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
-        compute_threads: tessera_engine::default_compute_threads(),
+        compute_threads: mosaica_engine::default_compute_threads(),
         flush_max_age_secs: 90,
         // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
         // what bounds the window close's O(buffered) copy. Nothing here reaches it.
@@ -328,7 +328,7 @@ fn main() {
         segment_floor_bytes: None,
         coalesce_width: None,
         // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+        compaction: mosaica_engine::CompactionSchedule::off(),
     };
 
     // Both engines are configured IDENTICALLY, including the thread pool. The single variable

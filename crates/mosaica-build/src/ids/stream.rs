@@ -30,10 +30,10 @@ use std::time::SystemTime;
 
 use super::run::{RunReader, RunReceipt, RunWriter};
 use rayon::prelude::*;
-use tessera_lifecycle::resolve::{self, Batch, Named, Refusal};
-use tessera_store::key_index::{Key, KeySpill};
-use tessera_store::unique::{KeyKind, UniqueKey};
-use tessera_types::EntityId;
+use mosaica_lifecycle::resolve::{self, Batch, Named, Refusal};
+use mosaica_store::key_index::{Key, KeySpill};
+use mosaica_store::unique::{KeyKind, UniqueKey};
+use mosaica_types::EntityId;
 
 use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::{FileRead, Scanned};
@@ -303,7 +303,7 @@ enum FieldSort {
 
 impl FieldSort {
     fn push(&mut self, key: UniqueKey, row: u32) -> Result<()> {
-        let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+        let store = |e: mosaica_store::StoreError| BuildError::Invalid(e.to_string());
         match (self, key) {
             (FieldSort::Int(sort), UniqueKey::Int(k)) => sort.push(k, row).map_err(store),
             (FieldSort::Keyword(sort), UniqueKey::Keyword(k)) => sort.push(k, row).map_err(store),
@@ -472,7 +472,7 @@ impl Pass {
             false => carried.len().max(1),
         };
         let share = (self.sort_bytes / spills).max(SORT_MIN as usize);
-        let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+        let store = |e: mosaica_store::StoreError| BuildError::Invalid(e.to_string());
         let mut sorts: Vec<FieldSort> = carried
             .iter()
             .map(|field| {
@@ -864,7 +864,7 @@ impl Pass {
         base: u64,
         limit: Option<&Limit>,
     ) -> Result<(Vec<HeldRun>, croaring::Bitmap, bool)> {
-        let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+        let store = |e: mosaica_store::StoreError| BuildError::Invalid(e.to_string());
         let mut raised = false;
         let mut note = |key: K| {
             if limit.is_some_and(|limit| limit.beyond(key.widen() as u64)) {
@@ -920,7 +920,7 @@ impl Pass {
             .drain(|key, item| {
                 named_run
                     .push(key, item)
-                    .map_err(|e| tessera_store::StoreError::MalformedBundle {
+                    .map_err(|e| mosaica_store::StoreError::MalformedBundle {
                         detail: e.to_string(),
                     })
             })
@@ -1073,7 +1073,7 @@ fn merge_field<K: Key>(
     let mut decided = 0u64;
     let mut current: Option<KeyRun<K>> = None;
     let mut failure: Option<BuildError> = None;
-    let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+    let store = |e: mosaica_store::StoreError| BuildError::Invalid(e.to_string());
     sort.drain(|key, row| {
         let result = (|| -> Result<()> {
             if current.as_ref().is_none_or(|run| run.key != key) {
@@ -1126,7 +1126,7 @@ fn merge_field<K: Key>(
         })();
         if let Err(e) = result {
             failure = Some(e);
-            return Err(tessera_store::StoreError::MalformedBundle {
+            return Err(mosaica_store::StoreError::MalformedBundle {
                 detail: "the identity merge stopped".to_string(),
             });
         }

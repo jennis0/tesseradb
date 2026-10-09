@@ -4,7 +4,7 @@
 //! One directory per bundle identity, and a file per entry named by a digest of what it is a
 //! function of and the level version it describes. A file is a magic, the payload's length and
 //! its SHA-256, then the payload; a file whose length or digest does not match is not read, so a
-//! torn or altered entry is a miss. Writes go through [`tessera_authz::write_private_atomically`],
+//! torn or altered entry is a miss. Writes go through [`mosaica_authz::write_private_atomically`],
 //! as the fragments beside them do.
 //!
 //! The directory is held under a byte bound: after each write the files least recently written or
@@ -22,8 +22,8 @@ use super::counts::{CountsAt, Dense, Grown, Reserves};
 use super::denied::DeniedLabels;
 use super::Geometry;
 
-const COUNTS_MAGIC: &[u8; 8] = b"TSFCNT02";
-const DENIED_MAGIC: &[u8; 8] = b"TSFDNY02";
+const COUNTS_MAGIC: &[u8; 8] = b"MSFCNT03";
+const DENIED_MAGIC: &[u8; 8] = b"MSFDNY03";
 const HEADER: usize = 8 + 8 + 32;
 
 /// The directory a bundle identity's entries live in.
@@ -135,7 +135,7 @@ fn write(dir: &Path, stem: &str, at: u64, extension: &str, magic: &[u8; 8], payl
     bytes.extend_from_slice(&Sha256::digest(payload));
     bytes.extend_from_slice(payload);
     let path = path_of(dir, stem, at, extension);
-    if let Err(error) = tessera_authz::write_private_atomically(&path, &bytes) {
+    if let Err(error) = mosaica_authz::write_private_atomically(&path, &bytes) {
         tracing::warn!(
             path = %path.display(),
             %error,
@@ -176,7 +176,7 @@ fn read(dir: &Path, stem: &str, at: u64, extension: &str, magic: &[u8; 8]) -> Op
     Some(payload.to_vec())
 }
 
-/// Little-endian reads off the front of a payload. `tessera-store`'s readers are private to the
+/// Little-endian reads off the front of a payload. `mosaica-store`'s readers are private to the
 /// formats they frame, so this is the figures' own.
 struct Reader<'a>(&'a [u8]);
 

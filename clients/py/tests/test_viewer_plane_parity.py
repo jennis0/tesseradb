@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-import tesseradb
-from tesseradb import Control, Selection, Viewer
+import mosaica
+from mosaica import Control, Selection, Viewer
 
-CONTRACT = Path(__file__).resolve().parents[3] / "docs" / "openapi" / "tessera.yaml"
+CONTRACT = Path(__file__).resolve().parents[3] / "docs" / "openapi" / "mosaica.yaml"
 
 
 def tagged_operations(contract: Path, tag: str) -> set[str]:
@@ -44,8 +44,8 @@ REACHED_AS = {
     "viewport": [(Selection, "count"), (Selection, "sample")],
     "suggestCategoryValues": [(Viewer, "categories")],
     "suggestCategoryValuesFiltered": [(Viewer, "categories")],
-    "login": [(tesseradb, "login")],
-    "logout": [(tesseradb, "logout")],
+    "login": [(mosaica, "login")],
+    "logout": [(mosaica, "logout")],
 }
 
 
@@ -91,7 +91,7 @@ def test_every_session_plane_and_catalogue_operation_is_reached_from_python():
     identity = tagged_operations(CONTRACT, "control: identity")
     assert session and identity
     missing = sorted(
-        [op for op in session if not callable(getattr(tesseradb, op, None))]
+        [op for op in session if not callable(getattr(mosaica, op, None))]
         + [op for op in identity if not callable(getattr(Control, snake(op), None))]
     )
     assert not missing, "the contract serves these and Python has no function for them: " + (

@@ -11,7 +11,7 @@ here reads a field's value out of the artefact.
 
 **What is deliberately NOT here, and where it is instead** — the blob-resident *values*:
 
-- at build level, `crates/tessera-build/tests/record_blob.rs` reads every value back through the
+- at build level, `crates/mosaica-build/tests/record_blob.rs` reads every value back through the
   Rust `RecordBlob` reader and compares against its fixture's own generation functions;
 - at the served surface, the record-always-exists differential (records §10; the epic's gate 3)
   asserts `/v1/items/{tessera_id}` returns every declared field equal to

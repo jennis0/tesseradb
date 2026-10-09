@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from tesseradb import Refusal, authorise, connect
+from mosaica import Refusal, authorise, connect
 
 pytest.importorskip("pyarrow")
 
@@ -28,7 +28,7 @@ def db(served, corpus):
 
 
 def counts(table) -> dict:
-    return json.loads(table.schema.metadata[b"tessera.counts"])
+    return json.loads(table.schema.metadata[b"mosaica.counts"])
 
 
 # ------------------------------------------------------------------------ the artifacts by tile
@@ -63,7 +63,7 @@ def test_every_route_gives_a_cluster_the_one_slot_below_the_palette_size_asked_f
     plain = db.viewport_artifacts("map", 1, per_tile=5, layers=["clusters"])
     assert set(plain.column("slot").to_pylist()) == {None}
     tiles = db.viewport_artifacts("map", 1, per_tile=5, layers=["clusters"], palette_size=8)
-    assert json.loads(tiles.schema.metadata[b"tessera.request"])["palette_size"] == 8
+    assert json.loads(tiles.schema.metadata[b"mosaica.request"])["palette_size"] == 8
     slots = {}
     for row in tiles.to_pylist():
         assert 0 <= row["slot"] < 8
@@ -171,7 +171,7 @@ def test_on_counts_receives_the_counts_once_and_they_are_the_samples(db):
         )
         assert len(seen) == 1
         tiles, cells = seen[0]
-        totals = json.loads(served.schema.metadata[b"tessera.counts"])
+        totals = json.loads(served.schema.metadata[b"mosaica.counts"])
         assert {name: sum(tiles.column(name).to_pylist()) for name in totals} == totals
         if offset is None:
             assert cells is None

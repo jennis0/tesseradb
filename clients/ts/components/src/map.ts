@@ -9,13 +9,13 @@ import {
   type MarksProjection,
   type Store,
   type SelectionShape
-} from '@tesseradb/client';
-import {assertCompositionMatchesServed, chosenColour, hasValue} from '@tesseradb/client/internal';
-import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DensityCounter, TesseraLayer, densityCountAt, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@tesseradb/deck';
-import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, drawnCells, encodingOf, encodingSignature, hoverAt, maxCount, type ContourShape} from '@tesseradb/deck/internal';
-import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import type {PaletteName, Quantisation, Rgba} from '@tesseradb/client';
-import {TesseraElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
+} from '@mosaica/client';
+import {assertCompositionMatchesServed, chosenColour, hasValue} from '@mosaica/client/internal';
+import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DensityCounter, MosaicaLayer, densityCountAt, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@mosaica/deck';
+import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, drawnCells, encodingOf, encodingSignature, hoverAt, maxCount, type ContourShape} from '@mosaica/deck/internal';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@mosaica/deck';
+import type {PaletteName, Quantisation, Rgba} from '@mosaica/client';
+import {MosaicaElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf, type PanelState} from './states.js';
 import {icon} from './icons.js';
@@ -122,31 +122,31 @@ let mapsMade = 0;
  * naming the keys. A `tabindex` the host sets moves to the canvas, leaving -1 on the map, so the
  * map is never a second stop. `focus()` focuses the canvas.
  *
- * The host element is `display: block`; its height comes from `--tessera-map-height`. A map that
+ * The host element is `display: block`; its height comes from `--mosaica-map-height`. A map that
  * is disconnected and not reconnected releases its GPU resources a quarter of a second later.
  *
  * @summary The map canvas.
- * @tagname tessera-map
+ * @tagname mosaica-map
  * @category Elements
  * @slot top-left - Content in the top-left corner, below the toolbar when it is there.
  * @slot top-right - Content in the top-right corner, below the toolbar when it is there.
  * @slot bottom-left - Content in the bottom-left corner, above the toolbar when it is there.
  * @slot bottom-right - Content in the bottom-right corner, above the toolbar when it is there.
  * @slot tooltip - Replaces the hover tooltip's content.
- * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The camera
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-viewchange']>} mosaica-viewchange - The camera
  *   moved.
- * @fires {CustomEvent<TesseraEventDetails['tessera-pick']>} tessera-pick - A point was clicked, and
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-pick']>} mosaica-pick - A point was clicked, and
  *   again with its record once the record arrives.
- * @fires {CustomEvent<TesseraEventDetails['tessera-miss']>} tessera-miss - A click found no point
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-miss']>} mosaica-miss - A click found no point
  *   and no artifact.
- * @fires {CustomEvent<TesseraEventDetails['tessera-hover']>} tessera-hover - The pointer moved onto
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-hover']>} mosaica-hover - The pointer moved onto
  *   or over a point.
- * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-artifactopen']>} mosaica-artifactopen - An
  *   artifact was opened and its drill-down arrived.
- * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - A
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-selectchange']>} mosaica-selectchange - A
  *   selection was drawn or cleared (`status` `loading` or `cleared`), and again when its counts
  *   arrive.
- * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-layerchange']>} mosaica-layerchange - The
  *   `layers` attribute changed.
  * @csspart canvas - The deck.gl canvas's container.
  * @csspart overlay - The state drawn over the canvas when refused, expired or empty.
@@ -161,12 +161,12 @@ let mapsMade = 0;
  * @csspart density-key - The key to density's colours, items per cell from 0 to the largest count
  *   drawn with the count at the scale's midpoint, in the bottom-left corner while density is drawn
  *   in a ramp or without the points.
- * @cssprop --tessera-map-height - The map's height.
- * @cssprop --tessera-map-bg - The canvas's background, behind the points and any basemap.
- * @cssprop --tessera-map-inset-left - Extra space between the top-left corner's content and the
+ * @cssprop --mosaica-map-height - The map's height.
+ * @cssprop --mosaica-map-bg - The canvas's background, behind the points and any basemap.
+ * @cssprop --mosaica-map-inset-left - Extra space between the top-left corner's content and the
  *   map's left edge, for a panel floated over the map's left side. Defaults to 0.
  */
-export class TesseraMap extends TesseraElement {
+export class MosaicaMap extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -174,9 +174,9 @@ export class TesseraMap extends TesseraElement {
       :host {
         display: block;
         position: relative;
-        height: var(--_tessera-map-height);
+        height: var(--_mosaica-map-height);
         min-height: 120px;
-        background: var(--_tessera-map-bg);
+        background: var(--_mosaica-map-bg);
         outline: none;
         overflow: hidden;
       }
@@ -185,7 +185,7 @@ export class TesseraMap extends TesseraElement {
         inset: 0;
       }
       [part='canvas']:focus-visible {
-        outline: 1.5px solid color-mix(in srgb, var(--_tessera-accent) 40%, transparent);
+        outline: 1.5px solid color-mix(in srgb, var(--_mosaica-accent) 40%, transparent);
         outline-offset: -1.5px;
       }
       :host([mode='box']) [part='canvas'],
@@ -197,7 +197,7 @@ export class TesseraMap extends TesseraElement {
         z-index: 2;
         display: flex;
         flex-direction: column;
-        gap: calc(var(--_tessera-space) / 2);
+        gap: calc(var(--_mosaica-space) / 2);
         max-width: 46%;
         pointer-events: none;
       }
@@ -205,20 +205,20 @@ export class TesseraMap extends TesseraElement {
         pointer-events: auto;
       }
       .top-left {
-        top: var(--_tessera-space);
-        left: calc(var(--_tessera-space) + var(--tessera-map-inset-left, 0px));
+        top: var(--_mosaica-space);
+        left: calc(var(--_mosaica-space) + var(--mosaica-map-inset-left, 0px));
       }
       .top-right {
-        top: var(--_tessera-space);
-        right: var(--_tessera-space);
+        top: var(--_mosaica-space);
+        right: var(--_mosaica-space);
       }
       .bottom-left {
-        bottom: var(--_tessera-space);
-        left: var(--_tessera-space);
+        bottom: var(--_mosaica-space);
+        left: var(--_mosaica-space);
       }
       .bottom-right {
-        bottom: var(--_tessera-space);
-        right: var(--_tessera-space);
+        bottom: var(--_mosaica-space);
+        right: var(--_mosaica-space);
         align-items: flex-end;
       }
       [part='controls'] {
@@ -227,26 +227,26 @@ export class TesseraMap extends TesseraElement {
         flex-direction: column;
         gap: 2px;
         padding: 3px;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        box-shadow: var(--_tessera-shadow);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
+        box-shadow: var(--_mosaica-shadow);
         pointer-events: auto;
       }
       [part='controls'] button {
-        width: var(--_tessera-tool-size, 32px);
-        height: var(--_tessera-tool-size, 32px);
+        width: var(--_mosaica-tool-size, 32px);
+        height: var(--_mosaica-tool-size, 32px);
         display: grid;
         place-items: center;
-        color: color-mix(in srgb, var(--_tessera-ink) 82%, var(--_tessera-surface));
-        border-radius: var(--_tessera-radius-control);
+        color: color-mix(in srgb, var(--_mosaica-ink) 82%, var(--_mosaica-surface));
+        border-radius: var(--_mosaica-radius-control);
       }
       [part='controls'] button:hover {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part='controls'] button[aria-pressed='true'] {
-        background: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
+        background: var(--_mosaica-accent);
+        color: var(--_mosaica-accent-ink);
       }
       /* The drawn region's count and clear button, on its top edge. */
       [part='region-tag'] {
@@ -256,20 +256,20 @@ export class TesseraMap extends TesseraElement {
         align-items: center;
         gap: 6px;
         padding: 2px 3px 2px 8px;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius-control);
-        box-shadow: var(--_tessera-shadow);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius-control);
+        box-shadow: var(--_mosaica-shadow);
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         white-space: nowrap;
         transform: translateY(calc(-100% - 4px));
       }
-      [part='region-tag'] tessera-count {
+      [part='region-tag'] mosaica-count {
         font-size: inherit;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
       }
-      [part='region-tag'] tessera-count::part(count) {
+      [part='region-tag'] mosaica-count::part(count) {
         font-weight: 600;
       }
       [part='region-tag'] button {
@@ -278,10 +278,10 @@ export class TesseraMap extends TesseraElement {
         display: grid;
         place-items: center;
         border-radius: 4px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='region-tag'] button:hover {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part='tooltip'] {
         position: absolute;
@@ -289,10 +289,10 @@ export class TesseraMap extends TesseraElement {
         pointer-events: none;
         padding: 8px 10px;
         max-width: 260px;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        box-shadow: var(--_tessera-shadow);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
+        box-shadow: var(--_mosaica-shadow);
         font-size: 12px;
         transform: translate(14px, 14px);
       }
@@ -303,7 +303,7 @@ export class TesseraMap extends TesseraElement {
       [part='tooltip'] .s {
         margin-top: 3px;
         font-size: 11px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='overlay'] {
         position: absolute;
@@ -318,13 +318,13 @@ export class TesseraMap extends TesseraElement {
         pointer-events: auto;
         min-height: 40px;
         padding: 6px 8px 6px 14px;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        box-shadow: var(--_tessera-shadow);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
+        box-shadow: var(--_mosaica-shadow);
         font-size: 13px;
         font-weight: 500;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
       }
       [part='overlay'] [part='state']:not(:has(button)) {
         padding-right: 14px;
@@ -335,11 +335,11 @@ export class TesseraMap extends TesseraElement {
         flex-direction: column;
         gap: 3px;
         padding: 7px 9px;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius-control);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius-control);
         font-size: 11px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         pointer-events: auto;
       }
       [part='density-key'] .ramp {
@@ -439,7 +439,7 @@ export class TesseraMap extends TesseraElement {
    * other size is taken as the nearest of them. The cells asked for are those of the depth nearest
    * that size at the current zoom. Where that depth's cells over the area asked for are more than
    * the server's `selection.maxAggregateCells`, the finest size that fits is drawn instead;
-   * {@link TesseraMap.densityStops} says which sizes fit.
+   * {@link MosaicaMap.densityStops} says which sizes fit.
    */
   @property({type: Number, attribute: 'density-resolution'}) accessor densityResolution = DEFAULT_DENSITY_CELL_PX;
   /**
@@ -480,7 +480,7 @@ export class TesseraMap extends TesseraElement {
    * Colours for single category values, per column, per category key, as `#rrggbb`, such as
    * `{field: {'cs.CV': '#f28e2b'}}`. Setting it replaces every value colour chosen before,
    * including those chosen on a field card; a host restores a viewer's saved choices this way,
-   * having kept them from `tessera-valuecolour`. Unset, the choices made on the cards stand.
+   * having kept them from `mosaica-valuecolour`. Unset, the choices made on the cards stand.
    */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /**
@@ -488,7 +488,7 @@ export class TesseraMap extends TesseraElement {
    * as `{topics: {'4021': '#f28e2b'}}`, set on the store in place of their palette colours
    * (`Store.setArtifactColours`). Setting it replaces every cluster colour chosen before, including
    * those chosen on a field card or in Edit colours; a host restores a viewer's saved choices this
-   * way, having kept them from `tessera-clustercolour`. An entry that is not a `tessera_id` and a
+   * way, having kept them from `mosaica-clustercolour`. An entry that is not a `tessera_id` and a
    * `#rrggbb` colour is skipped. Unset, the choices made on the cards stand.
    */
   @property({attribute: false}) accessor clusterColours: Record<string, Record<string, string>> | null = null;
@@ -547,14 +547,14 @@ export class TesseraMap extends TesseraElement {
 
   /**
    * What the last click found where it found no item: `{kind: 'miss'}`, or a broken pick, a fault
-   * in the layer, with its details. `null` after a hit. `<tessera-item-card>`'s `pick` takes it.
+   * in the layer, with its details. `null` after a hit. `<mosaica-item-card>`'s `pick` takes it.
    */
   lastPick: PickOutcome = null;
   /**
    * What the last click picked and where: an item or an artifact, by `tesseraId`, and the world
    * position the card for it points at, the picked point's own or, for an artifact, where the click
-   * landed. `null` before a pick, after a miss and after a switch of view. `<tessera-explorer>`
-   * places its callout from it through {@link TesseraMap.screenOf}.
+   * landed. `null` before a pick, after a miss and after a switch of view. `<mosaica-explorer>`
+   * places its callout from it through {@link MosaicaMap.screenOf}.
    */
   pickedAt: {kind: 'item' | 'artifact'; id: bigint; world: [number, number]} | null = null;
   /** The map's probe, one object mutated in place, for instruments and tests. @internal */
@@ -661,7 +661,7 @@ export class TesseraMap extends TesseraElement {
       if (changed.has('sizeBy')) this.pushSizeBy(s);
       if (changed.has('layers') && this.layers) {
         s.setLayers(this.layers);
-        emit(this, 'tessera-layerchange', {layers: this.layers});
+        emit(this, 'mosaica-layerchange', {layers: this.layers});
       }
       if (changed.has('budget') && this.budget > 0) s.setBudget(this.budget);
       if (changed.has('clusterBudget')) {
@@ -876,11 +876,11 @@ export class TesseraMap extends TesseraElement {
     const sel = s.get('selection');
     if (sel.item && sel.item !== this.announcedItem) {
       this.announcedItem = sel.item;
-      emit(this, 'tessera-pick', {id: idString(sel.item.id), record: sel.item.detail});
+      emit(this, 'mosaica-pick', {id: idString(sel.item.id), record: sel.item.detail});
     }
     if (sel.artifact && sel.artifact !== this.announcedArtifact) {
       this.announcedArtifact = sel.artifact;
-      emit(this, 'tessera-artifactopen', {id: idString(sel.artifact.id), detail: {...sel.artifact.detail, maskedCount: sel.artifact.detail.maskedCount.toString(10)}});
+      emit(this, 'mosaica-artifactopen', {id: idString(sel.artifact.id), detail: {...sel.artifact.detail, maskedCount: sel.artifact.detail.maskedCount.toString(10)}});
     }
     const region = s.get('region');
     // The current view's frame converts between data coordinates and world space.
@@ -914,7 +914,7 @@ export class TesseraMap extends TesseraElement {
       p.region = {verdict, exact: region.matched.exact, visible: region.visible?.value ?? null, matched: region.matched.value, held: region.held.count, status: region.status, ms};
       if (region.status !== 'loading' && region !== this.regionAnnounced) {
         this.regionAnnounced = region;
-        emit(this, 'tessera-selectchange', {
+        emit(this, 'mosaica-selectchange', {
           shape: shapeDetail(region.shape),
           status: region.status,
           visible: region.visible,
@@ -1051,7 +1051,7 @@ export class TesseraMap extends TesseraElement {
     s.setView(input);
     this.densityCounter?.look({target: this.viewState.target, zoom: this.viewState.zoom, width, height});
     this.probe.densityRequests = this.densityCounter?.requests ?? 0;
-    emit(this, 'tessera-viewchange', {bbox: input.bbox, zoom: this.viewState.zoom, width, height});
+    emit(this, 'mosaica-viewchange', {bbox: input.bbox, zoom: this.viewState.zoom, width, height});
   }
 
   private paint(): void {
@@ -1061,8 +1061,8 @@ export class TesseraMap extends TesseraElement {
     if (this.basemap) layers.push(this.basemap);
     if (s) {
       layers.push(
-        new TesseraLayer({
-          id: 'tessera',
+        new MosaicaLayer({
+          id: 'mosaica',
           store: s,
           slab: this.slab,
           clusterLevel: this.clusterLevel ?? undefined,
@@ -1148,7 +1148,7 @@ export class TesseraMap extends TesseraElement {
    * opens what the pointer highlighted. Contours are not in deck's pick pass.
    */
   private artifactAt(world: [number, number], prefer: bigint | null): bigint | null {
-    return hoverAt(this.contours(), world, this.hoveredArtifact, TesseraMap.HOVER_MARGIN_PX / 2 ** this.viewState.zoom, prefer);
+    return hoverAt(this.contours(), world, this.hoveredArtifact, MosaicaMap.HOVER_MARGIN_PX / 2 ** this.viewState.zoom, prefer);
   }
 
   /** What the pointer is over: the tooltip from the mark beneath, and the hovered artifact from {@link artifactAt}. */
@@ -1187,7 +1187,7 @@ export class TesseraMap extends TesseraElement {
     const title = this.titleField ? carried(this.titleField, null) : null;
     this.hover = {x: info.x, y: info.y, title: title ?? `#${idString(picked.id)}`, lines};
     if (this.titleField && title === null) this.describeHovered(picked.id, info.x, info.y);
-    emit(this, 'tessera-hover', {id: idString(picked.id), x: info.x, y: info.y});
+    emit(this, 'mosaica-hover', {id: idString(picked.id), x: info.x, y: info.y});
   }
 
   /**
@@ -1253,7 +1253,7 @@ export class TesseraMap extends TesseraElement {
         this.selectedWorldXY = picked.worldXY;
         const world = picked.worldXY ?? this.worldAt(info.x, info.y);
         this.pickedAt = world ? {kind: 'item', id: picked.id, world} : null;
-        emit(this, 'tessera-pick', {id: idString(picked.id)});
+        emit(this, 'mosaica-pick', {id: idString(picked.id)});
         void s?.pick(picked.id);
         this.paint();
         return;
@@ -1265,7 +1265,7 @@ export class TesseraMap extends TesseraElement {
         if (id === null) {
           this.lastPick = {kind: 'miss'};
           this.pickedAt = null;
-          emit(this, 'tessera-miss', {});
+          emit(this, 'mosaica-miss', {});
           return;
         }
         this.lastPick = null;
@@ -1366,13 +1366,13 @@ export class TesseraMap extends TesseraElement {
 
   /**
    * Select a shape in data coordinates, as drawing a box or lasso does; `null` clears the
-   * selection. Fires `tessera-selectchange`.
+   * selection. Fires `mosaica-selectchange`.
    */
   select(shape: SelectionShape | null): void {
     this.regionAskedAt = performance.now();
     if (this.probe.region) this.probe.region = null;
     this.resolvedStore?.select(shape);
-    emit(this, 'tessera-selectchange', {shape: shapeDetail(shape), status: shape ? 'loading' : 'cleared'});
+    emit(this, 'mosaica-selectchange', {shape: shapeDetail(shape), status: shape ? 'loading' : 'cleared'});
   }
 
   /** Whether the camera has been moved, by the user or the host, since the map was made. */
@@ -1407,8 +1407,8 @@ export class TesseraMap extends TesseraElement {
     // top-left corner's content starts, right of whatever the host keeps over the map's left side.
     const left = (corner[0] - tx!) * scale + width / 2;
     const top = Math.max(30, (corner[1] - ty!) * scale + height / 2);
-    return html`<div part="region-tag" style=${`left:max(calc(var(--_tessera-space) + var(--tessera-map-inset-left, 0px)), ${left}px);top:${top}px`}>
-      <tessera-count .masked=${region.matched}></tessera-count><span>${region.shape.outside ? 'outside' : 'inside'}</span>
+    return html`<div part="region-tag" style=${`left:max(calc(var(--_mosaica-space) + var(--mosaica-map-inset-left, 0px)), ${left}px);top:${top}px`}>
+      <mosaica-count .masked=${region.matched}></mosaica-count><span>${region.shape.outside ? 'outside' : 'inside'}</span>
       <button type="button" aria-label="Clear selection" title="Clear selection" @click=${() => this.select(null)}>${icon('close', 12, 1.4)}</button>
     </div>`;
   }
@@ -1464,9 +1464,9 @@ export class TesseraMap extends TesseraElement {
   }
 
   /**
-   * Fit a box `[x0, y0, x1, y1]` in data coordinates, the space `tessera-viewchange` reports, into
+   * Fit a box `[x0, y0, x1, y1]` in data coordinates, the space `mosaica-viewchange` reports, into
    * the map. The camera keeps the canvas's aspect, so the box shown contains the one asked for,
-   * and the next `tessera-viewchange` reports the box shown. Returns false before `meta`.
+   * and the next `mosaica-viewchange` reports the box shown. Returns false before `meta`.
    */
   fitBbox(extent: [number, number, number, number]): boolean {
     const q = this.resolvedStore?.frame();
@@ -1661,10 +1661,10 @@ function hoverText(value: unknown, arrowType: string | null): string {
 const checkedCompositions = new WeakSet<object>();
 
 attachContextRoot();
-defineOnce('tessera-map', TesseraMap);
+defineOnce('mosaica-map', MosaicaMap);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-map': TesseraMap;
+    'mosaica-map': MosaicaMap;
   }
 }

@@ -20,8 +20,8 @@ use std::ops::Range;
 use croaring::Bitmap;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use tessera_store::read::{first_code_at_or_past, ScalarSlice, SegmentData};
-use tessera_store::RowEntities;
+use mosaica_store::read::{first_code_at_or_past, ScalarSlice, SegmentData};
+use mosaica_store::RowEntities;
 
 use crate::compose::EffectiveMask;
 use crate::filter::EntityCodes;
@@ -59,7 +59,7 @@ impl CellSet<'_> {
     pub(crate) fn for_each_run(&self, rows: Range<u32>, f: &mut impl FnMut(Range<u32>)) {
         match self {
             CellSet::Mask(mask) => mask.for_each_visible_run(rows, f),
-            CellSet::Rows(set) => tessera_roaring::for_each_run_in(set, rows, f),
+            CellSet::Rows(set) => mosaica_roaring::for_each_run_in(set, rows, f),
         }
     }
 }
@@ -146,7 +146,7 @@ impl GroupTable {
             for (group, &code) in listed.iter().enumerate().rev() {
                 dense[code as usize] = group as u32;
             }
-            dense[tessera_store::vocabulary::ABSENT_CODE as usize] = rest + 1;
+            dense[mosaica_store::vocabulary::ABSENT_CODE as usize] = rest + 1;
             Lookup::Dense(dense)
         } else {
             let mut sparse = FxHashMap::default();
@@ -176,7 +176,7 @@ impl GroupTable {
         match &self.lookup {
             Lookup::Dense(dense) => dense.get(code as usize).copied().unwrap_or(self.listed),
             Lookup::Sparse(sparse) => {
-                if code == tessera_store::vocabulary::ABSENT_CODE {
+                if code == mosaica_store::vocabulary::ABSENT_CODE {
                     return self.none();
                 }
                 sparse.get(&code).copied().unwrap_or(self.listed)

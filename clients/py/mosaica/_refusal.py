@@ -13,7 +13,7 @@ class Refusal(ValueError):
 
         try:
             db.commit()
-        except tesseradb.Refusal as refused:
+        except mosaica.Refusal as refused:
             print(refused.report)
     """
 

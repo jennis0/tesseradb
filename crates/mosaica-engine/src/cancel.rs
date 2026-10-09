@@ -1,9 +1,9 @@
 //! D-C: cooperative cancellation for the viewport path (the rapid-pan case).
 //!
 //! [`CancelToken`] is a newtype over `Arc<AtomicBool>` — deliberately no `tokio` dependency, so
-//! the engine API stays synchronous (lifecycle §7). `tessera-server` mints one per
+//! the engine API stays synchronous (lifecycle §7). `mosaica-server` mints one per
 //! `/v1/viewport` request, moves a clone into the `spawn_blocking` closure, and flips the
-//! original from a drop-guard wired to client disconnect (see `tessera-server::viewer`'s
+//! original from a drop-guard wired to client disconnect (see `mosaica-server::viewer`'s
 //! `CancelGuard`). [`crate::viewport::Engine::viewport`] polls it at a few checkpoints (its own
 //! doc lists them) and aborts the whole request with [`crate::EngineError::Cancelled`] the moment
 //! it observes the flip — never a partial `ViewportOut` (I13a).
@@ -52,7 +52,7 @@ impl Default for CancelToken {
 
 /// What lets a caller waiting on a single-flight build carry this token into the wait. The cache
 /// sits below this crate and cannot name [`CancelToken`], so the trait is how the two meet.
-impl tessera_cache::Cancel for CancelToken {
+impl mosaica_cache::Cancel for CancelToken {
     fn is_cancelled(&self) -> bool {
         CancelToken::is_cancelled(self)
     }

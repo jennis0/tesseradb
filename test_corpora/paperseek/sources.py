@@ -55,7 +55,7 @@ def share() -> Path:
 
 
 def staging() -> Path:
-    """`$TESSERA_LADDER/paperseek/staging/`, the local copy everything after `stage.py` reads.
+    """`$MOSAICA_LADDER/paperseek/staging/`, the local copy everything after `stage.py` reads.
 
     **It belongs to the rung, not to a run**, exactly as rung 3's does: `prepare.py --out` moves
     where a run writes its corpus, and every run reads the same staged bytes.

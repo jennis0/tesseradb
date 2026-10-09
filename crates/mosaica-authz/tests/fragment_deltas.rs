@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tessera_authz::{build_fragment, write_delta_tier, write_postings, DeltaTier, PostingsReader};
-use tessera_types::TermId;
+use mosaica_authz::{build_fragment, write_delta_tier, write_postings, DeltaTier, PostingsReader};
+use mosaica_types::TermId;
 
 const SMALL_TERM_THRESHOLD: u32 = 32;
 
@@ -98,5 +98,5 @@ fn build_fragment_over_tiers(
     base: &PostingsReader,
     deltas: &[Arc<DeltaTier>],
 ) -> std::io::Result<croaring::Bitmap> {
-    tessera_authz::build_fragment_with_deltas(terms, base, deltas)
+    mosaica_authz::build_fragment_with_deltas(terms, base, deltas)
 }

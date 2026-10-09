@@ -10,8 +10,8 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_lifecycle::UnallocatedRow;
-use tessera_types::EntityId;
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -31,7 +31,7 @@ fn flushed_then_rotated(tmp: &std::path::Path, root: &std::path::Path, key: &str
 }
 
 /// One item at the fixture's centre holding the `id` of `key`, under the batch id `key`.
-fn ingest_keyed(engine: &tessera_engine::Engine, key: &str) -> EntityId {
+fn ingest_keyed(engine: &mosaica_engine::Engine, key: &str) -> EntityId {
     let row = UnallocatedRow {
         view: "s0".to_string(),
         join: None,

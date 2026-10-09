@@ -18,8 +18,8 @@ use std::sync::Arc;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_engine::Engine;
-use tessera_lifecycle::faults::FaultSwitchboard;
+use mosaica_engine::Engine;
+use mosaica_lifecycle::faults::FaultSwitchboard;
 
 /// Long enough for a slow machine and short enough to fail rather than hang.
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -212,8 +212,8 @@ async fn a_flush_requested_while_a_cycle_is_open_is_answered_two_ahead() {
     // The cycle is held open at the publication seam, so the second request below is made against
     // an open cycle as a fact rather than as a race against a segment write.
     faults.arm_pause(
-        tessera_lifecycle::faults::PauseSite::BeforeManifestPublish,
-        tessera_lifecycle::faults::PauseAction::Stall,
+        mosaica_lifecycle::faults::PauseSite::BeforeManifestPublish,
+        mosaica_lifecycle::faults::PauseAction::Stall,
     );
 
     ingest_one(&server, "two-ahead-1").await;
@@ -274,8 +274,8 @@ async fn rows_buffered_into_two_views_are_both_served_at_the_number() {
             .client
             .post(server.control_url("/control/ingest"))
             .bearer_auth(OPERATOR_CREDENTIAL)
-            .header("x-tessera-batch-id", batch_id)
-            .header("x-tessera-view", view)
+            .header("x-mosaica-batch-id", batch_id)
+            .header("x-mosaica-view", view)
             .header("content-type", "application/vnd.apache.arrow.stream")
             .body(build_ingest_batch_optional(&rows))
             .send()
@@ -369,7 +369,7 @@ async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "parked-1")
+        .header("x-mosaica-batch-id", "parked-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
@@ -417,7 +417,7 @@ async fn await_seam(faults: &Arc<FaultSwitchboard>) {
     wait_until(
         "the executor reached the publication seam",
         DEADLINE,
-        async || faults.arrivals(tessera_lifecycle::faults::PauseSite::BeforeManifestPublish) >= 1,
+        async || faults.arrivals(mosaica_lifecycle::faults::PauseSite::BeforeManifestPublish) >= 1,
     )
     .await;
 }
@@ -428,7 +428,7 @@ async fn ingest_one(server: &TestServer, batch_id: &str) -> Value {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
@@ -555,8 +555,8 @@ async fn a_publication_that_has_not_swapped_does_not_move_the_counter() {
     let (server, faults) = serve_with_faults(&tmp).await;
 
     faults.arm_pause(
-        tessera_lifecycle::faults::PauseSite::BeforeManifestPublish,
-        tessera_lifecycle::faults::PauseAction::Stall,
+        mosaica_lifecycle::faults::PauseSite::BeforeManifestPublish,
+        mosaica_lifecycle::faults::PauseAction::Stall,
     );
 
     ingest_one(&server, "swap-1").await;
@@ -609,7 +609,7 @@ async fn wait_visible_holds_a_row_page_until_its_rows_are_served() {
         .client
         .post(server.control_url("/control/ingest?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "waited")
+        .header("x-mosaica-batch-id", "waited")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
@@ -717,7 +717,7 @@ async fn the_wait_is_bounded_and_says_so() {
         .client
         .post(server.control_url("/control/ingest?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "bounded")
+        .header("x-mosaica-batch-id", "bounded")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
@@ -750,7 +750,7 @@ async fn the_largest_wait_ceiling_waits_for_the_publication() {
         .client
         .post(server.control_url("/control/ingest?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "unbounded")
+        .header("x-mosaica-batch-id", "unbounded")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()

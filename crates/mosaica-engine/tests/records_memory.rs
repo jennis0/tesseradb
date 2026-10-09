@@ -18,16 +18,16 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::{Config, Fields};
-use tessera_build::{build, BuildArgs, ViewArgs};
-use tessera_engine::filter::{FilterExpr, RegionLeaf};
-use tessera_engine::shapes::ShapeF64;
-use tessera_engine::{
+use mosaica_build::config::{Config, Fields};
+use mosaica_build::{build, BuildArgs, ViewArgs};
+use mosaica_engine::filter::{FilterExpr, RegionLeaf};
+use mosaica_engine::shapes::ShapeF64;
+use mosaica_engine::{
     Engine, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink, RecordsOrder,
     Session, SinkResult,
 };
-use tessera_spatial::shape::Space;
-use tessera_spatial::Projection;
+use mosaica_spatial::shape::Space;
+use mosaica_spatial::Projection;
 
 static LIVE: AtomicU64 = AtomicU64::new(0);
 static PEAK: AtomicU64 = AtomicU64::new(0);
@@ -189,12 +189,12 @@ fn bundle(dir: &Path, n: u64, note_of: impl Fn(u64) -> usize) -> Engine {
             points: points.clone(),
             point_fields: Fields::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
         strict: false,

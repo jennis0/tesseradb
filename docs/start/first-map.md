@@ -1,6 +1,6 @@
 # Your first map from files
 
-This tutorial is for someone who has never used Tessera. We'll take the 29,935 places GeoNames lists
+This tutorial is for someone who has never used Mosaica. We'll take the 29,935 places GeoNames lists
 for Ireland and put them on a map in your browser, where you can search them by name and filter them
 by kind of place and by population.
 
@@ -9,21 +9,21 @@ This tutorial should take about 30 minutes to complete. You'll need Rust (instal
 
 ## What we'll do
 
-1. Build `tessera` from its source code.
+1. Build `mosaica` from its source code.
 2. Download the GeoNames file for Ireland and convert it to Parquet.
-3. Write a declaration that describes the data, and validate it with `tessera check`.
-4. Build the data into a deployment with `tessera build`.
-5. Start the server with `tessera serve`.
+3. Write a declaration that describes the data, and validate it with `mosaica check`.
+4. Build the data into a deployment with `mosaica build`.
+5. Start the server with `mosaica serve`.
 6. Open the map in a browser and filter it.
 
-## Build Tessera
+## Build Mosaica
 
-Clone the repository, then build and install the `tessera` binary with cargo.
+Clone the repository, then build and install the `mosaica` binary with cargo.
 
 ```bash
-git clone https://github.com/jennis0/tesseradb ~/tesseradb
-cd ~/tesseradb
-cargo install --path crates/tessera-cli
+git clone https://github.com/jennis0/mosaica ~/mosaica
+cd ~/mosaica
+cargo install --path crates/mosaica-cli
 ```
 
 ```
@@ -36,11 +36,11 @@ Cargo puts the program in `~/.cargo/bin`, which rustup has already added to your
 check straight away that it runs.
 
 ```bash
-tessera --version
+mosaica --version
 ```
 
 ```
-tessera 310920847827ba735cd8e953c898784853e84291
+mosaica 310920847827ba735cd8e953c898784853e84291
 ```
 
 The long number is the commit your copy was built from, so yours will be different.
@@ -82,14 +82,14 @@ A population of 0 means GeoNames doesn't have a figure, which is true of most pl
 1,119 of the 29,935 have a population at all. That will matter when we come to filter by it.
 
 For this demo we'll keep five of the 19 columns: the name, the latitude and longitude, the class of
-place and the population. We'll leave the GeoNames id behind. Tessera doesn't need one to build a
+place and the population. We'll leave the GeoNames id behind. Mosaica doesn't need one to build a
 map, and when we check the declaration we'll see what an id column would have changed.
 
 ## Convert it to Parquet
 
-Tessera's build reads Parquet, an efficient file format for tables. A Parquet file records the name and type of
+Mosaica's build reads Parquet, an efficient file format for tables. A Parquet file records the name and type of
 every column inside the file itself, so a program can see what columns it has without reading any
-rows. `tessera check` makes use of that later on.
+rows. `mosaica check` makes use of that later on.
 
 We'll do the conversion with pyarrow, a Python library for Parquet. Make a Python environment and
 install pyarrow in it.
@@ -137,7 +137,7 @@ print(f"wrote {points.num_rows} places to points.parquet")
 Because the file has no header, the script supplies the 19 column names itself, in the order
 `readme.txt` lists them. GeoNames doesn't quote its fields, so the script tells pyarrow not to look
 for quotes. It reads the population as a whole number, then writes five columns to
-`points.parquet` under the names we'll tell Tessera to expect. Each row will be one place on the
+`points.parquet` under the names we'll tell Mosaica to expect. Each row will be one place on the
 map.
 
 - `lon` and `lat` are the place's position in degrees.
@@ -157,7 +157,7 @@ Every line of `IE.txt` is now a row in `points.parquet`.
 
 ## Describe the data
 
-Next we tell Tessera what the data means, in a file called a declaration. It's written in TOML. A
+Next we tell Mosaica what the data means, in a file called a declaration. It's written in TOML. A
 declaration names the files to read and says how to place each row on a map. It lists the columns to
 keep and the kind of value each holds, and it says who may see each row. Save this as `corpus.toml` beside
 `points.parquet`.
@@ -217,7 +217,7 @@ The `extent` gives a range of longitude and a range of latitude, in degrees. Our
 around Ireland. A declaration has to give an extent, but it can be `"auto"`, which fits it to the
 data. We give a rectangle so that a place with a bad coordinate can't stretch the map.
 
-`point_visibility` decides who may see each place. Tessera gives each place an access label, and
+`point_visibility` decides who may see each place. Mosaica gives each place an access label, and
 each viewer holds a set of labels. A viewer sees only the places whose label they hold. Labels
 usually come from a column in your data, but we don't have one, so every place gets the default
 label, `public`. Every viewer holds `public`, so everyone will see every place. The tutorial on
@@ -252,13 +252,13 @@ carries. The alternative, `derived`, would show each viewer only the values foun
 see. This `public` is a setting on the vocabulary itself, and has nothing to do with the access
 label on each place.
 
-**The attributes.** An attribute is a property Tessera keeps for every place, which you can use to
+**The attributes.** An attribute is a property Mosaica keeps for every place, which you can use to
 draw, filter or highlight the data. We declare three. The name is `text`, the feature class is a
 `category` drawn from the vocabulary above, and the population is an `i64`, which is a whole number.
 
-Unlike a traditional database, Tessera is built to stream millions of points to the user's browser
+Unlike a traditional database, Mosaica is built to stream millions of points to the user's browser
 for an interactive map. Most attributes aren't needed to draw the map, so when you build a database
-you tell Tessera what each attribute is for. There are two settings.
+you tell Mosaica what each attribute is for. There are two settings.
 
 - `render = true` stores the value beside each place's position on the map, so it travels with
   every point that's drawn. Any value the map uses when drawing, such as the colour of each point,
@@ -271,9 +271,9 @@ for filtering. It takes less memory and less disk space than one with either.
 
 ## Describe the deployment
 
-The declaration describes the data. A second file, `tessera.toml`, configures the database itself.
+The declaration describes the data. A second file, `mosaica.toml`, configures the database itself.
 It says where the bundle goes and which declaration to build, and holds the rest of the system's
-settings. `tessera check`, `tessera build` and `tessera serve` all look for it in the directory you
+settings. `mosaica check`, `mosaica build` and `mosaica serve` all look for it in the directory you
 run them from, and then in the directories above. Save this beside `corpus.toml`.
 
 ```toml
@@ -311,17 +311,17 @@ is plenty here.
 `[serve]` gives the server's three addresses and the name of a file holding the operator's secret.
 We'll create the file, and explain the addresses, when we start the server.
 
-`[catalogue]` names the directory where Tessera keeps its users, the passwords and keys they sign
+`[catalogue]` names the directory where Mosaica keeps its users, the passwords and keys they sign
 in with, and what each may see and do. The server creates it the first time it starts.
 
 ## Check the declaration
 
-Before building anything, ask Tessera what it makes of the two files. `tessera check` reads the
+Before building anything, ask Mosaica what it makes of the two files. `mosaica check` reads the
 declaration, opens each Parquet file it names, and compares the columns the declaration asks for
 with the columns each file actually has. It only reads names and types, never rows, so it's quick.
 
 ```bash
-tessera check
+mosaica check
 ```
 
 ```
@@ -353,16 +353,16 @@ The last line counts two sources, though we only have one file. The check reads 
 twice, once for the attributes and once for the view's positions.
 
 The `identity` lines, one for each reading, say how the build will tell one place from another. A
-database usually does that with a key. Tessera's equivalent is an attribute declared
+database usually does that with a key. Mosaica's equivalent is an attribute declared
 `unique = true`, such as the GeoNames id. A row carrying an id that a place already holds then
 names that place and changes it. We declared no unique attribute, so nothing in our file names a
 place, and each row becomes a place of its own. That's all a map built once from one file needs.
 If you later wanted to correct or delete a place by its GeoNames id, you'd keep the `geonameid`
-column in `convert.py` and declare it as an `i64` attribute with `unique = true`. Tessera would
+column in `convert.py` and declare it as an `i64` attribute with `unique = true`. Mosaica would
 then keep an index from each id to its place.
 
 The projected views section holds a surprise. We asked for a rectangle, but the check says the
-view has been snapped outward to a square. Tessera stores positions on a grid that lines up with the
+view has been snapped outward to a square. Mosaica stores positions on a grid that lines up with the
 standard map tiles, so that any tile the map asks for, at any zoom, falls exactly on the grid. To
 make that work it widens our extent to the smallest standard tile that contains it. At zoom level 5
 the world is 32 tiles across, and ours is the tile in column 15, row 10, counting from zero at the
@@ -375,7 +375,7 @@ While nothing depends on it yet, try making a mistake. Open `corpus.toml`, chang
 attribute's name to `populaton`, and run the check again.
 
 ```bash
-tessera check
+mosaica check
 ```
 
 ```
@@ -388,11 +388,11 @@ check FAILED: 1 finding(s) across 2 source(s). Nothing was read but Parquet sche
 The check names the attribute, says which column it went looking for, and lists the columns the file
 does have. Its last line is honest about its limits. It has only seen names and types, so a class
 missing from our closed vocabulary would get past it, and only the build would catch that. Change
-the name back to `population` and run `tessera check` once more to get `check OK` back.
+the name back to `population` and run `mosaica check` once more to get `check OK` back.
 
 ## Build the bundle
 
-Inside the server, every place is identified by a number of Tessera's own. That number never
+Inside the server, every place is identified by a number of Mosaica's own. That number never
 leaves the server, because a viewer who collected a few of them could estimate how many places
 they aren't allowed to see. Browsers get a `tessera_id` for each place instead. It's the internal
 number scrambled with a secret key, which the build makes up at random and keeps inside the bundle.
@@ -409,7 +409,7 @@ access label. Everything goes into the `bundle` directory. From here on the serv
 bundle, and never looks at your Parquet file again.
 
 ```bash
-tessera build
+mosaica build
 ```
 
 ```
@@ -457,7 +457,7 @@ nothing in our file can name a place twice.
 
 ## Serve it
 
-The server needs the secret file `tessera.toml` names. Fill it with a random value that only you
+The server needs the secret file `mosaica.toml` names. Fill it with a random value that only you
 can read.
 
 ```bash
@@ -477,18 +477,18 @@ The server listens on three addresses, each with its own job.
 
 Keeping them apart means you can open each address only to the callers that need it.
 
-`tessera serve` opens the bundle and starts answering on all three. It keeps running until you stop
+`mosaica serve` opens the bundle and starts answering on all three. It keeps running until you stop
 it, so give it a terminal of its own.
 
 ```bash
 cd ~/ireland
-tessera serve
+mosaica serve
 ```
 
 ```
-2026-09-24T00:49:40.984688Z  INFO tessera_server::memory: the allocator's arena count is capped arenas=12
-2026-09-24T00:49:41.027452Z  INFO tessera_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
-2026-09-24T00:49:41.027864Z  INFO tessera_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
+2026-09-24T00:49:40.984688Z  INFO mosaica_server::memory: the allocator's arena count is capped arenas=12
+2026-09-24T00:49:41.027452Z  INFO mosaica_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
+2026-09-24T00:49:41.027864Z  INFO mosaica_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
 {"event":"listening","viewer":"127.0.0.1:9141","session":"127.0.0.1:9142","control":"127.0.0.1:9143"}
 ```
 
@@ -497,27 +497,27 @@ line is the one to look for. It means all three addresses are open.
 
 ## Open the map
 
-The map itself is drawn by Tessera's browser components, which live in the repository's `clients/ts`
+The map itself is drawn by Mosaica's browser components, which live in the repository's `clients/ts`
 directory. They aren't published as a package yet, so build them from the clone. Use a second
 terminal for this.
 
 ```bash
-cd ~/tesseradb/clients/ts
+cd ~/mosaica/clients/ts
 npm ci
-npm run build -w @tesseradb/components
+npm run build -w @mosaica/components
 ```
 
 ```
 ...
 dist/assets/decode.worker-DjqcC_7y.js    266.69 kB
-dist/tessera-components.js             1,857.60 kB │ gzip: 444.08 kB
+dist/mosaica-components.js             1,857.60 kB │ gzip: 444.08 kB
 
 ✓ built in 3.75s
 ...
 ```
 
 `examples/plain-html` holds a web page with the map on it, and a small Node server that signs you
-in. Tessera needs to know who you are signed in as. It keeps its users, which it calls principals,
+in. Mosaica needs to know who you are signed in as. It keeps its users, which it calls principals,
 in the catalogue, and the page's server asks the session address for a token on your behalf.
 
 So we need two principals. `everyone` is the person reading the map. It holds the `read`
@@ -528,11 +528,11 @@ operator secret.
 
 ```bash
 cd ~/ireland
-export TESSERA_CREDENTIAL=$(cat operator.secret)
-tessera principal create everyone --kind person --control http://127.0.0.1:9143
-tessera grant --principal everyone --permission read --control http://127.0.0.1:9143
-tessera principal create page --kind service --control http://127.0.0.1:9143
-tessera grant --principal page --permission authorise-as --control http://127.0.0.1:9143
+export MOSAICA_CREDENTIAL=$(cat operator.secret)
+mosaica principal create everyone --kind person --control http://127.0.0.1:9143
+mosaica grant --principal everyone --permission read --control http://127.0.0.1:9143
+mosaica principal create page --kind service --control http://127.0.0.1:9143
+mosaica grant --principal page --permission authorise-as --control http://127.0.0.1:9143
 ```
 
 ```
@@ -544,12 +544,12 @@ tessera grant --principal page --permission authorise-as --control http://127.0.
 
 Each change answers how many sessions it ended. Nobody is signed in yet, so the answer is 0.
 
-The page's server proves it is `page` with an API key. Tessera shows a key once, when it makes it,
+The page's server proves it is `page` with an API key. Mosaica shows a key once, when it makes it,
 so save it straight to a file only you can read.
 
 ```bash
 umask 077
-tessera key create page --control http://127.0.0.1:9143 > page.key
+mosaica key create page --control http://127.0.0.1:9143 > page.key
 cat page.key
 ```
 
@@ -562,16 +562,16 @@ principal it reads as. The list that comes with the example belongs to a differe
 replace it with a single person, Everyone.
 
 ```bash
-cd ~/tesseradb/clients/ts/examples/plain-html
+cd ~/mosaica/clients/ts/examples/plain-html
 echo '{"everyone": {"label": "Everyone", "principal": "everyone"}}' > users.json
 ```
 
-Tell the page's server where Tessera is listening and give it the key, then start it.
+Tell the page's server where Mosaica is listening and give it the key, then start it.
 
 ```bash
-export TESSERA_VIEWER_URL=http://127.0.0.1:9141
-export TESSERA_SESSION_URL=http://127.0.0.1:9142
-export TESSERA_API_KEY=$(python3 -c 'import json; print(json.load(open("/dev/stdin"))["key"])' < ~/ireland/page.key)
+export MOSAICA_VIEWER_URL=http://127.0.0.1:9141
+export MOSAICA_SESSION_URL=http://127.0.0.1:9142
+export MOSAICA_API_KEY=$(python3 -c 'import json; print(json.load(open("/dev/stdin"))["key"])' < ~/ireland/page.key)
 node server.mjs
 ```
 
@@ -619,21 +619,21 @@ isn't among them.
 Choose Clear all again, then pick `feature_class` under Colour by. Each class gets its own colour,
 using the value that `render = true` sends with every point.
 
-When you've finished, press Ctrl-C in each terminal to stop the page's server and Tessera.
+When you've finished, press Ctrl-C in each terminal to stop the page's server and Mosaica.
 
 ## What you built
 
 `~/ireland` now holds a working deployment. The data is in `points.parquet` and the declaration in
-`corpus.toml`. `tessera.toml` holds the deployment's settings, `operator.secret` the operator's
+`corpus.toml`. `mosaica.toml` holds the deployment's settings, `operator.secret` the operator's
 secret, and `page.key` the page's key. The `catalogue` directory holds the two principals, and the
 `bundle` directory is what the build made from the data. To bring the map back, start
-`tessera serve` in `~/ireland`, then run the three `export` lines and `node server.mjs` in the
+`mosaica serve` in `~/ireland`, then run the three `export` lines and `node server.mjs` in the
 example's directory. The principals and the key are still in the catalogue.
 
 ## What you learned
 
-- A declaration tells Tessera what your data means. `tessera check` compares it with the column
-  names and types in your files, and `tessera build` reads every row.
+- A declaration tells Mosaica what your data means. `mosaica check` compares it with the column
+  names and types in your files, and `mosaica build` reads every row.
 - The bundle is what the server serves. The build sorts the places into map order and writes the
   indexes the server needs, and after that the server never opens your source files.
 - Every place carries an access label, and a viewer sees only the places whose label they hold.
@@ -648,7 +648,7 @@ example's directory. The principals and the key are still in the catalogue.
 
 The next tutorial is about access control. It gives places different labels, signs in two people who
 hold different ones, and compares their maps. It also explains the permission a browser gets, which
-Tessera calls a token. That tutorial isn't written yet. In the meantime, the
+Mosaica calls a token. That tutorial isn't written yet. In the meantime, the
 [overview](../system/overview.md) describes the whole system, and [the data
 model](../system/data-model.md) says more about views, attributes and vocabularies. [Access
 control](../system/access-control.md) covers labels and tokens.

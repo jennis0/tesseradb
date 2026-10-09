@@ -1,13 +1,13 @@
 import {Field, Float64, List, Null, RecordBatch, Schema, Struct, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, vi, type TestContext} from 'vitest';
 import {clusterLayerDeclaration, labelLayerDeclaration} from '../../scripts/operator.js';
-import {TesseraClient} from '../src/client.js';
+import {MosaicaClient} from '../src/client.js';
 import {Control} from '../src/control.js';
 import type {Meta, ViewportRequest} from '../src/types.js';
 import {start, type Served} from './served.js';
 
 /**
- * `Control` against a real `tessera serve` over the notebook corpus (`served.ts` builds and starts
+ * `Control` against a real `mosaica serve` over the notebook corpus (`served.ts` builds and starts
  * it), each write read back through the viewer plane. The rows written here carry a label no
  * notebook item carries, and a session holding only that label sees exactly them. A session resolves
  * its terms when it is authorised, so the one that reads the rows is authorised after they land.
@@ -21,7 +21,7 @@ const IDS = ['row-0', 'row-1', 'row-2', 'row-3'];
 const LAYER = 'ts-live/picks';
 
 let served: Served | string = 'the server has not started';
-let client: TesseraClient;
+let client: MosaicaClient;
 let control: Control;
 let meta: Meta;
 let token: string;
@@ -31,7 +31,7 @@ let pair: bigint;
 beforeAll(async () => {
   served = await start();
   if (typeof served === 'string') return;
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential});
+  client = new MosaicaClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential});
   control = new Control({controlUrl: served.controlUrl, credential: served.operatorCredential});
   token = (await client.authorise({terms: [TERM]})).token;
   meta = await client.meta(token);
@@ -375,7 +375,7 @@ describe('Control against a live server', () => {
     expect((await control.grant({principal: 'ts-live-portal', permission: 'authorise-as'})).ok).toBe(true);
     const portalKey = String((await control.createKey('ts-live-portal')).body.key);
     const {viewerUrl, sessionUrl} = served as Served;
-    const portal = new TesseraClient({viewerUrl, sessionUrl, sessionCredential: portalKey});
+    const portal = new MosaicaClient({viewerUrl, sessionUrl, sessionCredential: portalKey});
     const minted = await portal.authorise({principal: name});
     expect((await seen(minted.token)).visible).toBe((await seen()).visible);
     await portal.revoke(minted.tokenId);

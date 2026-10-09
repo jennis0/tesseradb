@@ -57,7 +57,7 @@ pub struct MetaGroup {
 /// The tile a view's frame corresponds to, and the scheme it is a tile of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TileAddress {
-    /// The tile scheme's name — [`tessera_spatial::frame::XYZ`] is the only one this system can
+    /// The tile scheme's name — [`mosaica_spatial::frame::XYZ`] is the only one this system can
     /// name.
     pub scheme: &'static str,
     pub z: u32,
@@ -83,7 +83,7 @@ pub struct EngineMeta {
     /// The group-scoped attribute column families, flattened over the groups in manifest order:
     /// one entry per family, naming the group whose views it has a column per and the view ids
     /// that have one.
-    pub scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
+    pub scoped_scalars: Vec<mosaica_store::manifest::ScopedScalar>,
     /// Each of `scoped_scalars`' view ids, positionally; see [`Self::scoped_family_views`].
     scoped_views: Vec<Vec<String>>,
     /// The live category bindings, from the same generation as `declared_scalars`. Ingest
@@ -143,7 +143,7 @@ pub(crate) enum Resolution<'a> {
     Declared(usize),
     /// A group-scoped family's column for one view.
     Scoped {
-        family: &'a tessera_store::manifest::ScopedScalar,
+        family: &'a mosaica_store::manifest::ScopedScalar,
         view: String,
     },
     Unknown,
@@ -160,8 +160,8 @@ pub(crate) enum Resolution<'a> {
 }
 
 /// Every integer width, and `timestamp_us`, whose values are `i64` microseconds.
-fn is_integer(ty: tessera_spatial::tiler::ScalarType) -> bool {
-    use tessera_store::unique::KeyKind;
+fn is_integer(ty: mosaica_spatial::tiler::ScalarType) -> bool {
+    use mosaica_store::unique::KeyKind;
     matches!(KeyKind::of(ty), Some(KeyKind::Unsigned | KeyKind::Signed))
 }
 
@@ -197,7 +197,7 @@ impl Resolution<'_> {
 impl EngineMeta {
     /// The view a request's id names — a plain view's name, or a group's `<group>:<key>` — or
     /// `None` for a view this bundle does not declare. One resolution for both planes: a viewer
-    /// verb's `view`, `x-tessera-view` and this document's own `views` are one namespace, and the
+    /// verb's `view`, `x-mosaica-view` and this document's own `views` are one namespace, and the
     /// key is the only address a view has.
     pub fn resolve_view(&self, requested: &str) -> Option<&MetaView> {
         self.views.iter().find(|v| v.id == requested)
@@ -278,7 +278,7 @@ impl EngineMeta {
         view: &str,
         visible: &crate::gate::VisibleViews,
         declared: impl Fn(&DeclaredScalar) -> bool,
-        scoped: impl Fn(&tessera_store::manifest::ScopedScalar) -> bool,
+        scoped: impl Fn(&mosaica_store::manifest::ScopedScalar) -> bool,
     ) -> Resolution<'_> {
         let (name, pin) = match leaf.split_once(crate::filter::PIN) {
             Some((name, pin)) => (name, Some(pin)),
@@ -308,7 +308,7 @@ impl EngineMeta {
         if !visible.contains_group(&family.group) {
             return Resolution::Unknown;
         }
-        let group_view = |key: &str| format!("{}{}{key}", family.group, tessera_store::GROUP_SEPARATOR);
+        let group_view = |key: &str| format!("{}{}{key}", family.group, mosaica_store::GROUP_SEPARATOR);
         match pin {
             Some(pin) => match self.resolve_visible_view(&group_view(pin), visible) {
                 // A view with no column reads the same as a key nobody declared or a gate-failed
@@ -355,7 +355,7 @@ impl EngineMeta {
     /// under every group declaring `members` of it. Unfiltered: the caller applies the gate.
     pub fn scoped_family_views(
         &self,
-        family: &tessera_store::manifest::ScopedScalar,
+        family: &mosaica_store::manifest::ScopedScalar,
     ) -> Vec<String> {
         self.scoped_scalars
             .iter()
@@ -398,13 +398,13 @@ pub(crate) fn meta_of(generation: &Generation) -> EngineMeta {
     // The tile scheme is a function of the view's projection and frame together, derived
     // here rather than at the wire, so the ingest plane cannot come to a different answer
     // about the same bundle.
-    let meta_view = |s: &tessera_store::manifest::ViewDescriptor,
+    let meta_view = |s: &mosaica_store::manifest::ViewDescriptor,
                      roster: Option<MetaRoster>| MetaView {
         id: s.id.clone(),
         display_name: s.display_name.clone(),
         quantisation: s.quantisation,
         projection: s.projection,
-        tile: tessera_spatial::frame::tile_scheme(
+        tile: mosaica_spatial::frame::tile_scheme(
             s.projection,
             &Bounds {
                 x_min: s.quantisation.x_min,

@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use tessera_authz::{coalesce_delta_tiers, write_delta_tier, DeltaTier};
-use tessera_types::TermId;
+use mosaica_authz::{coalesce_delta_tiers, write_delta_tier, DeltaTier};
+use mosaica_types::TermId;
 
 const SMALL_TERM_THRESHOLD: u32 = 32;
 
@@ -20,8 +20,8 @@ fn tier_at(dir: &std::path::Path, name: &str, entries: &[(u32, &[u32])]) -> Path
 fn posting(path: &std::path::Path, term: u32) -> Option<Vec<u32>> {
     let tier = DeltaTier::open(path).unwrap();
     tier.posting(TermId::new(term)).unwrap().map(|p| match p {
-        tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
-        tessera_authz::PostingRef::Array(bytes) => bytes
+        mosaica_authz::PostingRef::Roaring(view) => view.iter().collect(),
+        mosaica_authz::PostingRef::Array(bytes) => bytes
             .as_chunks::<4>()
             .0
             .iter()

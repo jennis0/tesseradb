@@ -1,11 +1,11 @@
 [package]
-name = "tessera-spatial"
+name = "mosaica-spatial"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
 
 [dependencies]
-tessera-types = { path = "../tessera-types" }
+mosaica-types = { path = "../mosaica-types" }
 
 [dev-dependencies]
 proptest = { workspace = true }

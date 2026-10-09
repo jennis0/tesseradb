@@ -1,7 +1,7 @@
 """Known-answer tests for `oracle.text` — the `match` and `phrase` arithmetic, by hand.
 
 **What is under test here is the set-and-sequence arithmetic, not the segmentation.** `tokenise`
-and `identity` reach the shipped `tessera tokenise` verb (decision 0070), which is a declared
+and `identity` reach the shipped `mosaica tokenise` verb (decision 0070), which is a declared
 echo: asking the binary what a string segments into and then asserting the answer would be testing
 the CLI, and re-implementing UAX #29 in Python would compare ICU4C against icu4x and turn every
 disagreement into a research question. So those two functions are **not** covered below, and the

@@ -8,7 +8,7 @@
 //!
 //! `terms/pairs.parquet` is the flat `(entity_id, term_id)` relation the mask differential runs
 //! against, sorted term-then-entity, exactly the order this sweep visits terms in. Its writer
-//! lives in `tessera-store`, which this crate must not depend on, so [`sweep_term_postings`]
+//! lives in `mosaica-store`, which this crate must not depend on, so [`sweep_term_postings`]
 //! takes an `on_term` callback instead of writing the file itself: it hands the caller each
 //! term's final bitmap, and a caller on the legal side of the boundary drives the write from it.
 //!
@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_types::TermId;
+use mosaica_types::TermId;
 
 use crate::postings::{encode_posting_bitmap, union_postings, PostingsReader, PostingsSpool};
 use crate::tier::DeltaTier;

@@ -9,9 +9,9 @@
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_lifecycle::membership::Attachment;
-use tessera_types::layer::{HierarchyKind, RegisteredLayer};
-use tessera_types::EntityId;
+use mosaica_lifecycle::membership::Attachment;
+use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
+use mosaica_types::EntityId;
 
 use crate::artifact_content::LevelContent;
 use crate::artifacts::{ArtifactRows, ArtifactView};

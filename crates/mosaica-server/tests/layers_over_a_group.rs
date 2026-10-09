@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use common::*;
-use tessera_build::{build, BuildArgs, ViewArgs};
+use mosaica_build::{build, BuildArgs, ViewArgs};
 
 const ENTITIES: u64 = 40;
 const YEARS: [&str; 2] = ["2010", "2011"];
@@ -186,12 +186,12 @@ struct Built {
     dir: PathBuf,
 }
 
-/// The declaration as `tessera build` reads it: parsed, its views enumerated, each layer's `views`
+/// The declaration as `mosaica build` reads it: parsed, its views enumerated, each layer's `views`
 /// expanded against them.
-fn parse(dir: &Path, layers: &str) -> Result<tessera_build::config::Config, String> {
+fn parse(dir: &Path, layers: &str) -> Result<mosaica_build::config::Config, String> {
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, format!("{VIEWS_TOML}{layers}")).unwrap();
-    tessera_build::config::Config::parse(&config_path, &Default::default()).map_err(|e| e.to_string())
+    mosaica_build::config::Config::parse(&config_path, &Default::default()).map_err(|e| e.to_string())
 }
 
 /// Build the fixture the way the binary does, with `layers` declared and `keyed` saying which
@@ -213,12 +213,12 @@ fn build_side(layers: &str, keyed: &dyn Fn(u64) -> bool) -> Built {
             points: view.source.clone().expect("every view names its points"),
             point_fields: view.fields.clone(),
             select: view.select.clone(),
-            access: tessera_build::config::AccessInput::relation(dir.join("pairs.parquet")),
+            access: mosaica_build::config::AccessInput::relation(dir.join("pairs.parquet")),
         })
         .collect();
     let groups = config.group_registry(&registry, &views);
     for layer in &mut config.layers {
-        layer.views = tessera_build::config::Config::expand_layer_views(&registry, &layer.views);
+        layer.views = mosaica_build::config::Config::expand_layer_views(&registry, &layer.views);
     }
     let scoped_layers = config
         .scopes
@@ -227,7 +227,7 @@ fn build_side(layers: &str, keyed: &dyn Fn(u64) -> bool) -> Built {
         .map(|(layer, group)| {
             (
                 layer.clone(),
-                tessera_build::ScopedLayer {
+                mosaica_build::ScopedLayer {
                     group: group.clone(),
                     column: "view".to_string(),
                     keys: YEARS.iter().map(|y| y.to_string()).collect(),
@@ -278,10 +278,10 @@ async fn post_keys(
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream");
     if let Some(view) = view {
-        request = request.header("x-tessera-view", view);
+        request = request.header("x-mosaica-view", view);
     }
     let resp = request.body(body).send().await.unwrap();
     let status = resp.status().as_u16();

@@ -33,7 +33,7 @@
 //! correctness-suite §12.3's table names for its site, read off the disc.
 //!
 //! The manifest seam is additionally held over real HTTP by
-//! `tessera-server/tests/faults_surface.rs`, which is the same site reached the way the
+//! `mosaica-server/tests/faults_surface.rs`, which is the same site reached the way the
 //! correctness suite's driver reaches it.
 
 mod common;
@@ -43,10 +43,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
-use tessera_lifecycle::{ChangeOp, UnallocatedRow};
-use tessera_types::EntityId;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+use mosaica_lifecycle::{ChangeOp, UnallocatedRow};
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(30);
 

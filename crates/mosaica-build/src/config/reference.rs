@@ -5,11 +5,11 @@
 //! comment, regenerate the page with:
 //!
 //! ```text
-//! TESSERA_WRITE_CORPUS_REFERENCE=1 cargo test -p tessera-build corpus_reference
+//! MOSAICA_WRITE_CORPUS_REFERENCE=1 cargo test -p mosaica-build corpus_reference
 //! ```
 //!
 //! The page walks `ConfigFile`: a field whose type is a block struct becomes a table of its own,
-//! headed by its path, and each row is a field described by its doc comment as `tessera_docgen`
+//! headed by its path, and each row is a field described by its doc comment as `mosaica_docgen`
 //! reads one. The other tests hold the page to `Config::parse`, each through [`FIXTURE`]: the page
 //! lists exactly the keys the parser accepts, each default it writes as a TOML value compiles to
 //! the same declaration as leaving the key out, and each key it calls required is refused when
@@ -18,12 +18,12 @@
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-use tessera_docgen::{Doc, Key, Source, TABLE_HEADER};
+use mosaica_docgen::{Doc, Key, Source, TABLE_HEADER};
 
 use super::*;
 
 const REGENERATE: &str =
-    "TESSERA_WRITE_CORPUS_REFERENCE=1 cargo test -p tessera-build corpus_reference";
+    "MOSAICA_WRITE_CORPUS_REFERENCE=1 cargo test -p mosaica-build corpus_reference";
 
 /// Fields held as a `toml::Value` whose table form is a struct: the key it is under, and the
 /// struct that describes the table.
@@ -186,7 +186,7 @@ fn types_table() -> String {
                     .unwrap_or_else(|| panic!("DECLARABLE_TYPES names '{name}', not a type")),
             ),
         };
-        let _ = writeln!(out, "| `{name}` | {} |", tessera_docgen::cell(holds));
+        let _ = writeln!(out, "| `{name}` | {} |", mosaica_docgen::cell(holds));
     }
     out
 }
@@ -211,7 +211,7 @@ fn render() -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "<!-- Generated from crates/tessera-build/src/config.rs. Edit the doc comments there, \
+        "<!-- Generated from crates/mosaica-build/src/config.rs. Edit the doc comments there, \
          then run: {REGENERATE} -->\n"
     );
     out.push_str("# corpus.toml\n\n");
@@ -251,12 +251,12 @@ fn render() -> String {
 
 #[test]
 fn corpus_reference_matches_the_source() {
-    tessera_docgen::check_page(
+    mosaica_docgen::check_page(
         Path::new(
             &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/reference/corpus-toml.md"),
         ),
         &render(),
-        "TESSERA_WRITE_CORPUS_REFERENCE",
+        "MOSAICA_WRITE_CORPUS_REFERENCE",
         REGENERATE,
     );
 }
@@ -508,7 +508,7 @@ fn the_reference_lists_the_keys_the_parser_accepts() {
         .map(|k| k.name)
         .collect();
     top.sort();
-    let accepted = tessera_docgen::accepted_keys(&refusal(&format!("nonesuch = 1\n{FIXTURE}")));
+    let accepted = mosaica_docgen::accepted_keys(&refusal(&format!("nonesuch = 1\n{FIXTURE}")));
     assert_eq!(accepted, Some(top), "the top level");
 
     for table in tables(&sources) {
@@ -522,7 +522,7 @@ fn the_reference_lists_the_keys_the_parser_accepts() {
             continue;
         }
         let message = refusal(&with_line(FIXTURE, &table.path, "nonesuch = 1"));
-        let accepted = tessera_docgen::accepted_keys(&message);
+        let accepted = mosaica_docgen::accepted_keys(&message);
         assert_eq!(accepted, Some(keys), "{}: {message}", table.path);
     }
 }
@@ -593,7 +593,7 @@ fn the_space_of_an_inline_row_defaults_to_the_one_the_page_states() {
     let stated = stated["space"].as_str().expect("a string").to_string();
 
     let config = parsed(FIXTURE).expect("FIXTURE compiles");
-    let frame = tessera_store::derived::ViewFrame::new(
+    let frame = mosaica_store::derived::ViewFrame::new(
         "map",
         Projection::None,
         Bounds {
@@ -624,7 +624,7 @@ fn the_space_of_an_inline_row_defaults_to_the_one_the_page_states() {
             &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             std::slice::from_ref(&frame),
-            tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+            mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
             scratch.path(),
             1 << 30,
         )

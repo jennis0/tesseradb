@@ -17,7 +17,7 @@
 //! `V = cap + 1` must count and select. The two differ by one row of work out of `cap`, which is
 //! under 1/cap of the total and far below the effect being measured.
 //!
-//! Run: `cargo run --release --example route_saving -p tessera-engine`
+//! Run: `cargo run --release --example route_saving -p mosaica-engine`
 //!
 //! **Reports the minimum of [`TRIALS`] trials, not a single timing or a mean.** This is a
 //! microbenchmark on a shared box: a competing load (another bench, a test suite, a build) inflates
@@ -33,16 +33,16 @@ use std::time::Instant;
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::projection::RowProjection;
-use tessera_engine::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
-use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
-use tessera_store::read::SegmentData;
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::{EntityId, TermId, TesseraId};
+use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
+use mosaica_engine::compose::{compose, EffectiveMask};
+use mosaica_engine::projection::RowProjection;
+use mosaica_engine::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
+use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
+use mosaica_store::read::SegmentData;
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::{EntityId, TermId, TesseraId};
 
 const EXTENT: Bounds = Bounds {
     x_min: 0.0,
@@ -221,7 +221,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
         temp.path(),
         "seg0",
         items.len() as u32,
-        tessera_store::edited::RowEntities::Numbers,
+        mosaica_store::edited::RowEntities::Numbers,
     )
     .unwrap();
 

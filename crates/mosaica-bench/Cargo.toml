@@ -1,5 +1,5 @@
 [package]
-name = "tessera-bench"
+name = "mosaica-bench"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -11,60 +11,60 @@ publish = false
 #
 # `bench-timing` is enabled by default HERE and only here. That is safe for this binary and
 # unsafe for the workspace: cargo's resolver-2 unifies features across a `--workspace` build, so
-# `tessera-cli` compiled in the same invocation also gets it. The second gate — `[serve]
+# `mosaica-cli` compiled in the same invocation also gets it. The second gate — `[serve]
 # stage_timing`, default false — is what makes that harmless, and `scripts/check-no-stage-header.sh`
 # asserts the shipped binary stays quiet.
 
 [features]
 default = ["bench-timing"]
 bench-timing = [
-    "tessera-engine/bench-timing",
-    "tessera-server/bench-timing",
+    "mosaica-engine/bench-timing",
+    "mosaica-server/bench-timing",
     # `suggest_walk --decomp` prices `ColumnPostings::intersects` a stage at a time.
-    "tessera-filter/bench-timing",
-    "tessera-authz/bench-timing",
+    "mosaica-filter/bench-timing",
+    "mosaica-authz/bench-timing",
 ]
 
 [dependencies]
-tessera-types = { path = "../tessera-types" }
+mosaica-types = { path = "../mosaica-types" }
 # `artifact_campaign_fixture` authors the Stage 7 campaign's spatial boxes over the generator's
 # own authored tile prefixes, and constructs its principal ladder in the generator's term space.
-# `check-layers.sh` constrains what `tessera-corpus` may depend ON — the second statement of the
+# `check-layers.sh` constrains what `mosaica-corpus` may depend ON — the second statement of the
 # corpus must not learn to read an artefact — and says nothing about who depends on it; the CLI
 # and several test crates already do.
-tessera-corpus = { path = "../tessera-corpus" }
-tessera-authz = { path = "../tessera-authz" }
-tessera-spatial = { path = "../tessera-spatial" }
-tessera-store = { path = "../tessera-store" }
-tessera-roaring = { path = "../tessera-roaring" }
-tessera-lifecycle = { path = "../tessera-lifecycle" }
-tessera-engine = { path = "../tessera-engine" }
-tessera-build = { path = "../tessera-build" }
-tessera-server = { path = "../tessera-server" }
+mosaica-corpus = { path = "../mosaica-corpus" }
+mosaica-authz = { path = "../mosaica-authz" }
+mosaica-spatial = { path = "../mosaica-spatial" }
+mosaica-store = { path = "../mosaica-store" }
+mosaica-roaring = { path = "../mosaica-roaring" }
+mosaica-lifecycle = { path = "../mosaica-lifecycle" }
+mosaica-engine = { path = "../mosaica-engine" }
+mosaica-build = { path = "../mosaica-build" }
+mosaica-server = { path = "../mosaica-server" }
 # `record_blob_ratio` writes and reads the record blob through its own shipped writer and reader
 # rather than a transcription of the format — which is the whole point of measuring the *built*
 # ratio rather than re-measuring the probe. `check-layers.sh`'s deny list forbids
-# `tessera-filter -> tessera-store`, `-> tessera-spatial` and `tessera-filter -> tessera-filter-write`;
+# `mosaica-filter -> mosaica-store`, `-> mosaica-spatial` and `mosaica-filter -> mosaica-filter-write`;
 # nothing there constrains this crate, which already sits above every other.
-tessera-filter = { path = "../tessera-filter" }
-tessera-filter-write = { path = "../tessera-filter-write" }
+mosaica-filter = { path = "../mosaica-filter" }
+mosaica-filter-write = { path = "../mosaica-filter-write" }
 # `suggest_walk` folds its synthetic keys and queries with the shipped fold, so the entry strings
 # it indexes are the ones a real vocabulary would produce.
-tessera-analyse = { path = "../tessera-analyse" }
+mosaica-analyse = { path = "../mosaica-analyse" }
 
 croaring = { workspace = true }
 # Calibration task: the load arm decodes just enough of a 200 response's tiles frame to sum the
-# `served` column, for the points-served-per-second/per-user/per-request metrics. `tessera-wire`
+# `served` column, for the points-served-per-second/per-user/per-request metrics. `mosaica-wire`
 # supplies the frame walk (`split_frames` — the streamed framing, contracts §3.2 r26); `arrow`
 # decodes the one tile batch. Checked against `scripts/check-layers.sh`'s deny list: nothing
-# there forbids `tessera-bench` (the harness, already above every other crate) from either edge,
+# there forbids `mosaica-bench` (the harness, already above every other crate) from either edge,
 # and both are transitive dependencies of this crate already.
-tessera-wire = { path = "../tessera-wire" }
+mosaica-wire = { path = "../mosaica-wire" }
 arrow = { workspace = true }
 # `utf8_retirement_fence` searches dictionary keys for a substring, which is the same question the
 # flat column's `scan_text_contains` answers — and it must ask it with the same searcher, or the
 # two sides of that comparison would differ by their string algorithm as well as by their format.
-# `tessera-filter` already takes this exact version for that scan.
+# `mosaica-filter` already takes this exact version for that scan.
 memchr = "2"
 # `browse_cost` builds its own synthetic bundle: neither ladder corpus declares a render-only
 # column, so the whole-view scan it prices is unreachable on them (its module doc says so).
@@ -91,10 +91,10 @@ tokio = { version = "1", features = ["full"] }
 # before building the next has no use for a runtime, and the async arms beside it are unaffected.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 # `blob_framing_probe` re-compresses each candidate framing at the record blob's own level, so it
-# needs the same libzstd `tessera-filter` reads the blocks with. Comparing a candidate against a
+# needs the same libzstd `mosaica-filter` reads the blocks with. Comparing a candidate against a
 # differently-invoked compressor would price the compressor rather than the framing.
 zstd = { workspace = true }
 
 [dev-dependencies]
-# `replay`'s test serves a server's routers itself, as `tessera-server`'s own tests do.
+# `replay`'s test serves a server's routers itself, as `mosaica-server`'s own tests do.
 axum = "0.8"

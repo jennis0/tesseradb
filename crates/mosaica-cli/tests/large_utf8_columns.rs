@@ -10,7 +10,7 @@
 //! Every string column the build reads is at the fixture's width: the points file's `text` and
 //! `category` columns, its access list (`list<utf8>` against `large_list<large_utf8>`), the
 //! vocabulary file's `key` and `title`, the artifact table's `key` and its `contents`, and the
-//! member table's `key`. What is asserted is that `tessera check` prints the same report and the
+//! member table's `key`. What is asserted is that `mosaica check` prints the same report and the
 //! build writes the same bundle, byte for byte, past the manifest's wall-clock timestamp and the
 //! identity key each build generates.
 
@@ -119,8 +119,8 @@ impl Width {
     }
 }
 
-fn tessera() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tessera"))
+fn mosaica() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }
 
 fn write(path: &Path, fields: Vec<Field>, columns: Vec<ArrayRef>) {
@@ -211,8 +211,8 @@ content                   = { computed = ["centroid"] }
 const DEPLOYMENT: &str = r#"
 [bundle]
 path  = "bundles/corpus"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [disclosure]
 token_max_lifetime = 3600
@@ -231,7 +231,7 @@ fn severity(entity: u64) -> &'static str {
 
 /// The whole project at one width: the deployment file, the declaration, and every source.
 fn project(dir: &Path, width: Width) {
-    std::fs::write(dir.join("tessera.toml"), DEPLOYMENT).unwrap();
+    std::fs::write(dir.join("mosaica.toml"), DEPLOYMENT).unwrap();
     std::fs::write(dir.join("schema.toml"), DECLARATION).unwrap();
 
     let ids: Vec<u64> = (0..N).collect();
@@ -336,11 +336,11 @@ fn project(dir: &Path, width: Width) {
 }
 
 fn run(cwd: &Path, args: &[&str]) -> Output {
-    tessera()
+    mosaica()
         .args(args)
         .current_dir(cwd)
         .output()
-        .expect("failed to run tessera")
+        .expect("failed to run mosaica")
 }
 
 fn stderr(output: &Output) -> String {
@@ -431,7 +431,7 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
     };
     let (manifest_a, manifest_b) = (manifest_of(&a), manifest_of(&b));
     let key_of = |manifest: &serde_json::Value| {
-        tessera_types::IdentityKey::from_hex(manifest["identity"]["key"].as_str().unwrap()).unwrap()
+        mosaica_types::IdentityKey::from_hex(manifest["identity"]["key"].as_str().unwrap()).unwrap()
     };
     let (key_a, key_b) = (key_of(&manifest_a), key_of(&manifest_b));
     for (name, left_bytes) in &a {
@@ -484,7 +484,7 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
 
 /// A `columns.arrow` file's batches, with its `tessera_id` column replaced by the entity id each
 /// row names under `key`.
-fn entity_columns(bytes: &[u8], key: &tessera_types::IdentityKey) -> Vec<RecordBatch> {
+fn entity_columns(bytes: &[u8], key: &mosaica_types::IdentityKey) -> Vec<RecordBatch> {
     let reader =
         arrow::ipc::reader::FileReader::try_new(std::io::Cursor::new(bytes.to_vec()), None)
             .unwrap();
@@ -500,7 +500,7 @@ fn entity_columns(bytes: &[u8], key: &tessera_types::IdentityKey) -> Vec<RecordB
             let entities: UInt64Array = ids
                 .values()
                 .iter()
-                .map(|&id| key.invert(tessera_types::TesseraId::new(id)).1.raw())
+                .map(|&id| key.invert(mosaica_types::TesseraId::new(id)).1.raw())
                 .collect();
             let mut columns = batch.columns().to_vec();
             columns[at] = Arc::new(entities);

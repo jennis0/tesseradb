@@ -5,21 +5,21 @@
 //! with the layer's entity and nothing else. There is no answer vocabulary to match against and no
 //! arm for the answer a command cannot receive.
 //!
-//! It lives here rather than in `tessera-lifecycle` because nothing outside this module builds a
+//! It lives here rather than in `mosaica-lifecycle` because nothing outside this module builds a
 //! command or reads a reply. What does live there is the half a command carries
-//! ([`tessera_lifecycle::UnallocatedRow`], the requests, the errors), which is entity-space and
-//! store-free, and which `tessera-server` names when it maps a failure to a status.
+//! ([`mosaica_lifecycle::UnallocatedRow`], the requests, the errors), which is entity-space and
+//! store-free, and which `mosaica-server` names when it maps a failure to a status.
 
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 
-use tessera_lifecycle::command::{
+use mosaica_lifecycle::command::{
     AttributeRequest, BatchArtifacts, DeclaredValue, ExecError, MembershipGrown, SubmitError,
     UnallocatedEdit, UnallocatedRow, VocabularyRequest,
 };
-use tessera_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
-use tessera_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
-use tessera_types::EntityId;
+use mosaica_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
+use mosaica_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
+use mosaica_types::EntityId;
 
 use super::{AcceptError, ExecutorHealth, PublishedBatch};
 
@@ -37,7 +37,7 @@ pub(crate) struct Reply<T> {
 
 /// The fault switchboard a reply reports to, where one is installed.
 #[cfg(feature = "fault-injection")]
-pub(crate) type Faults = Option<std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>>;
+pub(crate) type Faults = Option<std::sync::Arc<mosaica_lifecycle::faults::FaultSwitchboard>>;
 
 impl<T> Reply<T> {
     pub(crate) fn channel(
@@ -59,7 +59,7 @@ impl<T> Reply<T> {
         self.count_work();
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
-            use tessera_lifecycle::faults::{PauseAction, PauseSite, Step};
+            use mosaica_lifecycle::faults::{PauseAction, PauseSite, Step};
             if let Some(PauseAction::Panic) = faults.pause_point(PauseSite::BeforeAck) {
                 panic!("fault-injection: executor panicked at the BeforeAck pause point");
             }
@@ -72,7 +72,7 @@ impl<T> Reply<T> {
         self.count_work();
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
-            faults.record(tessera_lifecycle::faults::Step::Ack);
+            faults.record(mosaica_lifecycle::faults::Step::Ack);
         }
         let _ = self.tx.send(Err(error));
     }
@@ -112,7 +112,7 @@ impl<T> Pending<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ingested {
     /// One per row of the request, in request order.
-    pub(crate) receipt: Vec<tessera_lifecycle::RowReceipt>,
+    pub(crate) receipt: Vec<mosaica_lifecycle::RowReceipt>,
     /// How many artifacts this batch's membership columns created: a key no artifact held, on a
     /// layer whose `value_set` is open. Reported because a minted artifact cannot be undone.
     pub(crate) minted: u64,
@@ -173,7 +173,7 @@ pub(crate) struct IngestSubmission {
     /// The items the batch moves to new entities.
     pub(crate) edits: Vec<SubmittedEdit>,
     /// One per row of the request: the written row it became, or the item it left unchanged.
-    pub(crate) slots: Vec<tessera_lifecycle::Slot>,
+    pub(crate) slots: Vec<mosaica_lifecycle::Slot>,
     /// The unique values the created rows set, as `(declared position, key widened)`.
     pub(crate) keys: Vec<(u16, u128)>,
     pub(crate) batch_id: String,
@@ -185,7 +185,7 @@ pub(crate) struct IngestSubmission {
     /// executor re-checks the created rows' values against the entries added since.
     pub(crate) unique_seq: u64,
     /// The request rows creating an item indexed under more than
-    /// [`tessera_authz::MAX_KEYS_PER_ITEM`] keys.
+    /// [`mosaica_authz::MAX_KEYS_PER_ITEM`] keys.
     pub(crate) over_bound: Vec<u32>,
 }
 
@@ -214,7 +214,7 @@ pub(crate) enum Command {
     /// Register an annotation layer. The answer is the layer's own entity, which the handler turns
     /// into the `tessera_id` a caller later suppresses the layer by.
     RegisterLayer {
-        declaration: Box<tessera_types::layer::LayerDeclaration>,
+        declaration: Box<mosaica_types::layer::LayerDeclaration>,
         reply: Reply<EntityId>,
     },
     /// Drop an annotation layer. Its name is never issued again.
@@ -225,7 +225,7 @@ pub(crate) enum Command {
         key: String,
         /// The gate's labels, each one term; `None` is `public`.
         visibility: Option<Vec<String>>,
-        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+        metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
         reply: Reply<()>,
     },
     /// Drop a view of a view group, deleting the items it leaves with a row in no view. The

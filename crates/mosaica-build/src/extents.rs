@@ -48,8 +48,8 @@
 use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
-use tessera_filter::{Access, RecordBlob, RecordFieldRef, RecordValueRef, RECORD_BLOCK_TARGET};
-use tessera_filter_write::RecordBlobWriter;
+use mosaica_filter::{Access, RecordBlob, RecordFieldRef, RecordValueRef, RECORD_BLOCK_TARGET};
+use mosaica_filter_write::RecordBlobWriter;
 
 use crate::error::{BuildError, Result};
 
@@ -79,8 +79,8 @@ pub(crate) struct ExtentColumn {
     /// writer would start and stop its threads that many times. Held here and handed from one
     /// extent's writer to the next, they are started once, by the first extent that seals a block.
     /// The columns are written from one rayon lane each, so what the build holds is one pool a
-    /// spilled column ([`tessera_filter_write::BlockPool`]).
-    pool: Option<tessera_filter_write::BlockPool>,
+    /// spilled column ([`mosaica_filter_write::BlockPool`]).
+    pool: Option<mosaica_filter_write::BlockPool>,
 }
 
 impl ExtentColumn {
@@ -147,7 +147,7 @@ impl ExtentColumn {
     /// later value and the write order [`DuplicateMap`] rests on survives.
     ///
     /// **A folded group's inputs are checked before they are read**, which is the check
-    /// [`RecordBlob::open_rows_only`][tessera_filter::RecordBlob::open_rows_only] gives up: the
+    /// [`RecordBlob::open_rows_only`][mosaica_filter::RecordBlob::open_rows_only] gives up: the
     /// extents a fold consumes are unlinked at the end of the group and never reach
     /// [`DuplicateMap::over`], which is where the check is made for a column that does not fold.
     ///
@@ -175,15 +175,15 @@ impl ExtentColumn {
                 };
                 let blobs = open_all(extents)?;
                 check_hasrow_totals(extents, &blobs)?;
-                let mut cursors: Vec<tessera_filter_write::BlobRows<'_>> = blobs
+                let mut cursors: Vec<mosaica_filter_write::BlobRows<'_>> = blobs
                     .iter()
-                    .map(tessera_filter_write::BlobRows::over)
+                    .map(mosaica_filter_write::BlobRows::over)
                     .collect();
-                let mut sources: Vec<&mut dyn tessera_filter_write::RecordRows> = cursors
+                let mut sources: Vec<&mut dyn mosaica_filter_write::RecordRows> = cursors
                     .iter_mut()
-                    .map(|cursor| cursor as &mut dyn tessera_filter_write::RecordRows)
+                    .map(|cursor| cursor as &mut dyn mosaica_filter_write::RecordRows)
                     .collect();
-                tessera_filter_write::merge_record_rows(
+                mosaica_filter_write::merge_record_rows(
                     &mut sources,
                     &Bitmap::new(),
                     &out.blocks,
@@ -211,7 +211,7 @@ impl ExtentColumn {
     /// Open every extent, mapped, with the column's duplicate map beside them.
     ///
     /// The blobs are opened for a sequential walk alone
-    /// ([`RecordBlob::open_rows_only`][tessera_filter::RecordBlob::open_rows_only]): both readers
+    /// ([`RecordBlob::open_rows_only`][mosaica_filter::RecordBlob::open_rows_only]): both readers
     /// take the rows of an extent front to back, and a blob opened that way holds no has-row bitmap
     /// on the heap. The bitmaps are read here instead, one at a time and released, to build
     /// [`DuplicateMap`] — and the one addressing check that open gives up, that an extent's
@@ -374,7 +374,7 @@ fn check_hasrow_totals(extents: &[ExtentPaths], blobs: &[RecordBlob]) -> Result<
 
 /// One extent's has-row bitmap, checked against the rows its directory addresses.
 ///
-/// **This is the check [`RecordBlob::open_rows_only`][tessera_filter::RecordBlob::open_rows_only]
+/// **This is the check [`RecordBlob::open_rows_only`][mosaica_filter::RecordBlob::open_rows_only]
 /// gives up**, made wherever this build reads a has-row file: an extent whose directory and bitmap
 /// disagree about how many rows it holds refuses here rather than being walked.
 fn read_checked_hasrow(paths: &ExtentPaths, blob: &RecordBlob) -> Result<Bitmap> {
@@ -465,7 +465,7 @@ impl OpenExtents {
         &self,
         visit: &mut dyn FnMut(u32, &str) -> Result<()>,
     ) -> Result<()> {
-        let mut cursors: Vec<tessera_filter::RecordRowCursor<'_>> =
+        let mut cursors: Vec<mosaica_filter::RecordRowCursor<'_>> =
             self.blobs.iter().map(RecordBlob::rows_cursor).collect();
         let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>> =
             std::collections::BinaryHeap::with_capacity(cursors.len());
@@ -494,7 +494,7 @@ impl OpenExtents {
 /// The next live row of one extent — a row that is not is a value a later chunk overwrote,
 /// skipped here for the reason [`OpenExtents::for_each_record_in`] skips it.
 fn next_live(
-    cursor: &mut tessera_filter::RecordRowCursor<'_>,
+    cursor: &mut mosaica_filter::RecordRowCursor<'_>,
     duplicates: &DuplicateMap,
     extent: usize,
 ) -> Result<bool> {
@@ -510,7 +510,7 @@ fn next_live(
 
 /// The one field the row a cursor is at carries, borrowed out of the cursor's own block.
 fn field_value<'a>(
-    cursor: &'a tessera_filter::RecordRowCursor<'a>,
+    cursor: &'a mosaica_filter::RecordRowCursor<'a>,
     column: usize,
 ) -> Result<&'a str> {
     let tag = column as u16;
@@ -528,13 +528,13 @@ fn field_value<'a>(
     )))
 }
 
-fn record_error(e: tessera_filter::RecordError) -> BuildError {
+fn record_error(e: mosaica_filter::RecordError) -> BuildError {
     BuildError::Invalid(format!("an extent does not read back: {e}"))
 }
 
 /// One extent's live rows as a stream the record blob's merge reads.
 pub(crate) struct ExtentRows<'a> {
-    cursor: tessera_filter::RecordRowCursor<'a>,
+    cursor: mosaica_filter::RecordRowCursor<'a>,
     duplicates: &'a DuplicateMap,
     extent: usize,
 }
@@ -554,7 +554,7 @@ impl<'a> ExtentRows<'a> {
     }
 }
 
-impl tessera_filter_write::RecordRows for ExtentRows<'_> {
+impl mosaica_filter_write::RecordRows for ExtentRows<'_> {
     fn advance(&mut self) -> std::io::Result<bool> {
         loop {
             if !self.cursor.advance().map_err(std::io::Error::from)? {
@@ -581,7 +581,7 @@ impl tessera_filter_write::RecordRows for ExtentRows<'_> {
 /// Every reader of an extent — the fold's merge, the keyword dictionary pass, the text index's
 /// windows and the record blob's merge — takes its rows front to back, so none of them addresses a
 /// row by entity and none of them needs the has-row bitmap on the heap
-/// ([`RecordBlob::open_rows_only`][tessera_filter::RecordBlob::open_rows_only] states what that
+/// ([`RecordBlob::open_rows_only`][mosaica_filter::RecordBlob::open_rows_only] states what that
 /// gives up and what stands instead).
 fn open_all(extents: &[ExtentPaths]) -> Result<Vec<RecordBlob>> {
     let mut blobs = Vec::with_capacity(extents.len());
@@ -758,11 +758,11 @@ mod tests {
             directory: dir.join("merged.directory.arrow"),
         };
         let mut rows = ExtentRows::over(&open);
-        let mut sources: Vec<&mut dyn tessera_filter_write::RecordRows> = rows
+        let mut sources: Vec<&mut dyn mosaica_filter_write::RecordRows> = rows
             .iter_mut()
-            .map(|r| r as &mut dyn tessera_filter_write::RecordRows)
+            .map(|r| r as &mut dyn mosaica_filter_write::RecordRows)
             .collect();
-        tessera_filter_write::merge_record_rows(
+        mosaica_filter_write::merge_record_rows(
             &mut sources,
             &Bitmap::new(),
             &out.blocks,

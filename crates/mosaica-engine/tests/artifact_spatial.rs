@@ -17,7 +17,7 @@
 //! in the bookkeeping — a segment resolved twice or not at all, a row-base slip, a form built
 //! under one generation and read under another — shows up as a disagreement.
 //!
-//! **The boxes are the fixture's**, not the generator's: `tessera-corpus`'s boundary arm carries a
+//! **The boxes are the fixture's**, not the generator's: `mosaica-corpus`'s boundary arm carries a
 //! roster of authored tile prefixes and no geometry. So this file builds a box per chosen tile —
 //! the middle half of it — and two polygons over the map, and uses the generator only for the
 //! points, the access relation and the visibility oracle.
@@ -36,12 +36,12 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
-use tessera_corpus::{Corpus, Grant};
-use tessera_engine::Engine;
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_spatial::shape::Space;
-use tessera_types::EntityId;
+use mosaica_corpus::{Corpus, Grant};
+use mosaica_engine::Engine;
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_spatial::shape::Space;
+use mosaica_types::EntityId;
 
 const N: u64 = 3_000;
 const SEED: u64 = 0x5EED;
@@ -79,9 +79,9 @@ fn corpus() -> Corpus {
 fn tile_of(x: f64, y: f64) -> u64 {
     let e = extent();
     let shift = 16 - u32::from(DEPTH);
-    let cx = u32::from(tessera_spatial::cell(x, e.x_min, e.x_max)) >> shift;
-    let cy = u32::from(tessera_spatial::cell(y, e.y_min, e.y_max)) >> shift;
-    tessera_spatial::interleave_bits(cx, cy, DEPTH)
+    let cx = u32::from(mosaica_spatial::cell(x, e.x_min, e.x_max)) >> shift;
+    let cy = u32::from(mosaica_spatial::cell(y, e.y_min, e.y_max)) >> shift;
+    mosaica_spatial::interleave_bits(cx, cy, DEPTH)
 }
 
 /// The middle half of tile `prefix`, as a box in extent coordinates.
@@ -101,7 +101,7 @@ fn box_of(prefix: u64, tx: u32, ty: u32) -> [f64; 4] {
         at(tx * span + 3 * quarter, e.x_min, e.x_max),
         at(ty * span + 3 * quarter, e.y_min, e.y_max),
     ];
-    let covering = tessera_spatial::tiles_for_bbox(bbox, DEPTH, &e);
+    let covering = mosaica_spatial::tiles_for_bbox(bbox, DEPTH, &e);
     assert_eq!(
         covering.len(),
         1,
@@ -136,7 +136,7 @@ fn chosen_tiles(c: &Corpus) -> Vec<(u64, u32, u32)> {
         .map(|(prefix, _)| {
             for ty in 0..side {
                 for tx in 0..side {
-                    if tessera_spatial::interleave_bits(tx, ty, DEPTH) == prefix {
+                    if mosaica_spatial::interleave_bits(tx, ty, DEPTH) == prefix {
                         return (prefix, tx, ty);
                     }
                 }
@@ -147,15 +147,15 @@ fn chosen_tiles(c: &Corpus) -> Vec<(u64, u32, u32)> {
 }
 
 /// The canonical shape one declaration produces — what the oracle tests a quantised point against.
-fn canonical(shape: tessera_spatial::shape::ShapeF64) -> tessera_spatial::shape::Shape {
+fn canonical(shape: mosaica_spatial::shape::ShapeF64) -> mosaica_spatial::shape::Shape {
     shape
         .canonical(Space::View, &extent())
         .expect("the fixture's shapes canonicalise")
         .0
 }
 
-fn canonical_box(bbox: [f64; 4]) -> tessera_spatial::shape::Shape {
-    canonical(tessera_spatial::shape::ShapeF64::Bbox {
+fn canonical_box(bbox: [f64; 4]) -> mosaica_spatial::shape::Shape {
+    canonical(mosaica_spatial::shape::ShapeF64::Bbox {
         min_x: bbox[0],
         min_y: bbox[1],
         max_x: bbox[2],
@@ -163,9 +163,9 @@ fn canonical_box(bbox: [f64; 4]) -> tessera_spatial::shape::Shape {
     })
 }
 
-fn canonical_wkt(wkt: &str) -> tessera_spatial::shape::Shape {
-    canonical(tessera_spatial::shape::ShapeF64::Polygon(
-        tessera_spatial::shape::read_wkt(wkt).expect("the fixture's WKT reads"),
+fn canonical_wkt(wkt: &str) -> mosaica_spatial::shape::Shape {
+    canonical(mosaica_spatial::shape::ShapeF64::Polygon(
+        mosaica_spatial::shape::read_wkt(wkt).expect("the fixture's WKT reads"),
     ))
 }
 
@@ -174,8 +174,8 @@ fn canonical_wkt(wkt: &str) -> tessera_spatial::shape::Shape {
 fn grid_of(x: f64, y: f64) -> (u32, u32) {
     let e = extent();
     (
-        tessera_spatial::fixed32(x, e.x_min, e.x_max),
-        tessera_spatial::fixed32(y, e.y_min, e.y_max),
+        mosaica_spatial::fixed32(x, e.x_min, e.x_max),
+        mosaica_spatial::fixed32(y, e.y_min, e.y_max),
     )
 }
 
@@ -273,7 +273,7 @@ fn fixture_with(criterion: &str, edit: impl FnOnce(String) -> String) -> Fixture
     corpus.write_pairs_parquet(&pairs).expect("pairs");
     let config_path = tmp.path().join("spatial-config.toml");
     std::fs::write(&config_path, edit(config_toml(&corpus, criterion))).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the spatial fixture's declaration parses");
     build_with_layers(&root, &points, &pairs, &corpus, config);
     let cache = tmp.path().join("cache");
@@ -296,8 +296,8 @@ impl Fixture {
 
     /// The shapes, canonical, keyed as the layers key them — both layers in one map, the keys
     /// being disjoint.
-    fn shapes(&self) -> Vec<(String, tessera_spatial::shape::Shape)> {
-        let mut out: Vec<(String, tessera_spatial::shape::Shape)> = chosen_tiles(&self.corpus)
+    fn shapes(&self) -> Vec<(String, mosaica_spatial::shape::Shape)> {
+        let mut out: Vec<(String, mosaica_spatial::shape::Shape)> = chosen_tiles(&self.corpus)
             .into_iter()
             .map(|(prefix, tx, ty)| (format!("t{prefix}"), canonical_box(box_of(prefix, tx, ty))))
             .collect();
@@ -326,7 +326,7 @@ impl Fixture {
         grant: &str,
         deleted: &[u64],
         extra: &[(f64, f64)],
-        shapes: &[(String, tessera_spatial::shape::Shape)],
+        shapes: &[(String, mosaica_spatial::shape::Shape)],
     ) -> BTreeMap<String, u64> {
         let g = Grant::parse(grant).unwrap();
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
@@ -360,8 +360,8 @@ impl Fixture {
 fn served(engine: &Engine, grant: &str, zoom: u8, bbox: [f64; 4]) -> BTreeMap<String, u64> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
-    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
-    request.layers = tessera_engine::LayerSelection::Named(&names);
+    let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
+    request.layers = mosaica_engine::LayerSelection::Named(&names);
     engine
         .viewport_artifacts(&session, request)
         .expect("a viewport over the fixture")
@@ -600,8 +600,8 @@ fn a_deny_reaches_a_boundary_and_its_members() {
 fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
-    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
-    request.layers = tessera_engine::LayerSelection::Named(&names);
+    let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
+    request.layers = mosaica_engine::LayerSelection::Named(&names);
     let row = engine
         .viewport_artifacts(&session, request)
         .expect("a viewport")
@@ -844,16 +844,16 @@ fn merge(engine: &Engine, at: (f64, f64)) -> Vec<(f64, f64)> {
 /// members, the canonical shape in the record.
 /// A box published into the spatial level, and the tick that publishes its resolution into the
 /// level's held form (`ingest.md` §1.3).
-fn publish_box(engine: &Engine, key: &str, bbox: [f64; 4]) -> tessera_spatial::shape::Shape {
+fn publish_box(engine: &Engine, key: &str, bbox: [f64; 4]) -> mosaica_spatial::shape::Shape {
     let canonical = canonical_box(bbox);
-    let shape = tessera_lifecycle::membership::ArtifactShapes::new(vec![(
+    let shape = mosaica_lifecycle::membership::ArtifactShapes::new(vec![(
         "s0".to_string(),
         canonical.encode(),
     )])
     .expect("one view, one shape");
-    let artifact = tessera_lifecycle::IncomingArtifact {
+    let artifact = mosaica_lifecycle::IncomingArtifact {
         shape: Some(shape),
-        ..tessera_lifecycle::IncomingArtifact::from_entities(Some(key.to_string()), [])
+        ..mosaica_lifecycle::IncomingArtifact::from_entities(Some(key.to_string()), [])
     };
     engine
         .publish_artifacts(LAYER.into(), 0, vec![artifact])

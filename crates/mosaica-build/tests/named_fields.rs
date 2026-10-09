@@ -16,10 +16,10 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Config, Fields};
-use tessera_build::{build, BuildArgs};
-use tessera_spatial::Bounds;
-use tessera_types::IdentityKey;
+use mosaica_build::config::{Config, Fields};
+use mosaica_build::{build, BuildArgs};
+use mosaica_spatial::Bounds;
+use mosaica_types::IdentityKey;
 
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -123,13 +123,13 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
     let acquired = config.acquire().expect("the view acquires its inputs");
     let registry = config.build_views().expect("the registry compiles");
     let acquired_view =
-        tessera_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
+        mosaica_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
     let _ = dir;
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: acquired_view.points,
             point_fields: acquired_view.point_fields,
@@ -173,7 +173,7 @@ fn a_build_reads_the_columns_the_declaration_named() {
         build(&args(dir.path(), &config, dir.path().join("out"))).expect("the build reads");
     assert_eq!(report.items, N);
     // Three departments, minted from a column the canonical name would never have found.
-    let bundle = tessera_store::open_bundle(&dir.path().join("out")).expect("the bundle opens");
+    let bundle = mosaica_store::open_bundle(&dir.path().join("out")).expect("the bundle opens");
     let vocabulary = bundle
         .manifest
         .vocabularies
@@ -251,9 +251,9 @@ fn a_moved_geometry_name_does_not_fall_through_to_the_other_shape() {
     let fields = Fields::moved("view 's0'", [("x", "u"), ("y", "v")]);
     let message = format!(
         "{}",
-        tessera_build::input::read_points(
-            tessera_build::input::Source::every_row(&path, &fields),
-            tessera_spatial::Projection::None,
+        mosaica_build::input::read_points(
+            mosaica_build::input::Source::every_row(&path, &fields),
+            mosaica_spatial::Projection::None,
             &extent(),
         )
         .expect_err("expected a refusal")

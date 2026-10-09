@@ -33,7 +33,7 @@ use crate::error::{EngineError, Result};
 use crate::records::same_publication;
 use crate::session::Session;
 use crate::Generation;
-use tessera_spatial::{cells_for_bbox, Bounds, CellRect};
+use mosaica_spatial::{cells_for_bbox, Bounds, CellRect};
 
 /// A grouping resolved against the request's generation.
 pub(super) struct Plan {

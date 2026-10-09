@@ -4,7 +4,7 @@
 //! declaration survives a restart, and every viewer-plane reader answers the column over the rows
 //! that carried it and absence over the rows that predate it.
 //!
-//! The engine-level cases are `tessera-engine/tests/runtime_attributes.rs`; what this file pins
+//! The engine-level cases are `mosaica-engine/tests/runtime_attributes.rs`; what this file pins
 //! is the wire: the status codes and bodies the route answers, a batch with and without the
 //! column, and the viewer verbs a client reads the column through.
 
@@ -165,8 +165,8 @@ async fn post_ingest_into(
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .header("content-type", content_type)
         .body(body)
         .send()
@@ -259,7 +259,7 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     let (status, body) = declare(&served, json!({ "name": "score", "type": "i32" })).await;
     assert_eq!(status, 409, "the build's column is a held name too: {body}");
 
-    // What is refused is tested in `tessera_store::declaration` and the engine; here, that a
+    // What is refused is tested in `mosaica_store::declaration` and the engine; here, that a
     // refusal is a 422 with a `detail`.
     for bad in [
         json!({ "name": "region", "type": "u8" }),
@@ -402,7 +402,7 @@ async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
         .server
         .state
         .engine
-        .tessera_id_of(tessera_types::EntityId::new(0))
+        .tessera_id_of(mosaica_types::EntityId::new(0))
         .unwrap()
         .raw();
     let record = item(&served, built).await;
@@ -588,8 +588,8 @@ async fn write_json(served: &Served, route: &str, batch_id: &str, body: Value) -
         .client
         .post(served.server.control_url(route))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .json(&body)
         .send()
         .await

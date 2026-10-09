@@ -11,8 +11,8 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_lifecycle::ChangeOp;
-use tessera_types::EntityId;
+use mosaica_lifecycle::ChangeOp;
+use mosaica_types::EntityId;
 
 /// [`engine_with_tick`] with the row trigger set too — `flush_max_items`, §4.1's second trigger.
 fn engine_with_triggers(
@@ -59,7 +59,7 @@ fn engine_with_tick(
     engine
 }
 
-use tessera_engine::{Engine, EngineConfig};
+use mosaica_engine::{Engine, EngineConfig};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -118,7 +118,7 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
     );
 
     // Buffered row: a second request publishes it without waiting out the deadline.
-    let row = tessera_lifecycle::UnallocatedRow {
+    let row = mosaica_lifecycle::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -232,7 +232,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config()
         },
     )
@@ -265,7 +265,7 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
     let engine = engine_with_triggers(&tmp, &root, 3600, 4);
 
     for i in 0..4u8 {
-        let row = tessera_lifecycle::UnallocatedRow {
+        let row = mosaica_lifecycle::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -304,11 +304,11 @@ fn a_request_made_while_a_view_is_deferred_is_honoured_without_the_period() {
     );
     let engine = engine_with_tick(&tmp, &root, 3600);
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: "s1".to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1.0,
                 y_min: 0.0,
@@ -320,7 +320,7 @@ fn a_request_made_while_a_view_is_deferred_is_honoured_without_the_period() {
         .expect("the second view is created");
     let mut ingested = Vec::new();
     for (i, view) in ["s0", "s1"].into_iter().enumerate() {
-        let row = tessera_lifecycle::UnallocatedRow {
+        let row = mosaica_lifecycle::UnallocatedRow {
             view: view.to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -437,7 +437,7 @@ fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
         .expect("the bundle has a partition")
         .unwrap()
         .path();
-    tessera_store::view_path(&partition, view).join("segments")
+    mosaica_store::view_path(&partition, view).join("segments")
 }
 
 /// Whether a full-coverage viewer is served `entity`, ingested at (0.5, 0.5), in `view`.
@@ -447,7 +447,7 @@ fn serves(engine: &Engine, view: &str, entity: EntityId) -> bool {
     engine
         .viewport(
             &session,
-            tessera_engine::ViewportRequest::new(view, 10, [0.4, 0.4, 0.6, 0.6], 200),
+            mosaica_engine::ViewportRequest::new(view, 10, [0.4, 0.4, 0.6, 0.6], 200),
         )
         .unwrap()
         .points

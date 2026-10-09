@@ -16,14 +16,14 @@
 // * `tile_scheme: null`: the map carries no basemap, whatever its frame. An equirectangular frame
 //   is as aligned as a Mercator one, so alignment alone would get this wrong.
 //
-// Requires a running `tessera serve` and a running `vite dev`.
+// Requires a running `mosaica serve` and a running `vite dev`.
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
 
 const args = flags();
 const url = args.url ?? 'http://localhost:5173';
-const shots = args.shots ?? '/tmp/tessera-basemap';
+const shots = args.shots ?? '/tmp/mosaica-basemap';
 const name = args.name ?? 'basemap';
 await mkdir(shots, {recursive: true});
 
@@ -53,15 +53,15 @@ const CELL_GRID = 65536;
 const A_CELL_OR_SO = 0.01;
 
 await page.goto(withParams(url, {dataset: args.dataset}), {waitUntil: 'networkidle'});
-await page.waitForFunction(() => window.__tesseraProbe !== undefined, null, {timeout: 120_000});
+await page.waitForFunction(() => window.__mosaicaProbe !== undefined, null, {timeout: 120_000});
 
 const publishedScheme = await page.evaluate(
-  () => /** @type {any} */ (document.querySelector('tessera-explorer')).store.get('meta').views[0].tileScheme
+  () => /** @type {any} */ (document.querySelector('mosaica-explorer')).store.get('meta').views[0].tileScheme
 );
 // Where a basemap is expected, wait for it; tiles arrive after the first frame.
 if (publishedScheme !== null) {
   await page.waitForFunction(
-    () => /** @type {any} */ (document.querySelector('tessera-explorer'))?.map?.basemap != null,
+    () => /** @type {any} */ (document.querySelector('mosaica-explorer'))?.map?.basemap != null,
     null,
     {timeout: 120_000}
   );
@@ -69,7 +69,7 @@ if (publishedScheme !== null) {
 await page.waitForTimeout(5_000);
 
 const reading = await page.evaluate(() => {
-  const explorer = /** @type {any} */ (document.querySelector('tessera-explorer'));
+  const explorer = /** @type {any} */ (document.querySelector('mosaica-explorer'));
   const meta = explorer.store.get('meta');
   const drawn = explorer.store.get('view');
   return {
@@ -134,7 +134,7 @@ await page.screenshot({path: join(shots, `${name}-world.png`)});
 // is in the unit square, lower under equirectangular, since the projections place 50°N
 // differently.
 await page.evaluate((box) => {
-  /** @type {any} */ (document.querySelector('tessera-explorer')).map.fitBbox(box);
+  /** @type {any} */ (document.querySelector('mosaica-explorer')).map.fitBbox(box);
 }, view.projection === 'web_mercator' ? [0.47, 0.31, 0.52, 0.35] : [0.47, 0.22, 0.52, 0.26]);
 await page.waitForTimeout(6_000);
 await page.screenshot({path: join(shots, `${name}-europe.png`)});

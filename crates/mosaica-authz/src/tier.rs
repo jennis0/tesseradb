@@ -23,7 +23,7 @@ use std::sync::Arc;
 use arrow::array::{Array, LargeBinaryArray, LargeBinaryBuilder, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 
-use tessera_types::TermId;
+use mosaica_types::TermId;
 
 use crate::postings::{
     decode_single_batch, encode_posting, invalid_data, mapped_buffer, read_posting,

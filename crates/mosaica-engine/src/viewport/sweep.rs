@@ -2,7 +2,7 @@
 
 use super::*;
 use super::out::flat_families;
-use tessera_store::bands::{element, page_size, will_need, CopyType, CopyValue};
+use mosaica_store::bands::{element, page_size, will_need, CopyType, CopyValue};
 
 /// The emit pass's hard per-frame accumulation cap, applied under any `flush_bytes` — including
 /// the deliberately huge value that means "one flush per response". The wire's frame length is a
@@ -586,7 +586,7 @@ impl Engine {
 /// neighbour's value under this entity's identity.
 pub(crate) fn segment_row_of<'a>(
     view: &str,
-    view_data: &'a tessera_store::read::ViewData,
+    view_data: &'a mosaica_store::read::ViewData,
     entity: EntityId,
 ) -> Result<Option<(&'a SegmentData, usize)>> {
     let Some(row) = view_data.row_space.row_of(entity) else {
@@ -605,12 +605,12 @@ pub(crate) fn segment_holding(segments: &[(&SegmentData, u32)], row: u32) -> Opt
     Some((at, row - segments[at].1))
 }
 
-/// [`tessera_store::read::ViewData::segments_by_row_base`], refused in this crate's error.
-// Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
+/// [`mosaica_store::read::ViewData::segments_by_row_base`], refused in this crate's error.
+// Public for `mosaica-bench`'s `identity_bands_probe`; not part of the engine's API.
 #[doc(hidden)]
 pub fn segments_with_row_bases<'a>(
     view: &str,
-    view_data: &'a tessera_store::read::ViewData,
+    view_data: &'a mosaica_store::read::ViewData,
 ) -> Result<Vec<(&'a SegmentData, u32)>> {
     view_data
         .segments_by_row_base()
@@ -641,7 +641,7 @@ type ResolvedScalars<'a> = Vec<Option<ScalarSlice<'a>>>;
 /// absence in a segment of a view that does have one is [`Gather`]'s to resolve, and
 /// comes out as an absent value.
 pub(super) fn scoped_render_scalars(
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
     view: &str,
     visible: &crate::gate::VisibleViews,
 ) -> Vec<DeclaredScalar> {
@@ -668,9 +668,9 @@ pub(super) fn scoped_render_scalars(
 /// lane, and which a principal is told about — from being restated and coming to disagree: a fold
 /// taking a narrower list would drop a lane the build wrote.
 pub(crate) fn scoped_render_families<'a>(
-    manifest: &'a tessera_store::manifest::Manifest,
+    manifest: &'a mosaica_store::manifest::Manifest,
     view: &str,
-) -> Vec<&'a tessera_store::manifest::ScopedScalar> {
+) -> Vec<&'a mosaica_store::manifest::ScopedScalar> {
     manifest
         .groups
         .iter()
@@ -682,8 +682,8 @@ pub(crate) fn scoped_render_families<'a>(
 /// Every view whose row tail carries a column of `family`, in roster order: the one list
 /// [`scoped_render_families`] and `/v1/meta` both read. Unfiltered by the gate.
 pub(crate) fn scoped_family_views(
-    manifest: &tessera_store::manifest::Manifest,
-    family: &tessera_store::manifest::ScopedScalar,
+    manifest: &mosaica_store::manifest::Manifest,
+    family: &mosaica_store::manifest::ScopedScalar,
 ) -> Vec<String> {
     manifest
         .groups
@@ -691,7 +691,7 @@ pub(crate) fn scoped_family_views(
         .flat_map(|g| {
             g.views
                 .iter()
-                .map(move |v| format!("{}{}{}", g.name, tessera_store::GROUP_SEPARATOR, v.key))
+                .map(move |v| format!("{}{}{}", g.name, mosaica_store::GROUP_SEPARATOR, v.key))
         })
         .filter(|view| scoped_column_under(manifest, family, view))
         .collect()
@@ -700,8 +700,8 @@ pub(crate) fn scoped_family_views(
 /// Whether `view`'s row tail carries a column of `family`: `view` is a view of the family's group,
 /// or of a group declaring members of it, and the family has a column for that key.
 fn scoped_column_under(
-    manifest: &tessera_store::manifest::Manifest,
-    family: &tessera_store::manifest::ScopedScalar,
+    manifest: &mosaica_store::manifest::Manifest,
+    family: &mosaica_store::manifest::ScopedScalar,
     view: &str,
 ) -> bool {
     // Matched against the roster rather than parsed out of the id, since the roster decides which
@@ -709,7 +709,7 @@ fn scoped_column_under(
     let Some(roster) = manifest.groups.iter().find_map(|g| {
         let key = view
             .strip_prefix(g.name.as_str())?
-            .strip_prefix(tessera_store::GROUP_SEPARATOR)?;
+            .strip_prefix(mosaica_store::GROUP_SEPARATOR)?;
         g.views
             .iter()
             .any(|v| v.key == key)
@@ -730,7 +730,7 @@ fn scoped_column_under(
         family.views.contains(&format!(
             "{}{}{key}",
             family.group,
-            tessera_store::GROUP_SEPARATOR
+            mosaica_store::GROUP_SEPARATOR
         ))
     })
 }

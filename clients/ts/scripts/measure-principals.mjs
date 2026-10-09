@@ -4,7 +4,7 @@
 // The size comes from the server: a zoom-0, full-extent viewport call returns `visible` for the
 // root tile, which is the principal's visible-set cardinality.
 //
-//   TESSERA_OPERATOR_CRED=… node clients/ts/scripts/measure-principals.mjs \
+//   MOSAICA_OPERATOR_CRED=… node clients/ts/scripts/measure-principals.mjs \
 //     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 \
 //     --control http://127.0.0.1:45721 --terms 0..200 \
 //     [--ranks <pairs>.term-ranks.json] [--out PATH] [--key-out PATH]
@@ -43,8 +43,8 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const operatorCred = process.env.TESSERA_OPERATOR_CRED;
-if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
+const operatorCred = process.env.MOSAICA_OPERATOR_CRED;
+if (!operatorCred) throw new Error('set MOSAICA_OPERATOR_CRED');
 const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', credential: operatorCred});
 
 // `--terms` splits on commas, which a term may contain (a publisher called "Royal Botanic

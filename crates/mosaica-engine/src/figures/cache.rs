@@ -3,7 +3,7 @@
 //!
 //! # Single flight, removal only, and a byte bound
 //!
-//! Concurrent requests for one key share one build ([`tessera_cache::SingleFlightCache`]). A
+//! Concurrent requests for one key share one build ([`mosaica_cache::SingleFlightCache`]). A
 //! request waits for another's build for as long as its client stays connected, up to
 //! [`BUILD_WAIT_MS`]. A build on a large view takes longer than `serve.single_flight_wait_ms`,
 //! and a viewport has sent its head before it reads the figures, so a refusal at that budget would
@@ -36,7 +36,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
-use tessera_cache::{CacheWeight, Cancel, SingleFlightCache, WaitEnded, WaitingBuildError};
+use mosaica_cache::{CacheWeight, Cancel, SingleFlightCache, WaitEnded, WaitingBuildError};
 
 use super::counts::{CountsAt, Deltas, Reserves};
 use super::denied::DenyCorrection;
@@ -678,7 +678,7 @@ impl FiguresCache {
             filled_at,
         };
         match self.reserves.peek(&key) {
-            tessera_cache::Peek::Ready(held) => Some(held),
+            mosaica_cache::Peek::Ready(held) => Some(held),
             _ => None,
         }
     }
@@ -752,7 +752,7 @@ impl FiguresCache {
         let (interest, _caller) = self.register(&key, cancel);
         let polled: &dyn Cancel = match cancel {
             Some(cancel) => cancel,
-            None => &tessera_cache::NeverCancelled,
+            None => &mosaica_cache::NeverCancelled,
         };
         slots
             .get_or_try_build_waiting(key, polled, || {
@@ -1154,7 +1154,7 @@ mod tests {
     /// larger than the whole bound is served and not admitted.
     #[test]
     fn the_budget_bounds_what_is_resident() {
-        let floor = tessera_cache::PER_ENTRY_FLOOR_BYTES;
+        let floor = mosaica_cache::PER_ENTRY_FLOOR_BYTES;
         let cache = FiguresCache::new(2 * floor, None);
         get(&cache, key(1, "a", 0), || counts(&[1, 1]));
         get(&cache, key(2, "a", 0), || counts(&[2, 2]));

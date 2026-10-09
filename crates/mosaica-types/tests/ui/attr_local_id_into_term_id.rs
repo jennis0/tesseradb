@@ -10,7 +10,7 @@
 //! Paired with `.stderr` for the reason the harness's module doc gives: a row that failed for an
 //! unrelated reason would still "fail to compile".
 
-use tessera_types::{AttrLocalId, TermId};
+use mosaica_types::{AttrLocalId, TermId};
 
 fn main() {
     let a = AttrLocalId::new(7);

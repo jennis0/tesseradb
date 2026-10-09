@@ -1,4 +1,4 @@
-//! `tessera.toml`: what a deployment is, read by both `tessera build` and `tessera serve`.
+//! `mosaica.toml`: what a deployment is, read by both `mosaica build` and `mosaica serve`.
 //!
 //! Serving secrets are only located here and are read at startup ([`Credential::resolve`]), so a
 //! build never needs them. Every raw section refuses a key it does not know.
@@ -20,9 +20,9 @@ pub use error::ConfigError;
 
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
-/// `tessera.toml` describes one deployment: where its bundle and working files are, which corpus
-/// declaration `tessera build` reads, and how `tessera serve` listens and bounds its work.
-/// `tessera build`, `tessera check`, `tessera health` and `tessera serve` read it from the working
+/// `mosaica.toml` describes one deployment: where its bundle and working files are, which corpus
+/// declaration `mosaica build` reads, and how `mosaica serve` listens and bounds its work.
+/// `mosaica build`, `mosaica check`, `mosaica health` and `mosaica serve` read it from the working
 /// directory, or from the nearest directory above it that has one. `--deployment` names another
 /// file.
 ///
@@ -33,14 +33,14 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 struct RawConfig {
     /// Where the bundle and the server's own files are.
     bundle: RawBundle,
-    /// What `tessera build` and `tessera check` read.
+    /// What `mosaica build` and `mosaica check` read.
     #[serde(default)]
     build: RawBuild,
     /// How long a viewer's token lasts.
     ///
     /// Required.
     disclosure: Option<RawDisclosure>,
-    /// How `tessera serve` listens, whom it admits, and the limits on each request. `tessera
+    /// How `mosaica serve` listens, whom it admits, and the limits on each request. `mosaica
     /// build` reads none of it, and a file for building alone may leave the table out.
     #[serde(default)]
     serve: RawServe,
@@ -49,7 +49,7 @@ struct RawConfig {
     #[serde(default)]
     ingest: RawIngest,
     /// The identity catalogue: who may authenticate, with what, and the OIDC providers whose
-    /// access tokens are accepted. `tessera build` reads none of it.
+    /// access tokens are accepted. `mosaica build` reads none of it.
     #[serde(default)]
     catalogue: RawCatalogue,
 }
@@ -60,7 +60,7 @@ struct RawCatalogue {
     /// The directory holding the catalogue, a SQLite database of local principals, their
     /// password hashes and API keys, groups, grants and the providers declared through the API.
     /// It lives outside the bundle, so principals and grants carry across a rebuild. It is
-    /// created, readable by the service's user alone, when absent. `tessera serve` refuses to
+    /// created, readable by the service's user alone, when absent. `mosaica serve` refuses to
     /// start without it, or when another process holds it open.
     ///
     /// Default: not set.
@@ -85,7 +85,7 @@ struct RawCatalogue {
     /// be changed or removed through it; edit this file and restart. The service refuses to start
     /// when a name is declared here and in the catalogue, or twice here. A `jwks_url` is `https`,
     /// or `http` to `localhost`, `127.0.0.1` or `[::1]`; the environment variable
-    /// `TESSERA_ALLOW_INSECURE_JWKS=1` accepts any other `http` URL.
+    /// `MOSAICA_ALLOW_INSECURE_JWKS=1` accepts any other `http` URL.
     ///
     /// Type: array of tables.
     ///
@@ -124,8 +124,8 @@ struct RawRoleMapping {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBundle {
-    /// The bundle directory, which `tessera build` writes unless `--out` names another, and
-    /// `tessera serve` opens.
+    /// The bundle directory, which `mosaica build` writes unless `--out` names another, and
+    /// `mosaica serve` opens.
     path: PathBuf,
     /// A directory outside the bundle for files the server derives: cached visibility masks,
     /// which survive a restart, and suggestion indexes and scratch files, which are rebuilt at
@@ -164,20 +164,20 @@ struct RawDisclosure {
 struct RawServe {
     /// The viewer plane's address and port, such as `"127.0.0.1:8141"`: `/v1/meta`,
     /// `/v1/viewport`, `/v1/items`, `/v1/artifacts` and `/v1/categories`, for requests carrying a
-    /// viewer token. `tessera serve` refuses to start without it, and `tessera health` probes it.
+    /// viewer token. `mosaica serve` refuses to start without it, and `mosaica health` probes it.
     /// Port 0 takes a free port, which the server prints when it starts.
     ///
     /// Default: not set.
     viewer: Option<String>,
     /// The session plane's address and port: `POST /session/authorise`, where a principal holding
     /// `authorise-as` mints a session for another principal by API key, and
-    /// `POST /session/revoke`. `tessera serve` refuses to start without it.
+    /// `POST /session/revoke`. `mosaica serve` refuses to start without it.
     ///
     /// Default: not set.
     session: Option<String>,
     /// The control plane's address and port, or `"unix:<path>"` for a Unix socket: ingest,
     /// deletion and suppression, declarations, flush, compaction and status, all under
-    /// `/control`. `tessera serve` refuses to start without it. A relative socket path is read
+    /// `/control`. `mosaica serve` refuses to start without it. A relative socket path is read
     /// from the server's working directory, not from this file's directory, and a file already
     /// at the path is removed.
     ///
@@ -186,14 +186,14 @@ struct RawServe {
     /// A file holding the operator credential. It authenticates the built-in superuser, which
     /// holds every permission, `read-all` and `write-all` among them, and is not in the catalogue,
     /// so an empty catalogue still has an administrator. Its contents are trimmed. Changing the
-    /// file and restarting rotates it. `tessera serve` refuses to start when the file cannot be
+    /// file and restarting rotates it. `mosaica serve` refuses to start when the file cannot be
     /// read or holds only white space, and when neither this nor `operator_credential_env` is set.
     /// When both are set, the file is used.
     ///
     /// Default: not set.
     operator_credential_file: Option<PathBuf>,
     /// An environment variable holding the operator credential, trimmed as the file is.
-    /// `tessera serve` refuses to start when it is unset or holds only white space.
+    /// `mosaica serve` refuses to start when it is unset or holds only white space.
     ///
     /// Default: not set.
     operator_credential_env: Option<String>,
@@ -250,7 +250,7 @@ struct RawServe {
     ///
     /// Default: `1000`.
     max_k: Option<usize>,
-    /// The fewest marks a tile with a visible point draws. `tessera serve` refuses to start with
+    /// The fewest marks a tile with a visible point draws. `mosaica serve` refuses to start with
     /// `0`.
     ///
     /// Default: `2`.
@@ -314,7 +314,7 @@ struct RawServe {
     /// object left out, and the file is created readable by its owner only. Tokens and the credentials in
     /// headers are never written. The file is written by its own thread and flushed whenever it
     /// has caught up, and a restarted server appends to it, marking its lines with a new `run`.
-    /// `tessera-bench replay` sends a log back at a server. Unset, nothing is logged.
+    /// `mosaica-bench replay` sends a log back at a server. Unset, nothing is logged.
     ///
     /// Default: not set.
     request_log: Option<PathBuf>,
@@ -324,7 +324,7 @@ struct RawServe {
     /// Default: `10000`.
     max_region_vertices: Option<u64>,
     /// The most boundary cells a `region` filter is resolved to at one zoom level. Past it the
-    /// filter is answered for a cover of the polygon, which the `x-tessera-region` header
+    /// filter is answered for a cover of the polygon, which the `x-mosaica-region` header
     /// reports, rather than refused.
     ///
     /// Default: `262144`.
@@ -467,7 +467,7 @@ struct RawServe {
     ///
     /// Default: `16777216` (16 MiB).
     segment_floor_bytes: Option<u64>,
-    /// How many segments of one size tier are merged together. `tessera serve` refuses to start
+    /// How many segments of one size tier are merged together. `mosaica serve` refuses to start
     /// with a value below 2.
     ///
     /// Default: `4`.
@@ -478,7 +478,7 @@ struct RawServe {
     max_merged_segment_bytes: Option<u64>,
     /// How many small files of one size tier, which flushes write for attribute values, records,
     /// text indexes and access terms, are combined into one. Unique index runs are combined four
-    /// at a time whatever this says. `tessera serve` refuses to start with a value below 2.
+    /// at a time whatever this says. `mosaica serve` refuses to start with a value below 2.
     ///
     /// Default: `8`.
     coalesce_width: Option<usize>,
@@ -616,11 +616,11 @@ pub enum ControlListen {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Where `tessera build` writes and `tessera serve` opens; `tessera build --out` overrides it.
+    /// Where `mosaica build` writes and `mosaica serve` opens; `mosaica build --out` overrides it.
     pub bundle_path: PathBuf,
     pub cache_dir: PathBuf,
     pub wal_path: PathBuf,
-    /// The corpus declaration `tessera build` reads. The server reads its schema from the bundle.
+    /// The corpus declaration `mosaica build` reads. The server reads its schema from the bundle.
     pub schema_path: PathBuf,
     pub token_max_lifetime_secs: u64,
     /// `None` when the file declares no `[serve]` addresses; `prepare` refuses to serve then.
@@ -680,7 +680,7 @@ pub struct Config {
     pub visible_wait_max_secs: u64,
     pub cors_loopback: bool,
     pub operator_credential: Credential,
-    /// `None` when the file declares no `[catalogue] dir`; `tessera serve` refuses to start then.
+    /// `None` when the file declares no `[catalogue] dir`; `mosaica serve` refuses to start then.
     pub catalogue_dir: Option<PathBuf>,
     pub min_password_length: usize,
     pub failed_attempt_limit: u32,
@@ -711,7 +711,7 @@ pub struct Config {
     /// The most entities one publication's `excluding` list may name.
     pub max_excluded_per_request: usize,
     pub overlay_soft_limit: usize,
-    pub compaction: tessera_engine::CompactionSchedule,
+    pub compaction: mosaica_engine::CompactionSchedule,
     pub flush_max_age_secs: u64,
     pub flush_max_items: usize,
     pub ingest_buffer_max_items: usize,
@@ -792,12 +792,12 @@ fn or_off<T: Copy>(key: &'static str, raw: Option<&OrOff<T>>, default: T) -> Res
     }
 }
 
-pub const DEPLOYMENT_FILE: &str = "tessera.toml";
+pub const DEPLOYMENT_FILE: &str = "mosaica.toml";
 
 /// The corpus declaration when `[build]` names none.
 pub const DEFAULT_SCHEMA_FILE: &str = "schema.toml";
 
-/// This deployment's `tessera.toml`: `explicit` if given, else the nearest one at or above `from`.
+/// This deployment's `mosaica.toml`: `explicit` if given, else the nearest one at or above `from`.
 pub fn discover(explicit: Option<&Path>, from: &Path) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
@@ -920,7 +920,7 @@ fn parse(text: &str) -> Result<Config> {
 
     let compute_threads = serve
         .compute_threads
-        .unwrap_or_else(tessera_engine::default_compute_threads);
+        .unwrap_or_else(mosaica_engine::default_compute_threads);
     let compute_admission = serve
         .compute_admission
         .unwrap_or(compute_threads.saturating_mul(COMPUTE_ADMISSION_MULTIPLIER));
@@ -1019,7 +1019,7 @@ fn parse(text: &str) -> Result<Config> {
     let overlay_soft_limit = ingest
         .overlay_soft_limit
         .unwrap_or(DEFAULT_OVERLAY_SOFT_LIMIT);
-    let compaction = tessera_engine::CompactionSchedule {
+    let compaction = mosaica_engine::CompactionSchedule {
         min_interval_secs: ingest
             .compaction_min_interval_secs
             .unwrap_or(DEFAULT_COMPACTION_MIN_INTERVAL_SECS),
@@ -1096,13 +1096,13 @@ fn parse(text: &str) -> Result<Config> {
             .unwrap_or(DEFAULT_MAX_SUGGEST_SET_ENTITIES),
         max_shape_vertices: serve
             .max_shape_vertices
-            .unwrap_or(tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES),
+            .unwrap_or(mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES),
         max_region_vertices: serve
             .max_region_vertices
             .unwrap_or(DEFAULT_MAX_REGION_VERTICES),
         max_region_cells: serve
             .max_region_cells
-            .unwrap_or(tessera_engine::DEFAULT_MAX_REGION_CELLS),
+            .unwrap_or(mosaica_engine::DEFAULT_MAX_REGION_CELLS),
         max_browse_rows: serve.max_browse_rows.unwrap_or(DEFAULT_MAX_BROWSE_ROWS),
         max_page_rows,
         max_page_bytes,
@@ -1160,7 +1160,7 @@ fn parse(text: &str) -> Result<Config> {
         artifact_admission,
         single_flight_wait_ms: serve
             .single_flight_wait_ms
-            .unwrap_or(tessera_engine::DEFAULT_SINGLE_FLIGHT_WAIT_MS),
+            .unwrap_or(mosaica_engine::DEFAULT_SINGLE_FLIGHT_WAIT_MS),
         stream_flush_bytes: serve
             .stream_flush_bytes
             .unwrap_or(DEFAULT_STREAM_FLUSH_BYTES),
@@ -1216,13 +1216,13 @@ fn parse(text: &str) -> Result<Config> {
             .unwrap_or(DEFAULT_MASKED_COUNT_CACHE_BYTES),
         figures_disk_bytes: serve
             .figures_disk_bytes
-            .unwrap_or(tessera_engine::figures::DEFAULT_DISK_BYTES),
+            .unwrap_or(mosaica_engine::figures::DEFAULT_DISK_BYTES),
         masked_count_give_way_ms: serve
             .masked_count_give_way_ms
-            .unwrap_or(tessera_engine::figures::DEFAULT_GIVE_WAY_MS),
+            .unwrap_or(mosaica_engine::figures::DEFAULT_GIVE_WAY_MS),
         occupancy_cache_bytes: serve
             .occupancy_cache_bytes
-            .unwrap_or(tessera_engine::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES),
+            .unwrap_or(mosaica_engine::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES),
         fragment_cache_bytes: serve
             .fragment_cache_bytes
             .unwrap_or(DEFAULT_FRAGMENT_CACHE_BYTES),
@@ -1299,13 +1299,13 @@ mod tests {
             viewer = "127.0.0.1:7407"
             session = "127.0.0.1:7408"
             control = "127.0.0.1:7409"
-            operator_credential_env = "TESSERA_TEST_OPERATOR_CRED"
+            operator_credential_env = "MOSAICA_TEST_OPERATOR_CRED"
             {serve_extra}
         "#
         )
     }
 
-    /// `tessera build` reads this file too, so a deployment with no `[serve]` section parses.
+    /// `mosaica build` reads this file too, so a deployment with no `[serve]` section parses.
     #[test]
     fn a_build_only_deployment_needs_no_serve_section() {
         let toml = r#"
@@ -1382,7 +1382,7 @@ mod tests {
         let config = parse(&valid_toml("")).unwrap();
         assert_eq!(
             config.compaction,
-            tessera_engine::CompactionSchedule {
+            mosaica_engine::CompactionSchedule {
                 min_interval_secs: 86_400,
                 window_start_secs: Some(0),
                 window_secs: 4 * 3_600,
@@ -1515,7 +1515,7 @@ mod tests {
         std::fs::write(&at, "").unwrap();
         assert_eq!(discover(None, &deep).unwrap(), at);
 
-        let named = PathBuf::from("/elsewhere/tessera.toml");
+        let named = PathBuf::from("/elsewhere/mosaica.toml");
         assert_eq!(discover(Some(&named), &deep).unwrap(), named);
     }
 
@@ -1548,7 +1548,7 @@ mod tests {
         std::fs::write(
             &at,
             valid_toml("operator_credential_file = \"operator.cred\"\n").replace(
-                "operator_credential_env = \"TESSERA_TEST_OPERATOR_CRED\"\n",
+                "operator_credential_env = \"MOSAICA_TEST_OPERATOR_CRED\"\n",
                 "",
             ) + "[catalogue]\ndir = \"identity\"\n",
         )
@@ -1570,7 +1570,7 @@ mod tests {
         std::fs::write(
             &at,
             valid_toml("operator_credential_file = \"operator.cred\"\n").replace(
-                "operator_credential_env = \"TESSERA_TEST_OPERATOR_CRED\"\n",
+                "operator_credential_env = \"MOSAICA_TEST_OPERATOR_CRED\"\n",
                 "",
             ),
         )
@@ -1593,7 +1593,7 @@ mod tests {
         std::fs::write(
             &at,
             valid_toml("operator_credential_file = \"operator.cred\"\n").replace(
-                "operator_credential_env = \"TESSERA_TEST_OPERATOR_CRED\"\n",
+                "operator_credential_env = \"MOSAICA_TEST_OPERATOR_CRED\"\n",
                 "",
             ),
         )
@@ -1608,8 +1608,8 @@ mod tests {
     #[test]
     fn a_serving_credential_is_read_at_startup_rather_than_at_parse() {
         let toml = valid_toml("").replace(
-            "TESSERA_TEST_OPERATOR_CRED",
-            "TESSERA_TEST_CREDENTIAL_THAT_IS_NEVER_SET",
+            "MOSAICA_TEST_OPERATOR_CRED",
+            "MOSAICA_TEST_CREDENTIAL_THAT_IS_NEVER_SET",
         );
         let config = parse(&toml).expect("an unset credential variable must still parse");
         assert!(matches!(
@@ -1629,10 +1629,10 @@ mod tests {
             [[catalogue.providers]]
             name = "corp"
             issuer = "https://login.example.org"
-            audience = "tessera"
+            audience = "mosaica"
             jwks_url = "https://login.example.org/keys"
             claim_rules = [{ claim = "groups[*]", template = "{value}" }]
-            role_mappings = [{ claim = "groups[*]", value = "tessera-admins", group = "admins" }]
+            role_mappings = [{ claim = "groups[*]", value = "mosaica-admins", group = "admins" }]
             "#;
         let config = parse(&toml).expect("a provider parses");
         assert_eq!(config.min_password_length, 20);
@@ -1641,12 +1641,12 @@ mod tests {
             vec![OidcProvider {
                 name: "corp".into(),
                 issuer: "https://login.example.org".into(),
-                audience: "tessera".into(),
+                audience: "mosaica".into(),
                 jwks_url: "https://login.example.org/keys".into(),
                 claim_rules: vec![("groups[*]".into(), "{value}".into())],
                 role_mappings: vec![(
                     "groups[*]".into(),
-                    "tessera-admins".into(),
+                    "mosaica-admins".into(),
                     "admins".into()
                 )],
             }]
@@ -1694,7 +1694,7 @@ mod tests {
         assert_eq!(config.max_k, DEFAULT_MAX_K);
         assert_eq!(
             config.compute_threads,
-            tessera_engine::default_compute_threads()
+            mosaica_engine::default_compute_threads()
         );
         assert_eq!(
             config.compute_admission,

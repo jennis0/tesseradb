@@ -8,8 +8,8 @@
 //! restart pays per batch.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use tessera_lifecycle::wal::{WalRecord, WalRow, WalScalar};
-use tessera_types::EntityId;
+use mosaica_lifecycle::wal::{WalRecord, WalRow, WalScalar};
+use mosaica_types::EntityId;
 
 /// A row on GeoNames' declaration: `feature_class`, `feature_code`, `country`, `admin1..4` and
 /// `timezone` as category codes, then `population`, `elevation`, `dem`, `modification_date` and

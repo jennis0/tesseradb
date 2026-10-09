@@ -1,5 +1,5 @@
 //! **The per-point membership column names the deepest served artifact and never one the
-//! response withheld** (D12, `client-components.md` §5.10; `tessera_engine::membership_column`).
+//! response withheld** (D12, `client-components.md` §5.10; `mosaica_engine::membership_column`).
 //!
 //! The property the leak argument rests on is the join: every non-null value in the column is an
 //! identifier the same request serves on `Engine::viewport_artifacts`. It is asserted on every
@@ -17,16 +17,16 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
-use tessera_engine::{
+use mosaica_engine::{
     ArtifactOut, Engine, LayerSelection, PointColumns, ViewportArtifactsRequest, ViewportRequest,
 };
-use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_lifecycle::membership::{IncomingAttachment, IncomingContent};
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout, SuppliedContent, SuppliedRequirement,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const TREE: &str = "clusters/tree";
 const LABELS: &str = "clusters/labels";
@@ -45,7 +45,7 @@ fn declaration(
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
@@ -72,7 +72,7 @@ fn labels() -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,

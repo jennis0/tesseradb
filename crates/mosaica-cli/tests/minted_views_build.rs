@@ -19,10 +19,10 @@ use arrow::array::{ArrayRef, Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use tessera_store::read::open_bundle;
+use mosaica_store::read::open_bundle;
 
-fn tessera() -> std::process::Command {
-    std::process::Command::new(env!("CARGO_BIN_EXE_tessera"))
+fn mosaica() -> std::process::Command {
+    std::process::Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }
 
 const ENTITIES: u64 = 24;
@@ -133,8 +133,8 @@ point_visibility = { default = "public" }
 const DEPLOYMENT: &str = r#"
 [bundle]
 path  = "bundle"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [build]
 schema = "corpus.toml"
@@ -155,12 +155,12 @@ fn fixture(corpus: &str) -> tempfile::TempDir {
     write_world(&dir.path().join("world.parquet"));
     write_discriminated(&dir.path().join("quarter.parquet"));
     std::fs::write(dir.path().join("corpus.toml"), corpus).unwrap();
-    std::fs::write(dir.path().join("tessera.toml"), DEPLOYMENT).unwrap();
+    std::fs::write(dir.path().join("mosaica.toml"), DEPLOYMENT).unwrap();
     dir
 }
 
 fn build_in(dir: &Path) -> std::process::Output {
-    tessera()
+    mosaica()
         .current_dir(dir)
         .arg("build")
         .output()
@@ -217,7 +217,7 @@ fn a_group_with_no_roster_builds_its_minted_views() {
         let rows = (0..ENTITIES)
             .filter(|&e| {
                 view.row_space
-                    .row_of(tessera_types::EntityId::new(e))
+                    .row_of(mosaica_types::EntityId::new(e))
                     .is_some()
             })
             .count() as u64;
@@ -225,7 +225,7 @@ fn a_group_with_no_roster_builds_its_minted_views() {
     }
 
     // The bundle verifies: every file the minted views wrote is digested like any other's.
-    let out = tessera()
+    let out = mosaica()
         .current_dir(dir.path())
         .args(["verify", "--deep", "bundle"])
         .output()
@@ -260,7 +260,7 @@ fn a_minted_key_outside_the_charset_refuses_the_build() {
         ],
     );
     std::fs::write(dir.path().join("corpus.toml"), CORPUS).unwrap();
-    std::fs::write(dir.path().join("tessera.toml"), DEPLOYMENT).unwrap();
+    std::fs::write(dir.path().join("mosaica.toml"), DEPLOYMENT).unwrap();
 
     let built = build_in(dir.path());
     let stderr = String::from_utf8_lossy(&built.stderr).to_string();

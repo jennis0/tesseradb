@@ -32,13 +32,13 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::Engine;
-use tessera_lifecycle::wal::WalScalar;
-use tessera_lifecycle::UnallocatedRow;
-use tessera_store::read::open_bundle;
-use tessera_types::AttrLocalId;
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::Engine;
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_store::read::open_bundle;
+use mosaica_types::AttrLocalId;
 
 /// Built items — small, because the built layer is not what this module is about.
 const N: u64 = 16;
@@ -117,20 +117,20 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
             .schema,
     );
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -148,7 +148,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
     .expect("a bundle with an indexed text column builds");
 }
 
-fn text_extents(root: &Path) -> Vec<tessera_store::manifest::TextExtent> {
+fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
     open_bundle(root).expect("the bundle opens").partitions["default"]
         .manifest
         .text_extents
@@ -221,7 +221,7 @@ fn answers(engine: &Engine, terms: &[String]) -> BTreeMap<String, Vec<u32>> {
                 .filter_columns
                 .resolve(
                     "prose",
-                    &tessera_engine::filter::FilterOperand::Match {
+                    &mosaica_engine::filter::FilterOperand::Match {
                         query: term.clone(),
                         minimum: None,
                     },
@@ -240,13 +240,13 @@ fn answers(engine: &Engine, terms: &[String]) -> BTreeMap<String, Vec<u32>> {
 /// every question correctly from the base, and this is what separates the two.
 fn extent_index(
     root: &Path,
-    extent: &tessera_store::manifest::TextExtent,
+    extent: &mosaica_store::manifest::TextExtent,
 ) -> BTreeMap<String, Vec<u32>> {
     let prefix = root.join(current_prefix(root));
     let dict =
-        tessera_filter::SortedDict::open(&prefix.join(&extent.dict), tessera_filter::Access::Read)
+        mosaica_filter::SortedDict::open(&prefix.join(&extent.dict), mosaica_filter::Access::Read)
             .expect("the coalesced dictionary opens");
-    let postings = tessera_filter::ColumnPostings::open(&prefix.join(&extent.postings), false)
+    let postings = mosaica_filter::ColumnPostings::open(&prefix.join(&extent.postings), false)
         .expect("the coalesced postings open");
     assert_eq!(
         dict.len(),
@@ -418,7 +418,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
         .find(|e| e.column == "prose")
         .expect("the coalesced extent");
     let columns = &engine.generation().filter_columns;
-    let paths = |presence: &Path| tessera_engine::filter::TextExtentPaths {
+    let paths = |presence: &Path| mosaica_engine::filter::TextExtentPaths {
         column: "prose".to_string(),
         dict_rel: extent.dict.clone(),
         dict: prefix.join(&extent.dict),
@@ -428,7 +428,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
     };
 
     // A layer this generation does not hold.
-    let stray = tessera_engine::filter::CoalescedTextWindow {
+    let stray = mosaica_engine::filter::CoalescedTextWindow {
         consumed: vec!["attrs/prose/extents/never-dict.bin".to_string()],
         paths: paths(&prefix.join(&extent.presence)),
     };
@@ -445,7 +445,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
     short.remove(dropped);
     let short_path = dir.path().join("short-presence.roaring");
     std::fs::write(&short_path, short.serialize::<croaring::Portable>()).unwrap();
-    let window = tessera_engine::filter::CoalescedTextWindow {
+    let window = mosaica_engine::filter::CoalescedTextWindow {
         consumed: vec![extent.dict.clone()],
         paths: paths(&short_path),
     };
@@ -455,7 +455,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
     assert!(
         matches!(
             &err,
-            tessera_engine::filter::ComposeError::CoverageMismatch {
+            mosaica_engine::filter::ComposeError::CoverageMismatch {
                 column,
                 replacement,
                 consumed: 1,

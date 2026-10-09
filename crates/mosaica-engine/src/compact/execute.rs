@@ -2,15 +2,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tessera_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::edited::{EditedRows, RowEntities};
-use tessera_store::manifest::{DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor};
-use tessera_store::render_presence::RENDER_PRESENCE_DIR;
-use tessera_store::{
+use mosaica_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::edited::{EditedRows, RowEntities};
+use mosaica_store::manifest::{DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor};
+use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
+use mosaica_store::{
     fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
 };
-use tessera_types::IdentityKey;
+use mosaica_types::IdentityKey;
 
 use crate::flush::{failed, remove_spool_on_error, MaintenanceFailed};
 
@@ -43,17 +43,17 @@ pub(crate) struct FoldContext {
     pub(crate) tiers: Vec<Arc<DeltaTier>>,
     pub(crate) declared_scalars: Vec<DeclaredScalar>,
     /// Every group's scoped column families, flattened. Each owes a folded column per view.
-    pub(crate) scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
+    pub(crate) scoped_scalars: Vec<mosaica_store::manifest::ScopedScalar>,
     /// A scoped column's directory names its view's incarnation.
     pub(crate) view_incarnations:
-        std::collections::HashMap<String, tessera_types::view::ViewIncarnation>,
+        std::collections::HashMap<String, mosaica_types::view::ViewIncarnation>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
 }
 
 /// The summary is carried to publication's log, since its timings and counts are not in the file.
 pub(crate) struct FoldedTermImages {
-    pub(crate) extent: tessera_store::manifest::TermImageExtent,
-    pub(crate) summary: tessera_store::term_images::TermImageSummary,
+    pub(crate) extent: mosaica_store::manifest::TermImageExtent,
+    pub(crate) summary: mosaica_store::term_images::TermImageSummary,
 }
 
 /// A fold whose files are durable under a prefix nothing yet names.
@@ -64,9 +64,9 @@ pub(crate) struct CompletedFold {
     /// The files the fold wrote. Publication adds the carried files' digests for `MANIFEST.json`.
     pub(crate) files: BTreeMap<String, FileDigest>,
     /// Each unique column's new base runs, in key order with disjoint ranges.
-    pub(crate) unique: Vec<(String, Vec<tessera_store::manifest::BaseKeyRun>)>,
+    pub(crate) unique: Vec<(String, Vec<mosaica_store::manifest::BaseKeyRun>)>,
     /// The edited-items map's new base runs, each direction in key order with disjoint ranges.
-    pub(crate) edited: tessera_store::manifest::EditedItemsRuns,
+    pub(crate) edited: mosaica_store::manifest::EditedItemsRuns,
     /// Written unchanged into the new `SEGMENTS-<n>.json`.
     pub(crate) term_images: Vec<FoldedTermImages>,
     pub(crate) cost: Vec<PassCost>,
@@ -196,7 +196,7 @@ fn fold_row_spaces(
         let view_rel = format!(
             "partitions/{}/{}",
             plan.partition,
-            tessera_store::view_rel(&view.view)
+            mosaica_store::view_rel(&view.view)
         );
         let view_dir = ctx.to_prefix_dir.join(&view_rel);
         std::fs::create_dir_all(&view_dir).map_err(failed("creating the view"))?;
@@ -204,7 +204,7 @@ fn fold_row_spaces(
         let segment_dir = ctx.to_prefix_dir.join(&segment_rel);
         let permutation_rel = format!("{view_rel}/permutation.bin");
         let permutation_path = ctx.to_prefix_dir.join(&permutation_rel);
-        let row_entity_rel = format!("{view_rel}/{}", tessera_store::ROW_ENTITY_FILE);
+        let row_entity_rel = format!("{view_rel}/{}", mosaica_store::ROW_ENTITY_FILE);
         let row_entity_path = ctx.to_prefix_dir.join(&row_entity_rel);
 
         let inputs: Vec<FoldSegmentInput> = view
@@ -218,7 +218,7 @@ fn fold_row_spaces(
                         RowEntities::Listed(Arc::new(EditedRows::open(&dir, *listed)?))
                     }
                     PlannedEntities::Table(rel) => RowEntities::Table(std::sync::Arc::new(
-                        tessera_store::RowToEntity::load(&ctx.from_prefix_dir.join(rel))?,
+                        mosaica_store::RowToEntity::load(&ctx.from_prefix_dir.join(rel))?,
                     )),
                 };
                 Ok(FoldSegmentInput {
@@ -227,7 +227,7 @@ fn fold_row_spaces(
                     entities,
                 })
             })
-            .collect::<Result<_, tessera_store::StoreError>>()
+            .collect::<Result<_, mosaica_store::StoreError>>()
             .map_err(failed("pass 1 (row space: the inputs' entities)"))?;
         let out = fold_row_space(
             &segment_dir,
@@ -246,13 +246,13 @@ fn fold_row_spaces(
         )
         .map_err(failed("pass 1 (row space)"))?;
 
-        for name in tessera_store::SEGMENT_FILES {
+        for name in mosaica_store::SEGMENT_FILES {
             output.push(format!("{segment_rel}/{name}"), segment_dir.join(name));
         }
         for column in &out.presence_columns {
             output.push(
                 format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
-                tessera_store::render_presence::render_presence_path(&segment_dir, column),
+                mosaica_store::render_presence::render_presence_path(&segment_dir, column),
             );
         }
         output.push(permutation_rel, permutation_path);
@@ -273,7 +273,7 @@ fn fold_row_spaces(
 }
 
 /// Pass 4d: each view's field tallies over its new base rows, read from the files passes 1, 4a and
-/// 4c wrote, through the function a build calls ([`tessera_store::field_tallies::derive_view`]).
+/// 4c wrote, through the function a build calls ([`mosaica_store::field_tallies::derive_view`]).
 fn derive_field_tallies(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -282,21 +282,21 @@ fn derive_field_tallies(
 ) -> Result<(), MaintenanceFailed> {
     let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
     for segment in segments {
-        let path = tessera_store::field_tallies::derive_view(
+        let path = mosaica_store::field_tallies::derive_view(
             &partition_dir,
             &segment.view,
             &segment.seg_id,
             segment.row_count,
             &ctx.declared_scalars,
-            &|name| tessera_filter::base_numbers(&partition_dir, name),
+            &|name| mosaica_filter::base_numbers(&partition_dir, name),
         )
         .map_err(failed("pass 4d (field tallies)"))?;
         out.push(
             format!(
                 "partitions/{}/{}/{}",
                 plan.partition,
-                tessera_store::view_rel(&segment.view),
-                tessera_store::field_tallies::FIELD_TALLIES_FILE
+                mosaica_store::view_rel(&segment.view),
+                mosaica_store::field_tallies::FIELD_TALLIES_FILE
             ),
             path,
         );
@@ -363,7 +363,7 @@ fn derive_term_images(
     let postings = PostingsReader::open(postings_path, true)
         .map_err(failed("pass 2b (term images: the new postings)"))?;
     let dict_len = postings.term_count();
-    let mut index = tessera_store::derived::DerivedIndex::default();
+    let mut index = mosaica_store::derived::DerivedIndex::default();
     for segment in segments {
         if segment.row_count == 0 || dict_len == 0 {
             continue;
@@ -371,13 +371,13 @@ fn derive_term_images(
         let permutation_path = ctx.to_prefix_dir.join(format!(
             "partitions/{}/{}/permutation.bin",
             plan.partition,
-            tessera_store::view_rel(&segment.view)
+            mosaica_store::view_rel(&segment.view)
         ));
         // From pass 1's file, so the images match the permutation that is published.
-        let permutation = tessera_store::Permutation::load(&permutation_path)
+        let permutation = mosaica_store::Permutation::load(&permutation_path)
             .map_err(failed("pass 2b (term images: the new permutation)"))?;
-        let space = tessera_store::RowSpace::new(Arc::new(permutation), segment.row_count);
-        let stamp = tessera_store::term_images::TermImageStamp {
+        let space = mosaica_store::RowSpace::new(Arc::new(permutation), segment.row_count);
+        let stamp = mosaica_store::term_images::TermImageStamp {
             prefix: ctx.to_prefix.clone(),
             view: segment.view.clone(),
             base_seg_id: segment.seg_id.clone(),
@@ -385,7 +385,7 @@ fn derive_term_images(
             base_rows: segment.row_count,
             bound: space.base().bound(),
         };
-        let file = tessera_store::derived::term_image_file(
+        let file = mosaica_store::derived::term_image_file(
             &ctx.to_prefix_dir,
             &plan.partition,
             TERM_IMAGE_MANIFEST_N,
@@ -393,29 +393,29 @@ fn derive_term_images(
         )
         .map_err(failed("pass 2b (term images: naming the file)"))?;
 
-        // `tessera-store` cannot depend on `tessera-authz`, so the postings are adapted here.
+        // `mosaica-store` cannot depend on `mosaica-authz`, so the postings are adapted here.
         let walk = |term: u32,
-                    visit: &mut dyn FnMut(tessera_store::derived::PostingSlice<'_>)|
+                    visit: &mut dyn FnMut(mosaica_store::derived::PostingSlice<'_>)|
          -> std::io::Result<()> {
             if let Some(posting) = postings.posting_at(term)? {
                 match posting {
-                    tessera_authz::PostingRef::Array(bytes) => {
-                        visit(tessera_store::derived::PostingSlice::Array(bytes))
+                    mosaica_authz::PostingRef::Array(bytes) => {
+                        visit(mosaica_store::derived::PostingSlice::Array(bytes))
                     }
-                    tessera_authz::PostingRef::Roaring(bitmap) => {
-                        visit(tessera_store::derived::PostingSlice::Roaring(&bitmap))
+                    mosaica_authz::PostingRef::Roaring(bitmap) => {
+                        visit(mosaica_store::derived::PostingSlice::Roaring(&bitmap))
                     }
                 }
             }
             Ok(())
         };
-        let summary = tessera_store::term_images::derive_term_images(
+        let summary = mosaica_store::term_images::derive_term_images(
             &space,
             dict_len,
             &walk,
             &stamp,
             &file.path,
-            tessera_store::term_images::DeriveOptions {
+            mosaica_store::term_images::DeriveOptions {
                 threads: TERM_IMAGE_THREADS,
             },
         )
@@ -423,12 +423,12 @@ fn derive_term_images(
 
         out.push(file.rel.clone(), file.path);
         term_images.push(FoldedTermImages {
-            extent: tessera_store::manifest::TermImageExtent {
+            extent: mosaica_store::manifest::TermImageExtent {
                 path: file.rel,
                 view: segment.view.clone(),
                 incarnation: segment.incarnation,
                 dict_len,
-                keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER
+                keep_rows_per_container: mosaica_store::term_images::KEEP_ROWS_PER_CONTAINER
                     as u32,
             },
             summary,
@@ -445,15 +445,15 @@ fn fold_unique_indexes(
     plan: &FoldPlan,
     ctx: &FoldContext,
     out: &mut FoldOutput,
-) -> Result<Vec<(String, Vec<tessera_store::manifest::BaseKeyRun>)>, MaintenanceFailed> {
+) -> Result<Vec<(String, Vec<mosaica_store::manifest::BaseKeyRun>)>, MaintenanceFailed> {
     let mut folded = Vec::with_capacity(plan.unique.len());
     for index in &plan.unique {
         let inputs: Vec<PathBuf> = index
             .files()
             .map(|rel| ctx.from_prefix_dir.join(rel))
             .collect();
-        let out_rel = tessera_store::unique::index_dir_rel(&plan.partition, &index.attribute);
-        let written = tessera_store::unique::merge_unique_runs(
+        let out_rel = mosaica_store::unique::index_dir_rel(&plan.partition, &index.attribute);
+        let written = mosaica_store::unique::merge_unique_runs(
             &inputs,
             &plan.tombstones,
             &ctx.to_prefix_dir.join(&out_rel),
@@ -480,9 +480,9 @@ fn fold_edited_items(
     plan: &FoldPlan,
     ctx: &FoldContext,
     out: &mut FoldOutput,
-) -> Result<tessera_store::manifest::EditedItemsRuns, MaintenanceFailed> {
-    use tessera_store::edited::Direction;
-    let mut folded = tessera_store::manifest::EditedItemsRuns::default();
+) -> Result<mosaica_store::manifest::EditedItemsRuns, MaintenanceFailed> {
+    use mosaica_store::edited::Direction;
+    let mut folded = mosaica_store::manifest::EditedItemsRuns::default();
     for (direction, runs, into) in [
         (
             Direction::ByNumber,
@@ -499,11 +499,11 @@ fn fold_edited_items(
             .files()
             .map(|rel| ctx.from_prefix_dir.join(rel))
             .collect();
-        let written = tessera_store::edited::merge_edited_runs(
+        let written = mosaica_store::edited::merge_edited_runs(
             direction,
             &inputs,
             &plan.tombstones,
-            &ctx.to_prefix_dir.join(tessera_store::edited::runs_dir_rel(
+            &ctx.to_prefix_dir.join(mosaica_store::edited::runs_dir_rel(
                 &plan.partition,
                 direction,
             )),
@@ -511,7 +511,7 @@ fn fold_edited_items(
         )
         .map_err(failed("pass 3c (edited items)"))?;
         for run in written {
-            let listed = tessera_store::edited::as_base(&ctx.to_prefix_dir, &run)
+            let listed = mosaica_store::edited::as_base(&ctx.to_prefix_dir, &run)
                 .map_err(failed("pass 3c (edited items)"))?;
             out.push(listed.path.clone(), run.path);
             into.base.push(listed);
@@ -531,7 +531,7 @@ fn digest_and_sync(out: &FoldOutput) -> Result<BTreeMap<String, FileDigest>, Mai
         );
     }
     let paths: Vec<PathBuf> = out.written.iter().map(|(_, path)| path.clone()).collect();
-    tessera_store::fsync_written(&paths).map_err(failed("pass 5 (durability)"))?;
+    mosaica_store::fsync_written(&paths).map_err(failed("pass 5 (durability)"))?;
 
     Ok(files)
 }

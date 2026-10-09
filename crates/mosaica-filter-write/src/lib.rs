@@ -2,7 +2,7 @@
 //! one base — the coalesce's extent merge beside it, and the derived postings both producers emit
 //! through.
 //!
-//! # Why this is a crate rather than a module of `tessera-filter`
+//! # Why this is a crate rather than a module of `mosaica-filter`
 //!
 //! **Measured, and it is the seventh time this crate's shape has moved the scan.** `values.rs`
 //! carries the scan's inner loop, and the campaign that sized it
@@ -18,7 +18,7 @@
 //!
 //! It is also the boundary the layering already wanted. The build and the fold are the two
 //! producers, they live in different crates, and neither is on a request path — where
-//! `tessera-filter` is opened by every generation and read by every filtered viewport.
+//! `mosaica-filter` is opened by every generation and read by every filtered viewport.
 //!
 //! `filter-index.md` §6.2 is the design. A fold rewrites a bundle, and for this artefact what only
 //! it can do is retention — a deleted entity's value bytes leave the corpus here and nowhere else —
@@ -82,11 +82,11 @@ use std::path::Path;
 
 use arrow::buffer::ScalarBuffer;
 use croaring::Bitmap;
-use tessera_authz::KeyedPostingsSpool;
-use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
+use mosaica_authz::KeyedPostingsSpool;
+use mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
-use tessera_filter::{Codes, ColumnKind, ValueColumn, ValueColumnWriter};
-use tessera_roaring::RankedRuns;
+use mosaica_filter::{Codes, ColumnKind, ValueColumn, ValueColumnWriter};
+use mosaica_roaring::RankedRuns;
 
 pub use keyword::{coalesce_keyword_extents, fold_keyword_column, KeywordLayer};
 pub use record::{
@@ -98,8 +98,8 @@ pub use text::{coalesce_text_extents, merge_text_layers, TextLayerRef};
 /// The vocabulary's reserved *absent* code: never drawn, never bound to a key, and carried by
 /// exactly the entities that carry no value.
 ///
-/// Duplicated from `tessera_store::vocabulary::ABSENT_CODE` rather than imported, because
-/// `check-layers.sh` denies this crate the edge to `tessera-store` (filter-index §9) — the value is
+/// Duplicated from `mosaica_store::vocabulary::ABSENT_CODE` rather than imported, because
+/// `check-layers.sh` denies this crate the edge to `mosaica-store` (filter-index §9) — the value is
 /// part of the artefact's format, which this crate is on the writing end of.
 const ABSENT_CODE: u32 = 0;
 
@@ -174,7 +174,7 @@ pub fn fold_value_column(
 /// **A coalesce retires nothing**, so there is no tombstone parameter to pass and no way to spell
 /// one: a deleted-but-unfolded entity's value rides through untouched, because removal is the
 /// fold's (Rule F, write-path §5.4). An extent's presence bitmap is always written, for the reason
-/// [`tessera_filter::write_extent`] gives.
+/// [`mosaica_filter::write_extent`] gives.
 pub fn coalesce_attr_extents(
     inputs: &[&ValueColumn],
     values_path: &Path,
@@ -407,7 +407,7 @@ impl CategorySource for ValueColumn {
         }
         let present = self.present();
         let mut slot0 = 0usize;
-        for (start, last) in tessera_roaring::Runs::new(&present) {
+        for (start, last) in mosaica_roaring::Runs::new(&present) {
             for (k, entity) in (start..=last).enumerate() {
                 let code = code_at(self.codes(), slot0 + k)
                     .expect("the family was checked before the walk began");
@@ -535,7 +535,7 @@ pub fn write_category_postings(
 mod tests {
     use super::*;
     use arrow::buffer::ScalarBuffer;
-    use tessera_filter::write_value_column;
+    use mosaica_filter::write_value_column;
 
     fn codes_u32(v: Vec<u32>) -> Codes {
         Codes::U32(ScalarBuffer::from(v))
@@ -648,7 +648,7 @@ mod tests {
         let values = dir.join(format!("{tag}-values.arrow"));
         let presence = dir.join(format!("{tag}-presence.roaring"));
         coalesce_attr_extents(inputs, &values, &presence)?;
-        ValueColumn::open(&values, Some(&presence), tessera_filter::Access::Read)
+        ValueColumn::open(&values, Some(&presence), mosaica_filter::Access::Read)
     }
 
     /// **A coalesced extent carries exactly the `(entity, value)` triples its inputs carried
@@ -767,7 +767,7 @@ mod tests {
         let partial = fold_value_column(&[&b, &a], &bitmap([4, 7]), 11, &values, &presence)
             .expect("the fold");
         assert!(partial, "two blanked entities leave the column partial");
-        let out = ValueColumn::open(&values, Some(&presence), tessera_filter::Access::Read)
+        let out = ValueColumn::open(&values, Some(&presence), mosaica_filter::Access::Read)
             .expect("the folded column");
         for e in 0..=10u32 {
             let expected = (e != 4 && e != 7).then_some(e * 100);
@@ -800,7 +800,7 @@ mod tests {
 
         let path = dir.path().join("postings.arrow");
         write_category_postings(&path, "colour", &column, POSTINGS_BAND_ROWS).expect("the emit");
-        let postings = tessera_filter::ColumnPostings::open_keyed(&path).expect("open");
+        let postings = mosaica_filter::ColumnPostings::open_keyed(&path).expect("open");
         let mut codes: Vec<u32> = values
             .iter()
             .copied()
@@ -810,7 +810,7 @@ mod tests {
         codes.dedup();
         for code in codes {
             let members = postings
-                .entities(tessera_types::AttrLocalId::new(code))
+                .entities(mosaica_types::AttrLocalId::new(code))
                 .expect("read");
             let expected: Vec<u32> = (0..200u32)
                 .filter(|e| values[*e as usize] == code)
@@ -819,7 +819,7 @@ mod tests {
         }
         assert!(
             postings
-                .entities(tessera_types::AttrLocalId::new(ABSENT_CODE))
+                .entities(mosaica_types::AttrLocalId::new(ABSENT_CODE))
                 .expect("read")
                 .is_empty(),
             "the absent code is not a value and earns no posting"

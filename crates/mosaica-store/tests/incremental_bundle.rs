@@ -8,10 +8,10 @@
 
 use std::sync::Arc;
 
-use tessera_store::permutation::SegmentExtent;
-use tessera_store::read::PublishedManifest;
-use tessera_store::{open_bundle, Bundle};
-use tessera_types::{EntityId, RowId};
+use mosaica_store::permutation::SegmentExtent;
+use mosaica_store::read::PublishedManifest;
+use mosaica_store::{open_bundle, Bundle};
+use mosaica_types::{EntityId, RowId};
 
 mod fixture;
 use fixture::{build_bundle, flush_segment, next_manifest, PARTITION, VIEW};
@@ -241,7 +241,7 @@ fn an_unknown_view_is_refused() {
         .is_err());
 }
 
-/// A bundle with no extents is what `tessera build` writes, and `with_segment` must be the only
+/// A bundle with no extents is what `mosaica build` writes, and `with_segment` must be the only
 /// thing that changes it. Nothing here calls `open_bundle` twice.
 #[test]
 fn the_original_generation_is_unchanged_by_a_publication() {

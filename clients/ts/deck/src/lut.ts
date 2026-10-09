@@ -1,6 +1,6 @@
 import type {Device, Texture} from '@luma.gl/core';
-import {NO_ORDINAL, type ArtifactsProjection, type ArtifactTableChange, type Rgba} from '@tesseradb/client';
-import {NEUTRAL} from '@tesseradb/client/internal';
+import {NO_ORDINAL, type ArtifactsProjection, type ArtifactTableChange, type Rgba} from '@mosaica/client';
+import {NEUTRAL} from '@mosaica/client/internal';
 
 /**
  * The lookup texture: one RGBA texel per session ordinal, read by the mark shader as
@@ -138,7 +138,7 @@ export function patchLut(inputs: LutInputs, data: Uint8Array, ordinals: readonly
 }
 
 /**
- * The lookup texture on the GPU, written by the rows that changed. `TesseraLayer` makes one on its
+ * The lookup texture on the GPU, written by the rows that changed. `MosaicaLayer` makes one on its
  * deck's device and releases it when finalised; a host may pass its own and attach it. Without a
  * device it still builds the bytes.
  */

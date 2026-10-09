@@ -8,7 +8,7 @@
 //   look-ahead off: 9 requests, 0 of 6 pans free, 14,382 of 16,524 tiles from cache
 //   look-ahead on : 4 requests, 3 of 6 pans free, 16,524 of 16,524 tiles from cache
 //
-// Requires a running `tessera serve` and `vite dev`.
+// Requires a running `mosaica serve` and `vite dev`.
 //
 // The measurement is the fraction of pans answered entirely from held bands, with no request.
 // The script pauses between pans, since look-ahead runs only while the view is still.
@@ -28,7 +28,7 @@ let bytes = 0;
 page.on('response', (r) => {
   if (new URL(r.url()).pathname === '/v1/viewport') {
     requests++;
-    serverUs += Number(r.headers()['x-tessera-server-us'] ?? 0);
+    serverUs += Number(r.headers()['x-mosaica-server-us'] ?? 0);
     bytes += Number(r.headers()['content-length'] ?? 0);
   }
 });

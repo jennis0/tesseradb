@@ -14,10 +14,10 @@ pub(super) fn views_of(generation: &Generation) -> Vec<String> {
 
 /// One view's row space in `bundle`, or `None` where the partition or the view is not there.
 pub(super) fn view_row_space<'a>(
-    bundle: &'a tessera_store::read::Bundle,
+    bundle: &'a mosaica_store::read::Bundle,
     partition: &str,
     view: &str,
-) -> Option<&'a tessera_store::permutation::RowSpace> {
+) -> Option<&'a mosaica_store::permutation::RowSpace> {
     bundle
         .partitions
         .get(partition)
@@ -36,8 +36,8 @@ pub(super) fn pack_membership_extents(
     prefix_dir: &std::path::Path,
     partition: &str,
     n: u64,
-    ready: Vec<tessera_lifecycle::membership::PendingExtent>,
-) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
+    ready: Vec<mosaica_lifecycle::membership::PendingExtent>,
+) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
     if ready.is_empty() {
         return Ok(Vec::new());
     }
@@ -45,7 +45,7 @@ pub(super) fn pack_membership_extents(
         .join("partitions")
         .join(partition)
         .join("members");
-    std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
+    std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
         path: dir.clone(),
         source,
     })?;
@@ -53,9 +53,9 @@ pub(super) fn pack_membership_extents(
     for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
         let name = format!("members-{n:06}-{index:03}.tsmb");
         let count = blobs.len() as u32;
-        let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
-        tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
-        entries.push(tessera_store::manifest::MembershipExtent {
+        let bytes = mosaica_store::membership::pack(ordinal_lo, &blobs);
+        mosaica_store::write_and_fsync(&dir.join(&name), &bytes)?;
+        entries.push(mosaica_store::manifest::MembershipExtent {
             path: format!("partitions/{partition}/members/{name}"),
             layer,
             level,
@@ -63,7 +63,7 @@ pub(super) fn pack_membership_extents(
             count,
         });
     }
-    tessera_store::fsync_dir(&dir)?;
+    mosaica_store::fsync_dir(&dir)?;
     Ok(entries)
 }
 
@@ -71,9 +71,9 @@ pub(super) fn pack_membership_extents(
 /// any one missing is a refusal to open rather than "those entities have no record".
 pub(super) fn record_extent_paths(
     prefix_dir: &std::path::Path,
-    extent: &tessera_store::manifest::RecordExtent,
-) -> tessera_filter::RecordExtentPaths {
-    tessera_filter::RecordExtentPaths {
+    extent: &mosaica_store::manifest::RecordExtent,
+) -> mosaica_filter::RecordExtentPaths {
+    mosaica_filter::RecordExtentPaths {
         blocks: prefix_dir.join(&extent.blocks),
         hasrow: prefix_dir.join(&extent.hasrow),
         directory: prefix_dir.join(&extent.directory),
@@ -83,9 +83,9 @@ pub(super) fn record_extent_paths(
 /// An entity→term extent's four files, resolved against the prefix directory that holds them.
 pub(super) fn entity_terms_extent_paths(
     prefix_dir: &std::path::Path,
-    extent: &tessera_store::manifest::EntityTermsExtent,
-) -> tessera_store::EntityTermsExtentPaths {
-    tessera_store::EntityTermsExtentPaths {
+    extent: &mosaica_store::manifest::EntityTermsExtent,
+) -> mosaica_store::EntityTermsExtentPaths {
+    mosaica_store::EntityTermsExtentPaths {
         hasrow: prefix_dir.join(&extent.hasrow),
         offsets: prefix_dir.join(&extent.offsets),
         terms: prefix_dir.join(&extent.terms),
@@ -110,18 +110,18 @@ pub(super) fn held_tier(tiers: &[Arc<DeltaTier>], rels: &[String], rel: &str) ->
 /// A `spatial` layer's membership is the rows inside its shapes and an `attribute` layer's is the
 /// rows carrying a value. Both are evaluated against the geometry, so neither takes anything from
 /// a publication's or a growth's record.
-pub(super) fn stored_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
+pub(super) fn stored_membership(declaration: &mosaica_types::layer::LayerDeclaration) -> bool {
     matches!(
         declaration.membership,
-        tessera_types::layer::MembershipSource::Enumerated
+        mosaica_types::layer::MembershipSource::Enumerated
     ) && declaration.shape.is_none()
 }
 
 /// A layer whose memberships are resolved from shapes: spatial, with a shape declared.
-pub(in crate::write) fn spatial_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
+pub(in crate::write) fn spatial_membership(declaration: &mosaica_types::layer::LayerDeclaration) -> bool {
     matches!(
         declaration.membership,
-        tessera_types::layer::MembershipSource::Spatial
+        mosaica_types::layer::MembershipSource::Spatial
     ) && declaration.shape.is_some()
 }
 
@@ -564,7 +564,7 @@ impl Executor {
             &consumed,
             completed.segment,
             completed.output.extent,
-            tessera_store::read::PublishedManifest {
+            mosaica_store::read::PublishedManifest {
                 manifest,
                 n: manifest_n,
             },
@@ -750,7 +750,7 @@ impl Executor {
             let partition_dir = prefix_dir
                 .join("partitions")
                 .join(&completed.partition);
-            let extents: Vec<tessera_store::EntityTermsExtentPaths> = manifest
+            let extents: Vec<mosaica_store::EntityTermsExtentPaths> = manifest
                 .entity_terms_extents
                 .iter()
                 .map(|e| entity_terms_extent_paths(&prefix_dir, e))
@@ -781,7 +781,7 @@ impl Executor {
                     .join(&completed.partition);
                 // Both lists, one stack, as the open composes them: an artifact's content extents
                 // hold the same format and the same reader, and the two never share an entity.
-                let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
+                let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
                     .record_extents
                     .iter()
                     .chain(manifest.artifact_record_extents.iter())
@@ -861,7 +861,7 @@ impl Executor {
 
         let next_bundle = match live.bundle.with_manifest(
             &completed.partition,
-            tessera_store::read::PublishedManifest {
+            mosaica_store::read::PublishedManifest {
                 manifest,
                 n: manifest_n,
             },
@@ -917,7 +917,7 @@ impl Executor {
                 .partitions
                 .get(&completed.partition)
                 .expect("the partition this publication just rebased");
-            match tessera_store::unique::UniqueIndexes::open(
+            match mosaica_store::unique::UniqueIndexes::open(
                 &next_bundle.manifest,
                 &partition.manifest,
                 &self.prefix_dir(&live),
@@ -941,7 +941,7 @@ impl Executor {
                 .partitions
                 .get(&completed.partition)
                 .expect("the partition this publication just rebased");
-            match tessera_store::edited::EditedIndex::open(
+            match mosaica_store::edited::EditedIndex::open(
                 &partition.manifest.edited_items,
                 &self.prefix_dir(&live),
                 Some(&live.edited),
@@ -1199,7 +1199,7 @@ impl Executor {
             // through the key it shares. Under any other view a lane of absences is owed rather
             // than no lane, so a segment missing one is not left for its own view's rewriters to
             // guess about.
-            let scoped_render: Vec<tessera_store::manifest::ScopedScalar> = if families.is_empty() {
+            let scoped_render: Vec<mosaica_store::manifest::ScopedScalar> = if families.is_empty() {
                 crate::viewport::scoped_render_families(manifest, &view)
                     .into_iter()
                     .cloned()
@@ -1377,7 +1377,7 @@ impl Executor {
             return;
         }
         let generation = self.generation.load_full();
-        let mut views: std::collections::BTreeMap<&str, Option<&tessera_store::read::ViewData>> =
+        let mut views: std::collections::BTreeMap<&str, Option<&mosaica_store::read::ViewData>> =
             std::collections::BTreeMap::new();
         for partition in generation.bundle.partitions.values() {
             for (name, data) in &partition.views {
@@ -1488,15 +1488,15 @@ impl Executor {
         view: &str,
         layer: &str,
         level: u32,
-        segment: Option<&tessera_store::read::SegmentData>,
+        segment: Option<&mosaica_store::read::SegmentData>,
         resolved: &[crate::shapes::ShapePiece],
-        store: &tessera_lifecycle::membership::ArtifactStore,
+        store: &mosaica_lifecycle::membership::ArtifactStore,
     ) -> Option<crate::artifacts::SegmentRows> {
         let registered = self.live.registered_layer(layer)?;
         if stored_membership(&registered.declaration) {
             return Some(crate::artifacts::SegmentRows::Projected);
         }
-        if registered.declaration.membership != tessera_types::layer::MembershipSource::Spatial
+        if registered.declaration.membership != mosaica_types::layer::MembershipSource::Spatial
             || registered.declaration.shape.is_none()
         {
             return None;
@@ -1573,7 +1573,7 @@ impl Executor {
         // once every manifest naming one is durable (`LiveState::rehouse_memberships`).
         let mut written: Vec<(
             std::path::PathBuf,
-            Vec<tessera_store::manifest::MembershipExtent>,
+            Vec<mosaica_store::manifest::MembershipExtent>,
         )> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
@@ -1708,7 +1708,7 @@ impl Executor {
         partition: &str,
         partitions: usize,
         n: u64,
-    ) -> tessera_store::Result<Option<tessera_store::manifest::RecordExtent>> {
+    ) -> mosaica_store::Result<Option<mosaica_store::manifest::RecordExtent>> {
         let rows = self.live.unpublished_content();
         if rows.is_empty() {
             return Ok(None);
@@ -1721,7 +1721,7 @@ impl Executor {
         // layout question a multi-partition bundle has to answer and nothing here can. No such
         // bundle exists today, which is why this is a refusal with an alarm rather than a design.
         if partitions > 1 {
-            return Err(tessera_store::StoreError::MalformedBundle {
+            return Err(mosaica_store::StoreError::MalformedBundle {
                 detail: format!(
                     "this bundle has {partitions} partitions and an artifact belongs to none of \
                      them, so where its supplied content should be written is undecided; the \
@@ -1732,18 +1732,18 @@ impl Executor {
 
         let extents_rel = format!("partitions/{partition}/attrs/record/extents");
         let dir = prefix_dir.join(&extents_rel);
-        std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
+        std::fs::create_dir_all(&dir).map_err(|source| mosaica_store::StoreError::Io {
             path: dir.clone(),
             source,
         })?;
-        let extent = tessera_store::manifest::RecordExtent {
+        let extent = mosaica_store::manifest::RecordExtent {
             blocks: format!("{extents_rel}/artifacts-{n:06}.blocks.bin"),
             hasrow: format!("{extents_rel}/artifacts-{n:06}.hasrow.roaring"),
             directory: format!("{extents_rel}/artifacts-{n:06}.directory.arrow"),
         };
         let io = |path: &std::path::Path| {
             let path = path.to_path_buf();
-            move |source| tessera_store::StoreError::Io {
+            move |source| mosaica_store::StoreError::Io {
                 path: path.clone(),
                 source,
             }
@@ -1751,11 +1751,11 @@ impl Executor {
         let blocks = prefix_dir.join(&extent.blocks);
         let hasrow = prefix_dir.join(&extent.hasrow);
         let directory = prefix_dir.join(&extent.directory);
-        let mut writer = tessera_filter_write::RecordBlobWriter::create(
+        let mut writer = mosaica_filter_write::RecordBlobWriter::create(
             &blocks,
             &hasrow,
             &directory,
-            tessera_filter::RECORD_BLOCK_TARGET,
+            mosaica_filter::RECORD_BLOCK_TARGET,
         )
         .map_err(io(&blocks))?;
         // Ascending by entity, which the blob's block directory requires. Artifact ids descend as
@@ -1765,18 +1765,18 @@ impl Executor {
         rows.sort_by_key(|(entity, _)| entity.raw());
         for (entity, fields) in rows {
             let entity = u32::try_from(entity.raw()).map_err(|_| {
-                tessera_store::StoreError::MalformedBundle {
+                mosaica_store::StoreError::MalformedBundle {
                     detail: format!(
                         "artifact entity {} does not fit the u32 entity space",
                         entity.raw()
                     ),
                 }
             })?;
-            let fields: Vec<tessera_filter::RecordFieldRef<'_>> = fields
+            let fields: Vec<mosaica_filter::RecordFieldRef<'_>> = fields
                 .iter()
-                .map(|(tag, value)| tessera_filter::RecordFieldRef {
+                .map(|(tag, value)| mosaica_filter::RecordFieldRef {
                     tag: *tag,
-                    value: tessera_filter::RecordValueRef::Utf8(value),
+                    value: mosaica_filter::RecordValueRef::Utf8(value),
                 })
                 .collect();
             writer.push_row(entity, &fields).map_err(io(&blocks))?;
@@ -1792,7 +1792,7 @@ impl Executor {
             let file = std::fs::File::open(path).map_err(io(path))?;
             file.sync_all().map_err(io(path))?;
         }
-        tessera_store::fsync_dir(&dir)?;
+        mosaica_store::fsync_dir(&dir)?;
         Ok(Some(extent))
     }
 
@@ -1807,7 +1807,7 @@ impl Executor {
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
-    ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
+    ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
         let ready = self.live.unpublished_memberships();
         pack_membership_extents(prefix_dir, partition, n, ready)
     }
@@ -1951,7 +1951,7 @@ impl Executor {
         // The record extent composes onto the live stack here, not only into the manifest: a
         // published extent that no live stack holds answers no drill-down until the next fold.
         let record_dir = self.deps.bundle_root.join(&completed.prefix);
-        let record_paths: Vec<tessera_filter::RecordExtentPaths> = completed
+        let record_paths: Vec<mosaica_filter::RecordExtentPaths> = completed
             .record_extent
             .iter()
             .map(|e| record_extent_paths(&record_dir, e))
@@ -1976,7 +1976,7 @@ impl Executor {
             let partition_dir = record_dir.join("partitions").join(&completed.partition);
             // Stamped with the incarnation of the view the pair names, which is what places the
             // base the flush just wrote.
-            let opening: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
+            let opening: Vec<(String, String, mosaica_types::view::ViewIncarnation)> = completed
                 .scoped_columns
                 .iter()
                 .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
@@ -2068,7 +2068,7 @@ impl Executor {
         // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
         // are already here.
         for (column, view) in &completed.scoped_columns {
-            let entry = tessera_store::manifest::ScopedColumn {
+            let entry = mosaica_store::manifest::ScopedColumn {
                 column: column.clone(),
                 view: view.clone(),
                 // The incarnation of the view the entry names. The list is carried forward
@@ -2176,12 +2176,12 @@ impl Executor {
 
         // Stamped with the incarnation of the view the pair names, for
         // `Manifest::with_scoped_columns`, which publishes a pair only where it is the live one.
-        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
+        let scoped_columns: Vec<(String, String, mosaica_types::view::ViewIncarnation)> = completed
             .scoped_columns
             .iter()
             .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
             .collect();
-        let published = tessera_store::read::PublishedManifest {
+        let published = mosaica_store::read::PublishedManifest {
             manifest,
             n: manifest_n,
         };
@@ -2347,7 +2347,7 @@ impl Executor {
         // The runs this flush wrote join the index, and the live entries they hold leave.
         let unique = match next_bundle.partitions.get(&completed.partition) {
             Some(partition) if !completed.unique_runs.is_empty() => {
-                match tessera_store::unique::UniqueIndexes::open(
+                match mosaica_store::unique::UniqueIndexes::open(
                     &next_bundle.manifest,
                     &partition.manifest,
                     &self.prefix_dir(&live),
@@ -2376,7 +2376,7 @@ impl Executor {
             let Some(partition) = next_bundle.partitions.get(&completed.partition) else {
                 return false;
             };
-            match tessera_store::edited::EditedIndex::open(
+            match mosaica_store::edited::EditedIndex::open(
                 &partition.manifest.edited_items,
                 &self.prefix_dir(&live),
                 Some(&live.edited),
@@ -2504,7 +2504,7 @@ pub(super) fn dictionary_moved_under(promoted_from_dict_len: Option<u32>, live_l
 #[cfg(test)]
 mod dispatch_rules_tests {
     use super::*;
-    use tessera_lifecycle::BufferedItem;
+    use mosaica_lifecycle::BufferedItem;
 
     pub(super) fn plan_from(oldest: u64) -> crate::flush::FlushPlan {
         let item = BufferedItem {

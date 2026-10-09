@@ -24,7 +24,7 @@ PYPROJECT = ORACLE.parent / "pyproject.toml"
 # `oracle/__init__.py` divides the package into three. The definitional group is the one a
 # differential's independence rests on: it must reach nothing that spawns, drives or mutates the
 # system under test. `text` belongs to it — it holds no dictionary and no ordinals, and the
-# `tessera tokenise` subprocess it makes is a declared echo (decision 0070) reached by a path it is
+# `mosaica tokenise` subprocess it makes is a declared echo (decision 0070) reached by a path it is
 # handed, not an import of a driver.
 DEFINITIONAL = (
     "aggregate",

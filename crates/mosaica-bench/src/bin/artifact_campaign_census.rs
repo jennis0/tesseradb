@@ -1,4 +1,4 @@
-//! `tessera corpus artifact-census`, taking its grant from a **file** and writing to one.
+//! `mosaica corpus artifact-census`, taking its grant from a **file** and writing to one.
 //!
 //! **Why this exists, and why it is not a second statement of the corpus.** The census verb takes
 //! its principal as `--grant`, a comma-separated argv string. At the campaign's term width a
@@ -7,7 +7,7 @@
 //! roughly 13 000 terms with `Argument list too long`. That is a property of the process boundary,
 //! not of the census.
 //!
-//! So this binary reads the same grant from a file and calls the **same** `tessera-corpus` methods
+//! So this binary reads the same grant from a file and calls the **same** `mosaica-corpus` methods
 //! the CLI verb calls — `flat_artifact_census`, `partition_artifact_census`,
 //! `boundary_artifact_census`, `treed_artifact_census`. There is one statement of the corpus and
 //! this is a second door to it; a transcription of any of those rules here would be exactly the
@@ -26,9 +26,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use clap::{Parser, ValueEnum};
-use tessera_corpus::materialise::{BOUNDARY_LAYER, FIXTURE_LEVEL, FLAT_LAYER, PARTITION_LAYER, TREED_LAYER};
-use tessera_corpus::{Corpus, Grant};
-use tessera_spatial::Bounds;
+use mosaica_corpus::materialise::{BOUNDARY_LAYER, FIXTURE_LEVEL, FLAT_LAYER, PARTITION_LAYER, TREED_LAYER};
+use mosaica_corpus::{Corpus, Grant};
+use mosaica_spatial::Bounds;
 
 const GRID: f64 = 65536.0;
 

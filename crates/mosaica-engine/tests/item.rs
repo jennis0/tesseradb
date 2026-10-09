@@ -8,7 +8,7 @@ mod common;
 
 use tempfile::TempDir;
 
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 use common::*;
 
@@ -53,7 +53,7 @@ fn item_lookup_resolves_a_row_far_from_the_segments_start() {
     );
     let fields = out.unwrap().fields;
     let held = fields.iter().find(|f| f.name == "id").map(|f| f.value.clone());
-    assert_eq!(held, Some(tessera_engine::ScalarOut::U64(last_source)));
+    assert_eq!(held, Some(mosaica_engine::ScalarOut::U64(last_source)));
 }
 
 /// An identifier naming nothing and one naming an invisible item are indistinguishable

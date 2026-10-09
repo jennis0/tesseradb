@@ -1,4 +1,4 @@
-//! What `tessera build` does with the rows the identity rule refuses: leaves them out, prints them,
+//! What `mosaica build` does with the rows the identity rule refuses: leaves them out, prints them,
 //! writes them to `reports/refused.json` in the bundle, and refuses the build under `--strict`.
 
 use std::path::Path;
@@ -27,7 +27,7 @@ fn write(path: &Path, columns: Vec<(&str, ArrayRef)>) {
 /// A project whose points carry `ids` and whose members file names `members`.
 fn project(dir: &Path, ids: &[u64], members: &[u64]) {
     std::fs::write(
-        dir.join("tessera.toml"),
+        dir.join("mosaica.toml"),
         r#"
 [bundle]
 path  = "bundle"
@@ -98,7 +98,7 @@ require_member_visibility = "any"
 }
 
 fn build(dir: &Path, strict: bool) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tessera"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mosaica"));
     command.arg("build").current_dir(dir);
     if strict {
         command.arg("--strict");
@@ -169,7 +169,7 @@ fn a_limited_build_frames_the_rows_it_keeps() {
     let schema = std::fs::read_to_string(tmp.path().join("schema.toml")).unwrap();
     let schema = schema.replace("{ min = 0.0, max = 10.0 }", "\"auto\"");
     std::fs::write(tmp.path().join("schema.toml"), schema).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tessera"))
+    let output = Command::new(env!("CARGO_BIN_EXE_mosaica"))
         .args(["build", "--strict", "--limit", "3"])
         .current_dir(tmp.path())
         .output()
@@ -179,7 +179,7 @@ fn a_limited_build_frames_the_rows_it_keeps() {
         refused(tmp.path()).expect("the member left out is reported"),
         [("layer 'groups' members".to_string(), "outside_limit".to_string(), 1)]
     );
-    let bundle = tessera_store::read::open_bundle(&tmp.path().join("bundle")).unwrap();
+    let bundle = mosaica_store::read::open_bundle(&tmp.path().join("bundle")).unwrap();
     assert_eq!(bundle.manifest.entity_id_high_water, 2);
     // The kept rows sit at (0, 0) and (1, 1), and the rows left out at (2, 2) and (3, 3).
     let frame = bundle.manifest.views[0].quantisation;

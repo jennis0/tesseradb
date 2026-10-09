@@ -1,7 +1,7 @@
 """The declaration: blocks, the typed verbs' compilation into them, and the TOML.
 
 Each `declare_*` verb builds one block of the declaration and appends it here.
-The SDK writes the TOML and `tessera check` reads that file, so the mapping from verb to block is
+The SDK writes the TOML and `mosaica check` reads that file, so the mapping from verb to block is
 checked by the binary rather than mirrored in Python.
 
 What the TOML always says: every source name on every block, the allocation view, the value set

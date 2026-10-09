@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use tessera_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_spatial::tiler::{ScalarType, ScalarValue};
 
 use crate::error::{Result, StoreError};
 use crate::read::{ColumnsRef, MortonSlice, ScalarSlice};
@@ -104,7 +104,7 @@ impl SegmentCursor {
         else {
             return Err(malformed(format!(
                 "{op}: segment '{}' has no band entry for row {}, whose identity puts it in a \
-                 band; run `tessera verify --deep` on the bundle and rebuild it",
+                 band; run `mosaica verify --deep` on the bundle and rebuild it",
                 self.seg_id, row
             )));
         };
@@ -118,9 +118,9 @@ impl SegmentCursor {
     /// The entity the current row belongs to.
     pub(crate) fn entity(
         &self,
-        key: &tessera_types::IdentityKey,
+        key: &mosaica_types::IdentityKey,
         shard_id: u32,
-    ) -> Result<tessera_types::EntityId> {
+    ) -> Result<mosaica_types::EntityId> {
         self.entities.entity_of(
             self.row as u32,
             self.columns.tessera_id()[self.row],

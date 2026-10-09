@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {Meta} from '@tesseradb/client';
+import type {Meta} from '@mosaica/client';
 import '../src/colour-editor.js';
-import type {TesseraColourEditor} from '../src/colour-editor.js';
+import type {MosaicaColourEditor} from '../src/colour-editor.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, meta, mount, registered, scalar, settle, status} from './fake-store.js';
 
 afterEach(() => {
@@ -18,8 +18,8 @@ const META = meta({
 });
 
 async function open(field: string, attrs = '') {
-  const host = await mount(`<button id="opener">Edit colours</button><tessera-colour-editor field="${field}" ${attrs}></tessera-colour-editor>`);
-  const editor = host.querySelector('tessera-colour-editor') as TesseraColourEditor;
+  const host = await mount(`<button id="opener">Edit colours</button><mosaica-colour-editor field="${field}" ${attrs}></mosaica-colour-editor>`);
+  const editor = host.querySelector('mosaica-colour-editor') as MosaicaColourEditor;
   const store = fakeStore({meta: META, status: status({})});
   store.set('view', {...store.get('view'), id: 's0'});
   editor.store = store;
@@ -47,7 +47,7 @@ const CUT = [
   {key: 9n, count: 40, title: 'fibres', slot: 1}
 ];
 
-describe('<tessera-colour-editor> on a tree layer', () => {
+describe('<mosaica-colour-editor> on a tree layer', () => {
   it('lists the clusters of the drawn cut by their counts over everything visible, as a modal dialog named by the layer', async () => {
     const {host, store} = await open('cluster:topics');
     expect(specOf(store, 'colours-ranked')).toEqual({groupings: [{by: {layer: 'topics', top: 1000, cut: 'drawn', paletteSize: 'drawn'}}], subject: 'visible'});
@@ -65,7 +65,7 @@ describe('<tessera-colour-editor> on a tree layer', () => {
     // Each swatch is its slot's colour: slot 2 of Tableau 10.
     expect(rowsOf(host)[0]!.querySelector('[part="swatch"]')!.getAttribute('style')).toContain('#e15759');
     // The search reaches every cluster of the layer, not only those listed.
-    expect(deep(host, 'tessera-cluster-filter')!.getAttribute('placeholder')).toBe('Search clusters');
+    expect(deep(host, 'mosaica-cluster-filter')!.getAttribute('placeholder')).toBe('Search clusters');
   });
 
   it('finds a cluster outside the listed rows with the search box over the whole tree, and lists it first with its count', async () => {
@@ -73,7 +73,7 @@ describe('<tessera-colour-editor> on a tree layer', () => {
     answerAggregate(store, 'colours-ranked', aggregateEntry([{rows: CUT, groups: 3}], 's0', undefined, 'tableau10'));
     store.setBrowse('q:holo', {artifacts: [{tesseraId: 42n, key: null, name: 'holography', maskedCount: 3n, matchedCount: null, rung: 4, parentIds: [], childCount: 0, slot: null}], parents: [], next: null});
     await settle(host);
-    const input = deep(host, 'tessera-cluster-filter')!.shadowRoot!.querySelector('[part="entry"]') as HTMLInputElement;
+    const input = deep(host, 'mosaica-cluster-filter')!.shadowRoot!.querySelector('[part="entry"]') as HTMLInputElement;
     input.focus();
     input.value = 'holo';
     input.dispatchEvent(new Event('input'));
@@ -97,7 +97,7 @@ describe('<tessera-colour-editor> on a tree layer', () => {
     answerAggregate(store, 'colours-ranked', aggregateEntry([{rows: CUT, groups: 3}], 's0', undefined, 'tableau10'));
     await settle(host);
     const seen: unknown[] = [];
-    host.addEventListener('tessera-clustercolour', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-clustercolour', (e) => seen.push((e as CustomEvent).detail));
     for (const i of [0, 2]) {
       const box = rowsOf(host)[i]!.querySelector('[part="check"]') as HTMLInputElement;
       box.checked = true;
@@ -136,7 +136,7 @@ describe('<tessera-colour-editor> on a tree layer', () => {
     await settle(host);
     expect(deep(host, '[part="changed"]')!.textContent).toBe('2 colours changed');
     const seen: unknown[] = [];
-    host.addEventListener('tessera-clustercolour', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-clustercolour', (e) => seen.push((e as CustomEvent).detail));
     (deep(host, '[part="reset-all"]') as HTMLButtonElement).click();
     await settle(host);
     expect(seen).toHaveLength(1);
@@ -163,7 +163,7 @@ describe('<tessera-colour-editor> on a tree layer', () => {
     await settle(host);
     expect(deep(host, '[part="colour-popover"]')).toBeNull();
     expect((deep(host, '[part="dialog"]') as HTMLDialogElement).open).toBe(true);
-    const editor = host.querySelector('tessera-colour-editor')!;
+    const editor = host.querySelector('mosaica-colour-editor')!;
     expect(editor.shadowRoot!.activeElement).toBe(swatch);
   });
 
@@ -177,7 +177,7 @@ describe('<tessera-colour-editor> on a tree layer', () => {
     await settle(host);
     expect(deep(host, '[part="selected"]')).not.toBeNull();
     const seen: unknown[] = [];
-    host.addEventListener('tessera-clustercolour', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-clustercolour', (e) => seen.push((e as CustomEvent).detail));
     editor.field = 'cluster:topics';
     await settle(host);
     // The category's answer is not the layer's, so nothing is listed until the layer's lands.
@@ -228,7 +228,7 @@ describe('<tessera-colour-editor> on a tree layer', () => {
   });
 });
 
-describe('<tessera-colour-editor> on a levelled layer', () => {
+describe('<mosaica-colour-editor> on a levelled layer', () => {
   it('lists the clusters of the level coloured, the deepest unless one is set', async () => {
     const deepest = await open('cluster:bands');
     expect(specOf(deepest.store, 'colours-ranked')).toEqual({groupings: [{by: {layer: 'bands', level: 1, top: 1000, paletteSize: 'drawn'}}], subject: 'visible'});
@@ -239,7 +239,7 @@ describe('<tessera-colour-editor> on a levelled layer', () => {
   });
 });
 
-describe('<tessera-colour-editor> on a category', () => {
+describe('<mosaica-colour-editor> on a category', () => {
   it('lists the values by their counts over everything visible, and gives one the colour chosen in its picker', async () => {
     const {host, store} = await open('archive');
     expect(specOf(store, 'colours-ranked')).toEqual({groupings: [{by: {field: 'archive', top: 1000}}], subject: 'visible'});
@@ -250,7 +250,7 @@ describe('<tessera-colour-editor> on a category', () => {
       ['math', 'math', '30']
     ]);
     const seen: unknown[] = [];
-    host.addEventListener('tessera-valuecolour', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-valuecolour', (e) => seen.push((e as CustomEvent).detail));
     (rowsOf(host)[1]!.querySelector('[part="swatch"]') as HTMLButtonElement).click();
     await settle(host);
     expect(deep(host, '[part="colour-popover"]')!.getAttribute('aria-label')).toBe('Colour of math');

@@ -16,7 +16,7 @@ let out = '';
 let browser: Browser;
 
 beforeAll(async () => {
-  out = mkdtempSync(join(tmpdir(), 'tessera-components-'));
+  out = mkdtempSync(join(tmpdir(), 'mosaica-components-'));
   await build({configFile: join(root, 'vite.config.ts'), root, logLevel: 'silent', build: {outDir: out, emptyOutDir: true}});
   browser = await chromium.launch({args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader']});
 });
@@ -30,9 +30,9 @@ afterAll(async () => {
 async function page(body: string, css = ''): Promise<Page> {
   const p = await browser.newPage();
   await p.setContent(`<!doctype html><html><head><style>${css}</style></head><body>${body}</body></html>`);
-  await p.addScriptTag({path: join(out, 'tessera-components.js'), type: 'module'});
+  await p.addScriptTag({path: join(out, 'mosaica-components.js'), type: 'module'});
   await p.evaluate(async () => {
-    await customElements.whenDefined('tessera-explorer');
+    await customElements.whenDefined('mosaica-explorer');
     const all = (r: ParentNode): Element[] => [...r.querySelectorAll('*')].flatMap((e) => [e, ...(e.shadowRoot ? all(e.shadowRoot) : [])]);
     for (let i = 0; i < 3; i++) for (const e of all(document)) await (e as unknown as {updateComplete?: Promise<unknown>}).updateComplete;
   });
@@ -55,45 +55,45 @@ function computed(p: Page, path: string[], property: string): Promise<string> {
   );
 }
 
-const PAN = ['tessera-map', '[part="controls"] button[aria-pressed="true"]'];
-const INNER_PAN = ['tessera-explorer', 'tessera-map', '[part="controls"] button[aria-pressed="true"]'];
+const PAN = ['mosaica-map', '[part="controls"] button[aria-pressed="true"]'];
+const INNER_PAN = ['mosaica-explorer', 'mosaica-map', '[part="controls"] button[aria-pressed="true"]'];
 
 describe('theme tokens', () => {
   it('fall back to the light defaults, and to the dark ones under a dark colour scheme', async () => {
-    const light = await page('<tessera-map></tessera-map>');
-    expect(await computed(light, ['tessera-map'], 'background-color')).toBe('rgb(246, 246, 244)');
+    const light = await page('<mosaica-map></mosaica-map>');
+    expect(await computed(light, ['mosaica-map'], 'background-color')).toBe('rgb(246, 246, 244)');
     expect(await computed(light, PAN, 'background-color')).toBe('rgb(27, 29, 33)');
-    const dark = await page('<tessera-map></tessera-map>', ':root { color-scheme: dark; }');
-    expect(await computed(dark, ['tessera-map'], 'background-color')).toBe('rgb(17, 19, 23)');
+    const dark = await page('<mosaica-map></mosaica-map>', ':root { color-scheme: dark; }');
+    expect(await computed(dark, ['mosaica-map'], 'background-color')).toBe('rgb(17, 19, 23)');
     expect(await computed(dark, PAN, 'background-color')).toBe('rgb(236, 238, 241)');
   });
 
   it('take a value set on any ancestor', async () => {
-    const p = await page('<div><tessera-map></tessera-map></div>', 'body { --tessera-map-bg: rgb(255, 0, 0); --tessera-accent: rgb(0, 128, 0); }');
-    expect(await computed(p, ['tessera-map'], 'background-color')).toBe('rgb(255, 0, 0)');
+    const p = await page('<div><mosaica-map></mosaica-map></div>', 'body { --mosaica-map-bg: rgb(255, 0, 0); --mosaica-accent: rgb(0, 128, 0); }');
+    expect(await computed(p, ['mosaica-map'], 'background-color')).toBe('rgb(255, 0, 0)');
     expect(await computed(p, PAN, 'background-color')).toBe('rgb(0, 128, 0)');
   });
 
   it('take a value set on the element itself over one on an ancestor', async () => {
-    const p = await page('<tessera-map style="--tessera-map-bg: rgb(0, 0, 255)"></tessera-map>', 'body { --tessera-map-bg: rgb(255, 0, 0); }');
-    expect(await computed(p, ['tessera-map'], 'background-color')).toBe('rgb(0, 0, 255)');
+    const p = await page('<mosaica-map style="--mosaica-map-bg: rgb(0, 0, 255)"></mosaica-map>', 'body { --mosaica-map-bg: rgb(255, 0, 0); }');
+    expect(await computed(p, ['mosaica-map'], 'background-color')).toBe('rgb(0, 0, 255)');
   });
 
   it('reach the elements inside an explorer from the explorer and from above it', async () => {
-    const p = await page('<tessera-explorer style="--tessera-accent: rgb(1, 2, 3)"></tessera-explorer>', 'body { --tessera-map-bg: rgb(9, 8, 7); }');
+    const p = await page('<mosaica-explorer style="--mosaica-accent: rgb(1, 2, 3)"></mosaica-explorer>', 'body { --mosaica-map-bg: rgb(9, 8, 7); }');
     expect(await computed(p, INNER_PAN, 'background-color')).toBe('rgb(1, 2, 3)');
-    expect(await computed(p, ['tessera-explorer', 'tessera-map'], 'background-color')).toBe('rgb(9, 8, 7)');
+    expect(await computed(p, ['mosaica-explorer', 'mosaica-map'], 'background-color')).toBe('rgb(9, 8, 7)');
   });
 });
 
 describe('forwarded parts', () => {
   it('style the explorer’s inner map and status strip from the page', async () => {
     const p = await page(
-      '<tessera-explorer></tessera-explorer>',
-      'tessera-explorer::part(map-controls) { border-top-color: rgb(4, 5, 6); } tessera-explorer::part(status-strip) { color: rgb(7, 8, 9); }'
+      '<mosaica-explorer></mosaica-explorer>',
+      'mosaica-explorer::part(map-controls) { border-top-color: rgb(4, 5, 6); } mosaica-explorer::part(status-strip) { color: rgb(7, 8, 9); }'
     );
-    expect(await computed(p, ['tessera-explorer', 'tessera-map', '[part="controls"]'], 'border-top-color')).toBe('rgb(4, 5, 6)');
-    expect(await computed(p, ['tessera-explorer', '[part="strip-row"] tessera-status', '[part="strip"]'], 'color')).toBe('rgb(7, 8, 9)');
+    expect(await computed(p, ['mosaica-explorer', 'mosaica-map', '[part="controls"]'], 'border-top-color')).toBe('rgb(4, 5, 6)');
+    expect(await computed(p, ['mosaica-explorer', '[part="strip-row"] mosaica-status', '[part="strip"]'], 'color')).toBe('rgb(7, 8, 9)');
   });
 });
 
@@ -101,33 +101,33 @@ describe('the explorer by the width of its container', () => {
   /** What the explorer drew: which arrangement, where the tools sit, and whether the strip is short. */
   const layout = (p: Page) =>
     p.evaluate(() => {
-      const root = document.querySelector('tessera-explorer')!.shadowRoot!;
+      const root = document.querySelector('mosaica-explorer')!.shadowRoot!;
       return {
         sidebar: root.querySelector('[part="sidebar"]') !== null,
         panel: root.querySelector('[part="panel"]') !== null,
-        corner: root.querySelector('tessera-map')!.getAttribute('controls-corner'),
-        compact: root.querySelector('tessera-map tessera-status')!.hasAttribute('compact')
+        corner: root.querySelector('mosaica-map')!.getAttribute('controls-corner'),
+        compact: root.querySelector('mosaica-map mosaica-status')!.hasAttribute('compact')
       };
     });
   const settled = (p: Page) =>
     p.waitForFunction(() => {
-      const root = document.querySelector('tessera-explorer')?.shadowRoot;
-      return root?.querySelector('tessera-map tessera-status') != null;
+      const root = document.querySelector('mosaica-explorer')?.shadowRoot;
+      return root?.querySelector('mosaica-map mosaica-status') != null;
     });
 
   it('keeps the docked sidebar where there is room, and folds it into the card in a compact container', async () => {
-    const wide = await page('<div style="width: 1300px; height: 700px"><tessera-explorer layout="docked"></tessera-explorer></div>');
+    const wide = await page('<div style="width: 1300px; height: 700px"><mosaica-explorer layout="docked"></mosaica-explorer></div>');
     await settled(wide);
     expect(await layout(wide)).toEqual({sidebar: true, panel: false, corner: 'top-left', compact: false});
-    const compact = await page('<div style="width: 900px; height: 560px"><tessera-explorer layout="docked"></tessera-explorer></div>');
-    await compact.waitForFunction(() => document.querySelector('tessera-explorer')?.shadowRoot?.querySelector('[part="panel"]') != null);
+    const compact = await page('<div style="width: 900px; height: 560px"><mosaica-explorer layout="docked"></mosaica-explorer></div>');
+    await compact.waitForFunction(() => document.querySelector('mosaica-explorer')?.shadowRoot?.querySelector('[part="panel"]') != null);
     expect(await layout(compact)).toEqual({sidebar: false, panel: true, corner: 'bottom-left', compact: true});
   });
 });
 
 describe('a list that opens over what sits below it', () => {
   it('shows whole past the bottom of a card that scrolls inside itself', async () => {
-    const p = await page('<div id="card" style="width: 340px; height: 160px; overflow-y: auto"><tessera-filter-panel></tessera-filter-panel></div>');
+    const p = await page('<div id="card" style="width: 340px; height: 160px; overflow-y: auto"><mosaica-filter-panel></mosaica-filter-panel></div>');
     const seen = await p.evaluate(async () => {
       const columns = ['archive', 'title', 'submitted_at', 'author', 'venue', 'year'];
       const projections: Record<string, unknown> = {
@@ -140,7 +140,7 @@ describe('a list that opens over what sits below it', () => {
         aggregates: new Map()
       };
       const store = {get: (name: string) => projections[name], subscribe: () => () => {}, setAggregate: () => {}};
-      const panel = document.querySelector('tessera-filter-panel') as HTMLElement & {store: unknown; updateComplete: Promise<unknown>};
+      const panel = document.querySelector('mosaica-filter-panel') as HTMLElement & {store: unknown; updateComplete: Promise<unknown>};
       panel.store = store;
       await panel.updateComplete;
       panel.shadowRoot!.querySelector<HTMLElement>('[part="add"]')!.click();
@@ -158,9 +158,9 @@ describe('a list that opens over what sits below it', () => {
 
 describe('the map’s toolbar in a bottom corner', () => {
   it('sits against the bottom edge of the map, on its side', async () => {
-    const p = await page('<tessera-map controls-corner="bottom-left" style="--tessera-map-height: 400px; width: 600px"></tessera-map><tessera-map controls-corner="bottom-right" style="--tessera-map-height: 400px; width: 600px"></tessera-map>');
+    const p = await page('<mosaica-map controls-corner="bottom-left" style="--mosaica-map-height: 400px; width: 600px"></mosaica-map><mosaica-map controls-corner="bottom-right" style="--mosaica-map-height: 400px; width: 600px"></mosaica-map>');
     const at = await p.evaluate(() =>
-      [...document.querySelectorAll('tessera-map')].map((m) => {
+      [...document.querySelectorAll('mosaica-map')].map((m) => {
         const map = m.getBoundingClientRect();
         const bar = m.shadowRoot!.querySelector('[part="controls"]')!.getBoundingClientRect();
         return {bottom: map.bottom - bar.bottom < 40, left: bar.left - map.left < 40, right: map.right - bar.right < 40};
@@ -175,7 +175,7 @@ describe('the map’s toolbar in a bottom corner', () => {
 
 describe('the field column', () => {
   it('renders a card’s rows from the counts registered, and Tab from its search box reaches a row’s Highlight and shows it', async () => {
-    const p = await page('<div style="width: 340px"><tessera-filter-panel pinned="archive"></tessera-filter-panel></div>');
+    const p = await page('<div style="width: 340px"><mosaica-filter-panel pinned="archive"></mosaica-filter-panel></div>');
     const seen = await p.evaluate(async () => {
       const rows = [
         {key: 'cs', count: 30},
@@ -214,16 +214,16 @@ describe('the field column', () => {
         suggest: () => {},
         forgetSuggestions: () => {}
       };
-      const panel = document.querySelector('tessera-filter-panel') as HTMLElement & {store: unknown; updateComplete: Promise<unknown>};
+      const panel = document.querySelector('mosaica-filter-panel') as HTMLElement & {store: unknown; updateComplete: Promise<unknown>};
       panel.store = store;
       for (let i = 0; i < 6; i++) {
         await new Promise((r) => requestAnimationFrame(r));
         await panel.updateComplete;
       }
-      const card = panel.shadowRoot!.querySelector('tessera-field-card')!;
+      const card = panel.shadowRoot!.querySelector('mosaica-field-card')!;
       await (card as unknown as {updateComplete: Promise<unknown>}).updateComplete;
       const names = [...card.shadowRoot!.querySelectorAll('[part="name"]')].map((n) => n.textContent);
-      card.shadowRoot!.querySelector('tessera-filter')!.shadowRoot!.querySelector<HTMLInputElement>('[part="entry"]')!.focus();
+      card.shadowRoot!.querySelector('mosaica-filter')!.shadowRoot!.querySelector<HTMLInputElement>('[part="entry"]')!.focus();
       return {names};
     });
     expect(seen.names).toEqual(['cs', 'math']);

@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {TesseraClient} from '../src/client.js';
+import {MosaicaClient} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {setWorkerFactory, workerDecoder} from '../src/decoder.js';
 import {FakeWorker, fixture, settle} from './support.js';
@@ -64,13 +64,13 @@ describe('workerDecoder', () => {
 });
 
 describe('a decoder passed to a client', () => {
-  const fetch = (async () => new Response(body(), {headers: {etag: '"ck"', 'x-tessera-identity-key': 'ik'}})) as typeof globalThis.fetch;
+  const fetch = (async () => new Response(body(), {headers: {etag: '"ck"', 'x-mosaica-identity-key': 'ik'}})) as typeof globalThis.fetch;
 
   it('stays open when a client sharing it is closed, and the decodes in flight on it finish', async () => {
     const decoder = workerDecoder()!;
-    const one = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch, decoder});
-    const two = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch, decoder});
-    const ask = (client: TesseraClient) => client.viewport('tok', {view: 's0', zoom: 0, k: 100});
+    const one = new MosaicaClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch, decoder});
+    const two = new MosaicaClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch, decoder});
+    const ask = (client: MosaicaClient) => client.viewport('tok', {view: 's0', zoom: 0, k: 100});
     const asked = [ask(one), ask(two)];
     await settle();
     one.close();

@@ -5,8 +5,8 @@ use crate::engine::Engine;
 #[cfg(doc)]
 use crate::error::EngineError;
 
-/// Engine-wide configuration: the subset of `tessera.toml`'s `[disclosure]`/`[serve]` sections
-/// the engine itself reads. `tessera-server` parses the file; this is the shape [`Engine::open`]
+/// Engine-wide configuration: the subset of `mosaica.toml`'s `[disclosure]`/`[serve]` sections
+/// the engine itself reads. `mosaica-server` parses the file; this is the shape [`Engine::open`]
 /// consumes.
 #[derive(Debug, Clone, Copy)]
 pub struct EngineConfig {
@@ -110,8 +110,8 @@ pub const DEFAULT_MAX_MERGED_SEGMENT_BYTES: u64 = 256 << 20;
 /// where per-segment overheads stop dominating, so flushes a few bytes apart still merge; the cap
 /// bounds one merge's pool time and write amplification. The base segment has no extent, so
 /// `plan_merge`'s selection over the extent list can never choose it regardless of these knobs.
-pub(crate) fn merge_policy(config: &EngineConfig) -> tessera_store::merge::MergePolicy {
-    tessera_store::merge::MergePolicy {
+pub(crate) fn merge_policy(config: &EngineConfig) -> mosaica_store::merge::MergePolicy {
+    mosaica_store::merge::MergePolicy {
         tier_width: config.tier_width.unwrap_or(4),
         segment_floor_bytes: config.segment_floor_bytes.unwrap_or(16 << 20),
         max_merged_segment_bytes: config

@@ -18,12 +18,12 @@
 mod common;
 
 use common::*;
-use tessera_engine::Engine;
-use tessera_lifecycle::{ChangeOp, IncomingArtifact, IncomingGrowth};
-use tessera_types::layer::{
+use mosaica_engine::Engine;
+use mosaica_lifecycle::{ChangeOp, IncomingArtifact, IncomingGrowth};
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const LAYER: &str = "clusters/a";
 const LABELS: &str = "topics/a";
@@ -40,7 +40,7 @@ fn declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -63,10 +63,10 @@ fn label_declaration(name: &str) -> LayerDeclaration {
     let mut declaration = declaration(name, None);
     declaration.content = ContentDeclaration {
         computed: Vec::new(),
-        supplied: vec![tessera_types::layer::SuppliedContent {
+        supplied: vec![mosaica_types::layer::SuppliedContent {
             name: "label".into(),
             ty: "text".into(),
-            require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+            require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
         }],
     };
     declaration
@@ -75,7 +75,7 @@ fn label_declaration(name: &str) -> LayerDeclaration {
 /// The same layer with an **open** value set, so a batch naming a key no artifact holds mints one.
 fn open_declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclaration {
     LayerDeclaration {
-        value_set: tessera_types::layer::ValueSet::Open,
+        value_set: mosaica_types::layer::ValueSet::Open,
         ..declaration(name, layout)
     }
 }
@@ -163,11 +163,11 @@ fn publish_labelled(
     members: Vec<EntityId>,
     sets: &[Vec<u64>],
 ) {
-    let contents: Vec<tessera_lifecycle::membership::IncomingContent> = sets
+    let contents: Vec<mosaica_lifecycle::membership::IncomingContent> = sets
         .iter()
         .enumerate()
         .map(|(rank, sources)| {
-            tessera_lifecycle::membership::IncomingContent::new(
+            mosaica_lifecycle::membership::IncomingContent::new(
                 vec![format!("{key} label {rank}")],
                 fx.ids(sources),
             )
@@ -212,7 +212,7 @@ fn ingest(engine: &Engine, batch: &[u8]) -> EntityId {
     for (slot, byte) in key.iter_mut().zip(batch) {
         *slot = *byte;
     }
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -241,7 +241,7 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
     }
     let rows: Vec<_> = names
         .iter()
-        .map(|_| tessera_lifecycle::command::UnallocatedRow {
+        .map(|_| mosaica_lifecycle::command::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: descriptors.clone(),
@@ -255,7 +255,7 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
     let memberships = names
         .iter()
         .enumerate()
-        .map(|(i, key)| tessera_lifecycle::BatchMembership {
+        .map(|(i, key)| mosaica_lifecycle::BatchMembership {
             layer: LAYER.to_string(),
             level: 0,
             view: None,
@@ -268,7 +268,7 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
             rows,
             batch.to_string(),
             hash,
-            tessera_lifecycle::BatchArtifacts {
+            mosaica_lifecycle::BatchArtifacts {
                 memberships,
                 edges: Vec::new(),
             },
@@ -1401,7 +1401,7 @@ fn flush_interleaved(
         let rows: Vec<_> = (0..ROWS_EACH)
             .map(|t| {
                 let descriptors = descriptors_of(s, t);
-                tessera_lifecycle::command::UnallocatedRow {
+                mosaica_lifecycle::command::UnallocatedRow {
                     view: "s0".to_string(),
                     join: None,
                     x: ((t * TIER_WIDTH + s) * 20) as f64,
@@ -1460,7 +1460,7 @@ fn served_to(engine: &Engine, credential: &[u8]) -> Vec<String> {
     let mut keys: Vec<String> = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
         .artifacts()
@@ -1485,7 +1485,7 @@ fn publish_generated_from(
             vec![IncomingArtifact::with_content(
                 Some(key.into()),
                 members,
-                vec![tessera_lifecycle::membership::IncomingContent::new(
+                vec![mosaica_lifecycle::membership::IncomingContent::new(
                     vec![format!("{key} label 0")],
                     generated_from,
                 )],

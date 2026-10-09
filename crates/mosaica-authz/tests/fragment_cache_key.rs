@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tessera_authz::{
+use mosaica_authz::{
     coalesce_delta_tiers, write_delta_tier, write_postings, DeltaTier, FragmentCache,
     PostingsReader,
 };
-use tessera_types::TermId;
+use mosaica_types::TermId;
 
 const THRESHOLD: u32 = 32;
 

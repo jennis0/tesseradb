@@ -21,7 +21,7 @@ impl Worker {
         if running.is_none() {
             let (tx, rx) = channel::<Job>();
             let started = std::thread::Builder::new()
-                .name("tessera-figures".to_string())
+                .name("mosaica-figures".to_string())
                 .spawn(move || {
                     while let Ok(job) = rx.recv() {
                         job();

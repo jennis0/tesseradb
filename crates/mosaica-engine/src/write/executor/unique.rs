@@ -16,8 +16,8 @@ use super::*;
 
 use std::collections::VecDeque;
 
-use tessera_store::manifest::{BaseKeyRun, FileDigest, UniqueIndexRuns};
-use tessera_store::unique::{UniqueKey, WrittenUniqueRun};
+use mosaica_store::manifest::{BaseKeyRun, FileDigest, UniqueIndexRuns};
+use mosaica_store::unique::{UniqueKey, WrittenUniqueRun};
 
 /// The buffered values arriving during a round that the commit checks against the runs itself;
 /// more than this and another round checks them off this thread.
@@ -170,7 +170,7 @@ impl Executor {
             at: pending.at,
             wanted,
             prior: pending.runs().map(|(run, _)| run.path.clone()).collect(),
-            out_dir: prefix_dir.join(tessera_store::unique::index_dir_rel(
+            out_dir: prefix_dir.join(mosaica_store::unique::index_dir_rel(
                 &partition,
                 &pending.attribute,
             )),
@@ -184,7 +184,7 @@ impl Executor {
         #[cfg(feature = "fault-injection")]
         let switches = Arc::clone(&self.deps.switches);
         let spawned = std::thread::Builder::new()
-            .name("tessera-unique".to_string())
+            .name("mosaica-unique".to_string())
             .spawn(move || {
                 let outcome = crate::unique::build_round(input);
                 #[cfg(feature = "fault-injection")]
@@ -267,7 +267,7 @@ impl Executor {
                 .filter(|(entity, _)| !generation.overlay.is_deleted(*entity))
                 .filter_map(|(entity, scalars)| {
                     let value = scalars.get(at)?;
-                    let key = tessera_store::unique::key_of(ty, value)?;
+                    let key = mosaica_store::unique::key_of(ty, value)?;
                     (pending.checked.get(&entity) != Some(&key))
                         .then(|| (entity, key, value.clone()))
                 })
@@ -313,8 +313,8 @@ impl Executor {
         let mut note = |key: UniqueKey, value: &WalScalar| {
             if !keys_found.contains(&key) {
                 keys_found.push(key);
-                if examples.len() < tessera_store::unique::DUPLICATE_EXAMPLES {
-                    examples.push(tessera_store::unique::value_text(value));
+                if examples.len() < mosaica_store::unique::DUPLICATE_EXAMPLES {
+                    examples.push(mosaica_store::unique::value_text(value));
                 }
             }
         };
@@ -329,7 +329,7 @@ impl Executor {
                 note(*key, value);
             }
         }
-        let kind = tessera_store::unique::KeyKind::of(
+        let kind = mosaica_store::unique::KeyKind::of(
             generation.bundle.manifest.declared_scalars[pending.at].arrow_type,
         )
         .ok_or_else(|| "the column cannot be unique".to_string())?;
@@ -339,11 +339,11 @@ impl Executor {
             base: Vec::new(),
             live: pending
                 .runs()
-                .map(|(run, _)| tessera_store::unique::relative(&prefix_dir, &run.path))
+                .map(|(run, _)| mosaica_store::unique::relative(&prefix_dir, &run.path))
                 .collect::<Result<_, _>>()
                 .map_err(|e| e.to_string())?,
         };
-        let index = tessera_store::unique::UniqueIndex::open(&runs, kind, &prefix_dir, None)
+        let index = mosaica_store::unique::UniqueIndex::open(&runs, kind, &prefix_dir, None)
             .map_err(|e| e.to_string())?;
         let keys: Vec<UniqueKey> = arrived.iter().map(|(_, key, _)| *key).collect();
         for (i, holder) in index.lookup(&keys).map_err(|e| e.to_string())? {
@@ -364,7 +364,7 @@ impl Executor {
             .expect("a declaration is building");
         pending.discard();
         pending.reply.fail(ExecError::UniqueTaken {
-            detail: tessera_store::unique::duplicates_message(&pending.attribute, count, examples),
+            detail: mosaica_store::unique::duplicates_message(&pending.attribute, count, examples),
         });
     }
 
@@ -383,7 +383,7 @@ impl Executor {
             runs.iter()
                 .map(|(run, digest)| {
                     let base = run.as_base(&prefix_dir)?;
-                    Ok(tessera_lifecycle::wal::DeclaredRun {
+                    Ok(mosaica_lifecycle::wal::DeclaredRun {
                         path: base.path,
                         sha256: digest.sha256.clone(),
                         size: digest.size,
@@ -391,7 +391,7 @@ impl Executor {
                         last_key: base.last_key,
                     })
                 })
-                .collect::<Result<Vec<_>, tessera_store::StoreError>>()
+                .collect::<Result<Vec<_>, mosaica_store::StoreError>>()
         };
         let (base, live) = match (declared(&pending.base), declared(&pending.live)) {
             (Ok(base), Ok(live)) => (base, live),
@@ -541,7 +541,7 @@ impl Executor {
         };
         let bundle = match generation.bundle.with_manifest(
             partition,
-            tessera_store::read::PublishedManifest {
+            mosaica_store::read::PublishedManifest {
                 manifest,
                 n: served_n,
             },
@@ -552,12 +552,12 @@ impl Executor {
                 return;
             }
         };
-        let served = tessera_store::unique::with_unique_flags(
+        let served = mosaica_store::unique::with_unique_flags(
             &bundle.manifest,
             &bundle.partitions[partition].manifest,
         );
         let bundle = bundle.with_views(served);
-        let unique_indexes = match tessera_store::unique::UniqueIndexes::open(
+        let unique_indexes = match mosaica_store::unique::UniqueIndexes::open(
             &bundle.manifest,
             &bundle.partitions[partition].manifest,
             &self.prefix_dir(generation),

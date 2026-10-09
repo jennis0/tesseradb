@@ -20,21 +20,21 @@ use arrow::array::{
 use arrow::record_batch::RecordBatch;
 
 use common::*;
-use tessera_engine::filter::{FilterExpr, RegionLeaf};
-use tessera_engine::{
+use mosaica_engine::filter::{FilterExpr, RegionLeaf};
+use mosaica_engine::{
     ArtifactsRequest, Engine, EngineError, ItemsRequest, PageEnd, RecordsHead, RecordsLimits,
     RecordsRefused, RecordsSink, RecordsTrailer, Session, SinkResult,
 };
-use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_spatial::shape::{ShapeF64, Space};
-use tessera_types::layer::{
+use mosaica_lifecycle::membership::{IncomingAttachment, IncomingContent};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_spatial::shape::{ShapeF64, Space};
+use mosaica_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
     LayerDeclaration, LevelDeclaration, MembershipSource, ShapeDeclaration, ShapeKind,
     SuppliedContent, SuppliedRequirement,
 };
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, TesseraId};
 
 const N: u64 = 900;
 const TREE: &str = "clusters/tree";
@@ -325,7 +325,7 @@ fn fixture() -> Fx {
         .canonical(Space::View, &extent())
         .unwrap()
         .0;
-        let shape = tessera_lifecycle::membership::ArtifactShapes::new(vec![(
+        let shape = mosaica_lifecycle::membership::ArtifactShapes::new(vec![(
             "s0".to_string(),
             canonical.encode(),
         )])
@@ -600,7 +600,7 @@ const TAXA: &str = "taxa/tiered";
 fn plant_taxa(fx: &Fx) {
     let engine = fx.engine();
     let mut taxa = base_declaration(TAXA, HierarchyKind::Tiered);
-    taxa.layout = Some(tessera_types::layer::ServingLayout::RowMajorLabel);
+    taxa.layout = Some(mosaica_types::layer::ServingLayout::RowMajorLabel);
     taxa.content.computed = vec!["centroid".into()];
     taxa.levels = (0..3)
         .map(|level| LevelDeclaration {
@@ -975,9 +975,9 @@ fn a_parent_with_no_children_gives_one_typed_page_of_no_rows() {
     assert_eq!(sink.pages.len(), 1);
     let (batch, end) = &sink.pages[0];
     assert_eq!((batch.num_rows(), batch.schema()), (0, schema));
-    assert_eq!((end.next.as_deref(), end.ended_by), (None, tessera_engine::PageEndedBy::End));
+    assert_eq!((end.next.as_deref(), end.ended_by), (None, mosaica_engine::PageEndedBy::End));
     assert_eq!((trailer.pages, trailer.rows, trailer.next), (1, 0, None));
-    assert_eq!(trailer.ended_by, tessera_engine::ResponseEndedBy::End);
+    assert_eq!(trailer.ended_by, mosaica_engine::ResponseEndedBy::End);
 }
 
 /// The filter's region: a box over the middle of the map.
@@ -1343,7 +1343,7 @@ fn geometry_is_over_the_visible_members_in_view_coordinates() {
                 assert!((bx1.value(i) - hi(|p| p.0)).abs() < STEP);
                 assert!((by1.value(i) - hi(|p| p.1)).abs() < STEP);
 
-                let hull = tessera_spatial::shape::read_wkb(shapes.value(i)).expect("WKB");
+                let hull = mosaica_spatial::shape::read_wkb(shapes.value(i)).expect("WKB");
                 let rings: Vec<&Vec<(f64, f64)>> = hull.iter().flatten().collect();
                 for ring in &rings {
                     for v in ring.iter() {
@@ -1376,7 +1376,7 @@ fn geometry_is_over_the_visible_members_in_view_coordinates() {
         })
         .collect();
     for (bytes, rect) in shapes.iter().zip(BOX_RECTS) {
-        let parts = tessera_spatial::shape::read_wkb(bytes).unwrap();
+        let parts = mosaica_spatial::shape::read_wkb(bytes).unwrap();
         let ring = &parts[0][0];
         let corners = [
             (rect[0], rect[1]),
@@ -1418,7 +1418,7 @@ fn a_small_byte_ceiling_neither_skips_nor_repeats_a_row() {
         let (sink, trailer) = respond(engine, &session, next).unwrap();
         for (batch, end) in sink.pages {
             assert_eq!(batch.num_rows(), 1, "a row larger than the ceiling is sent alone");
-            by_bytes += usize::from(end.ended_by == tessera_engine::PageEndedBy::Bytes);
+            by_bytes += usize::from(end.ended_by == mosaica_engine::PageEndedBy::Bytes);
             read.extend(keys(&[batch]));
         }
         cursor = trailer.next;
@@ -1497,7 +1497,7 @@ fn a_response_cancelled_before_it_starts_counts_nothing() {
     let engine = fx.engine();
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let fields = names(&["key"]);
-    let cancel = tessera_engine::CancelToken::new();
+    let cancel = mosaica_engine::CancelToken::new();
     cancel.cancel();
     let mut req = request(TREE, &fields);
     req.count = true;
@@ -1505,14 +1505,14 @@ fn a_response_cancelled_before_it_starts_counts_nothing() {
     let (sink, trailer) = respond(engine, &session, req).unwrap();
     assert!(sink.pages.is_empty());
     assert_eq!(sink.head.unwrap().counts, None);
-    assert_eq!(trailer.ended_by, tessera_engine::ResponseEndedBy::Deadline);
+    assert_eq!(trailer.ended_by, mosaica_engine::ResponseEndedBy::Deadline);
 }
 
 /// Items ingested into `s0` at `places`, visible to every viewer; their entities.
 fn ingest_at(engine: &Engine, batch: &str, places: &[(f64, f64)]) -> Vec<EntityId> {
     let rows = places
         .iter()
-        .map(|&(x, y)| tessera_lifecycle::UnallocatedRow {
+        .map(|&(x, y)| mosaica_lifecycle::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -1649,22 +1649,22 @@ fn authored() -> Authored {
     write_points_n(&points, N);
     write_pairs_n(&pairs, N);
     let root = tmp.path().join("bundle");
-    let view = |id: &str, visibility: Option<Vec<String>>| tessera_build::ViewArgs {
+    let view = |id: &str, visibility: Option<Vec<String>>| mosaica_build::ViewArgs {
         visibility,
         view_id: id.to_string(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: points.clone(),
         point_fields: Default::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        access: mosaica_build::config::AccessInput::relation(pairs.clone()),
     };
-    tessera_build::build(&tessera_build::BuildArgs {
+    mosaica_build::build(&mosaica_build::BuildArgs {
         views: vec![view("s0", None), view("hidden", Some(vec!["1".to_string()]))],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &id_schema()),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &id_schema()),
         out: root.clone(),
         limit: None,
         strict: false,
@@ -1704,7 +1704,7 @@ fn authored() -> Authored {
     };
     let (seen, secret) = ([100.0, 100.0, 300.0, 300.0], [610.0, 620.0, 870.0, 880.0]);
     let secret_bytes = canonical(secret);
-    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(vec![
+    let shapes = mosaica_lifecycle::membership::ArtifactShapes::new(vec![
         ("hidden".to_string(), secret_bytes.clone()),
         ("s0".to_string(), canonical(seen)),
     ])
@@ -1744,15 +1744,15 @@ fn an_authored_shape_names_no_other_view_on_the_viewport() {
     let a = authored();
     let session = a.engine.authorise(&full_coverage_credential()).unwrap();
     for computed in [
-        tessera_engine::viewport::ComputedSelection::Named(&[]),
-        tessera_engine::viewport::ComputedSelection::Declared,
+        mosaica_engine::viewport::ComputedSelection::Named(&[]),
+        mosaica_engine::viewport::ComputedSelection::Declared,
     ] {
         let out = a
             .engine
             .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
-                    .layers(tessera_engine::LayerSelection::Named(&[AUTHORED]))
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                    .layers(mosaica_engine::LayerSelection::Named(&[AUTHORED]))
                     .computed(computed),
             )
             .unwrap()
@@ -1791,11 +1791,11 @@ fn browse_counts_only_served_children_and_none_on_a_layer_without_links() {
             engine
                 .browse(
                     &session,
-                    tessera_engine::browse::BrowseRequest {
+                    mosaica_engine::browse::BrowseRequest {
                         view: "s0",
                         layer,
                         level,
-                        form: tessera_engine::browse::BrowseForm::Roots,
+                        form: mosaica_engine::browse::BrowseForm::Roots,
                         filter: None,
                         limit: 100,
                         cursor: None,
@@ -1837,7 +1837,7 @@ fn an_authored_shape_names_no_other_view_on_browse() {
         a.engine
             .browse(
                 &session,
-                tessera_engine::browse::BrowseRequest {
+                mosaica_engine::browse::BrowseRequest {
                     view: "s0",
                     layer: AUTHORED,
                     level: None,
@@ -1850,12 +1850,12 @@ fn an_authored_shape_names_no_other_view_on_browse() {
             )
             .unwrap()
     };
-    let roots = browse(tessera_engine::browse::BrowseForm::Roots);
+    let roots = browse(mosaica_engine::browse::BrowseForm::Roots);
     assert_eq!(roots.artifacts.len(), 1, "the artifact is served");
     assert_eq!(roots.artifacts[0].name, None, "a shape slot names nothing");
     a.assert_clean("browse", &format!("{roots:?}"));
     for secret in &a.secrets {
-        let found = browse(tessera_engine::browse::BrowseForm::Search(secret.clone()));
+        let found = browse(mosaica_engine::browse::BrowseForm::Search(secret.clone()));
         assert!(found.artifacts.is_empty(), "browse's search read the slot for '{secret}'");
     }
 }
@@ -1882,7 +1882,7 @@ fn an_authored_shape_names_no_other_view_on_the_artifacts_read() {
     let content = content.as_any().downcast_ref::<StringArray>().unwrap();
     assert!(content.value(0).is_empty(), "the shape slot is served blank");
     let wkb = column::<BinaryArray>(&pages[0], "shape").value(0).to_vec();
-    let ring = tessera_spatial::shape::read_wkb(&wkb).unwrap()[0][0].clone();
+    let ring = mosaica_spatial::shape::read_wkb(&wkb).unwrap()[0][0].clone();
     for corner in [(a.seen[0], a.seen[1]), (a.seen[2], a.seen[3])] {
         assert!(ring
             .iter()
@@ -1909,7 +1909,7 @@ fn an_attached_artifact_takes_its_targets_matched_count() {
         let session = engine.authorise(&credential).unwrap();
         let roots = read_all(engine, &session, &request(TREE, &fields));
         let root_ids: HashMap<String, u64> = keys(&roots).into_iter().zip(ids(&roots)).collect();
-        let filter = FilterExpr::MemberOf(tessera_engine::filter::MemberOfLeaf {
+        let filter = FilterExpr::MemberOf(mosaica_engine::filter::MemberOfLeaf {
             layer: TREE.into(),
             artifact: TesseraId::new(root_ids[&root_key(2)]),
         });
@@ -1976,7 +1976,7 @@ fn a_hull_over_few_members_is_a_closed_ring_of_four_points() {
     assert_eq!(keys(&pages), vec!["one", "two", "collinear"]);
     let shapes = column::<BinaryArray>(&pages[0], "shape");
     for (i, (key, members)) in plants.iter().enumerate() {
-        let parts = tessera_spatial::shape::read_wkb(shapes.value(i)).expect("WKB");
+        let parts = mosaica_spatial::shape::read_wkb(shapes.value(i)).expect("WKB");
         assert!(!parts.is_empty(), "{key}: no hull");
         let positions: Vec<(f64, f64)> = members.iter().map(|&s| position(s)).collect();
         for ring in parts.iter().flatten() {

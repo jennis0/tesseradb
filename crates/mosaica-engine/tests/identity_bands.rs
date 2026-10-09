@@ -1,6 +1,6 @@
 //! What a bundle stores for the identity bands: every segment's `bands.bin` and `cell-codes.u32`,
 //! and each partitioning level's label column with its copy in band order
-//! (`tessera_store::bands`), after a build, a flush, a deletion, a growth, a fold and a restart.
+//! (`mosaica_store::bands`), after a build, a flush, a deletion, a growth, a fold and a restart.
 //!
 //! Each check reads the files the served generation names and compares them with the columns they
 //! were taken from, so a producer that skipped them or wrote them from other rows fails here.
@@ -18,17 +18,17 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::Engine;
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth, UnallocatedRow};
-use tessera_store::bands::{band_of, BandLabels, FIRST_BAND};
-use tessera_store::manifest::{DerivedExtent, DerivedForm};
-use tessera_store::membership::{LabelColumnPack, ROW_COLUMN_HOLE};
-use tessera_types::layer::{
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::Engine;
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth, UnallocatedRow};
+use mosaica_store::bands::{band_of, BandLabels, FIRST_BAND};
+use mosaica_store::manifest::{DerivedExtent, DerivedForm};
+use mosaica_store::membership::{LabelColumnPack, ROW_COLUMN_HOLE};
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 /// Enough rows for band 6, which holds about one row in 64, to hold a few dozen.
 const ROWS: u64 = 3_000;
@@ -73,11 +73,11 @@ fn build_scored(root: &Path) {
     write_pairs_n(&pairs, ROWS);
 
     let mut schema = id_schema();
-    schema.attributes.push(tessera_build::config::Attribute {
+    schema.attributes.push(mosaica_build::config::Attribute {
         field: None,
         name: "score".to_string(),
         title: None,
-        ty: tessera_spatial::tiler::ScalarType::I32,
+        ty: mosaica_spatial::tiler::ScalarType::I32,
         analyser: None,
         vocabulary: None,
         value_set: None,
@@ -86,20 +86,20 @@ fn build_scored(root: &Path) {
         unique: false,
     });
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
         strict: false,
@@ -207,7 +207,7 @@ fn every_segment_carries_its_bands_through_a_flush_a_deletion_a_fold_and_a_resta
         .find(|&&id| band_of(id) >= FIRST_BAND)
         .unwrap();
     let entity = engine
-        .resolve_tessera_ids(&[tessera_types::TesseraId::new(gone)])
+        .resolve_tessera_ids(&[mosaica_types::TesseraId::new(gone)])
         .unwrap()[0]
         .expect("a band entry names an item");
     engine.accept_change(entity, ChangeOp::Delete).unwrap();
@@ -237,7 +237,7 @@ fn every_segment_carries_its_bands_through_a_flush_a_deletion_a_fold_and_a_resta
     );
     drop(engine);
 
-    let report = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    let report = mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the bundle verifies deep");
     assert_eq!(report.band_entries as usize, folded_entries);
 }
@@ -259,7 +259,7 @@ fn flat(name: &str, layout: Option<ServingLayout>) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -461,7 +461,7 @@ fn every_partitioning_level_has_a_label_column_and_a_band_copy_that_follow_the_f
     let engine = open_engine_publishing(&root, &cache, &wal);
     assert!(unlabelled(&engine));
     drop(engine);
-    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("a bundle whose moved level has no copy verifies deep");
 
     // The fold writes the level again, with the growth in both.
@@ -471,7 +471,7 @@ fn every_partitioning_level_has_a_label_column_and_a_band_copy_that_follow_the_f
     assert_partition(&engine, &labels_of(&root, &engine, SERVED), &served);
     drop(engine);
 
-    let report = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    let report = mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the bundle verifies deep");
     assert_eq!(report.band_label_copies, 2);
 }
@@ -483,7 +483,7 @@ fn every_partitioning_level_has_a_label_column_and_a_band_copy_that_follow_the_f
 fn a_build_writes_the_label_columns_and_their_copies() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    let corpus = tessera_corpus::Corpus::new(7, ROWS, extent()).unwrap();
+    let corpus = mosaica_corpus::Corpus::new(7, ROWS, extent()).unwrap();
     corpus
         .write_points_parquet(&tmp.path().join("points.parquet"))
         .unwrap();
@@ -512,12 +512,12 @@ fn a_build_writes_the_label_columns_and_their_copies() {
         );
     }
     drop(engine);
-    let report = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    let report = mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the built bundle verifies deep");
     assert!(report.band_label_copies >= 1);
 }
 
-/// `tessera verify --deep` refuses a band label copy that does not hold its column's labels, and
+/// `mosaica verify --deep` refuses a band label copy that does not hold its column's labels, and
 /// a current label column that has no copy, naming the file in each case.
 #[test]
 fn deep_verification_refuses_a_damaged_copy_and_a_missing_one() {
@@ -549,19 +549,19 @@ fn deep_verification_refuses_a_damaged_copy_and_a_missing_one() {
     };
     let copy = path_of(|f| matches!(f, DerivedForm::BandLabels { .. }));
     let column = path_of(|f| *f == DerivedForm::LevelLabels);
-    let refused_on = |expected: &Path| match tessera_build::verify_deep(
+    let refused_on = |expected: &Path| match mosaica_build::verify_deep(
         &root,
-        &tessera_build::VerifyOpts::default(),
+        &mosaica_build::VerifyOpts::default(),
     ) {
-        Err(tessera_build::BuildError::Store(
-            tessera_store::StoreError::FileVerificationFailed { path, .. },
+        Err(mosaica_build::BuildError::Store(
+            mosaica_store::StoreError::FileVerificationFailed { path, .. },
         )) => assert_eq!(path, expected),
         other => panic!(
             "expected a refusal naming {}, got {other:?}",
             expected.display()
         ),
     };
-    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the folded bundle verifies deep");
 
     // A label changed in the copy.

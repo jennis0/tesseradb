@@ -20,17 +20,17 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{frame_view, Extent, Fields, LonLatBox};
-use tessera_build::input::{read_points, PointSurvey};
-use tessera_build::{build, BuildArgs};
-use tessera_spatial::{fixed32, AlignedSquare, Bounds, Projection};
-use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::config::{frame_view, Extent, Fields, LonLatBox};
+use mosaica_build::input::{read_points, PointSurvey};
+use mosaica_build::{build, BuildArgs};
+use mosaica_spatial::{fixed32, AlignedSquare, Bounds, Projection};
+use mosaica_store::read::open_bundle;
+use mosaica_types::IdentityKey;
 
 
 /// That fixture's points file, as a reader of it needs it.
-fn source<'a>(path: &'a std::path::Path, fields: &'a Fields) -> tessera_build::input::Source<'a> {
-    tessera_build::input::Source::every_row(path, fields)
+fn source<'a>(path: &'a std::path::Path, fields: &'a Fields) -> mosaica_build::input::Source<'a> {
+    mosaica_build::input::Source::every_row(path, fields)
 }
 
 /// A points file with the coordinate columns under the names a projected view reads.
@@ -64,8 +64,8 @@ fn whole_world() -> Extent {
     Extent::LonLat(LonLatBox {
         lon_min: -180.0,
         lon_max: 180.0,
-        lat_min: -tessera_spatial::WEB_MERCATOR_MAX_LATITUDE_DEG,
-        lat_max: tessera_spatial::WEB_MERCATOR_MAX_LATITUDE_DEG,
+        lat_min: -mosaica_spatial::WEB_MERCATOR_MAX_LATITUDE_DEG,
+        lat_max: mosaica_spatial::WEB_MERCATOR_MAX_LATITUDE_DEG,
     })
 }
 
@@ -151,7 +151,7 @@ fn clipped_points_are_counted_and_clamped_points_are_not() {
     let points = tmp.path().join("polar.parquet");
     // Two beyond the domain to the north, one to the south, one at the boundary itself (inside),
     // and one ordinary.
-    let max = tessera_spatial::WEB_MERCATOR_MAX_LATITUDE_DEG;
+    let max = mosaica_spatial::WEB_MERCATOR_MAX_LATITUDE_DEG;
     let lons = [0.0, 10.0, -10.0, 20.0, -0.1276];
     let lats = [89.9, 85.06, -87.0, max, 51.5072];
     write_points(&points, ("lon", "lat"), &lons, &lats);
@@ -402,7 +402,7 @@ fn build_bundle(
     let out = tmp.join("bundle");
     let (schema, attribute_sources) = common::id_attributes(points);
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "world".to_string(),
             projection,
@@ -410,7 +410,7 @@ fn build_bundle(
             points: points.to_path_buf(),
             point_fields: fields,
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -832,11 +832,11 @@ fn a_morton_points_file_under_a_projected_view_is_refused_by_the_survey() {
 /// asserts rather than assumes.
 #[test]
 fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
-    use tessera_build::shapes::{ShapeContext, ShapeReader};
-    use tessera_spatial::shape::{Shape, ShapeF64, Space};
-    use tessera_store::derived::ViewFrame;
-    use tessera_store::derived::{ShapeInput, ShapeSpace};
-    use tessera_types::layer::ShapeKind;
+    use mosaica_build::shapes::{ShapeContext, ShapeReader};
+    use mosaica_spatial::shape::{Shape, ShapeF64, Space};
+    use mosaica_store::derived::ViewFrame;
+    use mosaica_store::derived::{ShapeInput, ShapeSpace};
+    use mosaica_types::layer::ShapeKind;
 
     // (place, lon, lat, inside the shape as declared, inside the chord reading)
     const PLACES: &[(&str, f64, f64, bool, bool)] = &[
@@ -869,7 +869,7 @@ fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
     let extent = AlignedSquare::WORLD.bounds();
     let ctx = ShapeContext {
         views: vec![ViewFrame::new("world", Projection::WebMercator, extent)],
-        max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+        max_vertices: mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
     };
     let mut reader = ShapeReader::new("regions/uk", ShapeKind::Polygon, ctx, ShapeSpace::View);
     let shapes = reader
@@ -924,10 +924,10 @@ fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
 /// `projections.md` §5.3). This does not change with projections built.
 #[test]
 fn a_wgs84_shape_on_an_unprojected_view_is_refused() {
-    use tessera_build::shapes::{ShapeContext, ShapeReader};
-    use tessera_store::derived::ViewFrame;
-    use tessera_store::derived::{ShapeInput, ShapeSpace};
-    use tessera_types::layer::ShapeKind;
+    use mosaica_build::shapes::{ShapeContext, ShapeReader};
+    use mosaica_store::derived::ViewFrame;
+    use mosaica_store::derived::{ShapeInput, ShapeSpace};
+    use mosaica_types::layer::ShapeKind;
 
     let ctx = ShapeContext {
         views: vec![ViewFrame::new(
@@ -940,7 +940,7 @@ fn a_wgs84_shape_on_an_unprojected_view_is_refused() {
                 y_max: 1000.0,
             },
         )],
-        max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+        max_vertices: mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
     };
     let mut reader = ShapeReader::new("regions/uk", ShapeKind::Bbox, ctx, ShapeSpace::View);
     let err = reader
@@ -959,10 +959,10 @@ fn a_wgs84_shape_on_an_unprojected_view_is_refused() {
 /// read rather than reported (`projections.md` §2).
 #[test]
 fn a_wgs84_shape_coordinate_outside_the_range_is_refused() {
-    use tessera_build::shapes::{ShapeContext, ShapeReader};
-    use tessera_store::derived::ViewFrame;
-    use tessera_store::derived::{ShapeInput, ShapeSpace};
-    use tessera_types::layer::ShapeKind;
+    use mosaica_build::shapes::{ShapeContext, ShapeReader};
+    use mosaica_store::derived::ViewFrame;
+    use mosaica_store::derived::{ShapeInput, ShapeSpace};
+    use mosaica_types::layer::ShapeKind;
 
     let ctx = ShapeContext {
         views: vec![ViewFrame::new(
@@ -970,7 +970,7 @@ fn a_wgs84_shape_coordinate_outside_the_range_is_refused() {
             Projection::WebMercator,
             AlignedSquare::WORLD.bounds(),
         )],
-        max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+        max_vertices: mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
     };
     let mut reader = ShapeReader::new("regions/uk", ShapeKind::Bbox, ctx, ShapeSpace::Wgs84);
     let err = reader
@@ -984,9 +984,9 @@ fn a_wgs84_shape_coordinate_outside_the_range_is_refused() {
         .is_ok());
 }
 
-fn ctx_view() -> tessera_build::shapes::ShapeContext {
-    use tessera_store::derived::ViewFrame;
-    tessera_build::shapes::ShapeContext {
+fn ctx_view() -> mosaica_build::shapes::ShapeContext {
+    use mosaica_store::derived::ViewFrame;
+    mosaica_build::shapes::ShapeContext {
         views: vec![ViewFrame::new(
             "s0",
             Projection::None,
@@ -997,6 +997,6 @@ fn ctx_view() -> tessera_build::shapes::ShapeContext {
                 y_max: 1000.0,
             },
         )],
-        max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+        max_vertices: mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
     }
 }

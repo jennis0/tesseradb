@@ -1,8 +1,8 @@
 // A static harness for the highlight work's element screenshots: the built components against a
 // hand-made store, so the boards can be compared with what actually renders. Untracked.
-import {NO_COUNT, NO_MASKED, type BrowsePage, type Projections, type ProjectionName, type Store} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
-import '@tesseradb/components';
+import {NO_COUNT, NO_MASKED, type BrowsePage, type Projections, type ProjectionName, type Store} from '@mosaica/client';
+import {SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
+import '@mosaica/components';
 
 const layer = (name: string, kind: string, computedContent: string[], title: string) =>
   ({name, title, views: ['s0'], hierarchy: {kind, pruneChildren: false}, levels: [], computedContent,

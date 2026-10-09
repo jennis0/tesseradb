@@ -20,15 +20,15 @@
 mod common;
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine};
-use tessera_lifecycle::membership::IncomingContent;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
-use tessera_types::layer::{
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{ArtifactOut, Engine};
+use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 /// **No existence criterion**, deliberately, as in the fold's own cases: these assertions are about
 /// what a membership *is*, and a criterion would turn a wrong count into an absence — which is the
@@ -42,7 +42,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -139,7 +139,7 @@ fn publish(
     fx: &Fixture,
     engine: &Engine,
     sources: std::ops::Range<u64>,
-) -> tessera_types::TesseraId {
+) -> mosaica_types::TesseraId {
     engine.register_layer(declaration("clusters/a")).unwrap();
     let ids = engine
         .publish_artifacts(
@@ -194,7 +194,7 @@ fn rotate(engine: &Engine) {
 /// The sample is rate-limited to one per tick period (`Executor::sample_wal_gauge`), so a tick is
 /// not enough on its own: `wal.samples` is what says a fresh walk has run. With the one-second
 /// period `Fixture::open_with_short_tick` sets, this returns within about a second.
-fn resampled_gauge(engine: &Engine) -> tessera_engine::WalGauge {
+fn resampled_gauge(engine: &Engine) -> mosaica_engine::WalGauge {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     // The entry sample is taken on the executor thread, which `start_write_executor` does not wait
     // for. Without this the first call could take that sample for its own and read a gauge older
@@ -227,10 +227,10 @@ fn resampled_gauge(engine: &Engine) -> tessera_engine::WalGauge {
 /// a generating set at all, and therefore the only one under which I8 has anything to say.
 fn described_declaration() -> LayerDeclaration {
     let mut d = declaration("clusters/a");
-    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+    d.content.supplied = vec![mosaica_types::layer::SuppliedContent {
         name: "topic".into(),
         ty: "text".into(),
-        require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+        require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
     }];
     d
 }
@@ -243,7 +243,7 @@ fn artifacts_for(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
     engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
         .artifacts()
@@ -805,7 +805,7 @@ fn a_join_naming_something_other_than_a_point_is_refused() {
 fn open_declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
         scope: Default::default(),
-        value_set: tessera_types::layer::ValueSet::Open,
+        value_set: mosaica_types::layer::ValueSet::Open,
         ..declaration(name)
     }
 }
@@ -819,7 +819,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
     for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -834,8 +834,8 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
             vec![row],
             batch.to_string(),
             hash,
-            tessera_lifecycle::BatchArtifacts {
-                memberships: vec![tessera_lifecycle::BatchMembership {
+            mosaica_lifecycle::BatchArtifacts {
+                memberships: vec![mosaica_lifecycle::BatchMembership {
                     layer: layer.to_string(),
                     level: 0,
                     view: None,
@@ -937,7 +937,7 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
 
     let before = engine.allocator_high_water();
     let descriptors = vec![b"0".to_vec()];
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -952,8 +952,8 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
             vec![row],
             "b1".to_string(),
             [1u8; 32],
-            tessera_lifecycle::BatchArtifacts {
-                memberships: vec![tessera_lifecycle::BatchMembership {
+            mosaica_lifecycle::BatchArtifacts {
+                memberships: vec![mosaica_lifecycle::BatchMembership {
                     layer: "clusters/a".to_string(),
                     level: 0,
                     view: None,
@@ -995,7 +995,7 @@ fn ingest_into_view(
     for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: view.to_string(),
         join: item,
         descriptors: descriptors.clone(),
@@ -1010,8 +1010,8 @@ fn ingest_into_view(
             vec![row],
             batch.to_string(),
             hash,
-            tessera_lifecycle::BatchArtifacts {
-                memberships: vec![tessera_lifecycle::BatchMembership {
+            mosaica_lifecycle::BatchArtifacts {
+                memberships: vec![mosaica_lifecycle::BatchMembership {
                     layer: "clusters/a".to_string(),
                     level: 0,
                     view: None,
@@ -1041,11 +1041,11 @@ fn a_joining_row_restating_its_membership_appends_no_growth() {
     let fx = fixture();
     let engine = fx.open_with_short_tick();
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: "s1".to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -1094,11 +1094,11 @@ fn a_joining_row_naming_another_artifact_still_grows_it() {
     let fx = fixture();
     let engine = fx.open();
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: "s1".to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -1149,8 +1149,8 @@ fn a_joining_row_naming_another_artifact_still_grows_it() {
 const WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The newest side-manifest on disc, read the way a reopen reads it.
-fn newest_side_manifest(root: &std::path::Path) -> tessera_store::manifest::SegmentsManifest {
-    let bundle = tessera_store::open_bundle(root).expect("the bundle opens");
+fn newest_side_manifest(root: &std::path::Path) -> mosaica_store::manifest::SegmentsManifest {
+    let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
     bundle
         .partitions
         .values()
@@ -1373,7 +1373,7 @@ fn a_fold_with_a_batchs_memberships_pending_produces_a_correct_bundle() {
 /// after a restart that replays the log, and after the fold.
 #[test]
 fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     const CALLS: &str = "clusters/calls";
     const TAGGED: &str = "clusters/tagged";
     let fx = fixture();
@@ -1434,7 +1434,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
     assert_eq!(counts(&engine, TAGGED), held(&[("x", 30), ("y", 30)]));
     assert_eq!(served_layout(&engine, TAGGED), ServingLayout::RowMajorLabel);
     let descriptors = vec![b"0".to_vec()];
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -1446,7 +1446,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
     };
     let memberships = ["x", "y"]
         .into_iter()
-        .map(|key| tessera_lifecycle::BatchMembership {
+        .map(|key| mosaica_lifecycle::BatchMembership {
             layer: TAGGED.to_string(),
             level: 0,
             view: None,
@@ -1459,7 +1459,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
             vec![row],
             "tagged twice".to_string(),
             [7u8; 32],
-            tessera_lifecycle::BatchArtifacts {
+            mosaica_lifecycle::BatchArtifacts {
                 memberships,
                 edges: Vec::new(),
             },
@@ -1489,7 +1489,7 @@ fn a_level_whose_items_come_to_overlap_is_served_from_a_list_column() {
 }
 
 /// The layout of the form a level of `layer` is served from in view `s0`.
-fn served_layout(engine: &Engine, layer: &str) -> tessera_types::layer::ServingLayout {
+fn served_layout(engine: &Engine, layer: &str) -> mosaica_types::layer::ServingLayout {
     engine
         .held_artifact_form_for_test("s0", layer, 0)
         .expect("a read built the level's form")

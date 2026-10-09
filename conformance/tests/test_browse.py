@@ -90,7 +90,7 @@ def browse_server(tmp_path_factory):
     build_bundle(work, points)
     (work / "gated.toml").write_text(config_toml() + gated_layer_toml() + tree_layer_toml())
     bundle = work / "bundle-gated"
-    deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
+    deployment = write_deployment(work / "mosaica-gated.toml", bundle=bundle, schema=work / "gated.toml")
     cli_build(deployment, bundle)
     server, proc = spawn_server(
         bundle,

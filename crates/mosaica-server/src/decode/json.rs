@@ -18,8 +18,8 @@ use arrow::array::{
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use serde_json::{Map, Value};
-use tessera_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
-use tessera_types::layer::LayerDeclaration;
+use mosaica_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
+use mosaica_types::layer::LayerDeclaration;
 
 use super::{DecodeError, Fixed};
 
@@ -474,7 +474,7 @@ fn membership_column(
             Value::String(text) => Ok(Some(text.clone())),
             Value::Number(_) => {
                 Ok(integer(body_name, value, row, name)?
-                    .and_then(tessera_types::layer::integer_key))
+                    .and_then(mosaica_types::layer::integer_key))
             }
             _ => Err(refusal(
                 body_name,

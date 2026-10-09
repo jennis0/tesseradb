@@ -69,12 +69,12 @@
 //! viewer is looking at, not something a cheap viewport escapes.
 
 use crate::ingest_rows::IngestRows;
-use tessera_authz::PostingsReader;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_store::read::open_bundle;
-use tessera_types::EntityId;
+use mosaica_authz::PostingsReader;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_store::read::open_bundle;
+use mosaica_types::EntityId;
 
 use crate::arms::{Context, Result};
 use crate::corpus::{build_grant_to_coverage, Dictionary, GrantShape, TermStats};
@@ -186,7 +186,7 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
 
         for &op in &ops {
             let tmp = std::env::temp_dir().join(format!(
-                "tessera-bench-changes-{}-{}-{}",
+                "mosaica-bench-changes-{}-{}-{}",
                 std::process::id(),
                 fixture.scale,
                 op.name()
@@ -202,14 +202,14 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                     max_k: 200,
                     // §7.2's selection constants, at the server's own defaults — a bench measuring
                     // anything else measures a configuration nobody runs. Keep in step with
-                    // `tessera-server`'s DEFAULT_* constants.
+                    // `mosaica-server`'s DEFAULT_* constants.
                     k_min: 2,
                     k_max_marks: 500,
                     theta_target_marks: 16,
                     max_underlay_offset: 4,
                     max_underlay_cells: 8192,
                     max_tiles_per_request: 262_144,
-                    compute_threads: tessera_engine::default_compute_threads(),
+                    compute_threads: mosaica_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
                     // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
                     // what bounds the window close's O(buffered) copy. Nothing here reaches it.
@@ -219,7 +219,7 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                     segment_floor_bytes: None,
                     coalesce_width: None,
                     // Compaction §9's trigger is off unless a deployment configures one.
-                    compaction: tessera_engine::CompactionSchedule::off(),
+                    compaction: mosaica_engine::CompactionSchedule::off(),
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -378,12 +378,12 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
 /// 2. **Contended deny-ack.** Background threads submit large ingest batches continuously while
 ///    denies are issued, so a deny lands behind an in-flight `apply_ingest` that is cloning an
 ///    `N`-entry buffer. This is the head-of-line term, and it is the one §1.3 bounds.
-/// 3. **Never-shed** (`tessera-engine/src/write.rs`'s two-lane submit): the work lane is a bounded
+/// 3. **Never-shed** (`mosaica-engine/src/write.rs`'s two-lane submit): the work lane is a bounded
 ///    `SyncSender` (`QueueFull`), the deny lane an unbounded `Sender`. With the queue genuinely
 ///    saturated — proven by counting `QueueFull` on the ingest lane rather than assumed — no deny
 ///    may be refused. **Scope limit: this exercises the engine's lane split only.** The HTTP-level
 ///    asymmetry is a different claim and is not made here; `changes_never_429s` in
-///    `tessera-server/tests/http_write.rs` is what asserts it.
+///    `mosaica-server/tests/http_write.rs` is what asserts it.
 // Eight parameters, one over clippy's default. A bench arm's signature IS its knob surface --
 // ops, buffered depths, submitters, repeats and seed are each independently swept from the CLI,
 // and folding them into a params struct would put a second name on every one of them for no
@@ -447,7 +447,7 @@ pub fn run_deny_ack(
                 // `apply_change` clone (which is O(overlay), not O(buffer) — see the finding in
                 // the memo) would carry the previous cell's depth into this one's numbers.
                 let tmp = std::env::temp_dir().join(format!(
-                    "tessera-bench-denyack-{}-{}-{}-{}",
+                    "mosaica-bench-denyack-{}-{}-{}-{}",
                     std::process::id(),
                     fixture.scale,
                     op.name(),
@@ -468,7 +468,7 @@ pub fn run_deny_ack(
                         max_underlay_offset: 4,
                         max_underlay_cells: 8192,
                         max_tiles_per_request: 262_144,
-                        compute_threads: tessera_engine::default_compute_threads(),
+                        compute_threads: mosaica_engine::default_compute_threads(),
                         flush_max_age_secs: 90,
                         flush_max_items: 40_000,
                         max_merged_segment_bytes: None,
@@ -476,7 +476,7 @@ pub fn run_deny_ack(
                         segment_floor_bytes: None,
                         coalesce_width: None,
                         // Compaction §9's trigger is off unless a deployment configures one.
-                        compaction: tessera_engine::CompactionSchedule::off(),
+                        compaction: mosaica_engine::CompactionSchedule::off(),
                     },
                 )?;
                 // Small on purpose, unlike the other arms' generous 1024: the never-shed phase
@@ -548,7 +548,7 @@ pub fn run_deny_ack(
                                         ingest_ok
                                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     }
-                                    Err(tessera_engine::AcceptError::Submit(_)) => {
+                                    Err(mosaica_engine::AcceptError::Submit(_)) => {
                                         // The bounded work lane refusing under load: the
                                         // *expected* half of the asymmetry, and the proof that
                                         // the queue is genuinely saturated for the deny phase.
@@ -569,7 +569,7 @@ pub fn run_deny_ack(
                         let start = std::time::Instant::now();
                         let r = engine.accept_change(entity, op.change_op());
                         busy_ack.push(start.elapsed().as_nanos() as u64);
-                        if matches!(r, Err(tessera_engine::AcceptError::Submit(_))) {
+                        if matches!(r, Err(mosaica_engine::AcceptError::Submit(_))) {
                             // The failure this whole arm exists to detect: a security operation
                             // refused for load. Never acceptable (SA §4.2, contracts §3.1).
                             deny_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

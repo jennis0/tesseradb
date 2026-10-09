@@ -3,7 +3,7 @@
 Report a suspected vulnerability through GitHub's private vulnerability reporting, from the Security
 tab of this repository. Do not open a public issue.
 
-Tessera computes every count, density, cluster, label and sample over the records the requesting
+Mosaica computes every count, density, cluster, label and sample over the records the requesting
 viewer is permitted to see. [docs/system/security.md](docs/system/security.md) is the threat model
 and states what the system claims. A report is most useful when it names the claim that is broken.
 

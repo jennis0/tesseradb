@@ -1,9 +1,9 @@
-//! What an attribute column and a vocabulary may declare. `tessera build` and the running service
+//! What an attribute column and a vocabulary may declare. `mosaica build` and the running service
 //! both check a declaration here, so it means the same thing at either.
 
 use std::collections::BTreeSet;
 
-use tessera_spatial::tiler::ScalarType;
+use mosaica_spatial::tiler::ScalarType;
 
 pub const DECLARABLE_TYPES: &str = "bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, \
                                     timestamp_us, keyword, text and category";
@@ -102,11 +102,11 @@ pub fn check_attribute(
     }
     let analyser = match (ty, spec.analyser) {
         (ScalarType::Text, analyser) => {
-            let analyser = analyser.unwrap_or(tessera_analyse::UNICODE);
-            let identity = tessera_analyse::identity_of(analyser).ok_or_else(|| {
+            let analyser = analyser.unwrap_or(mosaica_analyse::UNICODE);
+            let identity = mosaica_analyse::identity_of(analyser).ok_or_else(|| {
                 format!(
                     "attribute '{name}': no analyser named '{analyser}'. Available: {}",
-                    tessera_analyse::ANALYSER_NAMES.join(", ")
+                    mosaica_analyse::ANALYSER_NAMES.join(", ")
                 )
             })?;
             Some(identity)
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn a_text_column_records_its_analyser_and_defaults_to_unicode() {
         let column = check_attribute(&spec("body", "text"), widths).unwrap();
-        let unicode = tessera_analyse::analyser(tessera_analyse::UNICODE).unwrap();
+        let unicode = mosaica_analyse::analyser(mosaica_analyse::UNICODE).unwrap();
         assert_eq!(column.analyser, Some(unicode.identity()));
     }
 

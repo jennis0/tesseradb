@@ -1,4 +1,4 @@
-//! `tessera items`, `tessera artifacts` and `tessera aggregate`: a whole read of `POST /v1/items`,
+//! `mosaica items`, `mosaica artifacts` and `mosaica aggregate`: a whole read of `POST /v1/items`,
 //! `POST /v1/artifacts` or one table of `POST /v1/aggregate` from a running server, written as
 //! Arrow IPC or Parquet.
 //!
@@ -19,7 +19,7 @@ use arrow::record_batch::RecordBatch;
 use clap::ValueEnum;
 use parquet::arrow::ArrowWriter;
 use serde_json::{Map, Value};
-use tessera_wire::{
+use mosaica_wire::{
     read_frame, FRAME_PAGE_END, FRAME_RECORDS, FRAME_RECORDS_HEAD, FRAME_TABLE_HEAD, FRAME_TRAILER,
 };
 
@@ -34,14 +34,14 @@ pub(crate) struct ItemsArgs {
     #[arg(long, value_name = "NAMES")]
     fields: String,
     /// Any of `position` and `labels`, comma-separated, in the order wanted: the columns
-    /// `tessera:x` and `tessera:y`, and `tessera:labels`. Any other name is refused.
+    /// `mosaica:x` and `mosaica:y`, and `mosaica:labels`. Any other name is refused.
     #[arg(long, value_name = "NAMES")]
     system_fields: Option<String>,
     /// A filter expression as JSON, such as `{"year": {"range": {"gte": 2020}}}`. Only the items
     /// that match are returned.
     #[arg(long, value_name = "JSON")]
     filters: Option<String>,
-    /// Return every item, with a `tessera:matched` column saying whether it matches `--filters`.
+    /// Return every item, with a `mosaica:matched` column saying whether it matches `--filters`.
     #[arg(long)]
     keep_unmatched: bool,
     /// Count the items the token may see in the view and those that match. The counts are
@@ -156,8 +156,8 @@ struct Target {
     /// The viewer plane's address, such as `http://127.0.0.1:8080`.
     #[arg(long, value_name = "URL")]
     server: String,
-    /// A session token, as `tessera login` or `tessera session authorise` prints one. Without it
-    /// the token is read from `TESSERA_TOKEN`, and with neither the read is refused.
+    /// A session token, as `mosaica login` or `mosaica session authorise` prints one. Without it
+    /// the token is read from `MOSAICA_TOKEN`, and with neither the read is refused.
     #[arg(long)]
     token: Option<String>,
     /// The file to write. Without it, or with `-`, the output goes to stdout.
@@ -322,7 +322,7 @@ fn run(route: &str, request: Result<Map<String, Value>, String>, target: &Target
     match request.and_then(|request| read(route, request, target)) {
         Ok(summary) => {
             eprintln!(
-                "tessera {route}: {} rows in {} pages from {} responses; head {}",
+                "mosaica {route}: {} rows in {} pages from {} responses; head {}",
                 summary.rows,
                 summary.pages,
                 summary.responses,
@@ -331,7 +331,7 @@ fn run(route: &str, request: Result<Map<String, Value>, String>, target: &Target
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("tessera {route}: {e}");
+            eprintln!("mosaica {route}: {e}");
             ExitCode::FAILURE
         }
     }
@@ -366,8 +366,8 @@ fn read(
 ) -> Result<Summary, String> {
     let token = match &target.token {
         Some(token) => token.clone(),
-        None => std::env::var("TESSERA_TOKEN")
-            .map_err(|_| "no session token: pass --token, or set TESSERA_TOKEN".to_string())?,
+        None => std::env::var("MOSAICA_TOKEN")
+            .map_err(|_| "no session token: pass --token, or set MOSAICA_TOKEN".to_string())?,
     };
     let mut output = Output::new(target)?;
     let client = reqwest::blocking::Client::builder()

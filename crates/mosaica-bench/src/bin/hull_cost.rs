@@ -21,12 +21,12 @@
 //! deduplicates the set it is given. That is a correctness differential rather than a measurement,
 //! and it is here because this is the only place a million-member cell arrives.
 //!
-//! Single-threaded throughout — `tessera_engine::derived` is, deliberately, and a timed section
+//! Single-threaded throughout — `mosaica_engine::derived` is, deliberately, and a timed section
 //! that was not would be measuring a different program.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin hull_cost -- <bundle root>
-//! cargo run --release -p tessera-bench --bin hull_cost -- <bundle root> \
+//! cargo run --release -p mosaica-bench --bin hull_cost -- <bundle root>
+//! cargo run --release -p mosaica-bench --bin hull_cost -- <bundle root> \
 //!     --layer clusters/hdbscan --rows
 //! ```
 
@@ -38,8 +38,8 @@ use std::time::Instant;
 use clap::Parser;
 use croaring::Bitmap;
 
-use tessera_engine::derived::{compute, dig_rings, quantised, ComputedProperty, RowLocator};
-use tessera_store::read::{open_bundle, Bundle, SegmentData};
+use mosaica_engine::derived::{compute, dig_rings, quantised, ComputedProperty, RowLocator};
+use mosaica_store::read::{open_bundle, Bundle, SegmentData};
 
 /// The resolution the engine reduces at, **written out here rather than read from it**. This
 /// binary's oracle is a second implementation of the reduction, and an oracle that imported the
@@ -115,7 +115,7 @@ fn main() -> ExitCode {
                     continue;
                 }
                 let path = prefix.join(Path::new(&extent.path));
-                let pack = match tessera_store::membership::MembershipPack::open(&path) {
+                let pack = match mosaica_store::membership::MembershipPack::open(&path) {
                     Ok(p) => p,
                     Err(e) => {
                         eprintln!("{}: {e}", path.display());
@@ -124,8 +124,8 @@ fn main() -> ExitCode {
                     }
                 };
                 for (ordinal, blob) in pack.iter() {
-                    let Some((record, _)) = tessera_lifecycle::membership::decode_record(
-                        tessera_types::EntityId::new(1),
+                    let Some((record, _)) = mosaica_lifecycle::membership::decode_record(
+                        mosaica_types::EntityId::new(1),
                         blob,
                     ) else {
                         continue;
@@ -177,7 +177,7 @@ fn main() -> ExitCode {
 
 /// The locator over a view's segments, in row-base order — the way `compute` resolves a member row
 /// to a position, so what is timed below is the one pass every declared property pays for.
-fn locator_over(view: &'static tessera_store::read::ViewData) -> RowLocator<'static> {
+fn locator_over(view: &'static mosaica_store::read::ViewData) -> RowLocator<'static> {
     let row_bases: HashMap<&str, u32> = view
         .row_space
         .extents()

@@ -1,7 +1,7 @@
-//! `tessera-bench` — the measurement harness.
+//! `mosaica-bench` — the measurement harness.
 //!
 //! **Why this is not criterion.** Criterion stays as the CI regression gate at one fixed scale
-//! (`crates/tessera-engine/benches/viewport.rs`), which is what it is good at. It has no
+//! (`crates/mosaica-engine/benches/viewport.rs`), which is what it is good at. It has no
 //! representation for a non-latency metric, and this suite's central methodological constraint —
 //! `probes/optimisations.md` §0, *"any benchmark that varies cardinality while holding container
 //! structure constant will mislead"* — means every latency must be reported next to the container
@@ -26,8 +26,8 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "tessera-bench",
-    about = "Tessera performance measurement harness"
+    name = "mosaica-bench",
+    about = "Mosaica performance measurement harness"
 )]
 struct Cli {
     /// Where fixtures live (built by `scripts/bench_build_fixtures.sh`).
@@ -35,7 +35,7 @@ struct Cli {
     fixtures: PathBuf,
 
     /// Where results and the resume ledger go.
-    #[arg(long, default_value = "/tmp/tessera-bench/runs/current", global = true)]
+    #[arg(long, default_value = "/tmp/mosaica-bench/runs/current", global = true)]
     run_dir: PathBuf,
 
     /// Repetitions per cell. The probes' convention is 3 generally, 5 at the largest scale; the
@@ -188,7 +188,7 @@ enum Command {
         seed: u64,
     },
 
-    /// Blank-database ingest: `tessera build` decomposed into its twelve pipeline stages.
+    /// Blank-database ingest: `mosaica build` decomposed into its twelve pipeline stages.
     IngestBuild {
         #[arg(long, value_delimiter = ',', default_values_t = [250_000u64, 2_422_486, 25_000_000])]
         scale: Vec<u64>,
@@ -387,7 +387,7 @@ enum Command {
 
 fn main() -> std::process::ExitCode {
     // Restore the default SIGPIPE disposition. Rust ignores SIGPIPE and turns the failed write
-    // into an error, which `println!` then panics on — so `tessera-bench fixtures | head` prints
+    // into an error, which `println!` then panics on — so `mosaica-bench fixtures | head` prints
     // a panic backtrace that reads like a real failure. Every listing subcommand here is meant to
     // be piped, so exit quietly instead, as every other CLI does.
     #[cfg(unix)]
@@ -460,7 +460,7 @@ fn main() -> std::process::ExitCode {
         // the run "succeeds" with no cells and a reader sees an empty file, not an error.
         eprintln!(
             "no fixture matches --scale {:?} --label-set {:?} under {}. \
-             Run `tessera-bench fixtures` to see what exists.",
+             Run `mosaica-bench fixtures` to see what exists.",
             cli.scale,
             cli.label_set,
             cli.fixtures.display()

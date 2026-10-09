@@ -60,14 +60,14 @@ EXCLUDE_PARTS = {
 # Paths this reorganisation retired. A hit is an error, with the replacement in the message.
 FORBIDDEN = [
     (".ignore/", "the design corpus moved to docs/design/ and docs/evidence/"),
-    ("tessera-architecture-design.md", "renamed to docs/design/architecture.md"),
-    ("tessera-contracts-spec.md", "renamed to docs/design/contracts.md"),
-    ("tessera-system-architecture.md", "renamed to docs/design/system-architecture.md"),
-    ("tessera-concurrency-lifecycle.md", "renamed to docs/design/concurrency-lifecycle.md"),
-    ("tessera-conformance-design.md", "renamed to docs/design/conformance.md"),
-    ("tessera-visualisation-architecture.md", "archived as docs/archive/visualisation.md"),
-    ("tessera-implementation-plan.md", "renamed to docs/design/implementation-plan.md"),
-    ("tessera-scaling-analysis.md", "renamed to docs/evidence/analysis/scaling-analysis.md"),
+    ("mosaica-architecture-design.md", "renamed to docs/design/architecture.md"),
+    ("mosaica-contracts-spec.md", "renamed to docs/design/contracts.md"),
+    ("mosaica-system-architecture.md", "renamed to docs/design/system-architecture.md"),
+    ("mosaica-concurrency-lifecycle.md", "renamed to docs/design/concurrency-lifecycle.md"),
+    ("mosaica-conformance-design.md", "renamed to docs/design/conformance.md"),
+    ("mosaica-visualisation-architecture.md", "archived as docs/archive/visualisation.md"),
+    ("mosaica-implementation-plan.md", "renamed to docs/design/implementation-plan.md"),
+    ("mosaica-scaling-analysis.md", "renamed to docs/evidence/analysis/scaling-analysis.md"),
     ("docs/design-memos/", "renamed to docs/evidence/memos/"),
     ("docs/superpowers/", "plans and spent specs moved to docs/archive/plans/"),
 ]
@@ -141,14 +141,14 @@ def resolve_loose(target: str, src: Path, tracked):
     """resolve(), then the shorthands this repo actually writes.
 
     Reports cite paths relative to a crate (`tests/http.rs`, `arms/viewport.rs`) or to the crates
-    directory (`tessera-authz/src/postings.rs`). Both are unambiguous to a human and neither is
+    directory (`mosaica-authz/src/postings.rs`). Both are unambiguous to a human and neither is
     root-relative. Returns (Path, None) when found, (None, reason) when not.
     """
     hit = resolve(target, src)
     if hit is not None:
         return hit, None
     head, _, rest = target.partition("/")
-    for cand in (f"crates/{target}", f"crates/tessera-{head}/{rest}" if rest else None):
+    for cand in (f"crates/{target}", f"crates/mosaica-{head}/{rest}" if rest else None):
         if cand and (hit := resolve(cand, src)) is not None:
             return hit, None
     suffix = "/" + target.lstrip("./")

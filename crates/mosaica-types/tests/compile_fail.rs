@@ -5,7 +5,7 @@
 //!
 //! I4 is not a property of what the code *does*; it is a property of what the code *cannot say*.
 //! `EntityId` and `RowId` are distinct newtypes with no conversion between them, and
-//! `tessera_store::Permutation::row_of` is documented as the only crossing in the tree. A runtime
+//! `mosaica_store::Permutation::row_of` is documented as the only crossing in the tree. A runtime
 //! test can confirm that the crossing which exists behaves; it cannot confirm that the crossings
 //! which do not exist are refused, because code that does not compile cannot be run. Conformance
 //! §4.1 names this and I8 as the two rows a compile-fail harness is uniquely suited to, and until
@@ -34,7 +34,7 @@
 //!
 //! So I4's enforcement, stated completely: distinct newtypes with private fields, no `From` impl
 //! (checked here and by the script), no field access (checked here), and **a code review for the
-//! explicit cast**. `tessera_store::Permutation::row_of` is the only legitimate crossing, and the
+//! explicit cast**. `mosaica_store::Permutation::row_of` is the only legitimate crossing, and the
 //! cast is the one spelling nothing mechanical refuses.
 //!
 //! # I8 has no row here
@@ -52,7 +52,7 @@
 //! the file pinned a version and therefore protected these fixtures — it does not, and believing
 //! it would make regenerating them feel like routine maintenance.
 //!
-//! `TRYBUILD=overwrite cargo test -p tessera-types` regenerates them. **Read the diff.** A changed
+//! `TRYBUILD=overwrite cargo test -p mosaica-types` regenerates them. **Read the diff.** A changed
 //! *error code* or a row that stopped failing is a finding — the whole point of pairing each case
 //! with its `.stderr` is that "it still fails to compile" is not enough. Only changed *phrasing*
 //! is noise. That judgement is the only thing standing between a rustc upgrade and a silently

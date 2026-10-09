@@ -1,8 +1,8 @@
 //! Round-trip test for CSR postings: tagged records in a single Arrow IPC file, `posting.arrow`,
 //! record ordinal = term_id.
 
-use tessera_authz::{write_postings, PostingRef, PostingsReader};
-use tessera_types::TermId;
+use mosaica_authz::{write_postings, PostingRef, PostingsReader};
+use mosaica_types::TermId;
 
 #[test]
 fn round_trip_three_terms() {

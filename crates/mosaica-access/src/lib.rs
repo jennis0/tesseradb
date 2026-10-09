@@ -14,7 +14,7 @@
 //!
 //! [`Labels`] holds many labels in one hash-consed DAG and evaluates them from a credential's
 //! terms. What an item is indexed under, and the postings and bitmaps behind each key, are in
-//! `tessera-authz`.
+//! `mosaica-authz`.
 //!
 //! This crate depends on no other crate of the workspace, so every crate that reads a label or a
 //! credential's terms, the identity catalogue included, may use it.

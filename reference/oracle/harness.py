@@ -5,10 +5,10 @@ CLAUDE.md's "Python drives, never implements" applies to test drivers too: one p
 implementation, reused by both suites, not two divergent copies.
 
 Everything here does the same thing `reference/tests/conftest.py` did before this refactor: build
-the release `tessera` binary via cargo if it is missing, build a fixture bundle via the CLI if one
-is missing at the requested root, spawn `tessera serve` as a real subprocess against a
-`tessera.toml` this module writes, and give the caller an HTTP-only `Server` handle. Nothing here
-calls into `tessera-engine` directly — only HTTP and the filesystem (Phase 1's fixture bundle
+the release `mosaica` binary via cargo if it is missing, build a fixture bundle via the CLI if one
+is missing at the requested root, spawn `mosaica serve` as a real subprocess against a
+`mosaica.toml` this module writes, and give the caller an HTTP-only `Server` handle. Nothing here
+calls into `mosaica-engine` directly — only HTTP and the filesystem (Phase 1's fixture bundle
 build is via the CLI subprocess, same as before).
 """
 
@@ -29,7 +29,7 @@ from pathlib import Path
 import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CLI_BIN = REPO_ROOT / "target" / "release" / "tessera"
+CLI_BIN = REPO_ROOT / "target" / "release" / "mosaica"
 
 OPERATOR_CREDENTIAL = "reference-oracle-operator-secret"
 
@@ -48,7 +48,7 @@ JOIN_COLUMN = "entity_id"
 # Fixture reuse: a stamped recipe, not a predicate over the artefact
 # ---------------------------------------------------------------------------------------------
 #
-# A fixture bundle is built once per `tessera` binary ([`fixture_dir`]) and reused. Deciding
+# A fixture bundle is built once per `mosaica` binary ([`fixture_dir`]) and reused. Deciding
 # *whether* it may be reused by inspecting the bundle is the construction that failed twice in this
 # file's own history — once on the r6 `identity` object, once on a build flag — and each time the
 # fix was to extend the predicate by one more clause. That is an allowlist, and the input
@@ -75,7 +75,7 @@ def _binary_digest() -> str:
 
 @functools.cache
 def builder_identity() -> str:
-    """The SHA-256 of the `tessera` binary that builds every fixture this session. Every receipt
+    """The SHA-256 of the `mosaica` binary that builds every fixture this session. Every receipt
     records it ([`write_recipe`]), so a bundle built by any other binary is rebuilt.
 
     Computed once per process, so a session's fixtures stay at one path if the binary is rebuilt
@@ -86,7 +86,7 @@ def builder_identity() -> str:
 
 
 def fixture_dir(name: str) -> Path:
-    """Where the fixture `name` lives between runs: `/tmp/tessera-<name>-<digest>`, with the first
+    """Where the fixture `name` lives between runs: `/tmp/mosaica-<name>-<digest>`, with the first
     12 hex digits of [`builder_identity`].
 
     The binary includes the commit it was built from, so each commit has its own directory, and a
@@ -96,8 +96,8 @@ def fixture_dir(name: str) -> Path:
     Each call marks this directory as used, and deletes the directories of `name` for other
     binaries that have gone unused for 7 days. Only names of exactly that form are deleted.
     """
-    path = FIXTURE_ROOT / f"tessera-{name}-{builder_identity()[:12]}"
-    keyed = re.compile(rf"tessera-{re.escape(name)}-[0-9a-f]{{12}}")
+    path = FIXTURE_ROOT / f"mosaica-{name}-{builder_identity()[:12]}"
+    keyed = re.compile(rf"mosaica-{re.escape(name)}-[0-9a-f]{{12}}")
     idle_since = time.time() - FIXTURE_MAX_IDLE_SECONDS
     with os.scandir(FIXTURE_ROOT) as entries:
         for entry in entries:
@@ -120,7 +120,7 @@ def fixture_dir(name: str) -> Path:
 def recipe_path(bundle_root: Path) -> Path:
     """The receipt's path — *beside* the bundle, not inside it.
 
-    Outside, because the bundle is a `tessera build` output and the byte-scanner and the shape
+    Outside, because the bundle is a `mosaica build` output and the byte-scanner and the shape
     checks treat everything under it as the build's own; a fixture-management file living there
     would be the suite planting something in the artefact it is supposed to be auditing.
     """
@@ -169,7 +169,7 @@ def free_port() -> int:
 
 
 def ensure_cli_built() -> None:
-    """Build `target/release/tessera` with **default features**, always.
+    """Build `target/release/mosaica` with **default features**, always.
 
     It does not short-circuit on `CLI_BIN.exists()`: an existence check cannot tell a
     default-feature binary from one built with a measurement feature, and cargo, which tracks
@@ -178,14 +178,14 @@ def ensure_cli_built() -> None:
     and never to `CLI_BIN`.
     """
     subprocess.run(
-        ["cargo", "build", "--release", "-p", "tessera-cli"],
+        ["cargo", "build", "--release", "-p", "mosaica-cli"],
         cwd=REPO_ROOT,
         check=True,
     )
 
 
 def build_argv(deployment: Path, out: Path, *args: str) -> list[str]:
-    """The `tessera build` invocation [`cli_build`] runs, for a recipe to record. `args` follow
+    """The `mosaica build` invocation [`cli_build`] runs, for a recipe to record. `args` follow
     `--out`."""
     return [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(out), *args]
 
@@ -202,10 +202,10 @@ def cli_build(deployment: Path, out: Path, *args: str, capture_output: bool = Fa
 
 
 def write_deployment(path: Path, *, bundle: Path, schema: Path) -> Path:
-    """Write the `tessera.toml` a build is invoked against, and hand back its path.
+    """Write the `mosaica.toml` a build is invoked against, and hand back its path.
 
     **Every harness here names it with `--deployment` rather than letting the search find one.**
-    `tessera build` walks up from the working directory looking for this file (`configuration.md`
+    `mosaica build` walks up from the working directory looking for this file (`configuration.md`
     §3); a test run's working directory is the repository, which has none, and whatever the search
     found above it would not be the fixture's. Naming it is the deterministic half.
 
@@ -237,7 +237,7 @@ control = "127.0.0.1:45721"
 
 
 def run_build(args: list[str]) -> subprocess.CompletedProcess:
-    """Run `tessera build` and hand back the completed process, refusal or not.
+    """Run `mosaica build` and hand back the completed process, refusal or not.
 
     The fixture builders build through [`cli_build`], which raises, because for them a failed
     build is a broken harness. The schema-refusal catalogue is the opposite test:
@@ -310,7 +310,7 @@ def ensure_fixture_bundle(
 
     A **pre-r6 bundle at `bundle_root` is rebuilt rather than reused.** Contracts r6 makes
     MANIFEST's `identity` object required — an absent one is a typed reader error, not a
-    default — so `tessera serve` correctly refuses a bundle built before r6. Testing for
+    default — so `mosaica serve` correctly refuses a bundle built before r6. Testing for
     `CURRENT` alone would hand every test a bundle the server will not open, and the failure
     surfaces as an opaque fixture-setup error rather than "your fixture is stale".
 
@@ -356,7 +356,7 @@ def _fixture_config_path(bundle_root: Path) -> Path:
 
 
 def _fixture_deployment_path(bundle_root: Path) -> Path:
-    return bundle_root.parent / f"{bundle_root.name}.tessera.toml"
+    return bundle_root.parent / f"{bundle_root.name}.mosaica.toml"
 
 
 def _extent_toml(extent: str) -> str:
@@ -461,7 +461,7 @@ def _input_stamp(argv: list[str]) -> dict:
 
 
 def fixture_recipe(argv: list[str], *, declaration: str = "") -> dict:
-    """The stamped input set for [`ensure_fixture_bundle`]: the whole `tessera build` invocation,
+    """The stamped input set for [`ensure_fixture_bundle`]: the whole `mosaica build` invocation,
     plus a stamp of the input *files* it names ([`_input_stamp`]).
 
     Everything this fixture is a function of is an argument to that command, a file that command
@@ -526,7 +526,7 @@ def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
 
 
 class Server:
-    """An HTTP-only handle to a running `tessera serve` process."""
+    """An HTTP-only handle to a running `mosaica serve` process."""
 
     def __init__(
         self,
@@ -601,7 +601,7 @@ class Server:
         **extra,
     ) -> requests.Response:
         """Like `viewport`, but returns the full `requests.Response` — for callers that need
-        headers (e.g. `x-tessera-pin`) alongside the body."""
+        headers (e.g. `x-mosaica-pin`) alongside the body."""
         resp = self.viewport_request(
             token,
             view_id,
@@ -757,7 +757,7 @@ class Server:
 
     def register_layer(self, declaration: dict) -> requests.Response:
         """`PUT /control/layers` — register one annotation layer. The body is the declaration
-        exactly as `tessera_types::layer::LayerDeclaration` serialises it."""
+        exactly as `mosaica_types::layer::LayerDeclaration` serialises it."""
         return requests.put(
             f"{self.control_base}/control/layers",
             headers={"Authorization": f"Bearer {self.operator_credential}"},
@@ -794,7 +794,7 @@ class Server:
             params={"strict": str(strict).lower()},
             headers={
                 "Authorization": f"Bearer {self.operator_credential}",
-                "x-tessera-batch-id": batch_id,
+                "x-mosaica-batch-id": batch_id,
                 "Content-Type": "application/vnd.apache.arrow.stream",
             },
             data=body,
@@ -886,7 +886,7 @@ def write_config(
     max_underlay_cells: int | None = None,
     serve_extra: str | None = None,
 ) -> Path:
-    """Write a `tessera.toml`.
+    """Write a `mosaica.toml`.
 
     `serve_extra` is appended verbatim to the `[serve]` section — for a suite that means to
     exercise one more knob (`max_region_cells`, say) without this signature growing a parameter
@@ -925,7 +925,7 @@ token_max_lifetime = 3600
 viewer = "127.0.0.1:{viewer_port}"
 session = "127.0.0.1:{session_port}"
 control = "127.0.0.1:{control_port}"
-operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
+operator_credential_env = "MOSAICA_REFERENCE_OPERATOR_CRED"
 max_k = {max_k}
 k_min = {k_min}
 k_max_marks = {k_max_marks}
@@ -936,7 +936,7 @@ theta_target_marks = {theta_target_marks}
     if serve_extra:
         config_text += serve_extra.rstrip() + "\n"
     config_text += f'\n[catalogue]\ndir = "{tmp_dir / "catalogue"}"\n'
-    config_path = tmp_dir / "tessera.toml"
+    config_path = tmp_dir / "mosaica.toml"
     config_path.write_text(config_text)
     return config_path
 
@@ -955,7 +955,7 @@ def spawn_server(
     max_underlay_cells: int | None = None,
     serve_extra: str | None = None,
 ) -> tuple[Server, subprocess.Popen]:
-    """Start `tessera serve` against `bundle_root`, using `cache_dir`/`wal_path` (defaulting to
+    """Start `mosaica serve` against `bundle_root`, using `cache_dir`/`wal_path` (defaulting to
     `tmp_dir/cache`, `tmp_dir/wal.log`) for its durable state. Passing the SAME `cache_dir`/
     `wal_path` across two calls is exactly the restart-on-same-state case
     (`test_restart_replay.py`).
@@ -991,7 +991,7 @@ def spawn_server(
     )
 
     env = os.environ.copy()
-    env["TESSERA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
+    env["MOSAICA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
     if env_extra:
         env.update(env_extra)
 
@@ -1004,7 +1004,7 @@ def spawn_server(
         stderr_target = subprocess.STDOUT
 
     proc = subprocess.Popen(
-        # `--deployment`, not `-c`: the configuration rework made `tessera.toml` the one document
+        # `--deployment`, not `-c`: the configuration rework made `mosaica.toml` the one document
         # both entry points read, and `serve` takes the same flag `build` does
         # (`configuration.md` §3). The old spelling was refused at argument parsing, so every
         # spawn here failed at startup rather than in a test's own assertion.
@@ -1028,7 +1028,7 @@ def spawn_server(
                 extra = proc.stdout.read().decode(errors="replace")
             elif log_path is not None:
                 extra = log_path.read_text(errors="replace")
-            raise RuntimeError(f"tessera serve exited early ({proc.returncode}):\n{extra}")
+            raise RuntimeError(f"mosaica serve exited early ({proc.returncode}):\n{extra}")
         try:
             resp = requests.get(f"{srv.viewer_base}/healthz", timeout=1)
             if resp.status_code == 200:
@@ -1040,7 +1040,7 @@ def spawn_server(
 
     if not up:
         proc.terminate()
-        raise RuntimeError("tessera serve did not become healthy within 20s")
+        raise RuntimeError("mosaica serve did not become healthy within 20s")
 
     return srv, proc
 

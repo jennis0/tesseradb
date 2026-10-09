@@ -40,27 +40,27 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use tessera_authz::{DeltaTier, Dict, FragmentCache};
-use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
-use tessera_lifecycle::buffer::DescriptorResolver;
-use tessera_lifecycle::command::{ExecError, SubmitError};
-use tessera_lifecycle::faults::WalMeter;
-use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
-use tessera_lifecycle::overlay::Replay;
-use tessera_lifecycle::registry::LayerRegistry;
-use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
-use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
-use tessera_lifecycle::{IngestBuffer, Overlay};
+use mosaica_authz::{DeltaTier, Dict, FragmentCache};
+use mosaica_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
+use mosaica_lifecycle::buffer::DescriptorResolver;
+use mosaica_lifecycle::command::{ExecError, SubmitError};
+use mosaica_lifecycle::faults::WalMeter;
+use mosaica_lifecycle::membership::{ArtifactStore, IncomingArtifact};
+use mosaica_lifecycle::overlay::Replay;
+use mosaica_lifecycle::registry::LayerRegistry;
+use mosaica_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
+use mosaica_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
+use mosaica_lifecycle::{IngestBuffer, Overlay};
 
 use crate::cache::RowProjectionCache;
 use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
-use tessera_store::merge::MergePolicy;
-use tessera_store::render_presence::RENDER_PRESENCE_DIR;
-use tessera_store::vocabulary::{MintError, Minted, Vocabularies};
-use tessera_types::{EntityId, IdentityKey, TermId};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
+use mosaica_store::merge::MergePolicy;
+use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
+use mosaica_store::vocabulary::{MintError, Minted, Vocabularies};
+use mosaica_types::{EntityId, IdentityKey, TermId};
 
 use crate::error::EngineError;
 use crate::{Generation, GenerationHandle};
@@ -97,7 +97,7 @@ pub(crate) struct WritePath {
     bundle_lock: Option<crate::bundle_lock::BundleWriteLock>,
     health: Arc<ExecutorHealth>,
     #[cfg(feature = "fault-injection")]
-    faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
+    faults: Option<Arc<mosaica_lifecycle::faults::FaultSwitchboard>>,
 }
 
 /// Why an executor could not be started.
@@ -115,7 +115,7 @@ pub enum ExecutorStartError {
     /// from the same seed.
     BundleLocked(crate::bundle_lock::BundleLockError),
     /// The bundle root could not be listed for the side-manifest numbers already on disc
-    /// (`tessera_store::highest_side_manifest_n`). Refusing to start leaves the bundle untouched.
+    /// (`mosaica_store::highest_side_manifest_n`). Refusing to start leaves the bundle untouched.
     SideManifestScan(String),
 }
 
@@ -149,7 +149,7 @@ impl std::error::Error for ExecutorStartError {}
 /// A failed send proves the command was never enqueued. Anything after a successful send may have
 /// taken effect: `Submit(ReceiptLost)` and `Exec(Wal)` on a `Delete`/`Suppress` report 500, never
 /// 503, because the write may already be durable and applied; `Submit(QueueFull)` is 429 and
-/// `Submit(ExecutorDead)` is 503, since non-enqueue there is proven. `tessera-server`'s
+/// `Submit(ExecutorDead)` is 503, since non-enqueue there is proven. `mosaica-server`'s
 /// `map_accept_error` owns this mapping. Neither this enum nor [`SubmitError`]/[`ExecError`] is
 /// `#[non_exhaustive]`, so a new variant is a compile error at every match, including that one,
 /// rather than a silent 500.
@@ -164,11 +164,11 @@ pub enum AcceptError {
         index: usize,
         x: f64,
         y: f64,
-        quantisation: tessera_store::manifest::Quantisation,
+        quantisation: mosaica_store::manifest::Quantisation,
     },
     /// A row names a view this bundle does not declare, so there is no frame to quantise it
     /// against. Checked at the engine's boundary for the same reason as [`Self::OutsideExtent`];
-    /// the HTTP handler refuses an unknown `x-tessera-view` with its own 404 and is only one of
+    /// the HTTP handler refuses an unknown `x-mosaica-view` with its own 404 and is only one of
     /// the buffer's writers.
     UnknownView {
         index: usize,
@@ -261,14 +261,14 @@ impl From<SubmitError> for AcceptError {
 }
 
 /// A generation's groups and their views, as a publication sees them.
-pub(crate) struct ServedViews<'a>(pub(crate) &'a tessera_store::manifest::Manifest);
+pub(crate) struct ServedViews<'a>(pub(crate) &'a mosaica_store::manifest::Manifest);
 
-impl tessera_lifecycle::GroupViews for ServedViews<'_> {
+impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
     fn incarnation_of(
         &self,
         group: &str,
         key: &str,
-    ) -> Option<tessera_types::view::ViewIncarnation> {
+    ) -> Option<mosaica_types::view::ViewIncarnation> {
         self.0.incarnation_of_key(group, key)
     }
     fn keys_of(&self, group: &str) -> Vec<String> {
@@ -287,7 +287,7 @@ impl tessera_lifecycle::GroupViews for ServedViews<'_> {
 pub(crate) fn retire_dead_view_artifacts(
     registry: &LayerRegistry,
     store: &mut ArtifactStore,
-    manifest: &tessera_store::manifest::Manifest,
+    manifest: &mosaica_store::manifest::Manifest,
 ) -> Vec<(String, u32)> {
     store.retire_dead_views(|layer, key, incarnation| {
         match registry.get(layer).and_then(|held| held.declaration.scope.group()) {
@@ -308,7 +308,7 @@ pub(crate) struct WritePathState {
     /// The view roster: which views of which groups exist, and which keys are burnt. Rebuilt
     /// exactly as the layer registry beside it is: seeded from the manifests, then the log
     /// replayed on top.
-    pub(crate) roster: tessera_lifecycle::ViewRoster,
+    pub(crate) roster: mosaica_lifecycle::ViewRoster,
     /// The attribute columns declared at a running service and not yet folded, rebuilt as the
     /// roster is: seeded from the manifests, then the log replayed on top.
     pub(crate) attributes: crate::attributes::RuntimeAttributes,
@@ -331,8 +331,8 @@ pub(crate) struct WritePathState {
 pub(crate) struct UniqueEvent {
     pub(crate) attribute: String,
     pub(crate) unique: bool,
-    pub(crate) base: Vec<tessera_lifecycle::wal::DeclaredRun>,
-    pub(crate) live: Vec<tessera_lifecycle::wal::DeclaredRun>,
+    pub(crate) base: Vec<mosaica_lifecycle::wal::DeclaredRun>,
+    pub(crate) live: Vec<mosaica_lifecycle::wal::DeclaredRun>,
 }
 
 impl WritePath {
@@ -375,7 +375,7 @@ impl WritePath {
         queue_bound: usize,
         flush: MaintenanceDeps,
         #[cfg(feature = "fault-injection")] faults: Option<
-            Arc<tessera_lifecycle::faults::FaultSwitchboard>,
+            Arc<mosaica_lifecycle::faults::FaultSwitchboard>,
         >,
     ) -> Result<(), ExecutorStartError> {
         if self.wal.is_none() {
@@ -404,7 +404,7 @@ impl WritePath {
         // Above every `SEGMENTS-<n>.json` on disc, not above what a manifest names: see
         // [`SideManifests`]. The sweep above has already removed the unpublished
         // prefixes, so what is left is what a reader could resolve.
-        let next_manifest_n = tessera_store::highest_side_manifest_n(&flush.bundle_root)
+        let next_manifest_n = mosaica_store::highest_side_manifest_n(&flush.bundle_root)
             .map_err(|e| ExecutorStartError::SideManifestScan(e.to_string()))?
             .map_or(1, |highest| highest + 1);
 
@@ -438,7 +438,7 @@ impl WritePath {
         // Read before the pointer moves into the thread. What the bundle's manifests already carry
         // is this list's starting point: see the field for why it is held rather than re-cloned
         // from a (stale) live manifest at each publication.
-        let seeded_membership_extents: Vec<tessera_store::manifest::MembershipExtent> = generation
+        let seeded_membership_extents: Vec<mosaica_store::manifest::MembershipExtent> = generation
             .load()
             .bundle
             .partitions
@@ -446,7 +446,7 @@ impl WritePath {
             .flat_map(|p| p.manifest.membership_extents.iter().cloned())
             .collect();
         // The derived files the last fold or the build wrote, held for the same reason.
-        let seeded_derived_extents: Vec<tessera_store::manifest::DerivedExtent> = generation
+        let seeded_derived_extents: Vec<mosaica_store::manifest::DerivedExtent> = generation
             .load()
             .bundle
             .partitions
@@ -454,7 +454,7 @@ impl WritePath {
             .flat_map(|p| p.manifest.derived_extents.iter().cloned())
             .collect();
         // The content half, seeded identically and for the identical reason.
-        let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
+        let seeded_content_extents: Vec<mosaica_store::manifest::RecordExtent> = generation
             .load()
             .bundle
             .partitions
@@ -476,7 +476,7 @@ impl WritePath {
         health.mark_tick(std::time::Instant::now());
 
         let join = std::thread::Builder::new()
-            .name("tessera-lifecycle".to_string())
+            .name("mosaica-lifecycle".to_string())
             .spawn(move || {
                 let mut executor = Executor {
                     log: ExecutorLog::new(exec_wal, wal_position_at_start),
@@ -650,7 +650,7 @@ impl WritePath {
 
     /// Submit a resolved ingest batch and wait for what each of its rows became.
     ///
-    /// Blocking: a tokio handler must call this inside `spawn_blocking`, because `tessera-engine`
+    /// Blocking: a tokio handler must call this inside `spawn_blocking`, because `mosaica-engine`
     /// has no tokio dependency. Rows arrive unallocated: entity ids are assigned on the executor,
     /// at the close of the commit window this submission lands in.
     pub(crate) fn accept_ingest(
@@ -693,7 +693,7 @@ impl WritePath {
     /// `Executor::commit_registry`.
     pub(crate) fn register_layer(
         &self,
-        declaration: tessera_types::layer::LayerDeclaration,
+        declaration: mosaica_types::layer::LayerDeclaration,
     ) -> Result<EntityId, AcceptError> {
         self.submit(|reply| Command::RegisterLayer {
             declaration: Box::new(declaration),
@@ -712,7 +712,7 @@ impl WritePath {
         group: String,
         key: String,
         visibility: Option<Vec<String>>,
-        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+        metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
     ) -> Result<(), AcceptError> {
         self.submit(|reply| Command::CreateView {
             group,
@@ -727,7 +727,7 @@ impl WritePath {
     /// carried this identity, in which case nothing was appended.
     pub(crate) fn declare_attribute(
         &self,
-        request: tessera_lifecycle::AttributeRequest,
+        request: mosaica_lifecycle::AttributeRequest,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::DeclareAttribute {
             request: Box::new(request),
@@ -740,7 +740,7 @@ impl WritePath {
     /// many held values it gave a new title.
     pub(crate) fn declare_vocabulary(
         &self,
-        request: tessera_lifecycle::VocabularyRequest,
+        request: mosaica_lifecycle::VocabularyRequest,
     ) -> Result<(bool, u64, u64), AcceptError> {
         let declared = self.submit(|reply| Command::DeclareVocabulary {
             request: Box::new(request),
@@ -753,7 +753,7 @@ impl WritePath {
     pub(crate) fn mint_vocabulary_values(
         &self,
         vocabulary: String,
-        values: Vec<tessera_lifecycle::DeclaredValue>,
+        values: Vec<mosaica_lifecycle::DeclaredValue>,
     ) -> Result<(u64, u64, u64), AcceptError> {
         let minted = self.submit(|reply| Command::MintVocabularyValues {
             vocabulary,
@@ -766,7 +766,7 @@ impl WritePath {
     /// Declare a view group. Answers whether a group of that name already carried this identity.
     pub(crate) fn create_view_group(
         &self,
-        declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
+        declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::CreateViewGroup {
             declaration: Box::new(declaration),
@@ -777,7 +777,7 @@ impl WritePath {
     /// Create a plain view. Answers whether a view of that name already carried this identity.
     pub(crate) fn create_plain_view(
         &self,
-        declaration: tessera_lifecycle::wal::PlainViewDeclaration,
+        declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::CreatePlainView {
             declaration: Box::new(declaration),
@@ -814,9 +814,9 @@ impl WritePath {
         &self,
         layer: String,
         level: u32,
-        joins: Vec<tessera_lifecycle::IncomingGrowth>,
+        joins: Vec<mosaica_lifecycle::IncomingGrowth>,
         stamp: crate::edited::Stamp,
-    ) -> Result<Vec<tessera_lifecycle::MembershipGrown>, AcceptError> {
+    ) -> Result<Vec<mosaica_lifecycle::MembershipGrown>, AcceptError> {
         self.submit(|reply| Command::GrowMemberships {
             layer,
             level,
@@ -912,9 +912,9 @@ impl Drop for DeathGuard {
 
 /// What the executor's work lane carries: a lifecycle command, or a geometry publication.
 ///
-/// The store-shaped half cannot live in `tessera-lifecycle`: that crate has no `tessera-store`
+/// The store-shaped half cannot live in `mosaica-lifecycle`: that crate has no `mosaica-store`
 /// dependency and must not acquire one, so a `Command` variant carrying an `Arc<Bundle>` is not
-/// expressible there. This enum is `tessera-engine`'s own executor vocabulary, and it exists so
+/// expressible there. This enum is `mosaica-engine`'s own executor vocabulary, and it exists so
 /// the executor thread is the only publisher of a generation; a second publisher's compare-and-swap
 /// could not stop the executor's own `store` from clobbering it.
 ///
@@ -961,7 +961,7 @@ pub enum PublishGeometryError {
     /// There is no write executor to publish through. Not a refusal of the geometry: a
     /// publication is a swap on the executor thread, so an engine that never started one cannot
     /// publish at all. Reachable only by an embedder that skipped `start_write_executor`;
-    /// `tessera-server` starts it unconditionally.
+    /// `mosaica-server` starts it unconditionally.
     NoExecutor,
     /// [`crate::Engine::publish_rotated_prefix_for_test`] was offered a prefix `CURRENT` does not name.
     ///
@@ -1128,7 +1128,7 @@ impl LifecycleHandle {
     /// [`Executor::run`]'s shutdown pass drains the deny lane and executes it before it observes the
     /// disconnect, so the command may be durably in force. No caller may use which half returned an
     /// error as the discriminator; [`SubmitError::may_have_taken_effect`] is, and it is the one
-    /// `tessera-server`'s batch fold uses.
+    /// `mosaica-server`'s batch fold uses.
     ///
     /// The doorbell rings here rather than in `Pending::wait`, so the executor can commit a small
     /// first window while the caller is still enqueueing, and so a `Pending` dropped without being
@@ -1225,7 +1225,7 @@ pub(crate) struct MaintenanceDeps {
     /// geometry swap exactly as the row-projection cache is: a row-space artefact keyed on a
     /// generation is unusable after it, and only retention is left to do.
     pub(crate) region_cache: Arc<
-        tessera_cache::SingleFlightCache<
+        mosaica_cache::SingleFlightCache<
             crate::region::RegionKey,
             crate::region::RegionDecomposition,
         >,

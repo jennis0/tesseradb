@@ -31,16 +31,16 @@ use std::path::Path;
 
 use arrow::array::{Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, TimeUnit};
-use tessera_store::access_column::AccessBatch;
-use tessera_store::coordinates::{place, read_coordinates, ColumnError};
+use mosaica_store::access_column::AccessBatch;
+use mosaica_store::coordinates::{place, read_coordinates, ColumnError};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
-use tessera_spatial::tiler::{ScalarType, ScalarValue};
-use tessera_spatial::{fixed32, Bounds, Projection};
-use tessera_store::scalar_column::ScalarColumn;
-use tessera_store::vocabulary::{code_value, Resolved, Unresolved, VocabularyMinter};
+use mosaica_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_spatial::{fixed32, Bounds, Projection};
+use mosaica_store::scalar_column::ScalarColumn;
+use mosaica_store::vocabulary::{code_value, Resolved, Unresolved, VocabularyMinter};
 
 use crate::config::{Fields, ViewSelector};
 use crate::error::{BuildError, Result};
@@ -50,7 +50,7 @@ use crate::row_groups::FileGroups;
 /// One input point: its number ([`crate::ids`]) and geometry.
 ///
 /// Geometry is carried **already quantised**, as 32-bit fixed point per axis against the build's
-/// extent ([`tessera_spatial::fixed32`]), rather than as the coordinates the file held. Three
+/// extent ([`mosaica_spatial::fixed32`]), rather than as the coordinates the file held. Three
 /// reasons, in the order they matter:
 ///
 /// - It is the only form that can represent every input source without loss. A file holding
@@ -62,7 +62,7 @@ use crate::row_groups::FileGroups;
 ///   arrays do not grow. An `f64` pair would have carried the precision too, at twice the memory
 ///   on the one structure the build allocates per entity.
 /// - The cell code and its residual both fall out by shift and mask
-///   ([`tessera_spatial::split32`]), so no downstream stage re-quantises and none can disagree
+///   ([`mosaica_spatial::split32`]), so no downstream stage re-quantises and none can disagree
 ///   with another about which cell a point belongs to.
 #[derive(Debug, Clone, Copy)]
 pub struct PointRow {
@@ -582,7 +582,7 @@ pub fn read_access_vocabulary(
 ///   a file that changed underneath the build. The permissive misreading — *null is unspecified,
 ///   so unrestricted* — would put every unlabelled point in everyone's mask.
 /// - **Terms are trimmed** by the label rule every reader of labels applies
-///   ([`tessera_access`]), so ` cs.LG` and `cs.LG` are one term. A term that is empty after
+///   ([`mosaica_access`]), so ` cs.LG` and `cs.LG` are one term. A term that is empty after
 ///   trimming is not a term.
 /// - **Filling never overrides.** A point carrying terms of its own keeps exactly those. A point's
 ///   terms are disjunctive — `M_auth` is a union of posting lists — so a label added to a point can
@@ -819,13 +819,13 @@ pub(crate) fn access_labels(
         .collect())
 }
 
-/// [`tessera_store::access_column::read_access_column`], refused as a schema error on `path`.
+/// [`mosaica_store::access_column::read_access_column`], refused as a schema error on `path`.
 fn read_access_column<'a>(
     path: &Path,
     column: &'a arrow::array::ArrayRef,
     name: &str,
 ) -> Result<AccessBatch<'a>> {
-    tessera_store::access_column::read_access_column(column, name).map_err(|detail| {
+    mosaica_store::access_column::read_access_column(column, name).map_err(|detail| {
         BuildError::Schema {
             path: path.to_path_buf(),
             detail,
@@ -852,7 +852,7 @@ pub enum PointSurvey {
 /// The box the data occupies, and what a frame does to it.
 ///
 /// **A clamp is `v < min` or `v > max`, and `v == max` is not one.** Cells are half-open and the
-/// maximum lands in the top cell by construction (`tessera_spatial::morton`), so counting the
+/// maximum lands in the top cell by construction (`mosaica_spatial::morton`), so counting the
 /// boundary value as a clamp would report every tightly-fitted corpus as damaged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoordinateSurvey {
@@ -1531,7 +1531,7 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
         .collect();
     let groups = FileGroups::open(path)?;
     let file_schema = groups.schema().clone();
-    tessera_store::declaration::check_declared_present(
+    mosaica_store::declaration::check_declared_present(
         columns
             .iter()
             .zip(&named)
@@ -1601,7 +1601,7 @@ pub(crate) fn items_without_a_row(
     if items == 0 || owed.is_empty() {
         return None;
     }
-    let detail = tessera_store::declaration::check_declared_present(
+    let detail = mosaica_store::declaration::check_declared_present(
         owed.iter()
             .map(|attribute| (attribute.name.as_str(), attribute.column())),
         |_| false,
@@ -1636,7 +1636,7 @@ pub struct AttributeBatch<'a> {
 /// One batch's worth of a declared column, decoded to the shape the row loop indexes.
 ///
 /// A category keeps absence in band as the reserved code 0; every other declaration is read by
-/// [`tessera_store::scalar_column`], the rule an ingest batch is read by.
+/// [`mosaica_store::scalar_column`], the rule an ingest batch is read by.
 pub struct BatchColumn {
     values: BatchValues,
 }
@@ -1673,7 +1673,7 @@ impl BatchColumn {
             // A category arrives as its *key*, never as a code: §3.1 — the key in the row is not
             // the display name, and the code is drawn once and pinned, so a data file
             // supplying codes directly would be a second place codes are decided.
-            let keys = tessera_store::scalar_column::category_keys(column).ok_or_else(|| {
+            let keys = mosaica_store::scalar_column::category_keys(column).ok_or_else(|| {
                 BuildError::Schema {
                     path: path.to_path_buf(),
                     detail: format!(
@@ -1814,7 +1814,7 @@ mod tests {
     use super::*;
 
     /// **The schema-only type check and the decoder must give one answer**, for every declared
-    /// type against every Arrow type this build can meet. A `tessera check` that passes a column
+    /// type against every Arrow type this build can meet. A `mosaica check` that passes a column
     /// the build then refuses is a wasted CI run; one that refuses a column the build accepts is
     /// worse — it makes the check something a caller learns to ignore.
     #[test]
@@ -1826,7 +1826,7 @@ mod tests {
         };
         use arrow::datatypes::TimeUnit;
         use std::sync::Arc;
-        use tessera_store::scalar_column;
+        use mosaica_store::scalar_column;
 
         fn attribute(ty: ScalarType, vocabulary: Option<&str>) -> crate::config::Attribute {
             crate::config::Attribute {
@@ -1966,7 +1966,7 @@ mod tests {
     fn deinterleave_inverts_interleave_across_the_grid() {
         for x in [0u16, 1, 2, 255, 4096, 65534, 65535] {
             for y in [0u16, 1, 7, 300, 65535] {
-                let code = tessera_spatial::interleave(x, y).raw();
+                let code = mosaica_spatial::interleave(x, y).raw();
                 assert_eq!(deinterleave(code), (x, y));
             }
         }

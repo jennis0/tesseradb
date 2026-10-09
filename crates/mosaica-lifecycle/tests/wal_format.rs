@@ -4,8 +4,8 @@
 //! it must be re-derivable from the log byte-for-byte. The field this file pins is the one §2.1's
 //! contiguity arithmetic assumes and the format did not carry.
 
-use tessera_lifecycle::wal::{Wal, WalError, WalRecord, WalRow, WalScalar};
-use tessera_types::EntityId;
+use mosaica_lifecycle::wal::{Wal, WalError, WalRecord, WalRow, WalScalar};
+use mosaica_types::EntityId;
 
 /// The view a row belongs to is durable, because a flush segment's entity range is
 /// contiguous only within one view (§2.1) and the WAL is append-only.
@@ -50,7 +50,7 @@ fn a_wal_row_round_trips_its_view() {
 /// that writes six bytes passes against no version check at all — which is why every case below
 /// writes the whole thing.
 fn header_at_version(version: u16, number: u64, base_pos: u64) -> Vec<u8> {
-    let mut header = b"TWAL".to_vec();
+    let mut header = b"MWAL".to_vec();
     header.extend_from_slice(&version.to_le_bytes());
     header.extend_from_slice(&number.to_le_bytes());
     header.extend_from_slice(&base_pos.to_le_bytes());
@@ -196,7 +196,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
 /// publication and a restart.
 #[test]
 fn view_create_and_drop_round_trip() {
-    use tessera_types::view::{CreatedView, DeadIncarnation, ViewMetadataValue};
+    use mosaica_types::view::{CreatedView, DeadIncarnation, ViewMetadataValue};
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
     let created = CreatedView {

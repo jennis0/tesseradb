@@ -14,7 +14,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${1:-/tmp/tessera-1e9}"
+OUT="${1:-/tmp/mosaica-1e9}"
 MIN_FREE_GB=50
 
 avail_kb=$(df --output=avail -k "$(dirname "$OUT")" 2>/dev/null | tail -1)
@@ -29,10 +29,10 @@ if (( avail_gb < MIN_FREE_GB )); then
   exit 1
 fi
 
-BIN="$ROOT/target/release/tessera"
+BIN="$ROOT/target/release/mosaica"
 if [[ ! -x "$BIN" ]]; then
   echo "Building release binary..."
-  (cd "$ROOT" && cargo build --release -p tessera-cli)
+  (cd "$ROOT" && cargo build --release -p mosaica-cli)
 fi
 
 # The declaration this build compiles: one view over the scaled geometry, its points' labels in the
@@ -65,7 +65,7 @@ TOML
 
 # The deployment file both verbs read. Generated per machine and never committed, so its paths are
 # absolute; `--out` still overrides `[bundle].path` for an operator who names one.
-DEPLOYMENT="${TMPDIR:-/tmp}/tessera-build-full.tessera.toml"
+DEPLOYMENT="${TMPDIR:-/tmp}/mosaica-build-full.mosaica.toml"
 cat > "$DEPLOYMENT" <<TOML
 [bundle]
 path  = "$OUT"

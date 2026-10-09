@@ -32,7 +32,7 @@
 //! The session path uses `project`; the artifact pass uses `project_with`.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin epoch_shard_projection -- \
+//! cargo run --release -p mosaica-bench --bin epoch_shard_projection -- \
 //!     --part linearity --rows 100000000 --mask scattered,contiguous
 //! ```
 
@@ -43,10 +43,10 @@ use clap::Parser;
 use croaring::{Bitmap, Portable};
 use serde_json::{json, Value};
 
-use tessera_store::permutation::ProjectScratch;
-use tessera_store::write::PermutationWriter;
-use tessera_store::Permutation;
-use tessera_types::EntityId;
+use mosaica_store::permutation::ProjectScratch;
+use mosaica_store::write::PermutationWriter;
+use mosaica_store::Permutation;
+use mosaica_types::EntityId;
 
 #[derive(Parser)]
 #[command(about = "Row projection per epoch shard: linearity in rows, and N leaves per token")]
@@ -164,7 +164,7 @@ fn splitmix64(x: u64) -> u64 {
 
 /// A balanced Feistel permutation on `[0, 4^half_bits)`, cycle-walked down to `[0, n)`.
 ///
-/// The construction `crates/tessera-store/examples/project_decomposition.rs` used for the 1 277 ms
+/// The construction `crates/mosaica-store/examples/project_decomposition.rs` used for the 1 277 ms
 /// figure, with a seed so that shards differ from one another. It stands in for the
 /// `(morton, tessera_id)` order a build produces: `project`'s cost depends only on the map being
 /// uncorrelated with entity order. A bijection on the larger domain restricted by walking is a

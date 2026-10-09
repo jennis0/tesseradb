@@ -568,9 +568,9 @@ mod tests {
              INSERT INTO principal_term VALUES (7, 'x ')",
             "INSERT INTO local_group (id, name) VALUES (7, 'eu'); \
              INSERT INTO group_term VALUES (7, 'public')",
-            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
+            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'mosaica', \
              'keys')",
-            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
+            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'mosaica', \
              'https://login.example.org/keys'); \
              INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'public')",
             "DELETE FROM generation",
@@ -584,11 +584,11 @@ mod tests {
             "INSERT INTO principal (name, kind) VALUES ('ad' || char(8238) || 'a', 'person')",
             "INSERT INTO local_group (name) VALUES ('e' || char(8203) || 'u')",
             "INSERT INTO provider VALUES ('co' || char(8294) || 'rp', \
-             'https://login.example.org/', 'tessera', 'https://login.example.org/keys')",
+             'https://login.example.org/', 'mosaica', 'https://login.example.org/keys')",
             "INSERT INTO local_group (id, name) VALUES (7, 'eu'); \
              INSERT INTO group_term VALUES (7, 'PUBLIC')",
             "INSERT INTO provider VALUES ('co' || char(27) || 'rp', 'https://login.example.org/', \
-             'tessera', 'https://login.example.org/keys')",
+             'mosaica', 'https://login.example.org/keys')",
         ];
         for row in rows {
             let fx = Fixture::new();
@@ -607,20 +607,20 @@ mod tests {
     #[test]
     fn a_stored_claim_rule_or_role_mapping_that_a_write_would_refuse_is_refused_on_open() {
         let provider = "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', \
-                        'tessera', 'https://login.example.org/keys');";
+                        'mosaica', 'https://login.example.org/keys');";
         for row in [
             "claim_rule VALUES ('corp', 0, 'groups[*]', '{value}-{value}')",
             "claim_rule VALUES ('corp', 0, 'groups[*]', ' {value}')",
             "claim_rule VALUES ('corp', 0, 'a..b', '{value}')",
             "claim_rule VALUES ('corp', 0, 'groups[*]', x'7b76616c75657d')",
-            "role_mapping VALUES ('corp', 0, 'groups[*]', ' tessera-admins', 'admins')",
-            "role_mapping VALUES ('corp', 0, 'groups[*]', 'tessera-admins', ' admins')",
-            "role_mapping VALUES ('corp', 0, 'groups[*]', 'tessera' || char(7), 'admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', ' mosaica-admins', 'admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', 'mosaica-admins', ' admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', 'mosaica' || char(7), 'admins')",
             "role_mapping VALUES ('corp', 0, 'groups[*]', '', 'admins')",
-            "role_mapping VALUES ('corp', 0, 'a..b', 'tessera-admins', 'admins')",
-            "role_mapping VALUES ('corp', 0, 'groups[*]', 'tessera-admins', \
+            "role_mapping VALUES ('corp', 0, 'a..b', 'mosaica-admins', 'admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', 'mosaica-admins', \
              'ad' || char(8238) || 'mins')",
-            "role_mapping VALUES ('corp', 0, 'groups[*]', 'tessera-admins', '')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', 'mosaica-admins', '')",
             "role_mapping VALUES ('corp', 0, 'groups[*]', x'61', 'admins')",
         ] {
             let fx = Fixture::new();
@@ -739,7 +739,7 @@ mod tests {
         cat.create_provider(&Provider {
             name: "corp".into(),
             issuer: "https://login.example.org/".into(),
-            audience: "tessera".into(),
+            audience: "mosaica".into(),
             jwks_url: "https://login.example.org/keys".into(),
             rules: vec![
                 ClaimRule {
@@ -754,7 +754,7 @@ mod tests {
             role_mappings: vec![
                 RoleMapping {
                     claim: "groups[*]".into(),
-                    value: "tessera-admins".into(),
+                    value: "mosaica-admins".into(),
                     group: "eu".into(),
                 },
                 RoleMapping {
@@ -766,7 +766,7 @@ mod tests {
         })
         .unwrap();
 
-        let claims = serde_json::json!({"groups": ["tessera-admins"], "tid": "7f3a"});
+        let claims = serde_json::json!({"groups": ["mosaica-admins"], "tid": "7f3a"});
         let before = (cat.providers(), cat.resolve_claims("corp", &claims));
         drop(cat);
         let cat = fx.open();

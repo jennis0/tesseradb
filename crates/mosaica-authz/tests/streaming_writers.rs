@@ -3,7 +3,7 @@
 
 use std::fs;
 use tempfile::TempDir;
-use tessera_authz::{
+use mosaica_authz::{
     encode_posting, write_posting_records, Dict, DictStreamWriter, DictWriter, PostingsSpool,
 };
 
@@ -134,7 +134,7 @@ fn postings_spool_matches_for_a_single_record() {
 #[test]
 fn the_bitmap_and_slice_encoders_agree_byte_for_byte() {
     use croaring::Bitmap;
-    use tessera_authz::encode_posting_bitmap;
+    use mosaica_authz::encode_posting_bitmap;
 
     const THRESHOLD: u32 = 8;
 

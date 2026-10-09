@@ -1,4 +1,4 @@
-//! **A build's unique columns**: every type `unique` applies to builds its index, and `tessera
+//! **A build's unique columns**: every type `unique` applies to builds its index, and `mosaica
 //! verify --deep` agrees the index with the column; a row holding a value an earlier row holds is
 //! refused, reported and left out; `unique` on a type it does not apply to, or on a group-scoped
 //! column, is refused at the declaration; and a damaged index is refused by the deep verifier.
@@ -16,10 +16,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use sha2::{Digest, Sha256};
 
-use tessera_build::{build, verify_deep, BuildArgs, BuildReport, VerifyOpts};
-use tessera_spatial::Bounds;
-use tessera_store::manifest::{CurrentPointer, SegmentsManifest};
-use tessera_types::IdentityKey;
+use mosaica_build::{build, verify_deep, BuildArgs, BuildReport, VerifyOpts};
+use mosaica_spatial::Bounds;
+use mosaica_store::manifest::{CurrentPointer, SegmentsManifest};
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 700;
@@ -186,10 +186,10 @@ unique = true
 field  = "entity_id"
 "#;
 
-fn parse(dir: &Path, toml: &str) -> Result<tessera_build::config::Schema, String> {
+fn parse(dir: &Path, toml: &str) -> Result<mosaica_build::config::Schema, String> {
     let path = dir.join("schema.toml");
     fs::write(&path, toml).unwrap();
-    tessera_build::config::Config::parse(&path, &Default::default())
+    mosaica_build::config::Config::parse(&path, &Default::default())
         .map(|config| config.schema)
         .map_err(|e| e.to_string())
 }
@@ -211,20 +211,20 @@ fn build_reported(
     let schema = parse(dir, SCHEMA).expect("the schema parses");
     let out = dir.join("bundle");
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -241,7 +241,7 @@ fn build_reported(
     };
     let built = match streaming {
         true => build(&args),
-        false => tessera_build::build_in_memory(&args),
+        false => mosaica_build::build_in_memory(&args),
     };
     built.map(|report| (out, report)).map_err(|e| e.to_string())
 }
@@ -403,7 +403,7 @@ fn an_index_disagreeing_with_its_column_is_refused_by_the_deep_verifier() {
         let root = build_in(temp.path(), false, true).unwrap();
         let (rel, path) = first_run(&root, attribute);
         let mut entries: Vec<(u64, u32)> = Vec::new();
-        let run = tessera_store::key_index::KeyRun::<u64>::open(&path).unwrap();
+        let run = mosaica_store::key_index::KeyRun::<u64>::open(&path).unwrap();
         for entry in run.iter() {
             entries.push(entry.unwrap());
         }
@@ -414,7 +414,7 @@ fn an_index_disagreeing_with_its_column_is_refused_by_the_deep_verifier() {
         fs::remove_file(&path).unwrap();
         let dir = path.parent().unwrap();
         let stem = path.file_stem().unwrap().to_str().unwrap().trim_end_matches("-0");
-        let mut writer = tessera_store::key_index::KeyRunWriter::<u64>::create(
+        let mut writer = mosaica_store::key_index::KeyRunWriter::<u64>::create(
             dir,
             stem,
             std::num::NonZeroU64::new(u64::MAX).unwrap(),

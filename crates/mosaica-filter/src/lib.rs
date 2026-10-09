@@ -4,12 +4,12 @@
 //! a column's postings and resolving a value to the set of entities carrying it. What a query does
 //! with that set is the engine's (`filter-surface.md`).
 //!
-//! # Why this is a separate crate from `tessera-authz`
+//! # Why this is a separate crate from `mosaica-authz`
 //!
 //! Both indexes are entity-space, neither mentions row ids, and they share the CSR postings format
-//! byte for byte — so a module inside `tessera-authz` would have been cheaper. It is separate
+//! byte for byte — so a module inside `mosaica-authz` would have been cheaper. It is separate
 //! because that crate owns `M_auth` and **I3**, while everything here may only ever narrow `M_sel`
-//! under **I12**, and `tessera-authz` is the crate an assurer opens first. Keeping its public
+//! under **I12**, and `mosaica-authz` is the crate an assurer opens first. Keeping its public
 //! surface authorisation-only is worth one crate and one dependency edge (filter-index §9).
 //!
 //! The edge runs this way — filter depends on authz, for the format only — rather than the reverse
@@ -26,7 +26,7 @@
 //!   bytes, so a namespace tag inside a descriptor lives in a space the caller also writes into;
 //!   separate files make the collision impossible rather than prevented (per-point-attributes §3.5).
 //! - **Separate types.** `AttrLocalId` and `TermId` are both `u32` ordinals read by the same code,
-//!   with no conversion between them, pinned by a compile-fail row in `tessera-types`. A file
+//!   with no conversion between them, pinned by a compile-fail row in `mosaica-types`. A file
 //!   boundary stops a descriptor collision; only a type boundary stops a call-site one.
 //! - **An untyped format core.** `PostingsReader::posting_at` takes a bare `u32` precisely so that
 //!   neither newtype has to cross into the other crate. Typing the shared reader in `TermId` would

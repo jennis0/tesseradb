@@ -19,7 +19,7 @@
 //! and the transport would only add noise.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin viewport_sweep -- \
+//! cargo run --release -p mosaica-bench --bin viewport_sweep -- \
 //!     --fixture data/bench-fixtures/1e8 --terms 0..200
 //! ```
 
@@ -28,9 +28,9 @@ use std::time::Instant;
 
 use clap::Parser;
 
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_store::read::open_bundle;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_store::read::open_bundle;
 
 /// Server defaults, so this measures a deployment somebody runs (see `arms::viewport`).
 const K_MAX_MARKS: usize = 500;
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "s0".to_string());
     drop(bundle);
 
-    let tmp = std::env::temp_dir().join(format!("tessera-viewport-sweep-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("mosaica-viewport-sweep-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
 
@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: MAX_TILES_PER_REQUEST,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
             // what bounds the window close's O(buffered) copy. Nothing here reaches it.
@@ -142,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             segment_floor_bytes: None,
             coalesce_width: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
 

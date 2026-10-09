@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BinaryHeap};
 
-use tessera_lifecycle::resolve::Refusal;
+use mosaica_lifecycle::resolve::Refusal;
 
 /// The rows of one file refused for one reason.
 ///
@@ -116,7 +116,7 @@ impl Tally {
     }
 }
 
-/// The report as `tessera build` prints it: one line per file and reason.
+/// The report as `mosaica build` prints it: one line per file and reason.
 pub fn describe(refused: &[RefusedRows]) -> Vec<String> {
     refused
         .iter()

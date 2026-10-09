@@ -4,7 +4,7 @@ survive when the viewport is held *fixed* across repeats, or does it collapse?
 
 Leading hypothesis under test: the gap is *between-viewport work variance* (random bboxes at
 random zooms 4..12 touch a wildly different number of tiles/rows per request), not a per-request
-stall. `Engine::viewport` (crates/tessera-engine/src/viewport.rs) does `mask.count_range` over
+stall. `Engine::viewport` (crates/mosaica-engine/src/viewport.rs) does `mask.count_range` over
 every tile `tiles_for_bbox` resolves -- work that is independent of `k` -- then samples/gathers up
 to `k` points per non-empty tile. If the count-loop's cost varies a lot across random geometry,
 p99-p50 over a *random* sweep would show a gap that is roughly constant in k (because the
@@ -22,7 +22,7 @@ population the random sweep draws from.
 
 Usage:
   reference/.venv/bin/python scripts/bench_fixed_viewport.py \
-      --bundle /tmp/tessera-1e9 --out probes/fixed-viewport-repeat.json
+      --bundle /tmp/mosaica-1e9 --out probes/fixed-viewport-repeat.json
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ N_REPEATS = 500
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bundle", default="/tmp/tessera-1e9")
-    ap.add_argument("--tmp", default="/tmp/tessera-1e9-serve-fixed")
+    ap.add_argument("--bundle", default="/tmp/mosaica-1e9")
+    ap.add_argument("--tmp", default="/tmp/mosaica-1e9-serve-fixed")
     ap.add_argument("-n", "--n-repeats", type=int, default=N_REPEATS)
     ap.add_argument("--width", type=int, default=10_000, help="grant width w")
     ap.add_argument("--seed", type=int, default=0)
@@ -113,7 +113,7 @@ def main() -> int:
         t0 = time.perf_counter()
         warm_resp = srv.viewport_response(token, "s0", 6, [0.0, 0.0, EXTENT, EXTENT], k=30)
         warmup_s = time.perf_counter() - t0
-        warmup_server_us = int(warm_resp.headers.get("x-tessera-server-us", "0"))
+        warmup_server_us = int(warm_resp.headers.get("x-mosaica-server-us", "0"))
         results["warmup_end_to_end_ms"] = warmup_s * 1000
         results["warmup_server_us"] = warmup_server_us
         print(f"Warm-up: {warmup_s * 1000:.1f} ms end-to-end, {warmup_server_us / 1000:.3f} ms server-side")
@@ -137,7 +137,7 @@ def main() -> int:
                 resp = srv.viewport_response(token, "s0", zoom, bbox, k=k)
                 e2e = (time.perf_counter() - t0) * 1e6
                 e2e_us.append(e2e)
-                server_us.append(float(resp.headers.get("x-tessera-server-us", "nan")))
+                server_us.append(float(resp.headers.get("x-mosaica-server-us", "nan")))
                 resp_bytes.append(len(resp.content))
                 if (i + 1) % 100 == 0:
                     print(f"  {i + 1}/{args.n_repeats} issued...")

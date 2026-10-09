@@ -3,7 +3,7 @@
 use super::*;
 use super::out::flat_families;
 use rustc_hash::FxHashMap;
-use tessera_access::{conjunction_text, Label};
+use mosaica_access::{conjunction_text, Label};
 
 use crate::session::SatisfiedKeys;
 
@@ -16,7 +16,7 @@ pub struct ItemOut {
     /// Present fields only, in declaration order — an absent field is absent, not null.
     pub fields: Vec<ItemField>,
     /// Why the asking session sees this item. Its labels are read as one disjunction, whose
-    /// operands are terms and conjunctions ([`tessera_authz::index_keys`]). Each held term among
+    /// operands are terms and conjunctions ([`mosaica_authz::index_keys`]). Each held term among
     /// them is named, and one satisfied clause of each satisfied conjunction, each written as label
     /// text, sorted. A held term that appears only inside a conjunction is not named on its own. Every term is one the credential holds, so no clause the session does
     /// not satisfy and no term it does not hold is named. Never the item's whole label.
@@ -129,7 +129,7 @@ impl Engine {
                         generation
                             .dict
                             .descriptor(key)
-                            .and_then(tessera_authz::label::label_of_key)
+                            .and_then(mosaica_authz::label::label_of_key)
                             .and_then(|text| Label::parse(text, usize::MAX).ok())
                     })
                     .as_ref()
@@ -259,8 +259,8 @@ fn item_views(
     rows.iter()
         .filter(|(view, _, _)| visible.contains_view(view))
         .map(|&(view, segment, local)| {
-            let (x, y) = tessera_spatial::unsplit32(
-                tessera_types::MortonCode::new(segment.morton.u32()[local]),
+            let (x, y) = mosaica_spatial::unsplit32(
+                mosaica_types::MortonCode::new(segment.morton.u32()[local]),
                 segment.columns.residual()[local],
             );
             ItemView {
@@ -419,7 +419,7 @@ pub(crate) fn flushed_row_scalar(
     generation: &Generation,
     entity: EntityId,
     declared_index: usize,
-) -> Option<tessera_filter::RecordValue> {
+) -> Option<mosaica_filter::RecordValue> {
     let manifest = &generation.bundle.manifest;
     // The slot in the render tail; a column that is not rendered has no hot-column home.
     let slot = manifest
@@ -472,8 +472,8 @@ pub(crate) fn flushed_row_scalar(
 pub(crate) fn slice_value(
     slice: &ScalarSlice<'_>,
     local: usize,
-) -> Option<tessera_filter::RecordValue> {
-    use tessera_filter::RecordValue as RV;
+) -> Option<mosaica_filter::RecordValue> {
+    use mosaica_filter::RecordValue as RV;
     match slice {
         ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => Some(RV::Bool(a.value(local))),
         ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
@@ -495,16 +495,16 @@ pub(crate) fn slice_value(
 }
 
 /// One stored value's drill-down form, for the entity-space and blob homes: the storage-typed
-/// [`tessera_filter::RecordValue`] adapted through the declaration — a category code to its key,
+/// [`mosaica_filter::RecordValue`] adapted through the declaration — a category code to its key,
 /// a `bool`'s `u8` storage back to `bool`, a `timestamp_us`'s `i64` back to its unit. Over the two
 /// facts rather than the declaration, since a group-scoped family has no [`DeclaredScalar`].
 pub(crate) fn stored_field_out(
-    value: tessera_filter::RecordValue,
+    value: mosaica_filter::RecordValue,
     arrow_type: ScalarType,
     vocabulary: Option<&str>,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
-    use tessera_filter::RecordValue as RV;
+    use mosaica_filter::RecordValue as RV;
     if vocabulary.is_some() {
         return category_key_out(category_code(&value)?, vocabulary, vocabularies);
     }
@@ -574,7 +574,7 @@ fn scoped_values_of(
                 .map(move |v| (g.name.as_str(), v.key.as_str()))
         })
         .filter(|(group, key)| {
-            visible.contains_view(&format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR))
+            visible.contains_view(&format!("{group}{}{key}", mosaica_store::GROUP_SEPARATOR))
         })
         .collect();
 
@@ -594,7 +594,7 @@ fn scoped_values_of(
             let Some(owned) = owning_key_of((group, key), members_of, &family.group) else {
                 continue;
             };
-            let id = format!("{}{}{owned}", family.group, tessera_store::GROUP_SEPARATOR);
+            let id = format!("{}{}{owned}", family.group, mosaica_store::GROUP_SEPARATOR);
             // The family's own list, not the roster: a view created since the build has no column
             // until one is written for it.
             if !family.views.contains(&id) {
@@ -645,8 +645,8 @@ pub(crate) fn category_key<'v>(
 }
 
 /// A category's code, at whichever width its home stores it; `None` for a value of another kind.
-pub(crate) fn category_code(value: &tessera_filter::RecordValue) -> Option<u32> {
-    use tessera_filter::RecordValue as RV;
+pub(crate) fn category_code(value: &mosaica_filter::RecordValue) -> Option<u32> {
+    use mosaica_filter::RecordValue as RV;
     match *value {
         RV::U8(code) => Some(u32::from(code)),
         RV::U16(code) => Some(u32::from(code)),

@@ -2,13 +2,13 @@
 //!
 //! ## Where the commands themselves live
 //!
-//! The executor thread is **not** in this crate — it is in `tessera-engine`'s `write` module, and
+//! The executor thread is **not** in this crate — it is in `mosaica-engine`'s `write` module, and
 //! so is the command enum it consumes. Its loop is append → fsync → **apply → swap** → ack, and
 //! apply/swap clone the `IngestBuffer`/`Overlay` out of a `Generation`, which holds a
-//! `tessera_store::Bundle`; `tessera-engine` depends on this crate, so a thread here importing
-//! `Generation` is a cycle cargo refuses, and this crate deliberately has no `tessera-store`
+//! `mosaica_store::Bundle`; `mosaica-engine` depends on this crate, so a thread here importing
+//! `Generation` is a cycle cargo refuses, and this crate deliberately has no `mosaica-store`
 //! dependency. What is here is the half that is entity-space and store-free: the rows and requests
-//! a command carries, and the two errors `tessera-server` maps to HTTP statuses.
+//! a command carries, and the two errors `mosaica-server` maps to HTTP statuses.
 //!
 //! ## Why the commands carry unallocated rows
 //!
@@ -20,7 +20,7 @@
 //! executor, and this type is what a handler submits: everything a `WalRow` needs *except* the ID,
 //! plus the resolved term set that is the item's sort signature.
 
-use tessera_types::{EntityId, TermId};
+use mosaica_types::{EntityId, TermId};
 
 use crate::alloc::{AllocError, PendingItem};
 use crate::wal::{WalError, WalRow, WalScalar};
@@ -34,7 +34,7 @@ use crate::wal::{WalError, WalRow, WalScalar};
 /// its absence in `scalars` or `scoped`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngestRow {
-    pub tessera_id: Option<tessera_types::TesseraId>,
+    pub tessera_id: Option<mosaica_types::TesseraId>,
     /// The row's access labels. `None` where the row left its label out, which keeps a named
     /// item's label and gives a new item the view's default. `Some` of an empty list is no label.
     pub labels: Option<Vec<Vec<u8>>>,
@@ -58,7 +58,7 @@ pub struct IngestRow {
 pub struct UnallocatedRow {
     pub view: String,
     /// The existing item this row adds to `view`, or `None` for a row that creates one.
-    pub join: Option<tessera_types::EntityId>,
+    pub join: Option<mosaica_types::EntityId>,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f64,
     pub y: f64,
@@ -157,7 +157,7 @@ pub struct BatchMembership {
 ///
 /// Carried beside the memberships rather than folded into them because it is a different claim
 /// about the same data: an entry names a membership, and *consecutive* entries name an edge
-/// ([`tessera_types::layer::parent_edges`]). The executor decides each one against what the layer
+/// ([`mosaica_types::layer::parent_edges`]). The executor decides each one against what the layer
 /// holds: the same edge is nothing to do, no edge at all is one to record, and a different parent is
 /// a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,7 +220,7 @@ pub struct UnallocatedEdit {
 /// 202s is the worst available outcome — the caller believes its write is in flight and it is
 /// not, which for a suppression means an item stays visible with an acknowledgement in hand.
 ///
-/// **Deliberately not `#[non_exhaustive]`, and that absence is load-bearing.** `tessera-server`'s
+/// **Deliberately not `#[non_exhaustive]`, and that absence is load-bearing.** `mosaica-server`'s
 /// `map_accept_error` names every variant of this enum and of [`ExecError`] with no `_` arm, so a
 /// new variant is an `E0004` there rather than a silent 500 — but only because neither type permits
 /// a cross-crate wildcard. Adding `#[non_exhaustive]` later reads as ordinary API hygiene for a
@@ -275,7 +275,7 @@ pub enum SubmitError {
     /// refused at its `send` with [`SubmitError::ExecutorDead`] and returns before the bell is rung.
     /// The doorbell producer is therefore a correct answer to a state nothing currently reaches, kept
     /// because reordering those fields (or giving the bell an independent lifetime) makes it live,
-    /// and the answer it gives is the right one either way. `tessera-engine`'s
+    /// and the answer it gives is the right one either way. `mosaica-engine`'s
     /// `an_executor_panic_is_reported_dead` pins the reachable one at its producer.
     ///
     /// Nothing fallible sits between the swap and the ack, but the group-commit shape widens this
@@ -288,7 +288,7 @@ pub enum SubmitError {
 impl SubmitError {
     /// Whether the command may have taken effect. `false` only where non-enqueue is proven.
     ///
-    /// The one question a batch-level answer needs (`tessera-server`'s `map_change_batch_error`),
+    /// The one question a batch-level answer needs (`mosaica-server`'s `map_change_batch_error`),
     /// asked here rather than by matching on variants at the call site — a caller re-deriving it
     /// is one forgotten variant away from reporting an applied suppression as a no-op.
     pub fn may_have_taken_effect(&self) -> bool {
@@ -365,7 +365,7 @@ pub struct AttributeRequest {
     pub analyser: Option<String>,
     pub index: bool,
     pub render: bool,
-    pub scope: tessera_types::layer::LayerScope,
+    pub scope: mosaica_types::layer::LayerScope,
     /// On a column that exists, declaring or removing `unique` is the one change accepted.
     pub unique: bool,
 }
@@ -380,8 +380,8 @@ pub struct AttributeRequest {
 pub struct VocabularyRequest {
     pub name: String,
     pub title: Option<String>,
-    pub kind: tessera_types::vocabulary::VocabularyKind,
-    pub visibility: tessera_types::vocabulary::Visibility,
+    pub kind: mosaica_types::vocabulary::VocabularyKind,
+    pub visibility: mosaica_types::vocabulary::Visibility,
     /// The code space's width by its contracts §2.2 name: `u8`, `u16` or `u32`.
     pub width: String,
     pub values: Vec<DeclaredValue>,
@@ -415,7 +415,7 @@ pub enum ExecError {
     /// it is in.
     ///
     /// **At batch scope, one of these does not stop the batch.** A `/control/changes` request is a
-    /// list, and `tessera-server`'s `run_changes` submits **every** validated item even after one
+    /// list, and `mosaica-server`'s `run_changes` submits **every** validated item even after one
     /// of them fails this way, then reports the first failure. That matters because
     /// [`crate::wal::WalError::Poisoned`] is a sustained posture, not a transient: a batch against
     /// a poisoned node would otherwise apply exactly its first item on every retry until the WAL is
@@ -429,7 +429,7 @@ pub enum ExecError {
     /// This `batch_id` was already accepted, or is held in an open window, with **different**
     /// body bytes → HTTP 409 (contracts §3.4). The retry has no effect, and **a held original is
     /// not disturbed by it**; the argument for that reading, and what would change under the
-    /// opposite one, are at the one site that decides it (`tessera-engine`'s
+    /// opposite one, are at the one site that decides it (`mosaica-engine`'s
     /// `Executor::admit_ingest`, the `Held` arm).
     ///
     /// Evaluated on the executor rather than in the handler, which is why it is an [`ExecError`]
@@ -445,7 +445,7 @@ pub enum ExecError {
     /// Widening or wrapping instead would recolour every row already carrying a code, so neither
     /// is done and the refusal is the whole answer.
     ///
-    /// **A rendered string, not the error itself.** Minting lives in `tessera-store`, and this
+    /// **A rendered string, not the error itself.** Minting lives in `mosaica-store`, and this
     /// crate deliberately carries no dependency on it (see this module's header), so the detail is
     /// rendered on the executor and travels as text. It names a vocabulary and a width — the
     /// deployment's own schema, never a filesystem path — so unlike most executor failures it may

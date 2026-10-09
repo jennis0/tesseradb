@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use tessera_store::flush::{write_flush_segment, FlushInput, FlushOutput, FlushRow};
-use tessera_store::manifest::Quantisation;
-use tessera_store::MortonSlice;
-use tessera_types::{EntityId, IdentityKey};
+use mosaica_store::flush::{write_flush_segment, FlushInput, FlushOutput, FlushRow};
+use mosaica_store::manifest::Quantisation;
+use mosaica_store::MortonSlice;
+use mosaica_types::{EntityId, IdentityKey};
 
 mod fixture;
 use fixture::{build_bundle, PARTITION, VIEW};

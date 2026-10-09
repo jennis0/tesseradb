@@ -32,17 +32,17 @@ use common::*;
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs, BuildReport};
-use tessera_spatial::Bounds;
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs, BuildReport};
+use mosaica_spatial::Bounds;
 
-/// Appends `line` to `build_equals_ingest.log` in the directory `TESSERA_TEST_TRACE_DIR` names,
+/// Appends `line` to `build_equals_ingest.log` in the directory `MOSAICA_TEST_TRACE_DIR` names,
 /// and does nothing when it is unset. Each line is one write straight to the file, so the last
 /// phase reached can be read after the test process is killed. A line that cannot be written is
 /// dropped, so the trace never decides the test's result.
 fn trace(line: &str) {
     use std::io::Write;
-    let Some(dir) = std::env::var_os("TESSERA_TEST_TRACE_DIR") else {
+    let Some(dir) = std::env::var_os("MOSAICA_TEST_TRACE_DIR") else {
         return;
     };
     let now = std::time::UNIX_EPOCH.elapsed().unwrap_or_default().as_secs_f64();
@@ -532,11 +532,11 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
     let registry = config.build_views().expect("the views compile");
     let anchor = config.anchor_view(&registry).expect("an anchor");
     let acquired = config.acquire().expect("the files acquire");
-    let views: Vec<tessera_build::ViewArgs> = registry
+    let views: Vec<mosaica_build::ViewArgs> = registry
         .iter()
         .map(|view| {
-            let acquired = tessera_build::config::acquire_view(view).expect("the view acquires");
-            tessera_build::ViewArgs {
+            let acquired = mosaica_build::config::acquire_view(view).expect("the view acquires");
+            mosaica_build::ViewArgs {
                 visibility: None,
                 view_id: view.id.clone(),
                 projection: view.projection,
@@ -556,7 +556,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
     let scoped_attributes = config
         .scoped_attributes
         .iter()
-        .map(|scoped| tessera_build::ScopedColumnFamily {
+        .map(|scoped| mosaica_build::ScopedColumnFamily {
             attribute: scoped.attribute.clone(),
             group: scoped.group.clone(),
             views: registry
@@ -683,10 +683,10 @@ async fn send(
             .client
             .request(method.clone(), url)
             .bearer_auth(OPERATOR_CREDENTIAL)
-            .header("x-tessera-batch-id", format!("{batch}-{strict}"))
+            .header("x-mosaica-batch-id", format!("{batch}-{strict}"))
             .json(body);
         if let Some(view) = view {
-            request = request.header("x-tessera-view", view);
+            request = request.header("x-mosaica-view", view);
         }
         request
     };
@@ -773,9 +773,9 @@ async fn seen(
             let grade = batch
                 .column_by_name("grade")
                 .map(|g| arrow::compute::cast(g, &arrow::datatypes::DataType::Int64).unwrap());
-            let x = batch.column_by_name("tessera:x").unwrap();
+            let x = batch.column_by_name("mosaica:x").unwrap();
             let x = x.as_any().downcast_ref::<Float64Array>().unwrap();
-            let y = batch.column_by_name("tessera:y").unwrap();
+            let y = batch.column_by_name("mosaica:y").unwrap();
             let y = y.as_any().downcast_ref::<Float64Array>().unwrap();
             for i in 0..batch.num_rows() {
                 let b = b.as_ref().and_then(|b| {

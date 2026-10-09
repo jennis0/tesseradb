@@ -67,25 +67,25 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_lifecycle::membership::ArtifactRecord;
-use tessera_store::membership::{
+use mosaica_lifecycle::membership::ArtifactRecord;
+use mosaica_store::membership::{
     pack_label_column, LabelColumnPack, ListColumnPack, ROW_COLUMN_HOLE, TILE_INDEX_EMPTY,
     TILE_INDEX_HOLE,
 };
-use tessera_store::permutation::RowSpace;
-use tessera_types::layer::ServingLayout;
+use mosaica_store::permutation::RowSpace;
+use mosaica_types::layer::ServingLayout;
 
 use crate::artifacts::MembershipRows;
 use crate::derived::{place, Placement};
 
 /// One walk of a level's live artifacts, handing each ordinal its **projected** rows — and the
-/// bytes are produced by [`tessera_store::derived::project_row_column`], beside the format.
+/// bytes are produced by [`mosaica_store::derived::project_row_column`], beside the format.
 ///
 /// **A callback rather than an iterator**, because the caller has to be able to run it more than
 /// once: a list column is an offset table sized by one pass and filled by a second, and the fold's
 /// walk holds one membership at a time rather than the level's. An iterator would have to be
 /// re-created, which is what this type is.
-type LevelWalk<'a> = tessera_store::derived::LevelWalk<'a>;
+type LevelWalk<'a> = mosaica_store::derived::LevelWalk<'a>;
 use crate::compose::WholeMask;
 
 /// How many rows one `next_many` read takes out of the mask: 1,024 × 4 B is a 4 KiB buffer, the
@@ -844,7 +844,7 @@ impl RowColumn {
     /// A label column refuses a row that would come to carry two artifacts, and a level served from
     /// its column has no other membership to fall back to. The bounded answer is the one the fold
     /// already takes for such a level (decision 0094): the list form, composed through the
-    /// disk-backed partition route ([`tessera_store::derived::project_row_column_pairs`]) from the
+    /// disk-backed partition route ([`mosaica_store::derived::project_row_column_pairs`]) from the
     /// pairs this column already holds and the pairs the amendment added. **Nothing row-sized is
     /// held while it runs** — one partition bucket, exactly as the fold's composition and the
     /// build's — so the level never materialises the artifact-major form the layout exists to
@@ -934,8 +934,8 @@ impl RowColumn {
     /// one pass and is handed the same closure.
     ///
     /// ⊘ **No production caller.** The fold writes its columns through
-    /// `tessera_store::derived::project_row_column` and the engine composes through the same
-    /// function, so what reaches this is `crates/tessera-bench/src/bin/epoch_shard_tile_index.rs`
+    /// `mosaica_store::derived::project_row_column` and the engine composes through the same
+    /// function, so what reaches this is `crates/mosaica-bench/src/bin/epoch_shard_tile_index.rs`
     /// and this crate's tests. Kept because it is the projection the two routes are asserted equal
     /// against.
     ///
@@ -980,11 +980,11 @@ impl RowColumn {
         path: &std::path::Path,
         members: &std::path::Path,
         expected: ServingLayout,
-    ) -> tessera_store::Result<Self> {
+    ) -> mosaica_store::Result<Self> {
         let mut column = Self::open_labels(path, expected)?;
-        let members = tessera_store::row_members::RowMembersPack::open(members)?;
+        let members = mosaica_store::row_members::RowMembersPack::open(members)?;
         if members.rows() != column.base_rows() || members.ordinals() as usize != column.len() {
-            return Err(tessera_store::StoreError::MalformedBundle {
+            return Err(mosaica_store::StoreError::MalformedBundle {
                 detail: format!(
                     "row-major column {}: its member file covers {} rows and {} ordinals where the \
                      column has {} and {}; the two are written together, so one of them is another \
@@ -1006,12 +1006,12 @@ impl RowColumn {
     pub fn open_labels(
         path: &std::path::Path,
         expected: ServingLayout,
-    ) -> tessera_store::Result<Self> {
+    ) -> mosaica_store::Result<Self> {
         let pack = match expected {
             ServingLayout::RowMajorLabel => Pack::Label(LabelColumnPack::open(path)?),
             ServingLayout::RowMajorList => Pack::List(ListColumnPack::open(path)?),
             ServingLayout::ArtifactMajor => {
-                return Err(tessera_store::StoreError::MalformedBundle {
+                return Err(mosaica_store::StoreError::MalformedBundle {
                     detail: format!(
                         "row-major column {}: the manifest tags it {}, which has no column — the \
                          entry names a file no writer produces",
@@ -1576,7 +1576,7 @@ impl RowColumn {
             Pack::Label(pack) => Some((pack.labels(), usize::from(pack.width()), pack.rows())),
             Pack::List(_) => None,
         };
-        let page = !(tessera_store::bands::page_size() - 1);
+        let page = !(mosaica_store::bands::page_size() - 1);
         let mut pages = Vec::new();
         // The last page asked for in each of the three columns, so each page is listed once.
         let mut last = [usize::MAX; 3];
@@ -1599,11 +1599,11 @@ impl RowColumn {
             if let Some(p) = places.get(at).filter(|p| p.row_base <= row) {
                 let (morton, residual) = p.columns();
                 let local = (row - p.row_base) as usize;
-                ask(1, tessera_store::bands::element(morton, local));
-                ask(2, tessera_store::bands::element(residual, local));
+                ask(1, mosaica_store::bands::element(morton, local));
+                ask(2, mosaica_store::bands::element(residual, local));
             }
         });
-        tessera_store::bands::will_need(&mut pages);
+        mosaica_store::bands::will_need(&mut pages);
     }
 
     /// The pack's and the tail's labels over the visible rows of `[lo, end)`, a run at a time.
@@ -1811,16 +1811,16 @@ impl RowColumn {
     }
 
     /// [`Self::assemble`] fed by `(row, ordinal)` pairs — see
-    /// [`tessera_store::derived::project_row_column_pairs`]. The two share the composition; what
+    /// [`mosaica_store::derived::project_row_column_pairs`]. The two share the composition; what
     /// differs is only how the caller has the membership to hand.
     fn assemble_pairs(
         ordinals: u32,
         row_count: u32,
         layout: ServingLayout,
         scratch: &std::path::Path,
-        each: tessera_store::derived::PairWalk<'_>,
+        each: mosaica_store::derived::PairWalk<'_>,
     ) -> Option<Self> {
-        let path = match tessera_store::derived::project_row_column_pairs(
+        let path = match mosaica_store::derived::project_row_column_pairs(
             ordinals, row_count, layout, scratch, each,
         ) {
             Ok(Some(path)) => path,
@@ -1866,7 +1866,7 @@ impl RowColumn {
         // file buys is the row-sized lane it replaces: the pass held four bytes a row while it
         // composed, and now holds one partition bucket. The bytes it reads back are the column the
         // form was going to hold anyway.
-        let path = match tessera_store::derived::project_row_column(
+        let path = match mosaica_store::derived::project_row_column(
             ordinals, row_count, layout, scratch, each,
         ) {
             Ok(Some(path)) => path,
@@ -1911,11 +1911,11 @@ impl RowColumn {
     /// I/O failure the caller treats as a column that did not compose.
     fn with_members(pack: Pack, scratch: &std::path::Path) -> Option<Self> {
         let labels = match &pack {
-            Pack::Label(pack) => tessera_store::derived::ColumnLabels::Label(pack),
-            Pack::List(pack) => tessera_store::derived::ColumnLabels::List(pack),
+            Pack::Label(pack) => mosaica_store::derived::ColumnLabels::Label(pack),
+            Pack::List(pack) => mosaica_store::derived::ColumnLabels::List(pack),
         };
-        let opened = tessera_store::derived::project_row_members(labels, scratch).and_then(|path| {
-            let members = tessera_store::row_members::RowMembersPack::open(&path);
+        let opened = mosaica_store::derived::project_row_members(labels, scratch).and_then(|path| {
+            let members = mosaica_store::row_members::RowMembersPack::open(&path);
             let _ = std::fs::remove_file(&path);
             members
         });
@@ -2535,8 +2535,8 @@ mod tests {
         let reference_position = |row: u32| -> Option<(u32, u32)> {
             let (base, morton, residual) = raw.iter().rev().find(|(base, _, _)| row >= *base)?;
             let at = (row - base) as usize;
-            Some(tessera_spatial::morton::unsplit32(
-                tessera_types::MortonCode::new(*morton.get(at)?),
+            Some(mosaica_spatial::morton::unsplit32(
+                mosaica_types::MortonCode::new(*morton.get(at)?),
                 *residual.get(at)?,
             ))
         };

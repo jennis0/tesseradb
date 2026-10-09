@@ -30,7 +30,7 @@
 //! **Elsewhere centres come from a sample.** The items sampled are the visible items whose
 //! `tessera_id` is below the cut `⌊S · 2⁶⁴ / N⌋`, `S` being [`SAMPLE`] and `N` the visible count, or
 //! every visible item where `N <= S`. They are read from the narrowest identity band holding the cut
-//! ([`tessera_store::bands`]), or from the segment's columns where no band does, with a column
+//! ([`mosaica_store::bands`]), or from the segment's columns where no band does, with a column
 //! level's labels read from its band-order copy where it has one. The cut moves in proportion to
 //! `N`, with no step, so a change in the visible count moves the centres only of the clusters
 //! holding an item between the old cut and the new. A cluster's centre is the mean position of its
@@ -99,10 +99,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use croaring::Bitmap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_lifecycle::membership::Attachment;
-use tessera_types::layer::{HierarchyKind, RegisteredLayer};
-use tessera_store::bands::BandLabels;
-use tessera_types::{EntityId, MortonCode};
+use mosaica_lifecycle::membership::Attachment;
+use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
+use mosaica_store::bands::BandLabels;
+use mosaica_types::{EntityId, MortonCode};
 
 use crate::artifacts::ArtifactVerdict;
 use crate::compose::{EffectiveMask, WholeMask};
@@ -176,7 +176,7 @@ impl LevelSlots {
     }
 }
 
-impl tessera_cache::CacheWeight for LevelSlots {
+impl mosaica_cache::CacheWeight for LevelSlots {
     fn cache_weight_bytes(&self) -> u64 {
         self.weight()
     }
@@ -294,7 +294,7 @@ const REBUILDS: usize = 2;
 /// newest held for each [`WithheldKey`] were built at; the rebuilds wanted, by session; and the
 /// rebuilds running, by session, with the token that ends them.
 pub(crate) struct SlotsCache {
-    builds: tessera_cache::SingleFlightCache<(WithheldKey, AddedKey), LevelSlots>,
+    builds: mosaica_cache::SingleFlightCache<(WithheldKey, AddedKey), LevelSlots>,
     newest: Mutex<FxHashMap<WithheldKey, AddedKey>>,
     wanted: Mutex<FxHashMap<u64, Vec<Wanted>>>,
     rebuilding: Mutex<FxHashMap<u64, crate::CancelToken>>,
@@ -302,7 +302,7 @@ pub(crate) struct SlotsCache {
 
 impl SlotsCache {
     pub(crate) fn new() -> Self {
-        let builds = tessera_cache::SingleFlightCache::new(SLOTS_BYTES);
+        let builds = mosaica_cache::SingleFlightCache::new(SLOTS_BYTES);
         builds.set_wait_budget_ms(BUILD_WAIT_MS);
         SlotsCache {
             builds,
@@ -321,9 +321,9 @@ impl SlotsCache {
             .get(withheld)
             .cloned()?;
         match self.builds.peek(&(withheld.clone(), added.clone())) {
-            tessera_cache::Peek::Ready(slots) => Some((added, slots)),
-            tessera_cache::Peek::Building => None,
-            tessera_cache::Peek::Absent => {
+            mosaica_cache::Peek::Ready(slots) => Some((added, slots)),
+            mosaica_cache::Peek::Building => None,
+            mosaica_cache::Peek::Absent => {
                 self.newest
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -517,13 +517,13 @@ impl Engine {
         let declaration = &layer.declaration;
         let fractional = matches!(
             declaration.require_member_visibility,
-            Some(tessera_types::layer::ExistenceCriterion::Fraction(_))
+            Some(mosaica_types::layer::ExistenceCriterion::Fraction(_))
         );
         let contained = declaration
             .content
             .supplied
             .iter()
-            .any(|c| c.require_member_visibility == tessera_types::layer::SuppliedRequirement::All);
+            .any(|c| c.require_member_visibility == mosaica_types::layer::SuppliedRequirement::All);
         (
             WithheldKey {
                 terms: id.terms,
@@ -660,7 +660,7 @@ impl Engine {
     }
 
     /// What this viewer's slots over every level of `layer` in `view` were built from and took,
-    /// building them where they are not held. For `tessera-bench`'s `slot_cost`; not part of the
+    /// building them where they are not held. For `mosaica-bench`'s `slot_cost`; not part of the
     /// engine's API.
     #[doc(hidden)]
     pub fn cluster_slot_stats(
@@ -1044,7 +1044,7 @@ fn sample_cut(visible: u64, size: u64) -> u64 {
 
 /// The position a stored `(cell code, residual)` names, in the 32-bit grid's units.
 fn position(code: u32, residual: u32) -> [f64; 2] {
-    let (x, y) = tessera_spatial::unsplit32(MortonCode::new(code), residual);
+    let (x, y) = mosaica_spatial::unsplit32(MortonCode::new(code), residual);
     [f64::from(x), f64::from(y)]
 }
 
@@ -1065,7 +1065,7 @@ fn sample(
     cut: u64,
     stop: &dyn Fn() -> bool,
 ) -> Result<Vec<Sampled>> {
-    let band = tessera_store::bands::band_below(cut);
+    let band = mosaica_store::bands::band_below(cut);
     let mut out: Vec<Sampled> = Vec::new();
     for (s, &(segment, row_base)) in served.segments.iter().enumerate() {
         if stop() {

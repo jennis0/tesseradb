@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use tessera_access::{Label, LabelId, Labels, Scratch, DEFAULT_MAX_NODES};
+use mosaica_access::{Label, LabelId, Labels, Scratch, DEFAULT_MAX_NODES};
 
 const TERMS: [&str; 8] = ["a", "b.c", "d e", "f", "g:h", "\"i\\", "d  e", "de"];
 

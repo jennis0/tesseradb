@@ -6,9 +6,9 @@
 //! [`Corpus::terms`] are those functions. [`Corpus::census`] is the one method that visits all
 //! `n` items.
 //!
-//! This crate may depend on `tessera-types` and `tessera-spatial` and on nothing else in the
+//! This crate may depend on `mosaica-types` and `mosaica-spatial` and on nothing else in the
 //! workspace. `scripts/check-layers.sh` enforces this. If the generator could read a bundle or
-//! use an engine type, the suite would compare the system with itself. `tessera-spatial` is
+//! use an engine type, the suite would compare the system with itself. `mosaica-spatial` is
 //! allowed because it defines quantisation and tile addressing, and the census must put a
 //! position in the same cell as the build does.
 //!
@@ -42,8 +42,8 @@ pub mod partition;
 
 use std::collections::HashMap;
 
-use tessera_spatial::{cell, interleave_bits, Bounds};
-use tessera_types::TermId;
+use mosaica_spatial::{cell, interleave_bits, Bounds};
+use mosaica_types::TermId;
 
 /// SplitMix64's stream increment: the `e`-th state of a stream from key `K` is `K + e·GOLDEN`.
 const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;

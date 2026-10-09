@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_filter::{Codes, SortedDict, SortedDictWriter, ValueColumn};
+use mosaica_filter::{Codes, SortedDict, SortedDictWriter, ValueColumn};
 
 use super::columns::{empty_record_stack, Column, FilterColumns, Layer, Route};
 use super::declared::{Family, Placement};
@@ -40,7 +40,7 @@ pub(super) fn opened(
     dict: Option<Arc<SortedDict>>,
 ) -> super::columns::successor::OpenedExtent {
     super::columns::successor::OpenedExtent {
-        extent: tessera_store::manifest::AttrExtent {
+        extent: mosaica_store::manifest::AttrExtent {
             column: column.to_string(),
             view: None,
             incarnation: None,
@@ -104,9 +104,9 @@ pub(super) fn keyword_column(
     FilterColumns {
         columns,
         placements,
-        access: tessera_filter::Access::Read,
+        access: mosaica_filter::Access::Read,
         records: Arc::new(empty_record_stack()),
-        entity_terms: Arc::new(tessera_store::EntityTermsStack::empty()),
+        entity_terms: Arc::new(mosaica_store::EntityTermsStack::empty()),
         unique: BTreeMap::new(),
     }
 }

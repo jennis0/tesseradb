@@ -39,10 +39,10 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
-use tessera_store::permutation::ProjectScratch;
-use tessera_store::write::write_permutation;
-use tessera_store::Permutation;
-use tessera_types::EntityId;
+use mosaica_store::permutation::ProjectScratch;
+use mosaica_store::write::write_permutation;
+use mosaica_store::Permutation;
+use mosaica_types::EntityId;
 
 /// Independent oracle: walk every set bit of `mask` through `perm.row_of`, one entity at a time,
 /// skipping absent/out-of-bound entities exactly as `project` does, then sort.
@@ -77,7 +77,7 @@ fn assert_bitmaps_equal(parallel: &Bitmap, serial: &Bitmap, case: &str) {
 }
 
 /// Run `perm.project(mask)` inside a rayon pool with exactly `threads` workers — the ambient-rayon
-/// contract (tessera-store owns no pool of its own; this installs one exactly as `tessera-engine`
+/// contract (mosaica-store owns no pool of its own; this installs one exactly as `mosaica-engine`
 /// does at the real call site). `project` is serial and uses none of it, which is the point: the
 /// answer must not depend on what the caller happens to have installed.
 fn project_with_threads(perm: &Permutation, mask: &Bitmap, threads: usize) -> Bitmap {

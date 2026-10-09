@@ -3,7 +3,7 @@
 import pyarrow as pa
 import pytest
 
-from tesseradb._database import create
+from mosaica._database import create
 
 pd = pytest.importorskip("pandas")
 

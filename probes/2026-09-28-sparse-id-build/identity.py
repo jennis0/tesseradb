@@ -1,6 +1,6 @@
 """Time a build's identity pass alone: build under a memory cap and stop once `source_ids` ends.
 
-    python3 identity.py --binary tessera --data DIR --cap 7G --budget 6g --out run.json
+    python3 identity.py --binary mosaica --data DIR --cap 7G --budget 6g --out run.json
 
 Reports the stage's wall time from the build's own `--stage-timings` line, and the bytes the
 process read and wrote and its major faults up to that point.
@@ -43,7 +43,7 @@ def main() -> int:
     cmd = [
         "systemd-run", "--user", "--scope", "--collect", "-p", f"MemoryMax={args.cap}",
         "-p", "MemorySwapMax=2G", "--",
-        str(args.binary.resolve()), "build", "--deployment", str(data / "tessera.toml"),
+        str(args.binary.resolve()), "build", "--deployment", str(data / "mosaica.toml"),
         "--config", str(data / "corpus.toml"), "--out", str(bundle), "--no-oracle-pairs",
         "--memory-budget", args.budget, "--stage-timings",
     ]

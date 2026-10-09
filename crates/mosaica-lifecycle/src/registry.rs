@@ -33,11 +33,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tessera_types::layer::{
+use mosaica_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, LevelShape, MembershipSource, RegisteredLayer,
     ReservedRuns,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 use crate::alloc::{AllocError, Allocator};
 use crate::membership::{deserialise_members, serialise_members, ArtifactStore, IncomingArtifact};
@@ -287,7 +287,7 @@ pub trait GroupViews {
         &self,
         group: &str,
         key: &str,
-    ) -> Option<tessera_types::view::ViewIncarnation>;
+    ) -> Option<mosaica_types::view::ViewIncarnation>;
     /// Every key of `group`, which a refusal names.
     fn keys_of(&self, group: &str) -> Vec<String>;
 }
@@ -296,7 +296,7 @@ pub trait GroupViews {
 struct NoGroupViews;
 
 impl GroupViews for NoGroupViews {
-    fn incarnation_of(&self, _: &str, _: &str) -> Option<tessera_types::view::ViewIncarnation> {
+    fn incarnation_of(&self, _: &str, _: &str) -> Option<mosaica_types::view::ViewIncarnation> {
         None
     }
     fn keys_of(&self, _: &str) -> Vec<String> {
@@ -320,7 +320,7 @@ pub struct PreparedPut {
     pub growth: Option<WalRecord>,
     /// One entity per artifact in the caller's order: a held artifact's own, or the one the
     /// publication claimed.
-    pub entities: Vec<tessera_types::EntityId>,
+    pub entities: Vec<mosaica_types::EntityId>,
     /// How many artifacts the publication created.
     pub created: u64,
     /// How many created artifacts carry no content on a layer that declares some (R5).
@@ -785,7 +785,7 @@ fn crossing(
 /// a set its layer does not have.
 fn scoped_view<'a>(
     layer_name: &str,
-    scope: &tessera_types::layer::LayerScope,
+    scope: &mosaica_types::layer::LayerScope,
     key: Option<&str>,
     view: Option<&'a str>,
 ) -> Result<Option<&'a str>, RegistryError> {
@@ -1408,7 +1408,7 @@ impl LayerRegistry {
             resolved.sort_unstable();
             resolved.dedup();
             let kind = layer.declaration.hierarchy.kind;
-            if resolved.len() > 1 && kind != tessera_types::layer::HierarchyKind::Dag {
+            if resolved.len() > 1 && kind != mosaica_types::layer::HierarchyKind::Dag {
                 let mut named = parts.parent_keys.clone();
                 named.sort_unstable();
                 named.dedup();
@@ -1785,7 +1785,7 @@ impl LayerRegistry {
                 )
             })
             .collect::<Result<_, _>>()?;
-        let incarnations: Vec<tessera_types::view::ViewIncarnation> = incoming
+        let incarnations: Vec<mosaica_types::view::ViewIncarnation> = incoming
             .iter()
             .zip(&views)
             .map(|(artifact, view)| {
@@ -1801,7 +1801,7 @@ impl LayerRegistry {
                             ),
                         }
                     }),
-                    _ => Ok(tessera_types::view::DECLARED_INCARNATION),
+                    _ => Ok(mosaica_types::view::DECLARED_INCARNATION),
                 }
             })
             .collect::<Result<_, _>>()?;
@@ -2052,7 +2052,7 @@ impl LayerRegistry {
                     .collect::<Result<_, _>>()?;
                 resolved.sort_unstable();
                 resolved.dedup();
-                if resolved.len() > 1 && kind != tessera_types::layer::HierarchyKind::Dag {
+                if resolved.len() > 1 && kind != mosaica_types::layer::HierarchyKind::Dag {
                     let mut named = artifact.parent_keys.clone();
                     named.sort_unstable();
                     named.dedup();
@@ -2383,7 +2383,7 @@ impl LayerRegistry {
                     .get(&layer)
                     .expect("resolve_growth_key found the layer before it reached the key")
                     .declaration;
-                if declaration.value_set != tessera_types::layer::ValueSet::Open {
+                if declaration.value_set != mosaica_types::layer::ValueSet::Open {
                     return Err(RegistryError::NoSuchArtifact { layer, level, key });
                 }
                 let unmintable = |why: &str| {
@@ -2662,13 +2662,13 @@ impl LayerRegistry {
         };
         let cross_level = matches!(
             layer.declaration.hierarchy.kind,
-            tessera_types::layer::HierarchyKind::Tiered
+            mosaica_types::layer::HierarchyKind::Tiered
         );
         let edges_allowed = cross_level
             || matches!(
                 layer.declaration.hierarchy.kind,
-                tessera_types::layer::HierarchyKind::Nested
-                    | tessera_types::layer::HierarchyKind::Dag
+                mosaica_types::layer::HierarchyKind::Nested
+                    | mosaica_types::layer::HierarchyKind::Dag
             );
         if !edges_allowed {
             return Err(RegistryError::EdgesOnUntreedLayer {
@@ -2788,7 +2788,7 @@ impl LayerRegistry {
         &mut self,
         layer: &str,
         level: u32,
-        layout: tessera_types::layer::ServingLayout,
+        layout: mosaica_types::layer::ServingLayout,
     ) -> bool {
         let Some(registered) = self.layers.get_mut(layer) else {
             return false;
@@ -2806,7 +2806,7 @@ impl LayerRegistry {
     }
 
     /// Choose the layout of the level `record` publishes into, where the level holds no artifact
-    /// before it: the rule a build applies ([`tessera_types::layer::choose`]) over the
+    /// before it: the rule a build applies ([`mosaica_types::layer::choose`]) over the
     /// memberships this publication carries. Called before `store` applies the record, on the live
     /// path and on replay alike, so both record the same layout. Returns the level where its
     /// layout moved: a form held in the layout it had before is not asked for again. The cost is
@@ -2837,7 +2837,7 @@ impl LayerRegistry {
             return None;
         }
         let declaration = &self.layers.get(layer)?.declaration;
-        let chosen = tessera_types::layer::choose(declaration, publication_shape(artifacts));
+        let chosen = mosaica_types::layer::choose(declaration, publication_shape(artifacts));
         self.set_layout(layer, *level, chosen)
             .then(|| (layer.clone(), *level))
     }
@@ -3018,14 +3018,14 @@ mod tests {
     struct AnyView;
 
     impl GroupViews for AnyView {
-        fn incarnation_of(&self, _: &str, _: &str) -> Option<tessera_types::view::ViewIncarnation> {
-            Some(tessera_types::view::DECLARED_INCARNATION)
+        fn incarnation_of(&self, _: &str, _: &str) -> Option<mosaica_types::view::ViewIncarnation> {
+            Some(mosaica_types::view::DECLARED_INCARNATION)
         }
         fn keys_of(&self, _: &str) -> Vec<String> {
             Vec::new()
         }
     }
-    use tessera_types::layer::{
+    use mosaica_types::layer::{
         ExistenceCriterion, Hierarchy, HierarchyKind, MembershipSource, ServingLayout,
         RESERVED_BLOCK,
     };
@@ -3039,7 +3039,7 @@ mod tests {
             membership: MembershipSource::Enumerated,
             value_set: Default::default(),
             visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
             require_member_visibility: Some(ExistenceCriterion::Count(50)),
             hierarchy: Hierarchy {
                 kind: HierarchyKind::Flat,
@@ -3084,7 +3084,7 @@ mod tests {
         );
         assert_eq!(
             layer.runs[0].capacity(),
-            tessera_types::layer::RESERVED_BLOCK
+            mosaica_types::layer::RESERVED_BLOCK
         );
         // The layer's own entity is not inside its level's run — it is a separate object, and
         // suppressing the layer must not suppress an artifact ordinal.
@@ -3958,7 +3958,7 @@ mod tests {
         // The second layer's *level* run took a block; its entity came from the block already held.
         assert_eq!(
             alloc.low_water(),
-            after_first - tessera_types::layer::RESERVED_BLOCK
+            after_first - mosaica_types::layer::RESERVED_BLOCK
         );
         let a = reg.get("a").unwrap().entity.raw();
         let b = reg.get("b").unwrap().entity.raw();
@@ -3971,7 +3971,7 @@ mod tests {
         register(&mut reg, &mut alloc, declaration("c")).unwrap();
         assert_eq!(
             alloc.low_water(),
-            before - 2 * tessera_types::layer::RESERVED_BLOCK,
+            before - 2 * mosaica_types::layer::RESERVED_BLOCK,
             "one block for the level, one fresh block for the entity cursor"
         );
         assert_ne!(reg.get("c").unwrap().entity.raw(), b + 1);
@@ -3983,10 +3983,10 @@ mod tests {
     /// filled on its own.
     fn described(name: &str) -> LayerDeclaration {
         let mut d = declaration(name);
-        d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        d.content.supplied = vec![mosaica_types::layer::SuppliedContent {
             name: "topic".into(),
             ty: "text".into(),
-            require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited,
+            require_member_visibility: mosaica_types::layer::SuppliedRequirement::Inherited,
         }];
         d
     }
@@ -4395,7 +4395,7 @@ mod tests {
         let mut alloc = Allocator::new(0);
         let mut layer = described("topics/all");
         layer.content.supplied[0].require_member_visibility =
-            tessera_types::layer::SuppliedRequirement::All;
+            mosaica_types::layer::SuppliedRequirement::All;
         register(&mut reg, &mut alloc, layer).unwrap();
         let put = reg
             .prepare_put(
@@ -4586,7 +4586,7 @@ mod tests {
     /// A group-scoped layer, whose artifacts are a set per view of the group.
     fn scoped(name: &str, group: &str) -> LayerDeclaration {
         let mut d = declaration(name);
-        d.scope = tessera_types::layer::LayerScope::Group(group.into());
+        d.scope = mosaica_types::layer::LayerScope::Group(group.into());
         d
     }
 
@@ -4597,14 +4597,14 @@ mod tests {
     }
 
     /// One group's views at their incarnations.
-    struct Quarter(&'static [(&'static str, tessera_types::view::ViewIncarnation)]);
+    struct Quarter(&'static [(&'static str, mosaica_types::view::ViewIncarnation)]);
 
     impl GroupViews for Quarter {
         fn incarnation_of(
             &self,
             group: &str,
             key: &str,
-        ) -> Option<tessera_types::view::ViewIncarnation> {
+        ) -> Option<mosaica_types::view::ViewIncarnation> {
             (group == "quarter")
                 .then(|| self.0.iter().find(|(held, _)| *held == key).map(|(_, at)| *at))
                 .flatten()
@@ -4889,7 +4889,7 @@ mod tests {
         let mut alloc = Allocator::new(0);
         let mut store = ArtifactStore::default();
         let mut d = scoped("clusters/q", "quarter");
-        d.value_set = tessera_types::layer::ValueSet::Open;
+        d.value_set = mosaica_types::layer::ValueSet::Open;
         register(&mut reg, &mut alloc, d).unwrap();
         publish(
             &mut reg,
@@ -4986,7 +4986,7 @@ mod tests {
         let mut alloc = Allocator::new(0);
         let store = ArtifactStore::default();
         let mut d = declaration("clusters/a");
-        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        d.artifact_visibility = mosaica_types::layer::ArtifactVisibility::carried("team");
         register(&mut reg, &mut alloc, d).unwrap();
         let mark = alloc.low_water();
         for batch in [vec![incoming("c1", &[1])], vec![unlabelled("c0", &[2]), incoming("c1", &[1])]]
@@ -5011,7 +5011,7 @@ mod tests {
         let mut alloc = Allocator::new(0);
         let mut store = ArtifactStore::default();
         let mut d = declaration("clusters/a");
-        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        d.artifact_visibility = mosaica_types::layer::ArtifactVisibility::carried("team");
         register(&mut reg, &mut alloc, d).unwrap();
 
         let mut first = incoming("c1", &[1]);
@@ -5080,7 +5080,7 @@ mod tests {
         let mut alloc = Allocator::new(0);
         let mut store = ArtifactStore::default();
         let mut d = declaration("clusters/a");
-        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        d.artifact_visibility = mosaica_types::layer::ArtifactVisibility::carried("team");
         register(&mut reg, &mut alloc, d).unwrap();
         publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[unlabelled("held", &[1])]).unwrap();
 

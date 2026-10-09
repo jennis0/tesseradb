@@ -9,8 +9,8 @@ edition = "2021"
 
 [dependencies]
 # **The shipped dictionary**, so what is timed is the format's own decoder and not a model of it.
-tessera-filter = { path = "../../../crates/tessera-filter" }
-# The candidate arm for the hoisted searcher. Already a direct dependency of `tessera-filter` for
+mosaica-filter = { path = "../../../crates/mosaica-filter" }
+# The candidate arm for the hoisted searcher. Already a direct dependency of `mosaica-filter` for
 # `scan_text_contains`'s region search, so this arm proposes no new dependency for the engine —
 # only moving one that the flat scan already carried.
 memchr = "2"

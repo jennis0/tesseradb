@@ -16,7 +16,7 @@
 //!
 //! # The six structures, and why not one
 //!
-//! [`tessera_filter::SortedDict`] carries no payload and refuses duplicate keys, and two values can
+//! [`mosaica_filter::SortedDict`] carries no payload and refuses duplicate keys, and two values can
 //! fold to one entry string — `cs.LG` and `CS.lg`, or two titles differing only in case — so the
 //! index is six mapped files rather than one:
 //!
@@ -66,8 +66,8 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_analyse::{EntryKind, SuggestionField, SuggestionFold};
-use tessera_filter::{Access, SortedDict, SortedDictWriter};
+use mosaica_analyse::{EntryKind, SuggestionField, SuggestionFold};
+use mosaica_filter::{Access, SortedDict, SortedDictWriter};
 
 /// The subdirectory of the engine's cache directory every vocabulary's index lives under.
 ///
@@ -137,7 +137,7 @@ fn u32_at(bytes: &[u8], index: usize) -> u32 {
 
 /// One value of a vocabulary, as the index is built from it.
 ///
-/// Taken in **key order** — the order [`tessera_store::vocabulary::VocabularyMinter::bindings`]
+/// Taken in **key order** — the order [`mosaica_store::vocabulary::VocabularyMinter::bindings`]
 /// yields — because the position is that order's index and the payload sort's tie-break is by key.
 #[derive(Debug, Clone)]
 pub struct SuggestValue {
@@ -815,7 +815,7 @@ impl SuggestIndexes {
     /// typeahead.
     pub fn build(
         parent: &Path,
-        vocabularies: &tessera_store::vocabulary::Vocabularies,
+        vocabularies: &mosaica_store::vocabulary::Vocabularies,
         names: impl IntoIterator<Item = String>,
         pool: &rayon::ThreadPool,
     ) -> SuggestIndexes {
@@ -848,7 +848,7 @@ impl SuggestIndexes {
     pub fn with_mints(
         self: &Arc<Self>,
         fold: &SuggestionFold,
-        vocabularies: &tessera_store::vocabulary::Vocabularies,
+        vocabularies: &mosaica_store::vocabulary::Vocabularies,
         mints: &[(String, String, u32)],
     ) -> Arc<SuggestIndexes> {
         // **Every commit window publishes; almost none mints.** Taking the `Arc` rather than a
@@ -874,7 +874,7 @@ impl SuggestIndexes {
 }
 
 /// A vocabulary's values in key order — the order the dense position indexes.
-pub fn values_of(minter: &tessera_store::vocabulary::VocabularyMinter) -> Vec<SuggestValue> {
+pub fn values_of(minter: &mosaica_store::vocabulary::VocabularyMinter) -> Vec<SuggestValue> {
     minter
         .bindings()
         .map(|(key, code)| SuggestValue {

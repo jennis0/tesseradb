@@ -13,17 +13,17 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
-use tessera_engine::{
+use mosaica_engine::{
     ArtifactOut, Engine, EngineError, LayerSelection, SinkResult, ViewportArtifactsHead,
     ViewportArtifactsOut, ViewportArtifactsRequest, ViewportArtifactsSink, ViewportRequest,
 };
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::membership::IncomingAttachment;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::membership::IncomingAttachment;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, TesseraId};
 
 /// A partition of the corpus, stored by row: every artifact is a run of source ids, which the
 /// fixture scatters over the whole map, in a handful of sizes so counts tie.
@@ -42,7 +42,7 @@ fn declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -406,7 +406,7 @@ fn a_denied_member_removes_its_artifact_from_its_tile_on_the_next_request() {
 
 /// A sink that cancels the request once it has its first frame.
 struct CancelAfterFirst {
-    cancel: tessera_engine::CancelToken,
+    cancel: mosaica_engine::CancelToken,
     frames: usize,
 }
 
@@ -428,7 +428,7 @@ impl ViewportArtifactsSink for CancelAfterFirst {
 fn a_cancelled_request_stops_between_tiles() {
     let fx = fixture();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
-    let cancel = tessera_engine::CancelToken::new();
+    let cancel = mosaica_engine::CancelToken::new();
     let mut sink = CancelAfterFirst {
         cancel: cancel.clone(),
         frames: 0,

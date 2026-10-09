@@ -1,10 +1,10 @@
 /**
- * The `tessera-*` custom elements. Importing the root entry defines every element. A host that
- * wants one element imports its subpath, such as `@tesseradb/components/count`. The map, the
+ * The `mosaica-*` custom elements. Importing the root entry defines every element. A host that
+ * wants one element imports its subpath, such as `@mosaica/components/count`. The map, the
  * explorer, the field card, the field column, the colour editor and the artifact card import
- * `@tesseradb/deck`, which depends on deck.gl; the other elements do not.
+ * `@mosaica/deck`, which depends on deck.gl; the other elements do not.
  *
- * @module @tesseradb/components
+ * @module @mosaica/components
  */
 import './store-element.js';
 import './count.js';
@@ -22,23 +22,23 @@ import './colour-editor.js';
 import './map.js';
 import './explorer.js';
 
-export {TesseraStore} from './store-element.js';
-export {TesseraCount} from './count.js';
-export {TesseraStatus} from './status.js';
-export {TesseraItemCard} from './item-card.js';
-export {TesseraFieldCard} from './field-card.js';
-export {TesseraFilterPanel} from './filter-panel.js';
-export {TesseraSelection} from './selection.js';
-export {TesseraLayerPicker} from './layer-picker.js';
-export {TesseraViewPicker} from './view-picker.js';
-export {TesseraKeyPicker} from './key-picker.js';
-export {TesseraArtifactCard} from './artifact-card.js';
-export {TesseraHierarchy} from './hierarchy.js';
-export {TesseraColourEditor} from './colour-editor.js';
-export {TesseraMap, type MapProbe} from './map.js';
-export {TesseraExplorer} from './explorer.js';
+export {MosaicaStore} from './store-element.js';
+export {MosaicaCount} from './count.js';
+export {MosaicaStatus} from './status.js';
+export {MosaicaItemCard} from './item-card.js';
+export {MosaicaFieldCard} from './field-card.js';
+export {MosaicaFilterPanel} from './filter-panel.js';
+export {MosaicaSelection} from './selection.js';
+export {MosaicaLayerPicker} from './layer-picker.js';
+export {MosaicaViewPicker} from './view-picker.js';
+export {MosaicaKeyPicker} from './key-picker.js';
+export {MosaicaArtifactCard} from './artifact-card.js';
+export {MosaicaHierarchy} from './hierarchy.js';
+export {MosaicaColourEditor} from './colour-editor.js';
+export {MosaicaMap, type MapProbe} from './map.js';
+export {MosaicaExplorer} from './explorer.js';
 export type {StoreSource} from './base.js';
-export type {SelectionShapeDetail, TesseraEventDetails, TesseraEventMap} from './events.js';
+export type {SelectionShapeDetail, MosaicaEventDetails, MosaicaEventMap} from './events.js';
 export type {PanelState} from './states.js';
 export {PARTS, type PartsOf} from './parts.js';
 export {storeContext} from './context.js';

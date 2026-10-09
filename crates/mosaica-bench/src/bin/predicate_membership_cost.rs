@@ -93,7 +93,7 @@
 //!
 //! **Where the column actually lives, because the first draft of this arm assumed wrong.** Not the
 //! render table: `membership = { attribute = … }` names an **indexed** column, and `attrs/` holds
-//! it as a `tessera_filter::ValueColumn` — a dense typed code array plus a presence bitmap,
+//! it as a `mosaica_filter::ValueColumn` — a dense typed code array plus a presence bitmap,
 //! addressed by **entity**. That is what `FilterColumns::category_membership` already walks to
 //! answer *which values can this principal see*. Entity space is also where the counting pass wants
 //! to be: a masked count is `|membership ∩ M_auth|` and `M_auth` is entity-space, so that pass
@@ -193,20 +193,20 @@
 //!
 //! Run at a second corpus size by passing one: `… --bin predicate_membership_cost 10000000`.
 //!
-//! Run: `cargo run --release -p tessera-bench --bin predicate_membership_cost`
+//! Run: `cargo run --release -p mosaica-bench --bin predicate_membership_cost`
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::buffer::ScalarBuffer;
 use croaring::{Bitmap, Portable};
-use tessera_filter::{Codes, ValueColumn};
-use tessera_engine::artifacts::ArtifactRows;
-use tessera_engine::compose::MaskedSet;
-use tessera_lifecycle::membership::ArtifactRecord;
-use tessera_store::permutation::{Permutation, RowSpace};
-use tessera_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
-use tessera_types::{EntityId, RowId};
+use mosaica_filter::{Codes, ValueColumn};
+use mosaica_engine::artifacts::ArtifactRows;
+use mosaica_engine::compose::MaskedSet;
+use mosaica_lifecycle::membership::ArtifactRecord;
+use mosaica_store::permutation::{Permutation, RowSpace};
+use mosaica_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
+use mosaica_types::{EntityId, RowId};
 
 /// Best-of, for the per-request arms. The move arm is single-shot: it is seconds at the top of the
 /// table and a repeat would say the same thing more slowly.
@@ -256,7 +256,7 @@ fn row_space(dir: &std::path::Path, rows: u32) -> RowSpace {
     let row_order = scatter(rows, 7);
     let perm_path = dir.join("permutation.bin");
     let entities: Vec<EntityId> = row_order.iter().map(|&e| EntityId::new(e as u64)).collect();
-    tessera_store::write::write_permutation(&perm_path, &entities, rows as u64)
+    mosaica_store::write::write_permutation(&perm_path, &entities, rows as u64)
         .expect("permutation writes");
     let table_path = dir.join(ROW_ENTITY_FILE);
     write_row_entity(&table_path, &row_order).expect("row-entity table writes");
@@ -289,7 +289,7 @@ fn memberships(rows: u32, n: usize) -> Vec<Bitmap> {
 /// partitions the corpus — a column's distinct values are its artifacts and every point carries
 /// one — and `membership = { attribute = … }` names a column the build has indexed, so `attrs/`
 /// already holds exactly this: a dense typed code array plus a presence bitmap, addressed by entity
-/// (`tessera_filter::ValueColumn`). It is what `FilterColumns::category_membership` already walks
+/// (`mosaica_filter::ValueColumn`). It is what `FilterColumns::category_membership` already walks
 /// to answer *which values can this principal see*; the histogram below accumulates counts over the
 /// same walk.
 ///
@@ -337,7 +337,7 @@ fn records(sets: &[Bitmap]) -> Vec<ArtifactRecord> {
 fn main() {
     // The house idiom for these binaries: a process-named directory under the system temp, removed
     // on the way out rather than left for the next run to reuse by accident.
-    let dir = std::env::temp_dir().join(format!("tessera-predicate-cost-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("mosaica-predicate-cost-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a working directory");
     // The corpus size, so the same layer sizes can be run against two of them — which is what
     // separates "a million artifacts costs this" from "a million members costs this".

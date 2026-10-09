@@ -1,7 +1,7 @@
 """What a viewer's first reads of the taxonomy cost on full GBIF, step by step.
 
     python3 probes/2026-10-06-first-open-fills/first_open.py --deployment data/ladder/gbif \
-        --binary <tessera> --run <bench run.json> --out <out.json> [--reopen] [--cap 24G] [--swap 2G]
+        --binary <mosaica> --run <bench run.json> --out <out.json> [--reopen] [--cap 24G] [--swap 2G]
 
 It starts the binary on a fresh cache over the deployment's bundle, under the cap, with the
 bundle's pages evicted first. For each of the bench's viewers in turn it sends what the store's

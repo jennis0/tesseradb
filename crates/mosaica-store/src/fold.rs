@@ -44,8 +44,8 @@
 //! A segment stores a row's Morton code and its residual — never an axis pair (`write.rs`'s
 //! `SegmentRow` doc). This pass reads both straight off the input's mapped bytes (the code as the
 //! heap key, the residual via [`ColumnsRef::residual`]) and writes them straight through
-//! [`SegmentWriter::append`]. Nothing here calls [`tessera_spatial::unsplit32`] or
-//! [`tessera_spatial::split32`] — a dequantise-then-requantise round trip would move every
+//! [`SegmentWriter::append`]. Nothing here calls [`mosaica_spatial::unsplit32`] or
+//! [`mosaica_spatial::split32`] — a dequantise-then-requantise round trip would move every
 //! surviving point by up to a cell, silently, and no row count would show it (write-path §7).
 //!
 //! ## The scatter is why `permutation.bin` is written through a mapping, not a `Vec`
@@ -79,8 +79,8 @@ use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
 
-use tessera_spatial::tiler::ScalarType;
-use tessera_types::{IdentityKey, TesseraId};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_types::{IdentityKey, TesseraId};
 
 use crate::error::{Result, StoreError};
 use crate::segment_cursor::{gather_scalars, SegmentCursor};
@@ -121,7 +121,7 @@ pub struct FoldRowSpaceSpec<'a> {
     /// the inputs were written. Any other column an input lacks fails the operation.
     pub absent_ok: &'a [String],
     /// `D₀` — the fold plan's tombstone clone (compaction §5), entity ids as a Roaring bitmap
-    /// (matching `tessera_lifecycle::Overlay::deleted`'s representation). A row whose entity is a
+    /// (matching `mosaica_lifecycle::Overlay::deleted`'s representation). A row whose entity is a
     /// member is dropped: not appended to the output segment, not scattered into
     /// `permutation.bin`.
     ///
@@ -358,8 +358,8 @@ pub fn fold_row_space(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_spatial::tiler::ScalarValue;
-    use tessera_types::EntityId;
+    use mosaica_spatial::tiler::ScalarValue;
+    use mosaica_types::EntityId;
 
     use crate::flush::{write_flush_segment, FlushInput, FlushRow};
     use crate::manifest::Quantisation;

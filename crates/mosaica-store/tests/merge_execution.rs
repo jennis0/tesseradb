@@ -5,12 +5,12 @@ mod fixture;
 use std::path::Path;
 
 use fixture::{build_bundle, PARTITION, VIEW};
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use tessera_store::manifest::Quantisation;
-use tessera_store::merge::{execute_merge, MergeInput, MergeSpec};
-use tessera_store::read::{ColumnsRef, MortonSlice};
-use tessera_types::{EntityId, IdentityKey};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
+use mosaica_store::manifest::Quantisation;
+use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
+use mosaica_store::read::{ColumnsRef, MortonSlice};
+use mosaica_types::{EntityId, IdentityKey};
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")
@@ -31,10 +31,10 @@ fn score() -> Vec<(String, ScalarType)> {
 }
 
 /// Entity `e`'s score: none on every fifth entity.
-fn score_of(e: u64) -> tessera_spatial::tiler::ScalarValue {
+fn score_of(e: u64) -> mosaica_spatial::tiler::ScalarValue {
     match e % 5 {
-        0 => tessera_spatial::tiler::ScalarValue::Null,
-        _ => tessera_spatial::tiler::ScalarValue::U32(e as u32 * 3),
+        0 => mosaica_spatial::tiler::ScalarValue::Null,
+        _ => mosaica_spatial::tiler::ScalarValue::U32(e as u32 * 3),
     }
 }
 
@@ -77,7 +77,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
     }
 }
 
-fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::merge::MergeOutput {
+fn merge(root: &Path, inputs: &[MergeInput]) -> mosaica_store::merge::MergeOutput {
     let schema: Vec<(String, ScalarType)> = vec![];
     execute_merge(
         &root.join("v00000"),
@@ -148,11 +148,11 @@ fn a_merged_segment_carries_its_own_bands() {
 
     merge(dir.path(), &[a, b]);
     let merged = seg_dir(dir.path(), "merged-1");
-    let segment = tessera_store::read::SegmentData::load(
+    let segment = mosaica_store::read::SegmentData::load(
         &merged,
         "merged-1",
         1_200,
-        tessera_store::edited::RowEntities::Numbers,
+        mosaica_store::edited::RowEntities::Numbers,
     )
     .unwrap();
     assert!(segment.bands.entries() > 0);
@@ -172,10 +172,10 @@ fn a_merged_segment_carries_its_own_bands() {
     // Each entry's indexed value is its own item's, carried from the input it came from.
     let copy = segment.bands.copy("score").expect("the indexed column is copied");
     for (e, &id) in segment.bands.ids().iter().enumerate() {
-        let entity = key().invert(tessera_types::TesseraId::new(id)).1.raw();
+        let entity = key().invert(mosaica_types::TesseraId::new(id)).1.raw();
         let held = copy.holds(e).then(|| copy.value_at(e));
         let expected = match score_of(entity) {
-            tessera_spatial::tiler::ScalarValue::Null => None,
+            mosaica_spatial::tiler::ScalarValue::Null => None,
             value => Some(value),
         };
         assert_eq!(held, expected, "entry {e}, entity {entity}");
@@ -250,8 +250,8 @@ fn the_extent_maps_every_entity_to_its_merged_row() {
 
     for entity in (100..106).chain(200..205) {
         let row = out.extent.rows[(entity - 100) as usize];
-        assert_ne!(row, tessera_types::ROW_ABSENT, "entity {entity} has a row");
-        let (shard, back) = key().invert(tessera_types::TesseraId::new(
+        assert_ne!(row, mosaica_types::ROW_ABSENT, "entity {entity} has a row");
+        let (shard, back) = key().invert(mosaica_types::TesseraId::new(
             cols.tessera_id()[row as usize],
         ));
         assert_eq!(shard, 0);
@@ -265,7 +265,7 @@ fn the_extent_maps_every_entity_to_its_merged_row() {
     // another entity's row for an id this segment never carried.
     assert_eq!(
         out.extent.rows[(150 - 100) as usize],
-        tessera_types::ROW_ABSENT
+        mosaica_types::ROW_ABSENT
     );
 }
 
@@ -419,10 +419,10 @@ fn a_column_declared_since_the_inputs_is_absent_in_every_row_rather_than_shiftin
 /// rather than the emission ordinal.
 #[test]
 fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
-    use tessera_spatial::tiler::TilerItem;
-    use tessera_spatial::unsplit32;
-    use tessera_store::write::write_segment;
-    use tessera_types::{MortonCode, TesseraId};
+    use mosaica_spatial::tiler::TilerItem;
+    use mosaica_spatial::unsplit32;
+    use mosaica_store::write::write_segment;
+    use mosaica_types::{MortonCode, TesseraId};
 
     let dir = tempfile::TempDir::new().unwrap();
     build_bundle(dir.path(), 10);
@@ -435,7 +435,7 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
     // What the superseded path did: read every input's rows, concatenate, sort by
     // `(morton, tessera_id)`, write through the one segment writer.
     let mut items: Vec<TilerItem> = Vec::new();
-    let mut entity_ids: Vec<tessera_types::EntityId> = Vec::new();
+    let mut entity_ids: Vec<mosaica_types::EntityId> = Vec::new();
     for input in &inputs {
         let d = seg_dir(dir.path(), &input.seg_id);
         let codes = MortonSlice::load(&d.join("morton.u32")).unwrap();
@@ -454,7 +454,7 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
     }
     let expected_dir = dir.path().join("expected");
     std::fs::create_dir_all(&expected_dir).unwrap();
-    let codes = tessera_spatial::sort_batch(&mut items, &mut entity_ids);
+    let codes = mosaica_spatial::sort_batch(&mut items, &mut entity_ids);
     write_segment(&expected_dir, &items, &codes, &[], &[]).expect("the reference segment writes");
 
     merge(dir.path(), &inputs);

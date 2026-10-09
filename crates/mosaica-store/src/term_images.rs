@@ -61,7 +61,7 @@
 //! entry's own container counts require. It does not read the payload, so it does not establish
 //! that a range holds a well-formed frozen bitmap. Nothing in this module verifies those bytes.
 //! That the payload is what the derivation wrote rests on the bundle's digest sweep, which covers
-//! this file as it covers every other file the manifest lists. `tessera_authz`'s cached fragment
+//! this file as it covers every other file the manifest lists. `mosaica_authz`'s cached fragment
 //! is a different arrangement and not a precedent for this one: it records a SHA-256 of its own
 //! frozen bytes in a sidecar and checks it inside its `open`, before it deserialises anything.
 
@@ -76,8 +76,8 @@ use croaring::{Bitmap, BitmapView, Frozen};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-use tessera_types::view::ViewIncarnation;
-use tessera_types::TermId;
+use mosaica_types::view::ViewIncarnation;
+use mosaica_types::TermId;
 
 use crate::derived::{PostingSlice, PostingWalk};
 use crate::permutation::{ProjectScratch, RowSpace};
@@ -91,10 +91,10 @@ use crate::permutation::{ProjectScratch, RowSpace};
 pub const KEEP_ROWS_PER_CONTAINER: u64 = 30;
 
 /// The first eight bytes of a term-image file.
-pub const MAGIC: [u8; 8] = *b"TSMIMG01";
+pub const MAGIC: [u8; 8] = *b"MSMIMG01";
 
 /// The header layout this module writes and reads.
-pub const HEADER_VERSION: u32 = 2;
+pub const HEADER_VERSION: u32 = 3;
 
 /// The fixed header, ahead of the table.
 pub const HEADER_BYTES: usize = 128;
@@ -1051,7 +1051,7 @@ pub struct RouteCosts {
 /// Fitted to the warm forced-route arms of eleven principals over 3.5×10⁹ rows under a 24 GiB cap:
 /// the walk and complement rates through the origin against held and outside entities, the three
 /// split rates by one non-negative least squares over containers and residual entities.
-/// `tessera-bench`'s `route_probe` re-takes them. `split_ns_per_bitset` rests on one principal,
+/// `mosaica-bench`'s `route_probe` re-takes them. `split_ns_per_bitset` rests on one principal,
 /// the only one whose bitset count is not in proportion to its array count.
 pub const ROUTE_COSTS: RouteCosts = RouteCosts {
     walk_ns_per_entity: 13.8,
@@ -1195,7 +1195,7 @@ pub fn chooser_inputs(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tessera_types::EntityId;
+    use mosaica_types::EntityId;
 
     use crate::permutation::Permutation;
 

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tessera_store::unique::{UniqueIndexes, UniqueKey};
+use mosaica_store::unique::{UniqueIndexes, UniqueKey};
 
 /// The entity each of `values` names in the `u64` unique column `attribute` of the bundle built at
 /// `root`. Entity ids are signature-sorted, so a source row's value is how a test finds the item
@@ -14,7 +14,7 @@ pub fn entities_of(
     attribute: &str,
     values: impl IntoIterator<Item = u64>,
 ) -> HashMap<u64, u32> {
-    let bundle = tessera_store::read::open_bundle(root).expect("the built bundle opens");
+    let bundle = mosaica_store::read::open_bundle(root).expect("the built bundle opens");
     let (phash, partition) = bundle.partitions.iter().next().expect("one partition");
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT")).unwrap();
@@ -38,15 +38,15 @@ pub fn entities_of(
 /// [`entities_of`] to find each item by, unless it declares one. Appended, so every declared
 /// column keeps its position.
 #[allow(dead_code)]
-pub fn with_id(mut schema: tessera_build::config::Schema) -> tessera_build::config::Schema {
+pub fn with_id(mut schema: mosaica_build::config::Schema) -> mosaica_build::config::Schema {
     if schema.attributes.iter().any(|a| a.name == "id") {
         return schema;
     }
-    schema.attributes.push(tessera_build::config::Attribute {
+    schema.attributes.push(mosaica_build::config::Attribute {
         field: Some("entity_id".to_string()),
         name: "id".to_string(),
         title: None,
-        ty: tessera_spatial::tiler::ScalarType::U64,
+        ty: mosaica_spatial::tiler::ScalarType::U64,
         analyser: None,
         vocabulary: None,
         value_set: None,
@@ -63,11 +63,11 @@ pub fn with_id(mut schema: tessera_build::config::Schema) -> tessera_build::conf
 pub fn id_attributes(
     points: &Path,
 ) -> (
-    tessera_build::config::Schema,
-    Vec<tessera_build::config::AttributeSource>,
+    mosaica_build::config::Schema,
+    Vec<mosaica_build::config::AttributeSource>,
 ) {
     let schema = with_id(Default::default());
-    let sources = tessera_build::config::AttributeSource::over(points, &schema);
+    let sources = mosaica_build::config::AttributeSource::over(points, &schema);
     (schema, sources)
 }
 

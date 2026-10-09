@@ -26,8 +26,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::UnallocatedRow;
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::UnallocatedRow;
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -49,7 +49,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str, tick_secs
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -71,7 +71,7 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str) -> Engine
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -487,8 +487,8 @@ fn a_restart_rotates_the_content_key() {
 /// that the residual does not exist.
 fn wait_for_viewport(
     engine: &Engine,
-    session: &tessera_engine::Session,
-) -> tessera_engine::viewport::ViewportOut {
+    session: &mosaica_engine::Session,
+) -> mosaica_engine::viewport::ViewportOut {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match engine.viewport(session, whole_extent()) {

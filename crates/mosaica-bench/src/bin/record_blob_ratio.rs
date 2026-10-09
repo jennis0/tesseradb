@@ -43,14 +43,14 @@
 //!
 //! Random single-row read latency is measured too: the figure that decides whether drill-down is
 //! an interaction. §3 quotes 169 µs, taken on title bytes at 256 KiB blocks; at the shipped 32 KiB
-//! a GeoNames row reads in about 50 µs (`tessera_filter::record`).
+//! a GeoNames row reads in about 50 µs (`mosaica_filter::record`).
 //!
 //! **Not measured here**: the coalesce and fold rewrite rates (§11 item 7), and any scale past the
 //! real corpus — arXiv has 2.42M records and this reads a prefix of them, so nothing here speaks
 //! to 10⁹ block behaviour beyond the block target being scale-free by construction.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin record_blob_ratio -- \
+//! cargo run --release -p mosaica-bench --bin record_blob_ratio -- \
 //!     --snapshot ~/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json \
 //!     [--limit 2400000] [--reads 2000]
 //! ```
@@ -60,8 +60,8 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use tessera_filter::{Access, RecordBlob, RecordField, RecordValue, RECORD_BLOCK_TARGET};
-use tessera_filter_write::RecordBlobWriter;
+use mosaica_filter::{Access, RecordBlob, RecordField, RecordValue, RECORD_BLOCK_TARGET};
+use mosaica_filter_write::RecordBlobWriter;
 
 /// One snapshot record, reduced to the fields a blob row would carry. Owned `String`s: the
 /// snapshot is read once and the rows are built three times.
@@ -318,7 +318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         t0.elapsed().as_secs_f64()
     );
 
-    let dir = std::env::temp_dir().join(format!("tessera-record-ratio-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("mosaica-record-ratio-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
 
     println!(
@@ -361,14 +361,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .sum::<u64>();
             encoded.clear();
-            let borrowed: Vec<tessera_filter::RecordFieldRef<'_>> = fields
+            let borrowed: Vec<mosaica_filter::RecordFieldRef<'_>> = fields
                 .iter()
-                .map(|f| tessera_filter::RecordFieldRef {
+                .map(|f| mosaica_filter::RecordFieldRef {
                     tag: f.tag,
                     value: f.value.as_ref().expect("the shapes carry no list"),
                 })
                 .collect();
-            tessera_filter::encode_row(entity as u32, &borrowed, &mut encoded)?;
+            mosaica_filter::encode_row(entity as u32, &borrowed, &mut encoded)?;
             framed_bytes += encoded.len() as u64;
             writer.push_row(entity as u32, &borrowed)?;
             rows += 1;

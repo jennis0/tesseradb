@@ -8,7 +8,7 @@
 
 use std::io::Write;
 
-use tessera_filter::{
+use mosaica_filter::{
     write_sorted_dict, Access, DictError, KeyMatcher, SortedDict, SortedDictWriter, DICT_FILE,
     DICT_FORMAT_VERSION,
 };
@@ -558,12 +558,12 @@ fn a_doctored_footer_refuses() {
 
     let mut bad_magic = good.clone();
     bad_magic[0] = b'X';
-    assert!(malformed(SortedDict::from_vec(bad_magic)).contains("TSDC"));
+    assert!(malformed(SortedDict::from_vec(bad_magic)).contains("MSDC"));
 
     let mut bad_trailer = good.clone();
     let last = good.len() - 1;
     bad_trailer[last] = b'X';
-    assert!(malformed(SortedDict::from_vec(bad_trailer)).contains("TSDC"));
+    assert!(malformed(SortedDict::from_vec(bad_trailer)).contains("MSDC"));
 
     let mut bad_version = good.clone();
     bad_version[layout.footer_at..layout.footer_at + 4]
@@ -637,7 +637,7 @@ fn a_short_file_refuses_before_it_is_mapped() {
     let path = dir.path().join(DICT_FILE);
     std::fs::File::create(&path)
         .unwrap()
-        .write_all(b"TS")
+        .write_all(b"MS")
         .unwrap();
     for access in [Access::Read, Access::Mapped] {
         assert!(malformed(SortedDict::open(&path, access)).contains("minimum"));

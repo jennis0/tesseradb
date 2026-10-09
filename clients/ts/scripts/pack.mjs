@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Around `npm pack` in a package directory: `before` puts the repository's licence at the package
-// root and drops the `tessera-source` conditions from the manifest, since the tarball holds no
+// root and drops the `mosaica-source` conditions from the manifest, since the tarball holds no
 // sources; `after` restores the manifest and removes the licence.
 import {copyFileSync, readFileSync, renameSync, rmSync, writeFileSync} from 'node:fs';
 
@@ -10,7 +10,7 @@ function withoutSource(exports) {
   if (typeof exports !== 'object' || exports === null) return exports;
   return Object.fromEntries(
     Object.entries(exports)
-      .filter(([key]) => key !== 'tessera-source')
+      .filter(([key]) => key !== 'mosaica-source')
       .map(([key, value]) => [key, withoutSource(value)])
   );
 }

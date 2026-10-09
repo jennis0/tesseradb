@@ -33,7 +33,7 @@
 //!   overlay's depth. One cell per `target:window` pair, each over a fresh copy of the fixture.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin write_cost -- \
+//! cargo run --release -p mosaica-bench --bin write_cost -- \
 //!     --fixture target/tmp/arxiv/bundle [--repeat 5] [--only a] [--unique]
 //! ```
 //!
@@ -46,12 +46,12 @@ use ingest_rows::IngestRows;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use tessera_engine::{ExecutorStats, WriteStage};
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
-use tessera_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
-use tessera_store::read::open_bundle;
-use tessera_types::{EntityId, TermId};
+use mosaica_engine::{ExecutorStats, WriteStage};
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
+use mosaica_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
+use mosaica_store::read::open_bundle;
+use mosaica_types::{EntityId, TermId};
 
 /// Descriptors per row. The density every other ingest arm in this crate writes at, so a figure
 /// here is comparable with one there.
@@ -200,14 +200,14 @@ fn open_engine(fx: &Fixture, scratch: &Path, tag: &str) -> Result<Engine, Box<dy
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 86_400,
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
     engine.start_write_executor(4096)?;
@@ -353,7 +353,7 @@ fn experiment_a(
     for round in 0..rounds {
         let engine = open_engine(fx, scratch, &format!("a{round}"))?;
         if unique {
-            engine.declare_attribute(tessera_engine::AttributeRequest {
+            engine.declare_attribute(mosaica_engine::AttributeRequest {
                 name: UNIQUE_COLUMN.to_string(),
                 title: None,
                 ty: "keyword".to_string(),
@@ -361,7 +361,7 @@ fn experiment_a(
                 analyser: None,
                 index: false,
                 render: false,
-                scope: tessera_types::layer::LayerScope::Entity,
+                scope: mosaica_types::layer::LayerScope::Entity,
                 unique: true,
             })?;
         }
@@ -748,15 +748,15 @@ fn declare_vocabulary_column(
 ) -> Result<String, Box<dyn std::error::Error>> {
     const PAGE: usize = 50_000;
     let name = format!("write-cost-vocabulary-{tag}");
-    let value = |i: usize| tessera_lifecycle::DeclaredValue {
+    let value = |i: usize| mosaica_lifecycle::DeclaredValue {
         key: format!("key-{i:08}"),
         title: None,
     };
-    engine.declare_vocabulary(tessera_lifecycle::VocabularyRequest {
+    engine.declare_vocabulary(mosaica_lifecycle::VocabularyRequest {
         name: name.clone(),
         title: None,
-        kind: tessera_types::vocabulary::VocabularyKind::Declared,
-        visibility: tessera_types::vocabulary::Visibility::Derived,
+        kind: mosaica_types::vocabulary::VocabularyKind::Declared,
+        visibility: mosaica_types::vocabulary::Visibility::Derived,
         width: "u32".to_string(),
         values: (0..size.min(PAGE)).map(value).collect(),
         reserved: Vec::new(),
@@ -768,7 +768,7 @@ fn declare_vocabulary_column(
         minted = end;
     }
     let column = format!("write_cost_category_{}", tag.replace('-', "_"));
-    engine.declare_attribute(tessera_lifecycle::AttributeRequest {
+    engine.declare_attribute(mosaica_lifecycle::AttributeRequest {
         name: column.clone(),
         title: None,
         ty: "category".to_string(),
@@ -796,19 +796,19 @@ fn register_predicate(
     Ok(name)
 }
 
-fn predicate_layer(name: &str, view: &str, field: &str) -> tessera_types::layer::LayerDeclaration {
-    tessera_types::layer::LayerDeclaration {
+fn predicate_layer(name: &str, view: &str, field: &str) -> mosaica_types::layer::LayerDeclaration {
+    mosaica_types::layer::LayerDeclaration {
         scope: Default::default(),
         name: name.to_string(),
         title: None,
         views: vec![view.to_string()],
-        membership: tessera_types::layer::MembershipSource::Attribute(field.to_string()),
+        membership: mosaica_types::layer::MembershipSource::Attribute(field.to_string()),
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
-        hierarchy: tessera_types::layer::Hierarchy {
-            kind: tessera_types::layer::HierarchyKind::Flat,
+        hierarchy: mosaica_types::layer::Hierarchy {
+            kind: mosaica_types::layer::HierarchyKind::Flat,
             prune_children: false,
         },
         content: Default::default(),
@@ -1053,7 +1053,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("built without `bench-timing`: every `WriteStage` figure would be zero".into());
     }
 
-    let scratch = std::env::temp_dir().join(format!("tessera-write-cost-{}", std::process::id()));
+    let scratch = std::env::temp_dir().join(format!("mosaica-write-cost-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)?;
     let root = scratch.join("bundle");

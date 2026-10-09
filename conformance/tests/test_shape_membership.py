@@ -302,7 +302,7 @@ def build_bundle(work: Path, points) -> Path:
     config = work / "shapes.toml"
     config.write_text(config_toml())
     bundle = work / "bundle"
-    deployment = write_deployment(work / "tessera.toml", bundle=bundle, schema=config)
+    deployment = write_deployment(work / "mosaica.toml", bundle=bundle, schema=config)
     cli_build(deployment, bundle)
     return bundle
 

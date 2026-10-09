@@ -30,7 +30,7 @@
 //! [`analyser_with_identity`], which returns `None` unless this binary has exactly the recorded
 //! version.
 //!
-//! The conformance oracle tokenises by running `tessera tokenise`. It has no tokeniser of its own,
+//! The conformance oracle tokenises by running `mosaica tokenise`. It has no tokeniser of its own,
 //! because the Python binding (PyICU) wraps ICU4C, whose segmentation can differ from icu4x's, and
 //! a comparison would then test one library against the other. The golden vectors are the
 //! independent check: expected tokens for each script family, reviewed by a person.

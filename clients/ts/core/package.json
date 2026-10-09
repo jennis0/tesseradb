@@ -1,5 +1,5 @@
 {
-  "name": "@tesseradb/client",
+  "name": "@mosaica/client",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -8,17 +8,17 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "tessera-source": "./src/index.ts",
+      "mosaica-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./internal": {
-      "tessera-source": "./src/internal.ts",
+      "mosaica-source": "./src/internal.ts",
       "types": "./dist/internal.d.ts",
       "default": "./dist/internal.js"
     },
     "./decode.worker": {
-      "tessera-source": "./src/decode.worker.ts",
+      "mosaica-source": "./src/decode.worker.ts",
       "types": "./dist/decode.worker.d.ts",
       "default": "./dist/decode.worker.js"
     }

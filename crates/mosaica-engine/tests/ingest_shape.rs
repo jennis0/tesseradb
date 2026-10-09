@@ -59,7 +59,7 @@
 //! stage columns are all zero.
 //!
 //! ```text
-//! cargo test -p tessera-engine --release --features bench-timing --test ingest_shape -- --ignored --nocapture
+//! cargo test -p mosaica-engine --release --features bench-timing --test ingest_shape -- --ignored --nocapture
 //! ```
 
 mod common;
@@ -67,8 +67,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::UnallocatedRow;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::UnallocatedRow;
 
 const BASE: u64 = 1_000_000;
 /// Rows per configuration. Enough to swamp the per-run fixed costs at every batch size tried, and
@@ -89,7 +89,7 @@ fn engine(tmp: &std::path::Path, root: &std::path::Path, window: usize) -> Engin
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )

@@ -15,7 +15,7 @@
 //! this mechanism most needs to exclude is a running process and the same bundle after a restart
 //! disagreeing about what an ordinal means. That was a real fail-open — `Dict::load` counted a
 //! repeated descriptor that `Dict::load_extending` skipped, shifting every ordinal after it — and
-//! `tessera-authz`'s own tests pin the loader law. These pin what a flush writes.
+//! `mosaica-authz`'s own tests pin the loader law. These pin what a flush writes.
 
 mod common;
 
@@ -23,9 +23,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_types::EntityId;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -51,7 +51,7 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config()
         },
     )
@@ -73,7 +73,7 @@ fn reader_at(tmp: &Path, root: &Path) -> Engine {
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config()
         },
     )
@@ -111,7 +111,7 @@ fn base_extent() -> Vec<Vec<u8>> {
     // `public` first: every build reserves it at term 0 (`per-point-attributes.md` §3.8), so it is
     // the build extent's first record whether or not any item carries it.
     vec![
-        tessera_authz::PUBLIC_LABEL.to_vec(),
+        mosaica_authz::PUBLIC_LABEL.to_vec(),
         b"0".to_vec(),
         b"1".to_vec(),
     ]
@@ -120,7 +120,7 @@ fn base_extent() -> Vec<Vec<u8>> {
 /// The descriptors a partition's dict extents carry, in listed order — read off disk, so this
 /// asserts the artefact rather than a lookup's opinion of it.
 fn extent_records(root: &Path, prefix: &str) -> Vec<Vec<Vec<u8>>> {
-    let bundle = tessera_store::open_bundle(root).expect("the bundle opens");
+    let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     let prefix_dir = root.join(prefix);
     partition
@@ -159,7 +159,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     let before = engine.authorise(&credential).expect("authorises");
     assert_eq!(
         *before.satisfied_for_test(),
-        [tessera_authz::PUBLIC_TERM].into_iter().collect(),
+        [mosaica_authz::PUBLIC_TERM].into_iter().collect(),
         "the descriptor does not exist yet, so this session satisfies nothing but the reserved \
          `public` term every session holds"
     );
@@ -205,7 +205,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     // §3.2's first consequence, preserved: the older session never gains it.
     assert_eq!(
         *before.satisfied_for_test(),
-        [tessera_authz::PUBLIC_TERM].into_iter().collect(),
+        [mosaica_authz::PUBLIC_TERM].into_iter().collect(),
         "`satisfied` is fixed at authorise; a promotion never reaches back into a live session"
     );
 }
@@ -306,7 +306,7 @@ fn promotion_past_the_term_ceiling_refuses_the_flush() {
             flush_max_age_secs: 1,
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config()
         },
     )

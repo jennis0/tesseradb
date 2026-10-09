@@ -31,11 +31,11 @@ pub enum BuildError {
     Declaration(String),
     /// The input violates an invariant the bundle format depends on.
     Invalid(String),
-    Store(tessera_store::error::StoreError),
+    Store(mosaica_store::error::StoreError),
     /// A `tessera_id` derivation failed — in this build, always
-    /// [`tessera_types::IdentityError::EntityOutOfRange`], which the allocator cap (I-1) makes
+    /// [`mosaica_types::IdentityError::EntityOutOfRange`], which the allocator cap (I-1) makes
     /// unreachable in practice. Never a truncation: see `IdentityKey::forward`'s doc comment.
-    Identity(tessera_types::IdentityError),
+    Identity(mosaica_types::IdentityError),
 }
 
 impl BuildError {
@@ -82,14 +82,14 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-impl From<tessera_store::error::StoreError> for BuildError {
-    fn from(e: tessera_store::error::StoreError) -> Self {
+impl From<mosaica_store::error::StoreError> for BuildError {
+    fn from(e: mosaica_store::error::StoreError) -> Self {
         BuildError::Store(e)
     }
 }
 
-impl From<tessera_types::IdentityError> for BuildError {
-    fn from(e: tessera_types::IdentityError) -> Self {
+impl From<mosaica_types::IdentityError> for BuildError {
+    fn from(e: mosaica_types::IdentityError) -> Self {
         BuildError::Identity(e)
     }
 }

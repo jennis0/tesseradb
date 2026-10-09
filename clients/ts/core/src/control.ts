@@ -556,7 +556,7 @@ export type ProviderDeclaration = {
 export type ProviderRecord = Required<ProviderDeclaration> & {
   /** The provider's name. */
   name: string;
-  /** Declared in `tessera.toml`, so the API cannot change or remove it. */
+  /** Declared in `mosaica.toml`, so the API cannot change or remove it. */
   read_only: boolean;
 };
 
@@ -611,7 +611,7 @@ export type ControlOptions = {
   fetch?: typeof fetch;
   /**
    * Headers sent on every request. The headers a route sets itself (`authorization`,
-   * `content-type`, and on the row routes `x-tessera-batch-id` and `x-tessera-view`) replace one of
+   * `content-type`, and on the row routes `x-mosaica-batch-id` and `x-mosaica-view`) replace one of
    * the same name here.
    */
   headers?: Record<string, string>;
@@ -665,12 +665,12 @@ export type StrictOptions = WriteOptions & {
  */
 export type RowOptions = StrictOptions & {
   /**
-   * The batch id, sent in `x-tessera-batch-id`. Defaults to a random id made once per call. Pass
+   * The batch id, sent in `x-mosaica-batch-id`. Defaults to a random id made once per call. Pass
    * the `batch` of an earlier {@link RowAnswer} to send its body again.
    */
   batch?: string;
   /**
-   * The view the rows belong to, sent in `x-tessera-view`. Required where the database has more
+   * The view the rows belong to, sent in `x-mosaica-view`. Required where the database has more
    * than one view; an unknown view is refused with `404`.
    */
   view?: string;
@@ -808,8 +808,8 @@ export class Control {
 
   private async rows(path: string, body: Uint8Array, options: RowOptions): Promise<RowAnswer> {
     const batch = options.batch ?? freshBatch();
-    const headers: Record<string, string> = {'content-type': ARROW, 'x-tessera-batch-id': batch};
-    if (options.view !== undefined) headers['x-tessera-view'] = options.view;
+    const headers: Record<string, string> = {'content-type': ARROW, 'x-mosaica-batch-id': batch};
+    if (options.view !== undefined) headers['x-mosaica-view'] = options.view;
     const answer = (await this.send('POST', withQuery(path, naming(options)), options, body, headers)) as Answer<IngestResponse>;
     return {...answer, batch};
   }
@@ -1094,7 +1094,7 @@ export class Control {
     return this.sendJson('POST', '/control/grants/revoke', grant, options) as Promise<Answer<CatalogueChange>>;
   }
 
-  /** `GET /control/providers`: every OIDC provider, declared through the API or in `tessera.toml`, in `body.providers`. */
+  /** `GET /control/providers`: every OIDC provider, declared through the API or in `mosaica.toml`, in `body.providers`. */
   listProviders(options: CallOptions = {}): Promise<Answer<{providers: ProviderRecord[]}>> {
     return this.send('GET', '/control/providers', options) as Promise<Answer<{providers: ProviderRecord[]}>>;
   }
@@ -1106,7 +1106,7 @@ export class Control {
 
   /**
    * `PUT /control/providers/{name}`: declares a provider, or replaces one whole. Every session
-   * authorised through a provider it replaces ends. One declared in `tessera.toml` is `409`.
+   * authorised through a provider it replaces ends. One declared in `mosaica.toml` is `409`.
    */
   putProvider(name: string, declaration: ProviderDeclaration, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
     return this.sendJson('PUT', `/control/providers/${segment(name)}`, declaration, options) as Promise<Answer<CatalogueChange>>;

@@ -64,6 +64,6 @@
           <text x="400" y="408" fill="#101820">answers how many, where, and which examples — pannable</text>
           <text x="400" y="424" fill="#101820">and zoomable at up to 10⁹ documents, updating continuously</text>
         </g>
-        <text x="20" y="460" font-size="11" fill="#5b6a75">the corpus and its permissions come from the caller: Tessera holds positions, permission terms and declared fields — never the documents themselves</text>
+        <text x="20" y="460" font-size="11" fill="#5b6a75">the corpus and its permissions come from the caller: Mosaica holds positions, permission terms and declared fields — never the documents themselves</text>
       
 </svg>

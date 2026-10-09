@@ -25,7 +25,7 @@ use std::collections::BinaryHeap;
 use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 
-use tessera_types::layer::ComputedProperty;
+use mosaica_types::layer::ComputedProperty;
 
 use super::artifacts::{
     level_is_selected, lineage_kind, requested_layers, settle_response, tile_rows, viewport_sets,
@@ -739,11 +739,11 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::artifacts::MembershipRows;
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
 
     /// What [`PROBE_ROWS_PER_CHUNK`] is set from: the time a probe that finds nothing takes for
     /// each 2¹⁶-row chunk of a tile, over the time the scan takes for each visible row. Run with
-    /// `cargo test --release -p tessera-engine probe_against_scan -- --ignored --nocapture`.
+    /// `cargo test --release -p mosaica-engine probe_against_scan -- --ignored --nocapture`.
     #[test]
     #[ignore = "a measurement"]
     fn probe_against_scan() {

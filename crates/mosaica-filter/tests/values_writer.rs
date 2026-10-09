@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use croaring::Bitmap;
-use tessera_filter::{write_value_column, Codes, ColumnKind, ValueColumn, ValueColumnWriter};
+use mosaica_filter::{write_value_column, Codes, ColumnKind, ValueColumn, ValueColumnWriter};
 
 fn read(path: &Path) -> Vec<u8> {
     std::fs::read(path).expect("the writer wrote a file")
@@ -140,7 +140,7 @@ fn a_partial_column_streams_its_presence_bitmap_too() {
     let opened = ValueColumn::open(
         &dir.path().join("streamed.arrow"),
         Some(&dir.path().join("streamed.roaring")),
-        tessera_filter::Access::Read,
+        mosaica_filter::Access::Read,
     )
     .expect("open");
     assert_eq!(opened.value_of(11).map(|v| v.raw()), Some(0));

@@ -18,17 +18,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::filter::{FilterExpr, RegionLeaf};
-use tessera_engine::shapes::ShapeF64;
-use tessera_engine::{Engine, LayerSelection, RegionVerdict, ViewportOut, ViewportRequest};
-use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
-use tessera_spatial::fixed32;
-use tessera_spatial::shape::{Shape, Space};
-use tessera_types::layer::{
+use mosaica_engine::filter::{FilterExpr, RegionLeaf};
+use mosaica_engine::shapes::ShapeF64;
+use mosaica_engine::{Engine, LayerSelection, RegionVerdict, ViewportOut, ViewportRequest};
+use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
+use mosaica_spatial::fixed32;
+use mosaica_spatial::shape::{Shape, Space};
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, TesseraId};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -268,7 +268,7 @@ fn past_the_cell_budget_the_answer_is_a_cover_whose_verdict_is_the_shapes_alone(
     assert!(matched(&full) < N_ITEMS, "and not the whole map");
 
     // Back at the default budget the same shape is exact again — the budget is in the key.
-    engine.set_max_region_cells(tessera_engine::DEFAULT_MAX_REGION_CELLS);
+    engine.set_max_region_cells(mosaica_engine::DEFAULT_MAX_REGION_CELLS);
     let exact = viewport(&engine, &full_coverage_credential(), Some(region(&shape)));
     assert_eq!(exact.region, Some(RegionVerdict::Exact));
     assert_eq!(matched(&exact), exact_full);
@@ -283,7 +283,7 @@ fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclar
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -337,7 +337,7 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
     let served = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
         )
         .unwrap()
         .artifacts();
@@ -480,14 +480,14 @@ fn merge_engine(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_engine::EngineConfig {
+        mosaica_engine::EngineConfig {
             flush_max_age_secs: 3600,
             // **The row trigger off.** This cell drives publication itself — it pins `B`
             // by flushing and waiting, so a trigger that published on its own would
             // measure a different buffer depth than the one the sweep set.
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..common::config_uncapped()
         },
     )
@@ -505,14 +505,14 @@ fn merge_engine(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
 fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
     let mut entities = Vec::new();
     for s in 0..TIER_WIDTH {
-        let rows: Vec<tessera_lifecycle::UnallocatedRow> = (0..ROWS_EACH)
+        let rows: Vec<mosaica_lifecycle::UnallocatedRow> = (0..ROWS_EACH)
             .map(|t| {
                 let descriptors = if t.is_multiple_of(2) {
                     vec![b"0".to_vec(), b"1".to_vec()]
                 } else {
                     vec![b"0".to_vec()]
                 };
-                tessera_lifecycle::UnallocatedRow {
+                mosaica_lifecycle::UnallocatedRow {
                     view: "s0".to_string(),
                     join: None,
                     x: flushed_x(s, t),
@@ -541,8 +541,8 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
 /// Flush one more segment of items placed **outside the band**, so the corpus grows and the
 /// segment list lengthens without moving the answer under test.
 fn flush_filler_segment(engine: &Engine, n: usize) {
-    let rows: Vec<tessera_lifecycle::UnallocatedRow> = (0..4)
-        .map(|i| tessera_lifecycle::UnallocatedRow {
+    let rows: Vec<mosaica_lifecycle::UnallocatedRow> = (0..4)
+        .map(|i| mosaica_lifecycle::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             x: (700 + i * 20) as f64,

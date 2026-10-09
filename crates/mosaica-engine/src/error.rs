@@ -2,8 +2,8 @@
 
 use std::io;
 
-use tessera_lifecycle::wal::WalError;
-use tessera_store::StoreError;
+use mosaica_lifecycle::wal::WalError;
+use mosaica_store::StoreError;
 
 /// Engine-level failures. Every variant here is fail-closed: none of them hand back a partial or
 /// best-effort result.

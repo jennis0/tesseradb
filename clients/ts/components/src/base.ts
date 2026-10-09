@@ -1,13 +1,13 @@
 import {ContextConsumer} from '@lit/context';
 import {LitElement, type PropertyValues} from 'lit';
 import {property} from 'lit/decorators.js';
-import {createStore, type SelectionShape, type Store, type TokenSupplier} from '@tesseradb/client';
-import type {SelectionShapeDetail, TesseraEventDetails} from './events.js';
+import {createStore, type SelectionShape, type Store, type TokenSupplier} from '@mosaica/client';
+import type {SelectionShapeDetail, MosaicaEventDetails} from './events.js';
 import {storeContext} from './context.js';
 
 /**
- * Where an element's store came from: its `store` property, a `<tessera-store>` or
- * `<tessera-explorer>` above it (`context`), one it built itself from `viewer-url` and `token` or
+ * Where an element's store came from: its `store` property, a `<mosaica-store>` or
+ * `<mosaica-explorer>` above it (`context`), one it built itself from `viewer-url` and `token` or
  * `authorise` (`own`), or none (`detached`), in which case it renders its detached state.
  */
 export type StoreSource = 'property' | 'context' | 'own' | 'detached';
@@ -20,7 +20,7 @@ type OwnConfig = {viewerUrl: string; token: string; authorise: TokenSupplier | n
  *
  * Store precedence: a `.store` property; else a context answer (a provider that connects after an
  * element built its own store is not adopted); else, for the map, the explorer and
- * `<tessera-store>`, its own store from `viewer-url`, `token` or an `authorise` property, and
+ * `<mosaica-store>`, its own store from `viewer-url`, `token` or an `authorise` property, and
  * `artifacts-per-tile`; else
  * detached, which renders nothing. An own store is built once those attributes suffice, and
  * replaced when `viewer-url`, `token` or the `authorise` function changes. A store handed in by
@@ -30,33 +30,33 @@ type OwnConfig = {viewerUrl: string; token: string; authorise: TokenSupplier | n
  * reorder them, and JupyterLab scrolls notebook cells out of the DOM; a new store each time would
  * refetch the view. An own store lives until `dispose()` or until its attributes change.
  */
-export abstract class TesseraElement extends LitElement {
+export abstract class MosaicaElement extends LitElement {
   /**
    * The store to read, which outranks a store from context and the element's own. The element does
    * not dispose a store it was given.
    */
   @property({attribute: false}) accessor store: Store | null = null;
   /**
-   * The viewer plane's base URL. Only `<tessera-map>`, `<tessera-explorer>` and `<tessera-store>`
+   * The viewer plane's base URL. Only `<mosaica-map>`, `<mosaica-explorer>` and `<mosaica-store>`
    * read it, to build their own store where no `store` property or context supplies one. Changing
    * it builds a new store.
    */
   @property({attribute: 'viewer-url'}) accessor viewerUrl = '';
   /**
    * A viewer token for the store the element builds from `viewer-url`. Only the map, the explorer
-   * and `<tessera-store>` read it. Changing it builds a new store.
+   * and `<mosaica-store>` read it. Changing it builds a new store.
    */
   @property() accessor token = '';
   /**
    * A token supplier, used in place of `token`, which the store calls to renew the token before it
    * expires. Setting another function builds a new store, since a store serves one viewer (see
-   * `Store` in `@tesseradb/client`), so a framework keeps the function stable across renders.
+   * `Store` in `@mosaica/client`), so a framework keeps the function stable across renders.
    */
   @property({attribute: false}) accessor authorise: TokenSupplier | null = null;
   /**
    * The most artifacts one level of a drawn layer shows in one tile, for the store the element
    * builds; at most `/v1/meta`'s `selection.max_artifacts_per_tile`. Only the map, the explorer
-   * and `<tessera-store>` read it. Unset, a drawn layer shows nothing, colouring by a layer has no
+   * and `<mosaica-store>` read it. Unset, a drawn layer shows nothing, colouring by a layer has no
    * colours, and the store says why.
    * Changing it builds a new store.
    */
@@ -237,7 +237,7 @@ export abstract class TesseraElement extends LitElement {
 export const UNNAMED = 'Unnamed';
 
 /** Emit one of the elements' events, bubbling and composed so it crosses shadow roots. */
-export function emit<K extends keyof TesseraEventDetails>(from: HTMLElement, name: K, detail: TesseraEventDetails[K]): void {
+export function emit<K extends keyof MosaicaEventDetails>(from: HTMLElement, name: K, detail: MosaicaEventDetails[K]): void {
   from.dispatchEvent(new CustomEvent(name, {detail, bubbles: true, composed: true}));
 }
 

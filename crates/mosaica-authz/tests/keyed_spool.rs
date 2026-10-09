@@ -1,7 +1,7 @@
 //! The streaming keyed-postings writer against the buffered one. Byte-identity is the assertion:
 //! the two writers must agree on bytes rather than on readback.
 
-use tessera_authz::{write_delta_tier_at, DeltaTier, KeyedPostingsSpool, PostingRef};
+use mosaica_authz::{write_delta_tier_at, DeltaTier, KeyedPostingsSpool, PostingRef};
 
 const SMALL: u32 = 32;
 

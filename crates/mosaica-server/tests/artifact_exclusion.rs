@@ -163,7 +163,7 @@ async fn an_exclusion_serves_what_the_inclusion_spelling_serves_and_replays() {
 async fn a_list_over_the_bound_is_refused_naming_the_limit() {
     let tmp = TempDir::new().unwrap();
     let bundle = build_fixture(tmp.path(), N_ITEMS);
-    let mut engine = tessera_engine::Engine::open(
+    let mut engine = mosaica_engine::Engine::open(
         &bundle,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
@@ -237,7 +237,7 @@ async fn the_complement_holds_a_point_that_is_buffered_and_not_yet_flushed() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "one-more-point")
+        .header("x-mosaica-batch-id", "one-more-point")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(Some(new_id), 20.0, 20.0, "0")]))
         .send()

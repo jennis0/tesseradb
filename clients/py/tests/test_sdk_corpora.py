@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tesseradb._database import create
+from mosaica._database import create
 
 pytest.importorskip("pyarrow")
 

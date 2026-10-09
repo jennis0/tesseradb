@@ -24,8 +24,8 @@ use arrow::array::{
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use croaring::Bitmap;
-use tessera_types::layer::RegisteredLayer;
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::layer::RegisteredLayer;
+use mosaica_types::{EntityId, TesseraId};
 
 use super::columns::ViewFrame;
 use super::cursor::{ArtifactsCursor, Binding, LayerBinding, Route};
@@ -182,7 +182,7 @@ struct ArtifactsPager<'r> {
     req: ArtifactsRequest<'r>,
     /// The layer's own entity when the read began: a layer registered since under the name is
     /// another layer, and the read ends.
-    layer_entity: tessera_types::EntityId,
+    layer_entity: mosaica_types::EntityId,
     properties: Vec<Property>,
     page_rows: u32,
     binding: Binding<'r>,
@@ -294,7 +294,7 @@ impl Scope<'_> {
     /// verdict serves it and its content can be read, as a served row's is.
     fn served_target(
         &self,
-        attachment: &tessera_lifecycle::membership::Attachment,
+        attachment: &mosaica_lifecycle::membership::Attachment,
     ) -> Option<&ReadLevel> {
         let target = self
             .targets
@@ -322,7 +322,7 @@ impl Scope<'_> {
     }
 
     /// The identifier of the artifact `attachment` names, where it is served.
-    fn target(&self, attachment: &tessera_lifecycle::membership::Attachment) -> Option<u64> {
+    fn target(&self, attachment: &mosaica_lifecycle::membership::Attachment) -> Option<u64> {
         self.served_target(attachment)?;
         self.tessera_id(attachment.entity)
     }
@@ -525,7 +525,7 @@ fn ids_digest(ids: &[TesseraId]) -> [u8; 32] {
     sorted.sort_unstable();
     sorted.dedup();
     let mut hasher = Sha256::new();
-    hasher.update(b"tessera-artifacts-ids-v1");
+    hasher.update(b"mosaica-artifacts-ids-v1");
     for id in sorted {
         hasher.update(id.to_le_bytes());
     }
@@ -815,7 +815,7 @@ impl ArtifactsPager<'_> {
                     row.shape = drawn_shape(scope, read, ordinal, &served)
                         .map(|parts| -> Result<Vec<u8>> {
                             let frame = frame()?;
-                            let parts: tessera_spatial::shape::RingsF64 = parts
+                            let parts: mosaica_spatial::shape::RingsF64 = parts
                                 .into_iter()
                                 .map(|rings| {
                                     rings
@@ -830,7 +830,7 @@ impl ArtifactsPager<'_> {
                                         .collect()
                                 })
                                 .collect();
-                            Ok(tessera_spatial::shape::write_wkb(&parts))
+                            Ok(mosaica_spatial::shape::write_wkb(&parts))
                         })
                         .transpose()?;
                 }

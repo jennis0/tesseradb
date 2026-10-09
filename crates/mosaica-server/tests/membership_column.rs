@@ -15,7 +15,7 @@
 //! [`a_wholly_ingested_corpus_is_the_database_a_build_produces`] — and until 2026-09-03 it could
 //! not be written, because both builds refused a bundle with no items and so *ingest into an empty
 //! database* was not a state this system could be put in through its own tools. The refusal is
-//! gone (`tessera-build/tests/empty_bundle.rs`); what remains build-only is fitting an `auto`
+//! gone (`mosaica-build/tests/empty_bundle.rs`); what remains build-only is fitting an `auto`
 //! extent to no rows, which is about acquisition rather than meaning.
 //!
 //! The split arms stay beside it. They are not a weaker substitute: a seed built and the rest
@@ -24,7 +24,7 @@
 //!
 //! **The list column is here because the lineage inference is the half most likely to drift.** A
 //! scalar key is one lookup; a list's positions carry levels and its adjacency carries edges, and
-//! those rules live in `tessera_types::layer` precisely so a build and a wire batch cannot read one
+//! those rules live in `mosaica_types::layer` precisely so a build and a wire batch cannot read one
 //! file two ways.
 
 mod common;
@@ -44,7 +44,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
+use mosaica_build::{build, BuildArgs};
 
 /// The corpus. Small enough for a flush and a fold inside a test, wide enough that a clustering
 /// over it has clusters of different sizes and a masked count that moves between principals.
@@ -225,10 +225,10 @@ fn build_side_with(rows: &[u64], layer: &str, with_levels: bool) -> Built {
     write_pairs(&pairs, rows);
     std::fs::write(&config_path, format!("{VIEW_TOML}{layer}")).unwrap();
 
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture declaration parses");
     let args = BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.clone(),
             &config.schema,
         ),
@@ -395,7 +395,7 @@ async fn post_ingest(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -507,10 +507,10 @@ async fn client_view(server: &TestServer, terms: &[&str]) -> ClientView {
 /// Decode every artifacts frame of a tile route's body in full, the parent edges resolved to keys.
 fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
     use arrow::array::Float64Array as F64;
-    let frames = tessera_wire::split_frames(body).expect("well-formed frames");
+    let frames = mosaica_wire::split_frames(body).expect("well-formed frames");
     let batches = frames
         .iter()
-        .filter(|(kind, _)| *kind == tessera_wire::FRAME_ARTIFACTS)
+        .filter(|(kind, _)| *kind == mosaica_wire::FRAME_ARTIFACTS)
         .flat_map(|(_, payload)| {
             arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(payload.to_vec()), None)
                 .unwrap()
@@ -1025,7 +1025,7 @@ async fn a_level_column_places_a_scalar_key_on_the_wire_as_at_a_build() {
                     .client
                     .post(ingested.control_url("/control/ingest"))
                     .bearer_auth(OPERATOR_CREDENTIAL)
-                    .header("x-tessera-batch-id", "levelled-json")
+                    .header("x-mosaica-batch-id", "levelled-json")
                     .header("content-type", "application/json")
                     .body(levelled_json(chunk))
                     .send()

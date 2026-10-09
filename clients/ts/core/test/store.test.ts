@@ -1,6 +1,6 @@
 import {tableFromIPC, tableToIPC} from 'apache-arrow';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {TesseraClient, TesseraError} from '../src/client.js';
+import {MosaicaClient, MosaicaError} from '../src/client.js';
 import {createStore, type Store, type StoreOptions, type ViewInput} from '../src/store.js';
 import {setWorkerFactory} from '../src/decoder.js';
 import {FRAME_POINTS, FRAME_TRAILER, FrameReader} from '../src/frame.js';
@@ -15,7 +15,7 @@ import {worldBbox} from '../src/prefetch.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
 /**
- * The store against a fake `TesseraClient`, a fake clock and a fake frame scheduler, with no DOM
+ * The store against a fake `MosaicaClient`, a fake clock and a fake frame scheduler, with no DOM
  * and no network.
  */
 
@@ -82,7 +82,7 @@ function fakeClient(reply: (req: FakeRequest) => ViewportResponse, meta: Meta = 
     categories: async () => [{code: 5, key: 'cs', title: 'CS'}],
     suggest: async () => ({status: 'ok' as const, column: 'admin4', q: '', values: [], more: false}),
     close: () => {}
-  } as unknown as TesseraClient;
+  } as unknown as MosaicaClient;
   return {client, viewport, viewportArtifacts};
 }
 
@@ -140,7 +140,7 @@ describe('setView converts a data bbox to the driver’s target and zoom', () =>
   });
 });
 
-describe('status.stale keys on the content key, never on x-tessera-stale', () => {
+describe('status.stale keys on the content key, never on x-mosaica-stale', () => {
   it('is false while the content key holds and true once a revalidation observes it move', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -1159,7 +1159,7 @@ describe('the store holds the drawn shape by identifier', () => {
       artifact,
       categories: async () => [],
       close: () => {}
-    } as unknown as TesseraClient;
+    } as unknown as MosaicaClient;
     return {client, artifact};
   }
 
@@ -1244,7 +1244,7 @@ describe('clear() and a refused request reach the region and the shapes', () => 
     let refuse = false;
     const {store} = await warm(
       () => {
-        if (refuse) throw new TesseraError(400, 'bad-region', 'too many vertices');
+        if (refuse) throw new MosaicaError(400, 'bad-region', 'too many vertices');
         return response('ck');
       },
       {clock, scheduler}
@@ -1550,7 +1550,7 @@ describe('the token', () => {
     const scheduler = fakeScheduler();
     const {client} = fakeClient(() => response('ck'));
     const authorise = vi.fn(async () => {
-      throw new TesseraError(401, 'bad-credential', 'refused');
+      throw new MosaicaError(401, 'bad-credential', 'refused');
     });
     const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
 
@@ -1639,7 +1639,7 @@ describe('the token', () => {
     Object.assign(client, {artifact});
     let refuse = true;
     const authorise = vi.fn(async () => {
-      if (refuse) throw new TesseraError(401, 'bad-credential', 'refused');
+      if (refuse) throw new MosaicaError(401, 'bad-credential', 'refused');
       return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
     });
     const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
@@ -1661,7 +1661,7 @@ describe('the token', () => {
     let issued = 0;
     // A token a second from expiry is renewed at every ask; the second renewal is refused.
     const authorise = vi.fn(async () => {
-      if (++issued > 1) throw new TesseraError(401, 'bad-credential', 'refused');
+      if (++issued > 1) throw new MosaicaError(401, 'bad-credential', 'refused');
       return {token: 't1', expiresAt: (Date.now() + 1_000) / 1000};
     });
     const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
@@ -1680,7 +1680,7 @@ describe('the token', () => {
     let refuse = false;
     const {store, viewport} = await warm(
       () => {
-        if (refuse) throw new TesseraError(401, 'expired-token', 'the token has expired');
+        if (refuse) throw new MosaicaError(401, 'expired-token', 'the token has expired');
         return response('ck');
       },
       {clock, scheduler}
@@ -1767,7 +1767,7 @@ describe('a store serves one viewer', () => {
       categories: async () => [],
       suggest: async () => ({status: 'ok' as const, column: 'archive', q: '', values: [], more: false}),
       close: () => {}
-    } as unknown as TesseraClient;
+    } as unknown as MosaicaClient;
     let issued = 0;
     const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
     const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 10}});
@@ -1980,7 +1980,7 @@ describe('a store serves one viewer', () => {
     const scheduler = fakeScheduler();
     const whose = (token: string): Who => (token === 't1' || token === 't-a' ? 'a' : 'b');
     const viewport = vi.fn(async (token: string, req: FakeRequest) => {
-      if (opts.refuse?.(token, req)) throw new TesseraError(422, 'bad-filter', 'this principal cannot filter on that column');
+      if (opts.refuse?.(token, req)) throw new MosaicaError(422, 'bad-filter', 'this principal cannot filter on that column');
       if (opts.hold?.(token, req)) return new Promise<never>(() => {});
       const who = whose(token);
       return {...answerOf(who, req), identityKey: `${who}:${req.view}`};
@@ -1988,7 +1988,7 @@ describe('a store serves one viewer', () => {
     // A viewer's artifact in every tile, under the identity key its points come under.
     const viewportArtifacts = vi.fn(async (token: string, req: ViewportArtifactsRequest, o?: Parameters<ReturnType<typeof tileAnswers>>[2]) => {
       const asked = {view: req.view, filters: req.filters ?? undefined} as FakeRequest;
-      if (opts.refuse?.(token, asked)) throw new TesseraError(422, 'bad-filter', 'this principal cannot filter on that column');
+      if (opts.refuse?.(token, asked)) throw new MosaicaError(422, 'bad-filter', 'this principal cannot filter on that column');
       if (opts.hold?.(token, asked)) return new Promise<never>(() => {});
       const who = whose(token);
       return tileAnswers(() => [artifact(VIEWERS[who].artifact)], () => ({identityKey: `${who}:${req.view}`, contentKey: `ck-${who}`}))(token, req, o);
@@ -2359,7 +2359,7 @@ describe('a store serves one viewer', () => {
       categories: async () => [{code: 5, key: 'cs', title: 'CS'}],
       suggest: async () => ({status: 'ok' as const, column: 'archive', q: '', values: [], more: false}),
       close: () => {}
-    } as unknown as TesseraClient;
+    } as unknown as MosaicaClient;
     // The host's supplier answers for whoever is signed in.
     let signedIn: Who = 'a';
     const authorise = vi.fn(async () => ({token: `t-${signedIn}`, expiresAt: (Date.now() + 3_600_000) / 1000}));
@@ -2410,7 +2410,7 @@ describe('the item a click opens and the record a hover names', () => {
     const {client} = fakeClient(() => response('ck'));
     const detail = {fields: {archive: 'cs'}, views: [], scoped: {}, labels: []};
     const item = vi.fn(async (_token: string, id: bigint) => {
-      if (id === 404n) throw new TesseraError(404, 'not-found', 'no such item');
+      if (id === 404n) throw new MosaicaError(404, 'not-found', 'no such item');
       return detail;
     });
     (client as unknown as {item: typeof item}).item = item;
@@ -2463,7 +2463,7 @@ describe('the item a click opens and the record a hover names', () => {
     Object.assign(client, {
       item: vi.fn(async () => {
         await held();
-        throw new TesseraError(404, 'not-found', 'no such item');
+        throw new MosaicaError(404, 'not-found', 'no such item');
       }),
       artifact: vi.fn(async () => {
         await held();
@@ -2707,7 +2707,7 @@ describe('a store closes only the client it built', () => {
   /** Answers `/v1/meta` and `/v1/viewport`, and refuses every other route. */
   const fetch = (async (url: string) => {
     if (url.endsWith('/v1/meta')) return new Response(WIRE_META, {headers: {'content-type': 'application/json'}});
-    if (url.endsWith('/v1/viewport')) return new Response(VIEWPORT.slice(), {headers: {etag: '"ck"', 'x-tessera-identity-key': 'ik'}});
+    if (url.endsWith('/v1/viewport')) return new Response(VIEWPORT.slice(), {headers: {etag: '"ck"', 'x-mosaica-identity-key': 'ik'}});
     return new Response('{}', {status: 404});
   }) as typeof globalThis.fetch;
 
@@ -2749,7 +2749,7 @@ describe('a store closes only the client it built', () => {
   const points = (store: Store) => store.get('marks').bands.reduce((n, band) => n + band.ids.length, 0);
 
   it('leaves a shared client open when one of its stores is replaced mid-decode, and the other store draws', async () => {
-    const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch});
+    const client = new MosaicaClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch});
     const other = await drawing({client});
     const replaced = await drawing({client});
     expect(workers.length).toBeGreaterThan(0);
@@ -2783,7 +2783,7 @@ describe('a store closes only the client it built', () => {
   });
 
   it('leaves a passed client usable once the store that used it is disposed', async () => {
-    const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch});
+    const client = new MosaicaClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch});
     const {store} = await drawing({client});
     const asked = client.viewport('tok', {view: 's0', zoom: 0, k: 100});
     await settle();

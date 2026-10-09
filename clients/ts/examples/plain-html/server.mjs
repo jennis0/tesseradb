@@ -21,7 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
  * which principal its user reads as, and the catalogue decides what that principal may see.
  *
  * @param {{sessionUrl: string, apiKey: string}} cfg
- * @param {string} principal  the Tessera principal the signed-in user reads as
+ * @param {string} principal  the Mosaica principal the signed-in user reads as
  * @returns {Promise<{token: string, expiresAt: number}>}
  */
 export async function authorise({sessionUrl, apiKey}, principal) {
@@ -80,7 +80,7 @@ export function createHandler(cfg) {
   };
   /** @param {import('node:http').ServerResponse} res */
   const unbuilt = (res) =>
-    json(res, 503, {error: `${join(cfg.bundleDir, 'tessera-components.js')} is not built; run: npm run bundle -w @tesseradb/components`});
+    json(res, 503, {error: `${join(cfg.bundleDir, 'mosaica-components.js')} is not built; run: npm run bundle -w @mosaica/components`});
   /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
   return async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -96,8 +96,8 @@ export function createHandler(cfg) {
         if (!user) return json(res, 404, {error: 'unknown user'});
         return json(res, 200, await authorise(cfg, user.principal));
       }
-      if (url.pathname === '/tessera-components.js') {
-        const bundle = await built('tessera-components.js');
+      if (url.pathname === '/mosaica-components.js') {
+        const bundle = await built('mosaica-components.js');
         if (!bundle) return unbuilt(res);
         res.writeHead(200, {'content-type': 'text/javascript', 'cache-control': 'no-store'});
         return res.end(bundle);
@@ -105,7 +105,7 @@ export function createHandler(cfg) {
       if (url.pathname === '/') {
         // The integrity hash of the bundle beside this server. A static page pastes it in, and the
         // browser refuses the bundle if the file changes.
-        const sri = await built('tessera-components.js.sri');
+        const sri = await built('mosaica-components.js.sri');
         if (!sri) return unbuilt(res);
         const page = await readFile(join(here, 'index.html'), 'utf8');
         res.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
@@ -126,11 +126,11 @@ function json(res, status, body) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const users = JSON.parse(await readFile(join(here, 'users.json'), 'utf8'));
-  const apiKey = process.env.TESSERA_API_KEY;
-  if (!apiKey) throw new Error('set TESSERA_API_KEY to an API key whose principal holds authorise-as');
+  const apiKey = process.env.MOSAICA_API_KEY;
+  if (!apiKey) throw new Error('set MOSAICA_API_KEY to an API key whose principal holds authorise-as');
   const handler = createHandler({
-    sessionUrl: process.env.TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
-    viewerUrl: process.env.TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585',
+    sessionUrl: process.env.MOSAICA_SESSION_URL ?? 'http://127.0.0.1:49303',
+    viewerUrl: process.env.MOSAICA_VIEWER_URL ?? 'http://127.0.0.1:37585',
     apiKey,
     users,
     bundleDir: join(here, '..', '..', 'components', 'dist')

@@ -1,6 +1,6 @@
-"""The local server: the deployment file, its secret, and the `tessera serve` child process.
+"""The local server: the deployment file, its secret, and the `mosaica serve` child process.
 
-`commit()` starts `tessera serve` as a child of the kernel over the directory's `tessera.toml`.
+`commit()` starts `mosaica serve` as a child of the kernel over the directory's `mosaica.toml`.
 The three planes are on loopback at port 0, so the kernel picks no ports and the child says which
 ones it bound by printing one JSON line on stdout. The line is written once all three planes are
 listening, so the announced viewer address is already answering when it arrives.
@@ -38,7 +38,7 @@ from ._refusal import Refusal
 from ._toml import dumps
 
 #: How long `start` waits for the announce line before it gives up, in seconds, unless
-#: `TESSERADB_SERVE_TIMEOUT` names another.
+#: `MOSAICA_SERVE_TIMEOUT` names another.
 SERVE_TIMEOUT = 30.0
 
 #: How many of the child's lines are kept for a refusal message.
@@ -46,7 +46,7 @@ KEPT_LINES = 200
 
 
 def serve_timeout() -> float:
-    return float(os.environ.get("TESSERADB_SERVE_TIMEOUT", SERVE_TIMEOUT))
+    return float(os.environ.get("MOSAICA_SERVE_TIMEOUT", SERVE_TIMEOUT))
 
 
 #: The deployment's token lifetime, which `[disclosure]` requires and has no backstop default.
@@ -78,7 +78,7 @@ class Listening:
 
 
 def write_deployment(directory: Path) -> Path:
-    """Write `tessera.toml`, which `tessera build` and `tessera serve` both read.
+    """Write `mosaica.toml`, which `mosaica build` and `mosaica serve` both read.
 
     Every path in it resolves against this file's own directory, so the database directory serves
     from wherever it is copied to.
@@ -86,30 +86,30 @@ def write_deployment(directory: Path) -> Path:
     `serve.cors_loopback` lets a page served from this machine read from the server, which is
     what a notebook's map needs, since its page's address is not known in advance. The server
     listens on this machine only. The catalogue of principals, credentials and grants is kept
-    under `.tessera/catalogue`.
+    under `.mosaica/catalogue`.
     """
     serve = {
         "viewer": "127.0.0.1:0",
         "session": "127.0.0.1:0",
         "control": "127.0.0.1:0",
-        "operator_credential_file": ".tessera/operator.cred",
+        "operator_credential_file": ".mosaica/operator.cred",
         "cors_loopback": True,
     }
     document = {
         "bundle": {
             "path": "bundle",
-            "cache": ".tessera/cache",
-            "wal": ".tessera/wal.log",
+            "cache": ".mosaica/cache",
+            "wal": ".mosaica/wal.log",
         },
         "build": {"schema": "schema.toml"},
         "disclosure": {"token_max_lifetime": TOKEN_MAX_LIFETIME},
         "serve": serve,
-        "catalogue": {"dir": ".tessera/catalogue"},
+        "catalogue": {"dir": ".mosaica/catalogue"},
     }
     # The engine's cache directory is opened rather than created, so a deployment file naming one
     # that does not exist refuses to start with an IO error.
-    (directory / ".tessera" / "cache").mkdir(parents=True, exist_ok=True)
-    path = directory / "tessera.toml"
+    (directory / ".mosaica" / "cache").mkdir(parents=True, exist_ok=True)
+    path = directory / "mosaica.toml"
     path.write_text(dumps(document), encoding="utf-8")
     return path
 
@@ -117,11 +117,11 @@ def write_deployment(directory: Path) -> Path:
 def secrets_for(directory: Path) -> None:
     """Write the operator credential, once per database.
 
-    It is written under `.tessera/`, which is owner-only, and the file is created owner-only
+    It is written under `.mosaica/`, which is owner-only, and the file is created owner-only
     rather than created and then narrowed: between a write and a `chmod` the secret is readable by
     anyone on the machine.
     """
-    private = directory / ".tessera"
+    private = directory / ".mosaica"
     private.mkdir(parents=True, exist_ok=True)
     private.chmod(0o700)
     _secret(private / "operator.cred", lambda: secrets.token_urlsafe(32))
@@ -141,7 +141,7 @@ def start(
     deployment: Path,
     timeout: float | None = None,
 ) -> tuple[subprocess.Popen, Listening]:
-    """Start `tessera serve` and read the addresses it bound."""
+    """Start `mosaica serve` and read the addresses it bound."""
     child = subprocess.Popen(
         [binary, "serve", "--deployment", str(deployment)],
         stdout=subprocess.PIPE,
@@ -189,7 +189,7 @@ def read_announce(stdout, timeout: float, stderr_text) -> Listening:
             reader.queueing = False
             return announce
     raise ServeRefused(
-        "tessera serve announced no listening line within "
+        "mosaica serve announced no listening line within "
         f"{timeout:g}s. The SDK waits for one line of JSON on stdout carrying "
         '\'"event": "listening"\' and the viewer, session and control addresses. '
         "What the child wrote:\n"
@@ -230,7 +230,7 @@ def _announce(line: str) -> Listening | None:
     missing = [k for k in ("viewer", "session", "control") if not document.get(k)]
     if missing:
         raise ServeRefused(
-            f"tessera serve's listening line names no {', '.join(missing)} address: {line}"
+            f"mosaica serve's listening line names no {', '.join(missing)} address: {line}"
         )
     return Listening(
         viewer=str(document["viewer"]),
@@ -281,63 +281,63 @@ def _stop_everything() -> None:
 
 
 def find_binary() -> tuple[str, str]:
-    """The `tessera` binary and where it was found.
+    """The `mosaica` binary and where it was found.
 
-    `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the `tesseradb-native`
+    `MOSAICA_BIN` when set, else the first `mosaica` on `PATH`, else the `mosaica-native`
     platform wheel, else a checkout's target directory, release before debug. An explicit
     override and a developer's own build both win over the wheel; the wheel is what makes a
-    fresh `pip install tesseradb` work.
+    fresh `pip install mosaica` work.
     """
-    named = os.environ.get("TESSERA_BIN")
+    named = os.environ.get("MOSAICA_BIN")
     if named:
         if not Path(named).exists():
-            raise Refusal(f"TESSERA_BIN names {named}, which does not exist")
-        return named, "TESSERA_BIN"
+            raise Refusal(f"MOSAICA_BIN names {named}, which does not exist")
+        return named, "MOSAICA_BIN"
     from shutil import which
 
-    found = which("tessera")
+    found = which("mosaica")
     if found:
         return found, "PATH"
     try:
-        from tesseradb_native import binary_path
+        from mosaica_native import binary_path
     except ImportError:
         pass
     else:
-        return binary_path(), "the tesseradb-native wheel"
+        return binary_path(), "the mosaica-native wheel"
     for parent in Path(__file__).resolve().parents:
         for profile in ("release", "debug"):
-            candidate = parent / "target" / profile / "tessera"
+            candidate = parent / "target" / profile / "mosaica"
             if candidate.exists():
                 return str(candidate), f"this checkout's target/{profile}"
     raise Refusal(
-        "no `tessera` binary at TESSERA_BIN, on PATH, in the tesseradb-native wheel, or in a "
-        "checkout's target directory. Install it with `pip install tesseradb-native`, or build "
-        "it with `cargo build --release -p tessera-cli`"
+        "no `mosaica` binary at MOSAICA_BIN, on PATH, in the mosaica-native wheel, or in a "
+        "checkout's target directory. Install it with `pip install mosaica-native`, or build "
+        "it with `cargo build --release -p mosaica-cli`"
     )
 
 
 def find_extension() -> ModuleType | None:
-    """The `_tessera` extension module, or `None` where nothing carries it.
+    """The `_mosaica` extension module, or `None` where nothing carries it.
 
-    The same order as `find_binary`: whatever is already importable as `_tessera`, then the
-    `tesseradb-native` wheel, then a checkout's target directory, where cargo names it
-    `lib_tessera.so`, which Python will not import by name, so it is loaded by path.
+    The same order as `find_binary`: whatever is already importable as `_mosaica`, then the
+    `mosaica-native` wheel, then a checkout's target directory, where cargo names it
+    `lib_mosaica.so`, which Python will not import by name, so it is loaded by path.
     """
-    for name in ("_tessera", "tesseradb_native._tessera"):
+    for name in ("_mosaica", "mosaica_native._mosaica"):
         try:
             return importlib.import_module(name)
         except ImportError:
             pass
     for parent in Path(__file__).resolve().parents:
         for profile in ("release", "debug"):
-            for built in ("lib_tessera.so", "lib_tessera.dylib", "_tessera.dll"):
+            for built in ("lib_mosaica.so", "lib_mosaica.dylib", "_mosaica.dll"):
                 candidate = parent / "target" / profile / built
                 if not candidate.exists():
                     continue
-                loader = ExtensionFileLoader("_tessera", str(candidate))
-                spec = spec_from_loader("_tessera", loader)
+                loader = ExtensionFileLoader("_mosaica", str(candidate))
+                spec = spec_from_loader("_mosaica", loader)
                 module = module_from_spec(spec)
-                sys.modules["_tessera"] = module
+                sys.modules["_mosaica"] = module
                 loader.exec_module(module)
                 return module
     return None

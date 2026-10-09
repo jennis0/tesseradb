@@ -7,7 +7,7 @@ pub(super) enum BatchState {
     /// recorded. Same bytes replays the receipt; different bytes is a `409`.
     Accepted {
         body_hash: [u8; 32],
-        receipt: Vec<tessera_lifecycle::RowReceipt>,
+        receipt: Vec<mosaica_lifecycle::RowReceipt>,
     },
     /// Held in the open commit window, not yet acknowledged; a byte-identical retry joins the
     /// queue of waiters the entry will ack. There is exactly one open window.
@@ -201,7 +201,7 @@ fn mint_cells<'a>(
                 }
             }
         };
-        cells[index] = tessera_store::vocabulary::code_value(arrow_type, code);
+        cells[index] = mosaica_store::vocabulary::code_value(arrow_type, code);
     }
     Ok(())
 }
@@ -406,10 +406,10 @@ impl Executor {
                 // What the open window touches is written at its close, and the re-check below
                 // reads what was written.
                 let joined = submission.slots.iter().filter_map(|slot| match slot {
-                    tessera_lifecycle::Slot::Joined { entity, .. } => Some(*entity),
+                    mosaica_lifecycle::Slot::Joined { entity, .. } => Some(*entity),
                     _ => None,
                 });
-                let claims = tessera_lifecycle::WindowClaims::of(
+                let claims = mosaica_lifecycle::WindowClaims::of(
                     &submission.rows,
                     submission.edits.iter().map(|e| e.edit.old).chain(joined),
                     submission.keys.clone(),
@@ -457,8 +457,8 @@ impl Executor {
                     || crate::write::joined::views_holding(&generation, old) != submitted.held_views
             })
             || slots.iter().any(|slot| match slot {
-                tessera_lifecycle::Slot::Unchanged { entity, .. }
-                | tessera_lifecycle::Slot::Joined { entity, .. } => {
+                mosaica_lifecycle::Slot::Unchanged { entity, .. }
+                | mosaica_lifecycle::Slot::Joined { entity, .. } => {
                     generation.overlay.is_deleted(*entity)
                 }
                 _ => false,
@@ -481,18 +481,18 @@ impl Executor {
         let stale = stale || {
             let key = &self.deps.identity_key;
             let number_of =
-                |tessera_id: u64| key.invert(tessera_types::TesseraId::new(tessera_id)).1;
+                |tessera_id: u64| key.invert(mosaica_types::TesseraId::new(tessera_id)).1;
             let mut named: Vec<(EntityId, EntityId)> = edits
                 .iter()
                 .map(|submitted| (submitted.edit.old, submitted.edit.number))
                 .collect();
             for slot in &slots {
                 match slot {
-                    tessera_lifecycle::Slot::Unchanged { entity, tessera_id }
-                    | tessera_lifecycle::Slot::Joined { entity, tessera_id } => {
+                    mosaica_lifecycle::Slot::Unchanged { entity, tessera_id }
+                    | mosaica_lifecycle::Slot::Joined { entity, tessera_id } => {
                         named.push((*entity, number_of(*tessera_id)));
                     }
-                    tessera_lifecycle::Slot::Written {
+                    mosaica_lifecycle::Slot::Written {
                         row,
                         tessera_id: Some(tessera_id),
                     } => {
@@ -548,7 +548,7 @@ impl Executor {
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         let declared_scalars = &generation.bundle.manifest.declared_scalars;
         // The group-scoped families, by the view a row names, derived once for the window.
-        let scoped_by_view: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
+        let scoped_by_view: FxHashMap<String, Vec<mosaica_store::manifest::ScopedScalar>> =
             scoped_families_by_view(&generation.bundle.manifest);
         let mut fresh: Vec<(String, String, u32)> = Vec::new();
         for entry in closing.entries_mut() {
@@ -811,7 +811,7 @@ impl Executor {
         let generation = self.generation.load_full();
         // Grown by exactly the keys this window minted; every other index carries forward.
         let suggest = generation.suggest.with_mints(
-            &tessera_analyse::SuggestionFold::new(),
+            &mosaica_analyse::SuggestionFold::new(),
             &vocabularies,
             mints,
         );
@@ -822,7 +822,7 @@ impl Executor {
 
         // What the buffered-row lists grow by: every entity this window buffered a row for.
         let mut inserted: Vec<EntityId> = Vec::new();
-        let mut overlay: Option<tessera_lifecycle::Overlay> = None;
+        let mut overlay: Option<mosaica_lifecycle::Overlay> = None;
         let mut deleted: Vec<EntityId> = Vec::new();
         let mut newly_denied: Vec<EntityId> = Vec::new();
         let mut pairs: Vec<(u32, u32)> = Vec::new();
@@ -851,11 +851,11 @@ impl Executor {
             for edit in entry.edits() {
                 let new = edit.rows[0].entity_id;
                 let overlay = overlay.get_or_insert_with(|| (*generation.overlay).clone());
-                overlay.apply(edit.old, tessera_lifecycle::ChangeOp::Delete);
+                overlay.apply(edit.old, mosaica_lifecycle::ChangeOp::Delete);
                 deleted.push(edit.old);
                 newly_denied.push(edit.old);
                 if edit.suppressed {
-                    overlay.apply(new, tessera_lifecycle::ChangeOp::Suppress);
+                    overlay.apply(new, mosaica_lifecycle::ChangeOp::Suppress);
                     newly_denied.push(new);
                 }
                 buffer.remove(edit.old);

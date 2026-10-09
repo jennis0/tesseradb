@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use tessera_filter::{ColumnPostings, RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
-use tessera_store::manifest::Visibility;
+use mosaica_filter::{ColumnPostings, RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
+use mosaica_store::manifest::Visibility;
 
 use super::{record_open_error, request_access, Column, FilterColumns, Layer, Route, TextLayer};
 use crate::filter::declared::{resolve_analyser, visibility_of};
@@ -22,10 +22,10 @@ use crate::filter::{
 /// flush writing the first column of a family for a view created since the build.
 pub(super) fn open_scoped_column(
     partition_dir: &Path,
-    family: &tessera_store::manifest::ScopedScalar,
+    family: &mosaica_store::manifest::ScopedScalar,
     view_id: &str,
-    incarnation: tessera_types::view::ViewIncarnation,
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    incarnation: mosaica_types::view::ViewIncarnation,
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     mmap: bool,
 ) -> Result<(String, Placement, Column), ComposeError> {
     let scoped_family = Family::of_scoped(family);
@@ -37,7 +37,7 @@ pub(super) fn open_scoped_column(
     // suffix: a recreated key opens its own base, leaving its predecessor's where the fold's
     // reclaim expects to find it.
     let mut dir = partition_dir.join("attrs").join(&family.name);
-    for component in tessera_store::scoped_column_components(view_id, incarnation) {
+    for component in mosaica_store::scoped_column_components(view_id, incarnation) {
         dir.push(component);
     }
     let name = scoped_column_name(&family.name, view_id);
@@ -129,7 +129,7 @@ fn open_value_base(
 /// base at [`FilterColumns::open`].
 fn text_extent_layers<'a>(
     prefix_dir: &Path,
-    extents: impl Iterator<Item = &'a tessera_store::manifest::TextExtent>,
+    extents: impl Iterator<Item = &'a mosaica_store::manifest::TextExtent>,
     mmap: bool,
 ) -> Result<Vec<TextLayer>, ComposeError> {
     extents
@@ -145,7 +145,7 @@ fn text_extent_layers<'a>(
 /// The layers an entity-scoped text column's published extents open as.
 fn entity_text_layers(
     prefix_dir: &Path,
-    texts: &[tessera_store::manifest::TextExtent],
+    texts: &[mosaica_store::manifest::TextExtent],
     column: &str,
     mmap: bool,
 ) -> Result<Vec<TextLayer>, ComposeError> {
@@ -166,12 +166,12 @@ fn entity_text_layers(
 /// disk, so a missing base is a refusal, never "those entities have no record".
 pub(crate) fn open_record_stack(
     partition_dir: &Path,
-    declared: &[tessera_store::manifest::DeclaredScalar],
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    declared: &[mosaica_store::manifest::DeclaredScalar],
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     unfolded: &[String],
     extents: &[RecordExtentPaths],
-    access: tessera_filter::Access,
-) -> Result<RecordStack, tessera_filter::RecordError> {
+    access: mosaica_filter::Access,
+) -> Result<RecordStack, mosaica_filter::RecordError> {
     let owes_base = declared
         .iter()
         .any(|d| !unfolded.iter().any(|name| name == &d.name) && blob_resident(d, vocabularies));
@@ -186,10 +186,10 @@ pub(crate) fn open_record_stack(
 /// "no entity carries a term", the fail-open direction on the write path.
 pub(crate) fn open_entity_terms_stack(
     partition_dir: &Path,
-    extents: &[tessera_store::EntityTermsExtentPaths],
-) -> Result<tessera_store::EntityTermsStack, tessera_store::StoreError> {
-    tessera_store::EntityTermsStack::open(
-        Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
+    extents: &[mosaica_store::EntityTermsExtentPaths],
+) -> Result<mosaica_store::EntityTermsStack, mosaica_store::StoreError> {
+    mosaica_store::EntityTermsStack::open(
+        Some(&partition_dir.join(mosaica_store::ENTITY_TERMS_DIR)),
         extents,
     )
 }
@@ -197,9 +197,9 @@ pub(crate) fn open_entity_terms_stack(
 /// The stack a column declared at a running service opens with before any fold: no base, no
 /// postings, the extents composed later. `None` for a column with no entity-space home.
 pub(super) fn runtime_layers(
-    scalar: &tessera_store::manifest::DeclaredScalar,
+    scalar: &mosaica_store::manifest::DeclaredScalar,
     declared_index: usize,
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> Result<Option<Column>, ComposeError> {
     let family = Family::of(scalar);
     let filterable = Placement::of(scalar, vocabularies).is_some_and(|placement| placement.entity);
@@ -233,19 +233,19 @@ pub(super) fn runtime_layers(
 /// the base each artefact class owes plus whatever has been published since.
 #[derive(Default, Clone, Copy)]
 pub struct PartitionExtents<'a> {
-    pub attrs: &'a [tessera_store::manifest::AttrExtent],
-    pub records: &'a [tessera_store::manifest::RecordExtent],
+    pub attrs: &'a [mosaica_store::manifest::AttrExtent],
+    pub records: &'a [mosaica_store::manifest::RecordExtent],
     /// An artifact's content extents, listed apart from a point's because their ownership differs
     /// rather than their bytes.
-    pub artifact_records: &'a [tessera_store::manifest::RecordExtent],
-    pub entity_terms: &'a [tessera_store::manifest::EntityTermsExtent],
-    pub texts: &'a [tessera_store::manifest::TextExtent],
+    pub artifact_records: &'a [mosaica_store::manifest::RecordExtent],
+    pub entity_terms: &'a [mosaica_store::manifest::EntityTermsExtent],
+    pub texts: &'a [mosaica_store::manifest::TextExtent],
 }
 
 impl<'a> PartitionExtents<'a> {
     /// The lists one partition's side-manifest names. `None` is a bundle carrying no partition,
     /// which names none.
-    pub fn of(manifest: Option<&'a tessera_store::manifest::SegmentsManifest>) -> Self {
+    pub fn of(manifest: Option<&'a mosaica_store::manifest::SegmentsManifest>) -> Self {
         let Some(manifest) = manifest else {
             return PartitionExtents::default();
         };
@@ -274,13 +274,13 @@ impl FilterColumns {
     /// Mapped, the pages are faulted in by the scans that touch them. The engine passes `true`;
     /// tests pass `false`.
     ///
-    /// It stays a `bool` where the reader beneath it takes a three-way [`tessera_filter::Access`]:
+    /// It stays a `bool` where the reader beneath it takes a three-way [`mosaica_filter::Access`]:
     /// the third case, `MappedSequential`, is the fold's hint and must never be applied to the
     /// request path's mappings, which a `bool` cannot express.
     pub fn open(
         prefix_dir: &Path,
         partition: &str,
-        manifest: &tessera_store::manifest::Manifest,
+        manifest: &mosaica_store::manifest::Manifest,
         extents: PartitionExtents<'_>,
         // The entity-scoped columns declared at a running service that no fold has written a
         // base for. Each opens as an empty stack the extents compose onto; every other declared
@@ -436,7 +436,7 @@ impl FilterColumns {
             &extents
                 .entity_terms
                 .iter()
-                .map(|e| tessera_store::EntityTermsExtentPaths {
+                .map(|e| mosaica_store::EntityTermsExtentPaths {
                     hasrow: prefix_dir.join(&e.hasrow),
                     offsets: prefix_dir.join(&e.offsets),
                     terms: prefix_dir.join(&e.terms),
@@ -463,7 +463,7 @@ impl FilterColumns {
             if !carries_live_view(view_incarnation, extent.view.as_deref(), extent.incarnation) {
                 continue;
             }
-            let column = tessera_filter::open_extent(
+            let column = mosaica_filter::open_extent(
                 &prefix_dir.join(&extent.values),
                 &prefix_dir.join(&extent.presence),
                 request_access(mmap),

@@ -1,13 +1,13 @@
 //! The golden vectors: the expected tokens for sample text in each script family, stored in
 //! `vectors/golden.json`.
 //!
-//! The conformance oracle tokenises by running `tessera tokenise`, so it cannot detect a wrong
+//! The conformance oracle tokenises by running `mosaica tokenise`, so it cannot detect a wrong
 //! analyser. These vectors can. Every text index is built from the analyser's tokens, so if an
 //! expected answer changes, change the analyser's version (`UNICODE_VERSION` in `src/lib.rs`) and
 //! rebuild every text index built under the old version.
 
 use sha2::{Digest, Sha256};
-use tessera_analyse::{
+use mosaica_analyse::{
     analyser, analyser_with_identity, identity_of, Analyser, ANALYSER_NAMES, ANALYSER_VECTOR_DIGESTS,
 };
 

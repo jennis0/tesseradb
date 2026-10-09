@@ -13,16 +13,16 @@
 //! Everything in this module is behind `feature = "fault-injection"`, reachable by exactly two
 //! routes (decision 0071):
 //!
-//! - **a self dev-dependency** (`tessera-lifecycle = { path = ".", features = ["fault-injection"]
-//!   }` in this crate's own `[dev-dependencies]`, and the same shape in `tessera-engine`'s and
-//!   `tessera-server`'s) — how every test in the tree gets it; and
-//! - **a declared, default-off feature on `tessera-server` and `tessera-cli`** — how the
+//! - **a self dev-dependency** (`mosaica-lifecycle = { path = ".", features = ["fault-injection"]
+//!   }` in this crate's own `[dev-dependencies]`, and the same shape in `mosaica-engine`'s and
+//!   `mosaica-server`'s) — how every test in the tree gets it; and
+//! - **a declared, default-off feature on `mosaica-server` and `mosaica-cli`** — how the
 //!   correctness suite's driver gets a *served binary* that carries the seam pause sites. That
-//!   binary is built to **its own target directory**, never `target/release/tessera`, which the
+//!   binary is built to **its own target directory**, never `target/release/mosaica`, which the
 //!   oracle harness builds with default features always:
 //!
 //!   ```text
-//!   cargo build --release -p tessera-cli --features fault-injection --target-dir target/faults
+//!   cargo build --release -p mosaica-cli --features fault-injection --target-dir target/faults
 //!   ```
 //!
 //! **What the gate buys: no default-features build carries this code.** `cargo build` does not
@@ -36,17 +36,17 @@
 //!
 //! **What it does not buy, stated because the obvious reading overclaims:** a `cargo test
 //! --workspace` build still unifies the feature across the workspace and
-//! into `tessera-server`, exactly as `bench-timing` does. The self dev-dependency is *not* stronger
+//! into `mosaica-server`, exactly as `bench-timing` does. The self dev-dependency is *not* stronger
 //! than `bench-timing` on that axis; it is stronger only on the release axis, because
-//! `tessera-bench` declares `bench-timing` as a **normal** dependency with `default =
+//! `mosaica-bench` declares `bench-timing` as a **normal** dependency with `default =
 //! ["bench-timing"]`, so a `cargo build --workspace --release` reaches it and cannot reach this.
 //!
 //! The consequence to respect rather than re-derive: a `#[cfg(feature = "fault-injection")]` block
-//! compiles differently under `cargo test -p tessera-lifecycle` than under `cargo test
+//! compiles differently under `cargo test -p mosaica-lifecycle` than under `cargo test
 //! --workspace`. So nothing may let a *default* build's behaviour depend on this feature —
-//! `crates/tessera-server/tests/http.rs` already demonstrates the footgun with a
+//! `crates/mosaica-server/tests/http.rs` already demonstrates the footgun with a
 //! `bench-timing` block that silently covers less when the feature is absent. The crates that
-//! *declare* the feature (`tessera-server`, `tessera-cli`) depend on it only to add the arming
+//! *declare* the feature (`mosaica-server`, `mosaica-cli`) depend on it only to add the arming
 //! surface and the switchboard's construction; every default-build code path is identical with
 //! and without it.
 //!
@@ -70,10 +70,10 @@
 //! it would leave the deny lane's durability retry with no test that could distinguish recovery
 //! from exhaustion — both would look like exhaustion, and both would pass.
 //!
-//! ## Why this module is here and not in `tessera-engine`
+//! ## Why this module is here and not in `mosaica-engine`
 //!
 //! [`Step`], [`PauseSite`] and [`FaultSwitchboard::pause_point`] describe **the executor**, and
-//! `ExecutorHealth` was moved into `tessera-engine` on exactly that argument (the crate that
+//! `ExecutorHealth` was moved into `mosaica-engine` on exactly that argument (the crate that
 //! deliberately owns no executor should not own the executor's vocabulary). This module breaks
 //! that rule knowingly: the switches ride on [`crate::wal::ExecutorWal`], which is here, and one
 //! switchboard a test can arm in a single call beats two half-boards that have to agree about
@@ -235,7 +235,7 @@ pub enum PauseSite {
     /// Between a merge's execution on the pool and its publication on the executor: the merged
     /// segment exists, its inputs are untouched, and the executor has not begun to publish.
     ///
-    /// The hook `tessera-engine/tests/merge.rs`'s module doc recorded as missing — both for a
+    /// The hook `mosaica-engine/tests/merge.rs`'s module doc recorded as missing — both for a
     /// crash-mid-merge test (kill while parked: the output segment is an orphan, the inputs still
     /// stand) and for ordering a suppression against the publication that re-derives the deny mask
     /// over the new row space. Sited at the top of the executor's `publish_merge`, before it reads
@@ -356,7 +356,7 @@ impl FaultSwitchboard {
     /// This is the "disk full on a suppress" the durability rules are written for: the record may be
     /// in the page cache, but nothing is durable. **The count is what selects which behaviour is
     /// under test.** One failure exercises the repair succeeding, and the deny is acknowledged
-    /// normally; `tessera_engine::DENY_DURABILITY_ATTEMPTS` failures exhaust it, and the deny is
+    /// normally; `mosaica_engine::DENY_DURABILITY_ATTEMPTS` failures exhaust it, and the deny is
     /// applied in memory with a 500 to its caller (lifecycle §4).
     pub fn fail_next_fsyncs(&self, n: usize) {
         self.fail_fsyncs.store(n, Ordering::SeqCst);

@@ -35,13 +35,13 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Attribute, Schema};
-use tessera_build::{build, build_in_memory, AttributeCoverage, BuildArgs};
-use tessera_filter::{Access, RecordBlob, RecordValue};
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::Bounds;
-use tessera_store::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::config::{Attribute, Schema};
+use mosaica_build::{build, build_in_memory, AttributeCoverage, BuildArgs};
+use mosaica_filter::{Access, RecordBlob, RecordValue};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::Bounds;
+use mosaica_store::open_bundle;
+use mosaica_types::IdentityKey;
 
 mod common;
 
@@ -244,10 +244,10 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
     let attributes = dir.join("attributes.parquet");
     let schema = schema();
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: Bounds {
                 x_min: 0.0,
                 x_max: 1000.0,
@@ -257,12 +257,12 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(dir.join("pairs.parquet")),
+            access: mosaica_build::config::AccessInput::relation(dir.join("pairs.parquet")),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(attributes, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(attributes, &schema),
         out,
         limit: None,
         strict: false,
@@ -338,7 +338,7 @@ fn expected_present() -> Vec<u64> {
     ]
 }
 
-fn assert_coverage(report: &tessera_build::BuildReport, which: &str) {
+fn assert_coverage(report: &mosaica_build::BuildReport, which: &str) {
     let coverage: &[AttributeCoverage] = &report.attribute_coverage;
     assert_eq!(coverage.len(), 1, "{which}: one attribute source");
     let source = &coverage[0];

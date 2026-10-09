@@ -11,7 +11,7 @@
 //! the array is read where it lies. [`Utf8Values`] is the same choice held by value,
 //! for a decoded batch column that outlives the borrow of its batch.
 //!
-//! The schema-only half of the same rule is [`is_utf8`], which is what `tessera check` asks of a
+//! The schema-only half of the same rule is [`is_utf8`], which is what `mosaica check` asks of a
 //! field it cannot downcast because it has no array.
 
 use arrow::array::{Array, ArrayRef, LargeStringArray, StringArray};

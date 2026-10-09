@@ -792,9 +792,9 @@ dependencies = [
  "croaring",
  "fst",
  "memmap2",
- "tessera-authz",
- "tessera-filter",
- "tessera-types",
+ "mosaica-authz",
+ "mosaica-filter",
+ "mosaica-types",
  "unicode-normalization",
 ]
 
@@ -810,7 +810,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-authz"
+name = "mosaica-authz"
 version = "0.1.0"
 dependencies = [
  "arrow",
@@ -818,32 +818,32 @@ dependencies = [
  "memmap2",
  "rustc-hash",
  "sha2",
- "tessera-types",
+ "mosaica-types",
 ]
 
 [[package]]
-name = "tessera-filter"
+name = "mosaica-filter"
 version = "0.1.0"
 dependencies = [
  "arrow",
  "croaring",
  "memchr",
  "memmap2",
- "tessera-authz",
- "tessera-roaring",
- "tessera-types",
+ "mosaica-authz",
+ "mosaica-roaring",
+ "mosaica-types",
  "zstd",
 ]
 
 [[package]]
-name = "tessera-roaring"
+name = "mosaica-roaring"
 version = "0.1.0"
 dependencies = [
  "croaring",
 ]
 
 [[package]]
-name = "tessera-types"
+name = "mosaica-types"
 version = "0.1.0"
 
 [[package]]

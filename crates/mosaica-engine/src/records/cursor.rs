@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 use super::RecordsOrder;
 use crate::error::{EngineError, Result};
 
-const KEY_DOMAIN: &[u8] = b"tessera-records-cursor-key-v1";
-const AAD_DOMAIN: &[u8] = b"tessera-records-cursor-v1";
+const KEY_DOMAIN: &[u8] = b"mosaica-records-cursor-key-v1";
+const AAD_DOMAIN: &[u8] = b"mosaica-records-cursor-v1";
 /// The sealed payload's layout. A cursor of another format does not open.
 const FORMAT: u8 = 5;
 const NONCE_LEN: usize = 24;

@@ -5,10 +5,10 @@ One fresh `/session/authorise` per row, so every row is a session the server has
 row projection and a cold `N_occ` ladder, which is what a first paint is. `/v1/meta` is fetched in
 between because a browser fetches it in between, and `--settle` inserts the rest of whatever gap a
 client leaves before its first viewport — the gap the authorise-time occupancy stage
-(`crates/tessera-engine/src/stage.rs`) has to finish inside.
+(`crates/mosaica-engine/src/stage.rs`) has to finish inside.
 
 `stage_ns` is a positional CSV and needs `serve.stage_timing = true` and a `bench-timing` build;
-see `crates/tessera-server/src/viewer.rs::stage_header`, whose field order this mirrors.
+see `crates/mosaica-server/src/viewer.rs::stage_header`, whose field order this mirrors.
 
 **The window is centred on data and shrinks with depth.** `N_occ` is viewport-invariant by §7.2, so
 `theta_occupancy_ns` is a function of the depth alone and the bbox cannot move it; the window is
@@ -118,7 +118,7 @@ for depth in DEPTHS:  # warm the page cache at every depth this run will measure
 
 if args.trajectory:
     # **One session, every depth in order** — a viewer zooming in and back out. The first request
-    # walks for itself and the background fill (`crates/tessera-engine/src/stage.rs`) takes the
+    # walks for itself and the background fill (`crates/mosaica-engine/src/stage.rs`) takes the
     # ladder to its ceiling behind it, so every later request inside that ceiling should show a
     # zero walk. `--settle` is applied between requests, as the fill's head start.
     print(f"{'depth':>5} {'N_occ':>9} {'proj_ms':>8} {'walk_ms':>8} {'sweep_ms':>9} {'total_ms':>9}",

@@ -1,6 +1,6 @@
-"""`_tessera`'s behaviour, through the module a Python process imports.
+"""`_mosaica`'s behaviour, through the module a Python process imports.
 
-Run by `crates/tessera-python/check.sh`, which builds the extension and puts it on the path.
+Run by `crates/mosaica-python/check.sh`, which builds the extension and puts it on the path.
 
 Every declaration here names no Parquet file, or names one that is not there: a block that names
 no file is declared and empty for a check, so the whole surface — a clean check, a refused one,
@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import _tessera
+import _mosaica
 
 DEPLOYMENT = """
 [bundle]
@@ -54,33 +54,33 @@ point_visibility = { default = "public" }
 
 
 def project(declaration: str, deployment: str = DEPLOYMENT) -> str:
-    """A deployment directory holding `declaration`, and the path of its `tessera.toml`."""
+    """A deployment directory holding `declaration`, and the path of its `mosaica.toml`."""
     directory = Path(tempfile.mkdtemp())
-    (directory / "tessera.toml").write_text(deployment, encoding="utf-8")
+    (directory / "mosaica.toml").write_text(deployment, encoding="utf-8")
     (directory / "schema.toml").write_text(declaration, encoding="utf-8")
-    return str(directory / "tessera.toml")
+    return str(directory / "mosaica.toml")
 
 
 class ACleanDeclaration(unittest.TestCase):
     def test_checks(self):
-        result = _tessera.check(project(DECLARED_AND_EMPTY))
+        result = _mosaica.check(project(DECLARED_AND_EMPTY))
         self.assertTrue(result.ok)
         self.assertEqual(result.findings, [])
 
     def test_names_every_block_it_looked_at_and_the_file_each_had(self):
-        result = _tessera.check(project(DECLARED_AND_EMPTY))
+        result = _mosaica.check(project(DECLARED_AND_EMPTY))
         looked_at = {(source.object.block, source.object.name) for source in result.sources}
         self.assertIn(("view", "s0"), looked_at)
         self.assertIn(("attribute", "score"), looked_at)
         self.assertEqual([source.path for source in result.sources], [None] * len(result.sources))
 
     def test_serialises_to_payloads_addressed_by_block_kind(self):
-        payloads = json.loads(_tessera.payloads(project(DECLARED_AND_EMPTY)))
+        payloads = json.loads(_mosaica.payloads(project(DECLARED_AND_EMPTY)))
         self.assertEqual([view["name"] for view in payloads["views"]], ["s0"])
         self.assertEqual([body["name"] for body in payloads["attributes"]], ["score"])
 
     def test_carries_the_whole_page_the_binary_prints(self):
-        page = _tessera.check(project(DECLARED_AND_EMPTY)).page
+        page = _mosaica.check(project(DECLARED_AND_EMPTY)).page
         self.assertIn("declared and empty", page)
         # The disclosure table, which a caller rendering from the findings alone cannot write.
         self.assertIn("\nviews\n", page)
@@ -89,30 +89,30 @@ class ACleanDeclaration(unittest.TestCase):
 
     def test_payloads_are_text_a_second_call_repeats(self):
         deployment = project(DECLARED_AND_EMPTY)
-        self.assertEqual(_tessera.payloads(deployment), _tessera.payloads(deployment))
+        self.assertEqual(_mosaica.payloads(deployment), _mosaica.payloads(deployment))
 
 
 class ADeclarationThatDoesNotCheck(unittest.TestCase):
     def test_comes_back_as_a_result_rather_than_an_exception(self):
-        result = _tessera.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
+        result = _mosaica.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
         self.assertFalse(result.ok)
         self.assertTrue(result.findings)
 
     def test_each_finding_names_the_block_it_is_about(self):
-        result = _tessera.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
+        result = _mosaica.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
         for finding in result.findings:
             self.assertIn(finding.object.block, ("view", "source", "attribute", "layer"))
             self.assertTrue(finding.object.name)
             self.assertTrue(finding.detail)
 
     def test_its_page_states_the_verdict_and_discloses_nothing(self):
-        page = _tessera.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE)).page
+        page = _mosaica.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE)).page
         self.assertIn("check FAILED:", page)
         self.assertNotIn("\nviews\n", page)
 
     def test_emits_no_payloads(self):
-        with self.assertRaises(_tessera.DeclarationError) as refusal:
-            _tessera.payloads(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
+        with self.assertRaises(_mosaica.DeclarationError) as refusal:
+            _mosaica.payloads(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
         self.assertTrue(refusal.exception.findings)
         self.assertEqual(refusal.exception.findings[0].object.block, "view")
         self.assertEqual(refusal.exception.findings[0].object.name, "s0")
@@ -120,38 +120,38 @@ class ADeclarationThatDoesNotCheck(unittest.TestCase):
 
 class ADeclarationThatCannotBeReadAtAll(unittest.TestCase):
     def refusal(self, deployment_path: str, call):
-        with self.assertRaises(_tessera.DeclarationError) as raised:
+        with self.assertRaises(_mosaica.DeclarationError) as raised:
             call(deployment_path)
         self.assertTrue(raised.exception.findings)
         return raised.exception.findings[0]
 
     def test_a_deployment_file_that_is_not_there_is_refused_by_both_calls(self):
-        missing = str(Path(tempfile.mkdtemp()) / "tessera.toml")
-        for call in (_tessera.check, _tessera.payloads):
+        missing = str(Path(tempfile.mkdtemp()) / "mosaica.toml")
+        for call in (_mosaica.check, _mosaica.payloads):
             finding = self.refusal(missing, call)
             self.assertEqual(finding.object.block, "deployment")
             self.assertEqual(finding.object.name, missing)
 
     def test_a_deployment_file_that_does_not_parse_is_refused(self):
-        finding = self.refusal(project(DECLARED_AND_EMPTY, "[bundle\n"), _tessera.check)
+        finding = self.refusal(project(DECLARED_AND_EMPTY, "[bundle\n"), _mosaica.check)
         self.assertEqual(finding.object.block, "deployment")
 
     def test_a_declaration_that_does_not_parse_is_refused_and_names_the_file(self):
-        finding = self.refusal(project("[[view]]\nname =\n"), _tessera.check)
+        finding = self.refusal(project("[[view]]\nname =\n"), _mosaica.check)
         self.assertEqual(finding.object.block, "declaration")
         self.assertTrue(finding.object.name.endswith("schema.toml"))
 
 
 class TheFindingsAreReadable(unittest.TestCase):
     def test_a_finding_prints_the_block_it_is_about_and_why(self):
-        result = _tessera.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
+        result = _mosaica.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
         printed = str(result.findings[0])
         self.assertIn("view 's0'", printed)
         self.assertIn(result.findings[0].detail, printed)
 
     def test_a_refusal_prints_what_it_carries(self):
-        with self.assertRaises(_tessera.DeclarationError) as refusal:
-            _tessera.payloads(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
+        with self.assertRaises(_mosaica.DeclarationError) as refusal:
+            _mosaica.payloads(project(NAMES_A_FILE_THAT_IS_NOT_THERE))
         self.assertIn(str(refusal.exception.findings[0]), str(refusal.exception))
 
 

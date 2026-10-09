@@ -10,10 +10,10 @@ edition = "2021"
 # **The shipped writers**, so what is reported is the format's own output on disk rather than an
 # accounting of it. That is the whole point: `2026-08-12-string-storage` arm 3 modelled the index
 # at 22.7–23.6 B/entity by summing per-posting costs, and a model of a format is not the format.
-tessera-analyse = { path = "../../../crates/tessera-analyse" }
-tessera-filter = { path = "../../../crates/tessera-filter" }
-tessera-authz = { path = "../../../crates/tessera-authz" }
-tessera-types = { path = "../../../crates/tessera-types" }
+mosaica-analyse = { path = "../../../crates/mosaica-analyse" }
+mosaica-filter = { path = "../../../crates/mosaica-filter" }
+mosaica-authz = { path = "../../../crates/mosaica-authz" }
+mosaica-types = { path = "../../../crates/mosaica-types" }
 serde_json = "1"
 tempfile = "3"
 

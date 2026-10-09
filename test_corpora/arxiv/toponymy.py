@@ -290,7 +290,7 @@ def splice_declaration(out: Path, levels: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--out", type=Path, default=None, help=f"default $TESSERA_LADDER/{RUNG}")
+    ap.add_argument("--out", type=Path, default=None, help=f"default $MOSAICA_LADDER/{RUNG}")
     ap.add_argument("--llm", choices=("live", "mock"), default="live",
                     help="'mock' names a cluster after its first keyphrase, for checking plumbing")
     ap.add_argument("--url", default="http://127.0.0.1:8888/v1")
@@ -498,7 +498,7 @@ def main() -> None:
     manifest_file.write_text(json.dumps(manifest, indent=2) + "\n")
 
     print(f"\nspliced the layer into {out / 'corpus.toml'}")
-    print(f"\nnext:\n  cd {out}\n  tessera check\n  tessera build")
+    print(f"\nnext:\n  cd {out}\n  mosaica check\n  mosaica build")
 
 
 if __name__ == "__main__":

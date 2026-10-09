@@ -20,10 +20,10 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use rustc_hash::FxHashMap;
-use tessera_filter::RecordValue as RV;
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::unfixed;
-use tessera_types::MortonCode;
+use mosaica_filter::RecordValue as RV;
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::unfixed;
+use mosaica_types::MortonCode;
 
 use super::plan::{FieldPlan, Home, Named, SystemField};
 use super::walk::{PageCx, Taken};
@@ -246,7 +246,7 @@ fn value_bytes(value: &RV) -> usize {
 /// the row carries a value, read as [`RowPresence`] says. A category's absence is its code 0,
 /// which `slice_value` answers.
 fn rendered_values(
-    segments: &[(&tessera_store::read::SegmentData, u32)],
+    segments: &[(&mosaica_store::read::SegmentData, u32)],
     field: &Named,
     rows: &[Taken],
 ) -> Vec<Option<RV>> {
@@ -281,8 +281,8 @@ fn mismatch(name: &str, ty: ScalarType) -> EngineError {
 /// A view's 32-bit grid converted back through its frame and projection: longitude and latitude
 /// in degrees for a geographic view, the view's own coordinates otherwise.
 pub(super) struct ViewFrame {
-    quantisation: tessera_store::manifest::Quantisation,
-    projection: tessera_spatial::Projection,
+    quantisation: mosaica_store::manifest::Quantisation,
+    projection: mosaica_spatial::Projection,
 }
 
 impl ViewFrame {
@@ -324,7 +324,7 @@ fn positions(
         .map(|row| {
             let (segment, _) = segments[row.seg];
             let local = row.local as usize;
-            let (qx, qy) = tessera_spatial::unsplit32(
+            let (qx, qy) = mosaica_spatial::unsplit32(
                 MortonCode::new(segment.morton.u32()[local]),
                 segment.columns.residual()[local],
             );
@@ -684,20 +684,20 @@ impl PageValues {
         for column in self.system {
             match column {
                 SystemColumn::Position(mut x, mut y) => {
-                    fields.push(Field::new("tessera:x", DataType::Float64, false));
+                    fields.push(Field::new("mosaica:x", DataType::Float64, false));
                     arrays.push(Arc::new(x.finish()));
-                    fields.push(Field::new("tessera:y", DataType::Float64, false));
+                    fields.push(Field::new("mosaica:y", DataType::Float64, false));
                     arrays.push(Arc::new(y.finish()));
                 }
                 SystemColumn::Labels(mut b) => {
                     let array = b.finish();
-                    fields.push(Field::new("tessera:labels", array.data_type().clone(), false));
+                    fields.push(Field::new("mosaica:labels", array.data_type().clone(), false));
                     arrays.push(Arc::new(array));
                 }
             }
         }
         if let Some(mut matched) = self.matched {
-            fields.push(Field::new("tessera:matched", DataType::Boolean, false));
+            fields.push(Field::new("mosaica:matched", DataType::Boolean, false));
             arrays.push(Arc::new(matched.finish()));
         }
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)

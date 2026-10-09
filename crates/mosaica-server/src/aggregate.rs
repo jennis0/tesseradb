@@ -15,14 +15,14 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::Value;
 
-use tessera_engine::{
+use mosaica_engine::{
     AggregateCaps, AggregateHead, AggregateRefused, AggregateRequest, AggregateSink, By,
     CancelToken, Cut, EngineError, Grouping, PageEnd, Pick, RecordsLimits, RecordsSink, RecordsTrailer,
     Reference,
     SinkResult, TableHead,
 };
-use tessera_engine::filter::Family;
-use tessera_wire::table_head_frame;
+use mosaica_engine::filter::Family;
+use mosaica_wire::table_head_frame;
 
 use crate::error::ApiError;
 use crate::records::{bulk_read, limits, view_and_filter, CompressionReq, FrameSink, Lane, Opening, Read};
@@ -172,7 +172,7 @@ pub(crate) async fn aggregate(
     ApiJson(req): ApiJson<AggregateReq>,
 ) -> Result<Response, ApiError> {
     let compression = req.compression;
-    let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
+    let read = move |state: &AppState, session: &mosaica_engine::Session, cancel, sink: &mut _| {
         run_aggregate(state, session, req, cancel, sink)
     };
     bulk_read(state, session, Lane::Compute, "aggregate", "", compression, read).await
@@ -180,7 +180,7 @@ pub(crate) async fn aggregate(
 
 fn run_aggregate(
     state: &AppState,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     req: AggregateReq,
     cancel: CancelToken,
     sink: &mut FrameSink,
@@ -257,9 +257,9 @@ fn run_aggregate(
 
 /// One grouping as the engine takes it, with its field resolved under `view`.
 fn grouping_of(
-    meta: &tessera_engine::EngineMeta,
+    meta: &mosaica_engine::EngineMeta,
     view: &str,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     grouping: &GroupingReq,
 ) -> Result<Grouping, ApiError> {
     let by = match &grouping.by {
@@ -291,9 +291,9 @@ fn grouping_of(
 }
 
 fn by_of(
-    meta: &tessera_engine::EngineMeta,
+    meta: &mosaica_engine::EngineMeta,
     view: &str,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     by: &ByReq,
 ) -> Result<By, ApiError> {
     let bad = |detail: &str| Err(ApiError::Contract(detail.to_string()));
@@ -404,7 +404,7 @@ fn by_of(
             }
             let palette = by
                 .palette_size
-                .map(tessera_engine::check_palette_size)
+                .map(mosaica_engine::check_palette_size)
                 .transpose()
                 .map_err(crate::error::map_engine_error)?;
             let pick = match (by.top, &by.artifacts) {

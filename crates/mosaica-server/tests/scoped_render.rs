@@ -38,12 +38,12 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::config::Attribute;
-use tessera_build::{
+use mosaica_build::config::Attribute;
+use mosaica_build::{
     build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily, ViewArgs,
 };
-use tessera_engine::EngineConfig;
-use tessera_spatial::tiler::ScalarType;
+use mosaica_engine::EngineConfig;
+use mosaica_spatial::tiler::ScalarType;
 
 const ENTITIES: u64 = 24;
 /// The plain view holds the first twenty; each quarter holds its own slice, so the two quarters
@@ -214,7 +214,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
                 members_of: None,
                 views: roster(true),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 scoped_scalars: Vec::new(),
             },
@@ -228,7 +228,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
                 members_of: Some("quarter".to_string()),
                 views: sharing_roster(),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 scoped_scalars: Vec::new(),
             },
@@ -354,8 +354,8 @@ async fn ingest_bare(served: &Served, batch_id: &str, view: &str, rows: &[(u64, 
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&rows))
         .send()
@@ -427,8 +427,8 @@ async fn try_ingest_families(
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -445,11 +445,11 @@ async fn try_ingest_families(
 /// the entity-scoped ones, and a reader that indexed positionally would be reading the scope's
 /// placement rather than the schema's.
 fn points_columns(body: &[u8]) -> (Vec<String>, BTreeMap<u64, Option<f32>>) {
-    let frames = tessera_wire::split_frames(body).expect("well-formed frames");
+    let frames = mosaica_wire::split_frames(body).expect("well-formed frames");
     let mut names: Vec<String> = Vec::new();
     let mut heat = BTreeMap::new();
     for (kind, payload) in frames {
-        if kind != tessera_wire::FRAME_POINTS {
+        if kind != mosaica_wire::FRAME_POINTS {
             continue;
         }
         let reader =
@@ -668,11 +668,11 @@ async fn every_render_column_meta_lists_for_a_view_is_accepted_by_point_rows() {
 fn decode_tiles_and_codes(body: &[u8]) -> (Vec<u8>, Vec<(u64, u64)>) {
     let mut tiles = Vec::new();
     let mut points = Vec::new();
-    for (kind, payload) in tessera_wire::split_frames(body).expect("well-formed frames") {
-        if kind == tessera_wire::FRAME_TILES {
+    for (kind, payload) in mosaica_wire::split_frames(body).expect("well-formed frames") {
+        if kind == mosaica_wire::FRAME_TILES {
             tiles.extend_from_slice(payload);
         }
-        if kind != tessera_wire::FRAME_POINTS {
+        if kind != mosaica_wire::FRAME_POINTS {
             continue;
         }
         let reader =
@@ -1116,8 +1116,8 @@ async fn a_scoped_family_may_be_left_out_of_any_row() {
                 .client
                 .post(served.server.control_url("/control/ingest"))
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .header("x-tessera-batch-id", batch_id)
-                .header("x-tessera-view", view)
+                .header("x-mosaica-batch-id", batch_id)
+                .header("x-mosaica-view", view)
                 .header("content-type", "application/vnd.apache.arrow.stream")
                 .body(body)
                 .send()
@@ -1838,8 +1838,8 @@ async fn edit_tag(
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .json(&json!([{ "id": entity, "tag": tag }]))
         .send()
         .await
@@ -2211,10 +2211,10 @@ async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_throug
 
 /// Every `tessera_id` a view's points frames carry, in the order they arrive.
 fn served_ids(body: &[u8]) -> Vec<u64> {
-    let frames = tessera_wire::split_frames(body).expect("well-formed frames");
+    let frames = mosaica_wire::split_frames(body).expect("well-formed frames");
     let mut out = Vec::new();
     for (kind, payload) in frames {
-        if kind != tessera_wire::FRAME_POINTS {
+        if kind != mosaica_wire::FRAME_POINTS {
             continue;
         }
         let reader =
@@ -2267,8 +2267,8 @@ fn expected_position(view: &str, e: u64) -> (u32, u32) {
     let (x, y) = position(view, e);
     let f = extent();
     (
-        tessera_spatial::fixed32(x, f.x_min, f.x_max),
-        tessera_spatial::fixed32(y, f.y_min, f.y_max),
+        mosaica_spatial::fixed32(x, f.x_min, f.x_max),
+        mosaica_spatial::fixed32(y, f.y_min, f.y_max),
     )
 }
 

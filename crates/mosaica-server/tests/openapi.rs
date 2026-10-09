@@ -1,6 +1,6 @@
 //! **The OpenAPI description is kept true here, or it is not true.**
 //!
-//! `docs/openapi/tessera.yaml` is hand-authored: the JSON DTOs live in this crate, some private,
+//! `docs/openapi/mosaica.yaml` is hand-authored: the JSON DTOs live in this crate, some private,
 //! the control plane's answers are built with `json!`, and the wire structs carry no serde derive,
 //! so nothing generates it from the types and nothing but this test stops it drifting. Every route
 //! the viewer, session and control planes mount is exercised, with a success and at least one
@@ -27,16 +27,16 @@ use arrow::array::{Float32Array, StringArray};
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_server::state::ComputeGate;
+use mosaica_server::state::ComputeGate;
 
 // ---------------------------------------------------------------------------------------------
 // The description, and validators over its component schemas.
 // ---------------------------------------------------------------------------------------------
 
-const DESCRIPTION: &str = include_str!("../../../docs/openapi/tessera.yaml");
+const DESCRIPTION: &str = include_str!("../../../docs/openapi/mosaica.yaml");
 
 fn description() -> Value {
-    let doc: Value = serde_yaml_ng::from_str(DESCRIPTION).expect("tessera.yaml parses as YAML");
+    let doc: Value = serde_yaml_ng::from_str(DESCRIPTION).expect("mosaica.yaml parses as YAML");
     assert_eq!(doc["openapi"], "3.1.0", "the description is OpenAPI 3.1");
     doc
 }
@@ -725,7 +725,7 @@ async fn authorise_and_revoke_match_the_description() {
     // An accepted key whose principal lacks `authorise-as`.
     let catalogue = &f.server.state.catalogue;
     catalogue
-        .create_principal("plain", tessera_catalogue::PrincipalKind::Service)
+        .create_principal("plain", mosaica_catalogue::PrincipalKind::Service)
         .unwrap();
     let (plain, _) = catalogue.create_api_key("plain", None, None).unwrap();
     let resp = authorise(&plain.key, json!({ "principal": principal }))
@@ -800,7 +800,7 @@ async fn authorise_and_revoke_match_the_description() {
 /// `POST /v1/login` by password and by API key, its refusals, and `POST /v1/logout`.
 #[tokio::test]
 async fn login_and_logout_match_the_description() {
-    use tessera_catalogue::{Grantee, Permission, PrincipalKind};
+    use mosaica_catalogue::{Grantee, Permission, PrincipalKind};
     let doc = description();
     let f = fixture().await;
     let catalogue = &f.server.state.catalogue;
@@ -916,7 +916,7 @@ impl Control {
     fn with_ann(self, group: bool) -> Self {
         let catalogue = &self.f.server.state.catalogue;
         catalogue
-            .create_principal("ann", tessera_catalogue::PrincipalKind::Person)
+            .create_principal("ann", mosaica_catalogue::PrincipalKind::Person)
             .unwrap();
         if group {
             catalogue.create_group("analysts").unwrap();
@@ -1174,10 +1174,10 @@ async fn the_provider_routes_match_the_description() {
     let c = Control::new().await;
     let declared = json!({
         "issuer": "https://login.example.org",
-        "audience": "tessera",
+        "audience": "mosaica",
         "jwks_url": "http://127.0.0.1:9/keys",
         "claim_rules": [{ "claim": "groups[*]", "template": "{value}" }],
-        "role_mappings": [{ "claim": "groups[*]", "value": "tessera-admins", "group": "admins" }],
+        "role_mappings": [{ "claim": "groups[*]", "value": "mosaica-admins", "group": "admins" }],
     });
     for _ in 0..2 {
         let body = Some(("ProviderDeclaration", declared.clone()));
@@ -1237,7 +1237,7 @@ async fn the_session_routes_match_the_description() {
 /// status and the catalogue `admin`.
 #[tokio::test]
 async fn every_control_route_needs_its_permission() {
-    use tessera_catalogue::{Grantee, Permission, PrincipalKind};
+    use mosaica_catalogue::{Grantee, Permission, PrincipalKind};
     let doc = description();
     let f = fixture().await;
     let catalogue = &f.server.state.catalogue;
@@ -1543,7 +1543,7 @@ async fn suggest_matches_the_description_and_its_own_refusals() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(resp.headers()["x-tessera-region"], "exact");
+    assert_eq!(resp.headers()["x-mosaica-region"], "exact");
     let page: Value = resp.json().await.unwrap();
     assert_valid(&doc, "SuggestResponse", &page);
     let hep = page["values"]
@@ -1586,7 +1586,7 @@ async fn viewport_carries_the_described_headers_and_framing() {
         .as_object()
         .unwrap();
     for (name, spec) in headers {
-        // A header the description marks optional — `x-tessera-region`, present exactly when
+        // A header the description marks optional — `x-mosaica-region`, present exactly when
         // the request carried a region leaf — is checked on the request that asks for it below.
         if spec["required"].as_bool() == Some(true) {
             assert!(
@@ -1600,7 +1600,7 @@ async fn viewport_carries_the_described_headers_and_framing() {
             );
         }
     }
-    let stale = resp.headers()["x-tessera-stale"]
+    let stale = resp.headers()["x-mosaica-stale"]
         .to_str()
         .unwrap()
         .to_string();
@@ -1628,7 +1628,7 @@ async fn viewport_carries_the_described_headers_and_framing() {
     assert_eq!(region_resp.status().as_u16(), 200);
     let verdict = region_resp
         .headers()
-        .get("x-tessera-region")
+        .get("x-mosaica-region")
         .expect("a request carrying a region leaf answers with the verdict")
         .to_str()
         .unwrap()
@@ -1641,7 +1641,7 @@ async fn viewport_carries_the_described_headers_and_framing() {
             .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
     assert!(
         described,
-        "x-tessera-region {verdict:?} is not one of the described spellings"
+        "x-mosaica-region {verdict:?} is not one of the described spellings"
     );
     assert_eq!(verdict, "exact");
     assert!(decoded.trailer.is_object());
@@ -1959,8 +1959,8 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
     }
     // The optional headers: the identity coordinate is present whenever a page was walked, and
     // the region verdict only with a region leaf, which this request has not.
-    assert!(resp.headers().contains_key("x-tessera-identity-key"));
-    assert!(!resp.headers().contains_key("x-tessera-region"));
+    assert!(resp.headers().contains_key("x-mosaica-identity-key"));
+    assert!(!resp.headers().contains_key("x-mosaica-region"));
     let decoded = decode_records(&resp.bytes().await.unwrap());
     assert_valid(&doc, "ItemsHead", &decoded.head);
     assert!(decoded.head["visible"].is_u64() && decoded.head["matched"].is_u64());
@@ -2063,8 +2063,8 @@ async fn the_aggregate_read_matches_the_description_with_its_refusals() {
             assert!(resp.headers().contains_key(name.as_str()), "{name}");
         }
     }
-    assert!(resp.headers().contains_key("x-tessera-identity-key"));
-    assert_eq!(resp.headers()["x-tessera-region"], "exact");
+    assert!(resp.headers().contains_key("x-mosaica-identity-key"));
+    assert_eq!(resp.headers()["x-mosaica-region"], "exact");
     let decoded = decode_aggregate(&resp.bytes().await.unwrap());
     assert!(!decoded.tables.is_empty());
     for (head, pages) in &decoded.tables {
@@ -2222,7 +2222,7 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 /// is caught by nothing but this test.
 ///
 /// **What is enumerated.** axum exposes no route enumeration, so the loop runs over
-/// `docs/openapi/tessera.yaml`'s operations and their declared `security`.
+/// `docs/openapi/mosaica.yaml`'s operations and their declared `security`.
 /// [`the_description_names_every_route_on_the_three_planes_and_no_other`] fails if a route is
 /// mounted and not described; describing it means declaring its `security`; declaring
 /// `sessionToken` puts it in this loop. A route declared `security: []` is skipped, and the two
@@ -2612,7 +2612,7 @@ async fn an_underlay_that_finds_no_cells_still_carries_a_zero_row_frame() {
     let resp = viewport(&f.server, token, &empty).await;
     assert_eq!(resp.status().as_u16(), 200);
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    // A tile with nothing visible carries no count row at all (`tessera-engine`'s `visible == 0`
+    // A tile with nothing visible carries no count row at all (`mosaica-engine`'s `visible == 0`
     // skip), so the zero-cell underlay is necessarily a zero-tile response. That is the state
     // under test, and it is still a complete answer — a trailer, and no points.
     assert!(decoded.tiles.is_empty(), "nothing is visible in this bbox");
@@ -2675,7 +2675,7 @@ async fn ingest_matches_the_description() {
     let f = fixture().await;
     let post = reqwest::Method::POST;
     let ingest = |batch_id: &str| {
-        control(&f.server, &post, "/control/ingest").header("x-tessera-batch-id", batch_id)
+        control(&f.server, &post, "/control/ingest").header("x-mosaica-batch-id", batch_id)
     };
 
     // JSON, with a category and a number, and one row with no `id`.
@@ -2717,7 +2717,7 @@ async fn ingest_matches_the_description() {
 
     // Arrow leaving both declared columns out: the item is created with no value in either.
     let resp = control(&f.server, &post, "/control/ingest")
-        .header("x-tessera-batch-id", "openapi-arrow")
+        .header("x-mosaica-batch-id", "openapi-arrow")
         .header("content-type", ARROW)
         .body(build_ingest_batch_optional(&[(Some(1002), 50.0, 60.0, "0")]))
         .send()
@@ -2758,7 +2758,7 @@ async fn ingest_matches_the_description() {
     assert_eq!(refused["tessera_ids"], json!([null]));
     assert_eq!(refused["refused"], json!([{ "row": 0, "reason": "names_no_item" }]));
     let resp = control(&f.server, &post, "/control/ingest?strict=true")
-        .header("x-tessera-batch-id", "openapi-unplaced-strict")
+        .header("x-mosaica-batch-id", "openapi-unplaced-strict")
         .header("content-type", "application/json")
         .body(unplaced)
         .send()
@@ -2768,7 +2768,7 @@ async fn ingest_matches_the_description() {
 
     // Waiting for the rows to be visible.
     let resp = control(&f.server, &post, "/control/ingest?wait=visible")
-        .header("x-tessera-batch-id", "openapi-visible")
+        .header("x-mosaica-batch-id", "openapi-visible")
         .json(&json!([{ "id": 1003, "x": 50.0, "y": 60.0,
                          "access": "0", "archive": "astro", "score": null }]))
         .send()
@@ -2787,7 +2787,7 @@ async fn ingest_matches_the_description() {
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
     let resp = ingest("openapi-view")
-        .header("x-tessera-view", "no-such-view")
+        .header("x-mosaica-view", "no-such-view")
         .json(&one)
         .send()
         .await
@@ -2810,7 +2810,7 @@ async fn ingest_matches_the_description() {
         .server
         .client
         .post(f.server.control_url("/control/ingest"))
-        .header("x-tessera-batch-id", "openapi-anonymous")
+        .header("x-mosaica-batch-id", "openapi-anonymous")
         .json(&one)
         .send()
         .await

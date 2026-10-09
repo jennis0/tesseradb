@@ -5,8 +5,8 @@ One walk (the module-scoped fixture), every test reading the same evidence: mate
 corpus through its own Rust materialisers, build the bundle through the CLI, serve it, ingest one
 batch drawn from the same functions beyond the built prefix, accept three denies, record the
 battery, and take one census viewport per principal. The row half then checks every row of every
-recorded response against `tessera corpus items`, and the census half checks per-tile masked
-counts — the battery's own tiles and underlay surfaces included — against `tessera corpus
+recorded response against `mosaica corpus items`, and the census half checks per-tile masked
+counts — the battery's own tiles and underlay surfaces included — against `mosaica corpus
 census`, minus the denies this harness had accepted.
 
 ## The plan's shape, and why

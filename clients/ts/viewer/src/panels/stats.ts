@@ -3,7 +3,7 @@ import type {AppState} from '../state.js';
 
 /**
  * The fields of the viewport trailer's `stage_ns`, a positional CSV. The order is shared with
- * `scripts/bench_*.py` and `tessera-bench` and only grows at the end.
+ * `scripts/bench_*.py` and `mosaica-bench` and only grows at the end.
  */
 const STAGE_FIELDS = [
   'generation_resolve_ns',

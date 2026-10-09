@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 /// Reserved out of plain view names and keys at the configuration parser and again at manifest
 /// load, which is what makes splitting on it unambiguous.
 ///
-/// **Re-exported, not redefined**: the roster's WAL records travel through `tessera-lifecycle`,
-/// which does not depend on this crate, so the character lives beside them in `tessera-types` and
+/// **Re-exported, not redefined**: the roster's WAL records travel through `mosaica-lifecycle`,
+/// which does not depend on this crate, so the character lives beside them in `mosaica-types` and
 /// both halves read the same one.
-pub use tessera_types::view::GROUP_SEPARATOR;
+pub use mosaica_types::view::GROUP_SEPARATOR;
 
-use tessera_types::view::{ViewIncarnation, DECLARED_INCARNATION};
+use mosaica_types::view::{ViewIncarnation, DECLARED_INCARNATION};
 
 /// The path components `view_id` derives, in order: one for a plain view, two for a group's.
 ///
@@ -46,7 +46,7 @@ pub fn view_path_components(view_id: &str) -> Vec<&str> {
 ///
 /// At [`DECLARED_INCARNATION`] the path is exactly what it always was, so nothing a build wrote
 /// moves; a key created while the service runs gets `<key>@<n>`, and `@` is reserved out of a view
-/// key (`tessera_types::view::check_view_key`) so the suffix can never collide with one.
+/// key (`mosaica_types::view::check_view_key`) so the suffix can never collide with one.
 pub fn scoped_column_rel(
     partition: &str,
     column: &str,

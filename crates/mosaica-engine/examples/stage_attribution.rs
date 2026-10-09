@@ -2,7 +2,7 @@
 //! p50 of 1.118 ms against 0.376 ms at `threads=1` — 2.97x *slower* with more threads.
 //!
 //! The number on its own does not say where the time goes. This attributes it, using the
-//! `bench-timing` feature's per-request [`tessera_engine::StageTimings`] rather than inference.
+//! `bench-timing` feature's per-request [`mosaica_engine::StageTimings`] rather than inference.
 //!
 //! **Method.** `StageTimings`' serial-prefix fields (`generation_resolve_ns` through
 //! `tile_ranges_ns`, plus `theta_anchor_ns` and `theta_occupancy_ns`) keep their wall-clock
@@ -17,18 +17,18 @@
 //! (would show as `parallel section wall` growing with no matching growth in the summed per-tile
 //! stage fields) or genuine per-tile work (would show as the per-tile sums growing too).
 //!
-//! Run: `cargo run --release --example stage_attribution -p tessera-engine --features bench-timing`
+//! Run: `cargo run --release --example stage_attribution -p mosaica-engine --features bench-timing`
 //!
 //! Without `--features bench-timing` every field is zero (the feature's whole zero-cost-when-off
 //! discipline) and this example prints that observation rather than a meaningless zero table.
 
 use std::path::{Path, PathBuf};
 
-use tessera_build::{build, BuildArgs};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_spatial::Bounds;
-use tessera_types::IdentityKey;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_spatial::Bounds;
+use mosaica_types::IdentityKey;
 
 const ITEM_LIMIT: u64 = 2_422_486;
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -56,24 +56,24 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Same fixture and convention as `benches/viewport.rs::ensure_bundle` — `/tmp/tessera-2m4`,
-/// built by `tessera-bench`'s `viewport_latency` binary,
+/// Same fixture and convention as `benches/viewport.rs::ensure_bundle` — `/tmp/mosaica-2m4`,
+/// built by `mosaica-bench`'s `viewport_latency` binary,
 /// `scripts/bench_build_fixtures.sh` (which symlinks this exact path to its own
 /// `$FIXTURES/2422486/categories-subclass` convention), or rebuilt here if both are missing.
 fn ensure_bundle() -> PathBuf {
-    let bundle_root = PathBuf::from("/tmp/tessera-2m4");
+    let bundle_root = PathBuf::from("/tmp/mosaica-2m4");
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
-            views: vec![tessera_build::ViewArgs {
+            views: vec![mosaica_build::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 extent: extent(),
                 points: root.join("data/scaled/geometry.parquet"),
                 point_fields: Default::default(),
                 select: None,
-                access: tessera_build::config::AccessInput::relation(
+                access: mosaica_build::config::AccessInput::relation(
                     root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
                 ),
             }],
@@ -128,11 +128,11 @@ fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
         .collect()
 }
 
-/// Copy of `tessera-bench::corpus::gen_viewports`'s algorithm (identical RNG, identical formula),
+/// Copy of `mosaica-bench::corpus::gen_viewports`'s algorithm (identical RNG, identical formula),
 /// so `viewports(1, ..., seed, &[ZOOM])[0]` is bit-for-bit the same first viewport
 /// `bench_concurrency.py`'s c=1 cell hits (its `load` arm draws `gen_viewports(256, 65536.0,
 /// seed, &[zoom])` and worker 0 starts at index 0) — not duplicated logic, the same draw.
-/// `tessera-engine` cannot depend on `tessera-bench` (`scripts/check-layers.sh`: nothing may
+/// `mosaica-engine` cannot depend on `mosaica-bench` (`scripts/check-layers.sh`: nothing may
 /// depend on the harness crate), so this is copied rather than imported.
 fn viewports(n: usize, extent: f64, seed: u64, zoom: u8) -> Vec<[f64; 4]> {
     use rand::{Rng, SeedableRng};
@@ -192,7 +192,7 @@ fn main() {
 
     for (label, compute_threads) in [
         ("threads=1", 1),
-        ("threads=default", tessera_engine::default_compute_threads()),
+        ("threads=default", mosaica_engine::default_compute_threads()),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let engine = Engine::open(
@@ -200,9 +200,9 @@ fn main() {
             &tmp.path().join("cache"),
             &tmp.path().join("wal.log"),
             EngineConfig {
-                // `tessera-server`'s own defaults (`config.rs`'s `DEFAULT_*` constants) — this
+                // `mosaica-server`'s own defaults (`config.rs`'s `DEFAULT_*` constants) — this
                 // must measure the deployment the server actually runs, not an arbitrary config
-                // (`tessera-bench/src/arms/viewport.rs`'s own doc makes the same point).
+                // (`mosaica-bench/src/arms/viewport.rs`'s own doc makes the same point).
                 token_max_lifetime_secs: 3600,
                 max_k: 1000,
                 k_min: 2,
@@ -221,7 +221,7 @@ fn main() {
                 segment_floor_bytes: None,
                 coalesce_width: None,
                 // Compaction §9's trigger is off unless a deployment configures one.
-                compaction: tessera_engine::CompactionSchedule::off(),
+                compaction: mosaica_engine::CompactionSchedule::off(),
             },
         )
         .expect("engine should open the 2.4M bundle");

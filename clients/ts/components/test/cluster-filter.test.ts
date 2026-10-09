@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {BrowseRow, Meta} from '@tesseradb/client';
+import type {BrowseRow, Meta} from '@mosaica/client';
 import '../src/cluster-filter.js';
-import type {TesseraClusterFilter} from '../src/cluster-filter.js';
+import type {MosaicaClusterFilter} from '../src/cluster-filter.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, meta, mount, registered, settle, status} from './fake-store.js';
 import {UNNAMED} from '../src/base.js';
 
@@ -20,8 +20,8 @@ const layer = (name: string, over: Partial<Meta['layers'][number]> = {}) =>
 const row = (id: bigint, name: string | null, parentIds: bigint[] = [], rung = 0): BrowseRow => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung, parentIds, childCount: 0, slot: null});
 
 async function mountField(over: {layers?: Meta['layers']; verb?: 'filter' | 'highlight'; members?: unknown[]} = {}) {
-  const host = await mount(`<tessera-cluster-filter layer="topics" verb="${over.verb ?? 'filter'}"></tessera-cluster-filter>`);
-  const el = host.querySelector('tessera-cluster-filter') as TesseraClusterFilter;
+  const host = await mount(`<mosaica-cluster-filter layer="topics" verb="${over.verb ?? 'filter'}"></mosaica-cluster-filter>`);
+  const el = host.querySelector('mosaica-cluster-filter') as MosaicaClusterFilter;
   const store = fakeStore({meta: meta({layers: over.layers ?? [layer('topics')]}), status: status({})});
   store.set('view', {...store.get('view'), id: 's0'});
   if (over.members) store.set('filters', {...store.get('filters'), members: over.members as never});
@@ -34,7 +34,7 @@ const browses = (store: ReturnType<typeof fakeStore>) => store.calls.filter((c) 
 const names = (host: HTMLElement) => deepAll(host, '[part~="option"] [part="name"]').map((n) => n.textContent);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-describe('<tessera-cluster-filter> with the box empty', () => {
+describe('<mosaica-cluster-filter> with the box empty', () => {
   it('offers the top-level clusters, asked unfiltered, and counts them through the aggregate without its own filter clauses', async () => {
     const {host, store, box} = await mountField();
     store.setBrowse('roots', {artifacts: [row(1n, 'Physics'), row(2n, 'Biology'), row(3n, null)], parents: [], next: null});
@@ -62,7 +62,7 @@ describe('<tessera-cluster-filter> with the box empty', () => {
   });
 });
 
-describe('<tessera-cluster-filter> asking', () => {
+describe('<mosaica-cluster-filter> asking', () => {
   it('keeps its counts registered only while its list is open', async () => {
     const {host, store, box} = await mountField();
     store.setBrowse('roots', {artifacts: [row(1n, 'Physics')], parents: [], next: null});
@@ -96,7 +96,7 @@ describe('<tessera-cluster-filter> asking', () => {
   });
 });
 
-describe('<tessera-cluster-filter> typing', () => {
+describe('<mosaica-cluster-filter> typing', () => {
   it('searches the names, shows each match’s nearest parents as its path, and a pick adds a member_of clause named by the cluster', async () => {
     const {host, store, box} = await mountField();
     store.setBrowse('q:x-ray', {artifacts: [row(30n, 'x-ray state', [20n])], parents: [], next: null});

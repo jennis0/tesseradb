@@ -1,5 +1,5 @@
 [package]
-name = "tessera-filter"
+name = "mosaica-filter"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -8,22 +8,22 @@ license.workspace = true
 default = []
 # Per-stage bench accessors on `ColumnPostings` — the record search, the view construction and the
 # `hits` test that `intersects` runs as one call. OFF by default and enabled only by
-# `tessera-bench`, mirroring `tessera-engine/bench-timing`. It adds no behaviour to any path.
-bench-timing = ["tessera-authz/bench-timing"]
+# `mosaica-bench`, mirroring `mosaica-engine/bench-timing`. It adds no behaviour to any path.
+bench-timing = ["mosaica-authz/bench-timing"]
 
 [dependencies]
-tessera-types = { path = "../tessera-types" }
-# The Roaring container assembler, shared with `tessera-store`'s row projection. Below both,
+mosaica-types = { path = "../mosaica-types" }
+# The Roaring container assembler, shared with `mosaica-store`'s row projection. Below both,
 # because `check-layers.sh` denies filter -> store and store must not reach the filter index.
-tessera-roaring = { path = "../tessera-roaring" }
+mosaica-roaring = { path = "../mosaica-roaring" }
 # For the CSR postings format only — `PostingsReader`, `DeltaTier` and their ordinal-addressed
 # format core. This crate reads attribute postings; it never reads an authorisation posting, and
 # nothing here constructs a `TermId`. See lib.rs for why the dependency is on the format rather
 # than the other way round.
-tessera-authz = { path = "../tessera-authz" }
+mosaica-authz = { path = "../mosaica-authz" }
 croaring.workspace = true
 # The value column is an Arrow IPC file, as every other columnar artefact in the bundle is
-# (contracts §2.1). Reading it here rather than through `tessera-store` is what keeps the layer
+# (contracts §2.1). Reading it here rather than through `mosaica-store` is what keeps the layer
 # rule intact: `check-layers.sh` denies filter → store, so this crate stays entity-space and never
 # meets `RowId`.
 arrow.workspace = true

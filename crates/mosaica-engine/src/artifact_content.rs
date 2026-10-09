@@ -11,7 +11,7 @@
 //! it this read, even where nothing is materialised and only the content's presence is proved.
 //!
 //! So a level's contents are gathered in one pass over the blob — block by block, in entity order,
-//! each block decompressed once ([`tessera_filter::RecordStack::for_each_row_in`]) — and held.
+//! each block decompressed once ([`mosaica_filter::RecordStack::for_each_row_in`]) — and held.
 //! The same two requests are then **6.7 ms and 33 ms**, and the pass that buys that is 53 ms for
 //! the whole of that level, paid by the first request that serves any artifact in it.
 //!
@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tessera_types::layer::ReservedRuns;
+use mosaica_types::layer::ReservedRuns;
 
 /// One `(layer, level)`'s supplied content: the tagged utf8 fields of every artifact in it that
 /// carries a record row.
@@ -66,7 +66,7 @@ impl LevelContent {
     /// A malformed blob refuses at the read and leaves the level with no contents here — every
     /// artifact in it is then withheld, which is the same fail-closed answer the direct read gives
     /// for the same bytes.
-    pub(crate) fn build(records: &tessera_filter::RecordStack, runs: &ReservedRuns) -> Self {
+    pub(crate) fn build(records: &mosaica_filter::RecordStack, runs: &ReservedRuns) -> Self {
         let mut wanted = croaring::Bitmap::new();
         for run in runs.runs() {
             let (Ok(start), Ok(end)) = (u32::try_from(run.start), u32::try_from(run.end)) else {
@@ -81,7 +81,7 @@ impl LevelContent {
             let mut tagged: Vec<(u16, String)> = fields
                 .into_iter()
                 .filter_map(|field| match field.value {
-                    tessera_filter::RecordValue::Utf8(text) => Some((field.tag, text)),
+                    mosaica_filter::RecordValue::Utf8(text) => Some((field.tag, text)),
                     _ => None,
                 })
                 .collect();

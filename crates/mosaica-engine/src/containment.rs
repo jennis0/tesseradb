@@ -57,7 +57,7 @@
 //! signature-shaped, since an entity is visible iff its keys meet the principal's satisfied set,
 //! and `build_fragment` unions postings over that set and does nothing else. Each conjunction an item's
 //! labels hold at the top level is one key of its own, which the satisfied set holds exactly when
-//! the principal satisfies the conjunction ([`tessera_authz::LabelIndex`]).
+//! the principal satisfies the conjunction ([`mosaica_authz::LabelIndex`]).
 //!
 //! # What is canonical, and what is not
 //!
@@ -81,13 +81,13 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 
-use tessera_authz::postings::{PostingRef, PostingsReader};
-use tessera_lifecycle::membership::ArtifactStore;
-use tessera_store::derived::{
+use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_lifecycle::membership::ArtifactStore;
+use mosaica_store::derived::{
     compose_containment, generating_entities, PostingSlice, SignatureIndex,
 };
-use tessera_store::membership::ContainmentPack;
-use tessera_types::TermId;
+use mosaica_store::membership::ContainmentPack;
+use mosaica_types::TermId;
 
 use crate::session::SatisfiedKeys;
 
@@ -103,10 +103,10 @@ impl PartitionSource<'_> {
 /// Build a [`SignatureIndex`] over `postings` — the one adapter between the postings format and
 /// the composer.
 ///
-/// **A type shuffle, not a decode.** `tessera-authz` owns `postings.arrow` and `tessera-store`
+/// **A type shuffle, not a decode.** `mosaica-authz` owns `postings.arrow` and `mosaica-store`
 /// does not depend on it, so the posting arrives here in whichever of its two shapes it is stored
 /// in and is handed straight across; the walk that turns postings into signatures is written once,
-/// beside the containment format. `tessera build` holds the identical six lines, which is what a
+/// beside the containment format. `mosaica build` holds the identical six lines, which is what a
 /// crate boundary costs when neither side may depend on the other.
 pub fn signature_index(wanted: &Bitmap, postings: &PostingsReader) -> io::Result<SignatureIndex> {
     SignatureIndex::build(wanted, postings.term_count(), &|term, visit| {
@@ -187,7 +187,7 @@ impl ContainmentPartition {
     /// Open a fold-written partition, mapped in place. A torn or foreign file **refuses** —
     /// see [`ContainmentPack`], and note that the failure it prevents is permissive rather than
     /// absent: an expression read short has clauses nobody has to satisfy.
-    pub fn open(path: &std::path::Path) -> tessera_store::Result<Self> {
+    pub fn open(path: &std::path::Path) -> mosaica_store::Result<Self> {
         Ok(ContainmentPartition {
             pack: Arc::new(ContainmentPack::open(path)?),
         })
@@ -313,13 +313,13 @@ impl ContainmentPartition {
     /// served; the inversion has its own cases, and `tests/artifact_containment.rs` drives both
     /// together against the masked-count route.
     pub(crate) fn of_clauses(ordinals: &[&[&[&[u32]]]]) -> Self {
-        let mut builder = tessera_store::derived::ContainmentBuilder::new();
+        let mut builder = mosaica_store::derived::ContainmentBuilder::new();
         for (ordinal, ranks) in ordinals.iter().enumerate() {
             builder.push(
                 ordinal as u32,
                 ranks
                     .iter()
-                    .map(|clauses| tessera_store::derived::encode_expression(clauses.to_vec())),
+                    .map(|clauses| mosaica_store::derived::encode_expression(clauses.to_vec())),
             );
         }
         Self::of_bytes(builder.finish())
@@ -513,7 +513,7 @@ mod tests {
     }
 
     /// A file that is not a partition, or is one written by a different packer, **refuses**. The
-    /// framing lives in `tessera_store::membership`, which has the exhaustive cases; this pins
+    /// framing lives in `mosaica_store::membership`, which has the exhaustive cases; this pins
     /// that the engine's opener goes through them rather than around.
     #[test]
     fn a_torn_partition_file_refuses_rather_than_opening_short() {

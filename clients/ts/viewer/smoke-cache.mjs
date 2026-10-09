@@ -4,7 +4,7 @@
 //   node clients/ts/viewer/smoke-cache.mjs [--url http://localhost:5173]
 //     [--headed] [--executable /path/to/chrome]
 //
-// Requires a running `tessera serve` and `vite dev`.
+// Requires a running `mosaica serve` and `vite dev`.
 //
 //  - It zooms in first: at zoom 0 the world bbox clamps, so a pan changes nothing.
 //  - It lets the depth budget settle: bands are keyed by depth, so while `mTarget` moves every

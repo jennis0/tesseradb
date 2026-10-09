@@ -17,7 +17,7 @@
 //! by name, theirs being a map with no declared order to keep.
 //!
 //! **It is derived from the declaration and from nothing the build computes**, which is why it is
-//! written beside the build rather than inside it, and why `tessera check` can emit exactly the
+//! written beside the build rather than inside it, and why `mosaica check` can emit exactly the
 //! same document without opening a data file. `reports/containment.json` is the other way round —
 //! it is a *result*, needing every artifact published — and the two sit in one directory because
 //! both are notices for an operator rather than anything a reader loads.
@@ -26,7 +26,7 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde_json::json;
-use tessera_types::layer::{
+use mosaica_types::layer::{
     ExistenceCriterion, MemberDefault, MembershipSource, SuppliedRequirement,
 };
 

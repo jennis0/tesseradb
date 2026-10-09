@@ -1,6 +1,6 @@
-//! `tessera check` and an indexed keyword's cardinality: the check reads Parquet footers and no
+//! `mosaica check` and an indexed keyword's cardinality: the check reads Parquet footers and no
 //! row, so it warns exactly where a footer records a distinct count, and nowhere else
-//! (`tessera_build::unique_key`).
+//! (`mosaica_build::unique_key`).
 //!
 //! Arrow's writer records no distinct count, so the footers that carry one are written here with
 //! the Parquet crate's column writer, statistics supplied. That is also what a writer which tracks
@@ -21,8 +21,8 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::types::Type;
 
-use tessera_build::check::check;
-use tessera_build::config::Config;
+use mosaica_build::check::check;
+use mosaica_build::config::Config;
 
 const N: usize = 60;
 
@@ -217,7 +217,7 @@ fn a_footer_without_a_distinct_count_says_nothing_about_a_unique_key() {
     assert!(report.is_clean(), "{:?}", report.findings);
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(
-        tessera_build::footer_distinct_count(&dir.path().join("points.parquet"), "key").unwrap(),
+        mosaica_build::footer_distinct_count(&dir.path().join("points.parquet"), "key").unwrap(),
         None
     );
 }

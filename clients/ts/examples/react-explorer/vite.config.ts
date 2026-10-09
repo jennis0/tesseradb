@@ -1,6 +1,6 @@
 import react from '@vitejs/plugin-react';
 import {defaultClientConditions, defineConfig} from 'vite';
-import {tesseraDecorators} from '../../components/vite-plugin-decorators.js';
+import {mosaicaDecorators} from '../../components/vite-plugin-decorators.js';
 
 /**
  * Same-origin, as the page will be in production: `/v1/*` is proxied to the viewer plane with
@@ -9,16 +9,16 @@ import {tesseraDecorators} from '../../components/vite-plugin-decorators.js';
  * one origin and no CORS is involved.
  */
 export default defineConfig({
-  plugins: [react(), tesseraDecorators()],
+  plugins: [react(), mosaicaDecorators()],
   // The workspace packages resolve to their sources, so the page runs without a library build.
-  resolve: {conditions: ['tessera-source', ...defaultClientConditions]},
+  resolve: {conditions: ['mosaica-source', ...defaultClientConditions]},
   server: {
     port: 5181,
     strictPort: true,
     proxy: {
-      '/v1': {target: process.env.TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585', changeOrigin: true},
-      '/token': {target: process.env.TESSERA_APP_URL ?? 'http://127.0.0.1:5180', changeOrigin: true},
-      '/users': {target: process.env.TESSERA_APP_URL ?? 'http://127.0.0.1:5180', changeOrigin: true}
+      '/v1': {target: process.env.MOSAICA_VIEWER_URL ?? 'http://127.0.0.1:37585', changeOrigin: true},
+      '/token': {target: process.env.MOSAICA_APP_URL ?? 'http://127.0.0.1:5180', changeOrigin: true},
+      '/users': {target: process.env.MOSAICA_APP_URL ?? 'http://127.0.0.1:5180', changeOrigin: true}
     }
   }
 });

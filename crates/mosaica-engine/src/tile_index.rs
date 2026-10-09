@@ -32,7 +32,7 @@
 //!
 //! §3 sizes them apart: **80 MB of extents at 10⁷ artifacts against 4.2 MB of index.** The extents
 //! are what scales with the population, so they are what the fold writes and what a reader maps
-//! ([`tessera_store::membership::TileIndexPack`], the layout memo's constraint 13). The node
+//! ([`mosaica_store::membership::TileIndexPack`], the layout memo's constraint 13). The node
 //! hierarchy is a pure function of them — an artifact's node is the finest whose block holds both
 //! ends of its span — so it is folded up here, in the same pass that validates the column, rather
 //! than written as a second thing that could disagree with the bytes beside it.
@@ -42,7 +42,7 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 
-use tessera_store::membership::{
+use mosaica_store::membership::{
     pack_tile_index, TileIndexPack, TILE_INDEX_EMPTY, TILE_INDEX_HOLE,
 };
 
@@ -55,14 +55,14 @@ use crate::compose::{MaskedSet, WholeMask};
 // that and is derived from the corpus: shifts run from the coarsest one the row count actually
 // reaches down to the floor, so there is a level matching every zoom a viewer can be at. What
 // stays fixed is the floor and the step above, and neither is measured at another value — both are
-// argued at [`tessera_store::derived::FINEST_SHIFT`] and
-// [`tessera_store::derived::LEVEL_STEP`].
+// argued at [`mosaica_store::derived::FINEST_SHIFT`] and
+// [`mosaica_store::derived::LEVEL_STEP`].
 //
 // **The ladder is one crate down** because the layout pick reads it too: the fraction of a level
 // no node can hold is now the trigger, and a build has to compute it without building this
-// hierarchy at all ([`tessera_store::derived::is_everywhere`]). Two definitions of where the
+// hierarchy at all ([`mosaica_store::derived::is_everywhere`]). Two definitions of where the
 // nodes are would make the pick and the walk disagree about which artifacts are placeable.
-use tessera_store::derived::tile_index_shifts as shifts_for;
+use mosaica_store::derived::tile_index_shifts as shifts_for;
 
 /// One ordinal's row-space extent. **Three states and not two**, which is the layout memo's
 /// constraint 3 and the sentinel rule the durable column encodes.
@@ -142,7 +142,7 @@ impl TileIndex {
         // Framed and read back through the same checks a mapped file takes, for the reason
         // `ContainmentPartition::packed` gives: the two routes are one reader, so a framing rule
         // can never hold for a file and not for the form a publication built.
-        Self::of_bytes(tessera_store::derived::project_tile_index(
+        Self::of_bytes(mosaica_store::derived::project_tile_index(
             membership.len() as u32,
             row_count,
             &|visit| {
@@ -172,19 +172,19 @@ impl TileIndex {
     ///
     /// An artifact's membership is asked of `store`, never read from the record's field. An
     /// attached artifact that declares none is placed over its target's
-    /// ([`tessera_lifecycle::membership::ArtifactStore::members_of`], decision 0145), and an index
+    /// ([`mosaica_lifecycle::membership::ArtifactStore::members_of`], decision 0145), and an index
     /// written over the empty set such a record carries would put it in no tile of the bundle it is
     /// filed in.
     pub fn project<'a, I>(
         ordinals: u32,
         artifacts: impl Fn() -> I,
-        space: &tessera_store::permutation::RowSpace,
-        store: &tessera_lifecycle::membership::ArtifactStore,
+        space: &mosaica_store::permutation::RowSpace,
+        store: &mosaica_lifecycle::membership::ArtifactStore,
     ) -> Self
     where
-        I: Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
+        I: Iterator<Item = (u32, &'a mosaica_lifecycle::membership::ArtifactRecord)>,
     {
-        Self::of_bytes(tessera_store::derived::project_tile_index(
+        Self::of_bytes(mosaica_store::derived::project_tile_index(
             ordinals,
             space.base_rows(),
             &|visit| {
@@ -211,7 +211,7 @@ impl TileIndex {
 
     /// Open a fold-written extent column, mapped in place, and fold the hierarchy over it. A torn
     /// or foreign file **refuses** — see [`TileIndexPack`].
-    pub fn open(path: &std::path::Path) -> tessera_store::Result<Self> {
+    pub fn open(path: &std::path::Path) -> mosaica_store::Result<Self> {
         Ok(Self::from_pack(TileIndexPack::open(path)?))
     }
 
@@ -693,11 +693,11 @@ mod tests {
 
     /// **The `everywhere` set is exactly what the walk cannot place**, which is what licenses the
     /// layout pick reading it from the extents alone: the one-shift test in
-    /// [`tessera_store::derived::is_everywhere`] and this hierarchy's own placement have to agree
+    /// [`mosaica_store::derived::is_everywhere`] and this hierarchy's own placement have to agree
     /// artifact for artifact, or the trigger is reading a different quantity from the one it is
     /// named after.
     ///
-    /// The level-set cases themselves moved with the ladder — `tessera_store::membership`'s own
+    /// The level-set cases themselves moved with the ladder — `mosaica_store::membership`'s own
     /// tests.
     #[test]
     fn the_everywhere_set_and_the_one_shift_test_agree() {
@@ -714,10 +714,10 @@ mod tests {
         let index = TileIndex::build(&membership, 16_384);
         assert!(index.everywhere() > 0, "the fixture must exercise the set");
 
-        let shift = tessera_store::derived::coarsest_shift(16_384);
+        let shift = mosaica_store::derived::coarsest_shift(16_384);
         let by_test = (0..membership.len() as u32)
             .filter(|&ordinal| match index.extent(ordinal) {
-                Extent::Span { lo, hi } => tessera_store::derived::is_everywhere(lo, hi, shift),
+                Extent::Span { lo, hi } => mosaica_store::derived::is_everywhere(lo, hi, shift),
                 _ => false,
             })
             .count() as u64;

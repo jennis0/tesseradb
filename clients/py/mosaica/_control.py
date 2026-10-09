@@ -203,15 +203,15 @@ class Control:
         - `view`: the view the rows are for. It may be left out where the database has one view.
         - `strict`: `True` refuses the whole batch at its first refused row, with `409`.
         """
-        headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
+        headers = {"content-type": ARROW, "x-mosaica-batch-id": batch}
         if view is not None:
-            headers["x-tessera-view"] = view
+            headers["x-mosaica-view"] = view
         return self._send("POST", "/control/ingest" + _query(strict=strict), body, headers)
 
     def declare_layer(self, payload: dict) -> Answer:
         """`PUT /control/layers`: declare one annotation layer.
 
-        `payload` is the layer's block as `tessera check --payloads` prints it. The answer carries
+        `payload` is the layer's block as `mosaica check --payloads` prints it. The answer carries
         the layer's `tessera_id`.
         """
         return self._send(
@@ -487,7 +487,7 @@ class Control:
 
     def list_providers(self) -> Answer:
         """`GET /control/providers`: every OIDC provider, declared through the API or in
-        `tessera.toml`, under `providers`."""
+        `mosaica.toml`, under `providers`."""
         return self._send("GET", "/control/providers")
 
     def show_provider(self, name: str) -> Answer:
@@ -514,7 +514,7 @@ class Control:
           whose claim holds the value exactly the local group's terms and permissions.
 
         Every session authorised through a provider it replaces ends. A provider declared in
-        `tessera.toml` is `409`.
+        `mosaica.toml` is `409`.
         """
         body: dict = {"issuer": issuer, "audience": audience, "jwks_url": jwks_url}
         if claim_rules is not None:

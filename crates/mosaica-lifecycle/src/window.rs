@@ -102,7 +102,7 @@
 use std::time::Instant;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_types::{EntityId, TermId};
+use mosaica_types::{EntityId, TermId};
 
 use crate::alloc::{assign_sorted, AllocError, Allocator, PendingItem};
 use crate::command::{UnallocatedEdit, UnallocatedRow};
@@ -116,7 +116,7 @@ use crate::wal::{RowOutcome, RowReceipt, WalEdit, WalRecord, WalRow};
 /// durable idempotency index can answer — costs a close per retry and allocates nothing extra.
 ///
 /// Generic in the waiter type, and that is forced rather than stylistic: the engine's `Responder`
-/// is `pub(crate)` inside a private module (`tessera-engine`'s `write.rs`, `mod ack`), whose private
+/// is `pub(crate)` inside a private module (`mosaica-engine`'s `write.rs`, `mod ack`), whose private
 /// field is the whole of the ack-ordering guarantee — a successful receipt cannot be constructed
 /// without proof that the generation carrying it is live. It must not become nameable from here.
 /// The window never *does* anything to a waiter, so it needs to know nothing about one.
@@ -128,7 +128,7 @@ pub struct WindowEntry<W> {
     /// One per row of the request, in request order: what the row became.
     pub slots: Vec<Slot>,
     /// The request rows creating an item indexed under more than
-    /// [`tessera_authz::MAX_KEYS_PER_ITEM`] keys.
+    /// [`mosaica_authz::MAX_KEYS_PER_ITEM`] keys.
     pub over_bound: Vec<u32>,
     pub batch_id: String,
     pub body_hash: [u8; 32],
@@ -319,7 +319,7 @@ impl<W> ClosedEntry<W> {
 /// Contracts §3.4 warns about exactly one confusion, and it is worth repeating where the numbers
 /// are produced: this is **posting run length in entity space** (the probes' results §2), **not**
 /// the row-space mask run ratio of their §5. The two normalise the same way over different sets and
-/// are not comparable. `tessera_bench::metrics::run_ratio` is the row-space one — it takes a Roaring
+/// are not comparable. `mosaica_bench::metrics::run_ratio` is the row-space one — it takes a Roaring
 /// bitmap of *row* ids and a *row* universe, and its callers pass masks and fragments. It is
 /// deliberately not reused here; sharing one function between the two would be the fastest route to
 /// quoting one as the other.
@@ -1099,7 +1099,7 @@ mod tests {
     #[test]
     fn a_window_of_joins_is_tallied_in_id_order_whatever_the_gaps() {
         let joining = |entity: u64, terms: &[u32]| UnallocatedRow {
-            join: Some(tessera_types::EntityId::new(entity)),
+            join: Some(mosaica_types::EntityId::new(entity)),
             ..row(terms)
         };
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);

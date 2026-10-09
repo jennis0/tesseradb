@@ -91,7 +91,7 @@
 //! * **Absorption — partly measured, and not here.** Flush, both halves of merge and the
 //!   background refresh exist; the compaction fold does not. What these arms still cannot show is
 //!   the steady state of a database that has been *running* and absorbing writes for a while.
-//!   `crates/tessera-engine/tests/soak.rs` covers the *shape* of it (40 flushes → 2 segments,
+//!   `crates/mosaica-engine/tests/soak.rs` covers the *shape* of it (40 flushes → 2 segments,
 //!   5 delta tiers, one full projection build); **`tests/scale.rs` covers it at size** since
 //!   2026-08-05, with the figures in `docs/evidence/memos/2026-08-05-write-path-at-scale.md`.
 //!
@@ -118,13 +118,13 @@ use crate::ingest_rows::IngestRows;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tessera_build::{BuildArgs, BuildObserver, BuildStage};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::{IdentityKey, TermId};
+use mosaica_build::{BuildArgs, BuildObserver, BuildStage};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{IdentityKey, TermId};
 
 use crate::arms::{Context, Result};
 use crate::corpus::{
@@ -217,15 +217,15 @@ pub fn run_build(
                 continue;
             }
 
-            let out = std::env::temp_dir().join(format!("tessera-bench-build-{scale}-{label_set}"));
+            let out = std::env::temp_dir().join(format!("mosaica-bench-build-{scale}-{label_set}"));
             let _ = std::fs::remove_dir_all(&out);
 
             let collector = StageCollector::default();
             let args = BuildArgs {
-                views: vec![tessera_build::ViewArgs {
+                views: vec![mosaica_build::ViewArgs {
                     visibility: None,
                     view_id: "s0".to_string(),
-                    projection: tessera_spatial::Projection::None,
+                    projection: mosaica_spatial::Projection::None,
                     extent: Bounds {
                         x_min: 0.0,
                         x_max: 65536.0,
@@ -235,7 +235,7 @@ pub fn run_build(
                     points: geometry.clone(),
                     point_fields: Default::default(),
                     select: None,
-                    access: tessera_build::config::AccessInput::relation(pairs.clone()),
+                    access: mosaica_build::config::AccessInput::relation(pairs.clone()),
                 }],
                 anchor: 0,
                 groups: Vec::new(),
@@ -258,7 +258,7 @@ pub fn run_build(
 
             eprintln!("ingest_build: scale={scale} set={label_set} (one repetition — a build is minutes, not microseconds)");
             let start = std::time::Instant::now();
-            let report = tessera_build::build_observed(&args, &collector)?;
+            let report = mosaica_build::build_observed(&args, &collector)?;
             let total_ns = start.elapsed().as_nanos() as u64;
 
             let stages = collector.stages.lock().unwrap().clone();
@@ -444,7 +444,7 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
     let mut run = ctx.open("ingest_batch")?;
 
     for fixture in &ctx.fixtures {
-        let postings = tessera_authz::PostingsReader::open(&fixture.postings_path(), true)?;
+        let postings = mosaica_authz::PostingsReader::open(&fixture.postings_path(), true)?;
         let stats = TermStats::compute(&postings)?;
         let dictionary = Dictionary::open(&fixture.root, &fixture.prefix)?;
         let (grant, _) = build_grant_to_coverage(
@@ -474,7 +474,7 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
             // for a reason that has nothing to do with batch size, which is exactly the
             // confound the `continuous` mode measures deliberately.
             let tmp = std::env::temp_dir().join(format!(
-                "tessera-bench-ingest-{}-{}",
+                "mosaica-bench-ingest-{}-{}",
                 std::process::id(),
                 batch
             ));
@@ -489,14 +489,14 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     max_k: 200,
                     // §7.2's selection constants, at the server's own defaults — a bench measuring
                     // anything else measures a configuration nobody runs. Keep in step with
-                    // `tessera-server`'s DEFAULT_* constants.
+                    // `mosaica-server`'s DEFAULT_* constants.
                     k_min: 2,
                     k_max_marks: 500,
                     theta_target_marks: 16,
                     max_underlay_offset: 4,
                     max_underlay_cells: 8192,
                     max_tiles_per_request: 262_144,
-                    compute_threads: tessera_engine::default_compute_threads(),
+                    compute_threads: mosaica_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
                     // **The row trigger off.** This cell drives publication itself — it pins `B`
                     // by flushing and waiting, so a trigger that published on its own would
@@ -507,7 +507,7 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                     segment_floor_bytes: None,
                     coalesce_width: None,
                     // Compaction §9's trigger is off unless a deployment configures one.
-                    compaction: tessera_engine::CompactionSchedule::off(),
+                    compaction: mosaica_engine::CompactionSchedule::off(),
                 },
             )?;
             // The WAL lives on a dedicated executor thread, so an engine that writes must start
@@ -583,7 +583,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
     let mut run = ctx.open("ingest_continuous")?;
 
     for fixture in &ctx.fixtures {
-        let postings = tessera_authz::PostingsReader::open(&fixture.postings_path(), true)?;
+        let postings = mosaica_authz::PostingsReader::open(&fixture.postings_path(), true)?;
         let stats = TermStats::compute(&postings)?;
         let dictionary = Dictionary::open(&fixture.root, &fixture.prefix)?;
         let (grant, coverage) = build_grant_to_coverage(
@@ -616,7 +616,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
         drop(bundle);
 
         let tmp = std::env::temp_dir().join(format!(
-            "tessera-bench-continuous-{}-{}",
+            "mosaica-bench-continuous-{}-{}",
             std::process::id(),
             fixture.scale
         ));
@@ -631,14 +631,14 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 max_k: k.max(200),
                 // §7.2's selection constants, at the server's own defaults — a bench measuring
                 // anything else measures a configuration nobody runs. Keep in step with
-                // `tessera-server`'s DEFAULT_* constants.
+                // `mosaica-server`'s DEFAULT_* constants.
                 k_min: 2,
                 k_max_marks: 500,
                 theta_target_marks: 16,
                 max_underlay_offset: 4,
                 max_underlay_cells: 8192,
                 max_tiles_per_request: 262_144,
-                compute_threads: tessera_engine::default_compute_threads(),
+                compute_threads: mosaica_engine::default_compute_threads(),
                 flush_max_age_secs: 90,
                 flush_max_items: usize::MAX,
                 max_merged_segment_bytes: None,
@@ -646,7 +646,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 segment_floor_bytes: None,
                 coalesce_width: None,
                 // Compaction §9's trigger is off unless a deployment configures one.
-                compaction: tessera_engine::CompactionSchedule::off(),
+                compaction: mosaica_engine::CompactionSchedule::off(),
             },
         )?;
         // The WAL lives on a dedicated executor thread, so an engine that writes must start one.
@@ -822,7 +822,7 @@ fn varied_signature_rows(
 /// latency; `run_batch` is where ack latency is measured.
 ///
 /// `run_ratio` here is **within-window sort quality against a within-window random baseline** — see
-/// `tessera_lifecycle::window::FragmentationTally`. It is not comparable with the probes' §2
+/// `mosaica_lifecycle::window::FragmentationTally`. It is not comparable with the probes' §2
 /// full-corpus posting compression, and it is not the row-space run ratio `crate::metrics` computes.
 pub fn run_concurrent(
     ctx: &Context,
@@ -834,7 +834,7 @@ pub fn run_concurrent(
     let mut run = ctx.open("ingest_concurrent")?;
 
     for fixture in &ctx.fixtures {
-        let postings = tessera_authz::PostingsReader::open(&fixture.postings_path(), true)?;
+        let postings = mosaica_authz::PostingsReader::open(&fixture.postings_path(), true)?;
         let stats = TermStats::compute(&postings)?;
         let dictionary = Dictionary::open(&fixture.root, &fixture.prefix)?;
         let (grant, _) = build_grant_to_coverage(
@@ -863,7 +863,7 @@ pub fn run_concurrent(
             }
 
             let tmp = std::env::temp_dir().join(format!(
-                "tessera-bench-concurrent-{}-{}",
+                "mosaica-bench-concurrent-{}-{}",
                 std::process::id(),
                 threads
             ));
@@ -882,7 +882,7 @@ pub fn run_concurrent(
                     max_underlay_offset: 4,
                     max_underlay_cells: 8192,
                     max_tiles_per_request: 262_144,
-                    compute_threads: tessera_engine::default_compute_threads(),
+                    compute_threads: mosaica_engine::default_compute_threads(),
                     flush_max_age_secs: 90,
                     flush_max_items: usize::MAX,
                     max_merged_segment_bytes: None,
@@ -890,7 +890,7 @@ pub fn run_concurrent(
                     segment_floor_bytes: None,
                     coalesce_width: None,
                     // Compaction §9's trigger is off unless a deployment configures one.
-                    compaction: tessera_engine::CompactionSchedule::off(),
+                    compaction: mosaica_engine::CompactionSchedule::off(),
                 },
             )?;
             // Generous, deliberately: this arm means to measure what a full window collects, never
@@ -1017,12 +1017,12 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<u6
 /// callers it sums `c` overlapping waits, so it exceeds the reciprocal of the throughput by
 /// design.
 fn stage_split(
-    before: &tessera_engine::ExecutorStats,
-    after: &tessera_engine::ExecutorStats,
+    before: &mosaica_engine::ExecutorStats,
+    after: &mosaica_engine::ExecutorStats,
     rows: u64,
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    for stage in tessera_engine::WriteStage::ALL {
+    for stage in mosaica_engine::WriteStage::ALL {
         let ns =
             after.stage_nanos[stage as usize].saturating_sub(before.stage_nanos[stage as usize]);
         map.insert(
@@ -1035,7 +1035,7 @@ fn stage_split(
 
 /// Distinct signatures the descriptor pool can express, and the pool's size.
 ///
-/// 1,024 is the widest column `crates/tessera-engine/tests/ingest_shape.rs`' signature-diversity
+/// 1,024 is the widest column `crates/mosaica-engine/tests/ingest_shape.rs`' signature-diversity
 /// sweep reaches, so the two harnesses describe the same regime. Above it that sweep found no
 /// further movement; below ~8 the window sort degenerates into an all-ties tie-break and measures
 /// the fixture rather than the system.
@@ -1203,7 +1203,7 @@ pub fn run_rate(ctx: &Context, sweep: &RateSweep) -> Result<()> {
                     let steady_rows = (b * steady_cycles) as u64;
 
                     let tmp = std::env::temp_dir().join(format!(
-                        "tessera-bench-rate-{}-{}-{}-{}",
+                        "mosaica-bench-rate-{}-{}-{}-{}",
                         std::process::id(),
                         density,
                         ratio,
@@ -1227,7 +1227,7 @@ pub fn run_rate(ctx: &Context, sweep: &RateSweep) -> Result<()> {
                             max_underlay_offset: 4,
                             max_underlay_cells: 8192,
                             max_tiles_per_request: 262_144,
-                            compute_threads: tessera_engine::default_compute_threads(),
+                            compute_threads: mosaica_engine::default_compute_threads(),
                             // Only a requested flush may fire. A periodic tick would put a
                             // publication in the middle of a cycle and make `B` a function of the
                             // rate rather than an axis.
@@ -1238,7 +1238,7 @@ pub fn run_rate(ctx: &Context, sweep: &RateSweep) -> Result<()> {
                             segment_floor_bytes: None,
                             coalesce_width: None,
                             // Compaction §9's trigger is off unless a deployment configures one.
-                            compaction: tessera_engine::CompactionSchedule::off(),
+                            compaction: mosaica_engine::CompactionSchedule::off(),
                         },
                     )?;
                     // Generous: this arm never means to measure queue-full backpressure.

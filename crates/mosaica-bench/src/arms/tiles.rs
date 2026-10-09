@@ -16,13 +16,13 @@
 
 use std::sync::Arc;
 
-use tessera_authz::PostingsReader;
-use tessera_engine::projection::RowProjection;
-use tessera_engine::{compose, EffectiveMask};
-use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_spatial::{tiles_for_bbox, Bounds};
-use tessera_store::read::open_bundle;
-use tessera_store::tile_ranges_all;
+use mosaica_authz::PostingsReader;
+use mosaica_engine::projection::RowProjection;
+use mosaica_engine::{compose, EffectiveMask};
+use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_spatial::{tiles_for_bbox, Bounds};
+use mosaica_store::read::open_bundle;
+use mosaica_store::tile_ranges_all;
 
 use crate::arms::{Context, Result};
 use crate::corpus::{build_grant_to_coverage, GrantShape, TermStats};
@@ -84,7 +84,7 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
             let containers = crate::metrics::containers(&fragment);
             let frozen = frozen_fragment(&postings, &grant.terms)?;
             let projection = Arc::new(RowProjection::walk(&frozen, &view.row_space));
-            let satisfied: rustc_hash::FxHashSet<tessera_types::TermId> =
+            let satisfied: rustc_hash::FxHashSet<mosaica_types::TermId> =
                 grant.terms.iter().copied().collect();
 
             // Composition is outside the timed loop too: this arm measures tile enumeration and
@@ -197,11 +197,11 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
 /// cache hits without saying so.
 fn frozen_fragment(
     postings: &PostingsReader,
-    terms: &[tessera_types::TermId],
-) -> Result<std::sync::Arc<tessera_authz::FrozenFragment>> {
-    let dir = std::env::temp_dir().join(format!("tessera-bench-frag-{}", std::process::id()));
+    terms: &[mosaica_types::TermId],
+) -> Result<std::sync::Arc<mosaica_authz::FrozenFragment>> {
+    let dir = std::env::temp_dir().join(format!("mosaica-bench-frag-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    let cache = tessera_authz::FragmentCache::new(&dir, [0u8; 32], [1u8; 32]);
+    let cache = mosaica_authz::FragmentCache::new(&dir, [0u8; 32], [1u8; 32]);
     // A fresh cache per call under one fixed credential hash, so the memo can hold nothing this
     // caller could contradict: any stamp is as good as any other, and `0` says so.
     Ok(cache.get_or_build(terms, postings, &[], u64::MAX)?)

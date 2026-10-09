@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
 
-use tessera_spatial::fixed32;
-use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_store::read::{ColumnsRef, MortonSlice};
-use tessera_store::write::write_segment;
-use tessera_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, Permutation, RowToEntity};
-use tessera_types::{EntityId, IdentityKey, RowId};
+use mosaica_spatial::fixed32;
+use mosaica_spatial::tiler::{sort_batch, TilerItem};
+use mosaica_store::read::{ColumnsRef, MortonSlice};
+use mosaica_store::write::write_segment;
+use mosaica_store::{fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, Permutation, RowToEntity};
+use mosaica_types::{EntityId, IdentityKey, RowId};
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")
@@ -48,7 +48,7 @@ fn write_input(dir: &Path, seg_id: &str, entities: &[u64], stride: u64) -> FoldS
     FoldSegmentInput {
         seg_id: seg_id.to_string(),
         dir: seg_dir,
-        entities: tessera_store::edited::RowEntities::Numbers,
+        entities: mosaica_store::edited::RowEntities::Numbers,
     }
 }
 
@@ -63,7 +63,7 @@ fn a_column_an_input_lacks_fails_the_fold_unless_declared_since_the_inputs() {
     let input = write_input(dir.path(), "in-a", &[1, 2, 3], 7);
     let schema = vec![(
         "citations".to_string(),
-        tessera_spatial::tiler::ScalarType::U64,
+        mosaica_spatial::tiler::ScalarType::U64,
     )];
     let identity_key = key();
     let no_tombstones = Bitmap::new();
@@ -92,7 +92,7 @@ fn a_column_an_input_lacks_fails_the_fold_unless_declared_since_the_inputs() {
     fold_row_space(
         &dir.path().join("out-seg"),
         &dir.path().join("permutation.bin"),
-        &dir.path().join(tessera_store::ROW_ENTITY_FILE),
+        &dir.path().join(mosaica_store::ROW_ENTITY_FILE),
         spec(lawful),
     )
     .expect("a column declared since the inputs folds as absence");
@@ -111,10 +111,10 @@ fn fold(
     inputs: &[FoldSegmentInput],
     tombstones: &Bitmap,
     bound: u64,
-) -> (tessera_store::FoldRowSpaceOutput, PathBuf, PathBuf) {
+) -> (mosaica_store::FoldRowSpaceOutput, PathBuf, PathBuf) {
     let output_dir = root.join("out-seg");
     let permutation_path = root.join("permutation.bin");
-    let row_entity_path = root.join(tessera_store::ROW_ENTITY_FILE);
+    let row_entity_path = root.join(mosaica_store::ROW_ENTITY_FILE);
     let out = fold_row_space(
         &output_dir,
         &permutation_path,
@@ -144,7 +144,7 @@ fn read_input_rows(input: &FoldSegmentInput) -> Vec<(u64, u64, u32, u32)> {
     (0..codes.u32().len())
         .map(|row| {
             let tessera_id = cols.tessera_id()[row];
-            let (_, entity) = k.invert(tessera_types::TesseraId::new(tessera_id));
+            let (_, entity) = k.invert(mosaica_types::TesseraId::new(tessera_id));
             (
                 entity.raw(),
                 tessera_id,
@@ -199,7 +199,7 @@ fn fold_drops_tombstoned_rows_and_keeps_the_rest_in_morton_order() {
     let k = key();
     let surviving_entities: Vec<u64> = rows
         .iter()
-        .map(|&(tid, _, _)| k.invert(tessera_types::TesseraId::new(tid)).1.raw())
+        .map(|&(tid, _, _)| k.invert(mosaica_types::TesseraId::new(tid)).1.raw())
         .collect();
     for e in (100..110).chain(200..208) {
         let dropped = [103u64, 105, 202].contains(&e);
@@ -306,7 +306,7 @@ fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
 
     // The `0xFF` sentinel, directly: read entity 500's raw slot bytes (never named by any input
     // or tombstone) and confirm the writer's fill, not merely that some reader interprets it as
-    // absent. Format per `tessera_store::permutation`: a 24-byte header, a `u32` per page of
+    // absent. Format per `mosaica_store::permutation`: a 24-byte header, a `u32` per page of
     // directory, zero padding to a 4 KiB boundary, then the present pages of 2¹⁶ slots each. This
     // fold's bound is 1000, so there is one page and it is present.
     let bytes = fs::read(&perm_path).expect("read permutation.bin");
@@ -398,7 +398,7 @@ fn the_fold_writes_a_row_entity_table_that_inverts_its_permutation() {
 
     let dead = tombstones(&[101, 103, 205]);
     let (out, _output_dir, perm_path) = fold(dir.path(), &[a, b], &dead, 1000);
-    let table_path = dir.path().join(tessera_store::ROW_ENTITY_FILE);
+    let table_path = dir.path().join(mosaica_store::ROW_ENTITY_FILE);
 
     let permutation = Permutation::load(&perm_path).expect("permutation.bin loads");
     let table = RowToEntity::load(&table_path).expect("row-entity.u32 loads");

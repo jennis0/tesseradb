@@ -36,7 +36,7 @@ BIN=./target/release/artifact_serving_scale
 HERE="$(cd "$(dirname "$0")" && pwd)"
 D="$HERE/data"
 mkdir -p "$D"
-[ -x "$BIN" ] || { echo "build first: cargo build --release -p tessera-bench --bin artifact_serving_scale" >&2; exit 1; }
+[ -x "$BIN" ] || { echo "build first: cargo build --release -p mosaica-bench --bin artifact_serving_scale" >&2; exit 1; }
 
 RUNS=${RUNS:-3}
 

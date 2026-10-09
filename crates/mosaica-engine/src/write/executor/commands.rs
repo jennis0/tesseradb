@@ -2,8 +2,8 @@ use super::*;
 
 /// The refusal a roster error is answered with: the three the wire tells apart, and this module's
 /// `ExecError` doc for why the caller's remedy decides.
-pub(super) fn roster_error(e: tessera_lifecycle::RosterError) -> ExecError {
-    use tessera_lifecycle::RosterError;
+pub(super) fn roster_error(e: mosaica_lifecycle::RosterError) -> ExecError {
+    use mosaica_lifecycle::RosterError;
     let detail = e.to_string();
     match e {
         // A conflict is a live key and nothing else now: a dropped key is created again at a
@@ -56,7 +56,7 @@ pub(super) fn dangling_entities(generation: &Generation, views: &[String]) -> Ve
 /// outside every mask, which the inclusion spelling would have named and this one keeps.
 ///
 /// The cost is a walk of the views' own slots, on the executor loop: the base permutation's
-/// present pages ([`tessera_store::permutation::Permutation::try_for_each_slot`]) and each
+/// present pages ([`mosaica_store::permutation::Permutation::try_for_each_slot`]) and each
 /// extent's rows, then the buffer once.
 pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croaring::Bitmap {
     let mut entities = croaring::Bitmap::new();
@@ -102,9 +102,9 @@ pub(super) fn growth_receipt(
     store: &ArtifactStore,
     layer: &str,
     level: u32,
-    joins: &[tessera_lifecycle::IncomingGrowth],
-    prepared: &tessera_lifecycle::PreparedGrow,
-) -> Vec<tessera_lifecycle::MembershipGrown> {
+    joins: &[mosaica_lifecycle::IncomingGrowth],
+    prepared: &mosaica_lifecycle::PreparedGrow,
+) -> Vec<mosaica_lifecycle::MembershipGrown> {
     joins
         .iter()
         .zip(&prepared.filled)
@@ -144,7 +144,7 @@ pub(super) fn growth_receipt(
                         counted(&|other| content.generated_from.and_cardinality(other))
                     }),
             };
-            tessera_lifecycle::MembershipGrown {
+            mosaica_lifecycle::MembershipGrown {
                 entity: record.entity,
                 joined,
                 filled: *filled,
@@ -162,12 +162,12 @@ pub(super) fn growth_receipt(
 /// The executor's refusal for a registry error: a differing fixed part is the caller's `409`
 /// (`ExecError::PartConflict`), everything else the `422` a refused layer operation has always
 /// been.
-pub(super) fn refusal_of(e: tessera_lifecycle::RegistryError) -> ExecError {
+pub(super) fn refusal_of(e: mosaica_lifecycle::RegistryError) -> ExecError {
     match e {
         // A second `excluding` on a held key is the same `409` a differing fixed part is: the
         // complement it asks for is a different set from the one the artifact holds.
-        tessera_lifecycle::RegistryError::PartConflict { .. }
-        | tessera_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
+        mosaica_lifecycle::RegistryError::PartConflict { .. }
+        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
             detail: e.to_string(),
         },
         other => ExecError::LayerRefused {
@@ -435,7 +435,7 @@ impl Executor {
         });
         if let Some(key) = held {
             return Err(refusal_of(
-                tessera_lifecycle::RegistryError::ExclusionOnHeldKey {
+                mosaica_lifecycle::RegistryError::ExclusionOnHeldKey {
                     layer: layer.to_string(),
                     level,
                     key,
@@ -516,8 +516,8 @@ impl Executor {
         &mut self,
         layer: String,
         level: u32,
-        joins: Vec<tessera_lifecycle::IncomingGrowth>,
-        reply: Reply<Vec<tessera_lifecycle::MembershipGrown>>,
+        joins: Vec<mosaica_lifecycle::IncomingGrowth>,
+        reply: Reply<Vec<mosaica_lifecycle::MembershipGrown>>,
     ) {
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
@@ -527,7 +527,7 @@ impl Executor {
         let prepared = self.live.with_publication_state(|registry, store, _| {
             let prepared = registry.prepare_grow(&layer, level, &joins, store)?;
             let grown = growth_receipt(registry, store, &layer, level, &joins, &prepared);
-            Ok::<_, tessera_lifecycle::RegistryError>((prepared, grown))
+            Ok::<_, mosaica_lifecycle::RegistryError>((prepared, grown))
         });
         let (prepared, grown) = match prepared {
             Ok(prepared) => prepared,
@@ -579,7 +579,7 @@ impl Executor {
             &mut LayerRegistry,
             &mut Allocator,
         )
-            -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
+            -> std::result::Result<WalRecord, mosaica_lifecycle::RegistryError>,
         ack_of: impl FnOnce(&WalRecord) -> T,
         reply: Reply<T>,
     ) {
@@ -639,7 +639,7 @@ impl Executor {
         group: String,
         key: String,
         visibility: Option<Vec<String>>,
-        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+        metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
         reply: Reply<()>,
     ) {
         let started = std::time::Instant::now();
@@ -662,7 +662,7 @@ impl Executor {
             });
             return;
         };
-        let facts = tessera_lifecycle::GroupFacts {
+        let facts = mosaica_lifecycle::GroupFacts {
             name: &descriptor.name,
             members_of: descriptor.members_of.as_deref(),
             metadata: &descriptor.metadata,
@@ -708,7 +708,7 @@ impl Executor {
     /// registration's rule.
     pub(super) fn commit_attribute_declare(
         &mut self,
-        request: tessera_lifecycle::AttributeRequest,
+        request: mosaica_lifecycle::AttributeRequest,
         reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
@@ -823,7 +823,7 @@ impl Executor {
     /// failed append means the group does not exist.
     pub(super) fn commit_view_group_create(
         &mut self,
-        declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
+        declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
         reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
@@ -871,7 +871,7 @@ impl Executor {
     /// and as a disagreement between the mask and the bundle by the deny mask.
     pub(super) fn commit_plain_view_create(
         &mut self,
-        declaration: tessera_lifecycle::wal::PlainViewDeclaration,
+        declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
         reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
@@ -918,7 +918,7 @@ impl Executor {
     pub(super) fn publish_view_manifest(
         &mut self,
         generation: &Arc<Generation>,
-        manifest: tessera_store::manifest::Manifest,
+        manifest: mosaica_store::manifest::Manifest,
         started: std::time::Instant,
     ) {
         let bundle = generation.bundle.with_views(manifest);
@@ -945,7 +945,7 @@ impl Executor {
     /// not exist and no code was spent.
     pub(super) fn commit_vocabulary_declare(
         &mut self,
-        request: tessera_lifecycle::VocabularyRequest,
+        request: mosaica_lifecycle::VocabularyRequest,
         reply: Reply<VocabularyDeclared>,
     ) {
         let started = std::time::Instant::now();
@@ -970,7 +970,7 @@ impl Executor {
         };
         // The codes, drawn into a minter this thread owns and nothing has published. A draw that
         // exhausts the width refuses with nothing appended and no binding anywhere.
-        let mut minter = match tessera_store::vocabulary::VocabularyMinter::declared(
+        let mut minter = match mosaica_store::vocabulary::VocabularyMinter::declared(
             compiled.name.clone(),
             compiled.kind,
             compiled.visibility,
@@ -1039,7 +1039,7 @@ impl Executor {
     pub(super) fn commit_vocabulary_values(
         &mut self,
         vocabulary: String,
-        values: Vec<tessera_lifecycle::DeclaredValue>,
+        values: Vec<mosaica_lifecycle::DeclaredValue>,
         reply: Reply<VocabularyValues>,
     ) {
         self.commit_vocabulary_page(vocabulary, values, reply, std::convert::identity);
@@ -1064,7 +1064,7 @@ impl Executor {
     pub(super) fn commit_vocabulary_page<T>(
         &mut self,
         vocabulary: String,
-        values: Vec<tessera_lifecycle::DeclaredValue>,
+        values: Vec<mosaica_lifecycle::DeclaredValue>,
         reply: Reply<T>,
         answer: impl Fn(VocabularyValues) -> T,
     ) {
@@ -1095,11 +1095,11 @@ impl Executor {
         let mut existing = 0u64;
         for value in &values {
             match minter.mint(&value.key) {
-                Ok(tessera_store::vocabulary::Minted::Fresh(code)) => {
+                Ok(mosaica_store::vocabulary::Minted::Fresh(code)) => {
                     added += 1;
                     codes.push((value.key.clone(), code));
                 }
-                Ok(tessera_store::vocabulary::Minted::Existing(code)) => {
+                Ok(mosaica_store::vocabulary::Minted::Existing(code)) => {
                     existing += 1;
                     codes.push((value.key.clone(), code));
                 }
@@ -1126,7 +1126,7 @@ impl Executor {
             }));
             return;
         }
-        let declaration = tessera_lifecycle::wal::VocabularyDeclaration {
+        let declaration = mosaica_lifecycle::wal::VocabularyDeclaration {
             name: vocabulary.clone(),
             title: None,
             kind: minter.kind(),
@@ -1135,7 +1135,7 @@ impl Executor {
             values: codes
                 .iter()
                 .map(
-                    |(key, code)| tessera_lifecycle::wal::DeclaredVocabularyValue {
+                    |(key, code)| mosaica_lifecycle::wal::DeclaredVocabularyValue {
                         key: key.clone(),
                         code: Some(*code),
                         title: minter.title_of(key).map(str::to_string),
@@ -1227,7 +1227,7 @@ impl Executor {
             self.apply_changes(
                 dangling
                     .into_iter()
-                    .map(|entity| (entity, tessera_lifecycle::ChangeOp::Delete))
+                    .map(|entity| (entity, mosaica_lifecycle::ChangeOp::Delete))
                     .collect(),
             );
         }

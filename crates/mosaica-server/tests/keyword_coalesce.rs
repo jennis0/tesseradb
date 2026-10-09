@@ -81,8 +81,8 @@ async fn ingest(server: &TestServer, batch_id: &str, tag: &str, i: usize) {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(batch(100.0 + i as f32, 100.0 + i as f32, tag))
         .send()

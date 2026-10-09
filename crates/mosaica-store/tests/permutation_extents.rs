@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use tessera_store::permutation::{RowSpace, SegmentExtent};
-use tessera_store::write::write_permutation;
-use tessera_store::Permutation;
-use tessera_types::{EntityId, RowId};
+use mosaica_store::permutation::{RowSpace, SegmentExtent};
+use mosaica_store::write::write_permutation;
+use mosaica_store::Permutation;
+use mosaica_types::{EntityId, RowId};
 
 /// A base covering `[0, rows.len())`, entity *i* at row `rows[i]`.
 fn base_of(rows: &[u32]) -> RowSpace {
@@ -139,7 +139,7 @@ fn collapsing_refuses_when_an_input_seg_id_is_absent() {
         .is_none());
 }
 
-/// A bundle out of `tessera build` carries no extents, and must project byte-for-byte what the
+/// A bundle out of `mosaica build` carries no extents, and must project byte-for-byte what the
 /// bare permutation did — the guarantee that makes this change landable ahead of any flush.
 #[test]
 fn an_extent_free_row_space_projects_exactly_what_the_base_does() {

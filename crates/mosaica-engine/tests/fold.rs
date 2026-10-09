@@ -19,14 +19,14 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
-use tessera_authz::{PostingRef, PostingsReader};
-use tessera_build::{build, BuildArgs};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_store::read::open_bundle;
-use tessera_types::{EntityId, TermId, TesseraId};
+use mosaica_authz::{PostingRef, PostingsReader};
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{EntityId, TermId, TesseraId};
 
 /// A fixture bundle and an engine over it, with the executor running and the background refresh
 /// off.
@@ -109,20 +109,20 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
     write_points_n(points_path, N_ITEMS);
     write_pairs_with_sparse_term(pairs_path, N_ITEMS);
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
         out: out.to_path_buf(),
         // No declared columns: this fixture's subject is the sparse *term*, not the scalar tail,
         // and an empty schema is what `common`'s builder uses for the same reason.
@@ -177,7 +177,7 @@ fn fold(engine: &Engine) {
 ///
 /// **Its own deadline**, per [`wait_for`]'s rule: this is the last wait of every paused-fold case,
 /// so a deadline shared with the waits before it would expire here whatever step actually stalled.
-fn wait_for_fold_publication(engine: &Engine, before: &tessera_engine::ExecutorStats) {
+fn wait_for_fold_publication(engine: &Engine, before: &mosaica_engine::ExecutorStats) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         let now = engine.write_executor_stats();
@@ -210,7 +210,7 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
-fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
+fn visible(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
     engine
         .viewport(
             session,
@@ -228,7 +228,7 @@ fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
         .sum()
 }
 
-/// The entity id `tessera-build` assigned to fixture source row `source_id`, resolved through the
+/// The entity id `mosaica-build` assigned to fixture source row `source_id`, resolved through the
 /// prefix `CURRENT` names at the time of the call.
 fn entity_of_source(root: &Path, prefix: &str, source_id: u64) -> EntityId {
     EntityId::new(source_to_new_map(root, prefix)[&source_id])
@@ -277,14 +277,14 @@ fn all_term_of(root: &Path, prefix: &str) -> TermId {
         .iter()
         .map(|extent| root.join(prefix).join(&extent.path))
         .collect();
-    tessera_authz::Dict::load(&paths)
+    mosaica_authz::Dict::load(&paths)
         .expect("the dictionary loads")
         .lookup(ALL_TERM.to_string().as_bytes())
         .expect("every fixture item carries ALL_TERM")
 }
 
 /// Ingest one item at (5, 5) carrying the fixture's `ALL_TERM`.
-fn ingest(engine: &Engine, batch: &str) -> Result<EntityId, tessera_engine::AcceptError> {
+fn ingest(engine: &Engine, batch: &str) -> Result<EntityId, mosaica_engine::AcceptError> {
     ingest_with_descriptors(engine, batch, &[b"0".to_vec()])
 }
 
@@ -294,7 +294,7 @@ fn ingest_with_descriptors(
     engine: &Engine,
     batch: &str,
     descriptors: &[Vec<u8>],
-) -> Result<EntityId, tessera_engine::AcceptError> {
+) -> Result<EntityId, mosaica_engine::AcceptError> {
     let row = UnallocatedRow {
         view: "s0".to_string(),
         join: None,
@@ -696,7 +696,7 @@ fn a_fold_is_suspended_while_a_completed_merge_is_unpublished() {
 /// **What it deliberately does not cover is the live prefix**, and the reason is that it cannot:
 /// removing `name == live` from the filter changes nothing observable, because `reclaim_prefix`
 /// reads `CURRENT` itself and refuses. That refusal is the load-bearing guard and it is tested
-/// where it lives (`tessera-store/tests/reclaim.rs`); the filter here is the cheaper first pass, and
+/// where it lives (`mosaica-store/tests/reclaim.rs`); the filter here is the cheaper first pass, and
 /// a test that appeared to cover it would be crediting this file for the store's work.
 #[test]
 fn the_startup_sweep_reclaims_an_orphaned_prefix_and_leaves_everything_else() {
@@ -1763,7 +1763,7 @@ fn a_session_from_before_a_fold_is_never_served_the_entity_the_fold_retired() {
 }
 
 /// Whether the manifest's tombstones name `entity`.
-fn tombstoned(manifest: &tessera_store::manifest::SegmentsManifest, entity: EntityId) -> bool {
+fn tombstoned(manifest: &mosaica_store::manifest::SegmentsManifest, entity: EntityId) -> bool {
     manifest
         .tombstones
         .entities()
@@ -1772,7 +1772,7 @@ fn tombstoned(manifest: &tessera_store::manifest::SegmentsManifest, entity: Enti
 }
 
 /// The `tessera_id`s a whole-map request serves this session, which is the mark set a viewer draws.
-fn marks(engine: &Engine, session: &tessera_engine::Session) -> Vec<u64> {
+fn marks(engine: &Engine, session: &mosaica_engine::Session) -> Vec<u64> {
     engine
         .viewport(
             session,
@@ -1855,7 +1855,7 @@ fn an_items_labels_survive_a_fold_and_a_folded_away_entitys_list_goes_with_it() 
 /// **Mutation this kills:** reversing `dict_extents`' listed order before it is carried into the
 /// new `SEGMENTS-<n>.json` (`write.rs`'s `publish_fold` currently copies `live_manifest
 /// .dict_extents` verbatim) — `Dict::load` assigns ordinals by position in the listed
-/// concatenation (`tessera-authz`'s `dict.rs`), so a reordered list answers a different ordinal
+/// concatenation (`mosaica-authz`'s `dict.rs`), so a reordered list answers a different ordinal
 /// for the descriptor promoted after the base extent, on the next open.
 #[test]
 fn term_ordinals_are_stable_across_a_fold() {
@@ -1952,7 +1952,7 @@ fn utc_time_of_day() -> u32 {
 }
 
 /// A config whose fold schedule is `schedule` and whose tick is otherwise the fixture's.
-fn config_scheduling(schedule: tessera_engine::CompactionSchedule) -> EngineConfig {
+fn config_scheduling(schedule: mosaica_engine::CompactionSchedule) -> EngineConfig {
     EngineConfig {
         compaction: schedule,
         ..config_uncapped()
@@ -2020,7 +2020,7 @@ fn the_retirable_depth_route_dispatches_a_fold_without_anyone_asking() {
     let engine = engine_over_fixture(
         tmp.path(),
         &root,
-        config_scheduling(tessera_engine::CompactionSchedule {
+        config_scheduling(mosaica_engine::CompactionSchedule {
             min_interval_secs: 0,
             window_start_secs: None,
             window_secs: 0,
@@ -2153,7 +2153,7 @@ fn the_tombstoned_row_route_dispatches_a_fold_on_a_bundle_no_count_gauge_would_f
     let engine = engine_over_fixture(
         tmp.path(),
         &root,
-        config_scheduling(tessera_engine::CompactionSchedule {
+        config_scheduling(mosaica_engine::CompactionSchedule {
             min_interval_secs: 0,
             // Every other route off: the fraction is the only thing that can dispatch, which is
             // what makes this case about the fraction rather than about the fixture.
@@ -2237,7 +2237,7 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     let engine = engine_over_fixture(
         tmp.path(),
         &root,
-        config_scheduling(tessera_engine::CompactionSchedule {
+        config_scheduling(mosaica_engine::CompactionSchedule {
             min_interval_secs: 0,
             window_start_secs: None,
             window_secs: 0,
@@ -2339,7 +2339,7 @@ fn the_segment_ceiling_dispatches_a_fold_outside_the_window() {
     let engine = engine_over_fixture(
         tmp.path(),
         &root,
-        config_scheduling(tessera_engine::CompactionSchedule {
+        config_scheduling(mosaica_engine::CompactionSchedule {
             min_interval_secs: 0,
             // Shut: opens in six hours, for one hour.
             window_start_secs: Some((now + 6 * 3_600) % 86_400),
@@ -2416,7 +2416,7 @@ fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let now = utc_time_of_day();
-    let closed = tessera_engine::CompactionSchedule {
+    let closed = mosaica_engine::CompactionSchedule {
         min_interval_secs: 0,
         // Opens in six hours, for one hour: closed now, whatever "now" is when this runs.
         window_start_secs: Some((now + 6 * 3_600) % 86_400),
@@ -2431,7 +2431,7 @@ fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
         tombstoned_rows_fraction: None,
         dead_bytes_ratio: None,
     };
-    let open = tessera_engine::CompactionSchedule {
+    let open = mosaica_engine::CompactionSchedule {
         window_start_secs: Some((now + 86_400 - 1_800) % 86_400),
         ..closed
     };
@@ -2653,11 +2653,11 @@ fn a_fold_lands_while_the_feed_runs(join: bool) {
 /// A plain view over a 1000 by 1000 frame.
 fn create_view(engine: &Engine, name: &str) {
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: name.to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -2672,11 +2672,11 @@ fn create_view(engine: &Engine, name: &str) {
 /// A view group `quarter` with one view, `quarter:q2`, over a 1000 by 1000 frame.
 fn create_quarter_q2(engine: &Engine) {
     engine
-        .create_view_group(tessera_lifecycle::wal::ViewGroupDeclaration {
+        .create_view_group(mosaica_lifecycle::wal::ViewGroupDeclaration {
             name: "quarter".to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,

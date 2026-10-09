@@ -8,13 +8,13 @@ use arc_swap::ArcSwap;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rustc_hash::FxHashMap;
-use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
-use tessera_lifecycle::Overlay;
-use tessera_store::manifest::{CurrentPointer, Declarations};
-use tessera_store::read::open_bundle;
-use tessera_store::vocabulary::Vocabularies;
-use tessera_store::Bundle;
-use tessera_types::IdentityKey;
+use mosaica_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
+use mosaica_lifecycle::Overlay;
+use mosaica_store::manifest::{CurrentPointer, Declarations};
+use mosaica_store::read::open_bundle;
+use mosaica_store::vocabulary::Vocabularies;
+use mosaica_store::Bundle;
+use mosaica_types::IdentityKey;
 
 use crate::cache::RowProjectionCache;
 use crate::config::{coalesce_policy, merge_policy, EngineConfig};
@@ -58,7 +58,7 @@ fn build_count_pool(
 ) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
-        .thread_name(|i| format!("tessera-count-{i}"))
+        .thread_name(|i| format!("mosaica-count-{i}"))
         .build()
 }
 
@@ -75,7 +75,7 @@ fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or("<unnamed>")
         .to_string();
     format!(
-        "tessera: a task spawned on the shared compute pool panicked; aborting\n  \
+        "mosaica: a task spawned on the shared compute pool panicked; aborting\n  \
          worker thread: {thread}\n  payload: {message}\n  abort-site backtrace (the panic's own \
          location is on the default hook's line above):\n{}",
         std::backtrace::Backtrace::force_capture()
@@ -97,7 +97,7 @@ pub struct Engine {
     /// A region leaf's decomposition per `(view, generation, canonical shape, stop depth)`. Not
     /// keyed on principal: rows inside the shape are tested under each request's own mask instead.
     pub(crate) region_cache: Arc<
-        tessera_cache::SingleFlightCache<
+        mosaica_cache::SingleFlightCache<
             crate::region::RegionKey,
             crate::region::RegionDecomposition,
         >,
@@ -119,7 +119,7 @@ pub struct Engine {
     /// not walk the mask again. Per *session*, since `N_occ` is counted inside one principal's own
     /// composed mask.
     pub(crate) occupancy: Arc<
-        tessera_cache::SingleFlightCache<
+        mosaica_cache::SingleFlightCache<
             crate::occupancy::OccupancyKey,
             crate::occupancy::OccupiedTiles,
         >,
@@ -214,7 +214,7 @@ fn initial_deny_of(bundle: &Bundle) -> Result<Overlay> {
 /// key is already held skipped.
 fn side_manifest_items<T: Clone>(
     bundle: &Bundle,
-    list: impl Fn(&tessera_store::manifest::SegmentsManifest) -> &[T],
+    list: impl Fn(&mosaica_store::manifest::SegmentsManifest) -> &[T],
     key: impl Fn(&T) -> &str,
 ) -> Vec<T> {
     let mut partition_keys: Vec<&String> = bundle.partitions.keys().collect();
@@ -235,8 +235,8 @@ fn side_manifest_items<T: Clone>(
 fn side_manifest_view_declarations(
     bundle: &Bundle,
 ) -> (
-    Vec<tessera_store::manifest::GroupDescriptor>,
-    Vec<tessera_store::manifest::ViewDescriptor>,
+    Vec<mosaica_store::manifest::GroupDescriptor>,
+    Vec<mosaica_store::manifest::ViewDescriptor>,
 ) {
     (
         side_manifest_items(bundle, |m| &m.groups, |group| &group.name),
@@ -244,7 +244,7 @@ fn side_manifest_view_declarations(
     )
 }
 
-fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<tessera_store::manifest::ManifestVocabulary> {
+fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<mosaica_store::manifest::ManifestVocabulary> {
     side_manifest_items(bundle, |m| &m.vocabularies, |vocabulary| &vocabulary.name)
 }
 
@@ -255,8 +255,8 @@ fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<tessera_store::manifest::M
 fn side_manifest_attributes(
     bundle: &Bundle,
 ) -> (
-    Vec<tessera_store::manifest::DeclaredScalar>,
-    Vec<tessera_store::manifest::ScopedScalar>,
+    Vec<mosaica_store::manifest::DeclaredScalar>,
+    Vec<mosaica_store::manifest::ScopedScalar>,
 ) {
     (
         side_manifest_items(bundle, |m| &m.attributes, |d| &d.name),
@@ -284,7 +284,7 @@ fn initial_vocabularies_of(bundle: &Bundle) -> Result<Vocabularies> {
 /// What every partition's side manifest carries, concatenated in the partitions' own order.
 fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
     bundle: &'a Bundle,
-    of: impl Fn(&'a tessera_store::manifest::SegmentsManifest) -> I,
+    of: impl Fn(&'a mosaica_store::manifest::SegmentsManifest) -> I,
 ) -> Vec<T> {
     bundle
         .partitions
@@ -349,11 +349,11 @@ fn open_filter_columns(
 ///
 /// [`ManifestSeed`]: crate::write::ManifestSeed
 struct SideDeclarations {
-    groups: Vec<tessera_store::manifest::GroupDescriptor>,
-    plain_views: Vec<tessera_store::manifest::ViewDescriptor>,
-    vocabularies: Vec<tessera_store::manifest::ManifestVocabulary>,
-    attributes: Vec<tessera_store::manifest::DeclaredScalar>,
-    scoped_attributes: Vec<tessera_store::manifest::ScopedScalar>,
+    groups: Vec<mosaica_store::manifest::GroupDescriptor>,
+    plain_views: Vec<mosaica_store::manifest::ViewDescriptor>,
+    vocabularies: Vec<mosaica_store::manifest::ManifestVocabulary>,
+    attributes: Vec<mosaica_store::manifest::DeclaredScalar>,
+    scoped_attributes: Vec<mosaica_store::manifest::ScopedScalar>,
 }
 
 /// Everything declared while the service ran, merged into the schema before anything reads it.
@@ -487,8 +487,8 @@ impl PrefixReaders {
 /// What a reconstruction of the write path leaves behind: the first generation's overlay and
 /// buffer, the write-side state the engine keeps, and the category bindings replay minted into.
 struct ReconstructedWrites {
-    overlay: tessera_lifecycle::Overlay,
-    buffer: tessera_lifecycle::IngestBuffer,
+    overlay: mosaica_lifecycle::Overlay,
+    buffer: mosaica_lifecycle::IngestBuffer,
     state: crate::write::WritePathState,
     vocabularies: Vocabularies,
 }
@@ -517,15 +517,15 @@ fn reconstruct_writes(
     let (free, held) = freed_of(bundle);
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
-    let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> =
+    let manifest_layers: Vec<mosaica_types::layer::RegisteredLayer> =
         across_partitions(bundle, |m| m.layers.iter().cloned());
     let manifest_layer_tombstones: Vec<String> =
         across_partitions(bundle, |m| m.layer_tombstones.iter().cloned());
     // A view's key is the group's, not a partition's, so these belong to the deployment
     // whichever partition's manifest published them.
-    let manifest_created_views: Vec<tessera_types::view::CreatedView> =
+    let manifest_created_views: Vec<mosaica_types::view::CreatedView> =
         across_partitions(bundle, |m| m.views.iter().cloned());
-    let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> =
+    let manifest_dead_incarnations: Vec<mosaica_types::view::DeadIncarnation> =
         across_partitions(bundle, |m| m.dead_view_incarnations.iter().cloned());
     // The views the *build* declared, whose keys a create must not reissue.
     let declared_views: Vec<(String, String)> = bundle
@@ -541,20 +541,20 @@ fn reconstruct_writes(
         .collect();
     // The union across partitions: an artifact's membership belongs to the deployment, not
     // whichever partition's manifest happens to name the extent.
-    let manifest_membership_extents: Vec<tessera_store::manifest::MembershipExtent> =
+    let manifest_membership_extents: Vec<mosaica_store::manifest::MembershipExtent> =
         across_partitions(bundle, |m| m.membership_extents.iter().cloned());
     // The list that makes a level's derived structures placeable across a restart.
-    let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> =
+    let manifest_level_versions: Vec<mosaica_store::manifest::LevelVersion> =
         across_partitions(bundle, |m| m.level_versions.iter().cloned());
     let (overlay, buffer, state) = WritePath::reconstruct(
         wal_path,
         crate::write::ManifestSeed {
-            high_water: tessera_lifecycle::alloc::allocator_floor(
+            high_water: mosaica_lifecycle::alloc::allocator_floor(
                 bundle.manifest.entity_id_high_water,
                 &side_manifest_high_waters,
             ),
-            low_water: tessera_lifecycle::alloc::allocator_ceiling(
-                tessera_types::layer::ROWLESS_CEILING,
+            low_water: mosaica_lifecycle::alloc::allocator_ceiling(
+                mosaica_types::layer::ROWLESS_CEILING,
                 &side_manifest_low_waters,
             ),
             free,
@@ -635,7 +635,7 @@ fn apply_unique_events(
                 }
                 (true, None) => {
                     for run in event.base.iter().chain(&event.live) {
-                        let digest = tessera_store::digest_of(&prefix_dir.join(&run.path))
+                        let digest = mosaica_store::digest_of(&prefix_dir.join(&run.path))
                             .map_err(EngineError::Store)?;
                         if digest.size != run.size || digest.sha256 != run.sha256 {
                             return Err(EngineError::Malformed(format!(
@@ -649,12 +649,12 @@ fn apply_unique_events(
                     }
                     manifest
                         .unique_indexes
-                        .push(tessera_store::manifest::UniqueIndexRuns {
+                        .push(mosaica_store::manifest::UniqueIndexRuns {
                             attribute: event.attribute.clone(),
                             base: event
                                 .base
                                 .iter()
-                                .map(|run| tessera_store::manifest::BaseKeyRun {
+                                .map(|run| mosaica_store::manifest::BaseKeyRun {
                                     path: run.path.clone(),
                                     first_key: run.first_key.clone(),
                                     last_key: run.last_key.clone(),
@@ -691,7 +691,7 @@ fn served_bundle(
     let (created_views, dead_incarnations) = state.roster.snapshot();
     // And the group-scoped columns a flush wrote: `with_scoped_columns` drops a column of a
     // dead incarnation rather than publishing its values as the new view's.
-    let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> =
+    let scoped_columns: Vec<(String, String, mosaica_types::view::ViewIncarnation)> =
         across_partitions(&bundle, |m| {
             m.scoped_columns
                 .iter()
@@ -708,7 +708,7 @@ fn served_bundle(
         scoped_columns: &scoped_columns,
     });
     let manifest = match bundle.partitions.values().next() {
-        Some(partition) => tessera_store::unique::with_unique_flags(&manifest, &partition.manifest),
+        Some(partition) => mosaica_store::unique::with_unique_flags(&manifest, &partition.manifest),
         None => manifest,
     };
     // A log that declared nothing, or vocabularies alone, keeps the bundle `open_bundle` built
@@ -738,8 +738,8 @@ fn first_generation(
     bundle: &Arc<Bundle>,
     state: &crate::write::WritePathState,
     vocabularies: Vocabularies,
-    overlay: tessera_lifecycle::Overlay,
-    buffer: tessera_lifecycle::IngestBuffer,
+    overlay: mosaica_lifecycle::Overlay,
+    buffer: mosaica_lifecycle::IngestBuffer,
     fragments: Arc<FragmentCache>,
     pool: &rayon::ThreadPool,
 ) -> Result<Arc<GenerationHandle>> {
@@ -751,7 +751,7 @@ fn first_generation(
         let partition = bundle.partitions.keys().next().cloned().unwrap_or_default();
         Arc::new(
             open_filter_columns(prefix_dir, bundle, &unfolded_attributes).map_err(|e| {
-                EngineError::Store(tessera_store::StoreError::Io {
+                EngineError::Store(mosaica_store::StoreError::Io {
                     path: prefix_dir.join("partitions").join(&partition),
                     source: e,
                 })
@@ -760,23 +760,23 @@ fn first_generation(
     };
 
     let unique = match bundle.partitions.values().next() {
-        Some(partition) => tessera_store::unique::UniqueIndexes::open(
+        Some(partition) => mosaica_store::unique::UniqueIndexes::open(
             &bundle.manifest,
             &partition.manifest,
             prefix_dir,
             None,
         )
         .map_err(EngineError::Store)?,
-        None => tessera_store::unique::UniqueIndexes::default(),
+        None => mosaica_store::unique::UniqueIndexes::default(),
     };
     let edited = match bundle.partitions.values().next() {
-        Some(partition) => tessera_store::edited::EditedIndex::open(
+        Some(partition) => mosaica_store::edited::EditedIndex::open(
             &partition.manifest.edited_items,
             prefix_dir,
             None,
         )
         .map_err(EngineError::Store)?,
-        None => tessera_store::edited::EditedIndex::default(),
+        None => mosaica_store::edited::EditedIndex::default(),
     };
 
     // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
@@ -848,7 +848,7 @@ fn adopt_derived_structures(
     // again keeps its predecessor's structures listed until a fold, under the same view id and
     // level version, and they address rows the new view does not have.
     let incarnation_of = |view: &str| bundle.manifest.incarnation_of(view);
-    let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> =
+    let manifest_derived_extents: Vec<mosaica_store::manifest::DerivedExtent> =
         across_partitions(bundle, |m| m.derived_extents.iter().cloned())
             .into_iter()
             .filter(|e| {
@@ -861,7 +861,7 @@ fn adopt_derived_structures(
     // The row columns' scratch, swept at open: meaningless outside the run that wrote it.
     let row_column_scratch = cache_dir.join(crate::artifacts::ROW_COLUMN_SCRATCH_DIR);
     let _ = std::fs::create_dir_all(&row_column_scratch);
-    tessera_store::derived::sweep_row_column_scratch(&row_column_scratch);
+    mosaica_store::derived::sweep_row_column_scratch(&row_column_scratch);
     let artifact_projections = Arc::new(crate::artifacts::ArtifactProjections::new(
         row_column_scratch,
     ));
@@ -988,13 +988,13 @@ impl Engine {
             adopt_derived_structures(cache_dir, &readers, &bundle, &state);
 
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
-        let region_cache = Arc::new(tessera_cache::SingleFlightCache::new(u64::MAX));
+        let region_cache = Arc::new(mosaica_cache::SingleFlightCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let switches = Arc::new(TestSwitches::default());
         let counters = Arc::new(ServeCounters::default());
-        // Bounded from construction, unlike the caches `tessera_server::prepare` bounds after
+        // Bounded from construction, unlike the caches `mosaica_server::prepare` bounds after
         // `open`: entries are fixed-size, so there is no figure a deployment would set.
-        let occupancy = Arc::new(tessera_cache::SingleFlightCache::new(
+        let occupancy = Arc::new(mosaica_cache::SingleFlightCache::new(
             crate::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES,
         ));
         let stage = crate::stage::StageDeps {
@@ -1164,7 +1164,7 @@ impl Engine {
     pub fn start_write_executor_with_faults(
         &mut self,
         queue_bound: usize,
-        faults: Arc<tessera_lifecycle::faults::FaultSwitchboard>,
+        faults: Arc<mosaica_lifecycle::faults::FaultSwitchboard>,
     ) -> std::result::Result<(), crate::write::ExecutorStartError> {
         let generation = Arc::clone(&self.generation);
         let deps = self.maintenance_deps();
@@ -1183,7 +1183,7 @@ impl Engine {
 /// function: it has two callers, one on each side of the executor queue, and a submission from
 /// the executor to itself would deadlock. Reads `CURRENT` first and refuses unless it names
 /// `prefix`, since publishing a prefix `CURRENT` does not name would serve geometry a restart
-/// could not find. Opens with [`tessera_store::open_written_prefix`], not `open_bundle`: the
+/// could not find. Opens with [`mosaica_store::open_written_prefix`], not `open_bundle`: the
 /// caller wrote and digested these bytes moments ago.
 pub(crate) fn open_rotation(
     bundle_root: &Path,
@@ -1207,7 +1207,7 @@ pub(crate) fn open_rotation(
     })?;
 
     let prefix_dir = bundle_root.join(prefix);
-    let mut bundle = tessera_store::open_written_prefix(bundle_root, prefix)
+    let mut bundle = mosaica_store::open_written_prefix(bundle_root, prefix)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
     // The columns declared while the fold ran, appended on `Engine::open`'s rule: the new
     // `MANIFEST.json` carries the schema as it stood at the plan, and the side manifest the fold
@@ -1221,7 +1221,7 @@ pub(crate) fn open_rotation(
     });
     if let Some(partition) = bundle.partitions.values().next() {
         bundle.manifest =
-            tessera_store::unique::with_unique_flags(&bundle.manifest, &partition.manifest);
+            mosaica_store::unique::with_unique_flags(&bundle.manifest, &partition.manifest);
     }
     let bundle = Arc::new(bundle);
     let (phash, partition) = bundle
@@ -1249,7 +1249,7 @@ pub(crate) fn open_rotation(
             .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
     );
     let unique = Arc::new(
-        tessera_store::unique::UniqueIndexes::open(
+        mosaica_store::unique::UniqueIndexes::open(
             &bundle.manifest,
             &partition.manifest,
             &prefix_dir,
@@ -1259,7 +1259,7 @@ pub(crate) fn open_rotation(
     );
 
     let edited = Arc::new(
-        tessera_store::edited::EditedIndex::open(
+        mosaica_store::edited::EditedIndex::open(
             &partition.manifest.edited_items,
             &prefix_dir,
             None,
@@ -1292,7 +1292,7 @@ fn read_current(root: &Path) -> Result<CurrentPointer> {
 /// built under the old rule.
 pub(crate) fn authorisation_rule_hash() -> [u8; 32] {
     use sha2::Digest;
-    sha2::Sha256::digest(b"tessera access expressions:1").into()
+    sha2::Sha256::digest(b"mosaica access expressions:1").into()
 }
 
 fn hex_decode_32(s: &str) -> Option<[u8; 32]> {
@@ -1403,7 +1403,7 @@ mod tests {
         unreachable!("the panic handler aborts long before this");
     }
 
-    const POOL_PANIC_CHILD: &str = "TESSERA_POOL_PANIC_CHILD";
+    const POOL_PANIC_CHILD: &str = "MOSAICA_POOL_PANIC_CHILD";
 
     /// Pins that the record carries the payload for both shapes a panic can leave it in
     /// (`&'static str` or `String`), and says so plainly when it is neither.

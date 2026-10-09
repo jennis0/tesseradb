@@ -209,7 +209,7 @@ impl Engine {
         session: &Session,
         generation: &Generation,
         view: &str,
-        view_data: &tessera_store::read::ViewData,
+        view_data: &mosaica_store::read::ViewData,
         cancel: &Option<CancelToken>,
         probe: &mut Probe,
     ) -> Result<(Arc<SessionGeometry>, RowProjectionKey)> {
@@ -344,7 +344,7 @@ impl Engine {
         };
         if matches!(
             self.occupancy.peek(&deepest),
-            tessera_cache::Peek::Ready(_)
+            mosaica_cache::Peek::Ready(_)
         ) {
             return;
         }
@@ -380,7 +380,7 @@ impl Engine {
             fragment_identity: identity.fragment_identity,
             fragment_watermark: identity.fragment_watermark,
         };
-        if let tessera_cache::Peek::Ready(hit) = self.occupancy.peek(&key) {
+        if let mosaica_cache::Peek::Ready(hit) = self.occupancy.peek(&key) {
             return hit.0;
         }
         // The whole ladder from one walk, with every shallower rung kept too, so a session that
@@ -400,7 +400,7 @@ impl Engine {
             .get_or_derive(key, None, |_| crate::occupancy::OccupiedTiles(ladder.at(depth)))
         {
             Ok(entry) => entry.0,
-            Err(tessera_cache::Building) => ladder.at(depth),
+            Err(mosaica_cache::Building) => ladder.at(depth),
         }
     }
 
@@ -445,7 +445,7 @@ impl Engine {
     /// of its views, composed by the same three calls [`Engine::viewport_stream`] makes. The
     /// generation comes back beside the mask because the segments the mask addresses are its
     /// bundle's.
-    // Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
+    // Public for `mosaica-bench`'s `identity_bands_probe`; not part of the engine's API.
     #[doc(hidden)]
     pub fn composed_mask(
         &self,

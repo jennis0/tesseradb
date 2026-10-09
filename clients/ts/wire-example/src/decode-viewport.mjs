@@ -1,5 +1,5 @@
 // A worked decode of a `POST /v1/viewport` or `POST /v1/artifacts/viewport` body in JavaScript,
-// using `apache-arrow` and no Tessera code. `docs/openapi/README.md` walks through it.
+// using `apache-arrow` and no Mosaica code. `docs/openapi/README.md` walks through it.
 //
 //   node src/decode-viewport.mjs <body.bin>
 //

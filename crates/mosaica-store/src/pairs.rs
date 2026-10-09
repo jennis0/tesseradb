@@ -3,10 +3,10 @@
 //!
 //! **A bundle artefact, so its writer lives with the others.** `SegmentWriter`, `PermutationWriter`,
 //! `write_segments_manifest` and `write_manifest_json` all sit in this
-//! crate because they write files contracts §2 defines; this one wrote from `tessera-build` alone
+//! crate because they write files contracts §2 defines; this one wrote from `mosaica-build` alone
 //! for as long as a build was the only thing that produced it. Compaction's pass 2 is the second producer, and it
-//! cannot reach `tessera-build` — that crate already depends on `tessera-authz`, so the edge only
-//! runs one way, and the fold's driver in `tessera-engine` has no edge to it either. Moving the
+//! cannot reach `mosaica-build` — that crate already depends on `mosaica-authz`, so the edge only
+//! runs one way, and the fold's driver in `mosaica-engine` has no edge to it either. Moving the
 //! writer down to the crate both already depend on is the placement the other artefacts already
 //! have, rather than a new exception for this one.
 //!
@@ -34,7 +34,7 @@ use crate::error::{Result, StoreError};
 /// file is off both request paths (build-cadence and oracle reads only), so the encoding is
 /// chosen for the oracle's benefit, not for query latency.
 ///
-/// **Two producers, which is why this lives here and not in `tessera-build`.** A build emits this
+/// **Two producers, which is why this lives here and not in `mosaica-build`.** A build emits this
 /// file once; compaction's pass 2 re-emits it at every fold, because a carried-forward
 /// `pairs.parquet` would disagree with the new base postings about every folded deletion — the one
 /// disagreement the I1 differential exists to catch (compaction §3). The build's copy was the
@@ -158,7 +158,7 @@ impl PairsParquetWriter {
 }
 
 /// `fsync` the file and its directory, so the rename that made it visible is durable too — the
-/// same discipline `tessera-build` applies to every artefact it writes, kept here because a
+/// same discipline `mosaica-build` applies to every artefact it writes, kept here because a
 /// producer that skipped it would leave a `pairs.parquet` a crash could truncate.
 fn fsync_file(path: &Path) -> Result<()> {
     let file = File::open(path).map_err(|e| StoreError::Io {

@@ -2,9 +2,9 @@
 #
 # Produced by `prepare.py`, which copies this file next to the parquets it writes (the house
 # convention every rung in this tree follows: `[sources]` is relative to the declaring document,
-# configuration.md §3, so the copy beside the data is what `tessera build` would read).
+# configuration.md §3, so the copy beside the data is what `mosaica build` would read).
 #
-# **`tessera check` and `tessera build` both pass against this file, unmodified** (2026-08-31):
+# **`mosaica check` and `mosaica build` both pass against this file, unmodified** (2026-08-31):
 # nine row spaces over one entity space — the plain view, `quarter`'s four inline views, and
 # `quarter_alt`'s four selected out of one file by its discriminator (views.md §7).
 #

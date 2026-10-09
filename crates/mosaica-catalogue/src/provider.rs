@@ -335,7 +335,7 @@ mod tests {
         Provider {
             name: "corp".into(),
             issuer: "https://login.example.org/".into(),
-            audience: "tessera".into(),
+            audience: "mosaica".into(),
             jwks_url: "https://login.example.org/keys".into(),
             rules,
             role_mappings: Vec::new(),
@@ -434,16 +434,16 @@ mod tests {
             rule("groups[*]", "{value}"),
             rule("department", "{value}"),
         ]);
-        p.role_mappings = vec![mapping("groups[*]", "tessera-admins", "admins")];
-        let m = p.apply(&json!({"groups": ["analysts", " tessera-admins "]}));
+        p.role_mappings = vec![mapping("groups[*]", "mosaica-admins", "admins")];
+        let m = p.apply(&json!({"groups": ["analysts", " mosaica-admins "]}));
         assert_eq!(m.groups, set(&["admins"]));
-        assert_eq!(m.terms, set(&["analysts", "tessera-admins"]));
+        assert_eq!(m.terms, set(&["analysts", "mosaica-admins"]));
         for other in [
-            json!({"groups": ["tessera-admins-x", "Tessera-Admins", "tessera-admin"]}),
+            json!({"groups": ["mosaica-admins-x", "Mosaica-Admins", "mosaica-admin"]}),
             json!({"groups": ["admins"]}),
-            json!({"groups": "tessera-admins"}),
-            json!({"department": "tessera-admins", "groups": ["analysts"]}),
-            json!({"department": ["tessera-admins"]}),
+            json!({"groups": "mosaica-admins"}),
+            json!({"department": "mosaica-admins", "groups": ["analysts"]}),
+            json!({"department": ["mosaica-admins"]}),
             json!({}),
         ] {
             assert!(p.apply(&other).groups.is_empty(), "{other}");
@@ -492,14 +492,14 @@ mod tests {
     #[test]
     fn a_role_mapping_with_a_claim_value_or_group_that_cannot_be_stored_is_refused() {
         let bad = [
-            ("", "tessera-admins", "admins"),
-            ("a..b", "tessera-admins", "admins"),
-            ("groups[0]", "tessera-admins", "admins"),
+            ("", "mosaica-admins", "admins"),
+            ("a..b", "mosaica-admins", "admins"),
+            ("groups[0]", "mosaica-admins", "admins"),
             ("groups[*]", " ", "admins"),
             ("groups[*]", "a\u{7}b", "admins"),
-            ("groups[*]", "tessera-admins", ""),
-            ("groups[*]", "tessera-admins", "ad\tmins"),
-            ("groups[*]", "tessera-admins", "ad\u{202E}mins"),
+            ("groups[*]", "mosaica-admins", ""),
+            ("groups[*]", "mosaica-admins", "ad\tmins"),
+            ("groups[*]", "mosaica-admins", "ad\u{202E}mins"),
         ];
         for (claim, value, group) in bad {
             let mut p = provider(vec![]);
@@ -511,12 +511,12 @@ mod tests {
     #[test]
     fn rules_and_role_mappings_are_stored_trimmed() {
         let mut p = provider(vec![rule(" groups[*] ", " group:{value} ")]);
-        p.role_mappings = vec![mapping(" groups[*] ", " tessera-admins ", " admins ")];
+        p.role_mappings = vec![mapping(" groups[*] ", " mosaica-admins ", " admins ")];
         let v = p.validated(false).unwrap();
         assert_eq!(v.rules, vec![rule("groups[*]", "group:{value}")]);
         assert_eq!(
             v.role_mappings,
-            vec![mapping("groups[*]", "tessera-admins", "admins")]
+            vec![mapping("groups[*]", "mosaica-admins", "admins")]
         );
     }
 

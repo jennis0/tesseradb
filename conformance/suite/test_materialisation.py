@@ -10,13 +10,13 @@ the first thing to notice, and what it says is that a file is missing, several h
 from the list that stopped matching.
 
 That is not hypothetical. Five artifact sources were declared on 2026-08-21 and the shim was
-never taught to write them, so `tessera build` exited 1 inside a module-scoped fixture and every
+never taught to write them, so `mosaica build` exited 1 inside a module-scoped fixture and every
 test that fixture feeds — including both of its negative controls — errored with a
 `CalledProcessError` carrying no reason, for nine days.
 
 **The invariant is that every source the declaration names is a file the materialiser wrote**,
 and it is checkable because both sides are enumerable: the sources come out of the generated
-`tessera.toml`'s `[sources]` table, and the files are whatever is on disk beside it. The check
+`mosaica.toml`'s `[sources]` table, and the files are whatever is on disk beside it. The check
 costs one materialisation and no build, so it fails in seconds where the build failure took a
 server spawn, and it fails naming the file rather than an exit code.
 """
@@ -60,7 +60,7 @@ def test_every_declared_source_is_a_file_the_shim_wrote(materialised: Path) -> N
         + "\n`Corpus::config_toml` and `verification._SHIM_MAIN` have diverged: the declaration "
         "names a file no writer call in the shim produces. Add the writer to the shim (the "
         "artifact sources are one call, `Corpus::write_artifact_fixtures`) rather than removing "
-        "the source. Left unfixed this surfaces as `tessera build` exiting 1 inside a "
+        "the source. Left unfixed this surfaces as `mosaica build` exiting 1 inside a "
         "module-scoped fixture, with the reason swallowed by `capture_output`."
     )
 

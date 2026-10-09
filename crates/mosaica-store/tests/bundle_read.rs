@@ -11,19 +11,19 @@ use std::path::Path;
 use croaring::Bitmap;
 use sha2::{Digest, Sha256};
 
-use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::{fixed32, split32, tiles_for_bbox, Bounds, Tile};
-use tessera_store::manifest::{
+use mosaica_spatial::tiler::{sort_batch, TilerItem};
+use mosaica_spatial::{fixed32, split32, tiles_for_bbox, Bounds, Tile};
+use mosaica_store::manifest::{
     CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::{open_bundle, tile_ranges, StoreError};
-use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{open_bundle, tile_ranges, StoreError};
+use mosaica_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 /// A synthetic `tessera_id`-shaped value for test fixtures: full splitmix64 output over a
 /// seed, so its top 16 bits are a `priority` prefix like any real `tessera_id` (contracts
-/// §2.6), without claiming this is the actual Feistel construction — `tessera-types`'s identity
+/// §2.6), without claiming this is the actual Feistel construction — `mosaica-types`'s identity
 /// tests cover that separately.
 fn synthetic_tessera_id(seed: u64) -> TesseraId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
@@ -100,7 +100,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         "partitions/default/views/main/permutation.bin".to_string(),
         file_digest(&view_dir.join("permutation.bin")),
     );
-    for name in tessera_store::SEGMENT_FILES {
+    for name in mosaica_store::SEGMENT_FILES {
         segments_files.insert(
             format!("partitions/default/views/main/segments/seg0/{name}"),
             file_digest(&seg_dir.join(name)),
@@ -129,7 +129,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: tessera_types::BUNDLE_FORMAT,
+        bundle_format: mosaica_types::BUNDLE_FORMAT,
         created_at: "2026-07-28T00:00:00Z".to_string(),
         declared_scalars: vec![],
         vocabularies: vec![],
@@ -155,7 +155,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
                 y_min: extent.y_min,
                 y_max: extent.y_max,
             },
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: "default".to_string(),
@@ -186,7 +186,7 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     let (items, codes) = build_bundle(dir.path(), 200);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    assert_eq!(bundle.manifest.bundle_format, tessera_types::BUNDLE_FORMAT);
+    assert_eq!(bundle.manifest.bundle_format, mosaica_types::BUNDLE_FORMAT);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(partition.segments_n, 0);
@@ -707,7 +707,7 @@ fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).expect("read MANIFEST.json"))
             .expect("parse MANIFEST.json");
-    value["bundle_format"] = serde_json::json!(tessera_types::BUNDLE_FORMAT - 1);
+    value["bundle_format"] = serde_json::json!(mosaica_types::BUNDLE_FORMAT - 1);
     let bytes = serde_json::to_vec_pretty(&value).expect("serialise");
     fs::write(&manifest_path, &bytes).expect("rewrite MANIFEST.json");
     let current = CurrentPointer {
@@ -726,8 +726,8 @@ fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
             assert_eq!(
                 (found, supported),
                 (
-                    tessera_types::BUNDLE_FORMAT - 1,
-                    tessera_types::BUNDLE_FORMAT
+                    mosaica_types::BUNDLE_FORMAT - 1,
+                    mosaica_types::BUNDLE_FORMAT
                 )
             );
         }
@@ -908,12 +908,12 @@ fn a_segment_without_its_bands_does_not_open() {
     let seg_dir = dir
         .path()
         .join("v00000/partitions/default/views/main/segments/seg0");
-    fs::remove_file(seg_dir.join(tessera_store::bands::BANDS_FILE)).unwrap();
-    let refused = tessera_store::read::SegmentData::load(
+    fs::remove_file(seg_dir.join(mosaica_store::bands::BANDS_FILE)).unwrap();
+    let refused = mosaica_store::read::SegmentData::load(
         &seg_dir,
         "seg0",
         40,
-        tessera_store::edited::RowEntities::Numbers,
+        mosaica_store::edited::RowEntities::Numbers,
     )
     .expect_err("a segment without its bands must not load");
     assert_eq!(refused.file, "bands");
@@ -935,7 +935,7 @@ fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
 
     // The bound is 60, so the file holds one page and the payload starts at the first 4 KiB
     // boundary past the 24-byte header and its one-entry directory
-    // (`tessera_store::permutation`). Overwrite entity 0's slot with a row index far past this
+    // (`mosaica_store::permutation`). Overwrite entity 0's slot with a row index far past this
     // segment's row_count (60) — still a structurally valid `u32`, not the sentinel, just out of
     // range.
     let corrupt_slot = 9_999u32.to_le_bytes();
@@ -997,7 +997,7 @@ fn open_bundle_rejects_a_path_traversing_segment_id() {
 // expected range from a model of the sweep. Everything compares against `tile_ranges_within`
 // over the whole segment, which searches the Morton column itself, and against `tile_ranges`.
 // (The gallop primitive underneath has its own unit test against `partition_point`, in
-// `tessera_store::read`.)
+// `mosaica_store::read`.)
 //
 // Two things a plausible-looking sweep gets wrong, both tested for here:
 //
@@ -1011,11 +1011,11 @@ fn open_bundle_rejects_a_path_traversing_segment_id() {
 
 /// `out[i]` is the Morton column's range for `tiles[i]`, and `tile_ranges`'s, for every `i`, or a
 /// failure naming the index.
-fn assert_matches_per_tile_search(seg: &tessera_store::SegmentData, tiles: &[Tile], what: &str) {
-    let swept = tessera_store::tile_ranges_all(seg, tiles);
+fn assert_matches_per_tile_search(seg: &mosaica_store::SegmentData, tiles: &[Tile], what: &str) {
+    let swept = mosaica_store::tile_ranges_all(seg, tiles);
     assert_eq!(swept.len(), tiles.len(), "{what}: one range per tile");
     for (i, tile) in tiles.iter().enumerate() {
-        let column = tessera_store::read::tile_ranges_within(seg, tile, 0..seg.row_count);
+        let column = mosaica_store::read::tile_ranges_within(seg, tile, 0..seg.row_count);
         assert_eq!(
             swept[i], column,
             "{what}: tile {i} ({tile:?}) — the sweep must agree with the full-column search \
@@ -1112,7 +1112,7 @@ fn tile_ranges_all_over_an_empty_tile_set_is_empty() {
     build_bundle(dir.path(), 64);
     let bundle = open_bundle(dir.path()).expect("open_bundle");
     let seg = &bundle.partitions["default"].views["main"].segments[0];
-    assert!(tessera_store::tile_ranges_all(seg, &[]).is_empty());
+    assert!(mosaica_store::tile_ranges_all(seg, &[]).is_empty());
 }
 
 /// **The fourth constructor: a prefix this process just wrote opens without re-hashing it.**
@@ -1129,7 +1129,7 @@ fn a_just_written_prefix_opens_to_the_same_bundle_without_re_verifying_it() {
     let (items, codes) = build_bundle(dir.path(), 200);
 
     let verified = open_bundle(dir.path()).expect("the read protocol in full");
-    let trusted = tessera_store::open_written_prefix(dir.path(), "v00000")
+    let trusted = mosaica_store::open_written_prefix(dir.path(), "v00000")
         .expect("a prefix this process wrote");
 
     // Same bundle, by every structure a request reads.
@@ -1148,7 +1148,7 @@ fn a_just_written_prefix_opens_to_the_same_bundle_without_re_verifying_it() {
     // And it does not read `CURRENT` at all — the fold calls it after the flip, but naming the
     // prefix is what makes the call independent of the commit having landed.
     fs::remove_file(dir.path().join("CURRENT")).expect("remove CURRENT");
-    tessera_store::open_written_prefix(dir.path(), "v00000")
+    mosaica_store::open_written_prefix(dir.path(), "v00000")
         .expect("the prefix is named, not looked up");
 }
 
@@ -1179,7 +1179,7 @@ fn a_just_written_prefix_skips_the_digest_sweep_and_open_bundle_does_not() {
          checked — this direction is unconditional and must stay so"
     );
     assert!(
-        tessera_store::open_written_prefix(dir.path(), "v00000").is_ok(),
+        mosaica_store::open_written_prefix(dir.path(), "v00000").is_ok(),
         "and the trusted constructor does not re-derive a digest its caller just computed"
     );
 }
@@ -1196,7 +1196,7 @@ fn a_just_written_prefix_still_refuses_a_manifest_that_disagrees_with_its_own_fi
         value["segments"][0]["row_count"] = serde_json::json!(39);
     });
 
-    let err = tessera_store::open_written_prefix(dir.path(), "v00000")
+    let err = mosaica_store::open_written_prefix(dir.path(), "v00000")
         .expect_err("the manifest disagrees with morton.u32 and columns.arrow");
     assert!(
         matches!(err, StoreError::MalformedBundle { .. }),

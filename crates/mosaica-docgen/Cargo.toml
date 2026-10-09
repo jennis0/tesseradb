@@ -1,11 +1,11 @@
 [package]
-name = "tessera-docgen"
+name = "mosaica-docgen"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
 
 # Test support only: a crate's tests use it to render a reference page from that crate's source.
-# Nothing in the `tessera` binary depends on it.
+# Nothing in the `mosaica` binary depends on it.
 [dependencies]
 syn = { version = "2", features = ["full"] }

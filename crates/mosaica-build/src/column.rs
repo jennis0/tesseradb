@@ -111,14 +111,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tessera_spatial::{ScalarType, ScalarValue};
+use mosaica_spatial::{ScalarType, ScalarValue};
 
 use crate::error::{BuildError, Result};
 use crate::spill::{MappedArena, MappedArray};
 
 /// The fixed-width members, each with its [`ScalarValue`] variant and its storage element.
 ///
-/// Generated rather than written out, for the reason `tessera_store::write`'s twin of this list is:
+/// Generated rather than written out, for the reason `mosaica_store::write`'s twin of this list is:
 /// eleven types across five methods is fifty near-identical arms whose only failure mode is a type
 /// appearing in one of another's — a column silently taking another's width or another's values,
 /// which no aggregate check sees. `Bool` and `Utf8` are written by hand: a `bool` has bit patterns
@@ -315,7 +315,7 @@ fn record_shape(ty: ScalarType) -> RecordShape {
 /// The refusal every setter shares: a value whose tag is not the column's.
 ///
 /// `#[cold]` and out of line because it is the arm no caller expects to reach, and building its
-/// message is the whole of its cost — the same reasoning `tessera_store::write` records for its
+/// message is the whole of its cost — the same reasoning `mosaica_store::write` records for its
 /// own twin of this, measured at ~10⁹ constructions across one build's columns.
 /// The set bits of a presence bitmap, ascending, **skipping an absent run 64 at a time** — see
 /// [`EntityColumn::present_entities`], and the arena layout sweep, which walks the same bits while

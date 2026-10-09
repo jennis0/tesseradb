@@ -1,9 +1,9 @@
 //! Writing the record blob: rows in, three files out (`records-and-search.md` §3, §7).
 //!
-//! The byte format — rows, blocks, the directory — is owned by `tessera_filter::record`, and this
+//! The byte format — rows, blocks, the directory — is owned by `mosaica_filter::record`, and this
 //! writer is its producer half: it lives in this crate for the module doc's codegen reason (the
 //! scan's crate holds no write machinery it can avoid holding), and it calls
-//! [`tessera_filter::encode_row`] rather than encoding anything itself, so the layout stays one
+//! [`mosaica_filter::encode_row`] rather than encoding anything itself, so the layout stays one
 //! module's fact.
 //!
 //! # The blob's lifecycle merges, and the two removal rules
@@ -12,7 +12,7 @@
 //! (`coalesce_attr_extents`, `fold_value_column`): a merge by entity over layers whose entities
 //! may interleave, streaming rows through [`RecordBlobWriter`], which repacks small blocks toward
 //! the block target as a side effect of re-blocking rather than as a pass of its own. Each input
-//! layer streams through [`tessera_filter::RecordBlob::for_each_row`], whose walk *is* the
+//! layer streams through [`mosaica_filter::RecordBlob::for_each_row`], whose walk *is* the
 //! addressing self-check, so a defective input refuses the pass instead of being laundered into a
 //! clean-looking output.
 //!
@@ -58,7 +58,7 @@ use arrow::array::{ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use croaring::{Bitmap, Portable};
 
-use tessera_filter::{
+use mosaica_filter::{
     encode_block_header, encode_row, encode_row_with, RecordBlob, RecordFieldRef, RowFields,
 };
 
@@ -75,7 +75,7 @@ const ZSTD_LEVEL: i32 = 3;
 ///
 /// **The figure is per pool, and a pool is per producer, so it multiplies by however many run at
 /// once.** The build's attribute join writes its spilled columns from one rayon lane each
-/// (`tessera_build::pipeline`), so a schema with four spilled columns has four pools: twelve
+/// (`mosaica_build::pipeline`), so a schema with four spilled columns has four pools: twelve
 /// threads and 160 KiB apiece at the 32 KiB target. A pool is therefore started once per column
 /// and handed from one extent's writer to the next ([`BlockPool`]), not started per writer; a
 /// producer that seals no block starts no thread at all.
@@ -256,7 +256,7 @@ pub struct RecordBlobWriter {
 
 impl RecordBlobWriter {
     /// Create a writer over the three paths. `target` is the uncompressed block target in bytes —
-    /// [`tessera_filter::RECORD_BLOCK_TARGET`] everywhere but a test that wants small blocks.
+    /// [`mosaica_filter::RECORD_BLOCK_TARGET`] everywhere but a test that wants small blocks.
     pub fn create(
         blocks_path: &Path,
         hasrow_path: &Path,
@@ -313,7 +313,7 @@ impl RecordBlobWriter {
     pub fn push_row_with(
         &mut self,
         entity: u32,
-        fields: &mut dyn FnMut(&mut RowFields<'_>) -> Result<(), tessera_filter::RecordError>,
+        fields: &mut dyn FnMut(&mut RowFields<'_>) -> Result<(), mosaica_filter::RecordError>,
     ) -> io::Result<()> {
         self.push_encoded(entity, &mut |buf| encode_row_with(entity, buf, fields))
     }
@@ -323,7 +323,7 @@ impl RecordBlobWriter {
     fn push_encoded(
         &mut self,
         entity: u32,
-        encode: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), tessera_filter::RecordError>,
+        encode: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), mosaica_filter::RecordError>,
     ) -> io::Result<()> {
         if self.last_entity.is_some_and(|last| last >= entity) {
             return Err(invalid(format!(
@@ -479,7 +479,7 @@ impl RecordBlobWriter {
 }
 
 /// A group-scoped text column's prose as a record blob, one row per entity holding
-/// [`tessera_filter::PROSE_TAG`]. `rows` ascend in the entity; a repeated entity keeps its first
+/// [`mosaica_filter::PROSE_TAG`]. `rows` ascend in the entity; a repeated entity keeps its first
 /// value, the one a cell holds.
 pub fn write_prose<'a>(
     blocks_path: &Path,
@@ -491,7 +491,7 @@ pub fn write_prose<'a>(
         blocks_path,
         hasrow_path,
         directory_path,
-        tessera_filter::RECORD_BLOCK_TARGET,
+        mosaica_filter::RECORD_BLOCK_TARGET,
     )?;
     let mut last: Option<u32> = None;
     for (entity, prose) in rows {
@@ -507,8 +507,8 @@ pub fn write_prose<'a>(
         writer.push_row(
             entity,
             &[RecordFieldRef {
-                tag: tessera_filter::PROSE_TAG,
-                value: tessera_filter::RecordValueRef::Utf8(prose),
+                tag: mosaica_filter::PROSE_TAG,
+                value: mosaica_filter::RecordValueRef::Utf8(prose),
             }],
         )?;
         last = Some(entity);
@@ -584,7 +584,7 @@ pub fn fold_record_blob(
 /// Stream the layers' rows into one blob in entity order, skipping `tombstones`.
 ///
 /// The layers' entities may interleave, and a values fill gives an entity a row in a second
-/// layer. Each merged row is what [`tessera_filter::RecordStack::fields_of`] answers over the
+/// layer. Each merged row is what [`mosaica_filter::RecordStack::fields_of`] answers over the
 /// layers in list order: the union of their fields, the earliest layer's value where two carry
 /// one tag. [`merge_record_rows`] lets the later stream win a tag, so the layers go in reversed.
 fn write_merged_rows(
@@ -638,7 +638,7 @@ pub trait RecordRows {
 
 /// A [`RecordBlob`]'s own rows as such a stream.
 pub struct BlobRows<'a> {
-    cursor: tessera_filter::RecordRowCursor<'a>,
+    cursor: mosaica_filter::RecordRowCursor<'a>,
 }
 
 impl<'a> BlobRows<'a> {
@@ -743,7 +743,7 @@ pub fn merge_record_rows(
                     row.field(
                         lent[source]
                             .field(field)
-                            .map_err(|e| tessera_filter::RecordError::Malformed(e.to_string()))?,
+                            .map_err(|e| mosaica_filter::RecordError::Malformed(e.to_string()))?,
                     )?;
                 }
                 Ok(())
@@ -773,7 +773,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_filter::{Access, RecordField, RecordValue, RECORD_BLOCK_TARGET};
+    use mosaica_filter::{Access, RecordField, RecordValue, RECORD_BLOCK_TARGET};
 
     /// One layer's three paths under `dir`, tagged so a test can hold several.
     fn paths_of(dir: &Path, tag: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -797,11 +797,11 @@ mod tests {
                     &[
                         RecordFieldRef {
                             tag: 0,
-                            value: tessera_filter::RecordValueRef::Utf8(note),
+                            value: mosaica_filter::RecordValueRef::Utf8(note),
                         },
                         RecordFieldRef {
                             tag: 1,
-                            value: tessera_filter::RecordValueRef::I64(i64::from(*entity) * 7),
+                            value: mosaica_filter::RecordValueRef::I64(i64::from(*entity) * 7),
                         },
                     ],
                 )
@@ -1089,7 +1089,7 @@ mod tests {
         for (entity, value) in rows {
             let field = RecordFieldRef {
                 tag,
-                value: tessera_filter::RecordValueRef::Utf8(value),
+                value: mosaica_filter::RecordValueRef::Utf8(value),
             };
             writer.push_row(*entity, &[field]).expect("push");
         }
@@ -1100,11 +1100,11 @@ mod tests {
     /// What the reader's stack answers for `entity` over the layers named, oldest first, with the
     /// fields in tag order.
     fn stack_answer(dir: &Path, layers: &[&str], entity: u32) -> Option<Vec<RecordField>> {
-        let extents: Vec<tessera_filter::RecordExtentPaths> = layers
+        let extents: Vec<mosaica_filter::RecordExtentPaths> = layers
             .iter()
             .map(|name| {
                 let (blocks, hasrow, directory) = paths_of(dir, name);
-                tessera_filter::RecordExtentPaths {
+                mosaica_filter::RecordExtentPaths {
                     blocks,
                     hasrow,
                     directory,
@@ -1112,7 +1112,7 @@ mod tests {
             })
             .collect();
         let stack =
-            tessera_filter::RecordStack::open(None, &extents, Access::Read).expect("the stack");
+            mosaica_filter::RecordStack::open(None, &extents, Access::Read).expect("the stack");
         let mut fields = stack.fields_of(entity).expect("read")?;
         fields.sort_by_key(|f| f.tag);
         Some(fields)

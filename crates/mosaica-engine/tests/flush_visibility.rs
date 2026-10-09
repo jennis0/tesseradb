@@ -18,7 +18,7 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -33,7 +33,7 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config()
         },
     )
@@ -44,15 +44,15 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
 fn ingest_into_view(
     engine: &Engine,
     batch: &str,
-    item: tessera_types::EntityId,
+    item: mosaica_types::EntityId,
     view: &str,
-) -> tessera_types::EntityId {
+) -> mosaica_types::EntityId {
     let descriptors = vec![b"0".to_vec()];
     let mut hash = [0u8; 32];
     for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: view.to_string(),
         join: Some(item),
         descriptors: descriptors.clone(),
@@ -119,7 +119,7 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
     assert_eq!(engine.generation().segments_version, 1);
 
     // And on disk, read back through the ordinary protocol.
-    let bundle = tessera_store::open_bundle(&root).expect("the published bundle opens");
+    let bundle = mosaica_store::open_bundle(&root).expect("the published bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     assert_eq!(
         partition.segments_n, 1,
@@ -205,7 +205,7 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
 
     // The geometry is still there, which is what makes the absence above a filter rather than a
     // loss.
-    let bundle = tessera_store::open_bundle(&root).expect("the published bundle opens");
+    let bundle = mosaica_store::open_bundle(&root).expect("the published bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     assert!(partition.views["s0"].row_space.row_of(id).is_some());
 }
@@ -234,7 +234,7 @@ fn the_allocator_floor_comes_from_the_side_manifest() {
         id
     };
 
-    let bundle = tessera_store::open_bundle(&root).expect("the published bundle opens");
+    let bundle = mosaica_store::open_bundle(&root).expect("the published bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     assert!(
         partition.manifest.entity_id_high_water > flushed.raw(),
@@ -340,11 +340,11 @@ fn the_backlog_gauge_counts_rows_in_every_view_whether_or_not_a_flush_is_in_flig
     let tmp = tempfile::TempDir::new().unwrap();
     let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: "s1".to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,

@@ -27,17 +27,17 @@ use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::artifacts::{ArtifactProjections, ArtifactRows, Containment};
-use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::projection::RowProjection;
-use tessera_engine::containment::{ContainmentPartition, PartitionSource};
-use tessera_engine::denied_rows_of;
-use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, ContentSet};
-use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
-use tessera_store::write::write_permutation;
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::{EntityId, TermId};
+use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
+use mosaica_engine::artifacts::{ArtifactProjections, ArtifactRows, Containment};
+use mosaica_engine::compose::{compose, EffectiveMask};
+use mosaica_engine::projection::RowProjection;
+use mosaica_engine::containment::{ContainmentPartition, PartitionSource};
+use mosaica_engine::denied_rows_of;
+use mosaica_lifecycle::membership::{ArtifactRecord, ArtifactStore, ContentSet};
+use mosaica_lifecycle::{ChangeOp, IngestBuffer, Overlay};
+use mosaica_store::write::write_permutation;
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::{EntityId, TermId};
 
 const UNIVERSE: u32 = 4_000;
 const TERMS: u32 = 40;
@@ -78,7 +78,7 @@ struct Fixture {
     postings: PostingsReader,
     /// The flushed entities' terms, as a flush writes them: read when a mask is composed and not
     /// by the partition's composer.
-    tier: Arc<tessera_authz::DeltaTier>,
+    tier: Arc<mosaica_authz::DeltaTier>,
     row_space: RowSpace,
     store: ArtifactStore,
     /// `entity → its terms`, kept so the expected answers below are computed from the fixture's
@@ -135,8 +135,8 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
         .filter(|(_, entities)| !entities.is_empty())
         .map(|(term, entities)| (term as u32, entities))
         .collect();
-    tessera_authz::write_delta_tier_at(&tier_path, &entries, SMALL_TERM_THRESHOLD).unwrap();
-    let tier = Arc::new(tessera_authz::DeltaTier::open(&tier_path).unwrap());
+    mosaica_authz::write_delta_tier_at(&tier_path, &entries, SMALL_TERM_THRESHOLD).unwrap();
+    let tier = Arc::new(mosaica_authz::DeltaTier::open(&tier_path).unwrap());
 
     // **A shuffle, not the identity.** Row order and entity order agreeing would let a bug that
     // conflated the two pass every case here.
@@ -154,7 +154,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
         extent_rows.swap(i, rng.gen_range(0..=i));
     }
     let row_space = RowSpace::new(Arc::new(Permutation::load(&perm_path).unwrap()), UNIVERSE)
-        .with_extent(tessera_store::SegmentExtent {
+        .with_extent(mosaica_store::SegmentExtent {
             entity_lo: u64::from(FLUSHED_LO),
             entity_hi: u64::from(FLUSHED_HI),
             seg_id: "s-flush-0".to_string(),
@@ -208,7 +208,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                     .into_iter()
                     .map(|set| ContentSet {
                         values: Some(vec!["text".to_string()]),
-                        digest: tessera_lifecycle::membership::content_digest(&[
+                        digest: mosaica_lifecycle::membership::content_digest(&[
                             "text".to_string()
                         ]),
                         cardinality: set.len() as u64,
@@ -267,7 +267,7 @@ impl Fixture {
         let base = Arc::new(RowProjection::walk(&fragment, &self.row_space));
         let buffer = IngestBuffer::new();
         let denied = denied_rows_of(overlay, &self.row_space);
-        let buffered = tessera_engine::buffered_rows_of(&buffer, &self.row_space);
+        let buffered = mosaica_engine::buffered_rows_of(&buffer, &self.row_space);
         let mask = compose(
             &satisfied,
             overlay,
@@ -607,7 +607,7 @@ fn a_level_composes_its_partition_once_for_every_view() {
         &fx.store,
         &fx.row_space,
         Some(&native),
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),
@@ -627,7 +627,7 @@ fn a_level_composes_its_partition_once_for_every_view() {
         &fx.store,
         &fx.row_space,
         Some(&native),
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),
@@ -682,14 +682,14 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     store.seed_level_version(LAYER, 0, 7);
     let composed_at = store.level_version(LAYER, 0);
     assert_eq!(composed_at, 7);
-    let entry = |version: u64| tessera_store::manifest::DerivedExtent {
+    let entry = |version: u64| mosaica_store::manifest::DerivedExtent {
         path: rel.to_string(),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
         view: None,
         incarnation: None,
-        form: tessera_store::manifest::DerivedForm::Containment,
+        form: mosaica_store::manifest::DerivedForm::Containment,
     };
     let source = PartitionSource {
         postings: &fx.postings,
@@ -707,7 +707,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
         &store,
         &fx.row_space,
         Some(&source),
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),
@@ -736,7 +736,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
             &store,
             &fx.row_space,
             Some(&source),
-            tessera_types::layer::ServingLayout::ArtifactMajor,
+            mosaica_types::layer::ServingLayout::ArtifactMajor,
             None,
             0,
             &held_rows_declaration(LAYER),
@@ -769,14 +769,14 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
     projections.adopt_all(
         tmp.path(),
         "v00000",
-        &[tessera_store::manifest::DerivedExtent {
+        &[mosaica_store::manifest::DerivedExtent {
             path: rel.to_string(),
             layer: LAYER.to_string(),
             level: 0,
             level_version: fx.store.level_version(LAYER, 0),
             view: None,
             incarnation: None,
-            form: tessera_store::manifest::DerivedForm::Containment,
+            form: mosaica_store::manifest::DerivedForm::Containment,
         }],
         &fx.store,
     );
@@ -792,7 +792,7 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
         &fx.store,
         &fx.row_space,
         Some(&source),
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),

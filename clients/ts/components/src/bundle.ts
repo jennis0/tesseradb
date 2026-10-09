@@ -8,8 +8,8 @@
  * This file is also the notebook widget's `_esm`: anywidget takes the default export,
  * `{initialize, render}` from `widget.ts`.
  */
-import DecodeWorker from '@tesseradb/client/decode.worker?worker&inline';
-import {setWorkerFactory} from '@tesseradb/client';
+import DecodeWorker from '@mosaica/client/decode.worker?worker&inline';
+import {setWorkerFactory} from '@mosaica/client';
 
 setWorkerFactory(() => new DecodeWorker());
 

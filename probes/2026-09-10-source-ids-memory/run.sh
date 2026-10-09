@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # What pass one costs in memory as a function of the row count, and whether the bundle moved.
 #
-# Part one runs `tessera build` over prefixes of a points file with two binaries, samples
+# Part one runs `mosaica build` over prefixes of a points file with two binaries, samples
 # /proc/<pid>/status beside each run, and stops the build as soon as `--stage-timings` prints the
 # `source_ids` line — the stage's own peak is that line's, and everything after it would take
 # hours at these row counts. It prints, per binary and row count, the stage's wall time, the
@@ -16,7 +16,7 @@
 #
 # PREFIX_CORPUS wants a points file whose `entity_id` ascends with the file, so `--limit` is a
 # prefix of it and the row groups past the limit are pruned by their statistics; GBIF's is.
-# IDENTITY_CORPUS is any prepared ladder corpus. Both want their own `tessera.toml`, `corpus.toml`,
+# IDENTITY_CORPUS is any prepared ladder corpus. Both want their own `mosaica.toml`, `corpus.toml`,
 # sources and `.env`.
 set -uo pipefail
 
@@ -36,12 +36,12 @@ for limit in $limits; do
     binary="$([ "$which" = before ] && echo "$BEFORE" || echo "$AFTER")"
     out="$work/prefix-$which"
     rm -rf "$out"
-    "$binary" build --deployment "$prefix_corpus/tessera.toml" --out "$out" \
+    "$binary" build --deployment "$prefix_corpus/mosaica.toml" --out "$out" \
       --limit "$limit" --no-oracle-pairs --stage-timings \
       > "$work/prefix-$which.log" 2> "$work/prefix-$which.err" &
     pid=$!
     case "$(ps -o comm= -p "$pid" 2>/dev/null)" in
-      *tessera*) ;;
+      *mosaica*) ;;
       *) echo "the pid is not the build; refusing to report its memory" >&2; exit 1 ;;
     esac
     ( while [ -r "/proc/$pid/status" ]; do
@@ -75,7 +75,7 @@ for which in before after; do
   binary="$([ "$which" = before ] && echo "$BEFORE" || echo "$AFTER")"
   out="$work/bundle-$name-$which"
   rm -rf "$out"
-  ( cd "$identity_corpus" && "$binary" build --deployment tessera.toml --config corpus.toml \
+  ( cd "$identity_corpus" && "$binary" build --deployment mosaica.toml --config corpus.toml \
       --out "$out" --stage-timings > "$work/build-$name-$which.log" 2>&1 )
 done
 diff -rq "$work/bundle-$name-before" "$work/bundle-$name-after" \

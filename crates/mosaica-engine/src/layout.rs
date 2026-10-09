@@ -7,18 +7,18 @@
 //! for the tile index to place, which is a property of where the data landed and moves as the
 //! corpus grows, so a fold re-evaluates it.
 //!
-//! [`choose`] and the shape it reads are [`tessera_types::layer`]'s, beside the declaration they
+//! [`choose`] and the shape it reads are [`mosaica_types::layer`]'s, beside the declaration they
 //! read, because the build, a fold and a level's first publication all choose. This module is the
 //! engine's name for them.
 
-pub use tessera_types::layer::{
+pub use mosaica_types::layer::{
     choose, LevelShape, ROW_MAJOR_EVERYWHERE_FRACTION, ROW_MAJOR_MIN_ARTIFACTS,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_types::layer::{
+    use mosaica_types::layer::{
         ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
         MembershipSource, ServingLayout, ShapeDeclaration, ShapeKind,
     };

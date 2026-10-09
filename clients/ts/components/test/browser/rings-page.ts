@@ -1,7 +1,7 @@
 import {Deck, OrthographicView} from '@deck.gl/core';
-import type {ArtifactsProjection, Band, LegendProjection, MarksProjection, Meta} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
-import {TesseraLayer, resolvePick} from '@tesseradb/deck';
+import type {ArtifactsProjection, Band, LegendProjection, MarksProjection, Meta} from '@mosaica/client';
+import {SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
+import {MosaicaLayer, resolvePick} from '@mosaica/deck';
 
 // Built by `rings.browser.ts` with Vite from the packages' sources. Two marks sized by `c`: one
 // with the value 10 at world (156, 256), one with no value at (356, 256), which draws as a ring. The
@@ -64,8 +64,8 @@ const deck = new Deck({
   views: new OrthographicView({flipY: true}),
   initialViewState: {target: [256, 256, 0], zoom: 0},
   layers: [
-    new TesseraLayer({
-      id: 'tessera',
+    new MosaicaLayer({
+      id: 'mosaica',
       depth: 2,
       status: 'shown',
       meta,

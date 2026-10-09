@@ -296,7 +296,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
     let bundle_root = tmp.path().join("bundle");
     let engine_config = default_engine_config();
     let max_k = engine_config.max_k;
-    let engine = tessera_engine::Engine::open(
+    let engine = mosaica_engine::Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
@@ -308,11 +308,11 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         .start_write_executor(1024)
         .expect("the write executor starts once per engine");
     let (catalogue, integrator_key, catalogue_dir) = test_identity();
-    let state = Arc::new(tessera_server::state::AppState {
+    let state = Arc::new(mosaica_server::state::AppState {
         engine,
-        sessions: parking_lot::Mutex::new(tessera_server::state::SessionRegistry::default()),
-        heap: tessera_server::memory::HeapWatch::default(),
-        limits: tessera_server::state::ServeLimits {
+        sessions: parking_lot::Mutex::new(mosaica_server::state::SessionRegistry::default()),
+        heap: mosaica_server::memory::HeapWatch::default(),
+        limits: mosaica_server::state::ServeLimits {
             max_k,
             max_category_values: 4,
             // A budget of 2, so a walk over `department`'s 11 values stops on the walk-budget
@@ -331,17 +331,17 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
             ingest_max_batch_bytes: 64 * 1024 * 1024,
             ..Default::default()
         },
-        suggest_admission: tessera_server::state::SuggestAdmission::new(),
+        suggest_admission: mosaica_server::state::SuggestAdmission::new(),
         compute_gate: generous_test_gate(),
         password_gate: generous_password_gate(),
         bulk_gate: generous_bulk_gate(),
         artifact_gate: generous_artifact_gate(),
-        ingest_admission: tessera_server::state::IngestAdmission::new(64),
+        ingest_admission: mosaica_server::state::IngestAdmission::new(64),
         catalogue,
-        oidc: tessera_server::oidc::Verifier::new(),
+        oidc: mosaica_server::oidc::Verifier::new(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         request_log: None,
-        faults: Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new()),
+        faults: Arc::new(mosaica_lifecycle::faults::FaultSwitchboard::new()),
     });
 
     let server = serve_state(state, integrator_key, Some(catalogue_dir)).await;
@@ -423,9 +423,9 @@ async fn meta_publishes_the_two_suggest_ceilings() {
 
 /// **At most one suggest in flight per session.** A second request for a session already holding
 /// the admission slot is refused with the shared `429 backpressure` — `Retry-After: 1` and body
-/// `retry_after_s: 1`, exactly as [`tessera_server::error::ApiError::Backpressure`] answers the
+/// `retry_after_s: 1`, exactly as [`mosaica_server::error::ApiError::Backpressure`] answers the
 /// compute-admission gate — refused before any engine call runs at all. The slot is engineered
-/// directly through [`tessera_server::state::SuggestAdmission`] rather than raced with a genuinely
+/// directly through [`mosaica_server::state::SuggestAdmission`] rather than raced with a genuinely
 /// slow request: the walk here has nothing slow to hold it open on, so this is the same
 /// "engineer a tiny, deterministic gate" move `saturated_gate_sheds_a_second_viewport_with_429...`
 /// makes in `tests/http.rs`, applied to a one-slot admission set instead of a one-permit
@@ -501,7 +501,7 @@ async fn post(
 /// **A filtered count is the items this principal may see in the view that pass the filter and
 /// carry the value**, for a principal who sees everything and one who sees a third, under a filter
 /// over a column with no index, so it is answered by the view's rows, and a region. The values
-/// offered are the `GET` form's, and the region's verdict is in `x-tessera-region`.
+/// offered are the `GET` form's, and the region's verdict is in `x-mosaica-region`.
 #[tokio::test]
 async fn a_filtered_count_is_the_visible_items_passing_the_filter() {
     let tmp = TempDir::new().unwrap();
@@ -531,7 +531,7 @@ async fn a_filtered_count_is_the_visible_items_passing_the_filter() {
         )
         .await;
         assert_eq!(status, 200, "{body}");
-        assert_eq!(headers["x-tessera-region"], "exact");
+        assert_eq!(headers["x-mosaica-region"], "exact");
         assert_eq!(keys_of(&body), keys_of(&unfiltered), "{terms:?}: {body}");
         let mut total = 0;
         for value in body["values"].as_array().unwrap() {
@@ -646,7 +646,7 @@ async fn the_post_forms_refusals() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert!(headers.get("x-tessera-region").is_none());
+    assert!(headers.get("x-mosaica-region").is_none());
     assert!(body["values"].as_array().unwrap().iter().all(|v| v.get("count").is_none()));
 }
 
@@ -663,7 +663,7 @@ async fn a_suggest_counting_within_a_view_is_subject_to_compute_admission() {
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
         default_engine_config(),
-        tessera_server::state::ComputeGate::new(1, 0, 250),
+        mosaica_server::state::ComputeGate::new(1, 0, 250),
     )
     .await;
     let token = token_for(&server, &["0"]).await;

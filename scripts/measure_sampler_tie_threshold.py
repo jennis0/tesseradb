@@ -21,7 +21,7 @@ Prior baselines were checked first and do NOT carry the needed granularity:
   - probes/work-correlation.json: has `sigma_visible` (summed over a whole viewport's
     tiles) per request, but never a per-tile breakdown, and again only w=10^4.
 Neither lets you recover a per-(tile, principal) V, so a new server run against the
-EXISTING /tmp/tessera-1e9 bundle (not rebuilt) is required. This script decodes the
+EXISTING /tmp/mosaica-1e9 bundle (not rebuilt) is required. This script decodes the
 per-tile `visible` column directly from `decode_viewport` (reference/oracle/wire.py),
 which returns `tiles = [(tile_id, visible, matched, served), ...]` per Arrow batch (`served` is
 contracts r7's addition; this script reads `visible` at index 1 and is unaffected).
@@ -39,7 +39,7 @@ linearity between term count and visible fraction.
 
 Usage:
   reference/.venv/bin/python scripts/measure_sampler_tie_threshold.py \
-      --bundle /tmp/tessera-1e9 --out probes/sampler-tie-threshold.json
+      --bundle /tmp/mosaica-1e9 --out probes/sampler-tie-threshold.json
 """
 
 from __future__ import annotations
@@ -74,8 +74,8 @@ ZOOMS = list(range(0, 9))
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bundle", default="/tmp/tessera-1e9")
-    ap.add_argument("--tmp", default="/tmp/tessera-1e9-serve-tiethresh")
+    ap.add_argument("--bundle", default="/tmp/mosaica-1e9")
+    ap.add_argument("--tmp", default="/tmp/mosaica-1e9-serve-tiethresh")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--boot-deadline", type=float, default=600.0)
     ap.add_argument("--out", default=None)
@@ -139,7 +139,7 @@ def main() -> int:
                 t0 = time.perf_counter()
                 resp = srv.viewport_response(token, "s0", z, FULL_BBOX, k=1)
                 wall_s = time.perf_counter() - t0
-                server_us = float(resp.headers.get("x-tessera-server-us", "nan"))
+                server_us = float(resp.headers.get("x-mosaica-server-us", "nan"))
                 tiles, _ = decode_viewport(resp.content)
                 visible_counts = [t[1] for t in tiles]
                 n_tiles = len(visible_counts)

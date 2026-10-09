@@ -7,7 +7,7 @@
 //! opposite object: a code drawn at random from the declared width's unused space, recorded beside
 //! its key, pinned forever. Codes are the `tessera_id` of vocabulary space; ordinals are its
 //! `entity_id`, and the two are joined only through the key. That is why none of
-//! `tessera_authz::dict` appears here.
+//! `mosaica_authz::dict` appears here.
 //!
 //! **The disclosure the scatter closes.** Dense first-seen codes make a *visible* code a lower
 //! bound on vocabulary cardinality: a viewer holding code 7 learns at least seven values exist.
@@ -30,7 +30,7 @@ use std::sync::Arc;
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-use tessera_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_spatial::tiler::{ScalarType, ScalarValue};
 
 use crate::manifest::{
     DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyExtension,

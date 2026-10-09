@@ -62,7 +62,7 @@ async fn ingest(server: &TestServer, batch_id: &str, body: Vec<u8>) -> reqwest::
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -126,10 +126,10 @@ async fn served_field_sourced(default: &str) -> (TempDir, TestServer) {
     let points = tmp.path().join("points.parquet");
     write_field_points(&points);
     let access = AccessInput {
-        source: tessera_build::config::AccessSource::Field("categories".to_string()),
+        source: mosaica_build::config::AccessSource::Field("categories".to_string()),
         default: Some(default.to_string()),
     };
-    tessera_build::build(&build_args(
+    mosaica_build::build(&build_args(
         &bundle_root,
         vec![view_args("s0", &points, access)],
     ))

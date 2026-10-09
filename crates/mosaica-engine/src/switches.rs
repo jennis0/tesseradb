@@ -40,7 +40,7 @@ pub(crate) struct TestSwitches {
     pub(crate) aggregate_min_chunk_rows: AtomicU64,
     /// The rows past which an aggregate's run of cells is sent as a page of its own.
     pub(crate) aggregate_alone_rows: AtomicU64,
-    /// The most terms a flush may carry the dictionary to: [`tessera_authz::MAX_DISTINCT_TERMS`].
+    /// The most terms a flush may carry the dictionary to: [`mosaica_authz::MAX_DISTINCT_TERMS`].
     pub(crate) max_distinct_terms: AtomicU64,
     /// How many visible items cluster centres are taken from: [`crate::slots::SAMPLE`].
     pub(crate) slot_sample: AtomicU64,
@@ -192,7 +192,7 @@ impl Default for TestSwitches {
             tags_from_labels: AtomicBool::new(true),
             aggregate_min_chunk_rows: AtomicU64::new(crate::aggregate::MIN_CHUNK_ROWS),
             aggregate_alone_rows: AtomicU64::new(crate::aggregate::ALONE_ROWS),
-            max_distinct_terms: AtomicU64::new(tessera_authz::MAX_DISTINCT_TERMS),
+            max_distinct_terms: AtomicU64::new(mosaica_authz::MAX_DISTINCT_TERMS),
             slot_sample: AtomicU64::new(crate::slots::SAMPLE),
             #[cfg(feature = "fault-injection")]
             projection_build_hold_wanted: AtomicBool::new(false),

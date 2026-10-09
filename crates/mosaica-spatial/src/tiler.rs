@@ -3,8 +3,8 @@
 //! One implementation shared by a build and a streaming flush, free of I/O. Priority is not
 //! computed here: it is the leading 16 bits of the `tessera_id` the caller supplies.
 
-pub use tessera_types::scalar::{ScalarType, ScalarValue};
-use tessera_types::{EntityId, TesseraId};
+pub use mosaica_types::scalar::{ScalarType, ScalarValue};
+use mosaica_types::{EntityId, TesseraId};
 
 use crate::morton::split32;
 

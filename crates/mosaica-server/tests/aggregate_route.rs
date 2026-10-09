@@ -17,7 +17,7 @@ use arrow::datatypes::DataType;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_server::state::{ComputeGate, ServeLimits};
+use mosaica_server::state::{ComputeGate, ServeLimits};
 
 const N: u64 = 3_000;
 const LAYER: &str = "groups/flat";
@@ -355,7 +355,7 @@ async fn a_value_grouping_counts_each_value_the_viewer_sees() {
             }
             let (headers, decoded) = aggregate_ok(&f.server, &token, &body).await;
             assert_eq!(
-                headers.get("x-tessera-region").is_some(),
+                headers.get("x-mosaica-region").is_some(),
                 filters.is_some(),
                 "the region header is present exactly with a region leaf"
             );
@@ -688,7 +688,7 @@ async fn a_reference_adds_its_counts_and_the_lift() {
             }),
         )
         .await;
-        assert_eq!(headers["x-tessera-region"], "exact");
+        assert_eq!(headers["x-mosaica-region"], "exact");
         for (head, _) in &decoded.tables {
             assert_eq!(head["total"], set.len());
             assert_eq!(head["reference_total"], refset.len());
@@ -732,19 +732,19 @@ async fn the_region_header_is_exact_or_a_cover() {
     let body = |key: &str| json!({ "view": "s0", key: circle, "groupings": [{}] });
     for key in ["filters", "reference"] {
         let (headers, _) = aggregate_ok(&f.server, &token, &body(key)).await;
-        assert_eq!(headers["x-tessera-region"], "exact", "{key}");
+        assert_eq!(headers["x-mosaica-region"], "exact", "{key}");
     }
     f.server.state.engine.set_max_region_cells(1);
     for key in ["filters", "reference"] {
         let (headers, _) = aggregate_ok(&f.server, &token, &body(key)).await;
-        let verdict = headers["x-tessera-region"].to_str().unwrap();
+        let verdict = headers["x-mosaica-region"].to_str().unwrap();
         assert!(verdict.starts_with("cover; depth="), "{key}: {verdict}");
     }
     let (headers, _) =
         aggregate_ok(&f.server, &token, &json!({ "view": "s0", "groupings": [{}] })).await;
-    assert!(headers.get("x-tessera-region").is_none());
-    assert!(headers.contains_key("x-tessera-identity-key"));
-    for header in ["x-tessera-server-us", "x-tessera-admission-us"] {
+    assert!(headers.get("x-mosaica-region").is_none());
+    assert!(headers.contains_key("x-mosaica-identity-key"));
+    for header in ["x-mosaica-server-us", "x-mosaica-admission-us"] {
         assert!(headers[header].to_str().unwrap().bytes().all(|b| b.is_ascii_digit()));
     }
 }
@@ -993,7 +993,7 @@ async fn every_request_is_admitted_as_the_viewport_is() {
 }
 
 /// Both permits of `gate`, once the request before has let them go.
-async fn hold(gate: &ComputeGate) -> tessera_server::state::GatePermits {
+async fn hold(gate: &ComputeGate) -> mosaica_server::state::GatePermits {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match gate.admit().await {

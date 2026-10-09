@@ -44,8 +44,8 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
-use tessera_store::Bundle;
+use mosaica_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
+use mosaica_store::Bundle;
 
 use crate::Generation;
 
@@ -114,12 +114,12 @@ pub(crate) struct PrefixRotation {
     pub(crate) filter_columns: Arc<crate::filter::FilterColumns>,
     /// The new prefix's unique indexes, opened over its own manifest for the filter columns'
     /// reason.
-    pub(crate) unique: Arc<tessera_store::unique::UniqueIndexes>,
+    pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
     /// The new prefix's edited-items runs, on the unique indexes' rule.
-    pub(crate) edited: Arc<tessera_store::edited::EditedIndex>,
+    pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
     /// The executed deletions leaving `deleted` in this swap — Rule F, and empty for a rotation
     /// that retires nothing. **The caller's obligation is compaction §5's rule**, restated at
-    /// `tessera_lifecycle::Overlay::retire`: only entities whose row *and* postings this
+    /// `mosaica_lifecycle::Overlay::retire`: only entities whose row *and* postings this
     /// publication demonstrably removed, derived from what it carried forward and never from what
     /// the plan predicted.
     pub(crate) retired: Bitmap,
@@ -316,8 +316,8 @@ impl std::fmt::Display for ManifestRegression {
 /// per-field replacement rules no total order describes. A new ordered scalar joins this
 /// comparison when it is added, or it inherits the silent version of the defect above.
 pub(crate) fn check_manifest_publishable(
-    live: &tessera_store::manifest::SegmentsManifest,
-    next: &tessera_store::manifest::SegmentsManifest,
+    live: &mosaica_store::manifest::SegmentsManifest,
+    next: &mosaica_store::manifest::SegmentsManifest,
 ) -> Result<(), ManifestRegression> {
     if next.watermark < live.watermark {
         return Err(ManifestRegression {
@@ -348,7 +348,7 @@ mod tests {
     
     
 
-    use tessera_lifecycle::{IngestBuffer, Overlay};
+    use mosaica_lifecycle::{IngestBuffer, Overlay};
     
     
     
@@ -426,11 +426,11 @@ mod tests {
     fn manifest_at(
         watermark: u64,
         entity_id_high_water: u64,
-    ) -> tessera_store::manifest::SegmentsManifest {
-        tessera_store::manifest::SegmentsManifest {
+    ) -> mosaica_store::manifest::SegmentsManifest {
+        mosaica_store::manifest::SegmentsManifest {
             watermark,
             entity_id_high_water,
-            ..tessera_store::manifest::SegmentsManifest::empty()
+            ..mosaica_store::manifest::SegmentsManifest::empty()
         }
     }
 

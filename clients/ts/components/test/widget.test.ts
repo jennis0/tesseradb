@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {composeFilters, type FilterExpr, type FilterOperandSet, type Store} from '@tesseradb/client';
+import {composeFilters, type FilterExpr, type FilterOperandSet, type Store} from '@mosaica/client';
 import {draftOf, initialize, render, stateOf, type KernelMessage, type WidgetModel} from '../src/widget.js';
 import {fakeStore, settle, status, type FakeStore} from './fake-store.js';
 
@@ -57,7 +57,7 @@ const META = {
 /** A layer points can be coloured by: it declares geometry and depends on nothing. */
 const clusters = (name: string) => ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1});
 
-const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, palette: null, value_colours: null, cluster_colours: null, size_by: null, size_min: null, size_max: null, size_scale: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
+const base = {url: 'http://mosaica.test', view: null, layers: null, colour_by: null, palette: null, value_colours: null, cluster_colours: null, size_by: null, size_min: null, size_max: null, size_scale: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
 
 /** A model initialised and one view rendered, so there is a store: the store is per view. */
 function setUp(initial: Record<string, unknown> = {}) {
@@ -113,7 +113,7 @@ describe('the token protocol', () => {
 
   it('hands title_field to every view’s explorer, and follows a change to it', async () => {
     const {model, el} = setUp({title_field: 'title'});
-    const explorer = el.querySelector('tessera-explorer') as unknown as {titleField: string};
+    const explorer = el.querySelector('mosaica-explorer') as unknown as {titleField: string};
     expect(explorer.titleField).toBe('title');
     model.set('title_field', null);
     expect(explorer.titleField).toBe('');
@@ -121,7 +121,7 @@ describe('the token protocol', () => {
 
   it('hands the point budget and its range to every view’s explorer, and follows a change to each', async () => {
     const {model, el} = setUp({budget: 40_000, budget_min: 500, budget_max: 90_000});
-    const explorer = el.querySelector('tessera-explorer') as unknown as {budget: number; budgetMin: number; budgetMax: number};
+    const explorer = el.querySelector('mosaica-explorer') as unknown as {budget: number; budgetMin: number; budgetMax: number};
     expect([explorer.budget, explorer.budgetMin, explorer.budgetMax]).toEqual([40_000, 500, 90_000]);
     model.set('budget', 60_000);
     model.set('budget_max', 100_000);
@@ -130,11 +130,11 @@ describe('the token protocol', () => {
 
   it('hands the cluster budget and its range to every view’s explorer, and sends it up when Most clusters is let go', async () => {
     const {model, el} = setUp({cluster_budget: 300, cluster_budget_min: 5, cluster_budget_max: 5_000});
-    const explorer = el.querySelector('tessera-explorer') as unknown as HTMLElement & {clusterBudget: number; clusterBudgetMin: number; clusterBudgetMax: number};
+    const explorer = el.querySelector('mosaica-explorer') as unknown as HTMLElement & {clusterBudget: number; clusterBudgetMin: number; clusterBudgetMax: number};
     expect([explorer.clusterBudget, explorer.clusterBudgetMin, explorer.clusterBudgetMax]).toEqual([300, 5, 5_000]);
     model.set('cluster_budget_max', 8_000);
     expect(explorer.clusterBudgetMax).toBe(8_000);
-    explorer.dispatchEvent(new CustomEvent('tessera-clusterbudgetchange', {detail: {budget: 1_200}, bubbles: true, composed: true}));
+    explorer.dispatchEvent(new CustomEvent('mosaica-clusterbudgetchange', {detail: {budget: 1_200}, bubbles: true, composed: true}));
     expect(model.get('cluster_budget')).toBe(1_200);
     expect(explorer.clusterBudget).toBe(1_200);
     model.set('cluster_budget', 300);
@@ -145,9 +145,9 @@ describe('the token protocol', () => {
 
   it('sends the budget up when Most points is let go, and takes the old one back from the kernel', async () => {
     const {model, el} = setUp({budget: 40_000});
-    const explorer = el.querySelector('tessera-explorer') as unknown as HTMLElement & {budget: number};
+    const explorer = el.querySelector('mosaica-explorer') as unknown as HTMLElement & {budget: number};
     const saves = model.saves;
-    explorer.dispatchEvent(new CustomEvent('tessera-budgetchange', {detail: {budget: 120_000}, bubbles: true, composed: true}));
+    explorer.dispatchEvent(new CustomEvent('mosaica-budgetchange', {detail: {budget: 120_000}, bubbles: true, composed: true}));
     expect(model.get('budget')).toBe(120_000);
     expect(model.saves).toBe(saves + 1);
     expect(explorer.budget).toBe(120_000);
@@ -164,7 +164,7 @@ describe('the token protocol', () => {
     await settle(document.body);
     expect(stateOf(model)?.views).toBe(2);
     expect(stores).toHaveLength(2);
-    expect(el.querySelector('tessera-explorer')).not.toBeNull();
+    expect(el.querySelector('mosaica-explorer')).not.toBeNull();
     // Both stores ask; one ready goes out, and a held token is handed back without a round trip.
     const a = supplier()();
     const b = supplier()();
@@ -284,7 +284,7 @@ describe('the down-sync', () => {
   it('a bbox set in the kernel before meta is fitted when meta arrives, and echoes nothing back', async () => {
     const {model, store, el} = setUp();
     await settle(document.body);
-    const explorer = el.querySelector('tessera-explorer') as unknown as {map: {fitBbox(b: number[]): boolean} | null};
+    const explorer = el.querySelector('mosaica-explorer') as unknown as {map: {fitBbox(b: number[]): boolean} | null};
     const fitted: number[][] = [];
     const map = explorer.map;
     expect(map).not.toBeNull();
@@ -330,8 +330,8 @@ describe('the down-sync', () => {
     expect(store.calls.filter((c) => c.name === 'setPalette').map((c) => c.args)).toEqual([['kelly']]);
     model.set('palette', 'okabe-ito');
     expect(store.calls.filter((c) => c.name === 'setPalette').map((c) => c.args)).toEqual([['kelly'], ['okabe-ito']]);
-    const explorer = el.querySelector('tessera-explorer')!;
-    explorer.dispatchEvent(new CustomEvent('tessera-clusterpalettechange', {detail: {palette: 'tableau20'}, bubbles: true, composed: true}));
+    const explorer = el.querySelector('mosaica-explorer')!;
+    explorer.dispatchEvent(new CustomEvent('mosaica-clusterpalettechange', {detail: {palette: 'tableau20'}, bubbles: true, composed: true}));
     expect(model.state.palette).toBe('tableau20');
     // The up-sync does not come back down.
     expect(store.calls.filter((c) => c.name === 'setPalette')).toHaveLength(2);
@@ -343,11 +343,11 @@ describe('the down-sync', () => {
     return {
       value(column: string, changes: {value: string; colour: string | null}[]) {
         setValueColours(store, column, changes);
-        explorer.dispatchEvent(new CustomEvent('tessera-valuecolour', {detail: {column, changes}, bubbles: true, composed: true}));
+        explorer.dispatchEvent(new CustomEvent('mosaica-valuecolour', {detail: {column, changes}, bubbles: true, composed: true}));
       },
       cluster(layer: string, changes: {tesseraId: string; colour: string | null}[]) {
         setClusterColours(store, layer, changes.map((c) => ({tesseraId: BigInt(c.tesseraId), colour: c.colour})));
-        explorer.dispatchEvent(new CustomEvent('tessera-clustercolour', {detail: {layer, changes}, bubbles: true, composed: true}));
+        explorer.dispatchEvent(new CustomEvent('mosaica-clustercolour', {detail: {layer, changes}, bubbles: true, composed: true}));
       }
     };
   }
@@ -355,7 +355,7 @@ describe('the down-sync', () => {
   it('applies the value and cluster colours set in the kernel and follows a change; colours chosen in the explorer go up at once', async () => {
     const {colouringOf} = await import('../src/colouring.js');
     const {model, store, stores, el} = setUp({value_colours: {venue: {nips: '#112233'}}, cluster_colours: {topics: {'7': '#445566'}}});
-    const explorer = el.querySelector('tessera-explorer')!;
+    const explorer = el.querySelector('mosaica-explorer')!;
     const choose = await choosers(store, explorer);
     await settle(el);
     const chosen = () => [...(store.get('artifacts').overrides.get('topics')?.keys() ?? [])];
@@ -376,7 +376,7 @@ describe('the down-sync', () => {
     expect(explorer.clusterColours).toEqual({topics: {'8': '#000000', '9': '#fedcba'}});
     expect(model.saves).toBe(saves + 3);
     // A store built for a new url starts with the colours chosen.
-    model.set('url', 'http://tessera.test/other');
+    model.set('url', 'http://mosaica.test/other');
     await settle(el);
     const next = stores.at(-1)!;
     expect(next).not.toBe(store);
@@ -386,7 +386,7 @@ describe('the down-sync', () => {
   it('keeps every colour chosen in the map when the kernel set None, and sends them all up with the next', async () => {
     const {colouringOf} = await import('../src/colouring.js');
     const {model, store, el} = setUp();
-    const explorer = el.querySelector('tessera-explorer')!;
+    const explorer = el.querySelector('mosaica-explorer')!;
     const choose = await choosers(store, explorer);
     await settle(el);
     choose.value('venue', [{value: 'nips', colour: '#112233'}]);

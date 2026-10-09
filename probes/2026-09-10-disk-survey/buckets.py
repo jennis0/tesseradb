@@ -1,6 +1,6 @@
 import json,os,sys,re
 from collections import defaultdict
-sys.path.insert(0,'/tmp/claude-1000/-home-joe-code-tessera/973cd74f-37a3-482c-acd7-5b3858baf8e0/scratchpad')
+sys.path.insert(0,'/tmp/claude-1000/-home-joe-code-mosaica/973cd74f-37a3-482c-acd7-5b3858baf8e0/scratchpad')
 from classify import kind
 
 BUCKET = {

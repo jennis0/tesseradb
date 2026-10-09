@@ -1,7 +1,7 @@
 /**
  * The parts each element renders, for an element that renders it inside its own shadow root and
  * forwards them. A forwarded part is named `<element>-<part>`, the element being its tag without
- * `tessera-`: through `<tessera-explorer>` the map's toolbar is `::part(map-controls)` and the
+ * `mosaica-`: through `<mosaica-explorer>` the map's toolbar is `::part(map-controls)` and the
  * item card's title is `::part(item-card-title)`.
  */
 
@@ -9,7 +9,7 @@
 const STATE = ['state', 'refusal', 'refresh', 'retry', 'reauthorise'];
 
 /**
- * The parts each element may render, by element name without `tessera-`, as the lists an element
+ * The parts each element may render, by element name without `mosaica-`, as the lists an element
  * forwards with `exportparts`. A host that renders an element inside its own shadow root forwards
  * `PARTS[name]` to style them from outside. Each element's reference page says when each part is
  * rendered.

@@ -19,20 +19,20 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_engine::filter::{FilterExpr, RegionLeaf};
-use tessera_engine::{
+use mosaica_engine::filter::{FilterExpr, RegionLeaf};
+use mosaica_engine::{
     AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, ArtifactsRequest, By,
     CancelToken, Cut, Engine, EngineError, Grouping, LayerSelection, PageEnd, Pick, RecordsHead,
     RecordsLimits, RecordsSink, Session, SinkResult, TableHead, ViewportArtifactsRequest,
 };
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_spatial::shape::{ShapeF64, Space};
-use tessera_types::layer::{
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_spatial::shape::{ShapeF64, Space};
+use mosaica_types::layer::{
     ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use tessera_types::TesseraId;
+use mosaica_types::TesseraId;
 
 const SIDE: u64 = 64;
 const CELL: f64 = 1000.0 / SIDE as f64;
@@ -96,21 +96,21 @@ fn build(dir: &Path, cells: &[(u64, u64)]) -> PathBuf {
     write_pairs_n(&pairs, cells.len() as u64);
     let schema = id_schema();
     let out = dir.join("bundle");
-    tessera_build::build(&tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+    mosaica_build::build(&mosaica_build::BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -194,7 +194,7 @@ impl Fx {
         name: &str,
         kind: HierarchyKind,
         nodes: &[Node],
-        layout: Option<tessera_types::layer::ServingLayout>,
+        layout: Option<mosaica_types::layer::ServingLayout>,
         computed: Vec<String>,
     ) -> BTreeMap<String, TesseraId> {
         self.plant_declared(name, kind, nodes, layout, computed, None)
@@ -206,9 +206,9 @@ impl Fx {
         name: &str,
         kind: HierarchyKind,
         nodes: &[Node],
-        layout: Option<tessera_types::layer::ServingLayout>,
+        layout: Option<mosaica_types::layer::ServingLayout>,
         computed: Vec<String>,
-        criterion: Option<tessera_types::layer::ExistenceCriterion>,
+        criterion: Option<mosaica_types::layer::ExistenceCriterion>,
     ) -> BTreeMap<String, TesseraId> {
         self.engine
             .register_layer(LayerDeclaration {
@@ -243,7 +243,7 @@ impl Fx {
                     Some(node.key.clone()),
                     node.members
                         .iter()
-                        .map(|s| tessera_types::EntityId::new(map[s]))
+                        .map(|s| mosaica_types::EntityId::new(map[s]))
                         .collect::<Vec<_>>(),
                 );
                 artifact.access = Some(
@@ -557,13 +557,13 @@ fn a_slot_is_the_same_at_any_zoom_box_budget_or_filter() {
             engine
                 .browse(
                     &session,
-                    tessera_engine::browse::BrowseRequest {
+                    mosaica_engine::browse::BrowseRequest {
                         view: "s0",
                         layer: TREE,
                         level: None,
                         form: match q {
-                            Some(q) => tessera_engine::browse::BrowseForm::Search(q),
-                            None => tessera_engine::browse::BrowseForm::Roots,
+                            Some(q) => mosaica_engine::browse::BrowseForm::Search(q),
+                            None => mosaica_engine::browse::BrowseForm::Roots,
                         },
                         filter: None,
                         limit: 1000,
@@ -698,7 +698,7 @@ fn a_palette_size_outside_two_to_thirty_two_is_refused() {
     let session = fx.session(true);
     for size in [0u32, 1, 33, 300] {
         assert!(matches!(
-            tessera_engine::check_palette_size(size),
+            mosaica_engine::check_palette_size(size),
             Err(EngineError::PaletteRefused(s)) if s == size
         ));
     }
@@ -716,7 +716,7 @@ fn a_palette_size_outside_two_to_thirty_two_is_refused() {
 /// most visible items, keep the parent's slot.
 #[test]
 fn stacked_and_tiered_layers_are_coloured_level_by_level() {
-    use tessera_types::layer::LevelDeclaration;
+    use mosaica_types::layer::LevelDeclaration;
     let fx = fixture();
     let engine = &fx.engine;
     let nodes = fx.tree(&[]);
@@ -764,7 +764,7 @@ fn stacked_and_tiered_layers_are_coloured_level_by_level() {
                         Some(node.key.clone()),
                         node.members
                             .iter()
-                            .map(|s| tessera_types::EntityId::new(map[s]))
+                            .map(|s| mosaica_types::EntityId::new(map[s]))
                             .collect::<Vec<_>>(),
                     );
                     if kind == HierarchyKind::Tiered && level > 0 {
@@ -904,7 +904,7 @@ fn an_ingest_is_answered_from_the_slots_held_until_they_are_rebuilt() {
 /// viewport then serves, and a bulk read in another session serves them too.
 #[test]
 fn a_level_centred_by_its_figures_is_coloured_alike_whichever_route_asks() {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     const FIGURED: &str = "clusters/figured";
     const ONLY_FIGURED: &[&str] = &[FIGURED];
     let fx = fixture();
@@ -946,11 +946,11 @@ fn a_level_centred_by_its_figures_is_coloured_alike_whichever_route_asks() {
     let browsed: BTreeMap<u64, Option<u8>> = engine
         .browse(
             &session,
-            tessera_engine::browse::BrowseRequest {
+            mosaica_engine::browse::BrowseRequest {
                 view: "s0",
                 layer: FIGURED,
                 level: None,
-                form: tessera_engine::browse::BrowseForm::Roots,
+                form: mosaica_engine::browse::BrowseForm::Roots,
                 filter: None,
                 limit: 1000,
                 cursor: None,
@@ -980,7 +980,7 @@ fn a_level_centred_by_its_figures_is_coloured_alike_whichever_route_asks() {
 /// level down, the grandchild is.
 #[test]
 fn a_tiered_parent_has_one_heir_at_its_shallowest_child_level() {
-    use tessera_types::layer::LevelDeclaration;
+    use mosaica_types::layer::LevelDeclaration;
     const TIERS: &str = "clusters/tiers";
     let fx = fixture();
     let engine = &fx.engine;
@@ -1036,7 +1036,7 @@ fn a_tiered_parent_has_one_heir_at_its_shallowest_child_level() {
                     Some(key.into()),
                     members(of)
                         .iter()
-                        .map(|s| tessera_types::EntityId::new(map[s]))
+                        .map(|s| mosaica_types::EntityId::new(map[s]))
                         .collect::<Vec<_>>(),
                 );
                 artifact.access = Some(label.map_or_else(Vec::new, |l: &str| vec![l.as_bytes().to_vec()]));
@@ -1062,7 +1062,7 @@ fn a_tiered_parent_has_one_heir_at_its_shallowest_child_level() {
 /// that level alone, and colouring the finest then starts the two levels below the coarsest.
 #[test]
 fn colouring_a_tiered_level_fills_no_deeper_level() {
-    use tessera_types::layer::{LevelDeclaration, ServingLayout};
+    use mosaica_types::layer::{LevelDeclaration, ServingLayout};
     const TIERS: &str = "clusters/lazy";
     let fx = fixture();
     let nodes = fx.tree(&[]);
@@ -1107,7 +1107,7 @@ fn colouring_a_tiered_level_fills_no_deeper_level() {
                     Some(node.key.clone()),
                     node.members
                         .iter()
-                        .map(|s| tessera_types::EntityId::new(map[s]))
+                        .map(|s| mosaica_types::EntityId::new(map[s]))
                         .collect::<Vec<_>>(),
                 );
                 if level > 0 {
@@ -1187,7 +1187,7 @@ fn subset_again() -> Vec<u8> {
 /// fresh build's.
 #[test]
 fn a_hidden_member_joining_a_fraction_layer_is_answered_with_slots_built_over_it() {
-    use tessera_types::layer::ExistenceCriterion;
+    use mosaica_types::layer::ExistenceCriterion;
     const FRACTION: &str = "clusters/fraction";
     let fx = fixture();
     let engine = &fx.engine;
@@ -1211,16 +1211,16 @@ fn a_hidden_member_joining_a_fraction_layer_is_answered_with_slots_built_over_it
 
     // Every built item the subset viewer cannot see, outside the leaf, joins it.
     let map = source_to_new_map(&fx.root, "v00000");
-    let hidden: Vec<tessera_types::EntityId> = (0..fx.cells.len() as u64)
+    let hidden: Vec<mosaica_types::EntityId> = (0..fx.cells.len() as u64)
         .filter(|s| !subset_sees(*s) && !grown.members.contains(s))
         .take(400)
-        .map(|s| tessera_types::EntityId::new(map[&s]))
+        .map(|s| mosaica_types::EntityId::new(map[&s]))
         .collect();
     engine
         .grow_memberships(
             FRACTION.into(),
             0,
-            vec![tessera_lifecycle::IncomingGrowth::from_entities(
+            vec![mosaica_lifecycle::IncomingGrowth::from_entities(
                 grown.key.clone(),
                 hidden,
             )],
@@ -1240,7 +1240,7 @@ fn a_hidden_member_joining_a_fraction_layer_is_answered_with_slots_built_over_it
 /// the slots held, then the rebuild, gives the finest level the slots a fresh build gives it.
 #[test]
 fn a_tiered_level_is_rebuilt_over_rebuilt_coarser_levels() {
-    use tessera_types::layer::LevelDeclaration;
+    use mosaica_types::layer::LevelDeclaration;
     const TIERS: &str = "clusters/growing";
     let fx = fixture();
     let engine = &fx.engine;
@@ -1283,7 +1283,7 @@ fn a_tiered_level_is_rebuilt_over_rebuilt_coarser_levels() {
                     Some(node.key.clone()),
                     node.members
                         .iter()
-                        .map(|s| tessera_types::EntityId::new(map[s]))
+                        .map(|s| mosaica_types::EntityId::new(map[s]))
                         .collect::<Vec<_>>(),
                 );
                 if level > 0 {
@@ -1329,19 +1329,19 @@ fn a_tiered_level_is_rebuilt_over_rebuilt_coarser_levels() {
 
     // The sparsest block of the first quadrant takes in a far corner's items and becomes the
     // quadrant's heir.
-    let far: Vec<tessera_types::EntityId> = nodes
+    let far: Vec<mosaica_types::EntityId> = nodes
         .iter()
         .find(|n| n.key == "b2-3-3")
         .expect("a block")
         .members
         .iter()
-        .map(|s| tessera_types::EntityId::new(map[s]))
+        .map(|s| mosaica_types::EntityId::new(map[s]))
         .collect();
     engine
         .grow_memberships(
             TIERS.into(),
             1,
-            vec![tessera_lifecycle::IncomingGrowth::from_entities(
+            vec![mosaica_lifecycle::IncomingGrowth::from_entities(
                 "b2-0-0".into(),
                 far,
             )],

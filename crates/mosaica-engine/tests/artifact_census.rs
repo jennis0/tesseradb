@@ -3,7 +3,7 @@
 //! Every other artifact test in this crate states an expectation and checks it. That works while a
 //! test can hold the expectation — three artifacts over three hundred documents — and stops working
 //! at the sizes this design is for, where the answer cannot be written down. So the expectation is
-//! *computed*: the corpus generator answers both directions in closed form (`tessera-corpus`'s
+//! *computed*: the corpus generator answers both directions in closed form (`mosaica-corpus`'s
 //! artifact arm), and this asks the engine the same questions and compares.
 //!
 //! **Both directions, because each hides the other's failure.** An artifact that lost a member and
@@ -25,14 +25,14 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
-use tessera_corpus::{Corpus, Grant};
-use tessera_engine::Engine;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_corpus::{Corpus, Grant};
+use mosaica_engine::Engine;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 /// The corpus this census is over. Small enough for the ordinary test pass, and every property of
 /// it independent of that choice — the same seed at a larger *n* is this corpus extended.
@@ -104,7 +104,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         // **No criterion on the layer**, so every published artifact is served and the census is a
         // statement about memberships rather than about which artifacts cleared a bar. The
         // generator's own criterion cycle is Stage 5's to exercise, where the tree makes it mean
@@ -135,7 +135,7 @@ fn served_counts(engine: &Engine) -> BTreeMap<String, u64> {
     engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
         .artifacts()
@@ -192,7 +192,7 @@ fn the_artifact_surface_agrees_with_the_generator_over_every_artifact_and_every_
     // The planted empty level publishes nothing, and a reader that inferred a level's existence
     // from its contents would never notice the difference.
     assert_eq!(
-        c.artifacts_in(LAYER, tessera_corpus::artifacts::EMPTY_LEVEL),
+        c.artifacts_in(LAYER, mosaica_corpus::artifacts::EMPTY_LEVEL),
         0,
         "the generator's empty level is not empty"
     );

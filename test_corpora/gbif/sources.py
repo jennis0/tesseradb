@@ -28,7 +28,7 @@ PART_COUNT = 8_369
 TOTAL_ROWS = 3_654_488_638
 
 #: The three taxonomic ranks the tiered layer walks. **It starts at family**, not at kingdom:
-#: `merge_member_runs` (`crates/tessera-build/src/layers.rs`) holds the largest single artifact's
+#: `merge_member_runs` (`crates/mosaica-build/src/layers.rs`) holds the largest single artifact's
 #: members resident as `u64` while it sorts them, and kingdom Animalia is 2,809,414,577 members —
 #: 22.5 GB on a 47 GB box, against Anatidae's 177,354,694 and 1.4 GB (owner ruling, 2026-09-09).
 #: `kingdom` rides as a rendered category column instead.

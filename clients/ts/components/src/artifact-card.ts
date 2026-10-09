@@ -1,7 +1,7 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {artifactName, isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@tesseradb/client';
-import {TesseraElement, UNNAMED, emit, idString} from './base.js';
+import {artifactName, isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@mosaica/client';
+import {MosaicaElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {refusalText, renderState} from './states.js';
@@ -41,14 +41,14 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
  * (`Store.openArtifact`), or the `artifact` property.
  *
  * @summary The opened artifact, with its lineage and its filter buttons.
- * @tagname tessera-artifact-card
+ * @tagname mosaica-artifact-card
  * @category Elements
  * @slot actions - Buttons beside the close button, such as the explorer's Pin.
- * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit to
- *   cluster was pressed. `<tessera-explorer>` fits its map to the artifact.
- * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A clause
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-artifactfit']>} mosaica-artifactfit - Fit to
+ *   cluster was pressed. `<mosaica-explorer>` fits its map to the artifact.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clausechange']>} mosaica-clausechange - A clause
  *   button put a `member_of` clause on or took it off.
- * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - The close button was
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-close']>} mosaica-close - The close button was
  *   pressed, with `what` set to `artifact`.
  * @csspart title - The heading: the level's or the layer's title, holding the close button while
  *   the card shows an artifact or a refusal.
@@ -73,7 +73,7 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
  * @csspart highlight - The Highlight this button, with `aria-pressed` while its clause is on.
  * @csspart outside - The Outside this button, with `aria-pressed` while its clause is on.
  */
-export class TesseraArtifactCard extends TesseraElement {
+export class MosaicaArtifactCard extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -94,17 +94,17 @@ export class TesseraArtifactCard extends TesseraElement {
         gap: 6px;
         margin-bottom: 10px;
       }
-      [part='count'] tessera-count::part(count) {
+      [part='count'] mosaica-count::part(count) {
         font-size: 20px;
         font-weight: 600;
       }
-      [part='count'] tessera-count::part(label) {
+      [part='count'] mosaica-count::part(label) {
         font-size: 13px;
       }
       [part='content'] {
         margin: 0 0 10px;
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       .children-label {
         margin: 12px 0 4px;
@@ -114,9 +114,9 @@ export class TesseraArtifactCard extends TesseraElement {
         margin: 0;
         padding: 0;
       }
-      [part='child'] tessera-count::part(count) {
+      [part='child'] mosaica-count::part(count) {
         margin-left: auto;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
@@ -131,11 +131,11 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='verbs'] .btn[aria-pressed='true'] {
         border-color: currentColor;
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part='verbs'] [data-verb='highlight'][aria-pressed='true'] {
-        background: var(--_tessera-highlight-soft);
-        color: var(--_tessera-highlight);
+        background: var(--_mosaica-highlight-soft);
+        color: var(--_mosaica-highlight);
       }
       .parents-label {
         margin: 12px 0 4px;
@@ -145,9 +145,9 @@ export class TesseraArtifactCard extends TesseraElement {
         margin: 0;
         padding: 0;
       }
-      [part='parent'] tessera-count::part(count) {
+      [part='parent'] mosaica-count::part(count) {
         margin-left: auto;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
@@ -158,10 +158,10 @@ export class TesseraArtifactCard extends TesseraElement {
         display: grid;
         place-items: center;
         border-radius: 5px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='close']:hover {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
     `
   ];
@@ -209,7 +209,7 @@ export class TesseraArtifactCard extends TesseraElement {
           ? withoutMember(s.get('filters').members, layer, artifact, verb)
           : withMember(s.get('filters').members, {layer, artifact, outside, verb, ...(name === null ? {} : {label: name})});
         s.setMembers(members);
-        emit(this, 'tessera-clausechange', {id: idString(artifact), layer, outside, verb, on: !on});
+        emit(this, 'mosaica-clausechange', {id: idString(artifact), layer, outside, verb, on: !on});
       }}
     >
       ${icon(outside ? 'outside' : verb === 'filter' ? 'filter' : 'highlight', 14)}${label}
@@ -229,7 +229,7 @@ export class TesseraArtifactCard extends TesseraElement {
     // The close button appears only while the card shows something to close.
     const heading = (closable: boolean) =>
       html`<h2 part="title"><span class="what">${what}</span>${closable
-        ? html`<slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button>`
+        ? html`<slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'mosaica-close', {what: 'artifact'})}>${icon('close', 14)}</button>`
         : nothing}</h2>`;
     if (refusal) {
       return html`<div class="panel">${heading(true)}<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText('Not available', refusal.code)}</span></div>`;
@@ -260,7 +260,7 @@ export class TesseraArtifactCard extends TesseraElement {
     return html`<div class="panel">${heading(true)}
       <span part="state" data-state="shown"></span>
       <div part="headline" class="card-title" ?data-unnamed=${clauseName === null}>${clauseName ?? UNNAMED}</div>
-      <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members"></tessera-count></div>
+      <div part="count"><mosaica-count .masked=${count} .stale=${stale} label="members"></mosaica-count></div>
       ${here && here.content.length > 0 && attached.has(here.tesseraId) ? html`<p part="content">${attached.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
       <div class="field">
         <div class="k">Layer</div><div part="value" class="v">${decl?.title || artifact.detail.layer}</div>
@@ -273,7 +273,7 @@ export class TesseraArtifactCard extends TesseraElement {
               ${parents.map(
                 (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(pnt.tesseraId))}>
                   ${nameSpan(artifactName(pnt, attached))}
-                  <tessera-count .masked=${{value: Number(pnt.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
+                  <mosaica-count .masked=${{value: Number(pnt.maskedCount), exact: true} as Masked} .stale=${stale}></mosaica-count>
                 </li>`
               )}
             </ul>`
@@ -284,7 +284,7 @@ export class TesseraArtifactCard extends TesseraElement {
               ${children.map(
                 (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(c.tesseraId))}>
                   ${nameSpan(artifactName(c, attached))}
-                  <tessera-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
+                  <mosaica-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></mosaica-count>
                 </li>`
               )}
             </ul>`
@@ -293,7 +293,7 @@ export class TesseraArtifactCard extends TesseraElement {
         // A filter layer draws nothing, so there is nothing to fit to.
         decl && isFilterLayer(decl)
           ? nothing
-          : html`<button part="fit" class="btn" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>`
+          : html`<button part="fit" class="btn" type="button" @click=${() => emit(this, 'mosaica-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>`
       }
       <div part="verbs" role="group" aria-label="This artifact">
         ${this.verb(artifact.detail.layer, artifact.id, false, 'filter', 'Filter to this', clauseName)}
@@ -305,10 +305,10 @@ export class TesseraArtifactCard extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-artifact-card', TesseraArtifactCard);
+defineOnce('mosaica-artifact-card', MosaicaArtifactCard);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-artifact-card': TesseraArtifactCard;
+    'mosaica-artifact-card': MosaicaArtifactCard;
   }
 }

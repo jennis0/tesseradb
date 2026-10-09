@@ -10,7 +10,7 @@
 //! CPU time of the process beside it.
 //!
 //! ```text
-//! cargo build --release -p tessera-bench --bin row_entity_crossing
+//! cargo build --release -p mosaica-bench --bin row_entity_crossing
 //! systemd-run --user --scope --collect -p MemoryMax=16G -p MemorySwapMax=2G -- \
 //!     target/release/row_entity_crossing \
 //!     --bundle data/ladder/geonames/bundle-final --view world \
@@ -28,12 +28,12 @@ use clap::Parser;
 use croaring::Bitmap;
 use serde_json::{json, Value};
 
-use tessera_engine::compose::MaskedSet;
-use tessera_engine::region::RegionDecomposition;
-use tessera_engine::shapes::{Bounds, ShapeF64, Space};
-use tessera_engine::viewport::{segments_with_row_bases, ViewportRequest};
-use tessera_engine::{Engine, EngineConfig, DEFAULT_MAX_REGION_CELLS};
-use tessera_types::RowId;
+use mosaica_engine::compose::MaskedSet;
+use mosaica_engine::region::RegionDecomposition;
+use mosaica_engine::shapes::{Bounds, ShapeF64, Space};
+use mosaica_engine::viewport::{segments_with_row_bases, ViewportRequest};
+use mosaica_engine::{Engine, EngineConfig, DEFAULT_MAX_REGION_CELLS};
+use mosaica_types::RowId;
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -125,9 +125,9 @@ fn main() -> Result<(), BoxError> {
             "WARNING: debug build, so every figure below is meaningless. Build with --release."
         );
     }
-    let tmp = std::env::temp_dir().join(format!("tessera-crossing-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("mosaica-crossing-{}", std::process::id()));
     std::fs::create_dir_all(&tmp)?;
-    let threads = tessera_engine::default_compute_threads();
+    let threads = mosaica_engine::default_compute_threads();
     let engine = Engine::open(
         &args.bundle,
         &tmp.join("cache"),
@@ -148,7 +148,7 @@ fn main() -> Result<(), BoxError> {
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
 
@@ -229,14 +229,14 @@ fn main() -> Result<(), BoxError> {
     let tables = row_space.row_entities().ok_or("no row-entity.u32")?;
     let (copied, copy, _, _) = timed(args.repeat, || {
         let mut entities: Vec<u32> = Vec::with_capacity(rows.cardinality() as usize);
-        tessera_roaring::for_each_run_in(&rows, 0..tables.len(), &mut |run| {
+        mosaica_roaring::for_each_run_in(&rows, 0..tables.len(), &mut |run| {
             tables.for_each_slice(run, |slice| entities.extend_from_slice(slice));
         });
         entities
     });
     let runs = {
         let mut n = 0u64;
-        tessera_roaring::for_each_run_in(&rows, 0..tables.len(), &mut |_| n += 1);
+        mosaica_roaring::for_each_run_in(&rows, 0..tables.len(), &mut |_| n += 1);
         n
     };
     let (sorted, sort, _, _) = timed(args.repeat, || {

@@ -1,16 +1,16 @@
 import {describe, expect, it} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {type ArtifactsProjection, type MarksProjection} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
+import {type ArtifactsProjection, type MarksProjection} from '@mosaica/client';
+import {SessionArtifactTable, servedLineage} from '@mosaica/client/internal';
 import {band} from '../../core/test/support.js';
-import {TesseraLayer, type TesseraLayerInternalProps} from '../src/layer.js';
+import {MosaicaLayer, type MosaicaLayerInternalProps} from '../src/layer.js';
 import {DULL_COLOUR} from '../src/marks-layer.js';
 import {fakeDevice} from './fake-device.js';
 
 /**
  * Under a highlight the marks are drawn in three passes: the rest in grey, then a glow under the
  * highlighted marks, then the highlighted marks in their own colour. What each pass was told is read
- * off the sublayers the Tessera layer rendered; the shader that acts on it is exercised in the
+ * off the sublayers the Mosaica layer rendered; the shader that acts on it is exercised in the
  * browser.
  */
 
@@ -39,13 +39,13 @@ function artifacts(): ArtifactsProjection {
 
 type PassProps = {visible: boolean; highlighting: boolean; highlightPass: string; dullColour: number[]; pickable: boolean};
 
-function passes(props: Partial<TesseraLayerInternalProps>): Record<string, PassProps> {
+function passes(props: Partial<MosaicaLayerInternalProps>): Record<string, PassProps> {
   const manager = new LayerManager(fakeDevice(), {});
-  manager.setLayers([new TesseraLayer({id: 'tessera', depth: 2, status: 'shown', artifacts: artifacts(), marks, density: 'none', ...props} as TesseraLayerInternalProps)]);
-  const layer = manager.getLayers().find((l) => l.id === 'tessera') as TesseraLayer;
+  manager.setLayers([new MosaicaLayer({id: 'mosaica', depth: 2, status: 'shown', artifacts: artifacts(), marks, density: 'none', ...props} as MosaicaLayerInternalProps)]);
+  const layer = manager.getLayers().find((l) => l.id === 'mosaica') as MosaicaLayer;
   const out: Record<string, PassProps> = {};
   for (const sub of layer.getSubLayers() as Layer[]) {
-    const m = /^tessera-marks-p0(?:-(\w+))?$/.exec(sub.id);
+    const m = /^mosaica-marks-p0(?:-(\w+))?$/.exec(sub.id);
     if (m) out[m[1] ?? 'all'] = sub.props as unknown as PassProps;
   }
   return out;

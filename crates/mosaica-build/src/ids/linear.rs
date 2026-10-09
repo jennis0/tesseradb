@@ -2,8 +2,8 @@
 //! files read before hold: the linear build's numbering and the streaming build's reference.
 
 use rustc_hash::FxHashMap;
-use tessera_lifecycle::resolve::{self, Batch, Holdings, RowIdentity, Verdict};
-use tessera_types::{EntityId, TesseraId};
+use mosaica_lifecycle::resolve::{self, Batch, Holdings, RowIdentity, Verdict};
+use mosaica_types::{EntityId, TesseraId};
 
 use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::FileRead;

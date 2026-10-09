@@ -6,12 +6,12 @@
 
 use croaring::Bitmap;
 
-use tessera_store::PairsParquetWriter;
+use mosaica_store::PairsParquetWriter;
 
 /// **`push_iter` produces exactly what `push_run` would from the same entities, batch boundary
 /// included.** `push_iter` exists so the term sweep can drive this writer from a `croaring::Bitmap`
 /// accumulator without collecting it into a `Vec<u32>` first (the memory bound the sweep exists to
-/// avoid — see `tessera_authz::term_sweep`'s module doc); this is the check that the shortcut
+/// avoid — see `mosaica_authz::term_sweep`'s module doc); this is the check that the shortcut
 /// costs nothing in the file it produces. One term's count (70,000) is chosen to exceed
 /// `PairsParquetWriter::BATCH` (65,536), so the comparison exercises an internal flush mid-term,
 /// not just the single-batch case.

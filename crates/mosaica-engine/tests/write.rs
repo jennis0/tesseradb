@@ -12,9 +12,9 @@
 //! success ack follows its generation swap, that a deny is never queued behind work, that a deny
 //! whose WAL append failed is applied anyway, and that a poisoned WAL trips the not-ready posture
 //! rather than being retried. Each needs a fault the engine cannot be *asked* for, which is why
-//! `tessera-lifecycle`'s `faults` module exists at all — see its module doc, and in particular its
+//! `mosaica-lifecycle`'s `faults` module exists at all — see its module doc, and in particular its
 //! fidelity rule: an injected failure must be
-//! indistinguishable from a real one, which `tessera-lifecycle/tests/wal.rs` pins independently.
+//! indistinguishable from a real one, which `mosaica-lifecycle/tests/wal.rs` pins independently.
 //!
 //! **No test here sleeps.** Every wait is on a condition the executor itself publishes — the
 //! switchboard's per-site arrival counter, the submitted-command counters — so a failure means the
@@ -36,14 +36,14 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{
     AcceptError, Engine, ExecutorPosture, DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES,
 };
-use tessera_lifecycle::command::{SubmitError, UnallocatedRow};
-use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
-use tessera_lifecycle::ChangeOp;
-use tessera_types::EntityId;
+use mosaica_lifecycle::command::{SubmitError, UnallocatedRow};
+use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
+use mosaica_lifecycle::ChangeOp;
+use mosaica_types::EntityId;
 
 use common::{build_fixture, IngestRows, full_coverage_credential, open_engine, item_of_id, item_of_key, keyed, tick, N_ITEMS};
 
@@ -148,7 +148,7 @@ fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
         .expect_err("a coordinate with no cell is refused");
     assert!(matches!(
         err,
-        tessera_engine::AcceptError::OutsideExtent { index: 0, .. }
+        mosaica_engine::AcceptError::OutsideExtent { index: 0, .. }
     ));
     assert_eq!(
         engine.allocator_high_water(),
@@ -1084,7 +1084,7 @@ fn recovery_discards_the_undurable_region_rather_than_publishing_it() {
 ///
 /// **The in-flight assertion pins `ReceiptLost` at its producer.**
 /// `write.rs`'s `submit` answers `SubmitError::ReceiptLost` when the responder is
-/// dropped, and `tessera-server`'s `map_accept_error` maps that to a fail-closed **500** rather than
+/// dropped, and `mosaica-server`'s `map_accept_error` maps that to a fail-closed **500** rather than
 /// the **503 `not-ready`** `ExecutorDead` gets — because a command the executor died *holding* may
 /// have been appended, fsynced, applied and swapped, and 503's whole meaning is "this node did not
 /// take your write". Until this assertion existed, every `ReceiptLost` in the workspace's tests was
@@ -1138,7 +1138,7 @@ fn an_executor_panic_is_reported_dead() {
     assert!(
         matches!(
             err,
-            tessera_engine::AcceptError::Submit(tessera_lifecycle::SubmitError::ExecutorDead)
+            mosaica_engine::AcceptError::Submit(mosaica_lifecycle::SubmitError::ExecutorDead)
         ),
         "got: {err}"
     );
@@ -1330,8 +1330,8 @@ fn expected_assignment(batches: &[(String, Vec<UnallocatedRow>)], lo: u64) -> Ve
 fn sig_rows(
     prefix: &str,
     n: usize,
-    low: &[tessera_types::TermId],
-    high: &[tessera_types::TermId],
+    low: &[mosaica_types::TermId],
+    high: &[mosaica_types::TermId],
 ) -> Vec<UnallocatedRow> {
     (0..n)
         .map(|i| {
@@ -1670,7 +1670,7 @@ fn a_job_is_counted_completed_before_its_caller_is_answered() {
         (
             "an attribute declaration",
             Box::new(|e| {
-                e.declare_attribute(tessera_engine::AttributeRequest {
+                e.declare_attribute(mosaica_engine::AttributeRequest {
                     name: "tally".to_string(),
                     title: None,
                     ty: "u32".to_string(),
@@ -1678,7 +1678,7 @@ fn a_job_is_counted_completed_before_its_caller_is_answered() {
                     analyser: None,
                     index: false,
                     render: false,
-                    scope: tessera_types::layer::LayerScope::Entity,
+                    scope: mosaica_types::layer::LayerScope::Entity,
                     unique: false,
                 })
                 .expect("the attribute is declared");
@@ -1716,7 +1716,7 @@ fn a_geometry_publication_leaves_the_work_counts_alone() {
 
     let live = engine.generation();
     engine
-        .publish_geometry(tessera_engine::GeometryPublication::within_prefix(
+        .publish_geometry(mosaica_engine::GeometryPublication::within_prefix(
             live.prefix.clone(),
             live.segments_version + 1,
             live.watermark,
@@ -1912,7 +1912,7 @@ fn a_retry_joins_rather_than_reallocating() {
 
 /// The child half of [`crash_between_fsync_and_swap_replays_rather_than_reallocates`] runs this
 /// same test binary with this variable set to the scratch directory to work in.
-const CRASH_CHILD_DIR: &str = "TESSERA_TASK8_CRASH_CHILD_DIR";
+const CRASH_CHILD_DIR: &str = "MOSAICA_TASK8_CRASH_CHILD_DIR";
 const CRASH_BATCH_ID: &str = "crash-batch";
 const CRASH_BODY_HASH: [u8; 32] = [5; 32];
 
@@ -2069,12 +2069,12 @@ fn crash_parent() {
 
 /// The entity ids the WAL's `IngestBatch` record for [`CRASH_BATCH_ID`] carries, in row order.
 fn crash_batch_ids(wal_path: &std::path::Path) -> Vec<EntityId> {
-    let wal = tessera_lifecycle::Wal::open(wal_path).expect("the WAL reopens");
+    let wal = mosaica_lifecycle::Wal::open(wal_path).expect("the WAL reopens");
     let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     records
         .iter()
         .filter_map(|r| match r {
-            tessera_lifecycle::WalRecord::IngestBatch { batch_id, rows, .. }
+            mosaica_lifecycle::WalRecord::IngestBatch { batch_id, rows, .. }
                 if batch_id == CRASH_BATCH_ID =>
             {
                 Some(rows.iter().map(|row| row.entity_id))
@@ -2119,7 +2119,7 @@ fn held_plus_different_bytes_409s_without_disturbing_the_original() {
         matches!(
             refused,
             Err(AcceptError::Exec(
-                tessera_lifecycle::ExecError::BatchConflict { .. }
+                mosaica_lifecycle::ExecError::BatchConflict { .. }
             ))
         ),
         "a held batch id with different bytes is a 409, not an acceptance: {refused:?}"
@@ -2194,11 +2194,11 @@ fn every_id_a_window_issues_is_in_the_wal() {
         ids
     }; // the engine is dropped, which joins the executor and closes the WAL
 
-    let wal = tessera_lifecycle::Wal::open(&wal_path).expect("the WAL reopens");
+    let wal = mosaica_lifecycle::Wal::open(&wal_path).expect("the WAL reopens");
     let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let mut framed: Vec<u64> = Vec::new();
     for record in &records {
-        if let tessera_lifecycle::WalRecord::IngestBatch { rows, .. } = record {
+        if let mosaica_lifecycle::WalRecord::IngestBatch { rows, .. } = record {
             framed.extend(rows.iter().map(|r| r.entity_id.raw()));
         }
     }
@@ -2249,7 +2249,7 @@ fn a_windows_acks_follow_its_swap() {
 
 /// **The deny window closes at its bound**, so the drain cannot run forever.
 ///
-/// [`tessera_engine::DENY_WINDOW_MAX_ENTRIES`] is what stops a window growing for as long as denies
+/// [`mosaica_engine::DENY_WINDOW_MAX_ENTRIES`] is what stops a window growing for as long as denies
 /// keep arriving — and the failure it prevents is not "a large window" but a drain that never
 /// returns, so no deny is ever acked at all. The executor is parked inside a priming submission so
 /// the whole batch is provably queued before anything drains; the drain then has to produce two
@@ -2266,7 +2266,7 @@ fn a_windows_acks_follow_its_swap() {
 /// record either way; using one entity keeps the fixture from having to be `bound + 1` items wide.
 #[test]
 fn the_deny_window_closes_at_its_bound() {
-    let bound = tessera_engine::DENY_WINDOW_MAX_ENTRIES;
+    let bound = mosaica_engine::DENY_WINDOW_MAX_ENTRIES;
     let tmp = TempDir::new().unwrap();
     let (engine, faults) = engine_with_faults(&tmp, 64);
     let entity = entity_of(&engine, 3);
@@ -2317,7 +2317,7 @@ fn the_deny_window_closes_at_its_bound() {
 /// **The counters `/control/status` publishes are fed by real window closes, and they move with the
 /// window size.**
 ///
-/// The arithmetic itself is proved at window scope in `tessera-lifecycle`'s `window_props.rs`,
+/// The arithmetic itself is proved at window scope in `mosaica-lifecycle`'s `window_props.rs`,
 /// where a corpus can be assigned three ways with no WAL in the loop. What only this level can show
 /// is the **wiring**: that `Executor::close_window` folds each allocation's tally into
 /// `ExecutorHealth`, and that the numbers a reader gets off `ExecutorStats` therefore describe the
@@ -2496,7 +2496,7 @@ fn a_refused_fold_is_counted_and_named_while_neither_fold_counter_moves() {
 
     let before = engine.write_executor_stats();
     assert_eq!(before.fold_refusals, 0, "nothing has been refused yet");
-    assert_eq!(before.fold_refusals_by_gate, [0; tessera_engine::FOLD_GATES.len()]);
+    assert_eq!(before.fold_refusals_by_gate, [0; mosaica_engine::FOLD_GATES.len()]);
     assert_eq!(before.last_fold_refusal, None);
 
     faults.fail_next_appends(1);
@@ -2543,7 +2543,7 @@ fn a_refused_fold_is_counted_and_named_while_neither_fold_counter_moves() {
     // **The gate it was counted under, and the five it was not.** One total says a fold was
     // refused; it does not say which refusal is standing, and on a node whose gate re-fires every
     // tick `last_refusal` is whatever refused most recently rather than what is holding.
-    let slot = tessera_engine::FOLD_GATES
+    let slot = mosaica_engine::FOLD_GATES
         .iter()
         .position(|gate| *gate == "wal_poisoned")
         .expect("the gate a refusal names is one of the six the counters are keyed by");
@@ -2638,7 +2638,7 @@ fn park_on_a_new_deny_window(
     engine: &Engine,
     faults: &FaultSwitchboard,
     entity: EntityId,
-) -> tessera_engine::PendingChange {
+) -> mosaica_engine::PendingChange {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let pending = engine
         .submit_changes(vec![(entity, ChangeOp::Suppress)])
@@ -2672,7 +2672,7 @@ fn drain_deny_windows(
     faults: &FaultSwitchboard,
     entities: &[EntityId],
     windows: usize,
-    parked: tessera_engine::PendingChange,
+    parked: mosaica_engine::PendingChange,
 ) {
     let fsyncs_before = engine.write_executor_stats().wal_fsyncs;
     let mut pending = vec![parked];

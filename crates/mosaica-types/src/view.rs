@@ -1,8 +1,8 @@
 //! The roster: what a view of a group carries, and what a create and a drop make durable
 //! (`views.md` §3.2).
 //!
-//! Here rather than in `tessera-store` because three layers hold the same records and only one of
-//! them is the manifest: the WAL record that makes a create durable (`tessera-lifecycle`), the
+//! Here rather than in `mosaica-store` because three layers hold the same records and only one of
+//! them is the manifest: the WAL record that makes a create durable (`mosaica-lifecycle`), the
 //! live roster the write path resolves against, and the segments manifest that carries the roster
 //! forward for ever. The crate graph runs lifecycle → types and never lifecycle → store, so a
 //! roster record defined beside the manifest could not travel in a log entry — the same argument
@@ -19,7 +19,7 @@ use crate::scalar::ScalarType;
 /// What joins a group's name to one of its keys in a view id — `<group>:<key>` (`views.md` §3.2).
 ///
 /// Here rather than beside the manifest's copy because the WAL's roster records travel through
-/// `tessera-lifecycle`, which does not depend on `tessera-store`, and a second spelling of the
+/// `mosaica-lifecycle`, which does not depend on `mosaica-store`, and a second spelling of the
 /// separator is how the two halves come to disagree about what a view id is.
 pub const GROUP_SEPARATOR: char = ':';
 
@@ -45,7 +45,7 @@ pub const DECLARED_INCARNATION: ViewIncarnation = 0;
 /// self-describing: serde's adjacently tagged representation cannot be deserialised from it, so a
 /// record carrying one round-trips as a CRC-clean frame that will not decode — which the log reads
 /// as corruption. The wire's `{type, value}` spelling is produced where the wire is produced
-/// (`tessera-server`'s `viewer`), which is where a presentation shape belongs.
+/// (`mosaica-server`'s `viewer`), which is where a presentation shape belongs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewMetadataValue {
@@ -272,7 +272,7 @@ pub struct DeadIncarnation {
 ///
 /// **The same charset a column name takes**, and for the same reason: a view id addresses a
 /// directory in the bundle (`views/<group>/<key>/`), the `view` in a request body, the
-/// `x-tessera-view` header and the manifest's `files` map, so it has to survive being a path
+/// `x-mosaica-view` header and the manifest's `files` map, so it has to survive being a path
 /// segment. Two characters are refused ahead of the charset because they are *reserved* rather
 /// than merely outside it: `:` joins a group to its key, and `@` pins a group-scoped attribute to
 /// a view (`views.md` §5).

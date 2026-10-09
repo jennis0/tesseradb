@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tessera_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
-use tessera_store::manifest::{
+use mosaica_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
+use mosaica_store::manifest::{
     AttrExtent, DictExtent, EntityTermsExtent, FileDigest, RecordExtent, TextExtent,
 };
 
@@ -89,14 +89,14 @@ pub(super) fn coalesce_attr_window(
     let column_rel = coalesced_column_rel(&ctx.out_rel, column, window.view.as_deref());
     std::fs::create_dir_all(ctx.prefix_dir.join(&column_rel))
         .map_err(failed(format!("coalesce dir for '{column}'")))?;
-    let inputs: Vec<tessera_filter::ValueColumn> = window
+    let inputs: Vec<mosaica_filter::ValueColumn> = window
         .extents
         .iter()
         .map(|extent| {
-            tessera_filter::open_extent(
+            mosaica_filter::open_extent(
                 &ctx.prefix_dir.join(&extent.values),
                 &ctx.prefix_dir.join(&extent.presence),
-                tessera_filter::Access::Mapped,
+                mosaica_filter::Access::Mapped,
             )
         })
         .collect::<std::io::Result<_>>()
@@ -106,9 +106,9 @@ pub(super) fn coalesce_attr_window(
         column: column.clone(),
         view: window.view.clone(),
         incarnation: window.incarnation,
-        values: format!("{column_rel}/{}", tessera_filter::VALUES_FILE),
-        presence: format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE),
-        dict: keyword.then(|| format!("{column_rel}/{}", tessera_filter::DICT_FILE)),
+        values: format!("{column_rel}/{}", mosaica_filter::VALUES_FILE),
+        presence: format!("{column_rel}/{}", mosaica_filter::PRESENCE_FILE),
+        dict: keyword.then(|| format!("{column_rel}/{}", mosaica_filter::DICT_FILE)),
         postings: None,
         offsets: None,
     };
@@ -129,11 +129,11 @@ pub(super) fn coalesce_attr_window(
     digest_outputs(files, ctx, extent.files())?;
 
     let values =
-        tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
+        mosaica_filter::open_extent(&values_path, &presence_path, mosaica_filter::Access::Mapped)
             .map_err(failed("coalesced attr extent"))?;
     let dict = dict_path
         .map(|path| {
-            tessera_filter::SortedDict::open(&path, tessera_filter::Access::Mapped).map(Arc::new)
+            mosaica_filter::SortedDict::open(&path, mosaica_filter::Access::Mapped).map(Arc::new)
         })
         .transpose()
         .map_err(failed("the coalesced dictionary does not reopen"))?;
@@ -146,7 +146,7 @@ pub(super) fn coalesce_attr_window(
 
 fn merge_keyword_window(
     window: &ColumnWindow<AttrExtent>,
-    inputs: &[tessera_filter::ValueColumn],
+    inputs: &[mosaica_filter::ValueColumn],
     ctx: &CoalesceContext,
     values_path: &Path,
     presence_path: &Path,
@@ -154,7 +154,7 @@ fn merge_keyword_window(
 ) -> Result<(), MaintenanceFailed> {
     let column = &window.column;
     // Sequential: the merge walks each dictionary once in ordinal order.
-    let dicts: Vec<tessera_filter::SortedDict> = window
+    let dicts: Vec<mosaica_filter::SortedDict> = window
         .extents
         .iter()
         .map(|extent| {
@@ -162,30 +162,30 @@ fn merge_keyword_window(
                 .dict
                 .as_deref()
                 .expect("every extent of a keyword window names a dictionary");
-            tessera_filter::SortedDict::open(
+            mosaica_filter::SortedDict::open(
                 &ctx.prefix_dir.join(rel),
-                tessera_filter::Access::MappedSequential,
+                mosaica_filter::Access::MappedSequential,
             )
         })
         .collect::<Result<_, _>>()
         .map_err(failed(format!("keyword dictionary for '{column}'")))?;
-    let layers: Vec<tessera_filter_write::KeywordLayer<'_>> = inputs
+    let layers: Vec<mosaica_filter_write::KeywordLayer<'_>> = inputs
         .iter()
         .zip(&dicts)
-        .map(|(values, dict)| tessera_filter_write::KeywordLayer { values, dict })
+        .map(|(values, dict)| mosaica_filter_write::KeywordLayer { values, dict })
         .collect();
-    tessera_filter_write::coalesce_keyword_extents(&layers, values_path, presence_path, dict_path)
+    mosaica_filter_write::coalesce_keyword_extents(&layers, values_path, presence_path, dict_path)
         .map_err(failed(format!("keyword coalesce for '{column}'")))
 }
 
 fn merge_values_window(
     column: &str,
-    inputs: &[tessera_filter::ValueColumn],
+    inputs: &[mosaica_filter::ValueColumn],
     values_path: &Path,
     presence_path: &Path,
 ) -> Result<(), MaintenanceFailed> {
-    let refs: Vec<&tessera_filter::ValueColumn> = inputs.iter().collect();
-    tessera_filter_write::coalesce_attr_extents(&refs, values_path, presence_path)
+    let refs: Vec<&mosaica_filter::ValueColumn> = inputs.iter().collect();
+    mosaica_filter_write::coalesce_attr_extents(&refs, values_path, presence_path)
         .map_err(failed(format!("attr coalesce for '{column}'")))
 }
 
@@ -214,31 +214,31 @@ fn coalesce_record_blobs(
     std::fs::create_dir_all(ctx.prefix_dir.join(record_rel))
         .map_err(failed(format!("coalesce dir {record_rel}")))?;
     let open = |extent: &RecordExtent| {
-        tessera_filter::RecordBlob::open(
+        mosaica_filter::RecordBlob::open(
             &ctx.prefix_dir.join(&extent.blocks),
             &ctx.prefix_dir.join(&extent.hasrow),
             &ctx.prefix_dir.join(&extent.directory),
-            tessera_filter::Access::Mapped,
+            mosaica_filter::Access::Mapped,
         )
     };
-    let inputs: Vec<tessera_filter::RecordBlob> = records
+    let inputs: Vec<mosaica_filter::RecordBlob> = records
         .iter()
         .map(open)
         .collect::<Result<_, _>>()
         .map_err(failed("record extent"))?;
-    let refs: Vec<&tessera_filter::RecordBlob> = inputs.iter().collect();
+    let refs: Vec<&mosaica_filter::RecordBlob> = inputs.iter().collect();
 
     let extent = RecordExtent {
-        blocks: format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE),
-        hasrow: format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE),
-        directory: format!("{record_rel}/{}", tessera_filter::RECORD_DIRECTORY_FILE),
+        blocks: format!("{record_rel}/{}", mosaica_filter::RECORD_BLOCKS_FILE),
+        hasrow: format!("{record_rel}/{}", mosaica_filter::RECORD_HASROW_FILE),
+        directory: format!("{record_rel}/{}", mosaica_filter::RECORD_DIRECTORY_FILE),
     };
-    tessera_filter_write::coalesce_record_extents(
+    mosaica_filter_write::coalesce_record_extents(
         &refs,
         &ctx.prefix_dir.join(&extent.blocks),
         &ctx.prefix_dir.join(&extent.hasrow),
         &ctx.prefix_dir.join(&extent.directory),
-        tessera_filter::RECORD_BLOCK_TARGET,
+        mosaica_filter::RECORD_BLOCK_TARGET,
     )
     .map_err(failed("record coalesce"))?;
     digest_outputs(files, ctx, extent.files())?;
@@ -259,22 +259,22 @@ pub(super) fn coalesce_text_window(
 
     // Dictionaries stream once each. Postings are read from whichever layer holds the least key,
     // so they are not opened for sequential access.
-    let dicts: Vec<tessera_filter::SortedDict> = window
+    let dicts: Vec<mosaica_filter::SortedDict> = window
         .extents
         .iter()
         .map(|extent| {
-            tessera_filter::SortedDict::open(
+            mosaica_filter::SortedDict::open(
                 &ctx.prefix_dir.join(&extent.dict),
-                tessera_filter::Access::MappedSequential,
+                mosaica_filter::Access::MappedSequential,
             )
         })
         .collect::<Result<_, _>>()
         .map_err(failed(format!("text extent for '{column}'")))?;
-    let postings: Vec<tessera_filter::ColumnPostings> = window
+    let postings: Vec<mosaica_filter::ColumnPostings> = window
         .extents
         .iter()
         .map(|extent| {
-            tessera_filter::ColumnPostings::open(&ctx.prefix_dir.join(&extent.postings), true)
+            mosaica_filter::ColumnPostings::open(&ctx.prefix_dir.join(&extent.postings), true)
         })
         .collect::<std::io::Result<_>>()
         .map_err(failed(format!("text extent for '{column}'")))?;
@@ -287,12 +287,12 @@ pub(super) fn coalesce_text_window(
         })
         .collect::<std::io::Result<_>>()
         .map_err(failed(format!("text presence for '{column}'")))?;
-    let inputs: Vec<tessera_filter_write::TextLayerRef<'_>> = dicts
+    let inputs: Vec<mosaica_filter_write::TextLayerRef<'_>> = dicts
         .iter()
         .zip(&postings)
         .zip(&presences)
         .map(
-            |((dict, postings), present)| tessera_filter_write::TextLayerRef {
+            |((dict, postings), present)| mosaica_filter_write::TextLayerRef {
                 dict,
                 postings,
                 present: Some(present),
@@ -317,7 +317,7 @@ pub(super) fn coalesce_text_window(
                 .collect::<Result<_, _>>()?;
             Some(coalesce_record_blobs(
                 &consumed,
-                &format!("{column_rel}/{}", tessera_store::manifest::SCOPED_PROSE_DIR),
+                &format!("{column_rel}/{}", mosaica_store::manifest::SCOPED_PROSE_DIR),
                 ctx,
                 files,
             )?)
@@ -327,7 +327,7 @@ pub(super) fn coalesce_text_window(
         column: column.clone(),
         view: window.view.clone(),
         incarnation: window.incarnation,
-        dict: format!("{column_rel}/{}", tessera_filter::DICT_FILE),
+        dict: format!("{column_rel}/{}", mosaica_filter::DICT_FILE),
         postings: format!("{column_rel}/postings.arrow"),
         presence: format!("{column_rel}/presence.roaring"),
         prose,
@@ -336,7 +336,7 @@ pub(super) fn coalesce_text_window(
     let postings_path = ctx.prefix_dir.join(&extent.postings);
     let spool_path = column_dir.join("postings.spool");
     remove_spool_on_error(
-        tessera_filter_write::coalesce_text_extents(
+        mosaica_filter_write::coalesce_text_extents(
             &inputs,
             &dict_path,
             &postings_path,
@@ -354,10 +354,10 @@ pub(super) fn coalesce_text_window(
 
     // A dictionary and postings that disagree would give ordinals that name the wrong words.
     let no_reopen = "the coalesced text extent does not reopen";
-    let reopened_dict = tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Read)
+    let reopened_dict = mosaica_filter::SortedDict::open(&dict_path, mosaica_filter::Access::Read)
         .map_err(failed(no_reopen))?;
     let reopened_postings =
-        tessera_filter::ColumnPostings::open(&postings_path, false).map_err(failed(no_reopen))?;
+        mosaica_filter::ColumnPostings::open(&postings_path, false).map_err(failed(no_reopen))?;
     if reopened_dict.len() != reopened_postings.record_count() {
         return Err(MaintenanceFailed(format!(
             "the coalesced text extent for '{column}' holds {} terms and {} postings records",
@@ -378,28 +378,28 @@ pub(super) fn coalesce_entity_terms(
     std::fs::create_dir_all(ctx.prefix_dir.join(&terms_rel))
         .map_err(failed("coalesce dir for the transpose"))?;
     let open = |extent: &EntityTermsExtent| {
-        tessera_store::EntityTerms::open(
+        mosaica_store::EntityTerms::open(
             &ctx.prefix_dir.join(&extent.hasrow),
             &ctx.prefix_dir.join(&extent.offsets),
             &ctx.prefix_dir.join(&extent.terms),
             &ctx.prefix_dir.join(&extent.bases),
         )
     };
-    let inputs: Vec<tessera_store::EntityTerms> = terms
+    let inputs: Vec<mosaica_store::EntityTerms> = terms
         .iter()
         .map(open)
         .collect::<Result<_, _>>()
         .map_err(failed("entity-terms extent"))?;
-    let expected: u64 = inputs.iter().map(tessera_store::EntityTerms::len).sum();
-    let refs: Vec<&tessera_store::EntityTerms> = inputs.iter().collect();
+    let expected: u64 = inputs.iter().map(mosaica_store::EntityTerms::len).sum();
+    let refs: Vec<&mosaica_store::EntityTerms> = inputs.iter().collect();
 
     let extent = EntityTermsExtent {
-        hasrow: format!("{terms_rel}/{}", tessera_store::ENTITY_TERMS_HASROW_FILE),
-        offsets: format!("{terms_rel}/{}", tessera_store::ENTITY_TERMS_OFFSETS_FILE),
-        terms: format!("{terms_rel}/{}", tessera_store::ENTITY_TERMS_TERMS_FILE),
-        bases: format!("{terms_rel}/{}", tessera_store::ENTITY_TERMS_BASES_FILE),
+        hasrow: format!("{terms_rel}/{}", mosaica_store::ENTITY_TERMS_HASROW_FILE),
+        offsets: format!("{terms_rel}/{}", mosaica_store::ENTITY_TERMS_OFFSETS_FILE),
+        terms: format!("{terms_rel}/{}", mosaica_store::ENTITY_TERMS_TERMS_FILE),
+        bases: format!("{terms_rel}/{}", mosaica_store::ENTITY_TERMS_BASES_FILE),
     };
-    let written = tessera_store::coalesce_entity_terms_extents(
+    let written = mosaica_store::coalesce_entity_terms_extents(
         &refs,
         &ctx.prefix_dir.join(&extent.hasrow),
         &ctx.prefix_dir.join(&extent.offsets),
@@ -433,7 +433,7 @@ pub(super) fn coalesce_edited_window(
         .map(|rel| ctx.prefix_dir.join(rel))
         .collect();
     let out_rel = format!("{}/edited/{}", ctx.out_rel, window.direction.name());
-    let written = tessera_store::edited::merge_edited_runs(
+    let written = mosaica_store::edited::merge_edited_runs(
         window.direction,
         &inputs,
         &croaring::Bitmap::new(),
@@ -442,10 +442,10 @@ pub(super) fn coalesce_edited_window(
     )
     .map_err(failed(&what))?;
     let paths: Vec<PathBuf> = written.iter().map(|run| run.path.clone()).collect();
-    tessera_store::fsync_written(&paths).map_err(failed(&what))?;
+    mosaica_store::fsync_written(&paths).map_err(failed(&what))?;
     let rels: Vec<String> = written
         .iter()
-        .map(|run| tessera_store::unique::relative(&ctx.prefix_dir, &run.path))
+        .map(|run| mosaica_store::unique::relative(&ctx.prefix_dir, &run.path))
         .collect::<Result<_, _>>()
         .map_err(failed(&what))?;
     digest_outputs(files, ctx, rels.iter().map(String::as_str))?;
@@ -462,7 +462,7 @@ pub(super) fn coalesce_unique_window(
     let attribute = &window.attribute;
     let inputs: Vec<PathBuf> = window.runs.iter().map(|rel| ctx.prefix_dir.join(rel)).collect();
     let out_rel = format!("{}/unique/{attribute}", ctx.out_rel);
-    let written = tessera_store::unique::merge_unique_runs(
+    let written = mosaica_store::unique::merge_unique_runs(
         &inputs,
         &croaring::Bitmap::new(),
         &ctx.prefix_dir.join(&out_rel),
@@ -470,11 +470,11 @@ pub(super) fn coalesce_unique_window(
     )
     .map_err(failed(format!("unique index runs for '{attribute}'")))?;
     let paths: Vec<PathBuf> = written.iter().map(|run| run.path.clone()).collect();
-    tessera_store::fsync_written(&paths)
+    mosaica_store::fsync_written(&paths)
         .map_err(failed(format!("unique index runs for '{attribute}'")))?;
     let rels: Vec<String> = written
         .iter()
-        .map(|run| tessera_store::unique::relative(&ctx.prefix_dir, &run.path))
+        .map(|run| mosaica_store::unique::relative(&ctx.prefix_dir, &run.path))
         .collect::<Result<_, _>>()
         .map_err(failed(format!("unique index runs for '{attribute}'")))?;
     digest_outputs(files, ctx, rels.iter().map(String::as_str))?;

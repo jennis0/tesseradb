@@ -66,7 +66,7 @@ const check = (claim, ok, evidence) => {
 };
 
 await page.goto(url, {waitUntil: 'load'});
-const map = page.locator('tessera-map').first();
+const map = page.locator('mosaica-map').first();
 /** The map's live state: the mode, the highlight while dragging, the region after, the camera. */
 const state = () =>
   map.evaluate((el) => {
@@ -119,7 +119,7 @@ const same = (a, b) => a[0] === b[0] && a[1] === b[1];
 {
   const started = Date.now();
   while (Date.now() - started < 60_000) {
-    if ((await page.evaluate(() => window.__tesseraProbeOf?.()?.marks ?? window.__tesseraProbe?.marks ?? 0)) > 0) break;
+    if ((await page.evaluate(() => window.__mosaicaProbeOf?.()?.marks ?? window.__mosaicaProbe?.marks ?? 0)) > 0) break;
     await page.waitForTimeout(200);
   }
   await page.waitForTimeout(1500);

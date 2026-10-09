@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {TesseraError} from '../src/client.js';
+import {MosaicaError} from '../src/client.js';
 import {Presenter, defaultFrameScheduler, type Presented} from '../src/presented.js';
 import {Replica} from '../src/replica.js';
 import type {Quantisation, ViewportResponse} from '../src/types.js';
@@ -99,7 +99,7 @@ describe('the presented frame', () => {
     const heldBands = h.replica.bandCount;
 
     // Ground nothing is held for, so the next request cannot be answered from the replica.
-    h.failWith.error = new TesseraError(403, 'expired-token', 'gone');
+    h.failWith.error = new MosaicaError(403, 'expired-token', 'gone');
     h.presenter.schedule({target: [400, 400, 0], zoom: 8}, 400, 300);
     await h.clock.advance(1000);
     expect(h.presenter.currentStatus).toBe('refused');

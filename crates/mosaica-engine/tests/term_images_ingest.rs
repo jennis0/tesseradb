@@ -35,10 +35,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_types::TesseraId;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_types::TesseraId;
 
 const WAIT: Duration = Duration::from_secs(180);
 
@@ -196,20 +196,20 @@ fn build_bundle(dir: &Path, name: &str, entities: u64) -> std::path::PathBuf {
     let out = dir.join(name);
     let schema = id_schema();
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: VIEW.to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -265,7 +265,7 @@ fn ingest_corpus(engine: &Engine) {
                     join: None,
                     x: x_of(i),
                     y: y_of(i),
-                    scalars: vec![tessera_lifecycle::wal::WalScalar::U64(i)],
+                    scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(i)],
                     terms: engine.resolve_terms(&descriptors),
                     descriptors,
                     scoped: Vec::new(),
@@ -302,12 +302,12 @@ fn fold(engine: &Engine) {
 // -------------------------------------------------------------------------------------------
 
 /// Authorise, waiting out a concurrent build of the same credential's fragment (lifecycle §3.3).
-fn authorise(engine: &Engine, credential: &[u8]) -> tessera_engine::Session {
+fn authorise(engine: &Engine, credential: &[u8]) -> mosaica_engine::Session {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match engine.authorise(credential) {
             Ok(session) => return session,
-            Err(tessera_engine::EngineError::FragmentBuilding) if Instant::now() < deadline => {
+            Err(mosaica_engine::EngineError::FragmentBuilding) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(error) => panic!("the credential must authorise: {error}"),
@@ -337,7 +337,7 @@ fn served_ids(engine: &Engine, credential: &[u8]) -> BTreeSet<u64> {
                 .fields
                 .into_iter()
                 .find_map(|field| match (field.name.as_str(), field.value) {
-                    ("id", tessera_engine::ScalarOut::U64(id)) => Some(id),
+                    ("id", mosaica_engine::ScalarOut::U64(id)) => Some(id),
                     _ => None,
                 })
                 .expect("every item in this corpus carries the `id` the caller supplied")

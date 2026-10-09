@@ -1,6 +1,6 @@
 # How to write here
 
-This governs everything in `docs/` and every code comment. Write for a competent technical reader who has not worked on Tessera: an assessor checking the security argument, an engineer evaluating the approach, a contributor arriving cold.
+This governs everything in `docs/` and every code comment. Write for a competent technical reader who has not worked on Mosaica: an assessor checking the security argument, an engineer evaluating the approach, a contributor arriving cold.
 
 ## Rules
 
@@ -47,7 +47,7 @@ The same rules. A module doc carries the design argument when the module upholds
 
 ## User documentation
 
-The rules above were written for the system chapters, whose reader is assessing a design. The pages in `docs/start/`, `docs/guides/` and `docs/reference/` have a different reader: someone learning Tessera or using it to get something done. Where this section and the rules above differ, this section wins on those pages. British spelling and the evidence rules apply everywhere.
+The rules above were written for the system chapters, whose reader is assessing a design. The pages in `docs/start/`, `docs/guides/` and `docs/reference/` have a different reader: someone learning Mosaica or using it to get something done. Where this section and the rules above differ, this section wins on those pages. British spelling and the evidence rules apply everywhere.
 
 There are three kinds of user page, and each is written differently. A tutorial teaches a newcomer by walking them through building something. A guide helps someone who already knows the basics do one task. A reference page is looked up, not read.
 
@@ -59,11 +59,11 @@ It opens with a promise. Say who the tutorial is for, what the reader will have 
 
 It teaches a mental model, not a list of commands. Before each step, say what we are about to do and why it is needed; after it, say what happened and what to notice in the output. By the end the reader should be able to explain the pipeline to someone else: source data, a declaration that describes it, a build that turns both into a bundle, a server with three separate doors, and tokens that decide what each viewer sees.
 
-Introduce each idea at the moment it is needed, one at a time, with the concrete case first and the name second, in plain words. "Every place on this map is tagged with who may see it. Tessera calls that tag an access label." A term the reader has not met is never used without this. Deeper explanation can wait for a link to the system chapters; the basic "what is this" cannot.
+Introduce each idea at the moment it is needed, one at a time, with the concrete case first and the name second, in plain words. "Every place on this map is tagged with who may see it. Mosaica calls that tag an access label." A term the reader has not met is never used without this. Deeper explanation can wait for a link to the system chapters; the basic "what is this" cannot.
 
 When you explain a setting, say what it is for, what the alternatives are and what each costs. The reader will face that choice with their own data. `render`, `index` and an attribute with neither are one decision, and a tutorial that shows only the value it uses leaves the reader unable to make it.
 
-Frame Tessera in terms the reader already knows. It is a database built to stream millions of points to a browser, so say how it differs from the databases they have used where that difference explains a step.
+Frame Mosaica in terms the reader already knows. It is a database built to stream millions of points to a browser, so say how it differs from the databases they have used where that difference explains a step.
 
 Leave out what does not help the reader do the task or understand it: timings, version lists, counts that decorate a sentence, asides and teasers about what comes later. The evidence rules keep every figure true; they are not a reason to include one.
 
@@ -106,7 +106,7 @@ Most of the other tells are in the sentences.
 - **Sentences about the text instead of the subject.** "There are six stages, and each one leaves something you can look at." "This is the step that decides what a viewer sees." Cut them, or replace them with the fact they gesture at.
 - **Framing that nobody would say aloud.** "The pieces every deployment is made of." "The whole path from a text file to a viewer's map." Name the actual things.
 - **Metaphor for a technical part.** Doors, lanes, gates. Use the real name and explain it in plain words.
-- **Claims no run could contradict.** "Tessera handles large data efficiently." Give the figure and its conditions, or cut the claim.
+- **Claims no run could contradict.** "Mosaica handles large data efficiently." Give the figure and its conditions, or cut the claim.
 - **Enthusiasm, hype and reassurance in place of information.** "That's it!", "don't worry", "seamlessly".
 - **Explanations that restate the command** instead of saying what it does and why.
 - **Three examples where one would do,** or options set side by side for balance.
@@ -115,18 +115,18 @@ Most of the other tells are in the sentences.
 
 ### Before and after
 
-> ✗ In this tutorial, we'll walk through building your first Tessera map. By the end, you'll have a powerful, interactive visualisation of your data, ready to explore!
+> ✗ In this tutorial, we'll walk through building your first Mosaica map. By the end, you'll have a powerful, interactive visualisation of your data, ready to explore!
 >
-> ✓ This tutorial is for someone who has never used Tessera. We'll take the 29,935 places GeoNames lists for Ireland and put them on a map in your browser. You'll be able to search them by name and filter them by population. The commands take about four minutes to run. Half of that is compiling Tessera.
+> ✓ This tutorial is for someone who has never used Mosaica. We'll take the 29,935 places GeoNames lists for Ireland and put them on a map in your browser. You'll be able to search them by name and filter them by population. The commands take about four minutes to run. Half of that is compiling Mosaica.
 
 > ✗ `point_visibility` names no field to read an access label from, so every place gets the default label, `public`.
 >
-> ✓ Tessera decides who may see each place by giving it an access label. Each viewer holds a set of labels and sees only the places that carry one of them. A label usually comes from a column in your data. We have no such column, so every place gets the default label, `public`. Every viewer holds `public`. Everyone will see every place.
+> ✓ Mosaica decides who may see each place by giving it an access label. Each viewer holds a set of labels and sees only the places that carry one of them. A label usually comes from a column in your data. We have no such column, so every place gets the default label, `public`. Every viewer holds `public`. Everyone will see every place.
 
-> ✗ Run `tessera build`.
+> ✗ Run `mosaica build`.
 >
 > ✓ Now build the bundle. The build reads every row of `points.parquet` and works out where each place sits on the map. It stores neighbouring places next to each other on disc. The result goes into the `bundle` directory. From now on the server reads only the bundle, never your Parquet file.
 
-> ✗ One program, `tessera`, does all the server-side work: it checks a declaration, builds a bundle and serves it. There are six stages, and each one leaves something you can look at.
+> ✗ One program, `mosaica`, does all the server-side work: it checks a declaration, builds a bundle and serves it. There are six stages, and each one leaves something you can look at.
 >
 > ✓ *(Cut both. The outline that follows shows what each stage does.)*

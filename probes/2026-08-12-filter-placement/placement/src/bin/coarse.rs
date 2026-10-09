@@ -21,8 +21,8 @@ use std::time::Instant;
 
 use croaring::Bitmap;
 use placement::{mask, median, permutation, project, splitmix, MaskShape};
-use tessera_filter::{Codes, ValueColumn};
-use tessera_types::AttrLocalId;
+use mosaica_filter::{Codes, ValueColumn};
+use mosaica_types::AttrLocalId;
 
 /// Tiles at a coarse level: 64×64 over the quadtree, which is the order a whole-view request
 /// resolves to before the drawn-mark budget starts cutting depth.

@@ -6,7 +6,7 @@
 //! `n = 0` outright — *"no points selected — a bundle with no items has no expressible entity
 //! range"* — which made *ingest into an empty database* a state the system could not be put in
 //! through its own tools, and so made 0091's own headline untestable
-//! (`tessera-server/tests/membership_column.rs` says so in its module doc, and now has the
+//! (`mosaica-server/tests/membership_column.rs` says so in its module doc, and now has the
 //! wholly-ingested arm the refusal used to block).
 //!
 //! What the zero-item bundle must be is *ordinary*: empty segments, empty postings, a dictionary
@@ -29,10 +29,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::{build, build_in_memory, BuildArgs};
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::{build, build_in_memory, BuildArgs};
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -201,15 +201,15 @@ fn inputs() -> Inputs {
 
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: inputs.points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(inputs.pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -232,13 +232,13 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
 }
 
 /// The declaration and the build, in the order the CLI does them.
-fn built(inputs: &Inputs, out: &Path) -> tessera_build::BuildReport {
-    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
+fn built(inputs: &Inputs, out: &Path) -> mosaica_build::BuildReport {
+    let config = mosaica_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
     let mut args = args(inputs, out);
     args.layers = config.layers;
     args.layer_inputs = config.layer_sources;
     args.attribute_sources =
-        tessera_build::config::AttributeSource::over(inputs.points.clone(), &config.schema);
+        mosaica_build::config::AttributeSource::over(inputs.points.clone(), &config.schema);
     args.schema = config.schema;
     build(&args).expect("a build over no points writes a bundle")
 }
@@ -273,7 +273,7 @@ fn a_build_with_no_points_writes_a_bundle() {
     assert_eq!(declared, vec!["published", "title", "id"]);
 
     // `public` is term 0 in every bundle whether or not a point carries it, so a dictionary over
-    // no points is not an empty file (`tessera_authz::PUBLIC_TERM`).
+    // no points is not an empty file (`mosaica_authz::PUBLIC_TERM`).
     assert_eq!(manifest.dict_extents.len(), 1);
     assert_eq!(manifest.dict_extents[0].records, 1);
 
@@ -285,7 +285,7 @@ fn a_build_with_no_points_writes_a_bundle() {
         .map(|l| l.declaration.name.as_str())
         .collect();
     assert_eq!(names, vec!["clusters/a"]);
-    assert!(manifest.entity_id_low_water < tessera_types::layer::ROWLESS_CEILING);
+    assert!(manifest.entity_id_low_water < mosaica_types::layer::ROWLESS_CEILING);
     for layer in &manifest.layers {
         assert!(layer.entity.raw() >= manifest.entity_id_low_water);
     }
@@ -301,12 +301,12 @@ fn the_two_builds_agree_about_the_empty_bundle() {
     let reference = inputs.dir.join("reference");
     built(&inputs, &streaming);
 
-    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
+    let config = mosaica_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
     let mut args = args(&inputs, &reference);
     args.layers = config.layers;
     args.layer_inputs = config.layer_sources;
     args.attribute_sources =
-        tessera_build::config::AttributeSource::over(inputs.points.clone(), &config.schema);
+        mosaica_build::config::AttributeSource::over(inputs.points.clone(), &config.schema);
     args.schema = config.schema;
     build_in_memory(&args).expect("the oracle builds the empty bundle too");
 
@@ -331,10 +331,10 @@ fn the_two_builds_agree_about_the_empty_bundle() {
 #[test]
 fn auto_extent_over_no_rows_is_still_refused() {
     let inputs = inputs();
-    let error = tessera_build::config::frame_view(
+    let error = mosaica_build::config::frame_view(
         "s0",
-        tessera_spatial::Projection::None,
-        &tessera_build::config::Extent::Auto { margin: 0.01 },
+        mosaica_spatial::Projection::None,
+        &mosaica_build::config::Extent::Auto { margin: 0.01 },
         &inputs.points,
         &Default::default(),
     )

@@ -1,12 +1,12 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {CLUSTER_PREFIX, activeCount, artifactName, emptyDraft, isPopulated, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type FilterDraft, type Layer, type MemberClause, type Meta, type Store} from '@tesseradb/client';
+import {CLUSTER_PREFIX, activeCount, artifactName, emptyDraft, isPopulated, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type FilterDraft, type Layer, type MemberClause, type Meta, type Store} from '@mosaica/client';
 import {OPERATOR_WORDS} from './filter.js';
 import {HeldAggregate} from './aggregate.js';
-import {TesseraElement, UNNAMED, columnCaption, dateRangeText, countText, emit, keyTitle, shortCount} from './base.js';
+import {MosaicaElement, UNNAMED, columnCaption, dateRangeText, countText, emit, keyTitle, shortCount} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
-import type {TesseraFieldCard} from './field-card.js';
+import type {MosaicaFieldCard} from './field-card.js';
 import {icon} from './icons.js';
 import {exportparts, forwarded} from './parts.js';
 import {FloatingList} from './float.js';
@@ -31,7 +31,7 @@ const VERBS: readonly ClauseVerb[] = ['filter', 'highlight'];
 const figure = (n: number, compact: boolean) => (compact ? shortCount(n) : countText(n));
 
 /**
- * The field column: what the cards count, the clauses applied, and one `<tessera-field-card>` per
+ * The field column: what the cards count, the clauses applied, and one `<mosaica-field-card>` per
  * field.
  *
  * The subject row names what the cards' solid bars count, In view and the number of matching items
@@ -41,7 +41,7 @@ const figure = (n: number, compact: boolean) => (compact ? shortCount(n) : count
  *
  * While any clause is applied, a line lists each as a chip: a filter clause plain, a highlight
  * clause in the highlight colour, and a `member_of` clause by its cluster's name. Pressing a
- * column's chip opens and focuses its card, or under `chips-only` fires `tessera-chipopen`; its ×
+ * column's chip opens and focuses its card, or under `chips-only` fires `mosaica-chipopen`; its ×
  * empties that clause, leaving the other position's alone. Clear all empties every clause in both
  * positions and drops every `member_of` clause.
  *
@@ -61,14 +61,14 @@ const figure = (n: number, compact: boolean) => (compact ? shortCount(n) : count
  * nothing while none is applied; `controls-only` leaves the subject row and the clauses out.
  *
  * @summary The field cards, what they count, and the clauses applied.
- * @tagname tessera-filter-panel
+ * @tagname mosaica-filter-panel
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-filterchange']>} mosaica-filterchange - A
  *   column's chip was removed (with `verb`, the position it was in, and `expr` null), Clear all was
  *   pressed (with `column` and `expr` null), or the highlight was cleared from the subject row (with
  *   `column` and `expr` null and `verb` `highlight`). Removing a `member_of` chip fires nothing. Each
  *   card fires its own as well.
- * @fires {CustomEvent<TesseraEventDetails['tessera-chipopen']>} tessera-chipopen - A column's chip
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-chipopen']>} mosaica-chipopen - A column's chip
  *   was pressed under `chips-only`, naming the column and the position of its clause.
  * @csspart state - The state line, with `data-state`.
  * @csspart refusal - The words "View refused", with `data-code`, in the refused state.
@@ -84,7 +84,7 @@ const figure = (n: number, compact: boolean) => (compact ? shortCount(n) : count
  *   `data-artifact`.
  * @csspart edit - The button that is a column chip's text, which opens its card.
  * @csspart clear - The Clear all button.
- * @csspart card - One `<tessera-field-card>`, with `data-field`.
+ * @csspart card - One `<mosaica-field-card>`, with `data-field`.
  * @csspart add - The Add field button, with `aria-expanded`.
  * @csspart add-note - How many fields are not listed.
  * @csspart add-list - The list of fields to add, while it is open.
@@ -92,10 +92,10 @@ const figure = (n: number, compact: boolean) => (compact ? shortCount(n) : count
  * @csspart add-option - One field in that list, with `data-column` or `data-layer`, `aria-checked`
  *   while it is listed, and `aria-disabled` where it is pinned and so cannot be taken off.
  * @csspart field-card-<part> - A part of a card, forwarded under a `field-card-` prefix.
- * @csspart filter-<part> - A part of a card's `<tessera-filter>` search box.
- * @csspart cluster-filter-<part> - A part of a card's `<tessera-cluster-filter>` search box.
+ * @csspart filter-<part> - A part of a card's `<mosaica-filter>` search box.
+ * @csspart cluster-filter-<part> - A part of a card's `<mosaica-cluster-filter>` search box.
  */
-export class TesseraFilterPanel extends TesseraElement {
+export class MosaicaFilterPanel extends MosaicaElement {
   /** Renders the line of clauses alone, and nothing while none is applied. */
   @property({type: Boolean, attribute: 'chips-only'}) accessor chipsOnly = false;
   /** Renders the cards and Add field without the subject row and the clauses. */
@@ -135,17 +135,17 @@ export class TesseraFilterPanel extends TesseraElement {
         align-items: center;
         flex-wrap: wrap;
         gap: 4px 14px;
-        padding: 8px var(--_tessera-panel-inline, 14px);
-        background: color-mix(in srgb, var(--_tessera-surface-2) 40%, var(--_tessera-surface));
-        border-top: 1px solid var(--_tessera-line-2);
-        border-bottom: 1px solid var(--_tessera-line-2);
+        padding: 8px var(--_mosaica-panel-inline, 14px);
+        background: color-mix(in srgb, var(--_mosaica-surface-2) 40%, var(--_mosaica-surface));
+        border-top: 1px solid var(--_mosaica-line-2);
+        border-bottom: 1px solid var(--_mosaica-line-2);
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         font-variant-numeric: tabular-nums;
       }
       :host([compact]) [part='subject'] {
         gap: 4px 12px;
-        padding: 6px var(--_tessera-panel-inline, 12px);
+        padding: 6px var(--_mosaica-panel-inline, 12px);
       }
       .key {
         display: flex;
@@ -161,24 +161,24 @@ export class TesseraFilterPanel extends TesseraElement {
         width: 10px;
         height: 6px;
         border-radius: 1px;
-        background: var(--_tessera-bar);
+        background: var(--_mosaica-bar);
       }
       .swatch.lit {
-        background: var(--_tessera-bar-highlight);
+        background: var(--_mosaica-bar-highlight);
       }
       .swatch.pale {
-        background: var(--_tessera-bar-match);
+        background: var(--_mosaica-bar-match);
       }
       [part='subject-name'] {
         font-weight: 500;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
       }
       [part='subject-name'].lit {
-        color: var(--_tessera-highlight);
+        color: var(--_mosaica-highlight);
       }
       [part='subject-count'] {
         font-weight: 600;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
       }
       [part='clear-highlight'] {
         width: 18px;
@@ -186,18 +186,18 @@ export class TesseraFilterPanel extends TesseraElement {
         display: grid;
         place-items: center;
         border-radius: 4px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='clear-highlight']:hover {
-        background: var(--_tessera-surface-3);
+        background: var(--_mosaica-surface-3);
       }
       [part='chips'] {
         display: flex;
         flex-wrap: wrap;
         align-items: center;
         gap: 6px;
-        padding: 8px var(--_tessera-panel-inline, 14px);
-        border-bottom: 1px solid var(--_tessera-line-2);
+        padding: 8px var(--_mosaica-panel-inline, 14px);
+        border-bottom: 1px solid var(--_mosaica-line-2);
       }
       [part='chip'] {
         min-height: 0;
@@ -222,7 +222,7 @@ export class TesseraFilterPanel extends TesseraElement {
         margin-left: auto;
         padding: 0;
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       .adder {
         position: relative;
@@ -230,10 +230,10 @@ export class TesseraFilterPanel extends TesseraElement {
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        padding: 10px var(--_tessera-panel-inline, 14px) 12px;
+        padding: 10px var(--_mosaica-panel-inline, 14px) 12px;
       }
       :host([compact]) .adder {
-        padding: 8px var(--_tessera-panel-inline, 12px);
+        padding: 8px var(--_mosaica-panel-inline, 12px);
       }
       [part='add'] {
         height: auto;
@@ -244,7 +244,7 @@ export class TesseraFilterPanel extends TesseraElement {
       }
       [part='add-note'] {
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       /* The list opens over what sits below it, in the top layer. */
       [part='add-list'] {
@@ -253,12 +253,12 @@ export class TesseraFilterPanel extends TesseraElement {
         margin: 0;
         box-sizing: border-box;
         overflow-y: auto;
-        background: var(--_tessera-surface);
-        color: var(--_tessera-ink);
+        background: var(--_mosaica-surface);
+        color: var(--_mosaica-ink);
         font-size: 13px;
         padding: 4px;
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius-control);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius-control);
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
       }
       [part='add-list'] .input {
@@ -275,7 +275,7 @@ export class TesseraFilterPanel extends TesseraElement {
       }
       [part~='add-option']:hover,
       [part~='add-option']:focus-visible {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part~='add-option']:focus-visible {
         outline-offset: -2px;
@@ -286,13 +286,13 @@ export class TesseraFilterPanel extends TesseraElement {
       [part~='add-option'] .kind {
         font-size: 12px;
         font-weight: 400;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       .none {
         display: block;
         padding: 6px 8px;
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
     `
   ];
@@ -336,7 +336,7 @@ export class TesseraFilterPanel extends TesseraElement {
     super.disconnectedCallback();
   }
 
-  /** List `field`'s card, open it, and scroll to and focus it once drawn. A host showing the cards after `tessera-chipopen` calls this. */
+  /** List `field`'s card, open it, and scroll to and focus it once drawn. A host showing the cards after `mosaica-chipopen` calls this. */
   show(field: string): void {
     this.opened = new Set([...this.opened, field]);
     this.unfold(field);
@@ -347,7 +347,7 @@ export class TesseraFilterPanel extends TesseraElement {
   /** Moves focus to the first card's search box or plot, else Add field. */
   override focus(options?: FocusOptions): void {
     const card = this.renderRoot.querySelector<HTMLElement>('[part~="card"]');
-    const target = card?.shadowRoot?.querySelector<HTMLElement>('tessera-filter, tessera-cluster-filter, [part="plot"], [part="fold"]') ?? this.renderRoot.querySelector<HTMLElement>('[part="add"]');
+    const target = card?.shadowRoot?.querySelector<HTMLElement>('mosaica-filter, mosaica-cluster-filter, [part="plot"], [part="fold"]') ?? this.renderRoot.querySelector<HTMLElement>('[part="add"]');
     if (target) target.focus(options);
     else super.focus(options);
   }
@@ -362,7 +362,7 @@ export class TesseraFilterPanel extends TesseraElement {
   }
 
   /** A card's own fold button: in the compact layout, opening one folds the one open before. */
-  private onToggle(field: string, card: TesseraFieldCard): void {
+  private onToggle(field: string, card: MosaicaFieldCard): void {
     if (this.compact) {
       this.openCard = card.folded ? null : field;
       return;
@@ -379,7 +379,7 @@ export class TesseraFilterPanel extends TesseraElement {
   }
 
   private edit(column: string, verb: ClauseVerb): void {
-    if (this.chipsOnly) emit(this, 'tessera-chipopen', {column, verb});
+    if (this.chipsOnly) emit(this, 'mosaica-chipopen', {column, verb});
     else this.show(column);
   }
 
@@ -389,12 +389,12 @@ export class TesseraFilterPanel extends TesseraElement {
     const s = this.resolvedStore;
     this.matching.set(s, this.isConnected && !this.chipsOnly && !this.controlsOnly && s?.get('meta') ? {groupings: [{}]} : null);
     if (!this.editing || this.chipsOnly) return;
-    const card = Array.from(this.renderRoot.querySelectorAll<TesseraFieldCard>('[part~="card"]')).find((c) => c.field === this.editing);
+    const card = Array.from(this.renderRoot.querySelectorAll<MosaicaFieldCard>('[part~="card"]')).find((c) => c.field === this.editing);
     if (!card) return;
     this.editing = null;
     void card.updateComplete.then(() => {
       card.scrollIntoView({block: 'nearest'});
-      (card.shadowRoot?.querySelector<HTMLElement>('tessera-filter, tessera-cluster-filter, [part="plot"]') ?? card.shadowRoot?.querySelector<HTMLElement>('[part="fold"]'))?.focus();
+      (card.shadowRoot?.querySelector<HTMLElement>('mosaica-filter, mosaica-cluster-filter, [part="plot"]') ?? card.shadowRoot?.querySelector<HTMLElement>('[part="fold"]'))?.focus();
     });
   }
 
@@ -439,7 +439,7 @@ export class TesseraFilterPanel extends TesseraElement {
     const s = this.resolvedStore;
     if (!s) return;
     s.setFilters(withoutClause(s.get('filters').draft, column, verb));
-    emit(this, 'tessera-filterchange', {column, verb, expr: null});
+    emit(this, 'mosaica-filterchange', {column, verb, expr: null});
   }
 
   private clearAll(): void {
@@ -448,7 +448,7 @@ export class TesseraFilterPanel extends TesseraElement {
     if (!s || !meta) return;
     s.setFilters(emptyDraft(meta.filterOperands));
     s.setMembers([]);
-    emit(this, 'tessera-filterchange', {column: null, expr: null});
+    emit(this, 'mosaica-filterchange', {column: null, expr: null});
   }
 
   /** Empty every clause in the highlight position, so the cards count what is in view again. */
@@ -459,7 +459,7 @@ export class TesseraFilterPanel extends TesseraElement {
     const {draft, members} = s.get('filters');
     s.setFilters({...draft, highlight: emptyDraft(meta.filterOperands).highlight});
     if (members.some((m) => m.verb === 'highlight')) s.setMembers(members.filter((m) => m.verb !== 'highlight'));
-    emit(this, 'tessera-filterchange', {column: null, verb: 'highlight', expr: null});
+    emit(this, 'mosaica-filterchange', {column: null, verb: 'highlight', expr: null});
   }
 
   private add(field: string): void {
@@ -488,7 +488,7 @@ export class TesseraFilterPanel extends TesseraElement {
       });
       if (held.length > 0) {
         s.setFilters(held.reduce((d, verb) => withoutClause(d, field, verb), draft));
-        for (const verb of held) emit(this, 'tessera-filterchange', {column: field, verb, expr: null});
+        for (const verb of held) emit(this, 'mosaica-filterchange', {column: field, verb, expr: null});
       }
     }
     void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="add"]')?.focus());
@@ -540,10 +540,10 @@ export class TesseraFilterPanel extends TesseraElement {
     const listed = this.listOrder.map((k) => shown.find((f) => f.key === k)!);
     const open = this.compact ? (listed.some((f) => f.key === this.openCard) ? this.openCard : null) : null;
     const card = (f: (typeof fields)[number]) =>
-      html`<tessera-field-card part="card" exportparts=${CARD_PARTS} data-field=${f.key} field=${f.key} .store=${s} .level=${this.clusterLevel}
+      html`<mosaica-field-card part="card" exportparts=${CARD_PARTS} data-field=${f.key} field=${f.key} .store=${s} .level=${this.clusterLevel}
         ?compact=${this.compact} .folded=${this.compact ? f.key !== open : this.folded.has(f.key)}
-        @tessera-fold=${(e: Event) => this.onToggle(f.key, e.currentTarget as TesseraFieldCard)}
-        @tessera-filterchange=${() => this.keepListed(f.key)} @tessera-clausechange=${() => this.keepListed(f.key)}></tessera-field-card>`;
+        @mosaica-fold=${(e: Event) => this.onToggle(f.key, e.currentTarget as MosaicaFieldCard)}
+        @mosaica-filterchange=${() => this.keepListed(f.key)} @mosaica-clausechange=${() => this.keepListed(f.key)}></mosaica-field-card>`;
     const head = this.controlsOnly ? nothing : html`${this.subjectRow(s)}${chips}`;
     return html`${head}<span part="state" data-state="shown"></span>${repeat(listed, (f) => f.key, card)}${this.adder(fields, listed, pinned)}`;
   }
@@ -646,10 +646,10 @@ export class TesseraFilterPanel extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-filter-panel', TesseraFilterPanel);
+defineOnce('mosaica-filter-panel', MosaicaFilterPanel);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-filter-panel': TesseraFilterPanel;
+    'mosaica-filter-panel': MosaicaFilterPanel;
   }
 }

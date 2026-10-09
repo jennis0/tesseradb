@@ -1,8 +1,8 @@
 //! Ingest through `Engine::ingest` from rows shaped as the executor writes them.
 
-use tessera_engine::{AcceptError, Engine, IngestRequest};
-use tessera_lifecycle::{IngestRow, UnallocatedRow};
-use tessera_types::EntityId;
+use mosaica_engine::{AcceptError, Engine, IngestRequest};
+use mosaica_lifecycle::{IngestRow, UnallocatedRow};
+use mosaica_types::EntityId;
 
 pub trait IngestRows {
     /// Send `rows` as one batch into the view they all name, each carrying its label, its

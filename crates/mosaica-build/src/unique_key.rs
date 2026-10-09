@@ -9,22 +9,22 @@
 //!
 //! **A warning, never a refusal.** A unique key indexed for the lookup is legitimate, and the
 //! build cannot tell that intent from an oversight. The figures are printed with their
-//! denominators, at the build and at `tessera verify`, and the operator decides.
+//! denominators, at the build and at `mosaica verify`, and the operator decides.
 //!
 //! The denominator is the rows that carry a value, not every row: a key unique wherever it is
 //! present is a unique key, and the index costs in proportion to the rows present. Both counts
 //! are printed beside the bundle's row count.
 //!
-//! `tessera check` reads Parquet footers and no row, so it can say this only where the writer
+//! `mosaica check` reads Parquet footers and no row, so it can say this only where the writer
 //! recorded a distinct count in the column's statistics. Most writers do not, and the check is
 //! then silent about it; the build's report is where the figure is certain.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use tessera_filter::{Access, SortedDict, ValueColumn};
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::{FileDigest, Manifest, SegmentsManifest};
+use mosaica_filter::{Access, SortedDict, ValueColumn};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::manifest::{FileDigest, Manifest, SegmentsManifest};
 
 use crate::error::{BuildError, Result};
 
@@ -149,7 +149,7 @@ pub fn keyword_cardinalities(
                 }
                 for view in &scalar.views {
                     let mut dir_rel = format!("{attrs_rel}/{}", scalar.name);
-                    for component in tessera_store::view_path_components(view) {
+                    for component in mosaica_store::view_path_components(view) {
                         dir_rel.push('/');
                         dir_rel.push_str(component);
                     }
@@ -191,7 +191,7 @@ pub(crate) fn report_keyword_cardinalities(columns: &[KeywordCardinality], bundl
 fn read_column(dir: &Path) -> Result<(u64, u64)> {
     let dict = SortedDict::open_dir(dir, Access::Mapped).map_err(|e| {
         BuildError::io(
-            &dir.join(tessera_filter::DICT_FILE),
+            &dir.join(mosaica_filter::DICT_FILE),
             std::io::Error::from(e),
         )
     })?;
@@ -248,7 +248,7 @@ impl FooterCount {
         self.values > 0 && self.distinct as f64 >= self.values as f64 * UNIQUE_KEY_FRACTION
     }
 
-    /// The line `tessera check` prints for an indexed keyword whose footer says it is unique.
+    /// The line `mosaica check` prints for an indexed keyword whose footer says it is unique.
     pub fn warning(&self) -> Option<String> {
         if !self.is_unique_key() {
             return None;

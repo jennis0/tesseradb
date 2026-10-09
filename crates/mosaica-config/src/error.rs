@@ -66,20 +66,20 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::Io(e) => write!(
                 f,
-                "cannot read the deployment file ({e}); name a readable tessera.toml"
+                "cannot read the deployment file ({e}); name a readable mosaica.toml"
             ),
             ConfigError::Toml(e) => write!(
                 f,
-                "tessera.toml does not parse; correct what this names: {e}"
+                "mosaica.toml does not parse; correct what this names: {e}"
             ),
             ConfigError::NoDeploymentConfig { from } => write!(
                 f,
-                "no tessera.toml found searching upward from {}; create one beside the corpus \
+                "no mosaica.toml found searching upward from {}; create one beside the corpus \
                  declaration, or name one with --deployment <path>, for example:\n\n\
                  \x20   [bundle]\n\
                  \x20   path  = \"bundles/corpus\"\n\
-                 \x20   cache = \".tessera/cache\"\n\
-                 \x20   wal   = \".tessera/wal.log\"\n\n\
+                 \x20   cache = \".mosaica/cache\"\n\
+                 \x20   wal   = \".mosaica/wal.log\"\n\n\
                  \x20   [build]\n\
                  \x20   schema = \"schema.toml\"\n\n\
                  \x20   [disclosure]\n\
@@ -92,7 +92,7 @@ impl std::fmt::Display for ConfigError {
             ),
             ConfigError::MissingDisclosureSection => write!(
                 f,
-                "tessera.toml has no [disclosure] section; add `[disclosure]` with \
+                "mosaica.toml has no [disclosure] section; add `[disclosure]` with \
                  `token_max_lifetime = 3600` (seconds) under it"
             ),
             ConfigError::MissingDisclosureKey(key) => write!(
@@ -116,7 +116,7 @@ impl std::fmt::Display for ConfigError {
             } => write!(
                 f,
                 "cannot read the {which} credential file {} ({source}); name a readable file, \
-                 relative to tessera.toml's directory or absolute",
+                 relative to mosaica.toml's directory or absolute",
                 path.display()
             ),
             ConfigError::BadAddr { key, value } => write!(
@@ -126,7 +126,7 @@ impl std::fmt::Display for ConfigError {
             ),
             ConfigError::PluginTable => write!(
                 f,
-                "tessera.toml has a [plugin] table, which Tessera does not read; delete the \
+                "mosaica.toml has a [plugin] table, which Mosaica does not read; delete the \
                  table and its `module` line"
             ),
             ConfigError::CorsWildcard { key } => write!(

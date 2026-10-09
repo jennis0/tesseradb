@@ -1,9 +1,9 @@
 {
-  "name": "@tesseradb/example-deck-host",
+  "name": "@mosaica/example-deck-host",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
-  "description": "TesseraLayer in a Deck the host builds: its own OrthographicView and camera, the store told through viewInputOf, and a layer of the host's own beside it.",
+  "description": "MosaicaLayer in a Deck the host builds: its own OrthographicView and camera, the store told through viewInputOf, and a layer of the host's own beside it.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -15,8 +15,8 @@
     "@deck.gl/core": "^9.3.7",
     "@deck.gl/layers": "^9.3.7",
     "@luma.gl/core": "^9.3.6",
-    "@tesseradb/client": "*",
-    "@tesseradb/deck": "*"
+    "@mosaica/client": "*",
+    "@mosaica/deck": "*"
   },
   "devDependencies": {
     "typescript": "^5.9.0",

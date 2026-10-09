@@ -25,7 +25,7 @@
 //! `systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=2G` at any rung.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin identity_bands_build -- \
+//! cargo run --release -p mosaica-bench --bin identity_bands_build -- \
 //!     --segment <bundle>/v00000/partitions/default/views/geo/segments/seg-0 --out <dir>
 //! ```
 
@@ -37,7 +37,7 @@ use std::time::Instant;
 use clap::Parser;
 use serde_json::json;
 
-use tessera_store::read::{ColumnsRef, CutIndex, MortonSlice};
+use mosaica_store::read::{ColumnsRef, CutIndex, MortonSlice};
 
 /// The bands that get a `(row, id, code)` list. Powers of two in the identity space: band `J`
 /// holds the rows whose identity is below `2^(64-J)`, about `2^-J` of a corpus whose identities

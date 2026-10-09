@@ -1,8 +1,8 @@
 //! The four generator properties, each checked by a test.
 
 use proptest::prelude::*;
-use tessera_corpus::{Corpus, Grant, TERM_SPACE};
-use tessera_spatial::{morton_of, Bounds, Tile};
+use mosaica_corpus::{Corpus, Grant, TERM_SPACE};
+use mosaica_spatial::{morton_of, Bounds, Tile};
 
 fn grid() -> Bounds {
     Bounds {
@@ -100,8 +100,8 @@ fn the_two_axes_are_independent() {
     let on_diagonal = (0u64..65_536)
         .filter(|&e| {
             let item = c.item(e);
-            tessera_spatial::cell(item.x, e_bounds.x_min, e_bounds.x_max)
-                == tessera_spatial::cell(item.y, e_bounds.y_min, e_bounds.y_max)
+            mosaica_spatial::cell(item.x, e_bounds.x_min, e_bounds.x_max)
+                == mosaica_spatial::cell(item.y, e_bounds.y_min, e_bounds.y_max)
         })
         .count();
     assert!(

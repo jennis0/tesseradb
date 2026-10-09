@@ -1,12 +1,12 @@
-//! **`tessera check` reads inside an inline artifact row**, which is where the whole row is: a
+//! **`mosaica check` reads inside an inline artifact row**, which is where the whole row is: a
 //! geometry on a layer that declares no `[layer.shape]`, two geometries on one row, and a
 //! geometry that is not the layer's declared kind are each a finding here, seconds after the
 //! declaration is written, rather than minutes into the build that would refuse them.
 
 use std::path::Path;
 
-use tessera_build::check::check;
-use tessera_build::config::Config;
+use mosaica_build::check::check;
+use mosaica_build::config::Config;
 
 /// One unprojected view, and the layer block as the caller wrote it.
 fn declaration(dir: &Path, layer: &str) -> Config {

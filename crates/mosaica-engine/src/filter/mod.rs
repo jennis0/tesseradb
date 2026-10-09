@@ -61,9 +61,9 @@ mod test_support;
 use croaring::Bitmap;
 
 use crate::compose::verdict_of;
-use tessera_authz::fragment::FrozenFragment;
-use tessera_lifecycle::buffer::IngestBuffer;
-use tessera_lifecycle::overlay::Overlay;
+use mosaica_authz::fragment::FrozenFragment;
+use mosaica_lifecycle::buffer::IngestBuffer;
+use mosaica_lifecycle::overlay::Overlay;
 
 pub use columns::successor::{
     CoalescedTextWindow, CoalescedWindow, OpenedExtent, TextExtentPaths,
@@ -90,13 +90,13 @@ pub use membership::{
 };
 
 /// The operand value types, re-exported so a caller building a [`FilterOperand`] needs no
-/// dependency on the filter crate: `check-layers.sh` denies `tessera-server` that edge, and an
+/// dependency on the filter crate: `check-layers.sh` denies `mosaica-server` that edge, and an
 /// operand's values are part of this crate's API surface even though the column they are compared
 /// against is not.
-pub use tessera_filter::{Endpoint, Scalar};
+pub use mosaica_filter::{Endpoint, Scalar};
 /// How a bound is narrowed to the column's own type, owned by the filter crate and called by both
 /// routes: the entity-space scan there, the row-space scan in [`crate::viewport`].
-pub(crate) use tessera_filter::{as_f64, narrow_hi, narrow_lo, NativeBound, Narrowed};
+pub(crate) use mosaica_filter::{as_f64, narrow_hi, narrow_lo, NativeBound, Narrowed};
 
 /// The entity-space set a filter may be evaluated over: the session's fragment with the deny state
 /// composed in, plus the buffered entities whose verdict passes.

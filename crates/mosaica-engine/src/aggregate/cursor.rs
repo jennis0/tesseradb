@@ -100,7 +100,7 @@ impl AggregateCursor {
 /// and not over a layer registered since under the same name.
 pub(super) fn digest(req: &AggregateRequest<'_>, layers: &[Option<u64>]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"tessera-aggregate-request-v1");
+    hasher.update(b"mosaica-aggregate-request-v1");
     let mut part = |text: String| {
         hasher.update((text.len() as u64).to_le_bytes());
         hasher.update(text.as_bytes());

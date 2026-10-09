@@ -19,11 +19,11 @@ use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use tessera_store::read::open_bundle;
-use tessera_types::EntityId;
+use mosaica_store::read::open_bundle;
+use mosaica_types::EntityId;
 
-fn tessera() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tessera"))
+fn mosaica() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }
 
 const ENTITIES: u64 = 30;
@@ -285,8 +285,8 @@ require_member_visibility = "inherited"
 const DEPLOYMENT: &str = r#"
 [bundle]
 path  = "bundle"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [build]
 schema = "corpus.toml"
@@ -333,9 +333,9 @@ fn the_whole_declaration_builds_and_verifies() {
         ],
     );
     std::fs::write(at("corpus.toml"), CORPUS).unwrap();
-    std::fs::write(at("tessera.toml"), DEPLOYMENT).unwrap();
+    std::fs::write(at("mosaica.toml"), DEPLOYMENT).unwrap();
 
-    let built = tessera()
+    let built = mosaica()
         .current_dir(dir.path())
         .arg("build")
         .output()
@@ -409,7 +409,7 @@ fn the_whole_declaration_builds_and_verifies() {
             .views
             .get(&format!("quarter_alt:{key}"))
             .expect("the sharing group's view");
-        let held = |view: &tessera_store::read::ViewData| -> Vec<u64> {
+        let held = |view: &mosaica_store::read::ViewData| -> Vec<u64> {
             (0..ENTITIES)
                 .filter(|&e| view.row_space.row_of(EntityId::new(e)).is_some())
                 .collect()
@@ -428,7 +428,7 @@ fn the_whole_declaration_builds_and_verifies() {
     // The bundle verifies, shallow and deep — every file the families and the per-view artifact
     // structures added is digested.
     for args in [vec!["verify"], vec!["verify", "--deep"]] {
-        let mut command = tessera();
+        let mut command = mosaica();
         command.current_dir(dir.path()).args(&args).arg("bundle");
         let out = command.output().expect("verify runs");
         assert!(

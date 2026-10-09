@@ -16,7 +16,7 @@ language model.
 # optional: a third clustering, named by a chat model (needs an endpoint — see below)
 ~/venvs/projection/bin/python -m test_corpora.arxiv.toponymy --llm mock
 
-cd "$TESSERA_LADDER/arxiv" && tessera check --payloads && tessera build
+cd "$MOSAICA_LADDER/arxiv" && mosaica check --payloads && mosaica build
 ```
 
 ## Two views over one entity space
@@ -31,13 +31,13 @@ positioned twice, each layout in its own frame:
 
 **They are here to exercise the multi-view machinery on a real corpus**, and because `knn` is the
 route that scales to the ladder's later embedding rungs. They are not a fidelity experiment: which
-of the two projections better preserves the embedding is a question about UMAP, not about Tessera,
+of the two projections better preserves the embedding is a question about UMAP, not about Mosaica,
 and nothing here measures it.
 
 `knn` is the **anchor** (`[defaults].allocation_view`, decision 0112): entity ids are ordered by
 Morton code in that view, so naming it explicitly is what stops a reordering of the view blocks
 silently re-keying a rebuild. It is also the layout the clusterings are computed over. **Two
-measured facts decided which view got the job**, and both are Tessera-side:
+measured facts decided which view got the job**, and both are Mosaica-side:
 
 - **The `knn` route is 3× faster end to end** — 94 s against 280 s over the whole corpus.
   Reducing to 64 dimensions costs 24 s and then leaves UMAP a graph to build that is *slower*
@@ -210,7 +210,7 @@ HDBSCAN exposes the same condensed tree as a record array, which `prepare.py`'s 
 directly. Its `condensed_tree_` *property* wraps `hdbscan` and raises without it, which is why the
 private array is what is read.
 
-**Sources.** `TESSERA_DATA` names the checkout holding `data/`; a worktree has none of its own.
+**Sources.** `MOSAICA_DATA` names the checkout holding `data/`; a worktree has none of its own.
 This rung's source is *derived* rather than staged: `data/` is what `probes/build_corpus.py` and
 `probes/build_embeddings.py` produced, and the share's `arxiv-tessera/2026-07-27/` is a mirror of
 that directory, a backup rather than a publisher's bytes.
@@ -234,8 +234,8 @@ in seconds without a model on the other end; its labels are not labels, and the 
 ## Serving it
 
 ```bash
-D="$TESSERA_LADDER/arxiv"
-./run_demo.sh --deployment "$D/tessera.toml" \
+D="$MOSAICA_LADDER/arxiv"
+./run_demo.sh --deployment "$D/mosaica.toml" \
     --terms "$(cat "$D/category-terms.txt")" --ranks "$D/category-ranks.json" \
     --label 'arXiv: two projections' --prose title,abstract
 ```
@@ -296,8 +296,8 @@ deep before the chain collapse and 192 nodes 13 deep after it; a mean stray shar
 clusters and 190 of 192 HDBSCAN clusters got a distinctive title, the other two carrying the
 fallback alone. 256 artifacts, 19,707,995 member rows, two layers.
 
-`tessera build` over that output: **54.5 s**, a 1.5 GB bundle, 4,163,155 (paper, category) pairs,
-87 splits of which 84 are non-covering, and no containment violation. `tessera verify --deep`
+`mosaica build` over that output: **54.5 s**, a 1.5 GB bundle, 4,163,155 (paper, category) pairs,
+87 splits of which 84 are non-covering, and no containment violation. `mosaica verify --deep`
 passes: 1 partition, 2 views, 2 segments, 4,844,972 rows. `run_demo.sh --deployment … --no-viewer`
 serves it and measures all five principals, 243 papers visible at the narrowest.
 

@@ -1,4 +1,4 @@
-import {WORLD_SIZE, type AggregateTable, type TilesProjection} from '@tesseradb/client';
+import {WORLD_SIZE, type AggregateTable, type TilesProjection} from '@mosaica/client';
 import {RAMPS, rampAt, type Rgb} from './colour.js';
 
 /**

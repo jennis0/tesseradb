@@ -5,7 +5,7 @@
 //! The declarations are constructed **programmatically**, not parsed: on this branch the schema
 //! parse still refuses a neither-column (the `used_for` migration deletes that refusal in this
 //! same epic), and driving the pipeline directly is what lets the stage land first. The values
-//! are read back through `tessera_filter::RecordBlob` — the reader that will serve drill-down —
+//! are read back through `mosaica_filter::RecordBlob` — the reader that will serve drill-down —
 //! and compared against the fixture's own generation functions, which is the conformance
 //! relation's shape (records §3, review B7).
 
@@ -19,13 +19,13 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Attribute, Schema};
-use tessera_build::{build, BuildArgs};
-use tessera_filter::{Access, RecordBlob, RecordValue};
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::Bounds;
-use tessera_store::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::config::{Attribute, Schema};
+use mosaica_build::{build, BuildArgs};
+use mosaica_filter::{Access, RecordBlob, RecordValue};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::Bounds;
+use mosaica_store::open_bundle;
+use mosaica_types::IdentityKey;
 
 mod common;
 
@@ -181,10 +181,10 @@ fn no_blob_schema() -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     let schema = common::with_id(schema);
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: Bounds {
                 x_min: 0.0,
                 x_max: 1000.0,
@@ -194,12 +194,12 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
             points: points.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
@@ -388,7 +388,7 @@ fn verify_deep_walks_every_blob_row() {
         .rows();
     assert!(rows > 0, "the fixture must have a blob for this to mean anything");
 
-    let report = tessera_build::verify_deep(&out, &tessera_build::VerifyOpts::default())
+    let report = mosaica_build::verify_deep(&out, &mosaica_build::VerifyOpts::default())
         .expect("a well-formed bundle verifies deep");
     assert_eq!(report.record_rows, rows);
 }
@@ -416,9 +416,9 @@ fn verify_deep_refuses_a_blob_whose_bitmap_renames_a_rank() {
             .next()
             .unwrap()
             .clone(),
-        tessera_filter::RECORD_HASROW_FILE
+        mosaica_filter::RECORD_HASROW_FILE
     );
-    let hasrow_path = record_dir(&out).join(tessera_filter::RECORD_HASROW_FILE);
+    let hasrow_path = record_dir(&out).join(mosaica_filter::RECORD_HASROW_FILE);
     let mut bitmap =
         Bitmap::try_deserialize::<Portable>(&std::fs::read(&hasrow_path).unwrap()).unwrap();
     // Move the last member up by one. Nothing else has that id — the build's entity space stops
@@ -429,7 +429,7 @@ fn verify_deep_refuses_a_blob_whose_bitmap_renames_a_rank() {
     std::fs::write(&hasrow_path, bitmap.serialize::<Portable>()).unwrap();
     refresh_digest(&out, &rel);
 
-    let err = tessera_build::verify_deep(&out, &tessera_build::VerifyOpts::default())
+    let err = mosaica_build::verify_deep(&out, &mosaica_build::VerifyOpts::default())
         .expect_err("the deep pass must refuse a blob whose bitmap and blocks disagree");
     let message = err.to_string();
     assert!(

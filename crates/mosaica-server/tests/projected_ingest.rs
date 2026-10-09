@@ -3,7 +3,7 @@
 //! Building a database and adding rows to one are the same operation ([decision
 //! 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)), so a view that
 //! declares a projection has to place a point the same way whichever door the point came through.
-//! The build transforms at the read of a points file (`tessera_build::input`); this file is about
+//! The build transforms at the read of a points file (`mosaica_build::input`); this file is about
 //! the other door — the Arrow batch `/control/ingest` decodes, whose coordinate columns are
 //! `lon`/`lat`, whose latitudes outside the projection's domain are clipped and counted rather than
 //! refused, and whose write-ahead log holds the **frame** coordinates the transform produced.
@@ -31,13 +31,13 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use tempfile::TempDir;
 
-use tessera_build::build;
-use tessera_build::config::Fields;
-use tessera_build::input::deinterleave;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::wal::{Wal, WalRecord};
-use tessera_spatial::{Bounds, Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
+use mosaica_build::build;
+use mosaica_build::config::Fields;
+use mosaica_build::input::deinterleave;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::wal::{Wal, WalRecord};
+use mosaica_spatial::{Bounds, Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
 
 use common::*;
 
@@ -85,7 +85,7 @@ fn build_projected_in(out: &Path, tmp: &Path, points: &[(f64, f64)], frame: Boun
     write_pairs_n(&pairs_path, points.len() as u64);
     let args = build_args(
         out,
-        vec![tessera_build::ViewArgs {
+        vec![mosaica_build::ViewArgs {
             projection: Projection::WebMercator,
             extent: frame,
             point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
@@ -142,7 +142,7 @@ async fn post_ingest(
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -205,10 +205,10 @@ fn config() -> EngineConfig {
 /// build and by an ingest into the database that build produced place every point in the same cell,
 /// **for a projected view**.
 ///
-/// The equivalent test in `tessera-engine`'s `coordinate_precision.rs` runs before any projection
+/// The equivalent test in `mosaica-engine`'s `coordinate_precision.rs` runs before any projection
 /// exists and proves only that the two routes carry the same width. This one is the case that
 /// matters, because the two routes now run *different code* to reach the quantiser:
-/// `tessera_build::input` projects at the read of a Parquet file, and `/control/ingest` projects at
+/// `mosaica_build::input` projects at the read of a Parquet file, and `/control/ingest` projects at
 /// the decode of an Arrow batch, on the other side of a wire, a WAL record and the ingest buffer.
 /// A projection applied on one side and not the other is invisible in every count and every type
 /// signature, and shows up only as a point in the wrong hemisphere.

@@ -20,16 +20,16 @@ use croaring::Bitmap;
 use parquet::arrow::ArrowWriter;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::cells::{
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::cells::{
     count_by_ranges, pass, pass_in_chunks, CellCount, CellSet, GroupTable, RowGroups,
 };
-use tessera_engine::compose::MaskedSet;
-use tessera_engine::viewport::segments_with_row_bases;
-use tessera_engine::Engine;
-use tessera_lifecycle::{UnallocatedRow, WalScalar};
-use tessera_store::read::{ScalarSlice, SegmentData};
+use mosaica_engine::compose::MaskedSet;
+use mosaica_engine::viewport::segments_with_row_bases;
+use mosaica_engine::Engine;
+use mosaica_lifecycle::{UnallocatedRow, WalScalar};
+use mosaica_store::read::{ScalarSlice, SegmentData};
 
 const N: u64 = 5_000;
 
@@ -94,20 +94,20 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
         .schema;
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
         strict: false,

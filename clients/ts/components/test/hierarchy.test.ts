@@ -1,12 +1,12 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import type {BrowseRow, Layer, Meta} from '@tesseradb/client';
+import type {BrowseRow, Layer, Meta} from '@mosaica/client';
 import '../src/hierarchy.js';
-import type {TesseraHierarchy} from '../src/hierarchy.js';
+import type {MosaicaHierarchy} from '../src/hierarchy.js';
 import {UNNAMED} from '../src/base.js';
 import {deep, deepAll, deepText, fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
- * `<tessera-hierarchy>` over `POST /v1/artifacts/browse`: the roots without a viewport, lazy
+ * `<mosaica-hierarchy>` over `POST /v1/artifacts/browse`: the roots without a viewport, lazy
  * children, "also under", the two counts under a filter, and the click that highlights.
  */
 
@@ -54,8 +54,8 @@ const row = (id: bigint, name: string | null, masked: bigint, extra: Partial<Bro
 });
 
 async function panel(overrides: Partial<Parameters<typeof fakeStore>[0]> = {}) {
-  const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
-  const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+  const host = await mount('<mosaica-hierarchy></mosaica-hierarchy>');
+  const el = host.querySelector('mosaica-hierarchy') as MosaicaHierarchy;
   const store = fakeStore({meta: META, status: status({}), ...overrides});
   store.setBrowse('roots', {artifacts: [row(1n, 'Neoplasms', 27_000_000n, {childCount: 2}), row(2n, 'Anatomy', 3_400n, {childCount: 1})], parents: [], next: 'p2'});
   el.store = store;
@@ -64,7 +64,7 @@ async function panel(overrides: Partial<Parameters<typeof fakeStore>[0]> = {}) {
   return {host, el, store};
 }
 
-describe('<tessera-hierarchy>', () => {
+describe('<mosaica-hierarchy>', () => {
   it('offers only the layers with a lineage, and opens on the roots with no viewport', async () => {
     const {host, store} = await panel();
     // `clusters/kmeans` is flat and declares no levels: one page of roots and no row has children,
@@ -78,8 +78,8 @@ describe('<tessera-hierarchy>', () => {
   });
 
   it('marks a row with no name as unnamed and never draws its key in the name’s place', async () => {
-    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
-    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const host = await mount('<mosaica-hierarchy></mosaica-hierarchy>');
+    const el = host.querySelector('mosaica-hierarchy') as MosaicaHierarchy;
     const store = fakeStore({meta: META, status: status({})});
     store.setBrowse('roots', {artifacts: [row(3n, null, 10n)], parents: [], next: null});
     el.store = store;
@@ -91,8 +91,8 @@ describe('<tessera-hierarchy>', () => {
   });
 
   it('names a row by the name the server serves it, and marks a row with none, or an empty one, unnamed', async () => {
-    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
-    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const host = await mount('<mosaica-hierarchy></mosaica-hierarchy>');
+    const el = host.querySelector('mosaica-hierarchy') as MosaicaHierarchy;
     const store = fakeStore({meta: META, status: status({})});
     store.setBrowse('roots', {artifacts: [row(3n, 'spin magnetic effect', 10n), row(4n, null, 8n), row(5n, '', 6n)], parents: [], next: null});
     el.store = store;
@@ -260,8 +260,8 @@ describe('<tessera-hierarchy>', () => {
   it('a panel that is not being shown asks for nothing, and browses when it is', async () => {
     // The roots are the widest request this panel makes; a hidden panel should not send it
     // alongside the first viewport.
-    const host = await mount('<tessera-hierarchy style="display:none"></tessera-hierarchy>');
-    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const host = await mount('<mosaica-hierarchy style="display:none"></mosaica-hierarchy>');
+    const el = host.querySelector('mosaica-hierarchy') as MosaicaHierarchy;
     const store = fakeStore({meta: META, status: status({})});
     store.setBrowse('roots', {artifacts: [row(1n, 'Neoplasms', 27_000_000n)], parents: [], next: null});
     el.store = store;
@@ -279,10 +279,10 @@ describe('<tessera-hierarchy>', () => {
 
 });
 
-describe('<tessera-hierarchy> refused', () => {
+describe('<mosaica-hierarchy> refused', () => {
   it('carries the refusal’s code and says nothing more about the empty tree', async () => {
-    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
-    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const host = await mount('<mosaica-hierarchy></mosaica-hierarchy>');
+    const el = host.querySelector('mosaica-hierarchy') as MosaicaHierarchy;
     const store = fakeStore({meta: META, status: status({})});
     store.browse = () => Promise.reject({code: 'layer-withheld', detail: ''});
     el.store = store;
@@ -293,7 +293,7 @@ describe('<tessera-hierarchy> refused', () => {
   });
 });
 
-describe('<tessera-hierarchy> across a change of viewer', () => {
+describe('<mosaica-hierarchy> across a change of viewer', () => {
   it('drops the roots and names it fetched when the store’s meta goes null, and asks again', async () => {
     const {host, store} = await panel();
     expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Neoplasms', 'Anatomy']);

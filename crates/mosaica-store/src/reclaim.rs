@@ -171,7 +171,7 @@ pub fn reclaim_prefix(prefix_dir: &Path) -> Result<()> {
 /// Delete a prefix tree **no `CURRENT` has ever named** — the partial bundle a failed build leaves.
 ///
 /// A batch build writes its prefix under `<out>/` and writes `CURRENT` last, and it refuses to
-/// start at all where `<out>/CURRENT` already exists (`tessera_build`'s argument validation), so
+/// start at all where `<out>/CURRENT` already exists (`mosaica_build`'s argument validation), so
 /// after a build has failed there is no `CURRENT` in that root. No manifest names the prefix, no
 /// reader can resolve it, and nothing has been published from it. Deleting it is what stops a
 /// retry starting with less free space than the first attempt had.

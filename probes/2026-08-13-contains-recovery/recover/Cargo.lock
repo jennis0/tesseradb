@@ -706,7 +706,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "serde_json",
- "tessera-filter",
+ "mosaica-filter",
 ]
 
 [[package]]
@@ -859,7 +859,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-authz"
+name = "mosaica-authz"
 version = "0.1.0"
 dependencies = [
  "arrow",
@@ -867,24 +867,24 @@ dependencies = [
  "memmap2",
  "rustc-hash",
  "sha2",
- "tessera-types",
+ "mosaica-types",
 ]
 
 [[package]]
-name = "tessera-filter"
+name = "mosaica-filter"
 version = "0.1.0"
 dependencies = [
  "arrow",
  "croaring",
  "memchr",
  "memmap2",
- "tessera-authz",
- "tessera-types",
+ "mosaica-authz",
+ "mosaica-types",
  "zstd",
 ]
 
 [[package]]
-name = "tessera-types"
+name = "mosaica-types"
 version = "0.1.0"
 
 [[package]]

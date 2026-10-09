@@ -34,7 +34,7 @@
 //! is its row list and its index.
 //!
 //! Run:
-//! `cargo run --release -p tessera-bench --bin epoch_shard_tile_index -- --fixture <root>
+//! `cargo run --release -p mosaica-bench --bin epoch_shard_tile_index -- --fixture <root>
 //! --layer <name> --scratch <dir>`
 
 use std::path::{Path, PathBuf};
@@ -46,18 +46,18 @@ use croaring::{Bitmap, Portable};
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 
-use tessera_engine::artifacts::MembershipRows;
-use tessera_engine::row_column::RowColumn;
-use tessera_engine::tile_index::{Extent, TileIndex};
-use tessera_lifecycle::membership::{decode_record, ArtifactRecord, ArtifactStore, Members};
-use tessera_store::derived::tile_index_shifts;
-use tessera_store::manifest::SegmentsManifest;
-use tessera_store::membership::{row_column_width, MembershipPack};
-use tessera_store::permutation::{Permutation, RowSpace};
-use tessera_store::read::MortonSlice;
-use tessera_store::write::write_permutation_iter;
-use tessera_types::layer::ServingLayout;
-use tessera_types::EntityId;
+use mosaica_engine::artifacts::MembershipRows;
+use mosaica_engine::row_column::RowColumn;
+use mosaica_engine::tile_index::{Extent, TileIndex};
+use mosaica_lifecycle::membership::{decode_record, ArtifactRecord, ArtifactStore, Members};
+use mosaica_store::derived::tile_index_shifts;
+use mosaica_store::manifest::SegmentsManifest;
+use mosaica_store::membership::{row_column_width, MembershipPack};
+use mosaica_store::permutation::{Permutation, RowSpace};
+use mosaica_store::read::MortonSlice;
+use mosaica_store::write::write_permutation_iter;
+use mosaica_types::layer::ServingLayout;
+use mosaica_types::EntityId;
 
 #[derive(Parser)]
 #[command(about = "Tile index size and candidacy cost under N epoch shards, on a real bundle")]
@@ -954,7 +954,7 @@ fn check_whole(args: &Args, fixture: &Fixture, shard: &ShardBuild, index: &TileI
         .find(|v| v.layer == args.layer && v.level == args.level)
         .map(|v| v.version);
     if let Some(extent) = fixture.manifest.derived_extents.iter().find(|e| {
-        e.form == tessera_store::manifest::DerivedForm::TileIndex
+        e.form == mosaica_store::manifest::DerivedForm::TileIndex
             && e.layer == args.layer
             && e.level == args.level
             && e.view.as_deref() == Some(fixture.view.as_str())

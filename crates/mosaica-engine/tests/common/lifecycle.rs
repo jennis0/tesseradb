@@ -49,7 +49,7 @@ pub fn remove_the_whole_log(wal: &Path) {
 
 /// The prefix `CURRENT` names at the bundle root.
 pub fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
+    let current: mosaica_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
             .expect("CURRENT parses");
     current.prefix

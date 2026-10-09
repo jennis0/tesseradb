@@ -14,14 +14,14 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, LevelSelection};
-use tessera_lifecycle::membership::IncomingAttachment;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_engine::{ArtifactOut, Engine, LayerSelection, LevelSelection};
+use mosaica_lifecycle::membership::IncomingAttachment;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 /// A treed layer: it declares no levels and its lineage is entirely in its edges
 /// (decision 0082).
@@ -52,7 +52,7 @@ fn declaration(
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
@@ -97,7 +97,7 @@ fn artifacts_of(engine: &Engine, credential: &[u8], budget: Option<u32>) -> Vec<
     engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).budget(budget),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).budget(budget),
         )
         .expect("a viewport over the whole map")
         .artifacts()
@@ -393,7 +393,7 @@ fn a_suppressed_parent_does_not_take_its_child_with_it() {
         .resolve_tessera_ids(&[served[0].tessera_id]).unwrap()[0]
         .expect("it names what was issued");
     engine
-        .accept_change(root_entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(root_entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .expect("the suppress is accepted");
 
     assert_eq!(
@@ -449,7 +449,7 @@ fn a_deleted_parent_leaves_its_child_a_root() {
         .expect("it names what was issued");
 
     engine
-        .accept_change(root_entity, tessera_lifecycle::wal::ChangeOp::Delete)
+        .accept_change(root_entity, mosaica_lifecycle::wal::ChangeOp::Delete)
         .expect("the delete is accepted");
     assert_eq!(
         keys(&artifacts_of(&engine, &credential, None)),
@@ -570,7 +570,7 @@ fn tiered(name: &str, levels: u32) -> LayerDeclaration {
     let mut d = declaration(name, None, false);
     d.hierarchy.kind = HierarchyKind::Tiered;
     d.levels = (0..levels)
-        .map(|level| tessera_types::layer::LevelDeclaration {
+        .map(|level| mosaica_types::layer::LevelDeclaration {
             level,
             title: Some(format!("level {level}")),
             zoom: None,
@@ -589,7 +589,7 @@ fn levelled_artifacts_of(
     engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .budget(budget)
                 .layers(LayerSelection::Named(&[layer])),
         )
@@ -1128,7 +1128,7 @@ fn tiered_zoomed(name: &str, ranges: &[(u32, u32)]) -> LayerDeclaration {
         .iter()
         .enumerate()
         .map(
-            |(level, &(lo, hi))| tessera_types::layer::LevelDeclaration {
+            |(level, &(lo, hi))| mosaica_types::layer::LevelDeclaration {
                 level: level as u32,
                 title: Some(format!("level {level}")),
                 zoom: Some((lo, hi)),
@@ -1177,7 +1177,7 @@ fn at_zoom(
     engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", zoom, WHOLE_MAP, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", zoom, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(&[layer]))
                 .levels(levels),
         )
@@ -1532,7 +1532,7 @@ fn naming_a_level_does_not_blank_a_treed_layer_beside_it() {
     let served = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(&[
                     "admin/boundaries",
                     "clusters/hdbscan",
@@ -1577,7 +1577,7 @@ fn a_dependent_goes_when_its_targets_level_is_not_asked_for() {
     let mut names = labels_on("admin/names", "admin/boundaries");
     names.hierarchy.kind = HierarchyKind::Stacked;
     names.levels = (0..2)
-        .map(|level| tessera_types::layer::LevelDeclaration {
+        .map(|level| mosaica_types::layer::LevelDeclaration {
             level,
             title: Some(format!("names {level}")),
             zoom: None,
@@ -1618,7 +1618,7 @@ fn a_dependent_goes_when_its_targets_level_is_not_asked_for() {
         engine
             .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", zoom, WHOLE_MAP, usize::MAX)
+                mosaica_engine::ViewportArtifactsRequest::new("s0", zoom, WHOLE_MAP, usize::MAX)
                     .layers(LayerSelection::Named(&["admin/boundaries", "admin/names"]))
                     .levels(levels),
             )
@@ -1654,14 +1654,14 @@ fn a_dependent_goes_when_its_targets_level_is_not_asked_for() {
 fn dag(name: &str) -> LayerDeclaration {
     let mut d = declaration(name, None, false);
     d.hierarchy.kind = HierarchyKind::Dag;
-    d.value_set = tessera_types::layer::ValueSet::Open;
+    d.value_set = mosaica_types::layer::ValueSet::Open;
     d
 }
 
 /// The same at `nested`, for the refusals that must not move.
 fn tree_open(name: &str) -> LayerDeclaration {
     let mut d = declaration(name, None, false);
-    d.value_set = tessera_types::layer::ValueSet::Open;
+    d.value_set = mosaica_types::layer::ValueSet::Open;
     d
 }
 
@@ -1684,7 +1684,7 @@ fn parents_in_bundle(
     fx: &Fixture,
     engine: &Engine,
     key: &str,
-) -> Vec<tessera_lifecycle::wal::ParentRef> {
+) -> Vec<mosaica_lifecycle::wal::ParentRef> {
     let dir = fx
         .root
         .join(&engine.generation().prefix)
@@ -1700,12 +1700,12 @@ fn parents_in_bundle(
         if path.extension().is_none_or(|e| e != "tsmb") {
             continue;
         }
-        let pack = tessera_store::membership::MembershipPack::open(&path).expect("a pack opens");
+        let pack = mosaica_store::membership::MembershipPack::open(&path).expect("a pack opens");
         for (_, blob) in pack.iter() {
             if blob.is_empty() {
                 continue;
             }
-            let (record, _) = tessera_lifecycle::membership::decode_record(EntityId::new(1), blob)
+            let (record, _) = mosaica_lifecycle::membership::decode_record(EntityId::new(1), blob)
                 .expect("a record the fold wrote decodes");
             if record.key.as_deref() == Some(key) {
                 assert!(found.is_none(), "one artifact under {key}");
@@ -1768,11 +1768,11 @@ fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
         assert_eq!(
             parents,
             vec![
-                tessera_lifecycle::wal::ParentRef {
+                mosaica_lifecycle::wal::ParentRef {
                     level: 0,
                     ordinal: 0
                 },
-                tessera_lifecycle::wal::ParentRef {
+                mosaica_lifecycle::wal::ParentRef {
                     level: 0,
                     ordinal: 1
                 }
@@ -1817,7 +1817,7 @@ fn ingest_edges(
     for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -1832,10 +1832,10 @@ fn ingest_edges(
             vec![row],
             batch.to_string(),
             hash,
-            tessera_lifecycle::BatchArtifacts {
+            mosaica_lifecycle::BatchArtifacts {
                 memberships: keys
                     .iter()
-                    .map(|key| tessera_lifecycle::BatchMembership {
+                    .map(|key| mosaica_lifecycle::BatchMembership {
                         layer: layer.to_string(),
                         level: 0,
                         view: None,
@@ -1845,7 +1845,7 @@ fn ingest_edges(
                     .collect(),
                 edges: edges
                     .iter()
-                    .map(|(child, parent)| tessera_lifecycle::BatchEdge {
+                    .map(|(child, parent)| mosaica_lifecycle::BatchEdge {
                         layer: layer.to_string(),
                         level: 0,
                         view: None,
@@ -1867,7 +1867,7 @@ fn count_of(engine: &Engine, key: &str) -> u64 {
         match engine.authorise(&full_coverage_credential()).and_then(|session| {
             engine.viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
             )
         }) {
             Ok(out) => break out.artifacts(),
@@ -2053,7 +2053,7 @@ fn ingest_levelled(
     for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -2068,10 +2068,10 @@ fn ingest_levelled(
             vec![row],
             batch.to_string(),
             hash,
-            tessera_lifecycle::BatchArtifacts {
+            mosaica_lifecycle::BatchArtifacts {
                 memberships: keys
                     .iter()
-                    .map(|(level, key)| tessera_lifecycle::BatchMembership {
+                    .map(|(level, key)| mosaica_lifecycle::BatchMembership {
                         layer: layer.to_string(),
                         level: *level,
                         view: None,
@@ -2081,7 +2081,7 @@ fn ingest_levelled(
                     .collect(),
                 edges: edges
                     .iter()
-                    .map(|(level, child, parent)| tessera_lifecycle::BatchEdge {
+                    .map(|(level, child, parent)| mosaica_lifecycle::BatchEdge {
                         layer: layer.to_string(),
                         level: *level,
                         view: None,
@@ -2096,7 +2096,7 @@ fn ingest_levelled(
 }
 
 /// The identifier the viewport serves each artifact under, by key.
-fn ids_by_key(engine: &Engine) -> std::collections::BTreeMap<String, tessera_types::TesseraId> {
+fn ids_by_key(engine: &Engine) -> std::collections::BTreeMap<String, mosaica_types::TesseraId> {
     artifacts_of(engine, &full_coverage_credential(), None)
         .into_iter()
         .filter_map(|a| a.key.map(|key| (key, a.tessera_id)))
@@ -2104,7 +2104,7 @@ fn ids_by_key(engine: &Engine) -> std::collections::BTreeMap<String, tessera_typ
 }
 
 /// The parents the viewport names for `key`.
-fn served_parents(engine: &Engine, key: &str) -> Vec<tessera_types::TesseraId> {
+fn served_parents(engine: &Engine, key: &str) -> Vec<mosaica_types::TesseraId> {
     artifacts_of(engine, &full_coverage_credential(), None)
         .into_iter()
         .find(|a| a.key.as_deref() == Some(key))
@@ -2191,7 +2191,7 @@ fn a_recorded_edge_survives_a_restart_and_a_fold() {
         fold(&engine);
         assert_eq!(
             parents_in_bundle(&fx, &engine, "c"),
-            vec![tessera_lifecycle::wal::ParentRef {
+            vec![mosaica_lifecycle::wal::ParentRef {
                 level: 0,
                 ordinal: 0
             }],
@@ -2299,7 +2299,7 @@ fn a_tiered_edge_is_recorded_against_a_parent_minted_by_the_same_batch() {
     let fx = fixture();
     let engine = fx.open();
     let mut layer = tiered_zoomed("admin/b", &[(0, 7), (0, 7)]);
-    layer.value_set = tessera_types::layer::ValueSet::Open;
+    layer.value_set = mosaica_types::layer::ValueSet::Open;
     engine.register_layer(layer).unwrap();
     // The fine level's artifact exists and hangs from nothing; the coarse level is empty.
     engine

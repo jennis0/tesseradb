@@ -8,7 +8,7 @@ them run in file order.
 
 The one cell that assigns `SCALE` has its value replaced with `"sample"` before it runs, so the
 walk builds `data/notebook-sample/`, which the notebook finds above its own directory. The test
-skips, naming what is missing, where that directory or the `tessera` binary is absent.
+skips, naming what is missing, where that directory or the `mosaica` binary is absent.
 
 `marimo` is stubbed while the cells run: `mo.md` returns its text, `mo.ui.anywidget` returns a
 holder, and `mo.ui.slider` holds its starting value. The widget is built for real, against a stub
@@ -35,7 +35,7 @@ from pathlib import Path
 import pytest
 
 from conftest import binary
-from tesseradb import Viewer
+from mosaica import Viewer
 
 pytest.importorskip("pyarrow")
 pd = pytest.importorskip("pandas")
@@ -114,7 +114,7 @@ def maps(monkeypatch) -> list:
 def walk(monkeypatch, tmp_path, stub_marimo, stub_bundle, maps):
     """The notebook's cells, executed in order, with every database it opened closed after."""
     binary()
-    monkeypatch.delenv("TESSERA_NOTEBOOK_DATA", raising=False)
+    monkeypatch.delenv("MOSAICA_NOTEBOOK_DATA", raising=False)
     # Section 6 saves the database under a fresh temporary directory; this puts it in tmp_path.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     namespace: dict = {"__name__": "notebook_marimo", "__file__": str(NOTEBOOK)}
@@ -128,7 +128,7 @@ def walk(monkeypatch, tmp_path, stub_marimo, stub_bundle, maps):
                 pytest.skip(str(why))
         yield namespace
     finally:
-        from tesseradb._database import Database
+        from mosaica._database import Database
 
         for value in list(namespace.values()):
             if isinstance(value, Database):
@@ -136,7 +136,7 @@ def walk(monkeypatch, tmp_path, stub_marimo, stub_bundle, maps):
 
 
 def tokens(texts) -> list[list[str]]:
-    """Each text's tokens, from `tessera tokenise`, the analyser the server indexes text with.
+    """Each text's tokens, from `mosaica tokenise`, the analyser the server indexes text with.
 
     The count of a `match` or `phrase` filter is computed from these in pandas. A regular
     expression places word boundaries differently from the analyser, and its counts on the
@@ -272,7 +272,7 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
     assert suppression["unsuppressed"].to_dict() == before
 
     # Section 6: the saved copy serves what it was saved with.
-    assert walk["saved_at"].joinpath("tessera.toml").exists()
+    assert walk["saved_at"].joinpath("mosaica.toml").exists()
     assert walk["reopened"].view("papers").count() == want["papers"]
 
     # A topic's title reaches a reader only where it may see every paper the title was written

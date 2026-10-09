@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, UInt32Array};
-use tessera_engine::member_key::MemberColumn;
-use tessera_lifecycle::{BatchArtifacts, BatchEdge, BatchMembership};
+use mosaica_engine::member_key::MemberColumn;
+use mosaica_lifecycle::{BatchArtifacts, BatchEdge, BatchMembership};
 
 use super::DecodeError;
 
@@ -20,11 +20,11 @@ pub(super) fn membership_column<'a>(
     body_name: &str,
     name: &'a str,
     column: &'a Arc<dyn Array>,
-    declaration: &tessera_types::layer::LayerDeclaration,
+    declaration: &mosaica_types::layer::LayerDeclaration,
     view_in: &dyn Fn(&str) -> Option<String>,
 ) -> Result<MembershipColumn<'a>, DecodeError> {
     // A predicate layer's membership is evaluated per request, so there is nothing to store.
-    if declaration.membership != tessera_types::layer::MembershipSource::Enumerated {
+    if declaration.membership != mosaica_types::layer::MembershipSource::Enumerated {
         return Err(DecodeError(format!(
             "{body_name}: column '{name}' names a layer whose membership is evaluated per \
              request, so it has no stored membership to write; leave the column out"
@@ -37,7 +37,7 @@ pub(super) fn membership_column<'a>(
         Some(group) => Some(view_in(group).ok_or_else(|| {
             DecodeError(format!(
                 "{body_name}: column '{name}' names a layer scoped to group '{group}' and this \
-                 batch names no view of it; name one in x-tessera-view"
+                 batch names no view of it; name one in x-mosaica-view"
             ))
         })?),
     };
@@ -110,7 +110,7 @@ impl MembershipTally {
         }
         if column.meaning.declares_edges() {
             // The same adjacency function a build reads a member table's list column by.
-            for ((_, parent), (level, child)) in tessera_types::layer::parent_edges(&keys) {
+            for ((_, parent), (level, child)) in mosaica_types::layer::parent_edges(&keys) {
                 self.edges.insert((
                     membership.layer.to_string(),
                     *level,

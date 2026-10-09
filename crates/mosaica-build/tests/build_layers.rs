@@ -21,10 +21,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::assert_bundles_identical;
-use tessera_build::{build, build_in_memory, BuildArgs};
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::{build, build_in_memory, BuildArgs};
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N_ITEMS: u64 = 250;
@@ -340,20 +340,20 @@ fn inputs_over(ids: &[u64]) -> Inputs {
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
     let schema = common::with_id(Default::default());
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: inputs.points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(inputs.pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             inputs.points.clone(),
             &schema,
         ),
@@ -378,20 +378,20 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
 fn run(
     inputs: &Inputs,
     out: &Path,
-) -> Result<tessera_build::BuildReport, tessera_build::BuildError> {
-    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default())?;
+) -> Result<mosaica_build::BuildReport, mosaica_build::BuildError> {
+    let config = mosaica_build::config::Config::parse(&inputs.config, &Default::default())?;
     let mut args = args(inputs, out);
     args.layers = config.layers;
     args.layer_inputs = config.layer_sources;
     // The attribute sources the schema binds — empty for the fixtures that declare no column, and
     // the points file for the predicate cases, which read one.
     args.attribute_sources =
-        tessera_build::config::AttributeSource::over(inputs.points.clone(), &config.schema);
+        mosaica_build::config::AttributeSource::over(inputs.points.clone(), &config.schema);
     args.schema = config.schema;
     build(&args)
 }
 
-fn manifest_of(root: &Path) -> tessera_store::manifest::SegmentsManifest {
+fn manifest_of(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
     let bundle = open_bundle(root).expect("a bundle built with layers opens");
     bundle
         .partitions
@@ -420,7 +420,7 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
         .collect();
     assert_eq!(names, vec!["clusters/a", "topics/x"]);
     assert!(
-        manifest.entity_id_low_water < tessera_types::layer::ROWLESS_CEILING,
+        manifest.entity_id_low_water < mosaica_types::layer::ROWLESS_CEILING,
         "the row-less mark must record what the layers claimed"
     );
     // Layer entities and artifact runs alike come out of the row-less region, above every point.
@@ -428,7 +428,7 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
         assert!(layer.entity.raw() > N_ITEMS);
         assert!(layer.entity.raw() >= manifest.entity_id_low_water);
         for runs in &layer.runs {
-            assert!(runs.capacity() >= tessera_types::layer::RESERVED_BLOCK);
+            assert!(runs.capacity() >= mosaica_types::layer::RESERVED_BLOCK);
         }
     }
 
@@ -461,7 +461,7 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
     let inputs = inputs();
     let streamed = inputs.dir.join("streamed");
     let linear = inputs.dir.join("linear");
-    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default())
+    let config = mosaica_build::config::Config::parse(&inputs.config, &Default::default())
         .expect("the fixture config parses");
     let mut linear_args = args(&inputs, &linear);
     linear_args.layers = config.layers;
@@ -532,7 +532,7 @@ fn contiguous_and_gapped_source_ids_place_a_member_on_the_same_entity() {
 }
 
 /// The report's entries as `(object, reason, rows)`.
-fn refusals(report: &tessera_build::BuildReport) -> Vec<(&str, &str, u64)> {
+fn refusals(report: &mosaica_build::BuildReport) -> Vec<(&str, &str, u64)> {
     report
         .refused
         .iter()
@@ -712,7 +712,7 @@ fn a_layer_naming_a_view_this_build_does_not_write_is_refused() {
 #[test]
 fn artifacts_without_a_layer_file_are_refused() {
     let inputs = inputs();
-    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
+    let config = mosaica_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
     let out = inputs.dir.join("bundle");
     let mut args = args(&inputs, &out);
     args.layer_inputs = config.layer_sources;
@@ -797,7 +797,7 @@ fn write_treed_members(path: &Path, membership: &[(&str, Vec<u64>)]) {
 fn treed_build(
     child_parent: &[(&str, Option<&str>)],
     membership: &[(&str, Vec<u64>)],
-) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
+) -> (mosaica_build::error::Result<()>, PathBuf, tempfile::TempDir) {
     let inputs = inputs();
     std::fs::write(&inputs.config, format!("{VIEW_TOML}{TREED_LAYERS_TOML}")).unwrap();
     write_treed_artifacts(&inputs.at("tree.parquet"), child_parent);
@@ -1007,7 +1007,7 @@ title = "counties"
 fn tiered_build(
     rows: &[(u32, &str, Option<&str>)],
     membership: &[(u32, &str, Vec<u64>)],
-) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
+) -> (mosaica_build::error::Result<()>, PathBuf, tempfile::TempDir) {
     let inputs = inputs();
     std::fs::write(&inputs.config, format!("{VIEW_TOML}{TIERED_LAYERS_TOML}")).unwrap();
     write_edged_artifacts(&inputs.at("admin.parquet"), rows);
@@ -1160,7 +1160,7 @@ fn build_spelling(
 fn build_spelling_reported(
     layers: &str,
     write_sources: impl FnOnce(&Inputs),
-) -> (PathBuf, tempfile::TempDir, tessera_build::BuildReport) {
+) -> (PathBuf, tempfile::TempDir, mosaica_build::BuildReport) {
     let inputs = inputs();
     std::fs::write(&inputs.config, format!("{VIEW_TOML}{layers}")).unwrap();
     write_sources(&inputs);
@@ -1762,13 +1762,13 @@ depends_on = ["clusters/a"]
 "#;
 
 /// Build `text` as this fixture's declaration, into `out`.
-fn run_config(inputs: &Inputs, text: &str, out: &Path) -> tessera_build::BuildReport {
+fn run_config(inputs: &Inputs, text: &str, out: &Path) -> mosaica_build::BuildReport {
     let path = inputs.dir.join(format!(
         "{}.toml",
         out.file_name().unwrap().to_string_lossy()
     ));
     std::fs::write(&path, format!("{VIEW_TOML}{text}")).unwrap();
-    let config = tessera_build::config::Config::parse(&path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&path, &Default::default())
         .expect("the declaration parses");
     let mut args = args(inputs, out);
     args.layers = config.layers;
@@ -2176,11 +2176,11 @@ fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
     }
     assert_eq!(
         minted.layers[0].declaration.value_set,
-        tessera_types::layer::ValueSet::Open
+        mosaica_types::layer::ValueSet::Open
     );
     assert_eq!(
         declared.layers[0].declaration.value_set,
-        tessera_types::layer::ValueSet::Closed
+        mosaica_types::layer::ValueSet::Closed
     );
 }
 
@@ -2600,7 +2600,7 @@ fn write_dag_artifacts(path: &Path, rows: &[(&str, &[&str])]) {
 fn dag_build(
     rows: &[(&str, &[&str])],
     membership: &[(&str, Vec<u64>)],
-) -> (tessera_build::error::Result<()>, PathBuf, tempfile::TempDir) {
+) -> (mosaica_build::error::Result<()>, PathBuf, tempfile::TempDir) {
     let inputs = inputs();
     std::fs::write(&inputs.config, format!("{VIEW_TOML}{}", dag_layers_toml())).unwrap();
     write_dag_artifacts(&inputs.at("tree.parquet"), rows);
@@ -3034,7 +3034,7 @@ fn a_build_mints_an_attribute_predicates_artifacts_from_its_column() {
     // the column, so one label per row is the only form it has.
     assert_eq!(
         layer.layout_of(0),
-        tessera_types::layer::ServingLayout::RowMajorLabel
+        mosaica_types::layer::ServingLayout::RowMajorLabel
     );
     let version = manifest
         .level_versions
@@ -3058,9 +3058,9 @@ fn a_build_mints_an_attribute_predicates_artifacts_from_its_column() {
 
 /// The membership string `reports/disclosure.json` carries for one layer of a declaration.
 fn disclosed_membership(config: &Path, layer: &str) -> String {
-    let config = tessera_build::config::Config::parse(config, &Default::default())
+    let config = mosaica_build::config::Config::parse(config, &Default::default())
         .expect("the fixture's declaration parses");
-    let disclosure = tessera_build::disclosure::Disclosure::of(&config);
+    let disclosure = mosaica_build::disclosure::Disclosure::of(&config);
     let json = serde_json::to_value(&disclosure).unwrap();
     json["layers"]
         .as_array()
@@ -3119,8 +3119,8 @@ fn a_build_publishes_a_shape_layers_shapes_and_discloses_the_kind() {
     assert!(
         matches!(
             layer.layout_of(0),
-            tessera_types::layer::ServingLayout::ArtifactMajor
-                | tessera_types::layer::ServingLayout::RowMajorLabel
+            mosaica_types::layer::ServingLayout::ArtifactMajor
+                | mosaica_types::layer::ServingLayout::RowMajorLabel
         ),
         "a shape level is picked one of the same forms an enumerated one is, not a form of its own"
     );
@@ -3437,9 +3437,9 @@ artifacts = [
 fn a_build_reads_an_authored_shape_content_and_discloses_the_kind() {
     let inputs = predicate_inputs(AUTHORED_LAYER);
     run(&inputs, &inputs.at("bundle")).expect("an authored polygon builds");
-    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
+    let config = mosaica_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
     let disclosure =
-        serde_json::to_value(tessera_build::disclosure::Disclosure::of(&config)).unwrap();
+        serde_json::to_value(mosaica_build::disclosure::Disclosure::of(&config)).unwrap();
     let layer = disclosure["layers"]
         .as_array()
         .unwrap()
@@ -3532,7 +3532,7 @@ fn write_labels_without_members(path: &Path, clusters: &[i64]) {
 /// A label set declaring no members builds (decision 0145). The label layer's artifacts carry an
 /// attachment, a text and an empty membership, and the build publishes them beside the clustering
 /// they name rather than refusing the declaration for want of a member table. What such a label is
-/// served over is asserted in `tessera-server/tests/label_membership.rs`; asserted here is that the
+/// served over is asserted in `mosaica-server/tests/label_membership.rs`; asserted here is that the
 /// bundle carries it, and that its clustering came from a point column with no member table
 /// anywhere.
 #[test]

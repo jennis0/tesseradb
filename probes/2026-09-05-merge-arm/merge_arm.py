@@ -7,18 +7,18 @@ the flush-extension route — and once the merge has published, the same request
 the first is the merge arm (the held form no longer covers the row space, so the level is
 projected whole on the request path), the second is the rebuilt form serving.
 
-    TESSERA_BIN=target/release/tessera python3 probes/2026-09-05-merge-arm/merge_arm.py <scratch>
+    MOSAICA_BIN=target/release/mosaica python3 probes/2026-09-05-merge-arm/merge_arm.py <scratch>
 """
 import base64, json, os, sys, time, uuid
 from pathlib import Path
 
-sys.path.insert(0, "/home/user/code/tessera/test_corpora")
+sys.path.insert(0, "/home/user/code/mosaica/test_corpora")
 import pyarrow as pa, pyarrow.ipc as ipc, pyarrow.parquet as pq, requests
 from common import serve_battery
 from common.deployment import Deployment
 from common.ingest_cycle import Control, encode_batch, wire_columns, wait_for
 
-R = Path("/home/user/code/tessera")
+R = Path("/home/user/code/mosaica")
 rung = R / "data/ladder/medcpt"
 scratch = Path(sys.argv[1])
 FLUSHES = int(os.environ.get("FLUSHES", "4"))
@@ -57,7 +57,7 @@ def batch(points: pa.Table, start: int, n: int, offset: int) -> bytes:
 
 
 d = Deployment(rung, Path(os.environ.get("BUNDLE", R / "data/ladder/.measure/medcpt36/allin/bundle")), scratch,
-               (8181, 8182, 8183), Path(os.environ["TESSERA_BIN"]))
+               (8181, 8182, 8183), Path(os.environ["MOSAICA_BIN"]))
 d.clear_scratch()
 t0 = time.perf_counter(); d.start(); out["open_s"] = round(time.perf_counter() - t0, 1)
 log(f"served pid={d.pid} open={out['open_s']} s")

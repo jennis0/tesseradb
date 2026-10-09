@@ -24,7 +24,7 @@
 //! recolouring with no symptom**, which is why a layer's index files are one atomic manifest unit
 //! (records §7, review B2) and why nothing here caches an ordinal across layers.
 //!
-//! The renumbering is also why `tessera-authz`'s dictionary-extent merge is not a template for the
+//! The renumbering is also why `mosaica-authz`'s dictionary-extent merge is not a template for the
 //! coalesce that will consume this reader. That merge is ordinal-*preserving* by construction, so
 //! it needs no content guard; this family's is not, and records §7 states the guard it owes
 //! instead — the remap must be monotone, and `merged[remap[i]] == input[i]` verified for every
@@ -162,7 +162,7 @@ pub const DICT_FILE: &str = "dict.bin";
 /// Bumped whenever the byte layout changes, and checked exactly at open. Pre-release there is no
 /// past to be compatible with (decision 0048); the version exists so a stale local artefact refuses
 /// loudly instead of being misread.
-pub const DICT_FORMAT_VERSION: u32 = 1;
+pub const DICT_FORMAT_VERSION: u32 = 2;
 
 /// Keys per block: the restart interval a writer uses unless told otherwise.
 ///
@@ -175,9 +175,9 @@ pub const DICT_FORMAT_VERSION: u32 = 1;
 /// its middle. The campaign's table is there for a reader who weighs the two differently.
 pub const DEFAULT_RESTART_INTERVAL: u32 = 16;
 
-/// `TSDC` — Tessera sorted dictionary. Written at both ends of the file, so a truncated tail is
+/// `MSDC` — Mosaica sorted dictionary. Written at both ends of the file, so a truncated tail is
 /// refused by the footer's copy before any offset in it is believed.
-const MAGIC: [u8; 4] = *b"TSDC";
+const MAGIC: [u8; 4] = *b"MSDC";
 
 /// `version | restart_interval | key_count | block_count | blocks_len | MAGIC`.
 const FOOTER_LEN: usize = 4 + 4 + 4 + 4 + 8 + 4;
@@ -561,12 +561,12 @@ impl SortedDict {
             )));
         }
         if bytes[..MAGIC.len()] != MAGIC {
-            return Err(malformed(format!("{origin} does not start with 'TSDC'")));
+            return Err(malformed(format!("{origin} does not start with 'MSDC'")));
         }
         let footer = len - FOOTER_LEN;
         if bytes[len - MAGIC.len()..] != MAGIC {
             return Err(malformed(format!(
-                "{origin} does not end with 'TSDC' — a truncated or overwritten tail"
+                "{origin} does not end with 'MSDC' — a truncated or overwritten tail"
             )));
         }
         let version = read_u32_at(&bytes, footer);

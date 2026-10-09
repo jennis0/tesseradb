@@ -38,7 +38,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use tessera_catalogue::{Catalogue, Provider};
+use mosaica_catalogue::{Catalogue, Provider};
 
 const KEYS_MAX_AGE: Duration = Duration::from_secs(3600);
 const KEYS_CEILING: Duration = Duration::from_secs(24 * 3600);

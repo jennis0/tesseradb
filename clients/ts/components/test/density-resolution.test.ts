@@ -1,8 +1,8 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import type {AggregateSpec} from '@tesseradb/client';
-import {DENSITY_SETTLE_MS, cellDepth} from '@tesseradb/deck';
+import type {AggregateSpec} from '@mosaica/client';
+import {DENSITY_SETTLE_MS, cellDepth} from '@mosaica/deck';
 import '../src/explorer.js';
-import type {TesseraMap} from '../src/map.js';
+import type {MosaicaMap} from '../src/map.js';
 import {fakeStore, meta, mount, registered, settle, status, type FakeStore} from './fake-store.js';
 import {SELECTION} from '../../core/test/support.js';
 
@@ -13,7 +13,7 @@ import {SELECTION} from '../../core/test/support.js';
  */
 
 /** A map 1000 × 800 px wide, fitted, so the whole 512-unit world is 800 px across at zoom log2(800 / 512). */
-function sized(map: TesseraMap): number {
+function sized(map: MosaicaMap): number {
   Object.defineProperty(map, 'clientWidth', {configurable: true, value: 1000});
   Object.defineProperty(map, 'clientHeight', {configurable: true, value: 800});
   map.fit();
@@ -29,8 +29,8 @@ describe('density resolution', () => {
   afterEach(() => vi.useRealTimers());
 
   it('asks the map for the depth nearest its cell size once the camera has rested, and again when the size changes', async () => {
-    const host = await mount('<tessera-map density="grid" density-resolution="8"></tessera-map>');
-    const map = host.querySelector('tessera-map') as TesseraMap;
+    const host = await mount('<mosaica-map density="grid" density-resolution="8"></mosaica-map>');
+    const map = host.querySelector('mosaica-map') as MosaicaMap;
     const store = fakeStore({meta: meta(), status: status({})});
     map.store = store;
     await settle(host);
@@ -50,15 +50,15 @@ describe('density resolution', () => {
   });
 
   it('sets the cell size from the Resolution slider, stops at the finest the server counts, and reports it', async () => {
-    const host = await mount('<tessera-explorer density="grid"></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; densityResolution: number};
+    const host = await mount('<mosaica-explorer density="grid"></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown; densityResolution: number};
     // The whole world at depth 5 is 1,024 cells and at depth 6 4,096: a limit of 2,000 admits
     // the 32 and 24 px stops, which ask for depth 5 at this zoom, and none finer.
     const store = fakeStore({meta: meta({selection: {...SELECTION, maxAggregateCells: 2000}}), status: status({})});
     el.store = store;
     await settle(host);
     const shadow = el.shadowRoot!;
-    const map = shadow.querySelector('tessera-map') as TesseraMap;
+    const map = shadow.querySelector('mosaica-map') as MosaicaMap;
     sized(map);
     shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
     await settle(host);
@@ -73,7 +73,7 @@ describe('density resolution', () => {
     ]);
 
     const seen: {densityResolution: number}[] = [];
-    host.addEventListener('tessera-displaychange', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-displaychange', (e) => seen.push((e as CustomEvent).detail));
     const slider = () => shadow.querySelector<HTMLInputElement>('[part="density-resolution"]')!;
     const readout = () => [...shadow.querySelectorAll('.readout')].map((r) => r.textContent).find((t) => t?.startsWith('cells'));
     // At this zoom the seven sizes ask for four depths, so the slider has four stops.
@@ -103,8 +103,8 @@ describe('density resolution', () => {
   });
 
   it('counts over the highlight, and a new highlight sends no request of the map’s own', async () => {
-    const host = await mount('<tessera-map density="hex"></tessera-map>');
-    const map = host.querySelector('tessera-map') as TesseraMap;
+    const host = await mount('<mosaica-map density="hex"></mosaica-map>');
+    const map = host.querySelector('mosaica-map') as MosaicaMap;
     const store = fakeStore({meta: meta(), status: status({})});
     map.store = store;
     await settle(host);
@@ -121,8 +121,8 @@ describe('density resolution', () => {
   });
 
   it('shows the slider for every mode but None', async () => {
-    const host = await mount('<tessera-explorer density="none"></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; density: string};
+    const host = await mount('<mosaica-explorer density="none"></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown; density: string};
     el.store = fakeStore({meta: meta(), status: status({})});
     await settle(host);
     const shadow = el.shadowRoot!;

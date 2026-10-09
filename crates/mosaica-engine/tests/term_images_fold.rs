@@ -7,7 +7,7 @@
 //! projection of the posting the same fold wrote, that a folded deletion is in neither, and that
 //! the file the new side-manifest names is the one the reopened bundle maps.
 //!
-//! `tests/../../tessera-build/tests/term_images_build.rs` holds the build's half. The two are one
+//! `tests/../../mosaica-build/tests/term_images_build.rs` holds the build's half. The two are one
 //! derivation (decisions 0091 and 0139), which is what the byte-identity case here asserts.
 
 mod common;
@@ -21,15 +21,15 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use croaring::Bitmap;
 use parquet::arrow::ArrowWriter;
-use tessera_authz::postings::{PostingRef, PostingsReader};
-use tessera_build::{build, BuildArgs};
-use tessera_engine::Engine;
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_store::read::open_bundle;
-use tessera_store::term_images::{TermImages, HEADER_BYTES, KEEP_ROWS_PER_CONTAINER};
-use tessera_store::RowSpace;
-use tessera_types::{EntityId, TermId};
+use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::Engine;
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_store::read::open_bundle;
+use mosaica_store::term_images::{TermImages, HEADER_BYTES, KEEP_ROWS_PER_CONTAINER};
+use mosaica_store::RowSpace;
+use mosaica_types::{EntityId, TermId};
 
 /// Rows enough for a second Roaring container, which is what puts a term whose image is spread
 /// over both on the wrong side of the keep rule: thirty rows a container is a cut a scattered term
@@ -169,22 +169,22 @@ fn build_fixture(tmp: &Path, root: &Path) {
     // **Two views over the one corpus**, because one view cannot show that each view's images are
     // its own file: the counter that names them runs across the calls of a publication, and two
     // views numbering from zero would write one file twice while both manifest entries stood.
-    let view_args = |view: &str| tessera_build::ViewArgs {
+    let view_args = |view: &str| mosaica_build::ViewArgs {
         visibility: None,
         view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: points.clone(),
         point_fields: Default::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        access: mosaica_build::config::AccessInput::relation(pairs.clone()),
     };
     let args = BuildArgs {
         views: vec![view_args(VIEWS[0]), view_args(VIEWS[1])],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &id_schema()),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &id_schema()),
         out: root.to_path_buf(),
         schema: id_schema(),
         limit: None,
@@ -271,7 +271,7 @@ fn images_of(root: &Path, prefix: &str, view: &str) -> (Arc<TermImages>, RowSpac
 }
 
 /// Every view's entry in the side-manifest of the bundle `CURRENT` names.
-fn extents_of(root: &Path) -> Vec<tessera_store::manifest::TermImageExtent> {
+fn extents_of(root: &Path) -> Vec<mosaica_store::manifest::TermImageExtent> {
     open_bundle(root).expect("the bundle opens").partitions["default"]
         .manifest
         .term_image_extents
@@ -613,7 +613,7 @@ fn a_flipped_byte_in_a_folds_image_refuses_the_bundle() {
     assert!(
         matches!(
             error,
-            tessera_store::StoreError::FileVerificationFailed { .. }
+            mosaica_store::StoreError::FileVerificationFailed { .. }
         ),
         "{error}"
     );

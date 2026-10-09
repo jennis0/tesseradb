@@ -19,7 +19,7 @@ pub(crate) struct ServedView<'a> {
     pub(crate) session: &'a Session,
     pub(crate) generation: &'a Generation,
     pub(crate) name: &'a str,
-    pub(crate) data: &'a tessera_store::read::ViewData,
+    pub(crate) data: &'a mosaica_store::read::ViewData,
     /// Every segment of the view, each with where its rows begin in the view's row space, ascending.
     pub(crate) segments: Vec<(&'a SegmentData, u32)>,
     /// This view's `deleted ∪ suppressed` in row space.

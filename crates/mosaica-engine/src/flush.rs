@@ -14,15 +14,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use tessera_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
-use tessera_lifecycle::wal::WalScalar;
-use tessera_lifecycle::{BufferedItem, Overlay};
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
-use tessera_store::permutation::SegmentExtent;
-use tessera_store::read::SegmentData;
-use tessera_store::{write_flush_segment, FlushInput, FlushRow};
-use tessera_types::{EntityId, IdentityKey, TermId};
+use mosaica_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_lifecycle::{BufferedItem, Overlay};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
+use mosaica_store::permutation::SegmentExtent;
+use mosaica_store::read::SegmentData;
+use mosaica_store::{write_flush_segment, FlushInput, FlushRow};
+use mosaica_types::{EntityId, IdentityKey, TermId};
 
 use crate::write::StageMark;
 use crate::Generation;
@@ -415,7 +415,7 @@ pub(crate) struct FlushContext {
     pub(crate) partition: String,
     pub(crate) view: String,
     /// The incarnation of `view` this flush writes into. A view whose incarnation cannot be resolved is not flushed.
-    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
+    pub(crate) incarnation: mosaica_types::view::ViewIncarnation,
     pub(crate) seg_id: String,
     pub(crate) row_base: u32,
     /// The view's entity floor when planned: the rows of entities below it are listed in the
@@ -439,7 +439,7 @@ pub(crate) struct FlushContext {
     /// The view id this flush's scoped columns are addressed by: the owning group's view of the same key, or [`FlushContext::view`] itself.
     pub(crate) scoped_view: String,
     /// The incarnation of [`FlushContext::scoped_view`]; under a sharing door this differs from [`FlushContext::incarnation`]'s view.
-    pub(crate) scoped_incarnation: tessera_types::view::ViewIncarnation,
+    pub(crate) scoped_incarnation: mosaica_types::view::ViewIncarnation,
     /// One entry per lane in `scalar_schema`'s scoped suffix; `None` for a lane this view renders but this flush's batches could not name.
     pub(crate) scoped_render: Vec<Option<usize>>,
     /// The indexed `text` columns, each with the analyser its declaration resolved; a text column has no value column.
@@ -448,7 +448,7 @@ pub(crate) struct FlushContext {
     pub(crate) dict: Arc<Dict>,
     /// The descriptor bytes behind every extension term id this plan's items carry; empty in the steady state.
     pub(crate) novel_descriptors: FxHashMap<TermId, Vec<u8>>,
-    /// [`tessera_authz::MAX_DISTINCT_TERMS`] unless a test lowers it, enforced at promotion (see
+    /// [`mosaica_authz::MAX_DISTINCT_TERMS`] unless a test lowers it, enforced at promotion (see
     /// [`promote`]), the one path by which a caller grows the dictionary.
     pub(crate) max_distinct_terms: u64,
     pub(crate) prefix: String,
@@ -457,7 +457,7 @@ pub(crate) struct FlushContext {
     /// The unique columns when planned, each with its position in a buffered row and its type.
     pub(crate) unique_schema: Vec<(String, usize, ScalarType)>,
     /// The edited-items map when planned: each planned entity's number is read from it on the pool.
-    pub(crate) edited: Arc<tessera_store::edited::EditedIndex>,
+    pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
     pub(crate) edited_live: Arc<crate::edited::EditedLive>,
 }
 
@@ -478,14 +478,14 @@ pub(crate) struct CompletedFlush {
     /// This flush's record-blob extent, or `None` where the schema declares no blob-resident column.
     pub(crate) record_extent: Option<RecordExtent>,
     /// This flush's slice of the entity-to-term transpose. Never absent, unlike the record extent.
-    pub(crate) entity_terms_extent: tessera_store::manifest::EntityTermsExtent,
+    pub(crate) entity_terms_extent: mosaica_store::manifest::EntityTermsExtent,
     /// The `(family, view)` pairs this flush gave a column; a view left off this list renders nothing on restart.
     pub(crate) scoped_columns: Vec<(String, String)>,
     /// The incarnation of the view [`CompletedFlush::scoped_columns`] names, which under a
     /// sharing door is the owning group's rather than the flushing view's.
-    pub(crate) scoped_incarnation: tessera_types::view::ViewIncarnation,
+    pub(crate) scoped_incarnation: mosaica_types::view::ViewIncarnation,
     /// This flush's text layers, one per indexed `text` column, composed onto the live generation at publication.
-    pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
+    pub(crate) text_extents: Vec<mosaica_store::manifest::TextExtent>,
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
     pub(crate) files: std::collections::BTreeMap<String, FileDigest>,
     /// The dictionary including this flush's promotions, republished with the geometry.
@@ -506,8 +506,8 @@ pub(crate) struct CompletedFlush {
 /// The edited-items runs one flush wrote, and the live pairs they replace.
 #[derive(Default)]
 pub(crate) struct FlushedEdited {
-    pub(crate) by_number: Vec<tessera_store::manifest::BaseKeyRun>,
-    pub(crate) by_entity: Vec<tessera_store::manifest::BaseKeyRun>,
+    pub(crate) by_number: Vec<mosaica_store::manifest::BaseKeyRun>,
+    pub(crate) by_entity: Vec<mosaica_store::manifest::BaseKeyRun>,
     pub(crate) entities: Vec<u32>,
 }
 
@@ -516,7 +516,7 @@ pub(crate) struct FlushedUnique {
     pub(crate) attribute: String,
     /// Prefix-relative; already digested into [`CompletedFlush::files`].
     pub(crate) runs: Vec<String>,
-    pub(crate) written: Vec<(tessera_store::unique::UniqueKey, EntityId)>,
+    pub(crate) written: Vec<(mosaica_store::unique::UniqueKey, EntityId)>,
 }
 
 /// The half of a completed flush that exists only where the plan gave rows geometry.
@@ -524,14 +524,14 @@ pub(crate) struct SegmentFlush {
     pub(crate) segment: SegmentData,
     pub(crate) extent: SegmentExtent,
     /// Ingredients for the manifest: assembled at publication, with deny fields serialised fresh from the overlay.
-    pub(crate) descriptor: tessera_store::manifest::SegmentDescriptor,
+    pub(crate) descriptor: mosaica_store::manifest::SegmentDescriptor,
     pub(crate) watermark: u64,
     pub(crate) entity_id_high_water: u64,
     pub(crate) tier: Arc<DeltaTier>,
     /// The tier's prefix-relative path; carried rather than re-derived, since a coalesce moves it.
     pub(crate) tier_path: String,
     /// The tier measured as encoded, computed on the pool beside the write it measures.
-    pub(crate) tier_tally: tessera_lifecycle::window::FragmentationTally,
+    pub(crate) tier_tally: mosaica_lifecycle::window::FragmentationTally,
     /// The segment's membership in every spatial level of its view, resolved on the pool.
     pub(crate) shape_pieces: Vec<crate::shapes::ShapePiece>,
 }
@@ -631,14 +631,14 @@ fn execute_flush_stages(
 
     // ---- the delta postings tier: carries the postings of the entities the segment gave rows.
     let tier_bits = if out.is_some() {
-        let tier_tally = tessera_lifecycle::window::FragmentationTally::of_tier(
+        let tier_tally = mosaica_lifecycle::window::FragmentationTally::of_tier(
             &promotion.postings,
             plan.items.len() as u64,
         );
         let tier_rel = format!(
             "partitions/{}/{}/segments/{}/delta.arrow",
             ctx.partition,
-            tessera_store::view_rel(&ctx.view),
+            mosaica_store::view_rel(&ctx.view),
             ctx.seg_id
         );
         let tier_path = ctx.prefix_dir.join(&tier_rel);
@@ -721,16 +721,16 @@ fn execute_flush_stages(
     for (column, view) in &scoped_columns {
         // The writer's own derivation, so the base is digested at the exact path it was written to.
         let rel =
-            tessera_store::scoped_column_rel(&ctx.partition, column, view, ctx.scoped_incarnation);
-        let prose = |name: &str| format!("{}/{name}", tessera_store::manifest::SCOPED_PROSE_DIR);
+            mosaica_store::scoped_column_rel(&ctx.partition, column, view, ctx.scoped_incarnation);
+        let prose = |name: &str| format!("{}/{name}", mosaica_store::manifest::SCOPED_PROSE_DIR);
         for name in [
-            tessera_filter::VALUES_FILE.to_string(),
-            tessera_filter::PRESENCE_FILE.to_string(),
-            tessera_filter::DICT_FILE.to_string(),
+            mosaica_filter::VALUES_FILE.to_string(),
+            mosaica_filter::PRESENCE_FILE.to_string(),
+            mosaica_filter::DICT_FILE.to_string(),
             "postings.arrow".to_string(),
-            prose(tessera_filter::RECORD_BLOCKS_FILE),
-            prose(tessera_filter::RECORD_HASROW_FILE),
-            prose(tessera_filter::RECORD_DIRECTORY_FILE),
+            prose(mosaica_filter::RECORD_BLOCKS_FILE),
+            prose(mosaica_filter::RECORD_HASROW_FILE),
+            prose(mosaica_filter::RECORD_DIRECTORY_FILE),
         ] {
             if ctx.prefix_dir.join(&rel).join(&name).exists() {
                 to_digest.push(format!("{rel}/{name}"));
@@ -776,10 +776,10 @@ fn execute_flush_stages(
         None => None,
         Some(out) => {
             let seg_dir = segment_dir(&ctx);
-            let entities = tessera_store::edited::RowEntities::Listed(std::sync::Arc::new(
-                tessera_store::edited::EditedRows::open(
+            let entities = mosaica_store::edited::RowEntities::Listed(std::sync::Arc::new(
+                mosaica_store::edited::EditedRows::open(
                     &seg_dir,
-                    tessera_store::edited::lists_edited_rows(out.files.keys()),
+                    mosaica_store::edited::lists_edited_rows(out.files.keys()),
                 )
                 .map_err(|e| MaintenanceFailed(e.to_string()))?,
             ));
@@ -1003,7 +1003,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
             path: format!(
                 "partitions/{}/{}/segments/{}/terms-0.dict",
                 ctx.partition,
-                tessera_store::view_rel(&ctx.view),
+                mosaica_store::view_rel(&ctx.view),
                 ctx.seg_id
             ),
             records: interned.len() as u64,
@@ -1106,7 +1106,7 @@ fn write_edited_runs(
     if pairs.is_empty() {
         return Ok(FlushedEdited::default());
     }
-    let written = tessera_store::edited::write_edited_runs(
+    let written = mosaica_store::edited::write_edited_runs(
         &ctx.prefix_dir,
         &ctx.partition,
         &ctx.seg_id,
@@ -1114,10 +1114,10 @@ fn write_edited_runs(
     )
     .map_err(failed("the edited items' runs"))?;
     let paths: Vec<std::path::PathBuf> = written.paths().map(Path::to_path_buf).collect();
-    tessera_store::fsync_written(&paths).map_err(failed("the edited items' runs"))?;
-    let based = |runs: &[tessera_store::key_index::WrittenRun<u32>]| {
+    mosaica_store::fsync_written(&paths).map_err(failed("the edited items' runs"))?;
+    let based = |runs: &[mosaica_store::key_index::WrittenRun<u32>]| {
         runs.iter()
-            .map(|run| tessera_store::edited::as_base(&ctx.prefix_dir, run))
+            .map(|run| mosaica_store::edited::as_base(&ctx.prefix_dir, run))
             .collect::<Result<Vec<_>, _>>()
             .map_err(failed("the edited items' runs"))
     };
@@ -1136,23 +1136,23 @@ fn write_unique_runs(
 ) -> Result<Vec<FlushedUnique>, MaintenanceFailed> {
     let mut out = Vec::with_capacity(ctx.unique_schema.len());
     for (attribute, at, ty) in &ctx.unique_schema {
-        let Some(kind) = tessera_store::unique::KeyKind::of(*ty) else {
+        let Some(kind) = mosaica_store::unique::KeyKind::of(*ty) else {
             continue;
         };
-        let mut entries: Vec<(tessera_store::unique::UniqueKey, u32)> = Vec::new();
+        let mut entries: Vec<(mosaica_store::unique::UniqueKey, u32)> = Vec::new();
         for (entity, item) in plan.value_rows() {
             if let Some(key) = item
                 .scalars
                 .get(*at)
-                .and_then(|v| tessera_store::unique::key_of(*ty, v))
+                .and_then(|v| mosaica_store::unique::key_of(*ty, v))
             {
                 entries.push((key, narrow_entity(*entity)?));
             }
         }
         entries.sort_unstable();
         entries.dedup();
-        let dir_rel = tessera_store::unique::index_dir_rel(&ctx.partition, attribute);
-        let written = tessera_store::unique::write_sorted_runs(
+        let dir_rel = mosaica_store::unique::index_dir_rel(&ctx.partition, attribute);
+        let written = mosaica_store::unique::write_sorted_runs(
             kind,
             &ctx.prefix_dir.join(&dir_rel),
             &ctx.seg_id,
@@ -1160,11 +1160,11 @@ fn write_unique_runs(
         )
         .map_err(failed(format!("unique index run for '{attribute}'")))?;
         let paths: Vec<PathBuf> = written.iter().map(|run| run.path.clone()).collect();
-        tessera_store::fsync_written(&paths)
+        mosaica_store::fsync_written(&paths)
             .map_err(failed(format!("unique index run for '{attribute}'")))?;
         let runs = written
             .iter()
-            .map(|run| tessera_store::unique::relative(&ctx.prefix_dir, &run.path))
+            .map(|run| mosaica_store::unique::relative(&ctx.prefix_dir, &run.path))
             .collect::<Result<Vec<_>, _>>()
             .map_err(failed(format!("unique index run for '{attribute}'")))?;
         out.push(FlushedUnique {
@@ -1190,7 +1190,7 @@ fn write_value_extent(
 ) -> Result<crate::filter::OpenedExtent, MaintenanceFailed> {
     let scoped = view.is_some();
     let what = if scoped { "scoped extent" } else { "filter extent" };
-    let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+    let (values_path, presence_path, dict_path) = mosaica_filter::write_extent(
         column_dir,
         &ctx.seg_id,
         &column.codes,
@@ -1209,12 +1209,12 @@ fn write_value_extent(
             })
     };
     let values =
-        tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
+        mosaica_filter::open_extent(&values_path, &presence_path, mosaica_filter::Access::Mapped)
             .map_err(|e| MaintenanceFailed(format!("{what} for '{name}': {e}")))?;
     let dict = dict_path
         .as_ref()
         .map(|path| {
-            tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
+            mosaica_filter::SortedDict::open(path, mosaica_filter::Access::Mapped)
                 .map(Arc::new)
                 .map_err(|e| {
                     MaintenanceFailed(if scoped {
@@ -1226,7 +1226,7 @@ fn write_value_extent(
         })
         .transpose()?;
     Ok(crate::filter::OpenedExtent {
-        extent: tessera_store::manifest::AttrExtent {
+        extent: mosaica_store::manifest::AttrExtent {
             column: name.to_string(),
             // `None` for an entity-scoped column, which belongs to no view: the incarnation
             // follows the view exactly, and a view here is the owner's rather than the flushing
@@ -1255,7 +1255,7 @@ fn extent_values<'a>(
     spec: &FilterColumnSpec,
     entities: Vec<(u32, &'a WalScalar)>,
 ) -> Result<ExtentColumn<'a>, MaintenanceFailed> {
-    use tessera_filter::Codes;
+    use mosaica_filter::Codes;
 
     let mut presence = croaring::Bitmap::new();
 
@@ -1306,7 +1306,7 @@ fn extent_values<'a>(
         let mut held: Vec<u32> = Vec::with_capacity(entities.len());
         for (entity, value) in entities {
             let code = category_code(value).ok_or_else(|| wrong(value))?;
-            if code == tessera_store::vocabulary::ABSENT_CODE {
+            if code == mosaica_store::vocabulary::ABSENT_CODE {
                 continue;
             }
             presence.add(entity);
@@ -1394,7 +1394,7 @@ pub(crate) fn buffered_value(item: &BufferedItem, place: BufferedPlace) -> &WalS
     values.get(index).unwrap_or(&WalScalar::Null)
 }
 
-/// A category value's code, [`tessera_store::vocabulary::ABSENT_CODE`] for `Null`, or `None` for
+/// A category value's code, [`mosaica_store::vocabulary::ABSENT_CODE`] for `Null`, or `None` for
 /// a value that is not a code. The ingest plane resolves a key and a null to a code before a row
 /// is buffered.
 pub(crate) fn category_code(value: &WalScalar) -> Option<u32> {
@@ -1402,7 +1402,7 @@ pub(crate) fn category_code(value: &WalScalar) -> Option<u32> {
         WalScalar::U8(c) => Some(u32::from(*c)),
         WalScalar::U16(c) => Some(u32::from(*c)),
         WalScalar::U32(c) => Some(*c),
-        WalScalar::Null => Some(tessera_store::vocabulary::ABSENT_CODE),
+        WalScalar::Null => Some(mosaica_store::vocabulary::ABSENT_CODE),
         _ => None,
     }
 }
@@ -1438,7 +1438,7 @@ fn scoped_rows<'a>(
 /// One column's extent content: the values, the entities that carry one, and the dictionary those
 /// values are ordinals into where the family has one.
 struct ExtentColumn<'a> {
-    codes: tessera_filter::Codes,
+    codes: mosaica_filter::Codes,
     presence: croaring::Bitmap,
     /// Sorted and distinct, `Some` for keyword columns only.
     dict_keys: Option<Vec<&'a str>>,
@@ -1446,7 +1446,7 @@ struct ExtentColumn<'a> {
 
 impl ExtentColumn<'_> {
     /// A column whose values file carries the values themselves — every family but keyword.
-    fn flat(codes: tessera_filter::Codes, presence: croaring::Bitmap) -> Self {
+    fn flat(codes: mosaica_filter::Codes, presence: croaring::Bitmap) -> Self {
         ExtentColumn {
             codes,
             presence,
@@ -1471,7 +1471,7 @@ pub(crate) struct TextColumnSpec {
     /// Position in a buffered row's scalar list.
     pub(crate) index: usize,
     pub(crate) name: String,
-    pub(crate) analyser: std::sync::Arc<tessera_analyse::Analyser>,
+    pub(crate) analyser: std::sync::Arc<mosaica_analyse::Analyser>,
 }
 
 /// One view's column of a group-scoped attribute family, and where its value sits in a buffered
@@ -1497,7 +1497,7 @@ pub(crate) struct ScopedColumnSpec {
     /// `false` for a view created since the build, whose base this flush writes empty.
     pub(crate) has_base: bool,
     /// The analyser a `text` family's terms are produced by — `Some` exactly for that family.
-    pub(crate) analyser: Option<std::sync::Arc<tessera_analyse::Analyser>>,
+    pub(crate) analyser: Option<std::sync::Arc<mosaica_analyse::Analyser>>,
 }
 
 /// This flush's text layers: per indexed `text` column, its own dictionary over the terms this
@@ -1509,7 +1509,7 @@ fn write_text_extents(
     ctx: &FlushContext,
     laps: &mut FlushLaps,
     mark: StageMark,
-) -> Result<Vec<tessera_store::manifest::TextExtent>, MaintenanceFailed> {
+) -> Result<Vec<mosaica_store::manifest::TextExtent>, MaintenanceFailed> {
     if ctx.text_schema.is_empty() {
         return Ok(Vec::new());
     }
@@ -1550,7 +1550,7 @@ struct TextTarget<'a> {
     seg_id: &'a str,
     /// Stamped on a layer that names a view, which is the owning group's rather than the
     /// flushing one's; an entity-scoped layer names none and carries no incarnation.
-    scoped_incarnation: tessera_types::view::ViewIncarnation,
+    scoped_incarnation: mosaica_types::view::ViewIncarnation,
 }
 
 impl<'a> TextTarget<'a> {
@@ -1571,11 +1571,11 @@ fn write_text_layer(
     rel_dir: &str,
     column: &str,
     view: Option<String>,
-    analyser: &tessera_analyse::Analyser,
+    analyser: &mosaica_analyse::Analyser,
     rows: Vec<(u32, &WalScalar)>,
     target: TextTarget<'_>,
     mut sub: Option<TextLaps<'_>>,
-) -> Result<Option<tessera_store::manifest::TextExtent>, MaintenanceFailed> {
+) -> Result<Option<mosaica_store::manifest::TextExtent>, MaintenanceFailed> {
     let dir = target.prefix_dir.join(rel_dir);
     std::fs::create_dir_all(&dir)
         .map_err(|e| MaintenanceFailed(format!("{}: {e}", dir.display())))?;
@@ -1584,7 +1584,7 @@ fn write_text_layer(
     let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
     let mut presence = croaring::Bitmap::new();
     let mut prose_rows: Vec<(u32, &str)> = Vec::new();
-    let mut scratch = tessera_analyse::TokenScratch::default();
+    let mut scratch = mosaica_analyse::TokenScratch::default();
     for (entity, value) in rows {
         let prose = match value {
             WalScalar::Utf8(s) => s.as_str(),
@@ -1622,17 +1622,17 @@ fn write_text_layer(
     let dict_rel = format!("{rel_dir}/{}-dict.bin", target.seg_id);
     let postings_rel = format!("{rel_dir}/{}-postings.arrow", target.seg_id);
     let presence_rel = format!("{rel_dir}/{}-presence.roaring", target.seg_id);
-    tessera_filter::write_sorted_dict(
+    mosaica_filter::write_sorted_dict(
         &target.prefix_dir.join(&dict_rel),
         terms.keys().map(String::as_str),
     )
     .map_err(|e| MaintenanceFailed(format!("{dict_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextDict);
     let per_term: Vec<Vec<u32>> = terms.into_values().collect();
-    tessera_authz::postings::write_postings(
+    mosaica_authz::postings::write_postings(
         &target.prefix_dir.join(&postings_rel),
         &per_term,
-        tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+        mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT,
     )
     .map_err(|e| MaintenanceFailed(format!("{postings_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextPostings);
@@ -1646,13 +1646,13 @@ fn write_text_layer(
     let prose = match view {
         None => None,
         Some(_) => {
-            let prose = tessera_store::manifest::RecordExtent {
+            let prose = mosaica_store::manifest::RecordExtent {
                 blocks: format!("{rel_dir}/{}-prose.blocks.bin", target.seg_id),
                 hasrow: format!("{rel_dir}/{}-prose.hasrow.roaring", target.seg_id),
                 directory: format!("{rel_dir}/{}-prose.directory.arrow", target.seg_id),
             };
             prose_rows.sort_by_key(|(entity, _)| *entity);
-            tessera_filter_write::write_prose(
+            mosaica_filter_write::write_prose(
                 &target.prefix_dir.join(&prose.blocks),
                 &target.prefix_dir.join(&prose.hasrow),
                 &target.prefix_dir.join(&prose.directory),
@@ -1663,7 +1663,7 @@ fn write_text_layer(
         }
     };
 
-    Ok(Some(tessera_store::manifest::TextExtent {
+    Ok(Some(mosaica_store::manifest::TextExtent {
         column: column.to_string(),
         // `None` for the same rows `view` is: an entity-scoped column belongs to no view.
         incarnation: view.as_ref().map(|_| target.scoped_incarnation),
@@ -1680,7 +1680,7 @@ fn write_text_layer(
 /// incarnation become a path, so a recreated key's base never lands on its predecessor's path.
 fn scoped_column_rel(ctx: &FlushContext, column: &str) -> String {
     // `scoped_view` and its own incarnation, not `view`'s.
-    tessera_store::scoped_column_rel(
+    mosaica_store::scoped_column_rel(
         &ctx.partition,
         column,
         &ctx.scoped_view,
@@ -1725,7 +1725,7 @@ fn write_scoped_extents(
         if let Some(analyser) = &spec.analyser {
             // Text: the same three files `write_text_extents` writes, in this view's directory.
             if let Some(extent) = write_text_layer(
-                &format!("{column_rel}/{}", tessera_filter::EXTENTS_DIR),
+                &format!("{column_rel}/{}", mosaica_filter::EXTENTS_DIR),
                 &spec.name,
                 Some(ctx.scoped_view.clone()),
                 analyser,
@@ -1768,7 +1768,7 @@ fn write_scoped_extents(
 /// group, their text layers, and the `(family, view)` pairs whose base it had to write.
 pub(crate) struct ScopedWrite {
     pub(crate) extents: Vec<crate::filter::OpenedExtent>,
-    pub(crate) texts: Vec<tessera_store::manifest::TextExtent>,
+    pub(crate) texts: Vec<mosaica_store::manifest::TextExtent>,
     pub(crate) created: Vec<(String, String)>,
 }
 
@@ -1783,33 +1783,33 @@ fn write_empty_scoped_base(
     };
     if spec.analyser.is_some() {
         // Text: a dictionary of no terms and postings over it, and no value column at all.
-        tessera_filter::write_sorted_dict(
-            &column_dir.join(tessera_filter::DICT_FILE),
+        mosaica_filter::write_sorted_dict(
+            &column_dir.join(mosaica_filter::DICT_FILE),
             std::iter::empty::<&str>(),
         )
         .map_err(|e| failed("the token dictionary", &e))?;
-        tessera_authz::postings::write_postings(
+        mosaica_authz::postings::write_postings(
             &column_dir.join("postings.arrow"),
             &[],
-            tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+            mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT,
         )
         .map_err(|e| failed("the token postings", &e))?;
-        let prose = column_dir.join(tessera_store::manifest::SCOPED_PROSE_DIR);
+        let prose = column_dir.join(mosaica_store::manifest::SCOPED_PROSE_DIR);
         std::fs::create_dir_all(&prose).map_err(|e| failed("the prose", &e))?;
-        tessera_filter_write::write_prose(
-            &prose.join(tessera_filter::RECORD_BLOCKS_FILE),
-            &prose.join(tessera_filter::RECORD_HASROW_FILE),
-            &prose.join(tessera_filter::RECORD_DIRECTORY_FILE),
+        mosaica_filter_write::write_prose(
+            &prose.join(mosaica_filter::RECORD_BLOCKS_FILE),
+            &prose.join(mosaica_filter::RECORD_HASROW_FILE),
+            &prose.join(mosaica_filter::RECORD_DIRECTORY_FILE),
             std::iter::empty(),
         )
         .map_err(|e| failed("the prose", &e))?;
         return Ok(());
     }
     let codes = empty_codes(spec.ty, spec.category);
-    let values_path = column_dir.join(tessera_filter::VALUES_FILE);
-    let presence_path = column_dir.join(tessera_filter::PRESENCE_FILE);
+    let values_path = column_dir.join(mosaica_filter::VALUES_FILE);
+    let presence_path = column_dir.join(mosaica_filter::PRESENCE_FILE);
     // Presence is written, empty: no presence file means every entity is present.
-    tessera_filter::write_value_column(
+    mosaica_filter::write_value_column(
         &values_path,
         &presence_path,
         &codes,
@@ -1817,21 +1817,21 @@ fn write_empty_scoped_base(
     )
     .map_err(|e| failed("the values", &e))?;
     if spec.ty == ScalarType::Keyword {
-        tessera_filter::write_sorted_dict(
-            &column_dir.join(tessera_filter::DICT_FILE),
+        mosaica_filter::write_sorted_dict(
+            &column_dir.join(mosaica_filter::DICT_FILE),
             std::iter::empty::<&str>(),
         )
         .map_err(|e| failed("the dictionary", &e))?;
     }
     if spec.category {
         let empty =
-            tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Read)
+            mosaica_filter::open_extent(&values_path, &presence_path, mosaica_filter::Access::Read)
                 .map_err(|e| failed("reopening the values", &e))?;
-        tessera_filter_write::write_category_postings(
+        mosaica_filter_write::write_category_postings(
             &column_dir.join("postings.arrow"),
             &spec.name,
             &empty,
-            tessera_filter_write::POSTINGS_BAND_ROWS,
+            mosaica_filter_write::POSTINGS_BAND_ROWS,
         )
         .map_err(|e| failed("the postings", &e))?;
     }
@@ -1839,8 +1839,8 @@ fn write_empty_scoped_base(
 }
 
 /// An empty `Codes` at a column's storage width, matching the width of the extents beside it.
-fn empty_codes(ty: ScalarType, category: bool) -> tessera_filter::Codes {
-    use tessera_filter::Codes;
+fn empty_codes(ty: ScalarType, category: bool) -> mosaica_filter::Codes {
+    use mosaica_filter::Codes;
     if category || ty == ScalarType::Keyword {
         return match ty {
             ScalarType::U8 => Codes::U8(Vec::new().into()),
@@ -1869,18 +1869,18 @@ fn empty_codes(ty: ScalarType, category: bool) -> tessera_filter::Codes {
 fn write_entity_terms_extent(
     per_entity: &[(u32, Vec<u32>)],
     ctx: &FlushContext,
-) -> Result<tessera_store::manifest::EntityTermsExtent, MaintenanceFailed> {
+) -> Result<mosaica_store::manifest::EntityTermsExtent, MaintenanceFailed> {
     let extents_rel = format!("partitions/{}/entities/terms/extents", ctx.partition);
     let extents_dir = ctx.prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&extents_dir)
         .map_err(|e| MaintenanceFailed(format!("entity-terms extent dir: {e}")))?;
-    let extent = tessera_store::manifest::EntityTermsExtent {
+    let extent = mosaica_store::manifest::EntityTermsExtent {
         hasrow: format!("{extents_rel}/{}.hasrow.roaring", ctx.seg_id),
         offsets: format!("{extents_rel}/{}.offsets.u32", ctx.seg_id),
         terms: format!("{extents_rel}/{}.terms.u32", ctx.seg_id),
         bases: format!("{extents_rel}/{}.bases.u64", ctx.seg_id),
     };
-    let mut writer = tessera_store::EntityTermsWriter::create_at(
+    let mut writer = mosaica_store::EntityTermsWriter::create_at(
         &ctx.prefix_dir.join(&extent.hasrow),
         &ctx.prefix_dir.join(&extent.offsets),
         &ctx.prefix_dir.join(&extent.terms),
@@ -1901,9 +1901,9 @@ fn write_entity_terms_extent(
 /// Push one accumulated row, where there is an entity and it carries something. An entity with no
 /// blob-resident value has no row and no has-row bit.
 fn push_record_row(
-    writer: &mut tessera_filter_write::RecordBlobWriter,
+    writer: &mut mosaica_filter_write::RecordBlobWriter,
     entity: Option<u32>,
-    fields: &[tessera_filter::RecordField],
+    fields: &[mosaica_filter::RecordField],
 ) -> Result<(), MaintenanceFailed> {
     let Some(entity) = entity else {
         return Ok(());
@@ -1911,13 +1911,13 @@ fn push_record_row(
     if fields.is_empty() {
         return Ok(());
     }
-    let borrowed: Vec<tessera_filter::RecordFieldRef<'_>> = fields
+    let borrowed: Vec<mosaica_filter::RecordFieldRef<'_>> = fields
         .iter()
         .map(|field| {
             field
                 .value
                 .as_ref()
-                .map(|value| tessera_filter::RecordFieldRef {
+                .map(|value| mosaica_filter::RecordFieldRef {
                     tag: field.tag,
                     value,
                 })
@@ -1958,17 +1958,17 @@ fn write_record_extent(
     let blocks_path = ctx.prefix_dir.join(&extent.blocks);
     let hasrow_path = ctx.prefix_dir.join(&extent.hasrow);
     let directory_path = ctx.prefix_dir.join(&extent.directory);
-    let mut writer = tessera_filter_write::RecordBlobWriter::create(
+    let mut writer = mosaica_filter_write::RecordBlobWriter::create(
         &blocks_path,
         &hasrow_path,
         &directory_path,
-        tessera_filter::RECORD_BLOCK_TARGET,
+        mosaica_filter::RECORD_BLOCK_TARGET,
     )
     .map_err(|e| MaintenanceFailed(format!("record extent: {e}")))?;
 
     // One row per entity, however many of the plan's rows carry its cells: fields accumulate while
     // the entity repeats and are pushed once.
-    let mut fields: Vec<tessera_filter::RecordField> = Vec::with_capacity(ctx.record_schema.len());
+    let mut fields: Vec<mosaica_filter::RecordField> = Vec::with_capacity(ctx.record_schema.len());
     let mut open: Option<u32> = None;
     for (entity, item) in plan.value_rows() {
         let entity = narrow_entity(*entity)?;
@@ -1988,18 +1988,18 @@ fn write_record_extent(
                     spec.name, spec.index
                 ))
             })?;
-            fields.push(tessera_filter::RecordField { tag, value });
+            fields.push(mosaica_filter::RecordField { tag, value });
         }
     }
     push_record_row(&mut writer, open, &fields)?;
     writer
         .finish()
         .map_err(|e| MaintenanceFailed(format!("record extent: {e}")))?;
-    tessera_filter::RecordBlob::open(
+    mosaica_filter::RecordBlob::open(
         &blocks_path,
         &hasrow_path,
         &directory_path,
-        tessera_filter::Access::Mapped,
+        mosaica_filter::Access::Mapped,
     )
     .map_err(|e| MaintenanceFailed(format!("record extent does not reopen: {e}")))?;
     Ok(Some(extent))
@@ -2010,8 +2010,8 @@ fn write_record_extent(
 fn record_value_of(
     value: &WalScalar,
     spec: &RecordColumnSpec,
-) -> Result<Option<tessera_filter::RecordValue>, MaintenanceFailed> {
-    use tessera_filter::RecordValue;
+) -> Result<Option<mosaica_filter::RecordValue>, MaintenanceFailed> {
+    use mosaica_filter::RecordValue;
     let wrong = || {
         MaintenanceFailed(format!(
             "column '{}' is declared {:?} but a buffered row carries {value:?}",
@@ -2063,7 +2063,7 @@ fn narrow_entity(entity: EntityId) -> Result<u32, MaintenanceFailed> {
 /// This flush's segment directory. Both the segment writer and promotion address it; naming it
 /// once keeps them from drifting apart.
 fn segment_dir(ctx: &FlushContext) -> PathBuf {
-    tessera_store::view_path(
+    mosaica_store::view_path(
         &ctx.prefix_dir.join("partitions").join(&ctx.partition),
         &ctx.view,
     )
@@ -2071,10 +2071,10 @@ fn segment_dir(ctx: &FlushContext) -> PathBuf {
     .join(&ctx.seg_id)
 }
 
-/// One file's size and hex SHA-256, by reading it back: `tessera_store::digest_of` with this
+/// One file's size and hex SHA-256, by reading it back: `mosaica_store::digest_of` with this
 /// crate's error type. `pub(crate)`: every background pass digests its own outputs this way.
 pub(crate) fn digest_of(path: &Path) -> Result<FileDigest, MaintenanceFailed> {
-    tessera_store::digest_of(path)
+    mosaica_store::digest_of(path)
         .map_err(|e| MaintenanceFailed(format!("digest {}: {e}", path.display())))
 }
 
@@ -2091,12 +2091,12 @@ mod tests {
 
     
 
-    use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
-    use tessera_lifecycle::IngestBuffer;
+    use mosaica_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
+    use mosaica_lifecycle::IngestBuffer;
     
     
     
-    use tessera_types::TermId;
+    use mosaica_types::TermId;
 
     const VIEW: &str = "s0";
 
@@ -2296,7 +2296,7 @@ mod tests {
     /// term included.
     #[test]
     fn a_text_layer_round_trips_through_the_files_it_writes() {
-        let analyser = tessera_analyse::Analyser::default();
+        let analyser = mosaica_analyse::Analyser::default();
         let prose: Vec<(u32, WalScalar)> = vec![
             (3, WalScalar::Utf8("Alpha beta".to_string())),
             (5, WalScalar::Utf8("beta GAMMA, beta!".to_string())),
@@ -2339,16 +2339,16 @@ mod tests {
             TextTarget {
                 prefix_dir: dir.path(),
                 seg_id: "flush-1-0",
-                scoped_incarnation: tessera_types::view::DECLARED_INCARNATION,
+                scoped_incarnation: mosaica_types::view::DECLARED_INCARNATION,
             },
             None,
         )
         .expect("the layer writes")
         .expect("rows carried prose");
 
-        let dict = tessera_filter::SortedDict::open(
+        let dict = mosaica_filter::SortedDict::open(
             &dir.path().join(&extent.dict),
-            tessera_filter::Access::Mapped,
+            mosaica_filter::Access::Mapped,
         )
         .expect("the dictionary reopens");
         dict.self_check().expect("the dictionary is well formed");
@@ -2361,7 +2361,7 @@ mod tests {
             "the dictionary is the sorted distinct term set"
         );
 
-        let postings = tessera_authz::postings::PostingsReader::open(
+        let postings = mosaica_authz::postings::PostingsReader::open(
             &dir.path().join(&extent.postings),
             false,
         )
@@ -2373,13 +2373,13 @@ mod tests {
                 .expect("the record decodes")
                 .expect("every term has a record")
             {
-                tessera_authz::postings::PostingRef::Array(bytes) => bytes
+                mosaica_authz::postings::PostingRef::Array(bytes) => bytes
                     .as_chunks::<4>()
                     .0
                     .iter()
                     .map(|b| u32::from_le_bytes(*b))
                     .collect(),
-                tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
+                mosaica_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
             };
             assert_eq!(&entities, expected, "the posting of '{term}'");
         }
@@ -2449,7 +2449,7 @@ mod tests {
             "the entity carrying nothing occupies no slot"
         );
         match &column.codes {
-            tessera_filter::Codes::U32(ordinals) => {
+            mosaica_filter::Codes::U32(ordinals) => {
                 assert_eq!(
                     ordinals.as_ref(),
                     &[1, 0, 1],
@@ -2480,7 +2480,7 @@ mod tests {
         let column = extent_values(&spec, rows).expect("the column gathers");
 
         let dir = tempfile::TempDir::new().expect("a temp dir");
-        let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+        let (values_path, presence_path, dict_path) = mosaica_filter::write_extent(
             dir.path(),
             "flush-1",
             &column.codes,
@@ -2490,13 +2490,13 @@ mod tests {
         .expect("the extent writes");
         let dict_path = dict_path.expect("a keyword extent names a dictionary");
 
-        let values = tessera_filter::open_extent(
+        let values = mosaica_filter::open_extent(
             &values_path,
             &presence_path,
-            tessera_filter::Access::Mapped,
+            mosaica_filter::Access::Mapped,
         )
         .expect("the values reopen");
-        let dict = tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Mapped)
+        let dict = mosaica_filter::SortedDict::open(&dict_path, mosaica_filter::Access::Mapped)
             .expect("the dictionary reopens");
         dict.self_check().expect("the dictionary is well formed");
 
@@ -2529,7 +2529,7 @@ mod tests {
         assert_eq!(column.dict_keys.as_deref(), Some(&[][..]));
 
         let dir = tempfile::TempDir::new().expect("a temp dir");
-        let (_, _, dict_path) = tessera_filter::write_extent(
+        let (_, _, dict_path) = mosaica_filter::write_extent(
             dir.path(),
             "flush-1",
             &column.codes,
@@ -2537,9 +2537,9 @@ mod tests {
             column.dict_keys.as_deref(),
         )
         .expect("the extent writes");
-        let dict = tessera_filter::SortedDict::open(
+        let dict = mosaica_filter::SortedDict::open(
             &dict_path.expect("named even when empty"),
-            tessera_filter::Access::Mapped,
+            mosaica_filter::Access::Mapped,
         )
         .expect("an empty dictionary opens");
         assert!(dict.is_empty());
@@ -2591,10 +2591,10 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let mut presence = croaring::Bitmap::new();
         presence.add(3);
-        let error = tessera_filter::write_extent(
+        let error = mosaica_filter::write_extent(
             dir.path(),
             "flush-1",
-            &tessera_filter::Codes::I64(vec![7i64].into()),
+            &mosaica_filter::Codes::I64(vec![7i64].into()),
             &presence,
             Some(&["alpha"]),
         )

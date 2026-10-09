@@ -1,6 +1,6 @@
 //! The ingest join rule's readers of already-flushed values.
 
-use tessera_types::{EntityId, TermId};
+use mosaica_types::{EntityId, TermId};
 
 use crate::Generation;
 
@@ -8,11 +8,11 @@ use crate::Generation;
 /// ask for it in one join. The outer `Option` is *not yet read*; the inner one is the blob's own
 /// answer, `None` for a missing row or an unreadable blob alike.
 #[derive(Default)]
-pub(crate) struct BlobRow(Option<Option<Vec<tessera_filter::RecordField>>>);
+pub(crate) struct BlobRow(Option<Option<Vec<mosaica_filter::RecordField>>>);
 
 impl BlobRow {
     /// A row already read: `None` where the blob holds no row for the entity.
-    pub(crate) fn of(fields: Option<Vec<tessera_filter::RecordField>>) -> BlobRow {
+    pub(crate) fn of(fields: Option<Vec<mosaica_filter::RecordField>>) -> BlobRow {
         BlobRow(Some(fields))
     }
 
@@ -20,7 +20,7 @@ impl BlobRow {
         &mut self,
         generation: &Generation,
         entity: u32,
-    ) -> &Option<Vec<tessera_filter::RecordField>> {
+    ) -> &Option<Vec<mosaica_filter::RecordField>> {
         self.0.get_or_insert_with(|| {
             match generation.filter_columns.records().fields_of(entity) {
                 Ok(fields) => fields,
@@ -29,8 +29,8 @@ impl BlobRow {
                 // build or flush fault. The drill-down propagates the full error as a refusal.
                 Err(e) => {
                     let kind = match &e {
-                        tessera_filter::RecordError::Io(io) => io.kind().to_string(),
-                        tessera_filter::RecordError::Malformed(_) => "malformed".to_string(),
+                        mosaica_filter::RecordError::Io(io) => io.kind().to_string(),
+                        mosaica_filter::RecordError::Malformed(_) => "malformed".to_string(),
                     };
                     tracing::warn!(
                         artefact = "attrs/record",
@@ -61,7 +61,7 @@ pub(crate) fn flushed_scalar_of(
     entity: EntityId,
     declared_index: usize,
     blob: &mut BlobRow,
-) -> Option<tessera_lifecycle::WalScalar> {
+) -> Option<mosaica_lifecycle::WalScalar> {
     let manifest = &generation.bundle.manifest;
     let declared = manifest.declared_scalars.get(declared_index)?;
     let vocabularies = &manifest.vocabularies;
@@ -114,9 +114,9 @@ pub(crate) fn flushed_terms_of(generation: &Generation, entity: EntityId) -> Opt
 pub(crate) fn flushed_scoped_of(
     generation: &Generation,
     entity: EntityId,
-    family: &tessera_store::manifest::ScopedScalar,
+    family: &mosaica_store::manifest::ScopedScalar,
     owner_view: &str,
-) -> Result<Option<tessera_lifecycle::WalScalar>, crate::write::AcceptError> {
+) -> Result<Option<mosaica_lifecycle::WalScalar>, crate::write::AcceptError> {
     let Ok(entity) = u32::try_from(entity.raw()) else {
         return Ok(None);
     };
@@ -125,7 +125,7 @@ pub(crate) fn flushed_scoped_of(
         return generation
             .filter_columns
             .scoped_prose(&column, entity)
-            .map(|prose| prose.map(tessera_lifecycle::WalScalar::Utf8))
+            .map(|prose| prose.map(mosaica_lifecycle::WalScalar::Utf8))
             .map_err(|e| crate::write::AcceptError::Unreadable(format!("'{column}': {e}")));
     }
     let Some(stored) = generation.filter_columns.stored_value(&column, entity) else {
@@ -137,9 +137,9 @@ pub(crate) fn flushed_scoped_of(
 /// A scoped family as the entity-scoped declaration the absence and comparison helpers take: same
 /// types, same vocabulary, same absence rules, so the two helpers cannot come to mean two things.
 pub(crate) fn declared_of_scoped(
-    family: &tessera_store::manifest::ScopedScalar,
-) -> tessera_store::manifest::DeclaredScalar {
-    tessera_store::manifest::DeclaredScalar {
+    family: &mosaica_store::manifest::ScopedScalar,
+) -> mosaica_store::manifest::DeclaredScalar {
+    mosaica_store::manifest::DeclaredScalar {
         name: family.name.clone(),
         arrow_type: family.arrow_type,
         vocabulary: family.vocabulary.clone(),
@@ -152,21 +152,21 @@ pub(crate) fn declared_of_scoped(
 
 /// Is this value no value at all for `declared`? A category's absence is in band: a vocabulary
 /// keeps code 0 out of its value space so a category can say absence with a code
-/// ([`tessera_store::vocabulary::ABSENT_CODE`]), and ingest turns a null category cell into that
+/// ([`mosaica_store::vocabulary::ABSENT_CODE`]), and ingest turns a null category cell into that
 /// code before either arm sees it. Every other family says absence with
-/// [`tessera_lifecycle::WalScalar::Null`].
+/// [`mosaica_lifecycle::WalScalar::Null`].
 pub(crate) fn scalar_is_absent(
-    value: &tessera_lifecycle::WalScalar,
-    declared: &tessera_store::manifest::DeclaredScalar,
+    value: &mosaica_lifecycle::WalScalar,
+    declared: &mosaica_store::manifest::DeclaredScalar,
 ) -> bool {
-    use tessera_lifecycle::WalScalar as WS;
+    use mosaica_lifecycle::WalScalar as WS;
     if matches!(value, WS::Null) {
         return true;
     }
     if declared.vocabulary.is_none() {
         return false;
     }
-    let absent = tessera_store::vocabulary::ABSENT_CODE;
+    let absent = mosaica_store::vocabulary::ABSENT_CODE;
     match value {
         WS::U8(c) => u32::from(*c) == absent,
         WS::U16(c) => u32::from(*c) == absent,
@@ -181,10 +181,10 @@ pub(crate) fn scalar_is_absent(
 /// vocabulary holds the key. A key it does not hold stays a key, which equals no stored code.
 pub(crate) fn supplied_as_stored(
     generation: &Generation,
-    value: &tessera_lifecycle::WalScalar,
-    declared: &tessera_store::manifest::DeclaredScalar,
-) -> tessera_lifecycle::WalScalar {
-    if let (Some(vocabulary), tessera_lifecycle::WalScalar::Utf8(key)) =
+    value: &mosaica_lifecycle::WalScalar,
+    declared: &mosaica_store::manifest::DeclaredScalar,
+) -> mosaica_lifecycle::WalScalar {
+    if let (Some(vocabulary), mosaica_lifecycle::WalScalar::Utf8(key)) =
         (declared.vocabulary.as_deref(), value)
     {
         if let Some(code) = generation
@@ -192,7 +192,7 @@ pub(crate) fn supplied_as_stored(
             .get(vocabulary)
             .and_then(|held| held.code_of(key))
         {
-            return tessera_store::vocabulary::code_value(declared.arrow_type, code);
+            return mosaica_store::vocabulary::code_value(declared.arrow_type, code);
         }
     }
     value.clone()
@@ -209,12 +209,12 @@ pub(crate) fn supplied_as_stored(
 /// `None` where the stored value cannot be read at the declared type, a malformed bundle rather
 /// than a caller's error.
 pub(crate) fn stored_as_wal(
-    value: tessera_filter::RecordValue,
-    declared: &tessera_store::manifest::DeclaredScalar,
-) -> Option<tessera_lifecycle::WalScalar> {
-    use tessera_filter::RecordValue as RV;
-    use tessera_lifecycle::WalScalar as WS;
-    use tessera_spatial::tiler::ScalarType;
+    value: mosaica_filter::RecordValue,
+    declared: &mosaica_store::manifest::DeclaredScalar,
+) -> Option<mosaica_lifecycle::WalScalar> {
+    use mosaica_filter::RecordValue as RV;
+    use mosaica_lifecycle::WalScalar as WS;
+    use mosaica_spatial::tiler::ScalarType;
 
     if declared.vocabulary.is_some() {
         let code = match value {
@@ -223,7 +223,7 @@ pub(crate) fn stored_as_wal(
             RV::U32(c) => c,
             _ => return None,
         };
-        return Some(tessera_store::vocabulary::code_value(
+        return Some(mosaica_store::vocabulary::code_value(
             declared.arrow_type,
             code,
         ));
@@ -260,11 +260,11 @@ pub(crate) fn held_entity_value(
     generation: &Generation,
     entity: EntityId,
     at: usize,
-    declared: &tessera_store::manifest::DeclaredScalar,
-    buffered: Option<&tessera_lifecycle::BufferedItem>,
+    declared: &mosaica_store::manifest::DeclaredScalar,
+    buffered: Option<&mosaica_lifecycle::BufferedItem>,
     blob: &mut BlobRow,
-) -> Option<tessera_lifecycle::WalScalar> {
-    let held = |value: tessera_lifecycle::WalScalar| {
+) -> Option<mosaica_lifecycle::WalScalar> {
+    let held = |value: mosaica_lifecycle::WalScalar| {
         (!scalar_is_absent(&value, declared)).then_some(value)
     };
     match buffered {
@@ -282,12 +282,12 @@ pub(crate) fn held_scoped_value(
     generation: &Generation,
     entity: EntityId,
     at: usize,
-    family: &tessera_store::manifest::ScopedScalar,
-    declared: &tessera_store::manifest::DeclaredScalar,
+    family: &mosaica_store::manifest::ScopedScalar,
+    declared: &mosaica_store::manifest::DeclaredScalar,
     owner_view: &str,
-) -> Result<Option<tessera_lifecycle::WalScalar>, crate::write::AcceptError> {
+) -> Result<Option<mosaica_lifecycle::WalScalar>, crate::write::AcceptError> {
     let manifest = &generation.bundle.manifest;
-    let held = |value: tessera_lifecycle::WalScalar| {
+    let held = |value: mosaica_lifecycle::WalScalar| {
         (!scalar_is_absent(&value, declared)).then_some(value)
     };
     let buffered = generation

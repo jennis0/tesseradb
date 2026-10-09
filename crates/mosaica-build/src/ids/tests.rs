@@ -13,8 +13,8 @@ use arrow::array::UInt64Array;
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use tessera_spatial::Bounds;
-use tessera_types::IdentityKey;
+use mosaica_spatial::Bounds;
+use mosaica_types::IdentityKey;
 
 use super::{reads, ReadInput};
 use crate::config::Config;
@@ -198,7 +198,7 @@ fn corpus(dir: &Path, seed: u64, rows: usize) {
     std::fs::write(dir.join("corpus.toml"), DECLARATION).unwrap();
 }
 
-/// The build's arguments for the declaration in `dir`, as `tessera build` assembles them.
+/// The build's arguments for the declaration in `dir`, as `mosaica build` assembles them.
 fn args(dir: &Path, budget: Option<u64>) -> crate::BuildArgs {
     let config = Config::parse(&dir.join("corpus.toml"), &HashMap::new()).expect("parses");
     let registry = config.build_views().expect("the views compile");
@@ -435,20 +435,20 @@ fn a_group_scoped_file_sets_the_unique_values_it_carries() {
     crate::build(&args).expect("the build runs");
 
     let root = dir.join("out");
-    let bundle = tessera_store::read::open_bundle(&root).expect("the bundle opens");
+    let bundle = mosaica_store::read::open_bundle(&root).expect("the bundle opens");
     let partition = bundle.partitions.get("default").expect("one partition");
-    let indexes = tessera_store::unique::UniqueIndexes::open(
+    let indexes = mosaica_store::unique::UniqueIndexes::open(
         &bundle.manifest,
         &partition.manifest,
         &root.join("v00000"),
         None,
     )
     .expect("the indexes open");
-    let holder = |attribute: &str, key: tessera_store::unique::UniqueKey| -> Vec<u32> {
+    let holder = |attribute: &str, key: mosaica_store::unique::UniqueKey| -> Vec<u32> {
         let index = indexes.get(attribute).expect("indexed");
         index.lookup(&[key]).expect("reads").into_iter().map(|(_, e)| e).collect()
     };
-    use tessera_store::unique::UniqueKey;
+    use mosaica_store::unique::UniqueKey;
     for (id, value) in [(1u64, "z1"), (3, "z3")] {
         let by_a = holder("a", UniqueKey::unsigned(id));
         assert_eq!(by_a.len(), 1);
@@ -760,8 +760,8 @@ fn an_attribute_file_naming_items_out_of_order_numbers_as_the_rule_does() {
             .map(|refused| refused.rows)
             .sum::<u64>()
     };
-    assert!(twice(tessera_lifecycle::resolve::Refusal::ONE_ITEM_TWICE) > 0);
-    assert!(twice(tessera_lifecycle::resolve::Refusal::ONE_VALUE_TWICE) > 0);
+    assert!(twice(mosaica_lifecycle::resolve::Refusal::ONE_ITEM_TWICE) > 0);
+    assert!(twice(mosaica_lifecycle::resolve::Refusal::ONE_VALUE_TWICE) > 0);
     std::fs::remove_dir_all(&scratch).unwrap();
     scratch_within_forecast(dir);
 }

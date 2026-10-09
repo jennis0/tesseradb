@@ -49,8 +49,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use serde_json::json;
-use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds};
-use tessera_store::{open_bundle, tile_ranges_all, SegmentData};
+use mosaica_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds};
+use mosaica_store::{open_bundle, tile_ranges_all, SegmentData};
 
 /// Ceiling on tiles a region request may resolve. `tiles_for_bbox` at depth 16 over the full
 /// extent would enumerate 65536² tiles (~69 GB of `Tile`s — see its doc); refusing above this
@@ -199,7 +199,7 @@ fn run(args: &Args) -> Result<(), String> {
 }
 
 fn analyse_region(
-    quantisation: &tessera_store::manifest::Quantisation,
+    quantisation: &mosaica_store::manifest::Quantisation,
     seg: &SegmentData,
     region: &RegionArgs,
 ) -> Result<serde_json::Value, String> {

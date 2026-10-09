@@ -4,28 +4,28 @@
 
 ## Database
 
-::: tesseradb._database.Database.insert
+::: mosaica._database.Database.insert
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.check
+::: mosaica._database.Database.check
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.commit
+::: mosaica._database.Database.commit
     options:
       heading_level: 3
 
-::: tesseradb._inserts.Insert
+::: mosaica._inserts.Insert
     options:
       show_bases: false
 
-::: tesseradb._reports.Report
+::: mosaica._reports.Report
     options:
       show_bases: false
 
-::: tesseradb._reports.CommitReport
+::: mosaica._reports.CommitReport
 
-::: tesseradb._reports.PagedReport
+::: mosaica._reports.PagedReport
     options:
       show_bases: false

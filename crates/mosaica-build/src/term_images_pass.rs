@@ -1,5 +1,5 @@
 //! **The build's term images**: one view's authorisation terms projected into its row space and
-//! written beside the segment that defines it (`tessera_store::term_images` for the file and the
+//! written beside the segment that defines it (`mosaica_store::term_images` for the file and the
 //! keep rule).
 //!
 //! # One implementation, called from both build routes
@@ -7,7 +7,7 @@
 //! The streaming pipeline and the in-memory build both call [`run`], and
 //! `tests/build_equivalence.rs` holds the two to one bundle, so a term-image file is the same
 //! bytes whichever route produced it. The derivation itself is the store's
-//! [`tessera_store::term_images::derive_term_images`], which the fold calls as well (decisions
+//! [`mosaica_store::term_images::derive_term_images`], which the fold calls as well (decisions
 //! 0091 and 0139): nothing here projects a posting.
 //!
 //! # Where it runs
@@ -26,13 +26,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tessera_authz::postings::{PostingRef, PostingsReader};
-use tessera_store::derived::{DerivedIndex, PostingSlice};
-use tessera_store::manifest::{TermImageExtent, DECLARED_INCARNATION};
-use tessera_store::term_images::{
+use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_store::derived::{DerivedIndex, PostingSlice};
+use mosaica_store::manifest::{TermImageExtent, DECLARED_INCARNATION};
+use mosaica_store::term_images::{
     derive_term_images, DeriveOptions, TermImageStamp, KEEP_ROWS_PER_CONTAINER,
 };
-use tessera_store::{Permutation, RowSpace};
+use mosaica_store::{Permutation, RowSpace};
 
 use crate::error::{BuildError, Result};
 
@@ -136,7 +136,7 @@ pub fn run(
     // pass returns before reaching it for a view with no drawn layer, and this one runs for every
     // view.
     let permutation_path =
-        tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
+        mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), view)
             .join("permutation.bin");
     let permutation = Permutation::load(&permutation_path)?;
     let space = RowSpace::new(Arc::new(permutation), rows_in_view);
@@ -151,10 +151,10 @@ pub fn run(
         bound: space.base().bound(),
     };
 
-    let file = tessera_store::derived::term_image_file(prefix_dir, partition, MANIFEST_N, index)?;
+    let file = mosaica_store::derived::term_image_file(prefix_dir, partition, MANIFEST_N, index)?;
 
-    // The one adapter between the postings format and the derivation: `tessera-store` does not
-    // depend on `tessera-authz`, so the shape is handed across and the walk is written where the
+    // The one adapter between the postings format and the derivation: `mosaica-store` does not
+    // depend on `mosaica-authz`, so the shape is handed across and the walk is written where the
     // format lives. `artifact_pass::containment` holds the identical six lines.
     let walk = |term: u32, visit: &mut dyn FnMut(PostingSlice<'_>)| -> std::io::Result<()> {
         if let Some(posting) = postings.posting_at(term)? {

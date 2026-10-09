@@ -8,15 +8,15 @@
 
 use tempfile::TempDir;
 
-use tessera_authz::Dict;
-use tessera_lifecycle::overlay::Replay;
-use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use tessera_lifecycle::Overlay;
-use tessera_types::EntityId;
+use mosaica_authz::Dict;
+use mosaica_lifecycle::overlay::Replay;
+use mosaica_lifecycle::wal::{ChangeOp, Wal, WalRecord};
+use mosaica_lifecycle::Overlay;
+use mosaica_types::EntityId;
 
 fn empty_dict() -> (Dict, TempDir) {
     let temp = TempDir::new().unwrap();
-    let paths = tessera_authz::DictWriter::new(temp.path())
+    let paths = mosaica_authz::DictWriter::new(temp.path())
         .finish()
         .unwrap();
     (Dict::load(&paths).unwrap(), temp)
@@ -133,7 +133,7 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     }
 
     let wal = Wal::open(&path).unwrap();
-    let mut replay = Replay::new(&dict, Overlay::new(), &tessera_lifecycle::owner_id_only);
+    let mut replay = Replay::new(&dict, Overlay::new(), &mosaica_lifecycle::owner_id_only);
     for record in wal.records() {
         let (position, record) = record.unwrap();
         replay.apply(&record, position, |_, _| false);

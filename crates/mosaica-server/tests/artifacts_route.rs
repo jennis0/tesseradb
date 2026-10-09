@@ -14,7 +14,7 @@ use arrow::array::{Array, RecordBatch, StringArray};
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_server::state::ComputeGate;
+use mosaica_server::state::ComputeGate;
 
 const N: u64 = 1_200;
 const LAYER: &str = "clusters/tree";

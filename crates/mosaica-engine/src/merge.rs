@@ -10,11 +10,11 @@
 //! A merge touches row space only, and the entity-space coalesce entity space only, so the two
 //! passes never want the same manifest entries.
 
-use tessera_store::manifest::SegmentDescriptor;
-use tessera_store::merge::{execute_merge, MergeInput, MergeOutput, MergePolicy, MergeSpec};
-use tessera_store::read::SegmentData;
-use tessera_store::render_presence::RENDER_PRESENCE_DIR;
-use tessera_types::IdentityKey;
+use mosaica_store::manifest::SegmentDescriptor;
+use mosaica_store::merge::{execute_merge, MergeInput, MergeOutput, MergePolicy, MergeSpec};
+use mosaica_store::read::SegmentData;
+use mosaica_store::render_presence::RENDER_PRESENCE_DIR;
+use mosaica_types::IdentityKey;
 
 use crate::flush::MaintenanceFailed;
 use crate::Generation;
@@ -29,7 +29,7 @@ pub(crate) struct MergePlan {
     pub(crate) view: String,
     /// The incarnation of `view` the inputs carry and the output takes. A merge never crosses a
     /// drop: its inputs are the live row space's own extents.
-    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
+    pub(crate) incarnation: mosaica_types::view::ViewIncarnation,
     pub(crate) inputs: Vec<MergeInput>,
     /// Where the merged extent begins in view row space: the first consumed extent's `row_base`.
     pub(crate) row_base: u32,
@@ -97,9 +97,9 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
                     edited_rows: {
                         let rel = format!(
                             "partitions/{partition}/{}/segments/{}/{}",
-                            tessera_store::view_rel(view),
+                            mosaica_store::view_rel(view),
                             d.seg_id,
-                            tessera_store::edited::EDITED_ROWS_FILE
+                            mosaica_store::edited::EDITED_ROWS_FILE
                         );
                         // A segment a fold carried is listed in the bundle's manifest.
                         partition_data.manifest.files.contains_key(&rel)
@@ -115,14 +115,14 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
 
 /// One segment's bytes, from the manifest's own digests: every file its directory holds.
 fn segment_bytes(
-    manifest: &tessera_store::manifest::SegmentsManifest,
+    manifest: &mosaica_store::manifest::SegmentsManifest,
     partition: &str,
     view: &str,
     seg_id: &str,
 ) -> u64 {
     let dir = format!(
         "partitions/{partition}/{}/segments/{seg_id}/",
-        tessera_store::view_rel(view)
+        mosaica_store::view_rel(view)
     );
     manifest
         .files
@@ -140,9 +140,9 @@ pub(crate) struct MergeContext {
     pub(crate) seg_id: String,
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
-    pub(crate) scalar_schema: Vec<(String, tessera_spatial::tiler::ScalarType)>,
+    pub(crate) scalar_schema: Vec<(String, mosaica_spatial::tiler::ScalarType)>,
     /// The columns the bands copy beside the render tail.
-    pub(crate) band_schema: Vec<(String, tessera_spatial::tiler::ScalarType)>,
+    pub(crate) band_schema: Vec<(String, mosaica_spatial::tiler::ScalarType)>,
     /// The columns an input segment may lawfully lack: the view's group-scoped render lanes and
     /// the entity-scoped columns declared at a running service and not yet folded. Any other
     /// missing column is a torn segment and fails the merge.
@@ -180,16 +180,16 @@ pub(crate) fn execute(
     )
     .map_err(|e| MaintenanceFailed(format!("merge: {e}")))?;
 
-    let seg_dir = tessera_store::view_path(
+    let seg_dir = mosaica_store::view_path(
         &ctx.prefix_dir.join("partitions").join(&plan.partition),
         &plan.view,
     )
     .join("segments")
     .join(&ctx.seg_id);
-    let entities = tessera_store::edited::RowEntities::Listed(std::sync::Arc::new(
-        tessera_store::edited::EditedRows::open(
+    let entities = mosaica_store::edited::RowEntities::Listed(std::sync::Arc::new(
+        mosaica_store::edited::EditedRows::open(
             &seg_dir,
-            tessera_store::edited::lists_edited_rows(output.files.keys()),
+            mosaica_store::edited::lists_edited_rows(output.files.keys()),
         )
         .map_err(|e| MaintenanceFailed(format!("merge: {e}")))?,
     ));
@@ -210,7 +210,7 @@ pub(crate) fn execute(
 /// their row-space files leave `files`. Every other list is unchanged: delta tiers address
 /// entities, and the consumed segments' entities still have rows in the merged segment.
 pub(crate) fn rebase_into(
-    manifest: &mut tessera_store::manifest::SegmentsManifest,
+    manifest: &mut mosaica_store::manifest::SegmentsManifest,
     completed: &CompletedMerge,
 ) -> bool {
     let plan = &completed.plan;
@@ -241,9 +241,9 @@ pub(crate) fn rebase_into(
         let seg_rel = format!(
             "partitions/{}/{}/segments/{seg_id}",
             plan.partition,
-            tessera_store::view_rel(&plan.view)
+            mosaica_store::view_rel(&plan.view)
         );
-        for name in tessera_store::SEGMENT_FILES {
+        for name in mosaica_store::SEGMENT_FILES {
             manifest.files.remove(&format!("{seg_rel}/{name}"));
         }
         let presence_prefix = format!("{seg_rel}/{RENDER_PRESENCE_DIR}/");

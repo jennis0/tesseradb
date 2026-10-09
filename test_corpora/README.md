@@ -9,18 +9,18 @@ Each rung's directory produces one of the corpora the ingest campaign measures a
 |---|---|
 | `<share>/datasets/<name>/<vintage>/` | the publisher's own bytes, read-only |
 | `test_corpora/<rung>/` | in git: `prepare.py`, `corpus.toml`, `README.md` |
-| `$TESSERA_LADDER/<rung>/` | derived: `points.parquet`, vocabularies, member files, `bundle/` |
+| `$MOSAICA_LADDER/<rung>/` | derived: `points.parquet`, vocabularies, member files, `bundle/` |
 
 Both roots are environment variables read by [`common/paths.py`](common/paths.py):
-`TESSERA_STAGED` for the share, `TESSERA_LADDER` for the derived directory. Both default to a
+`MOSAICA_STAGED` for the share, `MOSAICA_LADDER` for the derived directory. Both default to a
 directory in the checkout, `data/staged` and `data/ladder`; a share is named by the variable.
 
 ## Projection
 
 A geographic rung emits `lon` and `lat` in degrees exactly as its publisher wrote them, and its
-declaration names `projection = "web_mercator"` with an `extent` in that box. `tessera build`
+declaration names `projection = "web_mercator"` with an `extent` in that box. `mosaica build`
 transforms and quantises the coordinates. [`common/projection.py`](common/projection.py) is a
-second implementation of the same transform: `tessera_spatial::projection` checks its own result
+second implementation of the same transform: `mosaica_spatial::projection` checks its own result
 against it over sampled coordinates, and a built corpus is checked by recomputing every point's
 position through it from the source degrees.
 

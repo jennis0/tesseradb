@@ -18,12 +18,12 @@ use crate::state::AppState;
 /// the coordinates a client revalidates a cached response by, and whether a region count is exact.
 const EXPOSED: [&str; 7] = [
     "etag",
-    "x-tessera-identity-key",
-    "x-tessera-stale",
-    "x-tessera-pin",
-    "x-tessera-server-us",
-    "x-tessera-admission-us",
-    "x-tessera-region",
+    "x-mosaica-identity-key",
+    "x-mosaica-stale",
+    "x-mosaica-pin",
+    "x-mosaica-server-us",
+    "x-mosaica-admission-us",
+    "x-mosaica-region",
 ];
 
 /// The viewer plane's layer, from the development and production lists together.

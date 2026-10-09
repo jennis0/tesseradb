@@ -125,8 +125,8 @@ impl From<std::io::Error> for ComposeError {
     }
 }
 
-impl From<tessera_filter::DictError> for ComposeError {
-    fn from(e: tessera_filter::DictError) -> ComposeError {
+impl From<mosaica_filter::DictError> for ComposeError {
+    fn from(e: mosaica_filter::DictError) -> ComposeError {
         ComposeError::Io(e.into())
     }
 }

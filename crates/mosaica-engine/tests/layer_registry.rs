@@ -9,9 +9,9 @@
 mod common;
 
 use common::*;
-use tessera_engine::Engine;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_types::layer::{
+use mosaica_engine::Engine;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ROWLESS_CEILING,
 };
@@ -25,7 +25,7 @@ fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: visibility.map(str::to_string),
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: Some(ExistenceCriterion::Count(50)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
@@ -59,7 +59,7 @@ fn reachable(engine: &Engine, credential: &[u8]) -> Vec<String> {
 /// and the guard used to be a single `entity < high_water` test, which refuses every layer
 /// identifier this deployment has ever issued. The symptom would not have looked like a range
 /// check: suppressing a layer would simply have answered *no such thing*.
-fn layer_entity(engine: &Engine, id: tessera_types::TesseraId) -> tessera_types::EntityId {
+fn layer_entity(engine: &Engine, id: mosaica_types::TesseraId) -> mosaica_types::EntityId {
     engine.resolve_tessera_ids(&[id]).unwrap()[0]
         .expect("a layer identifier names the entity this deployment issued for it")
 }
@@ -252,7 +252,7 @@ fn an_incoherent_declaration_is_refused_with_nothing_spent() {
     // Decision 0082's one forbidden combination: a tree's lineage is its edges, so it declares no
     // levels.
     let mut treed_with_levels = declaration("clusters/bad", None);
-    treed_with_levels.levels = vec![tessera_types::layer::LevelDeclaration {
+    treed_with_levels.levels = vec![mosaica_types::layer::LevelDeclaration {
         level: 0,
         title: Some("L0".into()),
         zoom: None,

@@ -14,12 +14,12 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_authz::{DeltaTier, FrozenFragment, PostingsReader};
-use tessera_store::term_images::{
+use mosaica_authz::{DeltaTier, FrozenFragment, PostingsReader};
+use mosaica_store::term_images::{
     choose, chooser_inputs, ChooserInputs, Route, TermImages, ROUTE_COSTS,
 };
-use tessera_store::RowSpace;
-use tessera_types::TermId;
+use mosaica_store::RowSpace;
+use mosaica_types::TermId;
 
 /// What a row projection is built from, beside the row space it is built into: enough for the
 /// route to be priced and chosen before any of it is read.
@@ -45,7 +45,7 @@ pub struct ProjectionInputs<'a> {
 /// images and walks only the residual (entities of the unimaged terms, plus anything held only in
 /// a delta posting), and a grant so wide that what it excludes is small walks that exclusion and
 /// subtracts it from the row range instead. The per-entity and per-container rates the prices are
-/// built from are `tessera_store::term_images::ROUTE_COSTS`; the walk wins a tie.
+/// built from are `mosaica_store::term_images::ROUTE_COSTS`; the walk wins a tie.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionRoute {
     /// The grant covers the whole entity domain and the mapping is a bijection onto its rows.
@@ -203,7 +203,7 @@ impl RowProjection {
                 }
                 // The views live inside `union`, dropped when it returns; nothing caches them.
                 let mut union = images.union(&kept);
-                let residual = tessera_authz::residual_fragment(
+                let residual = mosaica_authz::residual_fragment(
                     &unkept,
                     &kept,
                     inputs.postings,
@@ -260,7 +260,7 @@ impl RowProjection {
                 held,
                 bound,
                 complement_valid,
-                tessera_authz::delta_entities(inputs.satisfied, inputs.deltas)?,
+                mosaica_authz::delta_entities(inputs.satisfied, inputs.deltas)?,
             ),
             None => ChooserInputs {
                 held,

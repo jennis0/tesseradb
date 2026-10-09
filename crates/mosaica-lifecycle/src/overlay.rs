@@ -10,7 +10,7 @@
 //!
 //! **A deletion retires at the fold that executes it.** [`Overlay::retire`] is Rule F's only route
 //! out of `deleted`, and its caller is the fold's own publication, which derives the executed set
-//! from what it demonstrably removed (`tessera_engine`'s `compact`, compaction §5). Rule F's safety
+//! from what it demonstrably removed (`mosaica_engine`'s `compact`, compaction §5). Rule F's safety
 //! is the identity match the publication builds (`write-path.md` §5.4, compaction §4), not a stamp
 //! ordering.
 //!
@@ -23,8 +23,8 @@
 
 use croaring::Bitmap;
 
-use tessera_authz::Dict;
-use tessera_types::EntityId;
+use mosaica_authz::Dict;
+use mosaica_types::EntityId;
 
 use crate::buffer::{DescriptorResolver, IngestBuffer};
 use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
@@ -258,7 +258,7 @@ impl Overlay {
 /// [`crate::membership`] builds one through this rather than through a second `as` that would
 /// truncate an id outside the space into another entity's — a document nobody named put into an
 /// artifact, with nothing reporting it. The build refuses the same id where it decodes one
-/// (`tessera_build::spill`'s member table).
+/// (`mosaica_build::spill`'s member table).
 pub(crate) fn as_u32(entity: EntityId) -> u32 {
     u32::try_from(entity.raw())
         .expect("entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)")
@@ -274,7 +274,7 @@ pub(crate) fn as_u32(entity: EntityId) -> u32 {
 pub fn owner_id_only(group: &str, key: &str) -> Vec<String> {
     vec![format!(
         "{group}{}{key}",
-        tessera_types::view::GROUP_SEPARATOR
+        mosaica_types::view::GROUP_SEPARATOR
     )]
 }
 
@@ -295,7 +295,7 @@ pub fn owner_id_only(group: &str, key: &str) -> Vec<String> {
 /// `view_ids_of_key` turns a `ViewDrop`'s `(owner group, key)` into every view id it names — the
 /// owner's and every sharing group's (`views.md` §3.3). It is a parameter rather than a derivation
 /// because the `members` relation lives in the bundle manifest and this crate does not depend on
-/// `tessera-store`; `Engine::open` supplies `Manifest::view_ids_for_key`, and a caller with no
+/// `mosaica-store`; `Engine::open` supplies `Manifest::view_ids_for_key`, and a caller with no
 /// manifest supplies the owner's id alone.
 ///
 /// [`Replay::finish`] returns, alongside the overlay and buffer, the `DescriptorResolver` in its
@@ -384,8 +384,8 @@ impl<'a> Replay<'a> {
             }
             // **Applied by the caller, against the live vocabularies, not here.** This replay
             // builds the overlay and the buffer, and reaches neither the bundle manifest a binding
-            // is seeded from nor the minter that has to hold it — `tessera-lifecycle` does not
-            // depend on `tessera-store`. `WritePath::reconstruct` walks the same records for the
+            // is seeded from nor the minter that has to hold it — `mosaica-lifecycle` does not
+            // depend on `mosaica-store`. `WritePath::reconstruct` walks the same records for the
             // mints, after seeding, so the seed-before-replay order is preserved where the state
             // lives. The rows here already carry their codes, so the buffer needs no binding to
             // read one.
@@ -560,7 +560,7 @@ mod tests {
     /// **A disposition is idempotent under replay, and this is where that is established rather
     /// than assumed.**
     ///
-    /// The deny lane's durability retry (`tessera-engine`'s `Executor::retry_deny_durability`)
+    /// The deny lane's durability retry (`mosaica-engine`'s `Executor::retry_deny_durability`)
     /// re-writes a window's records in place, so it leaves one copy — but it is safe to re-write
     /// only because replaying a disposition twice is indistinguishable from replaying it once, and
     /// that is a property of *this* function, not of the retry. Any future repair that appends a
@@ -575,7 +575,7 @@ mod tests {
         use tempfile::TempDir;
 
         let temp = TempDir::new().unwrap();
-        let writer = tessera_authz::DictWriter::new(temp.path());
+        let writer = mosaica_authz::DictWriter::new(temp.path());
         let paths = writer.finish().unwrap();
         let dict = Dict::load(&paths).unwrap();
 

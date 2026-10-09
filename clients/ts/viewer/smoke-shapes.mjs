@@ -16,7 +16,7 @@
 // from the meta, if opening an artifact draws other than one shape, if a predicate shape differed
 // between principals, or if the city-zoom shape is not finer than the overview's.
 //
-// Requires a running `tessera serve` over a bundle with a `spatial` layer and a layer declaring
+// Requires a running `mosaica serve` over a bundle with a `spatial` layer and a layer declaring
 // `hull` (such as the Overture one-part ladder with a hull on the taxonomy), and a running
 // `vite dev`. Without a predicate layer the boundary half is skipped, and said so; likewise the
 // hull half without a derived layer.
@@ -26,7 +26,7 @@ import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-brows
 
 const args = flags();
 const url = args.url ?? 'http://localhost:5173';
-const shots = args.shots ?? '/tmp/tessera-shapes';
+const shots = args.shots ?? '/tmp/mosaica-shapes';
 await mkdir(shots, {recursive: true});
 
 const browser = await launchBrowser(args);
@@ -54,7 +54,7 @@ const settled = async (limitMs = 60_000) => {
   let stable = 0;
   while (Date.now() - started < limitMs) {
     await page.waitForTimeout(500);
-    const marks = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    const marks = await page.evaluate(() => window.__mosaicaProbe?.marks ?? -1);
     if (marks === last) {
       if (++stable >= 4) return;
     } else {
@@ -67,21 +67,21 @@ const settled = async (limitMs = 60_000) => {
 /** The layer roster as the store holds it: each layer's name and the kind of shape it draws. */
 const roster = async () =>
   page.evaluate(() => {
-    const explorer = /** @type {{store: {get(name: 'meta'): {layers: {name: string; shape: string | null; computedContent: string[]}[]} | null} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{store: {get(name: 'meta'): {layers: {name: string; shape: string | null; computedContent: string[]}[]} | null} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     return (explorer?.store?.get('meta')?.layers ?? []).map((l) => ({name: l.name, shape: l.shape, computed: l.computedContent}));
   });
 
 /** What the map draws and holds: the probe's outline counts, the served set, the held shapes. */
 const drawn = async () =>
   page.evaluate(() => {
-    const p = window.__tesseraProbe;
-    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {tesseraId: bigint; layer: string; box: number[] | null; rung: number; parentIds: bigint[]; maskedCount: bigint}[]; shapes: Map<bigint, number[][][]>}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const p = window.__mosaicaProbe;
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {tesseraId: bigint; layer: string; box: number[] | null; rung: number; parentIds: bigint[]; maskedCount: bigint}[]; shapes: Map<bigint, number[][][]>}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     const a = explorer?.store?.get('artifacts');
     const served = (a?.served ?? []).map((x) => ({id: String(x.tesseraId), layer: x.layer, box: x.box, rung: x.rung, parents: x.parentIds.map((p) => String(p)), count: Number(x.maskedCount)}));
     const shapes = Object.fromEntries([...(a?.shapes ?? new Map())].map(([id, parts]) => [String(id), parts]));
     // The camera's zoom, which is what `needShape` asks the vertex rule at; the probe's `depth`
     // is the request depth, which the driver picks per principal from what they can see.
-    const map = /** @type {{map: {viewState?: {zoom: number}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')))?.map;
+    const map = /** @type {{map: {viewState?: {zoom: number}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')))?.map;
     return {
       outlines: p?.timings.outlines ?? -1,
       outlinesDrawn: p?.timings.outlinesDrawn ?? -1,
@@ -95,7 +95,7 @@ const drawn = async () =>
 /** Tick exactly one layer in the picker. */
 const only = async (layerName) => {
   await openLayers();
-  const entries = page.locator('tessera-layer-picker [part="entry"]');
+  const entries = page.locator('mosaica-layer-picker [part="entry"]');
   const n = await entries.count();
   for (let o = 0; o < n; o++) {
     const entry = entries.nth(o);
@@ -108,7 +108,7 @@ const only = async (layerName) => {
 const principal = async (index) => {
   await page.selectOption('#principal', String(index));
   await openLayers();
-  await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+  await page.locator('mosaica-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 };
 
 /**
@@ -117,7 +117,7 @@ const principal = async (index) => {
  */
 const open = async (id) => {
   await page.evaluate((id) => {
-    const explorer = /** @type {{store: {needShape(id: bigint): void; openArtifact(id: bigint): Promise<void>} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{store: {needShape(id: bigint): void; openArtifact(id: bigint): Promise<void>} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     explorer?.store?.needShape(BigInt(id));
     void explorer?.store?.openArtifact(BigInt(id));
   }, id);
@@ -137,7 +137,7 @@ const open = async (id) => {
 /** Ask for one artifact's shape by identifier, as a hover does, and read it back. */
 const fetchShape = async (id) => {
   await page.evaluate((id) => {
-    const explorer = /** @type {{store: {needShape(id: bigint): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{store: {needShape(id: bigint): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     explorer?.store?.needShape(BigInt(id));
   }, id);
   let d = await drawn();
@@ -153,7 +153,7 @@ const partsOf = (parts) => (parts ?? []).length;
 const holesOf = (parts) => (parts ?? []).reduce((n, rings) => n + Math.max(0, rings.length - 1), 0);
 
 await openLayers();
-await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+await page.locator('mosaica-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 await settled();
 
 const layers = await roster();
@@ -192,7 +192,7 @@ const CITY = [0.2236, 0.444, 0.2256, 0.446];
 
 const fitBbox = async (bbox) => {
   await page.evaluate((bbox) => {
-    const explorer = /** @type {{map: {fitBbox(extent: [number, number, number, number]): boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{map: {fitBbox(extent: [number, number, number, number]): boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     explorer?.map?.fitBbox(/** @type {[number, number, number, number]} */ (bbox));
   }, bbox);
   await settled();
@@ -200,7 +200,7 @@ const fitBbox = async (bbox) => {
 };
 const fitAll = async () => {
   await page.evaluate(() => {
-    const explorer = /** @type {{map: {fit(): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{map: {fit(): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     explorer?.map?.fit();
   });
   await settled();
@@ -221,7 +221,7 @@ const shoot = async (label, kind, where, pick, file, fit = false) => {
   }
   if (fit) {
     await page.evaluate((id) => {
-      const explorer = /** @type {{map: {fitTo(id: bigint): boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+      const explorer = /** @type {{map: {fitTo(id: bigint): boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
       explorer?.map?.fitTo(BigInt(id));
     }, id);
     await settled();

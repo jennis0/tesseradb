@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use tessera_engine::{Engine, EngineConfig, EngineError, IngestRequest};
-use tessera_lifecycle::{ChangeOp, IngestRow};
-use tessera_types::TesseraId;
-use tessera_lifecycle::wal::{Wal, WalRecord};
+use mosaica_engine::{Engine, EngineConfig, EngineError, IngestRequest};
+use mosaica_lifecycle::{ChangeOp, IngestRow};
+use mosaica_types::TesseraId;
+use mosaica_lifecycle::wal::{Wal, WalRecord};
 
 use common::*;
 
@@ -63,8 +63,8 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
             receipt: Vec::new(),
             batch_id: "over-the-top".to_string(),
             body_hash: [0u8; 32],
-            rows: vec![tessera_lifecycle::WalRow {
-                entity_id: tessera_types::EntityId::new(u32::MAX as u64 - 1),
+            rows: vec![mosaica_lifecycle::WalRow {
+                entity_id: mosaica_types::EntityId::new(u32::MAX as u64 - 1),
                 view: "s0".to_string(),
                 join: false,
                 descriptors: Vec::new(),

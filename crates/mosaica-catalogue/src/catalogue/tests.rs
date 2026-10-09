@@ -16,7 +16,7 @@ fn corp(rules: Vec<ClaimRule>) -> Provider {
     Provider {
         name: "corp".into(),
         issuer: "https://login.example.org/".into(),
-        audience: "tessera".into(),
+        audience: "mosaica".into(),
         jwks_url: "https://login.example.org/keys".into(),
         rules,
         role_mappings: Vec::new(),
@@ -47,10 +47,10 @@ fn mapping(value: &str, group: &str) -> RoleMapping {
     }
 }
 
-/// `corp` with `groups_rule` and the role mapping `groups[*]: tessera-admins -> admins`.
+/// `corp` with `groups_rule` and the role mapping `groups[*]: mosaica-admins -> admins`.
 fn corp_with_admins() -> Provider {
     Provider {
-        role_mappings: vec![mapping("tessera-admins", "admins")],
+        role_mappings: vec![mapping("mosaica-admins", "admins")],
         ..corp(vec![groups_rule()])
     }
 }
@@ -171,10 +171,10 @@ fn a_role_mapping_passes_on_its_groups_terms_and_permissions() {
     let fx = Fixture::new();
     let cat = fx.open();
     cat.create_provider(&corp_with_admins()).unwrap();
-    let admin = json!({"groups": ["analysts", "tessera-admins"]});
+    let admin = json!({"groups": ["analysts", "mosaica-admins"]});
     // A mapping to a group that does not exist passes on nothing.
     let r = cat.resolve_claims("corp", &admin).unwrap();
-    assert_eq!(r.terms, set(&["analysts", "tessera-admins"]));
+    assert_eq!(r.terms, set(&["analysts", "mosaica-admins"]));
     assert_eq!(r.permissions, PermissionSet::EMPTY);
 
     cat.create_group("admins").unwrap();
@@ -182,7 +182,7 @@ fn a_role_mapping_passes_on_its_groups_terms_and_permissions() {
     cat.grant_permission(Grantee::Group("admins"), Permission::Admin)
         .unwrap();
     let r = cat.resolve_claims("corp", &admin).unwrap();
-    assert_eq!(r.terms, set(&["analysts", "tessera-admins", "ops"]));
+    assert_eq!(r.terms, set(&["analysts", "mosaica-admins", "ops"]));
     assert_eq!(r.permissions, perms(&[Permission::Admin]));
 
     cat.grant_permission(Grantee::Group("admins"), Permission::ReadAll)
@@ -204,9 +204,9 @@ fn a_claim_value_that_does_not_exactly_match_a_role_mapping_passes_on_nothing() 
     cat.grant_permission(Grantee::Group("admins"), Permission::Admin)
         .unwrap();
     for value in [
-        "tessera-admins-x",
-        "Tessera-Admins",
-        "tessera-admin",
+        "mosaica-admins-x",
+        "Mosaica-Admins",
+        "mosaica-admin",
         "admins",
     ] {
         let r = cat
@@ -234,9 +234,9 @@ fn the_mapped_value_in_another_claim_passes_on_nothing_beyond_its_term() {
     cat.grant_permission(Grantee::Group("admins"), Permission::Admin)
         .unwrap();
     let r = cat
-        .resolve_claims("corp", &json!({"department": "tessera-admins"}))
+        .resolve_claims("corp", &json!({"department": "mosaica-admins"}))
         .unwrap();
-    assert_eq!(r.terms, set(&["tessera-admins"]));
+    assert_eq!(r.terms, set(&["mosaica-admins"]));
     assert_eq!(r.permissions, PermissionSet::EMPTY);
 }
 
@@ -250,19 +250,19 @@ fn a_provider_is_created_changed_and_dropped_and_survives_reopening() {
         Err(Error::Exists { .. })
     ));
     let mut changed = corp(vec![tenant_rule(), groups_rule()]);
-    changed.audience = "  tessera-prod ".into();
-    changed.role_mappings = vec![mapping(" tessera-admins ", "admins"), mapping("x", "y")];
+    changed.audience = "  mosaica-prod ".into();
+    changed.role_mappings = vec![mapping(" mosaica-admins ", "admins"), mapping("x", "y")];
     cat.update_provider(&changed).unwrap();
     drop(cat);
 
     let cat = fx.open();
     let stored = cat.provider("corp").unwrap();
     assert!(!stored.read_only);
-    assert_eq!(stored.provider.audience, "tessera-prod");
+    assert_eq!(stored.provider.audience, "mosaica-prod");
     assert_eq!(stored.provider.rules, vec![tenant_rule(), groups_rule()]);
     assert_eq!(
         stored.provider.role_mappings,
-        vec![mapping("tessera-admins", "admins"), mapping("x", "y")]
+        vec![mapping("mosaica-admins", "admins"), mapping("x", "y")]
     );
 
     let mut bad = corp(vec![]);
@@ -380,7 +380,7 @@ fn a_provider_sharing_another_providers_issuer_and_audience_is_refused_on_both_p
     assert_eq!(
         names(&cat),
         vec![
-            ("corp".to_owned(), "tessera".to_owned()),
+            ("corp".to_owned(), "mosaica".to_owned()),
             ("twin".to_owned(), "reports".to_owned())
         ]
     );
@@ -592,7 +592,7 @@ fn a_change_to_a_providers_rules_or_role_mappings_reports_the_provider() {
     let rules = corp(vec![groups_rule(), tenant_rule()]);
     assert_eq!(who(cat.update_provider(&rules).unwrap()), corp_only);
     let mapped = Provider {
-        role_mappings: vec![mapping("tessera-admins", "eu")],
+        role_mappings: vec![mapping("mosaica-admins", "eu")],
         ..rules
     };
     assert_eq!(who(cat.update_provider(&mapped).unwrap()), corp_only);
@@ -616,7 +616,7 @@ fn a_change_to_a_mapped_group_reports_its_members_and_every_provider_mapping_to_
     cat.create_provider(&Provider {
         name: "other".into(),
         audience: "other".into(),
-        role_mappings: vec![mapping("tessera-admins", "eu")],
+        role_mappings: vec![mapping("mosaica-admins", "eu")],
         ..corp(vec![])
     })
     .unwrap();

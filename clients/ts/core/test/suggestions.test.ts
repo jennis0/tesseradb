@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest';
-import {TesseraError} from '../src/client.js';
+import {MosaicaError} from '../src/client.js';
 import type {ClauseVerb} from '../src/filters.js';
 import type {FilterExpr} from '../src/types.js';
 import {Suggestions, type SuggestState} from '../src/suggestions.js';
@@ -93,7 +93,7 @@ describe('the category typeahead', () => {
   it('a landed success clears a refusal the same column carried, and a refusal clears a stale page', async () => {
     let fail = true;
     const ask = vi.fn(async (column: string, q: string) => {
-      if (fail) throw new TesseraError(500, 'fail-closed', 'admin4 postings unreadable');
+      if (fail) throw new MosaicaError(500, 'fail-closed', 'admin4 postings unreadable');
       return ok(column, q);
     });
     const {clock, part, state} = typeahead(ask);

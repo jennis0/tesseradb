@@ -1,6 +1,6 @@
 //! Build-stage observation.
 //!
-//! `tessera build` is a numbered sequence of stages (see `pipeline.rs`), and "blank-database
+//! `mosaica build` is a numbered sequence of stages (see `pipeline.rs`), and "blank-database
 //! ingest as a function of point count" is really a question about *which* of them bends with
 //! scale: the sorts are n log n, the digest pass is linear in bytes, and several passes are driven
 //! by the size of the source files rather than by `--limit` at all.
@@ -217,7 +217,7 @@ impl<'a> StageTimer<'a> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The JSON sink — `tessera build --stage-timings-json <path>`
+// The JSON sink — `mosaica build --stage-timings-json <path>`
 // ---------------------------------------------------------------------------------------------
 
 /// One stage's record, as `--stage-timings-json` writes it.

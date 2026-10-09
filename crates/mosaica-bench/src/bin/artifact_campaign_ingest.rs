@@ -27,9 +27,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use clap::Parser;
-use tessera_corpus::materialise::PARTITION_LAYER;
-use tessera_corpus::Corpus;
-use tessera_spatial::Bounds;
+use mosaica_corpus::materialise::PARTITION_LAYER;
+use mosaica_corpus::Corpus;
+use mosaica_spatial::Bounds;
 
 const GRID: f64 = 65536.0;
 
@@ -75,7 +75,7 @@ struct Args {
     /// The key that column carries on every row.
     #[arg(long)]
     membership_key: Option<String>,
-    /// A prefix for the `x-tessera-batch-id` header, so two runs against one server do not collide
+    /// A prefix for the `x-mosaica-batch-id` header, so two runs against one server do not collide
     /// on the idempotency horizon.
     #[arg(long, default_value = "campaign")]
     batch_prefix: String,
@@ -183,7 +183,7 @@ fn main() {
         let response = client
             .post(format!("{}/control/ingest", args.control))
             .bearer_auth(&args.credential)
-            .header("x-tessera-batch-id", &batch_id)
+            .header("x-mosaica-batch-id", &batch_id)
             .header("content-type", "application/vnd.apache.arrow.stream")
             .body(body)
             .send()

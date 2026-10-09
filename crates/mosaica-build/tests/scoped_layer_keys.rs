@@ -18,11 +18,11 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::{build, BuildArgs, ScopedLayer, ViewArgs};
-use tessera_engine::browse::{BrowseForm, BrowseRequest};
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::{build, BuildArgs, ScopedLayer, ViewArgs};
+use mosaica_engine::browse::{BrowseForm, BrowseRequest};
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -40,8 +40,8 @@ fn extent() -> Bounds {
     }
 }
 
-fn group_frame() -> tessera_store::manifest::Quantisation {
-    tessera_store::manifest::Quantisation {
+fn group_frame() -> mosaica_store::manifest::Quantisation {
+    mosaica_store::manifest::Quantisation {
         x_min: 0.0,
         x_max: 1000.0,
         y_min: 0.0,
@@ -258,7 +258,7 @@ fn write_names(path: &Path) {
 fn build_fixture(
     dir: &Path,
     artifacts: &[(&str, &str)],
-) -> Result<tessera_build::BuildReport, tessera_build::BuildError> {
+) -> Result<mosaica_build::BuildReport, mosaica_build::BuildError> {
     build_with_labels(dir, artifacts, None)
 }
 
@@ -268,7 +268,7 @@ fn build_with_labels(
     dir: &Path,
     artifacts: &[(&str, &str)],
     labels: Option<&str>,
-) -> Result<tessera_build::BuildReport, tessera_build::BuildError> {
+) -> Result<mosaica_build::BuildReport, mosaica_build::BuildError> {
     write_points(&dir.join("a.parquet"), 100.0);
     write_points(&dir.join("b.parquet"), 90.0);
     write_pairs(&dir.join("pairs.parquet"));
@@ -285,25 +285,25 @@ fn build_with_labels(
     }
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, toml).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture declaration parses");
 
     let view = |group: &str, key: &str, points: &str| ViewArgs {
         visibility: None,
         view_id: format!("{group}:{key}"),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: dir.join(points),
         point_fields: Default::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(dir.join("pairs.parquet")),
+        access: mosaica_build::config::AccessInput::relation(dir.join("pairs.parquet")),
     };
     let mut layers = config.layers.clone();
     for layer in &mut layers {
         let group = layer.scope.group().unwrap_or("slices").to_string();
         layer.views = vec![format!("{group}:a"), format!("{group}:b")];
     }
-    let group = |name: &str| tessera_store::manifest::GroupDescriptor {
+    let group = |name: &str| mosaica_store::manifest::GroupDescriptor {
         title: None,
         name: name.to_string(),
         members_of: None,
@@ -311,11 +311,11 @@ fn build_with_labels(
         visibility: None,
         scoped_scalars: Vec::new(),
         quantisation: group_frame(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         metadata: Vec::new(),
         views: ["a", "b"]
             .into_iter()
-            .map(|key| tessera_store::manifest::GroupViewDescriptor {
+            .map(|key| mosaica_store::manifest::GroupViewDescriptor {
                 key: key.to_string(),
                 visibility: None,
                 metadata: Default::default(),
@@ -347,7 +347,7 @@ fn build_with_labels(
         anchor: 0,
         groups,
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             dir.join("a.parquet"),
             &config.schema,
         ),
@@ -422,7 +422,7 @@ fn each_view_serves_its_own_copy_of_the_key() {
     let session = engine
         .authorise(br#"{"terms": ["1"]}"#)
         .expect("the credential covers every entity");
-    let mut served: Vec<(&str, tessera_types::TesseraId)> = Vec::new();
+    let mut served: Vec<(&str, mosaica_types::TesseraId)> = Vec::new();
     for view in ["slices:a", "slices:b"] {
         let out = engine
             .browse(
@@ -477,12 +477,12 @@ fn each_view_serves_its_own_copy_of_the_key() {
 
 /// An engine over the built bundle, with the caps raised above the fixture so no assertion above
 /// is answering a question about a cap.
-fn open_engine(dir: &Path) -> tessera_engine::Engine {
-    tessera_engine::Engine::open(
+fn open_engine(dir: &Path) -> mosaica_engine::Engine {
+    mosaica_engine::Engine::open(
         &dir.join("bundle"),
         &dir.join("cache"),
         &dir.join("wal.log"),
-        tessera_engine::EngineConfig {
+        mosaica_engine::EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 1024,
             k_min: 2,
@@ -491,14 +491,14 @@ fn open_engine(dir: &Path) -> tessera_engine::Engine {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )
     .expect("the engine opens over the built bundle")
@@ -526,7 +526,7 @@ fn an_artifact_naming_a_view_the_group_lacks_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let error = build_fixture(tmp.path(), &[("c0", "a"), ("c1", "z")])
         .expect_err("the group has no view 'z', so no artifact can belong to it");
-    assert!(matches!(error, tessera_build::BuildError::Invalid(_)), "{error:?}");
+    assert!(matches!(error, mosaica_build::BuildError::Invalid(_)), "{error:?}");
 }
 
 #[test]
@@ -535,7 +535,7 @@ fn a_label_layer_attached_across_groups_is_refused_and_one_in_the_targets_group_
     let error = build_with_labels(tmp.path(), &[("c0", "a"), ("c0", "b")], Some("tallies"))
         .expect_err("a label on tallies' views attached to a slices artifact is never served");
     assert!(
-        matches!(error, tessera_build::BuildError::Invalid(_)),
+        matches!(error, mosaica_build::BuildError::Invalid(_)),
         "{error:?}"
     );
 

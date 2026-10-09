@@ -9,10 +9,10 @@
 
 use std::time::Instant;
 
-use tessera_store::field_tallies::{
+use mosaica_store::field_tallies::{
     read, write, ExactSum, FieldTallies, FieldTally, Sum, TallyMerge, RESERVE,
 };
-use tessera_types::scalar::Number;
+use mosaica_types::scalar::Number;
 
 fn tally(seed: u64, float: bool) -> FieldTally {
     let value = |k: u64| match float {

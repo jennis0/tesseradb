@@ -16,7 +16,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use tessera_catalogue::{
+use mosaica_catalogue::{
     Affected, ApiKeyInfo, ClaimRule, Error as CatalogueError, Grantee, GroupInfo, Permission,
     PermissionSet, PrincipalInfo, PrincipalKind, Provider, ProviderInfo, RoleMapping,
 };
@@ -95,7 +95,7 @@ struct Change {
 /// after it commits, on the same thread.
 async fn change(
     state: &Arc<AppState>,
-    f: impl FnOnce(&tessera_catalogue::Catalogue) -> Result<Affected, CatalogueError> + Send + 'static,
+    f: impl FnOnce(&mosaica_catalogue::Catalogue) -> Result<Affected, CatalogueError> + Send + 'static,
 ) -> Result<Json<Change>, ApiError> {
     let sessions_ended = state
         .blocking(move |state| {

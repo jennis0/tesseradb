@@ -10,18 +10,18 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
-use tessera_engine::{
+use mosaica_engine::{
     ArtifactOut, Engine, LayerSelection, ViewportArtifactsRequest, ViewportOut, ViewportRequest,
 };
-use tessera_lifecycle::membership::IncomingAttachment;
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth, UnallocatedRow};
-use tessera_store::manifest::DerivedForm;
-use tessera_types::layer::{
+use mosaica_lifecycle::membership::IncomingAttachment;
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth, UnallocatedRow};
+use mosaica_store::manifest::DerivedForm;
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     LevelDeclaration, MembershipSource, ServingLayout,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const ROWS: u64 = 3_000;
 
@@ -40,7 +40,7 @@ fn declaration(name: &str, kind: HierarchyKind, layout: Option<ServingLayout>) -
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind,
@@ -88,7 +88,7 @@ fn column(out: &ViewportOut, layer: &str) -> Vec<Option<u64>> {
 /// The artifacts the same viewer is served over the request's tiles.
 fn served(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     request: &ViewportRequest<'_>,
 ) -> Vec<ArtifactOut> {
     let tiled = ViewportArtifactsRequest::new(request.view, request.zoom, request.bbox, usize::MAX)
@@ -127,7 +127,7 @@ struct Compared {
 /// the answer from the labels, and the artifacts the request is served.
 fn compare_one(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     request: ViewportRequest<'_>,
     layers: &[&str],
     at: &str,
@@ -194,7 +194,7 @@ fn open(root: &std::path::Path, tmp: &std::path::Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_engine::EngineConfig {
+        mosaica_engine::EngineConfig {
             theta_target_marks: 16,
             ..config()
         },
@@ -389,7 +389,7 @@ fn labels_tag_points_as_the_walk_does_through_growth_ingest_fold_and_suppression
     for id in [r1, f2] {
         engine
             .accept_change(
-                artifact_entity(&engine, tessera_types::TesseraId::new(id)),
+                artifact_entity(&engine, mosaica_types::TesseraId::new(id)),
                 ChangeOp::Suppress,
             )
             .unwrap();
@@ -419,8 +419,8 @@ const CONTENT: &str = "clusters/content";
 const FRACTION: &str = "clusters/fraction";
 
 /// `id` among the sources below `bound`, as a filter or a highlight: the unique index answers `in`.
-fn id_below(bound: i64) -> tessera_engine::filter::FilterExpr {
-    use tessera_engine::filter::{FilterExpr, FilterOperand, Scalar};
+fn id_below(bound: i64) -> mosaica_engine::filter::FilterExpr {
+    use mosaica_engine::filter::{FilterExpr, FilterOperand, Scalar};
     FilterExpr::Leaf {
         column: "id".into(),
         operand: FilterOperand::NumIn((0..bound).map(|v| Scalar::Int(i128::from(v))).collect()),
@@ -446,13 +446,13 @@ fn own_labels_content_fractions_filters_and_highlights_tag_as_the_walk_does() {
 
     let engine = open(&root, tmp.path());
     let mut labelled = declaration(LABELLED, HierarchyKind::Flat, None);
-    labelled.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("visibility");
+    labelled.artifact_visibility = mosaica_types::layer::ArtifactVisibility::carried("visibility");
     engine.register_layer(labelled).unwrap();
     let mut content = declaration(CONTENT, HierarchyKind::Flat, None);
-    content.content.supplied = vec![tessera_types::layer::SuppliedContent {
+    content.content.supplied = vec![mosaica_types::layer::SuppliedContent {
         name: "name".into(),
         ty: "text".into(),
-        require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+        require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
     }];
     engine.register_layer(content).unwrap();
     let mut fraction = tiered();
@@ -484,7 +484,7 @@ fn own_labels_content_fractions_filters_and_highlights_tag_as_the_walk_does() {
             IncomingArtifact::with_content(
                 Some(format!("c{a}")),
                 quarter(a),
-                vec![tessera_lifecycle::membership::IncomingContent::new(vec![format!("c{a}")], from)],
+                vec![mosaica_lifecycle::membership::IncomingContent::new(vec![format!("c{a}")], from)],
             )
         })
         .collect();
@@ -580,7 +580,7 @@ fn generator_row(engine: &Engine, partition: u32, x: f64, y: f64) -> Unallocated
 fn a_built_bundle_tags_alike_before_and_after_an_ingest() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    let corpus = tessera_corpus::Corpus::new(0x7A6, ROWS, extent()).unwrap();
+    let corpus = mosaica_corpus::Corpus::new(0x7A6, ROWS, extent()).unwrap();
     let (points, pairs) = (tmp.path().join("points.parquet"), tmp.path().join("pairs.parquet"));
     corpus.write_points_parquet(&points).unwrap();
     corpus.write_pairs_parquet(&pairs).unwrap();
@@ -625,7 +625,7 @@ fn a_spatial_level_tags_rows_above_its_base_as_the_walk_does() {
     const BOXES: &str = "regions/boxes";
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    let corpus = tessera_corpus::Corpus::new(0x5EED, ROWS, extent()).unwrap();
+    let corpus = mosaica_corpus::Corpus::new(0x5EED, ROWS, extent()).unwrap();
     let (points, pairs) = (tmp.path().join("points.parquet"), tmp.path().join("pairs.parquet"));
     corpus.write_points_parquet(&points).unwrap();
     corpus.write_pairs_parquet(&pairs).unwrap();
@@ -664,7 +664,7 @@ artifacts = [
         ),
     )
     .unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default()).unwrap();
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default()).unwrap();
     build_with_layers(&root, &points, &pairs, &corpus, config);
     let engine = open(&root, tmp.path());
     assert!(has_labels(&engine, BOXES, 0), "the build wrote the boxes' label column");

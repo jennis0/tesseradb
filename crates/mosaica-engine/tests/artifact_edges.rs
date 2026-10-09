@@ -12,14 +12,14 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine};
-use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
-use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
-use tessera_types::layer::{
+use mosaica_engine::{ArtifactOut, Engine};
+use mosaica_lifecycle::membership::{IncomingAttachment, IncomingContent};
+use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent,
 };
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, TesseraId};
 
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
@@ -34,7 +34,7 @@ fn clusters(visibility: Option<&str>) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: visibility.map(str::to_string),
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -61,7 +61,7 @@ fn labels() -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -72,7 +72,7 @@ fn labels() -> LayerDeclaration {
             supplied: vec![SuppliedContent {
                 name: "topic".into(),
                 ty: "text".into(),
-                require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+                require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
             }],
         },
         depends_on: vec![CLUSTERS.into()],
@@ -362,7 +362,7 @@ fn an_edge_needs_a_target_that_exists_and_a_dependency_that_was_declared() {
 /// A cluster layer that announces a grouping only to a principal who can see `n` of its members.
 fn clusters_with_bar(n: u64) -> LayerDeclaration {
     let mut d = clusters(None);
-    d.require_member_visibility = Some(tessera_types::layer::ExistenceCriterion::Count(n));
+    d.require_member_visibility = Some(mosaica_types::layer::ExistenceCriterion::Count(n));
     d
 }
 
@@ -371,7 +371,7 @@ fn clusters_with_bar(n: u64) -> LayerDeclaration {
 fn labels_containing_nothing() -> LayerDeclaration {
     let mut d = labels();
     d.content.supplied[0].require_member_visibility =
-        tessera_types::layer::SuppliedRequirement::Inherited;
+        mosaica_types::layer::SuppliedRequirement::Inherited;
     d
 }
 

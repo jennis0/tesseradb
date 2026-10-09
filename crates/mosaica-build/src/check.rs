@@ -1,4 +1,4 @@
-//! `tessera check` — the declaration against the files it names, **schemas only**.
+//! `mosaica check` — the declaration against the files it names, **schemas only**.
 //!
 //! ## What it is for
 //!
@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::scalar_column;
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::scalar_column;
 
 use crate::config::{ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup};
 use crate::input::TERM_ID;
@@ -111,9 +111,9 @@ pub struct SourceChecked {
 #[derive(Debug, Clone)]
 pub struct FramePreview {
     pub view: String,
-    pub projection: tessera_spatial::Projection,
+    pub projection: mosaica_spatial::Projection,
     /// The box declared, and the square it snaps to. `None` under `auto`.
-    pub snapped: Option<(crate::config::LonLatBox, tessera_spatial::frame::Snap)>,
+    pub snapped: Option<(crate::config::LonLatBox, mosaica_spatial::frame::Snap)>,
 }
 
 /// One line for the view, and one for the snap where there is one.
@@ -506,7 +506,7 @@ fn identify(
         .column_with_name(crate::ids::TESSERA_ID_COLUMN)
         .is_some();
     if addresses {
-        if let Err(missing) = tessera_lifecycle::resolve::require_identifier(tessera, carried.len())
+        if let Err(missing) = mosaica_lifecycle::resolve::require_identifier(tessera, carried.len())
         {
             report.note(object, format!("its rows address items, and {missing}"));
             return;
@@ -530,7 +530,7 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
     let object = Object::new("view", &view.name);
     // **The frame, before the file** — a projected view's square is a function of its declaration
     // alone, so it is answered here whether or not the source opens.
-    if view.projection != tessera_spatial::Projection::None {
+    if view.projection != mosaica_spatial::Projection::None {
         report.frames.push(FramePreview {
             view: view.name.clone(),
             projection: view.projection,
@@ -591,7 +591,7 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
 /// the attribute declares no source of its own (`views.md` §5).
 fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport) {
     let object = Object::new("view group", &group.name);
-    if group.projection != tessera_spatial::Projection::None {
+    if group.projection != mosaica_spatial::Projection::None {
         report.frames.push(FramePreview {
             view: group.name.clone(),
             projection: group.projection,
@@ -753,7 +753,7 @@ pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option
             columns(schema)
         ));
     };
-    (!tessera_store::access_column::is_access_type(found.data_type())).then(|| {
+    (!mosaica_store::access_column::is_access_type(found.data_type())).then(|| {
         format!(
             "the access column '{field}' holds {:?}. Access labels are strings, one or a list of \
              them",

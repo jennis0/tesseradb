@@ -32,9 +32,9 @@ use std::path::Path;
 use arrow::array::Float32Array;
 use common::*;
 use serde_json::{json, Value};
-use tessera_build::config::Attribute;
-use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily};
-use tessera_spatial::tiler::ScalarType;
+use mosaica_build::config::Attribute;
+use mosaica_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily};
+use mosaica_spatial::tiler::ScalarType;
 
 const ENTITIES: u64 = 30;
 /// The plain view holds the first twenty; each quarter holds its own slice. `world` overlaps every
@@ -182,7 +182,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 members_of: None,
                 views: roster(),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 // Derived at the manifest write from `scoped_attributes` below, so the family list
                 // has one origin.
@@ -196,7 +196,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 members_of: Some("quarter".to_string()),
                 views: roster(),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 metadata: Vec::new(),
                 scoped_scalars: Vec::new(),
             },

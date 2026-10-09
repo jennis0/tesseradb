@@ -36,17 +36,17 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::browse::{BrowseForm, BrowseOut, BrowseRequest, BrowseRow};
-use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
-use tessera_engine::{Engine, EngineError};
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::browse::{BrowseForm, BrowseOut, BrowseRequest, BrowseRow};
+use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
+use mosaica_engine::{Engine, EngineError};
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, SuppliedContent, SuppliedRequirement,
 };
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, TesseraId};
 
 const N: u64 = 900;
 const LAYER: &str = "clusters/tree";
@@ -129,7 +129,7 @@ fn declaration(criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
@@ -190,20 +190,20 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: bundle.clone(),
         limit: None,
         strict: false,
@@ -232,7 +232,7 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
     let mut planted = Vec::new();
     for (root, base) in ROOTS {
         let mut node = IncomingArtifact::from_entities(Some(root.into()), members(base..base + 300));
-        node.contents = vec![tessera_lifecycle::membership::IncomingContent {
+        node.contents = vec![mosaica_lifecycle::membership::IncomingContent {
             values: vec![format!("The {root} group")],
             generated_from: Default::default(),
         }];
@@ -241,7 +241,7 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
             let mut child =
                 IncomingArtifact::from_entities(Some(key.clone()), members(at..at + 100));
             child.parent_keys = vec![root.to_string()];
-            child.contents = vec![tessera_lifecycle::membership::IncomingContent {
+            child.contents = vec![mosaica_lifecycle::membership::IncomingContent {
                 values: vec![format!("Subgroup {key}")],
                 generated_from: Default::default(),
             }];
@@ -251,7 +251,7 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
     engine
         .publish_artifacts(LAYER.into(), 0, planted)
         .unwrap();
-    let opened = tessera_store::read::open_bundle(&bundle).expect("the fixture opens");
+    let opened = mosaica_store::read::open_bundle(&bundle).expect("the fixture opens");
     let codes = opened
         .manifest
         .vocabularies
@@ -516,7 +516,7 @@ fn a_child_whose_parent_is_withheld_is_a_root() {
     let alpha = id_of(&fx, &full_coverage_credential(), "alpha");
     let entity = fx.engine.resolve_tessera_ids(&[alpha]).unwrap()[0].unwrap();
     fx.engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .unwrap();
     let roots = browse(
         &fx.engine,
@@ -590,7 +590,7 @@ fn a_rows_child_count_counts_only_the_children_this_principal_is_served() {
     let one = id_of(&fx, &full_coverage_credential(), "alpha-one");
     let entity = fx.engine.resolve_tessera_ids(&[one]).unwrap()[0].unwrap();
     fx.engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .unwrap();
     let after = counts(&full_coverage_credential());
     assert_eq!(after[0], ("alpha".to_string(), 2), "the suppressed child is not counted");
@@ -599,7 +599,7 @@ fn a_rows_child_count_counts_only_the_children_this_principal_is_served() {
     let two = id_of(&fx, &full_coverage_credential(), "alpha-two");
     let entity = fx.engine.resolve_tessera_ids(&[two]).unwrap()[0].unwrap();
     fx.engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Delete)
         .unwrap();
     let after = counts(&full_coverage_credential());
     assert_eq!(after[0], ("alpha".to_string(), 1), "nor is the deleted one");
@@ -756,7 +756,7 @@ fn a_filter_adds_a_count_per_row_and_moves_nothing_else() {
             (
                 FilterExpr::Leaf {
                     column: "archive".into(),
-                    operand: FilterOperand::Equals(tessera_types::AttrLocalId::new(
+                    operand: FilterOperand::Equals(mosaica_types::AttrLocalId::new(
                         fx.codes["xx"],
                     )),
                 },
@@ -826,7 +826,7 @@ fn a_filter_adds_a_count_per_row_and_moves_nothing_else() {
             BrowseForm::Roots,
             Some(FilterExpr::Leaf {
                 column: "archive".into(),
-                operand: FilterOperand::Equals(tessera_engine::filter::UNRESOLVABLE_VALUE),
+                operand: FilterOperand::Equals(mosaica_engine::filter::UNRESOLVABLE_VALUE),
             }),
             100,
         );
@@ -916,7 +916,7 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
     assert_eq!(archive_of(0), "xx");
     let xx = FilterExpr::Leaf {
         column: "archive".into(),
-        operand: FilterOperand::Equals(tessera_types::AttrLocalId::new(fx.codes["xx"])),
+        operand: FilterOperand::Equals(mosaica_types::AttrLocalId::new(fx.codes["xx"])),
     };
     let counted = |key: &str| -> u64 {
         let out = fx
@@ -948,7 +948,7 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
     assert!(alpha_before > 1, "the count must have room to fall by one");
 
     fx.engine
-        .accept_change(doomed, tessera_lifecycle::wal::ChangeOp::Delete)
+        .accept_change(doomed, mosaica_lifecycle::wal::ChangeOp::Delete)
         .expect("a delete is accepted");
     let before = fx.engine.write_executor_stats();
     fx.engine.request_fold();
@@ -1026,12 +1026,12 @@ impl Labelled {
         sources: impl IntoIterator<Item = u64>,
     ) -> IncomingArtifact {
         let mut label = IncomingArtifact::from_entities(Some(key.into()), self.members(sources));
-        label.attached_to = Some(tessera_lifecycle::membership::IncomingAttachment {
+        label.attached_to = Some(mosaica_lifecycle::membership::IncomingAttachment {
             layer: BARE.into(),
             level: 0,
             key: target.into(),
         });
-        label.contents = vec![tessera_lifecycle::membership::IncomingContent {
+        label.contents = vec![mosaica_lifecycle::membership::IncomingContent {
             values: vec![text.into()],
             generated_from: Default::default(),
         }];
@@ -1256,7 +1256,7 @@ fn a_write_to_a_label_layer_moves_the_names_on_the_next_browse() {
     let x3 = artifact_entity(&lx.fx.engine, lx.ids["x3"]);
     lx.fx
         .engine
-        .accept_change(x3, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(x3, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .unwrap();
     let names = lx.names(&broad);
     assert!(names.contains(&("b3".to_string(), None)), "{names:?}");

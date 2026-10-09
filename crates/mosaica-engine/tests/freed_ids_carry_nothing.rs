@@ -23,12 +23,12 @@ use std::time::Duration;
 use common::*;
 use homes::fixture::*;
 use homes::Home;
-use tessera_engine::filter::{Endpoint, FilterOperand, Scalar};
-use tessera_engine::{AcceptError, Engine, IngestRequest, ScalarOut};
-use tessera_lifecycle::membership::{IncomingArtifact, IncomingContent};
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::IngestRow;
-use tessera_types::{AttrLocalId, EntityId, TesseraId};
+use mosaica_engine::filter::{Endpoint, FilterOperand, Scalar};
+use mosaica_engine::{AcceptError, Engine, IngestRequest, ScalarOut};
+use mosaica_lifecycle::membership::{IncomingArtifact, IncomingContent};
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::IngestRow;
+use mosaica_types::{AttrLocalId, EntityId, TesseraId};
 
 /// The source of the items the test edits twice: `X` visibly, `W` under a suppression.
 const W: u64 = 20;
@@ -143,7 +143,7 @@ fn count_in(engine: &Engine, view: &str, key: &str) -> Option<u64> {
     engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new(view, 0, WHOLE, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new(view, 0, WHOLE, usize::MAX),
         )
         .expect("a viewport over the whole map")
         .artifacts()
@@ -200,7 +200,7 @@ fn check(engine: &Engine, x: TesseraId, z: TesseraId, x_score: i32, after: &str)
                 // Served first, so the projection a fold's refresh may be building is built.
                 assert!(served(engine, &subset, Q1, None).contains(&z.raw()));
                 let out = engine
-                    .viewport(&subset, tessera_engine::ViewportRequest::new(Q1, 0, WHOLE, 10_000))
+                    .viewport(&subset, mosaica_engine::ViewportRequest::new(Q1, 0, WHOLE, 10_000))
                     .unwrap();
                 let at = out
                     .points
@@ -209,7 +209,7 @@ fn check(engine: &Engine, x: TesseraId, z: TesseraId, x_score: i32, after: &str)
                     .position(|t| *t == z.raw())
                     .expect("q1 serves z");
                 let score = out.scalar_names.iter().position(|n| n == "score").unwrap();
-                let tessera_engine::ColumnBuf::I32(scores) = &out.points.scalars[score].values
+                let mosaica_engine::ColumnBuf::I32(scores) = &out.points.scalars[score].values
                 else {
                     panic!("score renders as i32")
                 };
@@ -485,7 +485,7 @@ fn a_freed_id_carries_nothing_of_the_item_that_held_it() {
         engine.write_executor_stats().merges > merges
     });
     check(&engine, x, z, 502, "a merge");
-    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the merged bundle verifies");
 
     fold(&engine);
@@ -493,7 +493,7 @@ fn a_freed_id_carries_nothing_of_the_item_that_held_it() {
     drop(engine);
     let engine = open(tmp.path(), &root);
     check(&engine, x, z, 502, "a restart after the second fold");
-    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the folded bundle verifies");
 }
 
@@ -621,14 +621,14 @@ fn a_moved_entitys_suppression_stays_withdrawn_after_a_restart_replays_it() {
 /// through the entity it holds.
 #[test]
 fn a_fold_discarded_after_logging_the_unsuppression_hides_nothing_less() {
-    use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+    use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
     let mut engine = Engine::open(
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_engine::EngineConfig {
+        mosaica_engine::EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,
             ..config_uncapped()

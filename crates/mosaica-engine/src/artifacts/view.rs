@@ -5,11 +5,11 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 
-use tessera_lifecycle::membership::Attachment;
-use tessera_lifecycle::Overlay;
-use tessera_access::Label;
-use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
-use tessera_types::EntityId;
+use mosaica_lifecycle::membership::Attachment;
+use mosaica_lifecycle::Overlay;
+use mosaica_access::Label;
+use mosaica_types::layer::{ExistenceCriterion, LayerDeclaration};
+use mosaica_types::EntityId;
 
 
 use crate::compose::MaskedSet;
@@ -288,8 +288,8 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
 mod tests {
     use super::*;
     use crate::artifacts::test_support::*;
-    use tessera_lifecycle::wal::ChangeOp;
-    use tessera_types::layer::{
+    use mosaica_lifecycle::wal::ChangeOp;
+    use mosaica_types::layer::{
         ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, MembershipSource,
     };
 

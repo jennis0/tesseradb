@@ -8,7 +8,7 @@
 //! values it subtracts, and the mean is rounded once.
 //!
 //! F is composed rather than walked. A build and a fold store, per view, a tally of each field for
-//! each distinct key list the base rows' items carry ([`tessera_store::field_tallies`]). The items
+//! each distinct key list the base rows' items carry ([`mosaica_store::field_tallies`]). The items
 //! of a key list are in a grant's base rows together or not at all, by the rule the authorised set
 //! is built by ([`crate::compose::admits`]), so F's tally is the merge of the tallies of the lists
 //! the grant satisfies. A base row's value and its item's keys do not change between folds: an
@@ -32,12 +32,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_cache::CacheWeight;
-pub(crate) use tessera_store::field_tallies::{
+use mosaica_cache::CacheWeight;
+pub(crate) use mosaica_store::field_tallies::{
     keep_extreme, ExactSum, FieldTally, Sum, TallyMerge, RESERVE,
 };
-pub(crate) use tessera_types::scalar::Number;
-use tessera_types::TermId;
+pub(crate) use mosaica_types::scalar::Number;
+use mosaica_types::TermId;
 
 use crate::compose::EffectiveMask;
 use crate::error::{EngineError, Result};
@@ -332,7 +332,7 @@ impl Engine {
         extremes: bool,
     ) -> Result<Arc<Held>> {
         if extremes {
-            if let tessera_cache::Peek::Ready(earlier) =
+            if let mosaica_cache::Peek::Ready(earlier) =
                 self.figures.field_left.peek(&deny_key.field)
             {
                 let reusable = earlier.deny.rows.is_subset(&deny.rows)

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 pub const OPERATOR_CREDENTIAL: &str = "operator-credential";
 
-pub fn tessera() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tessera"))
+pub fn mosaica() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }
 
 /// A port nothing is listening on, taken from the kernel and released.
@@ -60,7 +60,7 @@ pub fn deployment(dir: &Path, ports: &Ports) {
 
 /// [`deployment`], with the control plane at `control`, an address or `unix:<path>`.
 pub fn deployment_with_control(dir: &Path, ports: &Ports, control: &str) {
-    let materialised = tessera()
+    let materialised = mosaica()
         .args(["corpus", "materialise", "--seed", "1", "--n", "2000", "--out"])
         .arg(dir)
         .output()
@@ -69,7 +69,7 @@ pub fn deployment_with_control(dir: &Path, ports: &Ports, control: &str) {
     std::fs::rename(dir.join("corpus-config.toml"), dir.join("schema.toml")).unwrap();
     std::fs::write(dir.join("operator.cred"), OPERATOR_CREDENTIAL).unwrap();
     std::fs::write(
-        dir.join("tessera.toml"),
+        dir.join("mosaica.toml"),
         format!(
             r#"
 [bundle]
@@ -93,7 +93,7 @@ dir = "catalogue"
         ),
     )
     .unwrap();
-    let built = tessera()
+    let built = mosaica()
         .arg("build")
         .current_dir(dir)
         .output()
@@ -102,7 +102,7 @@ dir = "catalogue"
 }
 
 pub fn healthy(dir: &Path) -> bool {
-    tessera()
+    mosaica()
         .arg("health")
         .current_dir(dir)
         .stderr(Stdio::null())
@@ -111,7 +111,7 @@ pub fn healthy(dir: &Path) -> bool {
         .success()
 }
 
-/// `tessera serve` over the deployment in `dir`, killed when this drops.
+/// `mosaica serve` over the deployment in `dir`, killed when this drops.
 pub struct Server(pub Child);
 
 /// The loopback addresses a server's viewer and session planes bound, as `http://…` URLs.
@@ -127,7 +127,7 @@ pub struct Bound {
 impl Server {
     /// Start the server and read the addresses it bound from the line it announces them on.
     pub fn announced(dir: &Path) -> (Server, Bound) {
-        let mut child = tessera()
+        let mut child = mosaica()
             .arg("serve")
             .current_dir(dir)
             .stdout(Stdio::piped())
@@ -162,7 +162,7 @@ impl Server {
     /// Start the server and wait until it answers its health check.
     pub fn start(dir: &Path) -> Server {
         let server = Server(
-            tessera()
+            mosaica()
                 .arg("serve")
                 .current_dir(dir)
                 .stdout(Stdio::null())

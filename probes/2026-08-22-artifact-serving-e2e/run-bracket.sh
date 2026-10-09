@@ -31,7 +31,7 @@ D="$HERE/data"
 COLLATE="$REPO/probes/2026-08-20-artifact-serving-scale/collate.py"
 mkdir -p "$D"
 [ -x "$BIN" ] || {
-  echo "build first: cargo build --release -p tessera-bench --bin artifact_serving_scale" >&2
+  echo "build first: cargo build --release -p mosaica-bench --bin artifact_serving_scale" >&2
   exit 1
 }
 

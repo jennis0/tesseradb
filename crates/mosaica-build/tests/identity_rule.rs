@@ -18,12 +18,12 @@ use arrow::datatypes::{Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::Config;
-use tessera_build::{build, build_in_memory, BuildArgs, BuildReport, RefusedRows};
-use tessera_filter::{Access, RecordBlob, RecordValue};
-use tessera_spatial::Bounds;
-use tessera_store::unique::{UniqueIndexes, UniqueKey};
-use tessera_types::IdentityKey;
+use mosaica_build::config::Config;
+use mosaica_build::{build, build_in_memory, BuildArgs, BuildReport, RefusedRows};
+use mosaica_filter::{Access, RecordBlob, RecordValue};
+use mosaica_spatial::Bounds;
+use mosaica_store::unique::{UniqueIndexes, UniqueKey};
+use mosaica_types::IdentityKey;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -82,11 +82,11 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
     let registry = config.build_views().expect("the views compile");
     let anchor = config.anchor_view(&registry).expect("an anchor");
     let acquired = config.acquire().expect("the files acquire");
-    let views: Vec<tessera_build::ViewArgs> = registry
+    let views: Vec<mosaica_build::ViewArgs> = registry
         .iter()
         .map(|view| {
-            let acquired = tessera_build::config::acquire_view(view).expect("the view acquires");
-            tessera_build::ViewArgs {
+            let acquired = mosaica_build::config::acquire_view(view).expect("the view acquires");
+            mosaica_build::ViewArgs {
                 visibility: None,
                 view_id: view.id.clone(),
                 projection: view.projection,
@@ -131,7 +131,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
 
 /// The items each of `keys` names in the unique column `attribute`.
 fn holders(root: &Path, attribute: &str, keys: &[UniqueKey]) -> Vec<Vec<u32>> {
-    let bundle = tessera_store::read::open_bundle(root).expect("the bundle opens");
+    let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
     let partition = bundle.partitions.get("default").expect("one partition");
     let indexes = UniqueIndexes::open(
         &bundle.manifest,
@@ -164,7 +164,7 @@ fn records(root: &Path) -> HashMap<u32, Vec<(u16, RecordValue)>> {
         .join("attrs")
         .join("record");
     let blob = RecordBlob::open_dir(&dir, Access::Read).expect("the blob opens");
-    let bundle = tessera_store::read::open_bundle(root).expect("the bundle opens");
+    let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
     (0..bundle.manifest.entity_id_high_water as u32)
         .map(|entity| {
             let fields = blob
@@ -619,7 +619,7 @@ fn a_row_refused_for_its_value_claims_no_item() {
 }
 
 /// **(g) A file whose rows address items and that carries no unique column is refused**, at the
-/// build and at `tessera check`, in one sentence.
+/// build and at `mosaica check`, in one sentence.
 #[test]
 fn a_file_with_nothing_to_name_items_by_is_refused_by_build_and_check() {
     let tmp = tempfile::tempdir().unwrap();
@@ -633,13 +633,13 @@ fn a_file_with_nothing_to_name_items_by_is_refused_by_build_and_check() {
         "points = \"points.parquet\"\n",
         "points = \"points.parquet\"\nscores = \"scores.parquet\"\n",
     ) + "\n[[attribute]]\nname = \"score\"\ntype = \"i64\"\nsource = \"scores\"\n";
-    let sentence = tessera_lifecycle::resolve::NoIdentifier.to_string();
+    let sentence = mosaica_lifecycle::resolve::NoIdentifier.to_string();
     let said = build(&args(dir, &declaration, &dir.join("bundle")))
         .expect_err("the build refuses")
         .to_string();
     assert!(said.contains(&sentence), "{said}");
     let config = Config::parse(&dir.join("corpus.toml"), &Default::default()).unwrap();
-    let report = tessera_build::check::check(&config);
+    let report = mosaica_build::check::check(&config);
     assert!(
         report
             .findings
@@ -735,7 +735,7 @@ require_member_visibility = "any"
 /// **The streaming build's sort-merge decides every row as the rule does**: over random corpora
 /// with repeated, colliding and missing values in two fields, an attribute file that edits and
 /// names items and a members file, it builds the bundle and refuses the rows the linear build does
-/// by asking [`tessera_lifecycle::resolve::resolve`] file by file.
+/// by asking [`mosaica_lifecycle::resolve::resolve`] file by file.
 #[test]
 fn the_sort_merge_decides_what_the_rule_decides() {
     for seed in 1..=12u64 {
@@ -796,7 +796,7 @@ fn creation_order_and_not_an_ids_value_numbers_items() {
     let view = |root: &Path, file: &str| {
         std::fs::read(root.join("v00000/partitions/default/views/s0").join(file)).unwrap()
     };
-    for file in ["permutation.bin", tessera_store::ROW_ENTITY_FILE] {
+    for file in ["permutation.bin", mosaica_store::ROW_ENTITY_FILE] {
         assert_eq!(view(&a, file), view(&b, file), "{file}");
     }
 }
@@ -1033,15 +1033,15 @@ require_member_visibility = "any"
     };
     // The second view's frame is `auto`, fitted over the rows the build keeps: both name kept
     // items, and neither has a value of `a` below the limit.
-    let near = tessera_build::Framing {
+    let near = mosaica_build::Framing {
         subject: "view 'near'".to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: tessera_build::config::Extent::Auto { margin: 0.0 },
+        projection: mosaica_spatial::Projection::None,
+        extent: mosaica_build::config::Extent::Auto { margin: 0.0 },
         views: vec![1],
     };
-    let report = tessera_build::build_framed(&limited, &[near], &tessera_build::NoopObserver)
+    let report = mosaica_build::build_framed(&limited, &[near], &mosaica_build::NoopObserver)
         .expect("a clean corpus builds under --strict");
-    let bundle = tessera_store::read::open_bundle(&out).expect("the bundle opens");
+    let bundle = mosaica_store::read::open_bundle(&out).expect("the bundle opens");
     let frame = bundle.manifest.views.iter().find(|v| v.id == "near").unwrap().quantisation;
     // The kept rows sit at (0, 11) and (37, 48); the rows left out at (74, 85) and (11, 22).
     assert_eq!((frame.x_min, frame.x_max, frame.y_min, frame.y_max), (0.0, 37.0, 11.0, 48.0));

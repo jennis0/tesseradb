@@ -4,13 +4,13 @@
 //!
 //! # Why this is here and not in the engine
 //!
-//! It was in the engine, and only the fold could reach it. `tessera build` writes a prefix too, and
+//! It was in the engine, and only the fold could reach it. `mosaica build` writes a prefix too, and
 //! a build that cannot write these files leaves every one of them to be derived on the first
 //! request that names the level — which is the 111-second truncated response
 //! `probes/2026-08-22-artifact-serving-e2e/README.md` §8 reproduces, and the 10–11× the same
 //! campaign measures between a fresh bundle and its first fold.
 //!
-//! The rule this module follows is `tessera-build`'s own manifest comment about the filter
+//! The rule this module follows is `mosaica-build`'s own manifest comment about the filter
 //! artefact: **the format's owner owns both halves, so the writer and the reader cannot drift.**
 //! [`crate::membership`] owns the bytes of all three structures — [`pack_tile_index`],
 //! [`pack_label_column`]/[`pack_list_column`] and [`pack_containment`] — and this owns the one pass
@@ -26,7 +26,7 @@
 //!
 //! # What a caller supplies, and why it is a callback
 //!
-//! A level's memberships live in `tessera-lifecycle`, which this crate does not depend on and must
+//! A level's memberships live in `mosaica-lifecycle`, which this crate does not depend on and must
 //! not: the Roaring form is that crate's and the addressing is [`crate::membership`]'s. So every
 //! entry point here takes a [`LevelWalk`] — *call me with each ordinal and its projected rows* —
 //! which the caller closes over its own store with. Nothing in this file knows what an
@@ -50,13 +50,13 @@ use std::path::Path;
 
 use croaring::Bitmap;
 
-use tessera_spatial::shape::{
+use mosaica_spatial::shape::{
     contexts_at, read_wkb, read_wkt, CanonReport, DecodeError, PolyCtx, Rect, Shape, ShapeF64,
     Space,
 };
-use tessera_spatial::{unsplit32, Bounds, Projection, Tile};
-use tessera_types::layer::{LevelShape, ServingLayout, ShapeKind};
-use tessera_types::MortonCode;
+use mosaica_spatial::{unsplit32, Bounds, Projection, Tile};
+use mosaica_types::layer::{LevelShape, ServingLayout, ShapeKind};
+use mosaica_types::MortonCode;
 
 use crate::read::{tile_ranges_all, SegmentData};
 
@@ -247,7 +247,7 @@ pub fn project_tile_index(ordinals: u32, row_count: u32, each: LevelWalk<'_>) ->
 /// one record per member entry in its row range: a level whose rows carry one ordinal each fills it
 /// in proportion to the row space, and a list-form level of many ordinals a row fills it in
 /// proportion to the level's entries. The pre-flight charges it at the larger of the two
-/// (`crates/tessera-build/src/residency.rs`).
+/// (`crates/mosaica-build/src/residency.rs`).
 ///
 /// **Each bucket is sorted by `(row, ordinal)` before it is replayed, and the list form's bytes
 /// depend on it.** A row's list is written in the order the ordinals reach it, and both walks that
@@ -653,7 +653,7 @@ fn member_buckets(counts: &[u64], target: u64) -> Vec<u32> {
 /// One artifact's bitmap and covering, built from its rows as they arrive ascending: each Roaring
 /// container handed over whole, and the widest gaps kept as they pass.
 struct MemberBuilder {
-    sink: tessera_roaring::Sink,
+    sink: mosaica_roaring::Sink,
     key: u32,
     run: Vec<u32>,
     first: Option<u32>,
@@ -666,7 +666,7 @@ struct MemberBuilder {
 impl MemberBuilder {
     fn new() -> Self {
         MemberBuilder {
-            sink: tessera_roaring::Sink::new(),
+            sink: mosaica_roaring::Sink::new(),
             key: 0,
             run: Vec::new(),
             first: None,
@@ -880,7 +880,7 @@ pub fn sweep_row_column_scratch(scratch: &Path) {
 
 /// One term's postings, as this module needs to read them.
 ///
-/// **An adapter, not a second format.** `tessera-authz` owns `postings.arrow` and this crate does
+/// **An adapter, not a second format.** `mosaica-authz` owns `postings.arrow` and this crate does
 /// not depend on it, so a caller hands each posting over in whichever of the two shapes it is
 /// stored in and the walk below is written once. The decode that produces the shape stays where the
 /// format lives.
@@ -1154,7 +1154,7 @@ pub fn encode_expression(mut clauses: Vec<&[u32]>) -> Vec<u32> {
 /// One derived file waiting to be filed: its coordinates and its bytes.
 pub struct Filed {
     pub view: Option<String>,
-    pub incarnation: Option<tessera_types::view::ViewIncarnation>,
+    pub incarnation: Option<mosaica_types::view::ViewIncarnation>,
     pub layer: String,
     pub level: u32,
     pub level_version: u64,
@@ -1372,8 +1372,8 @@ pub fn file_derived(
     entries
 }
 
-const SHAPE_HELD_MAGIC: &[u8; 4] = b"TSSH";
-const SHAPE_HELD_VERSION: u16 = 1;
+const SHAPE_HELD_MAGIC: &[u8; 4] = b"MSSH";
+const SHAPE_HELD_VERSION: u16 = 2;
 const SHAPE_HELD_HOLE: u32 = u32::MAX;
 
 /// FNV-1a over a shape's canonical bytes — the per-entry guard that a persisted decomposition is
@@ -1391,7 +1391,7 @@ pub fn canonical_digest(bytes: &[u8]) -> u64 {
 /// Every artifact's decomposition of one `(view, layer, level)`, framed (`ShapeHeldExtent`).
 ///
 /// ```text
-/// TSSH | u16 version | u16 reserved (0) | u32 ordinals | u64 level_version
+/// MSSH | u16 version | u16 reserved (0) | u32 ordinals | u64 level_version
 ///      | per ordinal: u32 canonical_len — u32::MAX a hole (no shape) | u64 canonical digest
 ///        | u8 has_bounds | [4 × u32 bounds] | u32 n_interior | u32 n_boundary
 ///        | n_interior × (u64 prefix, u8 depth) | n_boundary × (u32 cell, u8 parity)
@@ -1443,7 +1443,7 @@ pub fn shape_held_bytes(
 pub struct HeldEntry {
     pub canonical_len: u32,
     pub digest: u64,
-    pub bounds: Option<tessera_spatial::shape::Bbox>,
+    pub bounds: Option<mosaica_spatial::shape::Bbox>,
     pub interior: Vec<Tile>,
     pub boundary: Vec<(MortonCode, bool)>,
 }
@@ -1487,7 +1487,7 @@ pub fn read_shape_held(path: &Path, level_version: u64) -> crate::Result<Vec<Opt
     let u32_of = |s: &[u8]| u32::from_le_bytes([s[0], s[1], s[2], s[3]]);
     let u64_of = |s: &[u8]| u64::from_le_bytes(s.try_into().expect("eight bytes"));
     if take(4)? != SHAPE_HELD_MAGIC {
-        return Err(refuse("magic is not TSSH".into()));
+        return Err(refuse("magic is not MSSH".into()));
     }
     let version = u16::from_le_bytes(take(2)?.try_into().expect("two bytes"));
     if version != SHAPE_HELD_VERSION {
@@ -1517,7 +1517,7 @@ pub fn read_shape_held(path: &Path, level_version: u64) -> crate::Result<Vec<Opt
             0 => None,
             1 => {
                 let b = take(16)?;
-                Some(tessera_spatial::shape::Bbox {
+                Some(mosaica_spatial::shape::Bbox {
                     min_x: u32_of(&b[0..4]),
                     min_y: u32_of(&b[4..8]),
                     max_x: u32_of(&b[8..12]),
@@ -1766,7 +1766,7 @@ pub struct CanonicalShapes {
     /// Per view, what canonicalisation did and what the held form costs.
     pub reports: Vec<(String, CanonReport, ShapeStats)>,
     /// The grid-unit bounds per view, for the parent-escape report.
-    pub bounds: Vec<(String, Option<tessera_spatial::shape::Bbox>)>,
+    pub bounds: Vec<(String, Option<mosaica_spatial::shape::Bbox>)>,
 }
 
 /// Read an **authored content's** text as the shape its declared kind names
@@ -1935,7 +1935,7 @@ pub fn check_shape_span(views: &[ViewFrame], space: ShapeSpace) -> Result<(), Sh
 ///
 /// **Reported, never refused**, for everything the [`CanonReport`] carries — clipped, outside,
 /// rings dropped, degrees-looking — on the rule that bounds warn and never exclude. What refuses is
-/// a [`tessera_spatial::shape::CanonError`] (a coordinate that is not one, and a `wgs84` one
+/// a [`mosaica_spatial::shape::CanonError`] (a coordinate that is not one, and a `wgs84` one
 /// outside ±180 × ±90 with it) and a polygon over `max_vertices`, naming the count and the cap
 /// (ruling (e)).
 ///
@@ -2013,7 +2013,7 @@ pub struct HeldShape {
     /// lower corner.
     pub boundary: Vec<(MortonCode, bool)>,
     /// The grid-unit box enclosing the shape; `None` for a polygon canonicalised to nothing.
-    pub bounds: Option<tessera_spatial::shape::Bbox>,
+    pub bounds: Option<mosaica_spatial::shape::Bbox>,
 }
 
 impl HeldShape {
@@ -2119,13 +2119,13 @@ impl ShapeIndex {
 }
 
 /// The depth-[`SHAPE_INDEX_DEPTH`] tiles a grid-unit box meets.
-fn coarse_tiles(b: tessera_spatial::shape::Bbox) -> impl Iterator<Item = u32> {
+fn coarse_tiles(b: mosaica_spatial::shape::Bbox) -> impl Iterator<Item = u32> {
     let shift = 32 - SHAPE_INDEX_DEPTH;
     let (x0, x1) = (b.min_x >> shift, b.max_x >> shift);
     let (y0, y1) = (b.min_y >> shift, b.max_y >> shift);
     (y0..=y1).flat_map(move |ty| {
         (x0..=x1)
-            .map(move |tx| tessera_spatial::interleave_bits(tx, ty, SHAPE_INDEX_DEPTH as u8) as u32)
+            .map(move |tx| mosaica_spatial::interleave_bits(tx, ty, SHAPE_INDEX_DEPTH as u8) as u32)
     })
 }
 

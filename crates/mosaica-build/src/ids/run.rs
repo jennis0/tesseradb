@@ -10,7 +10,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
-use tessera_store::key_index::Key;
+use mosaica_store::key_index::Key;
 
 use crate::error::{BuildError, Result};
 use crate::spill::mix64;

@@ -18,7 +18,7 @@
 //! anonymous memory (`RssAnon`) are the spill's and not the lookups' mappings.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin key_index_scale -- --dir <scratch> [--entries N] [--keys dense|random] [--spill]
+//! cargo run --release -p mosaica-bench --bin key_index_scale -- --dir <scratch> [--entries N] [--keys dense|random] [--spill]
 //! ```
 
 use std::fs::File;
@@ -31,7 +31,7 @@ use clap::{Parser, ValueEnum};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_store::key_index::{verify_run, KeyRun, KeyRunWriter, KeySpill};
+use mosaica_store::key_index::{verify_run, KeyRun, KeyRunWriter, KeySpill};
 
 #[derive(Parser)]
 #[command(about = "key index run write, open, lookup and spill costs at scale")]
@@ -239,7 +239,7 @@ fn main() {
     let write = started.elapsed();
     let path = runs[0].path.clone();
     let started = Instant::now();
-    tessera_store::fsync_written(std::slice::from_ref(&path)).expect("fsync");
+    mosaica_store::fsync_written(std::slice::from_ref(&path)).expect("fsync");
     let fsync = started.elapsed();
     let size = std::fs::metadata(&path).expect("metadata").len();
     println!(

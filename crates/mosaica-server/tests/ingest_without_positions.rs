@@ -106,8 +106,8 @@ async fn ingest_point_with(served: &Served, batch_id: &str, columns: Value) -> u
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .json(&body)
         .send()
         .await
@@ -126,9 +126,9 @@ async fn values(served: &Served, batch_id: &str, view: Option<&str>, body: Value
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id);
+        .header("x-mosaica-batch-id", batch_id);
     if let Some(view) = view {
-        request = request.header("x-tessera-view", view);
+        request = request.header("x-mosaica-view", view);
     }
     let resp = request.json(&body).send().await.unwrap();
     let status = resp.status().as_u16();
@@ -419,8 +419,8 @@ async fn the_two_encodings_land_identical_values() {
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "values-arrow")
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", "values-arrow")
+        .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(arrow_values(SUBJECT, "alpha"))
         .send()
@@ -494,8 +494,8 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "values-arrow")
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", "values-arrow")
+        .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(arrow_values_by_tessera_id(id, "alpha"))
         .send()

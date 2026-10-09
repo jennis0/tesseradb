@@ -217,8 +217,8 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> (u16, Value) 
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -290,7 +290,7 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     let (status, _) = declare(&served, "severity", opened).await;
     assert_eq!(status, 409, "and under another value set");
 
-    // What is refused is tested in `tessera_store::declaration`; here, that a refusal is a 422
+    // What is refused is tested in `mosaica_store::declaration`; here, that a refusal is a 422
     // with a `detail`.
     for bad in [
         json!({ "value_set": "closed", "visibility": "public", "width": "f32" }),

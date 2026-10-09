@@ -22,7 +22,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use tessera_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_spatial::tiler::{ScalarType, ScalarValue};
 
 use crate::error::{Result, StoreError};
 use crate::key_index::{

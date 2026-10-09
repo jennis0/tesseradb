@@ -12,7 +12,7 @@ power loss would have done, and then asks the same survival questions. The offse
 WAL's own sidecar — one per sequence member, `wal-000001.log` → `wal-000001.sync`, an 8-byte
 little-endian offset into that member written write-tmp-then-rename and fsynced together with its
 directory entry after every WAL fsync, because replay already needs it
-(`tessera-lifecycle/src/wal.rs`, "the durable prefix"; decision 0038). The configured `wal` path
+(`mosaica-lifecycle/src/wal.rs`, "the durable prefix"; decision 0038). The configured `wal` path
 names the family, not a file, so the test derives the active member rather than opening it. §5
 specifies an `fsync_offset()` introspection command behind a `conformance` cargo feature to supply
 this number; none of that is needed, because the number is already on disk.
@@ -74,18 +74,18 @@ purely from what replay restored:
 **`/control/status`'s actual Phase 1 shape, and why "high-water unchanged" alone is weaker
 evidence than it first looks (code review Important-2 on an earlier draft of this file).** The
 brief describes checking that `/control/status` "shows the ingested batch's rows as buffered".
-Phase 1's `/control/status` handler (`crates/tessera-server/src/control.rs`) exposes exactly one
+Phase 1's `/control/status` handler (`crates/mosaica-server/src/control.rs`) exposes exactly one
 field, `entity_id_high_water` — there is no separate buffered-row-count field, no batch-id list,
 and no flag anywhere distinguishing "this response reflects a WAL replay" from "this response
 reflects a freshly recorded batch" (confirmed by reading every route `control.rs` registers).
 
 **Why a *direct* viewport-visibility check (does the ingested item show up on a subsequent
 `/v1/viewport`?) is impossible in Phase 1, not merely inconvenient.** Investigated before choosing
-the evidence below, per the review's instruction. `crates/tessera-engine/src/compose.rs`'s mask
+the evidence below, per the review's instruction. `crates/mosaica-engine/src/compose.rs`'s mask
 composition walks the ingest buffer looking for a row via `Permutation::row_of(entity)`, and its
 own comment states Phase 1 buffered entities have no row anywhere (no flush/build has happened
 yet) — the "no row" branch is always taken, so a buffered item contributes nothing to any
-viewport's mask, however it is authorised. `tessera-lifecycle/src/buffer.rs`'s module doc says the
+viewport's mask, however it is authorised. `mosaica-lifecycle/src/buffer.rs`'s module doc says the
 same thing directly: "a buffered item simply has no `Permutation::row_of` entry anywhere, so it
 can never contribute [to a viewport]." This is stated as intentional design in
 `docs/design/system-architecture.md` (§6.2/§6.3: WAL/ack durably records allocator state
@@ -122,11 +122,11 @@ review's "high-water alone" gap.
 
 **Out of scope (Task 13 note, brief step 2):** deny-op WAL-append-failure fault injection (what
 happens if the fsync for a `suppress`/`delete` genuinely fails) is explicitly out of scope for
-Phase 1 conformance — `crates/tessera-server/src/control.rs`'s module doc describes the intended
+Phase 1 conformance — `crates/mosaica-server/src/control.rs`'s module doc describes the intended
 fail-open-vs-fail-closed handling, but injecting a real fsync failure requires fault-injection
 plumbing this phase doesn't have. Not tested here.
 
-Also out of scope per the ledger note: the `x-tessera-view` header (unimplemented; contracts
+Also out of scope per the ledger note: the `x-mosaica-view` header (unimplemented; contracts
 allow 422 on ambiguity but Phase 1 ships one view, so this is never exercised).
 """
 

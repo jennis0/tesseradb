@@ -92,7 +92,7 @@ pub struct ItemsRequest<'a> {
     pub system_fields: &'a [String],
     /// The viewport's filter, resolved as it resolves one. `None` is every visible item.
     pub filter: Option<FilterExpr>,
-    /// Every visible item with a `tessera:matched` column, instead of the matching ones only.
+    /// Every visible item with a `mosaica:matched` column, instead of the matching ones only.
     pub keep_unmatched: bool,
     /// Put the visible and matching counts in the head. Refused with a cursor.
     pub count: bool,

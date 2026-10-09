@@ -1,6 +1,6 @@
 """The serve battery — view latency across a principal ladder, hot and cold, on one schema.
 
-It drives a running `tessera serve` and writes the `serve` block of the rung's
+It drives a running `mosaica serve` and writes the `serve` block of the rung's
 `measurements.json`.
 
 Each cell is measured under three conditions, stamped in every row:
@@ -24,7 +24,7 @@ and counted in `eviction_failed` instead.
 
     python -m test_corpora.common.serve_battery \\
         --viewer http://127.0.0.1:8151 --session http://127.0.0.1:8152 \\
-        --control http://127.0.0.1:8153 --operator-cred "$CRED" --bundle /path/to/bundle --cache /path/to/.tessera/cache \\
+        --control http://127.0.0.1:8153 --operator-cred "$CRED" --bundle /path/to/bundle --cache /path/to/.mosaica/cache \\
         --ranks /path/to/branch-ranks.json --server-pid 1234 --out serve-nocap.json \\
         [--cap-bytes 6442450944 --cgroup /sys/fs/cgroup/user.slice/.../scope]
 """
@@ -291,7 +291,7 @@ def viewport(
         # Time to the cut, if there was one.
         "wall_ms": wall * 1000.0,
         # Time from admission to the sweep's end: the trailer's `stream_us` covers the rest.
-        "server_ms": int(r.headers.get("x-tessera-server-us", "0")) / 1000.0,
+        "server_ms": int(r.headers.get("x-mosaica-server-us", "0")) / 1000.0,
         "bytes": len(content),
         "request_zoom": zoom,
         "k": k,
@@ -305,7 +305,7 @@ def viewport(
 
 
 def _cell_index(v: float, lo: float, hi: float) -> int:
-    """`tessera-spatial`'s 16-bit quantiser: the cell a coordinate falls in, clamped at both ends."""
+    """`mosaica-spatial`'s 16-bit quantiser: the cell a coordinate falls in, clamped at both ends."""
     scaled = math.floor((v - lo) / (hi - lo) * 65536.0)
     if scaled <= 0:
         return 0
@@ -313,7 +313,7 @@ def _cell_index(v: float, lo: float, hi: float) -> int:
 
 
 def covered_tiles(quantisation: dict, bbox: Sequence[float], depth: int) -> int:
-    """How many depth-`depth` tiles `bbox` covers, as `tessera-spatial` counts them: the engine
+    """How many depth-`depth` tiles `bbox` covers, as `mosaica-spatial` counts them: the engine
     refuses a request above `max_tiles_per_request`, so the battery asks a shallower depth first.
     """
     if depth <= 0:
@@ -1010,7 +1010,7 @@ class Battery:
                 {
                     "status": r.status_code,
                     "wall_ms": (time.perf_counter() - t0) * 1000.0,
-                    "server_ms": int(r.headers.get("x-tessera-server-us", "0")) / 1000.0,
+                    "server_ms": int(r.headers.get("x-mosaica-server-us", "0")) / 1000.0,
                 }
             )
         out["drilldown"] = {
@@ -1116,7 +1116,7 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--boot-rung", help="a rung directory to serve, instead of an already-running server")
     ap.add_argument("--boot-bundle", help="the bundle to serve; defaults to <rung>/bundle")
     ap.add_argument("--boot-scratch", help="where the scratch deployment, cache and WAL go")
-    ap.add_argument("--boot-binary", help="the tessera binary")
+    ap.add_argument("--boot-binary", help="the mosaica binary")
     ap.add_argument("--boot-port0", type=int, default=8151)
     ap.add_argument(
         "--boot-serve-config",
@@ -1167,7 +1167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if served is not None:
             served.stop()
     if served is not None:
-        # The open: tessera serve from launch to /readyz, measured around start() alone.
+        # The open: mosaica serve from launch to /readyz, measured around start() alone.
         result["open_s"] = open_s
     result["ran_s"] = round(time.time() - started, 1)
     Path(args.out).write_text(json.dumps(result, indent=2))

@@ -26,7 +26,7 @@ pub(super) const QUANTISE_DIVISIONS: u32 = 1_024;
 pub(super) const REDUCTION_FLOOR: usize = 75_000;
 
 /// The representatives the served dig computes its shape over, or `None` where it digs over every
-/// member, for `tessera-bench`'s `hull_cost` to hold the reduction to a second implementation
+/// member, for `mosaica-bench`'s `hull_cost` to hold the reduction to a second implementation
 /// written from the definition.
 #[doc(hidden)]
 pub fn quantised(points: &[[u32; 2]]) -> Option<Vec<[u32; 2]>> {
@@ -280,7 +280,7 @@ impl<'a> Runs<'a> {
 /// The two cell coordinates interleaved, the key [`quantise`] folds runs on: standard
 /// bit-spreading, five shift-or-and steps an axis. Ordering by this key is Morton order over the
 /// binning grid, so "this run is out of order" is a single comparison. A `u64` and not
-/// [`tessera_spatial::morton::interleave`], because the binning grid's coordinates run to 32 bits
+/// [`mosaica_spatial::morton::interleave`], because the binning grid's coordinates run to 32 bits
 /// where the cell side is small, against the corpus grid's 16.
 pub(super) fn interleave_cell(cx: u64, cy: u64) -> u64 {
     fn spread(mut v: u64) -> u64 {

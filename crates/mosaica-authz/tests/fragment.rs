@@ -9,8 +9,8 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use tempfile::TempDir;
 
-use tessera_authz::{build_fragment, write_postings, FragmentCache, FragmentCacheError};
-use tessera_types::TermId;
+use mosaica_authz::{build_fragment, write_postings, FragmentCache, FragmentCacheError};
+use mosaica_types::TermId;
 
 const UNIVERSE: u32 = 100_000;
 
@@ -51,7 +51,7 @@ fn write_random_postings(
 fn build_fragment_matches_brute_force_union() {
     let temp = TempDir::new().unwrap();
     let (path, per_term) = write_random_postings(temp.path(), 1, 50);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let mut rng = StdRng::seed_from_u64(2);
     for _ in 0..20 {
@@ -76,7 +76,7 @@ fn build_fragment_matches_brute_force_union() {
 fn build_fragment_empty_grant_is_empty() {
     let temp = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(temp.path(), 3, 10);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let fragment = build_fragment(&[], &reader).unwrap();
     assert_eq!(fragment.cardinality(), 0);
@@ -86,7 +86,7 @@ fn build_fragment_empty_grant_is_empty() {
 fn frozen_round_trip_second_call_does_not_rebuild() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, per_term) = write_random_postings(corpus_dir.path(), 7, 10);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
     let bundle_identity = [9u8; 32];
@@ -154,7 +154,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
 fn stale_bundle_identity_misses_the_cache() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 11, 5);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
     let rule_hash = [7u8; 32];
@@ -185,7 +185,7 @@ fn stale_bundle_identity_misses_the_cache() {
 fn stale_rule_hash_misses_the_cache() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 13, 5);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
     let bundle_identity = [9u8; 32];
@@ -217,7 +217,7 @@ fn stale_rule_hash_misses_the_cache() {
 fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, per_term) = write_random_postings(corpus_dir.path(), 21, 8);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
     let bundle_identity = [3u8; 32];
@@ -272,7 +272,7 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
 fn concurrent_cold_builds_single_flight_to_one_real_build() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 41, 20);
-    let reader = Arc::new(tessera_authz::PostingsReader::open(&path, false).unwrap());
+    let reader = Arc::new(mosaica_authz::PostingsReader::open(&path, false).unwrap());
 
     let cache_dir = TempDir::new().unwrap();
     let cache = Arc::new(FragmentCache::new(cache_dir.path(), [1u8; 32], [2u8; 32]));
@@ -309,7 +309,7 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
         })
         .collect();
 
-    let results: Vec<Arc<tessera_authz::FrozenFragment>> =
+    let results: Vec<Arc<mosaica_authz::FrozenFragment>> =
         handles.into_iter().map(|h| h.join().unwrap()).collect();
     for r in &results {
         assert!(
@@ -330,7 +330,7 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
 fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, per_term) = write_random_postings(corpus_dir.path(), 51, 6);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
     let cache = FragmentCache::new(cache_dir.path(), [3u8; 32], [4u8; 32]);
@@ -372,7 +372,7 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
 fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, per_term) = write_random_postings(corpus_dir.path(), 61, 4);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let root = TempDir::new().unwrap();
     let blocker_path = root.path().join("blocker");
@@ -415,7 +415,7 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
 fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 17, 5);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
@@ -453,7 +453,7 @@ fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
 fn a_fragment_carries_the_identity_it_was_built_under() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 19, 5);
-    let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
+    let reader = mosaica_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
@@ -482,7 +482,7 @@ fn a_fragment_carries_the_identity_it_was_built_under() {
 fn concurrent_waiting_callers_are_all_served_the_one_build() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 43, 20);
-    let reader = Arc::new(tessera_authz::PostingsReader::open(&path, false).unwrap());
+    let reader = Arc::new(mosaica_authz::PostingsReader::open(&path, false).unwrap());
 
     let cache_dir = TempDir::new().unwrap();
     let cache = Arc::new(FragmentCache::new(cache_dir.path(), [1u8; 32], [2u8; 32]));
@@ -501,13 +501,13 @@ fn concurrent_waiting_callers_are_all_served_the_one_build() {
             std::thread::spawn(move || {
                 barrier.wait();
                 cache
-                    .get_or_build_waiting(&terms, &reader, &[], 7, &tessera_cache::NeverCancelled)
+                    .get_or_build_waiting(&terms, &reader, &[], 7, &mosaica_cache::NeverCancelled)
                     .expect("a waiting caller is served, not refused")
             })
         })
         .collect();
 
-    let results: Vec<Arc<tessera_authz::FrozenFragment>> =
+    let results: Vec<Arc<mosaica_authz::FrozenFragment>> =
         handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert!(results.iter().all(|r| Arc::ptr_eq(&results[0], r)));
     assert_eq!(cache.rebuild_count(), 1);

@@ -254,7 +254,7 @@ def predicate_spread(out: Path, views: dict, column: str) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, default=None,
-                    help=f"default $TESSERA_LADDER/{sources.RUNG}")
+                    help=f"default $MOSAICA_LADDER/{sources.RUNG}")
     ap.add_argument("--sample", type=int, default=SAMPLE_PER_LEVEL,
                     help="artifacts measured per level")
     ap.add_argument("--survey-rows", type=int, default=SURVEY_ROWS,

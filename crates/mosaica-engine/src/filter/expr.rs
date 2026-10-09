@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_types::AttrLocalId;
+use mosaica_types::AttrLocalId;
 
 use super::{Endpoint, Family, FilterError, Scalar};
 
@@ -60,9 +60,9 @@ pub const REGION_COLUMN: &str = "region";
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegionLeaf {
     /// A box, circle, ellipse or polygon in its canonical grid-unit form.
-    Shape(Arc<tessera_spatial::shape::Shape>),
+    Shape(Arc<mosaica_spatial::shape::Shape>),
     /// A published artifact's membership.
-    Artifact(tessera_types::TesseraId),
+    Artifact(mosaica_types::TesseraId),
 }
 
 /// The leaf name a `member_of` leaf answers to, reserved exactly as `region` is.
@@ -77,7 +77,7 @@ pub const MEMBER_OF_COLUMN: &str = "member_of";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberOfLeaf {
     pub layer: String,
-    pub artifact: tessera_types::TesseraId,
+    pub artifact: mosaica_types::TesseraId,
 }
 
 /// A filter expression: a leaf predicate over one column, or a combinator over sub-expressions.
@@ -289,7 +289,7 @@ impl RowExpr {
         }
     }
 
-    /// The coarsest verdict any region leaf reached, or `None`: the `x-tessera-region` header's
+    /// The coarsest verdict any region leaf reached, or `None`: the `x-mosaica-region` header's
     /// value.
     pub fn region_verdict(&self) -> Option<crate::region::RegionVerdict> {
         match self {
@@ -319,7 +319,7 @@ pub type MemberResolver<'a> = dyn Fn(&MemberOfLeaf) -> Result<Bitmap, FilterErro
 /// entries beside it, deleted entities dropped. Visibility is the evaluator's: it intersects the
 /// answer with its candidate.
 pub type UniqueResolver<'a> =
-    dyn Fn(&str, &[tessera_store::unique::UniqueKey]) -> Result<Vec<u32>, FilterError> + 'a;
+    dyn Fn(&str, &[mosaica_store::unique::UniqueKey]) -> Result<Vec<u32>, FilterError> + 'a;
 
 /// The two row-space leaves' resolvers, whether this principal reaches a layer a `member_of`
 /// names, which is refused before either resolver runs, and the unique columns' lookup.

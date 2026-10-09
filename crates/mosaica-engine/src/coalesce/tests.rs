@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use tessera_authz::DictStreamWriter;
-use tessera_filter::RecordField;
-use tessera_store::manifest::{Quantisation, SegmentsManifest, DECLARED_INCARNATION};
-use tessera_store::manifest::UniqueIndexRuns;
-use tessera_store::FlushOutput;
-use tessera_types::view::ViewIncarnation;
-use tessera_types::{AttrLocalId, EntityId, TermId};
+use mosaica_authz::DictStreamWriter;
+use mosaica_filter::RecordField;
+use mosaica_store::manifest::{Quantisation, SegmentsManifest, DECLARED_INCARNATION};
+use mosaica_store::manifest::UniqueIndexRuns;
+use mosaica_store::FlushOutput;
+use mosaica_types::view::ViewIncarnation;
+use mosaica_types::{AttrLocalId, EntityId, TermId};
 
 use super::*;
 use crate::flush::SMALL_TERM_THRESHOLD;
@@ -98,7 +98,7 @@ impl Fixture {
     }
 
     fn digest_of(&self, rel: &str) -> FileDigest {
-        tessera_store::digest_of(&self.path(rel)).unwrap()
+        mosaica_store::digest_of(&self.path(rel)).unwrap()
     }
 
     fn digest<'a>(&mut self, rels: impl IntoIterator<Item = &'a str>) {
@@ -123,10 +123,10 @@ impl Fixture {
 
     /// A geometry segment.
     fn write_segment(&self, seg: &str, entities: &[u32], row_base: u32) -> FlushOutput {
-        let key = tessera_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
+        let key = mosaica_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
         let rows = entities
             .iter()
-            .map(|&e| tessera_store::FlushRow {
+            .map(|&e| mosaica_store::FlushRow {
                 entity_id: EntityId::new(e.into()),
                 number: EntityId::new(e.into()),
                 x: 0.5,
@@ -134,7 +134,7 @@ impl Fixture {
                 scalars: Vec::new(),
             })
             .collect();
-        let input = tessera_store::FlushInput {
+        let input = mosaica_store::FlushInput {
             seg_id: seg,
             incarnation: DECLARED_INCARNATION,
             rows,
@@ -151,7 +151,7 @@ impl Fixture {
             row_base,
             entity_floor: 0,
         };
-        tessera_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input).unwrap()
+        mosaica_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input).unwrap()
     }
 
     fn write_dict(&self, dir_rel: &str, descriptors: &[String]) -> String {
@@ -184,7 +184,7 @@ impl Fixture {
             (TermId::new(1), entities.clone()),
             (TermId::new(100 + flush), vec![entities[0]]),
         ];
-        tessera_authz::write_delta_tier(&self.path(&tier), &pairs, SMALL_TERM_THRESHOLD).unwrap();
+        mosaica_authz::write_delta_tier(&self.path(&tier), &pairs, SMALL_TERM_THRESHOLD).unwrap();
         self.digest([tier.as_str()]);
         self.manifest.deltas.push(tier);
 
@@ -226,7 +226,7 @@ impl Fixture {
         match view {
             None => format!("partitions/{PARTITION}/attrs/{column}"),
             Some((view, incarnation)) => {
-                tessera_store::scoped_column_rel(PARTITION, column, view, incarnation)
+                mosaica_store::scoped_column_rel(PARTITION, column, view, incarnation)
             }
         }
     }
@@ -252,10 +252,10 @@ impl Fixture {
         let presence: croaring::Bitmap = entities.iter().copied().collect();
         let dict_keys: Option<Vec<&str>> =
             dict.as_ref().map(|d| d.iter().map(String::as_str).collect());
-        let (values, presence, dict) = tessera_filter::write_extent(
+        let (values, presence, dict) = mosaica_filter::write_extent(
             &self.path(&Self::column_rel(column, view)),
             flush,
-            &tessera_filter::Codes::U32(codes.into()),
+            &mosaica_filter::Codes::U32(codes.into()),
             &presence,
             dict_keys.as_deref(),
         )
@@ -282,23 +282,23 @@ impl Fixture {
             hasrow: format!("{dir}/{seg}.hasrow.roaring"),
             directory: format!("{dir}/{seg}.directory.arrow"),
         };
-        let mut writer = tessera_filter_write::RecordBlobWriter::create(
+        let mut writer = mosaica_filter_write::RecordBlobWriter::create(
             &self.path(&extent.blocks),
             &self.path(&extent.hasrow),
             &self.path(&extent.directory),
-            tessera_filter::RECORD_BLOCK_TARGET,
+            mosaica_filter::RECORD_BLOCK_TARGET,
         )
         .unwrap();
         for &e in entities {
             let name = format!("name-{e}");
             let fields = [
-                tessera_filter::RecordFieldRef {
+                mosaica_filter::RecordFieldRef {
                     tag: 0,
-                    value: tessera_filter::RecordValueRef::Utf8(&name),
+                    value: mosaica_filter::RecordValueRef::Utf8(&name),
                 },
-                tessera_filter::RecordFieldRef {
+                mosaica_filter::RecordFieldRef {
                     tag: 1,
-                    value: tessera_filter::RecordValueRef::U32(e),
+                    value: mosaica_filter::RecordValueRef::U32(e),
                 },
             ];
             writer.push_row(e, &fields).unwrap();
@@ -333,7 +333,7 @@ impl Fixture {
         };
         if let Some(prose) = &extent.prose {
             let texts: Vec<String> = entities.iter().map(|e| format!("only-{e}")).collect();
-            tessera_filter_write::write_prose(
+            mosaica_filter_write::write_prose(
                 &self.path(&prose.blocks),
                 &self.path(&prose.hasrow),
                 &self.path(&prose.directory),
@@ -345,9 +345,9 @@ impl Fixture {
             .unwrap();
         }
         let words = terms.keys().map(String::as_str);
-        tessera_filter::write_sorted_dict(&self.path(&extent.dict), words).unwrap();
+        mosaica_filter::write_sorted_dict(&self.path(&extent.dict), words).unwrap();
         let per_term: Vec<Vec<u32>> = terms.into_values().collect();
-        tessera_authz::write_postings(&self.path(&extent.postings), &per_term, SMALL_TERM_THRESHOLD)
+        mosaica_authz::write_postings(&self.path(&extent.postings), &per_term, SMALL_TERM_THRESHOLD)
             .unwrap();
         let presence: croaring::Bitmap = entities.iter().copied().collect();
         std::fs::write(self.path(&extent.presence), presence.serialize::<croaring::Portable>())
@@ -365,7 +365,7 @@ impl Fixture {
             terms: format!("{dir}/{seg}.terms.u32"),
             bases: format!("{dir}/{seg}.bases.u64"),
         };
-        let mut writer = tessera_store::EntityTermsWriter::create_at(
+        let mut writer = mosaica_store::EntityTermsWriter::create_at(
             &self.path(&extent.hasrow),
             &self.path(&extent.offsets),
             &self.path(&extent.terms),
@@ -397,7 +397,7 @@ impl Fixture {
     /// The term id every descriptor resolves to through `dicts`.
     fn term_ids(&self, dicts: &[DictExtent]) -> Vec<Option<u32>> {
         let paths: Vec<PathBuf> = dicts.iter().map(|d| self.path(&d.path)).collect();
-        let dict = tessera_authz::Dict::load(&paths).unwrap();
+        let dict = mosaica_authz::Dict::load(&paths).unwrap();
         let descriptors = ["base-0".to_string(), "base-1".to_string()]
             .into_iter()
             .chain((0..4).flat_map(|f| (0..2).map(move |j| format!("flush-{f}-{j}"))));
@@ -406,16 +406,16 @@ impl Fixture {
 
     /// Each column's value per entity, read through `extents` as a restart opens them.
     fn attr_values(&self, extents: &[AttrExtent]) -> ByColumn<BTreeMap<u32, String>> {
-        let access = tessera_filter::Access::Read;
+        let access = mosaica_filter::Access::Read;
         let mut out: ByColumn<BTreeMap<u32, String>> = BTreeMap::new();
         let mut scratch = Vec::new();
         for extent in extents {
             let (values, presence) = (self.path(&extent.values), self.path(&extent.presence));
-            let values = tessera_filter::open_extent(&values, &presence, access).unwrap();
+            let values = mosaica_filter::open_extent(&values, &presence, access).unwrap();
             let dict = extent
                 .dict
                 .as_ref()
-                .map(|d| tessera_filter::SortedDict::open(&self.path(d), access).unwrap());
+                .map(|d| mosaica_filter::SortedDict::open(&self.path(d), access).unwrap());
             let column = out.entry((extent.column.clone(), extent.view.clone())).or_default();
             for e in flushed_entities() {
                 let Some(value) = values.value_of(e) else {
@@ -434,11 +434,11 @@ impl Fixture {
     fn record_fields(&self, extents: &[RecordExtent]) -> BTreeMap<u32, Vec<RecordField>> {
         let mut out = BTreeMap::new();
         for extent in extents {
-            let blob = tessera_filter::RecordBlob::open(
+            let blob = mosaica_filter::RecordBlob::open(
                 &self.path(&extent.blocks),
                 &self.path(&extent.hasrow),
                 &self.path(&extent.directory),
-                tessera_filter::Access::Read,
+                mosaica_filter::Access::Read,
             )
             .unwrap();
             for e in flushed_entities() {
@@ -456,10 +456,10 @@ impl Fixture {
         for extent in extents {
             let key = (extent.column.clone(), extent.view.clone());
             let (words, present) = out.entry(key).or_default();
-            let access = tessera_filter::Access::Read;
-            let dict = tessera_filter::SortedDict::open(&self.path(&extent.dict), access).unwrap();
+            let access = mosaica_filter::Access::Read;
+            let dict = mosaica_filter::SortedDict::open(&self.path(&extent.dict), access).unwrap();
             let postings = self.path(&extent.postings);
-            let postings = tessera_filter::ColumnPostings::open(&postings, false).unwrap();
+            let postings = mosaica_filter::ColumnPostings::open(&postings, false).unwrap();
             dict.walk(|ordinal, word| {
                 let entities = postings.entities(AttrLocalId::new(ordinal)).unwrap();
                 words.entry(word.to_string()).or_default().extend(entities.iter());
@@ -474,7 +474,7 @@ impl Fixture {
     fn entity_terms(&self, extents: &[EntityTermsExtent]) -> BTreeMap<u32, Vec<u32>> {
         let mut out = BTreeMap::new();
         for extent in extents {
-            let layer = tessera_store::EntityTerms::open(
+            let layer = mosaica_store::EntityTerms::open(
                 &self.path(&extent.hasrow),
                 &self.path(&extent.offsets),
                 &self.path(&extent.terms),
@@ -722,7 +722,7 @@ fn a_window_the_merge_refuses_fails_alone() {
     let fx = Fixture::with_every_kind();
     let faulted = fx.manifest.attr_extents.iter().find(|e| e.column == "title").unwrap();
     let faulted = faulted.dict.clone().unwrap();
-    tessera_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
+    mosaica_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
     let plan = fx.plan().expect("every kind qualifies");
     let completed = fx.execute(plan).expect("the other windows write");
     assert_eq!(completed.failures.len(), 1, "the title window failed");
@@ -747,7 +747,7 @@ fn a_window_the_merge_refuses_fails_alone() {
 fn a_pass_whose_every_window_fails_is_an_error() {
     let fx = title_flushes([true; 3]);
     let faulted = fx.manifest.attr_extents[1].dict.clone().unwrap();
-    tessera_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
+    mosaica_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
     let plan = fx.plan().expect("the window is planned");
     assert!(fx.execute(plan).is_err());
 }

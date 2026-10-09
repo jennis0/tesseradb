@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use tessera_engine::Engine;
+use mosaica_engine::Engine;
 
 /// Poll `cond` every 5 ms until it holds, failing after `within` with what was being waited for.
 pub fn wait_until(what: &str, within: Duration, mut cond: impl FnMut() -> bool) {

@@ -13,7 +13,7 @@ import pyarrow as pa
 import pytest
 
 from conftest import viewport
-from tesseradb._refusal import Refusal
+from mosaica._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
 from test_sdk_pages import whole_frame

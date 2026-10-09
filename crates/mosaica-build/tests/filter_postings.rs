@@ -2,7 +2,7 @@
 //! (filter-index §2.2, §2.5, §4).
 //!
 //! `schema.rs`'s unit tests cover the parse rules. These read what the build actually wrote,
-//! through the reader that will serve it — `tessera_filter::ColumnPostings` — because the two
+//! through the reader that will serve it — `mosaica_filter::ColumnPostings` — because the two
 //! halves agreeing on the record format is the whole content of this seam, and a test that
 //! re-implemented the decode would agree with itself.
 
@@ -16,12 +16,12 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Config, Schema};
-use tessera_build::{build, BuildArgs};
-use tessera_filter::{ColumnPostings, ValueColumn};
-use tessera_spatial::Bounds;
-use tessera_store::open_bundle;
-use tessera_types::{AttrLocalId, IdentityKey};
+use mosaica_build::config::{Config, Schema};
+use mosaica_build::{build, BuildArgs};
+use mosaica_filter::{ColumnPostings, ValueColumn};
+use mosaica_spatial::Bounds;
+use mosaica_store::open_bundle;
+use mosaica_types::{AttrLocalId, IdentityKey};
 
 mod common;
 
@@ -175,20 +175,20 @@ fn parse_schema(text: &str) -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     let schema = common::with_id(schema);
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
@@ -422,7 +422,7 @@ fn the_derived_postings_agree_with_the_value_column() {
     let dir = build_with(FILTER_SCHEMA);
     let out = dir.path().join("bundle");
     let cdir = column_dir(&out, "department");
-    let column = ValueColumn::open_dir(&cdir, tessera_filter::Access::Mapped).unwrap();
+    let column = ValueColumn::open_dir(&cdir, mosaica_filter::Access::Mapped).unwrap();
     let postings = ColumnPostings::open_keyed(&postings_path(&out, "department")).unwrap();
 
     // Every entity, so the scan's candidate excludes nothing.
@@ -450,7 +450,7 @@ fn the_column_answers_entity_to_value() {
     let entity_of = common::entities_of(&out, "id", 0..N);
     let codes = codes_of(&out, "department");
     let cdir = column_dir(&out, "department");
-    let column = ValueColumn::open_dir(&cdir, tessera_filter::Access::Mapped).unwrap();
+    let column = ValueColumn::open_dir(&cdir, mosaica_filter::Access::Mapped).unwrap();
 
     for source in 0..N {
         let entity = entity_of[&source];
@@ -494,7 +494,7 @@ fn a_universal_column_writes_no_presence_bitmap() {
         !cdir.join("presence.roaring").exists(),
         "a universal column must not write a presence bitmap"
     );
-    let column = ValueColumn::open_dir(&cdir, tessera_filter::Access::Mapped).unwrap();
+    let column = ValueColumn::open_dir(&cdir, mosaica_filter::Access::Mapped).unwrap();
     assert_eq!(column.present().cardinality(), N);
 }
 
@@ -549,7 +549,7 @@ fn a_string_filter_column_emits_its_pair_and_no_postings() {
          identity a posting could be keyed by"
     );
     assert!(
-        cdir.join(tessera_filter::DICT_FILE).exists(),
+        cdir.join(mosaica_filter::DICT_FILE).exists(),
         "a keyword's ordinals are positions in the dictionary written beside them"
     );
 }

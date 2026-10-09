@@ -1,12 +1,12 @@
-# Tessera overview
+# Mosaica overview
 
-Tessera serves interactive, pannable, zoomable maps over a corpus of documents or records, with
+Mosaica serves interactive, pannable, zoomable maps over a corpus of documents or records, with
 access control at the level of the individual item. Each viewer gets their own map, generated on
 request, from a single machine. New data can be ingested into a running service, and a deletion or
 suppression applies to every request that starts after it is accepted.
 
 Existing large-scale map servers bake a dataset into one shared view and serve the same tiles to
-everyone. Tessera computes each viewer's map from exactly the items they are permitted to see.
+everyone. Mosaica computes each viewer's map from exactly the items they are permitted to see.
 Every count, density, cluster and label a viewer is shown, not only the points they can retrieve,
 is computed from that same set and nothing else.
 
@@ -47,14 +47,14 @@ at 10⁹ points.
 | Datashader / tippecanoe | corpus-scale, rasterised or tiled | No | No | not published | Nothing computed per viewer; the same image or tiles serve everyone |
 | Elasticsearch with document-level security | any size the cluster holds; each tile is a query | Yes, per query | Yes | not published | Speed: a documented case went from 30 ms to 26 s once document-level filtering was applied, and interactive spatial aggregation at 10⁸ points and above needs a cluster. Counting how many inaccessible documents contain a given term is a documented limitation |
 | PostgreSQL with row-level security | any size the database holds; each tile is a query | Yes, per query | Yes | not published | Speed: a measured policy over a spatial predicate abandoned its index and ran 3,340× slower. `EXPLAIN` discloses excluded-row counts |
-| Tessera | 10⁹ points measured, synthetic, low-cardinality labels; 7.4×10⁷ measured in a real corpus | Yes: every served quantity | Yes: ingest, deletion and suppression while serving | 2 h 37 m, the synthetic corpus below | A leak register enumerates what is accepted; anything not in it is a bug |
+| Mosaica | 10⁹ points measured, synthetic, low-cardinality labels; 7.4×10⁷ measured in a real corpus | Yes: every served quantity | Yes: ingest, deletion and suppression while serving | 2 h 37 m, the synthetic corpus below | A leak register enumerates what is accepted; anything not in it is a bug |
 
 We know of no system that does all of these at once.
 
 ## How it works
 
 An operator declares an access label on each item: an expression over terms, such as
-`secret&(team_a|team_b)`. A viewer is a principal in Tessera's identity catalogue, or an identity
+`secret&(team_a|team_b)`. A viewer is a principal in Mosaica's identity catalogue, or an identity
 from an OIDC provider. It authenticates once, with a password, an API key or an OIDC access token,
 or an integrator's backend authorises a session on its behalf, and it receives a token holding the
 terms granted to it. An item is visible to a viewer whose terms satisfy its label, and that
@@ -89,7 +89,7 @@ in full, the threat model they answer to, and the disclosures accepted rather th
 
 ## How it scales
 
-Tessera has been built and served against a synthetic 10⁹-point corpus with a low-cardinality
+Mosaica has been built and served against a synthetic 10⁹-point corpus with a low-cardinality
 label set, and against three real corpora at smaller scale. All were measured on the same class of
 single machine: one box with 47 GB of RAM, no cluster.
 
@@ -119,7 +119,7 @@ running service has not been measured since the write path was reworked.
 Use it as a backend through its API and your own visualisation, or embed the components it ships
 with.
 
-TesseraDB, the server, is one binary that checks a declaration, builds a bundle, serves it and
+Mosaica, the server, is one binary that checks a declaration, builds a bundle, serves it and
 verifies it. It exposes three HTTP planes: viewer, session and control. An OpenAPI description
 covers all three, so any language can read from and write to a deployment without the clients
 below.
@@ -143,15 +143,15 @@ point_visibility = { field = "country", default = "public" }
 ```
 
 `point_visibility` names the field that decides who may see each point; here, a point's `country`
-value, with `public` items visible to everyone. Three commands take it from there. `tessera check`
-validates the declaration against the Parquet schemas, `tessera build` produces the bundle in one
-streaming pass, and `tessera serve` opens it on the HTTP API.
+value, with `public` items visible to everyone. Three commands take it from there. `mosaica check`
+validates the declaration against the Parquet schemas, `mosaica build` produces the bundle in one
+streaming pass, and `mosaica serve` opens it on the HTTP API.
 
-On the client side, `<tessera-explorer>` drops a full map into a page as a custom element,
-`TesseraLayer` adds the same data to a deck.gl scene, and in a notebook the Python client's `Map`
+On the client side, `<mosaica-explorer>` drops a full map into a page as a custom element,
+`MosaicaLayer` adds the same data to a deck.gl scene, and in a notebook the Python client's `Map`
 widget opens the same view without leaving Python.
 
-Tessera Client, the headless store behind these, holds the session, keeps a local copy of what has
+Mosaica Client, the headless store behind these, holds the session, keeps a local copy of what has
 been served, composes filters and regions, and hands off what is on screen to whatever draws it. It
 does no rendering of its own. The components built on it, a full explorer, the map, filter panel,
 pickers, item and artifact cards, a hierarchy browser, and more, are custom elements that work in
@@ -187,6 +187,6 @@ any framework, with a deck.gl layer and React bindings alongside them.
 `docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md`;
 `probes/dataset.md`; `probes/2026-07-30-1e9-rebuild/build-time-rss.txt`;
 `test_corpora/geonames/corpus.toml`; `test_corpora/medcpt/mesh.py`;
-`clients/ts/README.md`; `clients/py/README.md`; `docs/openapi/tessera.yaml`;
-`crates/tessera-server/src/control.rs`; `docs/system/access-control.md`;
+`clients/ts/README.md`; `clients/py/README.md`; `docs/openapi/mosaica.yaml`;
+`crates/mosaica-server/src/control.rs`; `docs/system/access-control.md`;
 `docs/system/security.md`; `docs/system/write-path.md`.

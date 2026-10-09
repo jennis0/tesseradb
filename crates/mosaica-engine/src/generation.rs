@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
-use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::read::Bundle;
-use tessera_store::vocabulary::Vocabularies;
-use tessera_types::EntityId;
+use mosaica_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
+use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_store::read::Bundle;
+use mosaica_store::vocabulary::Vocabularies;
+use mosaica_types::EntityId;
 
 use crate::DenyMask;
 
@@ -30,7 +30,7 @@ pub struct GenerationParts {
     /// descriptor buffers an item under an unsatisfiable extension id and becomes a durable
     /// ordinal only when the flush that carries it publishes a `dict_extents` entry (§3.2), so
     /// the dictionary grows with geometry and has to be republished alongside it. Ordinals are
-    /// preserved across a promotion ([`tessera_authz::Dict::load_extending`]), so a session
+    /// preserved across a promotion ([`mosaica_authz::Dict::load_extending`]), so a session
     /// authorised against an older generation keeps evaluating the terms it was granted; what it
     /// does *not* get is the newly promoted one, which is fail-closed and is what §3.3's
     /// staleness hint exists to advertise.
@@ -53,17 +53,17 @@ pub struct GenerationParts {
     /// **Swapping this is necessary and is not sufficient.** Two holders sit outside it — a
     /// `Session`'s own `Arc<FrozenFragment>`, and `SessionGeometry`'s — and a replaced container
     /// reaches neither. The comparison is therefore made at composition, against
-    /// [`tessera_authz::FrozenFragment::identity`]: `Engine::fragment_for` for the first,
+    /// [`mosaica_authz::FrozenFragment::identity`]: `Engine::fragment_for` for the first,
     /// `RowProjectionCache::freshest_fragment`'s prefix scoping for the second.
     pub(crate) fragments: Arc<FragmentCache>,
     /// Every unique column's index runs, as the partition manifest lists them. Replaced by every
     /// publication that changes the list, sharing the runs it already opened.
-    pub(crate) unique: Arc<tessera_store::unique::UniqueIndexes>,
+    pub(crate) unique: Arc<mosaica_store::unique::UniqueIndexes>,
     /// The unique index entries of the rows the buffer holds, published with the buffer.
     pub(crate) unique_live: Arc<crate::unique::UniqueLive>,
     /// The edited-items map's runs, as the partition manifest lists them. Replaced by every
     /// publication that changes the list, sharing the runs it already opened.
-    pub(crate) edited: Arc<tessera_store::edited::EditedIndex>,
+    pub(crate) edited: Arc<mosaica_store::edited::EditedIndex>,
     /// The edited-items pairs no run holds yet, published with the buffer.
     pub(crate) edited_live: Arc<crate::edited::EditedLive>,
     /// How many commit windows have committed an edit, and how many folds have retired entities,
@@ -79,7 +79,7 @@ pub struct GenerationParts {
     /// A fragment build unions the base with every live tier over the session's satisfied terms
     /// (§5.2). They live on the generation rather than on the engine: a flush publishes one and
     /// the entity-space coalesce merges several into one, so the set changes with each
-    /// publication. Empty in a bundle straight out of `tessera build`.
+    /// publication. Empty in a bundle straight out of `mosaica build`.
     pub delta_postings: Vec<Arc<DeltaTier>>,
     /// Monotone counter bumped on every overlay/buffer swap (independent of `segments_version` —
     /// an overlay change never touches the bundle).
@@ -423,14 +423,14 @@ impl Generation {
         overlay: Overlay,
         buffer: IngestBuffer,
     ) -> Generation {
-        let manifest = tessera_store::manifest::Manifest {
+        let manifest = mosaica_store::manifest::Manifest {
             bundle_format: 3,
             created_at: String::new(),
             declared_scalars: vec![],
             vocabularies: vec![],
             small_term_threshold: 32,
             entity_id_high_water: 0,
-            identity: tessera_store::manifest::IdentityDescriptor {
+            identity: mosaica_store::manifest::IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),
                 rounds: 1,
                 key: "0123456789abcdef0123456789abcdef".to_string(),
@@ -444,7 +444,7 @@ impl Generation {
         };
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let postings_path = dir.path().join("postings.arrow");
-        tessera_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
+        mosaica_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
         Generation::new(GenerationParts {
             prefix: prefix.to_string(),
             segments_version,

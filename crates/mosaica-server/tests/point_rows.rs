@@ -120,8 +120,8 @@ async fn ask(server: &TestServer, token: &str, point_rows: Option<Value>) -> Vec
 fn columns(body: &[u8]) -> (Vec<String>, BTreeMap<String, ArrayRef>) {
     let mut names = Vec::new();
     let mut parts: BTreeMap<String, Vec<ArrayRef>> = BTreeMap::new();
-    for (kind, payload) in tessera_wire::split_frames(body).unwrap() {
-        if kind != tessera_wire::FRAME_POINTS {
+    for (kind, payload) in mosaica_wire::split_frames(body).unwrap() {
+        if kind != mosaica_wire::FRAME_POINTS {
             continue;
         }
         let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();

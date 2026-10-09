@@ -1,7 +1,7 @@
 import type {Quantisation} from './types.js';
 
 /**
- * The mapping between deck.gl's non-geospatial tile indices and Tessera's Morton cell grid.
+ * The mapping between deck.gl's non-geospatial tile indices and Mosaica's Morton cell grid.
  *
  * The engine's world is a 2^16 x 2^16 cell grid, quantised per axis, so a tile is square in cell
  * space and rectangular in data space. The viewer uses cell space, scaled by `CELLS_PER_WORLD_UNIT`,
@@ -161,7 +161,7 @@ export function rectToRequestBbox(
  * is scaled separately, so a tile is square in world space whatever the data extent.
  *
  * @param q - The view's quantisation extent, from the view's `quantisation` in
- *   {@link TesseraClient.meta}.
+ *   {@link MosaicaClient.meta}.
  * @returns `[x, y]` in world units: `0` to {@link WORLD_SIZE} for a point inside the extent.
  *
  * @category Coordinates and colour

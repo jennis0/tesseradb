@@ -215,10 +215,10 @@ that actually matches how a text logger would leak an id.
 orders with every declared field, both system fields, two pages a response and the cursor carried
 across responses to the end.
 Every frame is swept. A records frame's `tessera_id` column is swept as the points batch's is, at
-its own 8-byte stride against the unfiltered target set, and its `tessera:x` and `tessera:y`
+its own 8-byte stride against the unfiltered target set, and its `mosaica:x` and `mosaica:y`
 columns at their own stride against the floor-filtered set, since a position at the extent origin
 is `0.0`, whose bits are entity id 0. The declared fields' columns are corpus values the fixture
-planted and are not swept, as the points batch's `fx_key` is not. `tessera:labels` and the head,
+planted and are not swept, as the points batch's `fx_key` is not. `mosaica:labels` and the head,
 page-end and trailer JSON get the decimal sweep. A cursor is opaque and encrypted under a fresh nonce, so its decoded bytes are uniform:
 every 8-byte window at every offset is swept against the unfiltered set and the identity key's
 halves, at the same `~1e-9` coincidence rate the `tessera_id` column's sweep argues. A 4-byte
@@ -258,7 +258,7 @@ necessary but not sufficient evidence for I10. This is a black-box scan; it cann
 future change reintroduces an entity id or the identity key under a width, encoding
 or obfuscation that defeats every scan here, and it cannot prove no code path ever *could* leak —
 only that this particular run's outputs, scanned these particular ways, didn't. The gather/wire
-code review (`tessera-wire`'s module docs: `columns.arrow` carries no entity-id column at all post-
+code review (`mosaica-wire`'s module docs: `columns.arrow` carries no entity-id column at all post-
 r6, so the gather cannot produce one) is the other, structural half of I10's assurance; this test
 does not replace it.
 
@@ -501,7 +501,7 @@ class RecordsScan(NamedTuple):
 
     #: 8-byte windows of the `tessera_id` column's value buffer, at its own stride.
     tessera_windows: set[int]
-    #: 8-byte windows of the `tessera:x` and `tessera:y` value buffers, at their own stride.
+    #: 8-byte windows of the `mosaica:x` and `mosaica:y` value buffers, at their own stride.
     position_windows: set[int]
     tessera_ids: list[int]
     #: Each row's `serial`, in row order beside `tessera_ids`, where the frame carries it.
@@ -528,13 +528,13 @@ def _records_scan(payload: bytes) -> RecordsScan:
             scan.tessera_ids.extend(ids.to_pylist())
             if "serial" in names:
                 scan.serials.extend(batch.column("serial").to_pylist())
-            for name in ("tessera:x", "tessera:y"):
+            for name in ("mosaica:x", "mosaica:y"):
                 if name in names:
                     scan.position_windows.update(
                         _le_windows(_value_buffer(batch.column(name), 8), 8, stride=8)
                     )
-            if "tessera:labels" in names:
-                for row in batch.column("tessera:labels").to_pylist():
+            if "mosaica:labels" in names:
+                for row in batch.column("mosaica:labels").to_pylist():
                     scan.labels.extend(row)
     return scan
 
@@ -758,7 +758,7 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     #      line rather than standing alone, so the digit-run regex is exercised on the shape it
     #      actually meets — a bare `str(planted)` would pass a scanner that only matched whole
     #      buffers.
-    log_line = f"2026-08-01T00:00:00Z INFO tessera_engine: gathered entity_id={planted} rows=1\n"
+    log_line = f"2026-08-01T00:00:00Z INFO mosaica_engine: gathered entity_id={planted} rows=1\n"
     log_bytes = log_line.encode() + b"prefix" + planted.to_bytes(8, "little") + b"suffix"
     assert _decimal_windows(log_bytes, SAFE_ID_FLOOR) & targets, (
         "the decimal-text sweep did not catch an entity id written into a log line"
@@ -802,8 +802,8 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     records = _records_stream(
         {
             "tessera_id": pa.array([planted], type=pa.uint64()),
-            "tessera:x": pa.array([0.5], type=pa.float64()),
-            "tessera:y": pa.array([0.5], type=pa.float64()),
+            "mosaica:x": pa.array([0.5], type=pa.float64()),
+            "mosaica:y": pa.array([0.5], type=pa.float64()),
         }
     )
     assert _records_scan(records).tessera_windows & targets, (
@@ -812,8 +812,8 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     records = _records_stream(
         {
             "tessera_id": pa.array(clean_ids, type=pa.uint64()),
-            "tessera:x": pa.array([planted_bits, 0.0], type=pa.float64()),
-            "tessera:y": pa.array([0.5, 0.25], type=pa.float64()),
+            "mosaica:x": pa.array([planted_bits, 0.0], type=pa.float64()),
+            "mosaica:y": pa.array([0.5, 0.25], type=pa.float64()),
         }
     )
     scan = _records_scan(records)
@@ -850,7 +850,7 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
     clean_cursor = base64.urlsafe_b64encode(bytes(range(200, 256))).decode().rstrip("=")
     assert not (_cursor_windows(clean_cursor) & targets), "the cursor sweep flagged a clean cursor"
 
-    clean_log = b"2026-08-01T00:00:00Z INFO tessera_server: served zoom=4 k=20 status=200\n"
+    clean_log = b"2026-08-01T00:00:00Z INFO mosaica_server: served zoom=4 k=20 status=200\n"
     assert not (_decimal_windows(clean_log, SAFE_ID_FLOOR) & targets), (
         "the decimal-text sweep flagged a clean log line"
     )
@@ -1094,7 +1094,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
         while True:
             resp = server.items(token, **body)
             assert resp.status_code == 200, resp.text
-            assert resp.headers["x-tessera-identity-key"] != identity_key_hex
+            assert resp.headers["x-mosaica-identity-key"] != identity_key_hex
             raw = resp.content
             assert identity_key_raw not in raw, "identity key's raw 16 bytes found in an items body"
             responses += 1

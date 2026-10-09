@@ -1,7 +1,7 @@
 //! **What a write invalidates, and what it leaves alone.**
 //!
 //! Two structures are derived from a level's records and held between requests: its row form
-//! ([`tessera_engine`]'s `ArtifactProjections`) and its lineage (`Lineages`). Both were keyed on a
+//! ([`mosaica_engine`]'s `ArtifactProjections`) and its lineage (`Lineages`). Both were keyed on a
 //! single store-wide version, so *any* artifact write invalidated *every* level's form in *every*
 //! view — 138 s of rebuild at 10⁷ artifacts over 10⁹ rows, which is a cache that never survives a
 //! write to be used (`design/artifact-serving-at-scale.md` §8.1, §8.2).
@@ -21,14 +21,14 @@ mod common;
 
 use common::*;
 use rustc_hash::FxHashSet;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, ViewportArtifactsRequest};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
-use tessera_types::layer::{
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, ViewportArtifactsRequest};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 /// **No existence criterion**, so a count that moved is a membership that moved rather than an
 /// artifact that appeared or vanished — the distinction these cases turn on.
@@ -41,7 +41,7 @@ fn declaration(name: &str, kind: HierarchyKind) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind,
@@ -463,7 +463,7 @@ fn hulled(name: &str) -> LayerDeclaration {
 /// Each step is a real request for the artifacts in view through the serving path, so what is
 /// being counted is the derivations a *sequence of requests* makes rather than a rate computed
 /// from a key's shape.
-fn pan(engine: &Engine, session: &tessera_engine::Session, steps: usize) {
+fn pan(engine: &Engine, session: &mosaica_engine::Session, steps: usize) {
     for step in 0..steps {
         let x = 40.0 * step as f64;
         engine
@@ -479,14 +479,14 @@ fn pan(engine: &Engine, session: &tessera_engine::Session, steps: usize) {
 /// served on.
 fn shape_of(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     layer: &str,
 ) -> Vec<Vec<Vec<[u32; 2]>>> {
     let id = engine
         .viewport_artifacts(
             session,
             ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
-                .computed(tessera_engine::ComputedSelection::Named(&[])),
+                .computed(mosaica_engine::ComputedSelection::Named(&[])),
         )
         .expect("a viewport")
         .artifacts()
@@ -621,7 +621,7 @@ fn per_session_entries(engine: &Engine) -> [usize; 2] {
 /// on the term set rather than the session, so a prune leaves them.
 fn row_major(name: &str) -> LayerDeclaration {
     let mut declaration = flat(name);
-    declaration.layout = Some(tessera_types::layer::ServingLayout::RowMajorLabel);
+    declaration.layout = Some(mosaica_types::layer::ServingLayout::RowMajorLabel);
     declaration
 }
 
@@ -647,7 +647,7 @@ fn pruning_fixture(fx: &Fixture) -> Engine {
 
 /// Two requests that warm all three: the points take the occupancy ladder, and the artifacts give
 /// the masked counts and the derived geometry.
-fn warm(engine: &Engine, session: &tessera_engine::Session) {
+fn warm(engine: &Engine, session: &mosaica_engine::Session) {
     engine
         .viewport(
             session,

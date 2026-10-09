@@ -14,7 +14,7 @@
 //! another transcription of it.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin blob_framing_probe -- \
+//! cargo run --release -p mosaica-bench --bin blob_framing_probe -- \
 //!     <bundle>/v00000/partitions/default/attrs/record [max blocks]
 //! ```
 //!
@@ -28,11 +28,11 @@
 
 use std::path::PathBuf;
 
-use tessera_filter::{
+use mosaica_filter::{
     encode_block_header, Access, RecordBlob, RecordField, RecordValue,
 };
 
-/// The writer's level (`tessera_filter_write`'s `ZSTD_LEVEL`), so a candidate is priced at the
+/// The writer's level (`mosaica_filter_write`'s `ZSTD_LEVEL`), so a candidate is priced at the
 /// operating point the shipped blob was written at.
 const LEVEL: i32 = 3;
 

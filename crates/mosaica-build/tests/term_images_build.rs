@@ -1,7 +1,7 @@
 //! **The term images a build writes, against the projections they stand in for.**
 //!
 //! A term image is one authorisation term's base posting projected into a view's row space
-//! (`tessera_store::term_images`). A session that holds the term reads the image instead of
+//! (`mosaica_store::term_images`). A session that holds the term reads the image instead of
 //! walking the term's entities through the permutation, so the file is right only if every kept
 //! image is exactly what that walk would have produced, and the table beside it describes every
 //! term whether or not one was kept.
@@ -22,16 +22,16 @@ use arrow::record_batch::RecordBatch;
 use croaring::Bitmap;
 use parquet::arrow::ArrowWriter;
 
-use tessera_authz::postings::{PostingRef, PostingsReader};
-use tessera_build::{build, build_in_memory, BuildArgs};
-use tessera_spatial::Bounds;
-use tessera_store::manifest::DECLARED_INCARNATION;
-use tessera_store::read::open_bundle;
-use tessera_store::term_images::{
+use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_build::{build, build_in_memory, BuildArgs};
+use mosaica_spatial::Bounds;
+use mosaica_store::manifest::DECLARED_INCARNATION;
+use mosaica_store::read::open_bundle;
+use mosaica_store::term_images::{
     TermImageRefusal, TermImageStamp, TermImages, KEEP_ROWS_PER_CONTAINER,
 };
-use tessera_store::RowSpace;
-use tessera_types::{IdentityKey, TermId};
+use mosaica_store::RowSpace;
+use mosaica_types::{IdentityKey, TermId};
 
 /// Rows enough for a second Roaring container, which is what puts a term whose image is spread
 /// over both on the wrong side of the keep rule: thirty rows a container is a cut a scattered
@@ -163,15 +163,15 @@ fn write_pairs(path: &Path) {
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     let (schema, attribute_sources) = common::id_attributes(points);
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -197,7 +197,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
 fn built(
     dir: &Path,
     name: &str,
-    run: fn(&BuildArgs) -> tessera_build::error::Result<tessera_build::BuildReport>,
+    run: fn(&BuildArgs) -> mosaica_build::error::Result<mosaica_build::BuildReport>,
 ) -> PathBuf {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
@@ -348,7 +348,7 @@ fn a_flipped_byte_in_an_image_refuses_the_bundle() {
     assert!(
         matches!(
             error,
-            tessera_store::StoreError::FileVerificationFailed { .. }
+            mosaica_store::StoreError::FileVerificationFailed { .. }
         ),
         "{error}"
     );
@@ -414,7 +414,7 @@ fn two_term_image_extents_for_one_view_refuse_the_bundle() {
 
     let error = open_bundle(&root).expect_err("two extents for one view refuse the bundle");
     assert!(
-        matches!(error, tessera_store::StoreError::MalformedBundle { .. }),
+        matches!(error, mosaica_store::StoreError::MalformedBundle { .. }),
         "{error}"
     );
 }
@@ -460,7 +460,7 @@ fn a_term_image_file_no_digest_covers_refuses_the_bundle() {
 
     let error = open_bundle(&root).expect_err("an undigested file refuses the bundle");
     assert!(
-        matches!(error, tessera_store::StoreError::UnverifiedFile { .. }),
+        matches!(error, mosaica_store::StoreError::UnverifiedFile { .. }),
         "{error}"
     );
 }

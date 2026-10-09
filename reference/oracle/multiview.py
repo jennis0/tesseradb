@@ -177,7 +177,7 @@ JOIN_COLUMN = "entity_id"
 
 POINTS_NAME = "multiview-world.parquet"
 SCHEMA_NAME = "multiview-config.toml"
-DEPLOYMENT_NAME = "multiview-tessera.toml"
+DEPLOYMENT_NAME = "multiview-mosaica.toml"
 
 
 def quarter_points_name(key: str) -> str:

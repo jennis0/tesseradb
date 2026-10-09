@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
 
 fn partition_dir(root: &Path, prefix: &str) -> PathBuf {
     root.join(prefix).join("partitions").join("default")
@@ -88,7 +88,7 @@ fn a_flush_publishes_above_a_side_manifest_a_second_writer_left() {
     )
     .unwrap();
 
-    let row = tessera_lifecycle::UnallocatedRow {
+    let row = mosaica_lifecycle::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -180,7 +180,7 @@ fn an_executor_seeds_above_a_side_manifest_no_manifest_names() {
         .start_write_executor(8)
         .expect("the executor starts once");
 
-    let row = tessera_lifecycle::UnallocatedRow {
+    let row = mosaica_lifecycle::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -251,7 +251,7 @@ fn a_refused_publication_re_plans_above_the_number_it_was_refused_at() {
 
     let prefix = engine.generation().prefix.clone();
     let dir = partition_dir(&root, &prefix);
-    let row = tessera_lifecycle::UnallocatedRow {
+    let row = mosaica_lifecycle::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -352,8 +352,8 @@ fn pruning_bounds_the_directory_and_keeps_the_highest_number() {
     for (published, source) in (1..=6u64).enumerate() {
         engine
             .accept_change(
-                tessera_types::EntityId::new(entities[&source]),
-                tessera_lifecycle::wal::ChangeOp::Suppress,
+                mosaica_types::EntityId::new(entities[&source]),
+                mosaica_lifecycle::wal::ChangeOp::Suppress,
             )
             .expect("a deny is never refused");
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -365,7 +365,7 @@ fn pruning_bounds_the_directory_and_keeps_the_highest_number() {
 
     let present = side_manifest_numbers(&dir);
     assert!(
-        present.len() <= tessera_store::SIDE_MANIFESTS_KEPT,
+        present.len() <= mosaica_store::SIDE_MANIFESTS_KEPT,
         "six publications left {present:?}"
     );
     let highest = *present.last().unwrap();
@@ -374,8 +374,8 @@ fn pruning_bounds_the_directory_and_keeps_the_highest_number() {
     // is not refused at the artefact.
     engine
         .accept_change(
-            tessera_types::EntityId::new(entities[&7]),
-            tessera_lifecycle::wal::ChangeOp::Suppress,
+            mosaica_types::EntityId::new(entities[&7]),
+            mosaica_lifecycle::wal::ChangeOp::Suppress,
         )
         .expect("a deny is never refused");
     let deadline = Instant::now() + Duration::from_secs(30);

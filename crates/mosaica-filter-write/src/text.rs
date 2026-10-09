@@ -45,9 +45,9 @@ use std::io;
 use std::path::Path;
 
 use croaring::Bitmap;
-use tessera_authz::PostingsSpool;
-use tessera_filter::{ColumnPostings, SortedDict, SortedDictWriter};
-use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
+use mosaica_authz::PostingsSpool;
+use mosaica_filter::{ColumnPostings, SortedDict, SortedDictWriter};
+use mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 /// One input layer: its dictionary, its postings over that dictionary, and the entities it holds a
 /// value for.
@@ -188,7 +188,7 @@ fn merge(
             }
             entities |= inputs[i]
                 .postings
-                .entities(tessera_types::AttrLocalId::new(at[i]))?;
+                .entities(mosaica_types::AttrLocalId::new(at[i]))?;
             at[i] += 1;
             current[i] = cursor_key(inputs[i].dict, at[i], &mut scratch)?;
         }
@@ -209,7 +209,7 @@ fn merge(
         // one that took the other would re-tag every posting on the boundary and stop reproducing
         // the build it is supposed to agree with.
         let record =
-            tessera_authz::postings::encode_posting_bitmap(&entities, SMALL_TERM_THRESHOLD_DEFAULT)?;
+            mosaica_authz::postings::encode_posting_bitmap(&entities, SMALL_TERM_THRESHOLD_DEFAULT)?;
         spool.append(&record)?;
     }
 

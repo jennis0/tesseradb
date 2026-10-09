@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use common::*;
-use tessera_server::state::now_secs;
+use mosaica_server::state::now_secs;
 
 const PASSWORD: &str = "correct horse battery staple";
 
@@ -568,7 +568,7 @@ fn unsigned(claims: &Value) -> String {
 const ISSUER: &str = "https://login.example.org";
 
 fn claims(groups: &[&str], exp: u64) -> Value {
-    json!({ "iss": ISSUER, "aud": "tessera", "sub": "u-1", "exp": exp, "groups": groups })
+    json!({ "iss": ISSUER, "aud": "mosaica", "sub": "u-1", "exp": exp, "groups": groups })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -589,20 +589,20 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     }
     let provider = json!({
         "issuer": ISSUER,
-        "audience": "tessera",
+        "audience": "mosaica",
         "jwks_url": idp.url,
         "claim_rules": [{ "claim": "groups[*]", "template": "{value}" }],
         "role_mappings": [
-            { "claim": "groups[*]", "value": "tessera-readers", "group": "readers" },
-            { "claim": "groups[*]", "value": "tessera-admins", "group": "admins" },
-            { "claim": "groups[*]", "value": "tessera-auditors", "group": "auditors" },
+            { "claim": "groups[*]", "value": "mosaica-readers", "group": "readers" },
+            { "claim": "groups[*]", "value": "mosaica-admins", "group": "admins" },
+            { "claim": "groups[*]", "value": "mosaica-auditors", "group": "auditors" },
         ],
     });
     control(&server, reqwest::Method::PUT, "/control/providers/corp", provider.clone()).await;
 
     // A reader's claim `1` is a term, and the mapping gives `read`. Its session ends at `exp`.
     let exp = now_secs() + 300;
-    let token = idp.token("k1", claims(&["1", "tessera-readers"], exp));
+    let token = idp.token("k1", claims(&["1", "mosaica-readers"], exp));
     let resp = login(&server, json!({ "access_token": token })).await;
     assert_eq!(resp.status(), 200);
     let answer: Value = resp.json().await.unwrap();
@@ -614,39 +614,39 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     // check is refused as any bad credential is.
     let resp = login(&server, json!({ "access_token": idp.token("k1", claims(&["1"], exp)) })).await;
     assert_eq!(resp.status(), 403);
-    let mut wrong_audience = claims(&["tessera-readers"], exp);
+    let mut wrong_audience = claims(&["mosaica-readers"], exp);
     wrong_audience["aud"] = json!("someone-else");
-    let mut no_subject = claims(&["tessera-readers"], exp);
+    let mut no_subject = claims(&["mosaica-readers"], exp);
     no_subject.as_object_mut().unwrap().remove("sub");
     let hs256 = jsonwebtoken::encode(
         &Header::new(Algorithm::HS256),
-        &claims(&["tessera-readers"], exp),
+        &claims(&["mosaica-readers"], exp),
         &EncodingKey::from_secret(b"anyone can sign this"),
     )
     .unwrap();
-    let mut not_yet = claims(&["tessera-readers"], exp);
+    let mut not_yet = claims(&["mosaica-readers"], exp);
     not_yet["nbf"] = json!(now_secs() + 120);
-    let mut not_yet_as_text = claims(&["tessera-readers"], exp);
+    let mut not_yet_as_text = claims(&["mosaica-readers"], exp);
     not_yet_as_text["nbf"] = json!((now_secs() + 120).to_string());
-    let mut expiry_as_text = claims(&["tessera-readers"], exp);
+    let mut expiry_as_text = claims(&["mosaica-readers"], exp);
     expiry_as_text["exp"] = json!(exp.to_string());
-    let mut wrong_issuer = claims(&["tessera-readers"], exp);
+    let mut wrong_issuer = claims(&["mosaica-readers"], exp);
     wrong_issuer["iss"] = json!("https://login.example.net");
     idp.add_key("unpublished");
     for (why, bad) in [
         ("wrong audience", idp.token("k1", wrong_audience)),
         ("no subject", idp.token("k1", no_subject)),
-        ("expired", idp.token("k1", claims(&["tessera-readers"], now_secs() - 1))),
+        ("expired", idp.token("k1", claims(&["mosaica-readers"], now_secs() - 1))),
         ("HS256", hs256),
         ("not before", idp.token("k1", not_yet)),
         ("not before, as a string", idp.token("k1", not_yet_as_text)),
         ("expiry as a string", idp.token("k1", expiry_as_text)),
         ("wrong issuer", idp.token("k1", wrong_issuer)),
-        ("unknown key", idp.token("unpublished", claims(&["tessera-readers"], exp))),
-        ("alg none", unsigned(&claims(&["tessera-readers"], exp))),
+        ("unknown key", idp.token("unpublished", claims(&["mosaica-readers"], exp))),
+        ("alg none", unsigned(&claims(&["mosaica-readers"], exp))),
         (
             "a logout token",
-            idp.typed_token("k1", Some("logout+jwt"), claims(&["tessera-readers"], exp)),
+            idp.typed_token("k1", Some("logout+jwt"), claims(&["mosaica-readers"], exp)),
         ),
     ] {
         let resp = login(&server, json!({ "access_token": bad })).await;
@@ -654,14 +654,14 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     }
     // A token typed as an access token, or untyped, is accepted.
     for typ in [Some("at+jwt"), Some("application/at+jwt"), None] {
-        let token = idp.typed_token("k1", typ, claims(&["tessera-readers"], exp));
+        let token = idp.typed_token("k1", typ, claims(&["mosaica-readers"], exp));
         let resp = login(&server, json!({ "access_token": token })).await;
         assert_eq!(resp.status(), 200, "{typ:?}");
     }
 
     // A mapping to a group holding `read-all` reads every item, and a session minted through
     // `authorise-as` for the same identity reads only its terms.
-    let auditor = idp.token("k1", claims(&["tessera-auditors"], exp));
+    let auditor = idp.token("k1", claims(&["mosaica-auditors"], exp));
     let resp = login(&server, json!({ "access_token": auditor.clone() })).await;
     let own = resp.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_owned();
     assert_eq!(visible(&server, &own).await, N_ITEMS);
@@ -678,7 +678,7 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
 
     // An admin mapping reaches the catalogue on the control plane with the token as its bearer,
     // and no write.
-    let admin = idp.token("k1", claims(&["tessera-admins"], exp));
+    let admin = idp.token("k1", claims(&["mosaica-admins"], exp));
     let resp = server
         .client
         .get(server.control_url("/control/principals"))
@@ -690,7 +690,7 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     let resp = server
         .client
         .post(server.control_url("/control/flush"))
-        .bearer_auth(idp.token("k1", claims(&["tessera-readers"], exp)))
+        .bearer_auth(idp.token("k1", claims(&["mosaica-readers"], exp)))
         .send()
         .await
         .unwrap();
@@ -701,7 +701,7 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
         .client
         .post(server.session_url("/session/authorise"))
         .bearer_auth(&server.integrator_key)
-        .json(&json!({ "access_token": idp.token("k1", claims(&["0", "tessera-readers"], exp)) }))
+        .json(&json!({ "access_token": idp.token("k1", claims(&["0", "mosaica-readers"], exp)) }))
         .send()
         .await
         .unwrap();
@@ -717,7 +717,7 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     // A rotated key is fetched when a token names it.
     idp.add_key("k2");
     idp.publish(&["k1", "k2"]);
-    let resp = login(&server, json!({ "access_token": idp.token("k2", claims(&["tessera-readers"], exp)) })).await;
+    let resp = login(&server, json!({ "access_token": idp.token("k2", claims(&["mosaica-readers"], exp)) })).await;
     assert_eq!(resp.status(), 200);
     let session = resp.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_owned();
 
@@ -732,7 +732,7 @@ async fn the_catalogue_survives_a_restart() {
     build_fixture(tmp.path(), N_ITEMS);
     let catalogue_dir = tmp.path().join("catalogue");
     let start = |dir: &std::path::Path| {
-        let engine = tessera_engine::Engine::open(
+        let engine = mosaica_engine::Engine::open(
             &tmp.path().join("bundle"),
             &tmp.path().join("cache"),
             &tmp.path().join("wal.log"),
@@ -740,7 +740,7 @@ async fn the_catalogue_survives_a_restart() {
         )
         .unwrap();
         let (catalogue, key) = test_identity_at(dir);
-        let state = tessera_server::state::AppState {
+        let state = mosaica_server::state::AppState {
             engine,
             sessions: parking_lot::Mutex::new(Default::default()),
             heap: Default::default(),
@@ -750,12 +750,12 @@ async fn the_catalogue_survives_a_restart() {
             password_gate: generous_password_gate(),
             bulk_gate: generous_bulk_gate(),
             artifact_gate: generous_artifact_gate(),
-            ingest_admission: tessera_server::state::IngestAdmission::new(4),
+            ingest_admission: mosaica_server::state::IngestAdmission::new(4),
             catalogue,
             oidc: Default::default(),
             operator_credential: OPERATOR_CREDENTIAL.to_owned(),
             request_log: None,
-            faults: Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new()),
+            faults: Arc::new(mosaica_lifecycle::faults::FaultSwitchboard::new()),
         };
         (Arc::new(state), key)
     };
@@ -770,7 +770,7 @@ async fn the_catalogue_survives_a_restart() {
     assert_eq!(visible(&server, &token).await, N_ITEMS);
 }
 
-/// Writes `tessera.toml` for a deployment serving a fixture bundle on ephemeral ports, with
+/// Writes `mosaica.toml` for a deployment serving a fixture bundle on ephemeral ports, with
 /// `catalogue` appended as its catalogue section.
 fn deployment(tmp: &TempDir, catalogue: &str) -> std::path::PathBuf {
     let bundle = build_fixture(tmp.path(), N_ITEMS);
@@ -790,7 +790,7 @@ fn deployment(tmp: &TempDir, catalogue: &str) -> std::path::PathBuf {
         catalogue.to_owned(),
     ]
     .join("\n");
-    let path = tmp.path().join("tessera.toml");
+    let path = tmp.path().join("mosaica.toml");
     std::fs::write(&path, text).unwrap();
     path
 }
@@ -803,18 +803,18 @@ async fn serve_file_provider(tmp: &TempDir) -> TestServer {
         "[[catalogue.providers]]",
         "name = \"corp\"",
         "issuer = \"https://login.example.org\"",
-        "audience = \"tessera\"",
+        "audience = \"mosaica\"",
         "jwks_url = \"https://login.example.org/keys\"",
     ]
     .join("\n");
-    let prepared = tessera_server::prepare(&deployment(tmp, &catalogue)).expect("the deployment starts");
+    let prepared = mosaica_server::prepare(&deployment(tmp, &catalogue)).expect("the deployment starts");
     serve_state(prepared.state, String::new(), None).await
 }
 
 #[test]
 fn a_deployment_declaring_no_catalogue_is_refused() {
     let tmp = TempDir::new().unwrap();
-    assert!(tessera_server::prepare(&deployment(&tmp, "")).is_err());
+    assert!(mosaica_server::prepare(&deployment(&tmp, "")).is_err());
 }
 
 #[tokio::test]
@@ -846,7 +846,7 @@ fn verifier_for(
     idp: &Idp,
     refetch: std::time::Duration,
     max_age: std::time::Duration,
-) -> (tessera_catalogue::Catalogue, tessera_server::oidc::Verifier, TempDir) {
+) -> (mosaica_catalogue::Catalogue, mosaica_server::oidc::Verifier, TempDir) {
     verifier_with_ceiling(idp, refetch, max_age, std::time::Duration::from_secs(24 * 3600))
 }
 
@@ -856,19 +856,19 @@ fn verifier_with_ceiling(
     refetch: std::time::Duration,
     max_age: std::time::Duration,
     ceiling: std::time::Duration,
-) -> (tessera_catalogue::Catalogue, tessera_server::oidc::Verifier, TempDir) {
+) -> (mosaica_catalogue::Catalogue, mosaica_server::oidc::Verifier, TempDir) {
     let (catalogue, _, dir) = test_identity();
     catalogue
-        .create_provider(&tessera_catalogue::Provider {
+        .create_provider(&mosaica_catalogue::Provider {
             name: "corp".into(),
             issuer: ISSUER.into(),
-            audience: "tessera".into(),
+            audience: "mosaica".into(),
             jwks_url: idp.url.clone(),
             rules: Vec::new(),
             role_mappings: Vec::new(),
         })
         .unwrap();
-    let verifier = tessera_server::oidc::Verifier::with_intervals(refetch, max_age, ceiling);
+    let verifier = mosaica_server::oidc::Verifier::with_intervals(refetch, max_age, ceiling);
     (catalogue, verifier, dir)
 }
 
@@ -958,21 +958,21 @@ async fn a_token_two_providers_accept_is_refused() {
     let post = reqwest::Method::POST;
     control(&server, post.clone(), "/control/groups", json!({ "name": "readers" })).await;
     control(&server, post, "/control/grants", json!({ "group": "readers", "permission": "read" })).await;
-    for (name, audience) in [("corp", "tessera"), ("partner", "tessera-partner")] {
+    for (name, audience) in [("corp", "mosaica"), ("partner", "mosaica-partner")] {
         let provider = json!({
             "issuer": ISSUER,
             "audience": audience,
             "jwks_url": idp.url,
-            "role_mappings": [{ "claim": "groups[*]", "value": "tessera-readers", "group": "readers" }],
+            "role_mappings": [{ "claim": "groups[*]", "value": "mosaica-readers", "group": "readers" }],
         });
         control(&server, reqwest::Method::PUT, &format!("/control/providers/{name}"), provider).await;
     }
     let exp = now_secs() + 300;
-    let mut both = claims(&["tessera-readers"], exp);
-    both["aud"] = json!(["tessera", "tessera-partner"]);
+    let mut both = claims(&["mosaica-readers"], exp);
+    both["aud"] = json!(["mosaica", "mosaica-partner"]);
     let resp = login(&server, json!({ "access_token": idp.token("k1", both) })).await;
     assert_eq!(resp.status(), 401);
-    let one = claims(&["tessera-readers"], exp);
+    let one = claims(&["mosaica-readers"], exp);
     let resp = login(&server, json!({ "access_token": idp.token("k1", one) })).await;
     assert_eq!(resp.status(), 200);
 }

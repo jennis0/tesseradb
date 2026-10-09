@@ -36,16 +36,16 @@ use std::sync::Arc;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-use tessera_authz::FrozenFragment;
-use tessera_spatial::projection::Projection;
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
-use tessera_store::manifest::{DeclaredScalar, Quantisation, ViewMetadataValue};
-use tessera_store::read::{ScalarSlice, SegmentData};
-use tessera_store::vocabulary::Vocabularies;
-use tessera_store::tile_ranges_all;
-use tessera_types::layer::ComputedProperty;
-use tessera_types::{EntityId, GenerationStamp, RowId, TermId, TesseraId, API_VERSION};
+use mosaica_authz::FrozenFragment;
+use mosaica_spatial::projection::Projection;
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
+use mosaica_store::manifest::{DeclaredScalar, Quantisation, ViewMetadataValue};
+use mosaica_store::read::{ScalarSlice, SegmentData};
+use mosaica_store::vocabulary::Vocabularies;
+use mosaica_store::tile_ranges_all;
+use mosaica_types::layer::ComputedProperty;
+use mosaica_types::{EntityId, GenerationStamp, RowId, TermId, TesseraId, API_VERSION};
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
@@ -138,7 +138,7 @@ impl Engine {
         view: &str,
     ) -> ViewCoordinates {
         let mut hasher = Sha256::new();
-        hasher.update(b"tessera-identity-key-v1");
+        hasher.update(b"mosaica-identity-key-v1");
         hasher.update(geometry.auth_data_hash);
         hasher.update(geometry.fragment.identity);
         hasher.update((view.len() as u64).to_le_bytes());
@@ -148,7 +148,7 @@ impl Engine {
         identity_key.copy_from_slice(&identity_digest[..16]);
 
         let mut hasher = Sha256::new();
-        hasher.update(b"tessera-content-key-v1");
+        hasher.update(b"mosaica-content-key-v1");
         hasher.update(identity_key);
         hasher.update(geometry.fragment.watermark.to_le_bytes());
         hasher.update(generation.overlay_version.to_le_bytes());

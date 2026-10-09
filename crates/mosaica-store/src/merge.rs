@@ -36,8 +36,8 @@ use std::path::Path;
 
 use croaring::Bitmap;
 
-use tessera_spatial::tiler::ScalarType;
-use tessera_types::{IdentityKey, TesseraId};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_types::{IdentityKey, TesseraId};
 
 use crate::error::{Result, StoreError};
 use crate::flush::{digest_of, write_render_presence};
@@ -155,7 +155,7 @@ pub struct MergeInput {
 pub struct MergeSpec<'a> {
     /// The incarnation of the view this merge writes into (decision 0115) — the inputs' own, a
     /// merge never crossing a drop.
-    pub incarnation: tessera_types::view::ViewIncarnation,
+    pub incarnation: mosaica_types::view::ViewIncarnation,
     /// The **new** segment's id. Never one of the inputs': `seg_id`s are never reused (contracts
     /// §2.1), which is what makes the publication rebase ABA-safe.
     pub seg_id: &'a str,
@@ -420,8 +420,8 @@ pub fn execute_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_spatial::tiler::ScalarValue;
-    use tessera_types::EntityId;
+    use mosaica_spatial::tiler::ScalarValue;
+    use mosaica_types::EntityId;
 
     use crate::flush::{write_flush_segment, FlushInput, FlushRow};
     use crate::manifest::Quantisation;

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use tessera_types::layer::ServingLayout;
+use mosaica_types::layer::ServingLayout;
 
 use crate::artifacts::MembershipRows;
 use crate::derived::{place, Placement};

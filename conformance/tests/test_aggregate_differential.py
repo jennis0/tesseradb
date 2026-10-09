@@ -21,7 +21,7 @@ What this module covers:
   nothing, under that fixture's three principals and a numeric filter.
 - **Filtered references**: the set without its region, a reference that is not a superset of the
   set (rows with no item of the set, in listed groups, `rest` and `none`), and a region in the
-  reference alone, which the `x-tessera-region` header reports; each row's lift against the
+  reference alone, which the `x-mosaica-region` header reports; each row's lift against the
   oracle's.
 - **The size of the set** equals the viewport's matched count.
 - **A field that cannot be counted** (a `keyword`) is refused with `422`.
@@ -265,7 +265,7 @@ REFERENCE_GROUPINGS = [
 def test_a_filtered_reference_is_the_oracles(catalogue_server, catalogue_oracle, case_name, name):
     """Each row's reference count and lift against the oracle, for a reference that is the set
     without its region, one that is not a superset of the set, and one that alone carries a
-    region, which the `x-tessera-region` header then reports."""
+    region, which the `x-mosaica-region` header then reports."""
     case = next(c for c in cat.catalogue() if c.name == case_name)
     token = catalogue_server.authorise(list(case.grants))["token"]
     filters, reference = REFERENCES[name]
@@ -273,7 +273,7 @@ def test_a_filtered_reference_is_the_oracles(catalogue_server, catalogue_oracle,
             "groupings": REFERENCE_GROUPINGS}
     resp = catalogue_server.aggregate(token, **body)
     assert resp.status_code == 200, resp.text
-    assert resp.headers.get("x-tessera-region") == "exact", name
+    assert resp.headers.get("x-mosaica-region") == "exact", name
     heads, tables = read_tables(catalogue_server, token, body)
     _items, expected = expected_tables(
         catalogue_oracle, set(case.entities), filters, reference, REFERENCE_GROUPINGS

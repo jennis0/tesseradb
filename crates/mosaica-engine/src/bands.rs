@@ -1,4 +1,4 @@
-//! Selection from a segment's identity bands ([`tessera_store::bands`]): the same served set
+//! Selection from a segment's identity bands ([`mosaica_store::bands`]): the same served set
 //! [`crate::select`] defines, read from the few entries of a tile that can be in it.
 //!
 //! Band `j` holds every row whose `tessera_id` is below `2^(64 - j)`, so it holds every row below
@@ -19,7 +19,7 @@
 //! parts, and every part is read at the same band, so the count and the `m` smallest are taken over
 //! the union, as [`crate::select::SelectionParts`] requires.
 
-use tessera_store::bands::{band_below, FIRST_BAND};
+use mosaica_store::bands::{band_below, FIRST_BAND};
 
 use crate::compose::EffectiveMask;
 use crate::error::{EngineError, Result};
@@ -124,7 +124,7 @@ pub fn select(
 /// Answers how many entries were read. The mask, or a set composed under it, is what `admits`
 /// asks, so the band decides only which rows are read, never which are visible.
 pub(crate) fn admitted_entries(
-    segment: &tessera_store::read::SegmentData,
+    segment: &mosaica_store::read::SegmentData,
     row_base: u32,
     band: u32,
     range: std::ops::Range<u32>,
@@ -141,12 +141,12 @@ pub(crate) fn admitted_entries(
     bands.will_need(ids, lo..hi);
     for e in lo..hi {
         let row = rows[e];
-        // The entries are trusted only as far as `tessera verify --deep` checked them, so a row is
+        // The entries are trusted only as far as `mosaica verify --deep` checked them, so a row is
         // checked against the range, and the segment, before it names anything.
         if !range.contains(&row) {
             return Err(EngineError::Malformed(format!(
                 "segment '{}' has a band entry naming row {row}, outside the rows {range:?} it was \
-                 found among; run `tessera verify --deep` on the bundle and rebuild it",
+                 found among; run `mosaica verify --deep` on the bundle and rebuild it",
                 segment.seg_id
             )));
         }

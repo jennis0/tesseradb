@@ -314,7 +314,7 @@ impl<'a> Cx<'a> {
     }
 
     /// Every segment of the view, with its first row.
-    pub(super) fn segments(&self) -> &[(&'a tessera_store::read::SegmentData, u32)] {
+    pub(super) fn segments(&self) -> &[(&'a mosaica_store::read::SegmentData, u32)] {
         &self.open.served.segments
     }
 

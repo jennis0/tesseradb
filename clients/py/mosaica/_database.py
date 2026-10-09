@@ -1,10 +1,10 @@
-"""A Tessera database in a directory: declare it, fill it, commit it and read it.
+"""A Mosaica database in a directory: declare it, fill it, commit it and read it.
 
-The directory holds everything `tessera build` and `tessera serve` read, so copying it moves the
-database: `tessera serve --deployment <dir>/tessera.toml` serves it from wherever it lands.
+The directory holds everything `mosaica build` and `mosaica serve` read, so copying it moves the
+database: `mosaica serve --deployment <dir>/mosaica.toml` serves it from wherever it lands.
 
 Beside the declaration file, the package keeps its own copy of the declared blocks and pending
-inserts as JSON under `.tessera/`, written at every declaration and insert, so `open()` restores a
+inserts as JSON under `.mosaica/`, written at every declaration and insert, so `open()` restores a
 database saved before its first commit. It keeps nothing about what the database contains: what
 the database holds is always asked of its server.
 """
@@ -49,8 +49,8 @@ if TYPE_CHECKING:
     from .widget import Map
 
 #: The compiled extension that checks a declaration in this process, or `None`, in which case
-#: the check runs `tessera check` instead. Both use the same parser.
-_tessera = _instance.find_extension()
+#: the check runs `mosaica check` instead. Both use the same parser.
+_mosaica = _instance.find_extension()
 
 #: A temporary database goes here when the platform has a RAM-backed filesystem.
 RAM_BACKED = Path("/dev/shm")
@@ -74,7 +74,7 @@ def _accepted(answer, what: str) -> dict:
 
 
 class Database:
-    """A Tessera database in a directory, which you declare, fill, commit and read.
+    """A Mosaica database in a directory, which you declare, fill, commit and read.
 
     Make one with `create()` or reopen one with `open()`. Writing takes three steps. The
     `declare_*` methods say what exists: views, columns, vocabularies, annotation layers. They
@@ -86,7 +86,7 @@ class Database:
     rows carry. `view(name)` starts a count, a sample or a map; `viewer(terms)` reads as
     someone holding only those terms.
 
-        db = tesseradb.create()
+        db = mosaica.create()
         db.declare_view("papers")
         db.insert("papers", frame, x="x", y="y", access="labels")
         db.commit()
@@ -125,10 +125,10 @@ class Database:
 
     @property
     def binary(self) -> str:
-        """The `tessera` program this database runs.
+        """The `mosaica` program this database runs.
 
-        `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the one the
-        `tesseradb-native` wheel installed, else a checkout's own build. Where there is none, the
+        `MOSAICA_BIN` when set, else the first `mosaica` on `PATH`, else the one the
+        `mosaica-native` wheel installed, else a checkout's own build. Where there is none, the
         refusal says where it looked.
         """
         return _instance.find_binary()[0]
@@ -1197,7 +1197,7 @@ class Database:
             document.pop("defaults")
 
     def write(self) -> dict:
-        """Write `schema.toml` and `tessera.toml` into the directory, and return the declaration
+        """Write `schema.toml` and `mosaica.toml` into the directory, and return the declaration
         as a dictionary.
 
         `check()` and `commit()` do this themselves. Call it to look at the files first.
@@ -1217,7 +1217,7 @@ class Database:
             "pending": [_stored(insert) for insert in self.pending],
             "blocks": _tagged(self.blocks.blocks),
         }
-        path = self.path / ".tessera" / "declaration.json"
+        path = self.path / ".mosaica" / "declaration.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=1), encoding="utf-8")
 
@@ -1251,16 +1251,16 @@ class Database:
     def _checked(self) -> tuple[bool, str]:
         """Check the written declaration, and return whether it passed and the page it printed.
 
-        The check runs in this process where the extension is installed, and as `tessera check`
+        The check runs in this process where the extension is installed, and as `mosaica check`
         otherwise. The page is the same either way.
         """
-        deployment = str(self.path / "tessera.toml")
-        if _tessera is None:
+        deployment = str(self.path / "mosaica.toml")
+        if _mosaica is None:
             result = self._run(["check", "--deployment", deployment])
             return result.returncode == 0, result.stdout + result.stderr
         try:
-            report = _tessera.check(deployment)
-        except _tessera.DeclarationError as refused:
+            report = _mosaica.check(deployment)
+        except _mosaica.DeclarationError as refused:
             return False, f"check FAILED: {refused}"
         return report.ok, report.page
 
@@ -1302,7 +1302,7 @@ class Database:
         if not ok:
             raise Refusal("commit: the declaration did not check\n" + page)
         build = self._run(
-            ["build", "--deployment", str(self.path / "tessera.toml")]
+            ["build", "--deployment", str(self.path / "mosaica.toml")]
             + (["--strict"] if strict else [])
         )
         report = CommitReport(
@@ -1410,19 +1410,19 @@ class Database:
     def _payloads(self) -> dict:
         """The request bodies the declaration becomes at a running server, one entry per block kind.
 
-        `tessera check --payloads` writes them, so the binary serialises what it parsed.
+        `mosaica check --payloads` writes them, so the binary serialises what it parsed.
         """
         self.write()
-        deployment = str(self.path / "tessera.toml")
+        deployment = str(self.path / "mosaica.toml")
         refused = "commit: the declaration did not check, so no declaration payload was emitted\n"
-        if _tessera is None:
+        if _mosaica is None:
             result = self._run(["check", "--deployment", deployment, "--payloads"])
             if result.returncode != 0:
                 raise Refusal(refused + result.stdout + result.stderr)
             return json.loads(result.stdout)
         try:
-            return json.loads(_tessera.payloads(deployment))
-        except _tessera.DeclarationError as why:
+            return json.loads(_mosaica.payloads(deployment))
+        except _mosaica.DeclarationError as why:
             raise Refusal(f"{refused}check FAILED: {why}") from None
 
     def token(self, terms: Sequence[str] | None = None) -> Token:
@@ -1849,7 +1849,7 @@ class Database:
         - `token`: the `Token`, or its `token_id`.
 
         Only the token's id is sent. An id that names no live token is accepted without comment.
-        A reader holding the `Token` gets another with its `renew()`, as `tesseradb.revoke` says.
+        A reader holding the `Token` gets another with its `renew()`, as `mosaica.revoke` says.
         """
         self.serve()
         revoke(self.session_url, self.operator_credential, token)
@@ -1869,7 +1869,7 @@ class Database:
         if self._child is not None:
             return self.listening
         binary, _ = _instance.find_binary()
-        self._child, self.listening = _instance.start(binary, self.path / "tessera.toml")
+        self._child, self.listening = _instance.start(binary, self.path / "mosaica.toml")
         return self.listening
 
     @property
@@ -1877,7 +1877,7 @@ class Database:
         """The secret this database's server is run with, which acts as its superuser: `control`
         writes with it and manages principals with it, and `token` and `viewer` mint with it. It
         stays on this machine."""
-        return (self.path / ".tessera" / "operator.cred").read_text(encoding="utf-8").strip()
+        return (self.path / ".mosaica" / "operator.cred").read_text(encoding="utf-8").strip()
 
     @property
     def viewer_url(self) -> str | None:
@@ -1965,7 +1965,7 @@ class Database:
 
         A temporary database is deleted when it is closed, so this is how to keep one. The copy
         can be reopened with `open(path)` or served with
-        `tessera serve --deployment <path>/tessera.toml`.
+        `mosaica serve --deployment <path>/mosaica.toml`.
         """
         target = Path(path).expanduser()
         if target.exists() and any(target.iterdir()):
@@ -2077,17 +2077,17 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
     - `path`: the directory. It must be empty or not yet exist. Without it the database goes in
       a temporary directory, in memory where the system offers one (`/dev/shm` on Linux), and is
       deleted when closed or when Python exits.
-    - `replace`: `True` deletes a Tessera database already at `path` first. A directory that holds
+    - `replace`: `True` deletes a Mosaica database already at `path` first. A directory that holds
       anything else is refused.
 
-    `db.path` is where the database is, and `db.binary` the `tessera` program it runs.
+    `db.path` is where the database is, and `db.binary` the `mosaica` program it runs.
 
-        db = tesseradb.create()
-        db = tesseradb.create("~/maps/papers", replace=True)
+        db = mosaica.create()
+        db = mosaica.create("~/maps/papers", replace=True)
     """
     if path is None:
         parent = RAM_BACKED if RAM_BACKED.is_dir() else None
-        directory = Path(tempfile.mkdtemp(prefix="tesseradb-", dir=parent))
+        directory = Path(tempfile.mkdtemp(prefix="mosaica-", dir=parent))
         database = Database(directory, temporary=True)
     else:
         directory = Path(path).expanduser()
@@ -2095,19 +2095,19 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
             if not replace:
                 raise Refusal(
                     f"create: {directory} is not empty. open() reads a saved database, and "
-                    f"replace=True removes a Tessera database that is there first"
+                    f"replace=True removes a Mosaica database that is there first"
                 )
-            if not (directory / "tessera.toml").exists():
+            if not (directory / "mosaica.toml").exists():
                 raise Refusal(
-                    f"create: {directory} is not empty and holds no tessera.toml, so it is not a "
-                    f"Tessera database. replace=True removes a database, never a directory of "
+                    f"create: {directory} is not empty and holds no mosaica.toml, so it is not a "
+                    f"Mosaica database. replace=True removes a database, never a directory of "
                     f"somebody else's files"
                 )
             shutil.rmtree(directory)
         directory.mkdir(parents=True, exist_ok=True)
         database = Database(directory)
     (database.path / "sources").mkdir(parents=True, exist_ok=True)
-    (database.path / ".tessera").mkdir(parents=True, exist_ok=True)
+    (database.path / ".mosaica").mkdir(parents=True, exist_ok=True)
     return database
 
 
@@ -2117,14 +2117,14 @@ def open(path: str | os.PathLike) -> Database:  # noqa: A001
     A committed database reopens ready to read, and its next commit adds to it. One saved before
     its first commit reopens with its declarations and inserts as they were left.
 
-        db = tesseradb.open("~/maps/papers")
+        db = mosaica.open("~/maps/papers")
         db.view("papers").count()
     """
     directory = Path(path).expanduser()
-    if not (directory / "tessera.toml").exists():
-        raise Refusal(f"open: {directory} holds no tessera.toml. create() makes a new database")
+    if not (directory / "mosaica.toml").exists():
+        raise Refusal(f"open: {directory} holds no mosaica.toml. create() makes a new database")
     database = Database(directory)
-    state = directory / ".tessera" / "declaration.json"
+    state = directory / ".mosaica" / "declaration.json"
     if state.exists():
         _load(database, json.loads(state.read_text(encoding="utf-8")))
     elif (directory / "schema.toml").exists():
@@ -2226,7 +2226,7 @@ def _untagged(value: Any) -> Any:
 
 
 #: The integer a member key column spells "in no artifact" with, beside a null: the build and the
-#: ingest route read a member key the same way (`tessera_store::member_key`). An artifact's own key
+#: ingest route read a member key the same way (`mosaica_store::member_key`). An artifact's own key
 #: of -1 is a name.
 NOISE_KEY = -1
 

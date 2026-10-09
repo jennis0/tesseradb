@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use tessera_engine::{Engine, Session};
+use mosaica_engine::{Engine, Session};
 
 use crate::error::ApiError;
 
@@ -51,7 +51,7 @@ pub struct SessionEntry {
     pub api_key: Option<String>,
     /// The principal that minted the session through `authorise-as`.
     pub minted_by: Option<String>,
-    pub permissions: tessera_catalogue::PermissionSet,
+    pub permissions: mosaica_catalogue::PermissionSet,
     pub created_at: u64,
     /// The earliest of the configured lifetime, the API key's expiry and the OIDC token's `exp`.
     pub expires_at: u64,
@@ -59,7 +59,7 @@ pub struct SessionEntry {
 
 impl SessionEntry {
     /// Whether a catalogue change reported in `affected` ends this session.
-    fn affected_by(&self, affected: &tessera_catalogue::Affected) -> bool {
+    fn affected_by(&self, affected: &mosaica_catalogue::Affected) -> bool {
         let principal = match &self.principal {
             Principal::Local(name) => affected.principals.contains(name),
             Principal::Oidc { provider, .. } => affected.providers.contains(provider),
@@ -373,7 +373,7 @@ impl ComputeGate {
     }
 
     /// Takes a slot, then a compute permit. Returns the permits, to move into the blocking closure,
-    /// and the wait in microseconds for `x-tessera-admission-us`. Every shed is counted once.
+    /// and the wait in microseconds for `x-mosaica-admission-us`. Every shed is counted once.
     pub async fn admit(&self) -> Result<(GatePermits, u64), crate::error::ApiError> {
         let start = Instant::now();
 
@@ -620,7 +620,7 @@ pub struct ServeLimits {
 }
 
 impl ServeLimits {
-    pub fn from_config(config: &tessera_config::Config) -> Self {
+    pub fn from_config(config: &mosaica_config::Config) -> Self {
         ServeLimits {
             max_k: config.max_k,
             max_category_values: config.max_category_values,
@@ -664,16 +664,16 @@ impl ServeLimits {
 
 impl Default for ServeLimits {
     fn default() -> Self {
-        use tessera_config::defaults as c;
+        use mosaica_config::defaults as c;
         ServeLimits {
             max_k: c::DEFAULT_MAX_K,
             max_category_values: c::DEFAULT_MAX_CATEGORY_VALUES,
             max_suggestions: c::DEFAULT_MAX_SUGGESTIONS,
             max_suggestion_walk: c::DEFAULT_MAX_SUGGESTION_WALK,
             max_suggest_set_entities: c::DEFAULT_MAX_SUGGEST_SET_ENTITIES,
-            max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+            max_shape_vertices: mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
             max_region_vertices: c::DEFAULT_MAX_REGION_VERTICES,
-            max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
+            max_region_cells: mosaica_engine::DEFAULT_MAX_REGION_CELLS,
             max_browse_rows: c::DEFAULT_MAX_BROWSE_ROWS,
             max_artifacts_per_tile: c::DEFAULT_MAX_ARTIFACTS_PER_TILE,
             ingest_max_batch_rows: c::DEFAULT_INGEST_MAX_BATCH_ROWS,
@@ -731,7 +731,7 @@ pub struct AppState {
     /// The control plane's own bound, so ingest is never throttled by what viewports consume.
     pub ingest_admission: IngestAdmission,
     /// Principals, credentials, groups, grants and OIDC providers.
-    pub catalogue: tessera_catalogue::Catalogue,
+    pub catalogue: mosaica_catalogue::Catalogue,
     /// Checks OIDC access tokens against their providers' published keys.
     pub oidc: crate::oidc::Verifier,
     /// Authenticates the superuser on the control plane.
@@ -741,7 +741,7 @@ pub struct AppState {
     /// The write executor's fault switchboard, in the faults build only. The executor holds the
     /// same `Arc`, so `/control/faults/*` arms the thread that pauses.
     #[cfg(feature = "fault-injection")]
-    pub faults: std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>,
+    pub faults: std::sync::Arc<mosaica_lifecycle::faults::FaultSwitchboard>,
 }
 
 /// The token of an `Authorization: Bearer` header, on every plane.
@@ -878,7 +878,7 @@ impl AppState {
     pub async fn write<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>
     where
         T: Send + 'static,
-        F: FnOnce(&AppState) -> Result<T, tessera_engine::AcceptError> + Send + 'static,
+        F: FnOnce(&AppState) -> Result<T, mosaica_engine::AcceptError> + Send + 'static,
     {
         self.blocking(move |state| f(state).map_err(crate::error::map_accept_error))
             .await
@@ -936,7 +936,7 @@ impl AppState {
     /// Ends every session a catalogue change affected, prunes them on the calling thread, and
     /// returns how many. A change calls it on the blocking thread that committed it, straight
     /// after the commit, so its sessions end whether or not its caller is still waiting.
-    pub fn end_affected_now(&self, affected: &tessera_catalogue::Affected) -> usize {
+    pub fn end_affected_now(&self, affected: &mosaica_catalogue::Affected) -> usize {
         if affected.is_empty() {
             return 0;
         }

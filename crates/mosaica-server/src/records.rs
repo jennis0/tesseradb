@@ -17,13 +17,13 @@ use axum::extract::State;
 use axum::response::Response;
 use serde::Deserialize;
 
-use tessera_engine::filter::FilterExpr;
-use tessera_engine::viewport::MetaView;
-use tessera_engine::{
+use mosaica_engine::filter::FilterExpr;
+use mosaica_engine::viewport::MetaView;
+use mosaica_engine::{
     ArtifactsRequest, CancelToken, EngineError, ItemsRequest, PageEnd, RecordsHead, RecordsLimits,
     RecordsOrder, RecordsSink, RecordsTrailer, RegionVerdict, SinkClosed, SinkResult,
 };
-use tessera_wire::{
+use mosaica_wire::{
     records_head_frame, page_end_frame, records_frame, trailer_frame, RecordsCompression,
 };
 
@@ -117,7 +117,7 @@ pub(crate) struct Opening {
     pub(crate) region: Option<RegionVerdict>,
     /// The head frame, the body's first bytes; empty on a route whose body has no head frame.
     pub(crate) head: Vec<u8>,
-    /// Microseconds from admission to the head, sent as `x-tessera-server-us`.
+    /// Microseconds from admission to the head, sent as `x-mosaica-server-us`.
     pub(crate) server_us: u64,
 }
 
@@ -184,7 +184,7 @@ pub(crate) async fn items(
     ApiJson(req): ApiJson<ItemsReq>,
 ) -> Result<Response, ApiError> {
     let compression = req.compression;
-    let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
+    let read = move |state: &AppState, session: &mosaica_engine::Session, cancel, sink: &mut _| {
         run_items(state, session, req, cancel, sink)
     };
     bulk_read(state, session, Lane::Bulk, "items", "visible", compression, read).await
@@ -197,7 +197,7 @@ pub(crate) async fn artifacts(
     ApiJson(req): ApiJson<ArtifactsReq>,
 ) -> Result<Response, ApiError> {
     let compression = req.compression;
-    let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
+    let read = move |state: &AppState, session: &mosaica_engine::Session, cancel, sink: &mut _| {
         run_artifacts(state, session, req, cancel, sink)
     };
     bulk_read(state, session, Lane::Bulk, "artifacts", "served", compression, read).await
@@ -217,12 +217,12 @@ pub(crate) enum Lane {
 /// refusal, and the view it read for the log. The permits are held until the response ends.
 pub(crate) async fn bulk_read(
     state: Arc<AppState>,
-    session: Arc<tessera_engine::Session>,
+    session: Arc<mosaica_engine::Session>,
     lane: Lane,
     route: &'static str,
     served_as: &'static str,
     compression: Option<CompressionReq>,
-    read: impl FnOnce(&AppState, &tessera_engine::Session, CancelToken, &mut FrameSink) -> Read
+    read: impl FnOnce(&AppState, &mosaica_engine::Session, CancelToken, &mut FrameSink) -> Read
         + Send
         + 'static,
 ) -> Result<Response, ApiError> {
@@ -354,8 +354,8 @@ fn finish(
 /// The view a request names, as this principal reaches it, and its filter parsed against it.
 pub(crate) fn view_and_filter<'m>(
     state: &AppState,
-    meta: &'m tessera_engine::viewport::EngineMeta,
-    session: &tessera_engine::Session,
+    meta: &'m mosaica_engine::viewport::EngineMeta,
+    session: &mosaica_engine::Session,
     view: &str,
     filters: Option<&serde_json::Value>,
 ) -> Result<(&'m MetaView, Option<FilterExpr>), ApiError> {
@@ -388,7 +388,7 @@ pub(crate) fn limits(state: &AppState) -> RecordsLimits {
 
 fn run_items(
     state: &AppState,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     req: ItemsReq,
     cancel: CancelToken,
     sink: &mut FrameSink,
@@ -425,7 +425,7 @@ fn run_items(
 
 fn run_artifacts(
     state: &AppState,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     req: ArtifactsReq,
     cancel: CancelToken,
     sink: &mut FrameSink,
@@ -457,7 +457,7 @@ fn run_artifacts(
     };
     let palette_size = match req
         .palette_size
-        .map(tessera_engine::check_palette_size)
+        .map(mosaica_engine::check_palette_size)
         .transpose()
     {
         Ok(size) => size,

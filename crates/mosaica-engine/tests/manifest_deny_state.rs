@@ -11,10 +11,10 @@ mod common;
 use std::path::Path;
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::Engine;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_types::EntityId;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::Engine;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_types::EntityId;
 
 /// Rewrite `SEGMENTS-0.json` with `edit` applied to its parsed JSON. The side-manifest carries no
 /// digest of its own — only the `files` entries *inside* it are verified — so this needs no
@@ -30,7 +30,7 @@ fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)
 /// One of a manifest's deny fields, holding `ids`, as it is written into the JSON.
 fn deny_set(ids: &[u64]) -> serde_json::Value {
     let entities: croaring::Bitmap = ids.iter().map(|id| *id as u32).collect();
-    serde_json::to_value(tessera_store::manifest::EntitySet::of(&entities)).unwrap()
+    serde_json::to_value(mosaica_store::manifest::EntitySet::of(&entities)).unwrap()
 }
 
 fn visible(engine: &Engine) -> u64 {
@@ -205,7 +205,7 @@ fn a_wal_unsuppress_beats_a_manifest_suppression_that_predates_it() {
     );
 }
 
-/// The entity id `tessera build` assigned to source row `source_id`.
+/// The entity id `mosaica build` assigned to source row `source_id`.
 fn entity_of_source(root: &Path, source_id: u64) -> u64 {
     source_to_new_map(root, "v00000")[&source_id]
 }

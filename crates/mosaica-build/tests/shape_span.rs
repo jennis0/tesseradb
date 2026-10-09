@@ -6,14 +6,14 @@
 //! carried until now: a layer drawn on views that do *not* share a frame. The single-frame case is
 //! `projected_build.rs`'s, and it must not change — one of these tests holds it fixed.
 
-use tessera_spatial::shape::Shape;
-use tessera_spatial::{fixed32, AlignedSquare, Bounds, Projection};
-use tessera_store::derived::{
+use mosaica_spatial::shape::Shape;
+use mosaica_spatial::{fixed32, AlignedSquare, Bounds, Projection};
+use mosaica_store::derived::{
     canonical_shapes, check_shape_span, shape_input, ShapeInput, ShapeSpace, ViewFrame,
 };
-use tessera_types::layer::{ShapeKind, DEFAULT_MAX_SHAPE_VERTICES};
+use mosaica_types::layer::{ShapeKind, DEFAULT_MAX_SHAPE_VERTICES};
 
-use tessera_build::shapes::{ShapeContext, ShapeReader};
+use mosaica_build::shapes::{ShapeContext, ShapeReader};
 
 /// A box over Britain, in degrees. Straight edges in the longitude/latitude plane, so it is a
 /// `wgs84` declaration on every projected view and means nothing read as frame coordinates.

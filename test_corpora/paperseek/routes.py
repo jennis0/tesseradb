@@ -17,7 +17,7 @@ it.** 2,500,000 x 1024 float16 is 5.12 GB of raw vectors before the index's own 
 was **measured** to fit on this card, not what was extrapolated; `README.md` carries the table and
 says which sizes were tried.
 
-The owner's framing (2026-09-02) carries over: this corpus tests Tessera's speed and memory rather
+The owner's framing (2026-09-02) carries over: this corpus tests Mosaica's speed and memory rather
 than the UMAP pipeline, so the first route that works is the one taken and nothing about layout
 fidelity is measured or claimed.
 
@@ -356,7 +356,7 @@ def main() -> None:
     ap.add_argument("--shard", type=int, default=SHARD_ROWS, help="rows per CAGRA index")
     ap.add_argument("--managed", action="store_true", help="RMM managed memory for the layout")
     ap.add_argument("--graph-only", action="store_true", help="stop after the kNN graph")
-    ap.add_argument("--out", type=Path, default=None, help="default $TESSERA_LADDER/paperseek")
+    ap.add_argument("--out", type=Path, default=None, help="default $MOSAICA_LADDER/paperseek")
     ap.add_argument("--report", type=Path, default=None, help="append the timings here as JSON")
     ap.add_argument("--partial", action="store_true",
                     help="sample the staged prefix while the staging pass is still running")

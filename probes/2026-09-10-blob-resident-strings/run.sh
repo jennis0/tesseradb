@@ -26,7 +26,7 @@
 # pre-flight, which costs a pass over 3,495,729,729 rows.
 #
 # LADDER is `data/ladder`. WORK wants ~80 GB free, on the same filesystem as the builds. BEFORE
-# and AFTER must be named so that `ps -o comm=` reads `tessera` in them: both the sampler and the
+# and AFTER must be named so that `ps -o comm=` reads `mosaica` in them: both the sampler and the
 # forecast below refuse a pid whose command is not the build, and a binary copied to `before` is
 # not one.
 set -uo pipefail
@@ -50,7 +50,7 @@ for name in ${IDENTITY:-gbif-64p multiview treeoflife-1m medcpt-1m geonames}; do
   for which in before after; do
     binary="$([ "$which" = before ] && echo "$before" || echo "$after")"
     rm -rf "$work/$name-$which"
-    ( cd "$corpus" && "$binary" build --deployment tessera.toml --config corpus.toml \
+    ( cd "$corpus" && "$binary" build --deployment mosaica.toml --config corpus.toml \
         --out "$work/$name-$which" > "$work/$name-$which.log" 2>&1 ) \
       || { echo "$name: $which build failed"; tail -5 "$work/$name-$which.log"; continue; }
   done
@@ -88,13 +88,13 @@ forecast() {
   local out="$3"
   rm -rf "$out"; mkdir -p "$out"
   set -a; . "$1/.env"; set +a
-  "$2" build --deployment "$1/tessera.toml" --config "$1/corpus.toml" \
+  "$2" build --deployment "$1/mosaica.toml" --config "$1/corpus.toml" \
     --out "$out/bundle" "${@:4}" > "$out/out.log" 2>&1 &
   local pid=$!
   # The pid the loop below waits on is the build's own: a wrapper shell's would fall through at
   # once and record a forecast that was never printed.
   case "$(ps -o comm= -p "$pid" 2>/dev/null)" in
-    *tessera*) ;;
+    *mosaica*) ;;
     *) kill "$pid" 2>/dev/null; echo "the pid is not the build" >&2; return 1 ;;
   esac
   while kill -0 "$pid" 2>/dev/null; do

@@ -20,7 +20,7 @@
 //! readers rely on: each view's segments ascend without overlap in entity order.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin maintenance_steady_state -- \
+//! cargo run --release -p mosaica-bench --bin maintenance_steady_state -- \
 //!     --ticks 200 --rows 2000 [--hold-merge 9] [--scratch DIR]
 //! ```
 
@@ -40,12 +40,12 @@ use clap::Parser;
 use parquet::arrow::ArrowWriter;
 use rand::{Rng, SeedableRng};
 
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{AttributeRequest, Engine, EngineConfig};
-use tessera_lifecycle::wal::WalScalar;
-use tessera_lifecycle::UnallocatedRow;
-use tessera_store::manifest::SegmentsManifest;
-use tessera_types::layer::LayerScope;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{AttributeRequest, Engine, EngineConfig};
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_store::manifest::SegmentsManifest;
+use mosaica_types::layer::LayerScope;
 
 
 const VIEW: &str = "s0";
@@ -192,7 +192,7 @@ fn open(tmp: &Path, root: &Path, merge_held: bool) -> Result<Engine, Box<dyn std
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             // Every tick is one this binary asks for.
             flush_max_age_secs: 86_400,
             flush_max_items: usize::MAX,
@@ -201,7 +201,7 @@ fn open(tmp: &Path, root: &Path, merge_held: bool) -> Result<Engine, Box<dyn std
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
     engine.start_write_executor(4096)?;
@@ -245,11 +245,11 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
     w.close()?;
 
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: VIEW.to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: tessera_spatial::Bounds {
+            projection: mosaica_spatial::Projection::None,
+            extent: mosaica_spatial::Bounds {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -258,7 +258,7 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
             points,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -267,7 +267,7 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
         out: out.to_path_buf(),
         limit: None,
         strict: false,
-        identity_key: tessera_types::IdentityKey::from_hex(KEY_HEX).expect("key"),
+        identity_key: mosaica_types::IdentityKey::from_hex(KEY_HEX).expect("key"),
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -365,7 +365,7 @@ impl Probe {
         }
     }
 
-    fn carry(&mut self, stats: &tessera_engine::ExecutorStats) {
+    fn carry(&mut self, stats: &mosaica_engine::ExecutorStats) {
         self.carried[0] += stats.merges;
         self.carried[1] += stats.merge_failures;
         self.carried[2] += stats.coalesces;
@@ -388,7 +388,7 @@ impl Probe {
         let coalesce_passes_failed = coalesce_passes_failed + stats.coalesce_passes_failed;
 
         let (files, bytes) = walk(&prefix_dir, |_| true);
-        let segments_dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), VIEW).join("segments");
+        let segments_dir = mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), VIEW).join("segments");
         let merge_dirs = count_dirs(&segments_dir, "merge-");
         let coalesce_dirs = count_dirs(&prefix_dir.join("partitions").join(partition).join("coalesced"), "coalesce-");
 

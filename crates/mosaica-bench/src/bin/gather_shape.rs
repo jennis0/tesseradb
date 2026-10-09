@@ -31,7 +31,7 @@
 //! than reports if the two disagree.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin gather_shape -- <bundle> [rows] [reps]
+//! cargo run --release -p mosaica-bench --bin gather_shape -- <bundle> [rows] [reps]
 //! ```
 
 use std::time::Instant;
@@ -40,9 +40,9 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
-use tessera_store::read::{open_bundle, ScalarSlice, SegmentData};
+use mosaica_store::read::{open_bundle, ScalarSlice, SegmentData};
 
-/// One gathered value. Mirrors `tessera_engine::ScalarOut`, which is private to that crate.
+/// One gathered value. Mirrors `mosaica_engine::ScalarOut`, which is private to that crate.
 #[derive(Debug, Clone, PartialEq)]
 enum ScalarOut {
     Bool(bool),
@@ -60,7 +60,7 @@ enum ScalarOut {
     Utf8(String),
 }
 
-/// One gathered column. Mirrors `tessera_server::viewer::ColumnBuf`.
+/// One gathered column. Mirrors `mosaica_server::viewer::ColumnBuf`.
 #[derive(Debug, PartialEq)]
 enum ColumnBuf {
     Bool(Vec<bool>),

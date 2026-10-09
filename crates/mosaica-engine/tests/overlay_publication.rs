@@ -16,10 +16,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_store::manifest::SegmentsManifest;
-use tessera_types::EntityId;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_store::manifest::SegmentsManifest;
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -36,7 +36,7 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -49,7 +49,7 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
 
 /// The newest side-manifest on disc, read the way the reader reads it — highest `n` first.
 fn newest_manifest(root: &Path) -> (u64, SegmentsManifest) {
-    let bundle = tessera_store::open_bundle(root).expect("the bundle opens");
+    let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
     (partition.segments_n, partition.manifest.clone())
 }
@@ -59,7 +59,7 @@ fn suppressed_in(manifest: &SegmentsManifest) -> Vec<u64> {
 }
 
 /// The ids one of a manifest's deny fields carries, ascending.
-fn ids_of(field: &tessera_store::manifest::EntitySet) -> Vec<u64> {
+fn ids_of(field: &mosaica_store::manifest::EntitySet) -> Vec<u64> {
     field
         .entities()
         .expect("the field a writer produced decodes")
@@ -214,11 +214,11 @@ fn a_node_restored_from_the_bundle_alone_honours_the_published_deny() {
     );
 }
 
-fn visible_count(engine: &Engine, session: &tessera_engine::Session) -> u64 {
+fn visible_count(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
     engine
         .viewport(
             session,
-            tessera_engine::ViewportRequest::new(
+            mosaica_engine::ViewportRequest::new(
                 "s0",
                 4,
                 [0.0, 0.0, 1000.0, 1000.0],
@@ -317,7 +317,7 @@ fn a_run_of_denies_leaves_a_bounded_directory_and_a_reopen_hides_every_one() {
         .filter(|name| name.starts_with("SEGMENTS-") && name.ends_with(".json"))
         .collect();
     assert!(
-        present.len() <= tessera_store::SIDE_MANIFESTS_KEPT,
+        present.len() <= mosaica_store::SIDE_MANIFESTS_KEPT,
         "seven publications left {} side-manifests: {present:?}",
         present.len()
     );

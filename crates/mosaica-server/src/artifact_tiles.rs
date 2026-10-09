@@ -14,12 +14,12 @@ use axum::extract::State;
 use axum::response::Response;
 use serde::Deserialize;
 
-use tessera_engine::{
+use mosaica_engine::{
     ArtifactOut, CancelToken, ComputedSelection, SinkResult, ViewportArtifactsHead,
     ViewportArtifactsRequest, ViewportArtifactsSink,
 };
-use tessera_types::GenerationStamp;
-use tessera_wire::{artifacts_frame, trailer_frame, ArtifactRow};
+use mosaica_types::GenerationStamp;
+use mosaica_wire::{artifacts_frame, trailer_frame, ArtifactRow};
 
 use crate::error::{map_engine_error, ApiError};
 use crate::state::{ApiJson, AppState, GatePermits, ViewerSession};
@@ -72,7 +72,7 @@ pub(crate) struct ViewportArtifactsReq {
 struct Opening {
     head: ViewportArtifactsHead,
     first_frame: Vec<u8>,
-    /// Microseconds from admission to the first frame, sent as `x-tessera-server-us`.
+    /// Microseconds from admission to the first frame, sent as `x-mosaica-server-us`.
     server_us: u64,
 }
 
@@ -145,7 +145,7 @@ impl ViewportArtifactsSink for WireSink {
 /// The producer: the engine call and the frames, on a blocking thread for the whole stream.
 fn run(
     state: &AppState,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     req: ViewportArtifactsReq,
     cancel: CancelToken,
     mut sink: WireSink,
@@ -172,7 +172,7 @@ fn run(
             return;
         }
     };
-    let palette_size = match req.palette_size.map(tessera_engine::check_palette_size).transpose() {
+    let palette_size = match req.palette_size.map(mosaica_engine::check_palette_size).transpose() {
         Ok(size) => size,
         Err(e) => {
             sink.producer.refuse(map_engine_error(e));
@@ -183,11 +183,11 @@ fn run(
     let names = layer_names(req.layers.as_ref());
     let numbers = level_numbers(req.levels.as_ref());
     // The handler refused any other word.
-    let computed: Vec<tessera_engine::ComputedProperty> = req
+    let computed: Vec<mosaica_engine::ComputedProperty> = req
         .computed
         .iter()
         .flatten()
-        .filter_map(|name| tessera_engine::ComputedProperty::parse_ask(name))
+        .filter_map(|name| mosaica_engine::ComputedProperty::parse_ask(name))
         .collect();
     let mut request = ViewportArtifactsRequest::new(
         &view.id,
@@ -242,7 +242,7 @@ fn run(
                     "artifacts viewport stream SHED mid-body by the server — {}",
                     shed.detail()
                 );
-            } else if !matches!(e, tessera_engine::EngineError::Cancelled) {
+            } else if !matches!(e, mosaica_engine::EngineError::Cancelled) {
                 tracing::warn!(error = %e, "artifacts viewport stream aborted mid-body");
             }
             sink.producer.abort();
@@ -269,12 +269,12 @@ pub(crate) async fn viewport_artifacts(
         .computed
         .iter()
         .flatten()
-        .find(|name| tessera_engine::ComputedProperty::parse_ask(name).is_none())
+        .find(|name| mosaica_engine::ComputedProperty::parse_ask(name).is_none())
     {
         return Err(ApiError::Contract(format!(
             "`computed` names {bad:?}; this route computes {}, and an artifact's shape is read \
              by its `tessera_id`",
-            tessera_engine::ComputedProperty::ASK_VOCABULARY.join(" and ")
+            mosaica_engine::ComputedProperty::ASK_VOCABULARY.join(" and ")
         )));
     }
 
@@ -322,8 +322,8 @@ pub(crate) async fn viewport_artifacts(
             crate::stream::hex16(&head.coordinates.content_key)
         ),
     )
-    .header("x-tessera-pin", pin)
-    .header("x-tessera-stale", if head.stale { "1" } else { "0" })
+    .header("x-mosaica-pin", pin)
+    .header("x-mosaica-stale", if head.stale { "1" } else { "0" })
     .body(body.into_body(opening.first_frame))
     .expect("response construction cannot fail"))
 }

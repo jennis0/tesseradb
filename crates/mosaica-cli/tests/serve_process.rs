@@ -1,4 +1,4 @@
-//! `tessera serve` as a process, and `tessera health` asking it whether it is ready: what a
+//! `mosaica serve` as a process, and `mosaica health` asking it whether it is ready: what a
 //! container runs and what its health check runs.
 
 mod common;

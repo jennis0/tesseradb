@@ -12,8 +12,8 @@ spelled on a Python call, which no file expresses.
 
 import pytest
 
-from tesseradb._database import create
-from tesseradb._refusal import Refusal
+from mosaica._database import create
+from mosaica._refusal import Refusal
 
 pd = pytest.importorskip("pandas")
 

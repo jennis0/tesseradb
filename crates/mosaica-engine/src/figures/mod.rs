@@ -61,7 +61,7 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_types::layer::LayerDeclaration;
+use mosaica_types::layer::LayerDeclaration;
 
 use crate::derived::{place, Placement};
 use crate::error::{EngineError, Result};
@@ -152,7 +152,7 @@ struct BoxSource {
 type WithPlaces = Arc<dyn Fn(&mut dyn FnMut(&[Placement<'_>])) + Send + Sync>;
 
 /// [`WithPlaces`] over one view of `bundle`.
-fn places_of_view(bundle: Arc<tessera_store::read::Bundle>, view: String) -> WithPlaces {
+fn places_of_view(bundle: Arc<mosaica_store::read::Bundle>, view: String) -> WithPlaces {
     Arc::new(move |read: &mut dyn FnMut(&[Placement<'_>])| {
         let Some(view_data) = bundle
             .partitions
@@ -457,8 +457,8 @@ impl Engine {
                         Ok::<_, std::convert::Infallible>(Tail(deltas))
                     })
                     .map_err(|ended| match ended {
-                        tessera_cache::WaitingBuildError::Wait(ended) => wait_error(ended),
-                        tessera_cache::WaitingBuildError::Build(never) => match never {},
+                        mosaica_cache::WaitingBuildError::Wait(ended) => wait_error(ended),
+                        mosaica_cache::WaitingBuildError::Build(never) => match never {},
                     })?;
                 Some(tail)
             }
@@ -640,7 +640,7 @@ impl Engine {
             deny_version,
             failing,
         };
-        if let tessera_cache::Peek::Ready(held) = self.figures.denies.peek(&key) {
+        if let mosaica_cache::Peek::Ready(held) = self.figures.denies.peek(&key) {
             return Ok(Some(held));
         }
         let mut denied = served.denied.clone();
@@ -690,8 +690,8 @@ impl Engine {
             })
             .map(Some)
             .map_err(|ended| match ended {
-                tessera_cache::WaitingBuildError::Wait(ended) => wait_error(ended),
-                tessera_cache::WaitingBuildError::Build(never) => match never {},
+                mosaica_cache::WaitingBuildError::Wait(ended) => wait_error(ended),
+                mosaica_cache::WaitingBuildError::Build(never) => match never {},
             })
     }
 
@@ -974,16 +974,16 @@ fn deny_version(
 }
 
 /// A wait on a correction's build, or the build's own error.
-pub(crate) fn waited(ended: tessera_cache::WaitingBuildError<EngineError>) -> EngineError {
+pub(crate) fn waited(ended: mosaica_cache::WaitingBuildError<EngineError>) -> EngineError {
     match ended {
-        tessera_cache::WaitingBuildError::Wait(ended) => wait_error(ended),
-        tessera_cache::WaitingBuildError::Build(e) => e,
+        mosaica_cache::WaitingBuildError::Wait(ended) => wait_error(ended),
+        mosaica_cache::WaitingBuildError::Build(e) => e,
     }
 }
 
-fn wait_error(ended: tessera_cache::WaitEnded) -> EngineError {
+fn wait_error(ended: mosaica_cache::WaitEnded) -> EngineError {
     match ended {
-        tessera_cache::WaitEnded::Budget => EngineError::CountsBuilding,
-        tessera_cache::WaitEnded::Cancelled => EngineError::Cancelled,
+        mosaica_cache::WaitEnded::Budget => EngineError::CountsBuilding,
+        mosaica_cache::WaitEnded::Cancelled => EngineError::Cancelled,
     }
 }

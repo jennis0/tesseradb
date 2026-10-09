@@ -61,9 +61,9 @@ use std::time::Instant;
 
 use croaring::Bitmap;
 
-use tessera_store::permutation::Permutation;
-use tessera_store::write::write_permutation_iter;
-use tessera_types::EntityId;
+use mosaica_store::permutation::Permutation;
+use mosaica_store::write::write_permutation_iter;
+use mosaica_types::EntityId;
 
 /// Rows per artifact — §2's `rows/artifacts` at the 10⁹/10⁷ point the design's sizing comes from.
 const DEFAULT_MEMBERS: u32 = 100;

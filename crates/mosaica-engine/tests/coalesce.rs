@@ -14,10 +14,10 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_types::EntityId;
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -29,7 +29,7 @@ const WIDTH: usize = 8;
 const RUN_WIDTH: usize = 4;
 
 /// The live key runs of the fixture's unique `id`.
-fn live_runs(manifest: &tessera_store::manifest::SegmentsManifest) -> &[String] {
+fn live_runs(manifest: &mosaica_store::manifest::SegmentsManifest) -> &[String] {
     &manifest.unique_indexes.iter().find(|i| i.attribute == "id").expect("`id` is unique").live
 }
 
@@ -45,10 +45,10 @@ fn settle_coalesce(engine: &Engine) {
 
 /// The key runs after a coalesce: the base runs unchanged, and fewer live runs than a run window.
 fn assert_runs_coalesced(
-    after: &tessera_store::manifest::SegmentsManifest,
-    before: &tessera_store::manifest::SegmentsManifest,
+    after: &mosaica_store::manifest::SegmentsManifest,
+    before: &mosaica_store::manifest::SegmentsManifest,
 ) {
-    let base = |m: &tessera_store::manifest::SegmentsManifest| {
+    let base = |m: &mosaica_store::manifest::SegmentsManifest| {
         let index = m.unique_indexes.iter().find(|i| i.attribute == "id").unwrap();
         index.base.iter().map(|run| run.path.clone()).collect::<Vec<_>>()
     };
@@ -72,7 +72,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config()
         },
     )
@@ -104,8 +104,8 @@ fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
         .expect("ingest is accepted")[0]
 }
 
-fn manifest_of(root: &std::path::Path) -> tessera_store::manifest::SegmentsManifest {
-    let bundle = tessera_store::open_bundle(root).expect("the bundle opens");
+fn manifest_of(root: &std::path::Path) -> mosaica_store::manifest::SegmentsManifest {
+    let bundle = mosaica_store::open_bundle(root).expect("the bundle opens");
     bundle.partitions.values().next().unwrap().manifest.clone()
 }
 
@@ -500,7 +500,7 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
     let doomed = ingested[0];
     let terms_before = engine.flushed_terms(doomed).expect("a flushed label set");
     engine
-        .accept_change(doomed, tessera_lifecycle::wal::ChangeOp::Delete)
+        .accept_change(doomed, mosaica_lifecycle::wal::ChangeOp::Delete)
         .expect("the delete is accepted");
 
     settle_coalesce(&engine);
@@ -706,7 +706,7 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     let folded = manifest_of(&root);
     assert_eq!(folded.deltas.len(), WIDTH, "one carried tier per flush");
     assert_eq!(live_runs(&folded).len(), WIDTH, "one carried key run per flush");
-    let digested = tessera_store::open_bundle(&root)
+    let digested = mosaica_store::open_bundle(&root)
         .expect("the bundle opens")
         .manifest
         .files;
@@ -765,7 +765,7 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
 
 fn declare(engine: &Engine, name: &str, ty: &str, index: bool) {
     engine
-        .declare_attribute(tessera_engine::AttributeRequest {
+        .declare_attribute(mosaica_engine::AttributeRequest {
             name: name.to_string(),
             title: None,
             ty: ty.to_string(),
@@ -773,7 +773,7 @@ fn declare(engine: &Engine, name: &str, ty: &str, index: bool) {
             analyser: None,
             index,
             render: false,
-            scope: tessera_types::layer::LayerScope::Entity,
+            scope: mosaica_types::layer::LayerScope::Entity,
             unique: false,
         })
         .unwrap_or_else(|e| panic!("column '{name}' declares: {e}"));
@@ -782,12 +782,12 @@ fn declare(engine: &Engine, name: &str, ty: &str, index: bool) {
 /// Each item's drill-down fields, and the items each filter matches in each view.
 #[derive(Debug, PartialEq)]
 struct Interleaved {
-    fields: Vec<Vec<(String, tessera_engine::ScalarOut)>>,
+    fields: Vec<Vec<(String, mosaica_engine::ScalarOut)>>,
     matches: Vec<Vec<u64>>,
 }
 
 fn interleaved_answers(engine: &Engine, entities: &[EntityId]) -> Interleaved {
-    use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
+    use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
     let session = engine.authorise(&full_coverage_credential()).expect("the session authorises");
     let fields = entities
         .iter()
@@ -861,7 +861,7 @@ fn interleaved_answers(engine: &Engine, entities: &[EntityId]) -> Interleaved {
 /// did before, live and after a restart.
 #[test]
 fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same() {
-    use tessera_lifecycle::wal::WalScalar;
+    use mosaica_lifecycle::wal::WalScalar;
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     build_fixture_n(
@@ -877,11 +877,11 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
     declare(&engine, "prose", "text", true);
     declare(&engine, "weight", "f32", true);
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: "s1".to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -943,11 +943,11 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
     );
 
     let manifest = manifest_of(&root);
-    let column_extents = |m: &tessera_store::manifest::SegmentsManifest, column: &str| {
+    let column_extents = |m: &mosaica_store::manifest::SegmentsManifest, column: &str| {
         m.attr_extents.iter().filter(|e| e.column == column).count()
             + m.text_extents.iter().filter(|e| e.column == column).count()
     };
-    let lists = |m: &tessera_store::manifest::SegmentsManifest| {
+    let lists = |m: &mosaica_store::manifest::SegmentsManifest| {
         [
             column_extents(m, "tag"),
             column_extents(m, "prose"),

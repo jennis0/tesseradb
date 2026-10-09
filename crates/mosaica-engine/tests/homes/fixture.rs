@@ -18,16 +18,16 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use crate::common::*;
-use tessera_build::config::{Attribute, Config, Fields};
-use tessera_build::{
+use mosaica_build::config::{Attribute, Config, Fields};
+use mosaica_build::{
     build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
     ViewArgs,
 };
-use tessera_engine::filter::{FilterExpr, FilterOperand};
-use tessera_engine::{Engine, EngineConfig, Session, ViewportRequest};
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::Projection;
-use tessera_types::EntityId;
+use mosaica_engine::filter::{FilterExpr, FilterOperand};
+use mosaica_engine::{Engine, EngineConfig, Session, ViewportRequest};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::Projection;
+use mosaica_types::EntityId;
 
 pub const N: u64 = 24;
 /// The item edited.
@@ -175,7 +175,7 @@ pub fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
         points: points.to_path_buf(),
         point_fields: Fields::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
     }
 }
 
@@ -192,7 +192,7 @@ pub fn scoped(
             field: None,
             ty,
             analyser: analyser
-                .map(|name| tessera_analyse::identity_of(name).expect("the analyser is carried")),
+                .map(|name| mosaica_analyse::identity_of(name).expect("the analyser is carried")),
             vocabulary: None,
             value_set: None,
             index: true,
@@ -310,7 +310,7 @@ pub fn build_homes(dir: &Path) -> std::path::PathBuf {
             scoped("heat", ScalarType::F32, None, quarter_views.clone()),
             scoped("memo", ScalarType::Text, Some("unicode"), quarter_views),
         ],
-        attribute_sources: tessera_build::config::AttributeSource::over(world, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(world, &schema),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -346,8 +346,8 @@ pub fn open(tmp: &Path, root: &Path) -> Engine {
     engine
 }
 
-pub fn label_layer() -> tessera_types::layer::LayerDeclaration {
-    use tessera_types::layer::{
+pub fn label_layer() -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::{
         ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
         MembershipSource, SuppliedContent, SuppliedRequirement,
     };
@@ -382,8 +382,8 @@ pub fn label_layer() -> tessera_types::layer::LayerDeclaration {
 
 /// One artifact over every item, its content generated from [`X`] and [`Y`].
 pub fn publish(engine: &Engine, root: &Path) {
-    use tessera_lifecycle::membership::IncomingContent;
-    use tessera_lifecycle::IncomingArtifact;
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::IncomingArtifact;
     engine
         .register_layer(label_layer())
         .expect("the layer registers");
@@ -420,7 +420,7 @@ pub fn served(
         req.filter = filter.clone();
         match engine.viewport(session, req) {
             Ok(out) => return out.points.tessera_ids.into_iter().collect(),
-            Err(tessera_engine::EngineError::ProjectionBuilding)
+            Err(mosaica_engine::EngineError::ProjectionBuilding)
                 if std::time::Instant::now() < deadline =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(20));

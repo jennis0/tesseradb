@@ -292,7 +292,7 @@ A response carries two keys and a generation name a client can compare against w
 holds.
 
 Whether a held answer may still be shown at all depends on the identity key, carried as
-`x-tessera-identity-key`. It is derived from the session's authorisation data, its visible set
+`x-mosaica-identity-key`. It is derived from the session's authorisation data, its visible set
 and the view, and changes when any of them does. The visible set's identity is keyed by the
 bundle, so the identity key also changes when the bundle is rebuilt, which gives every item a new
 `tessera_id`. It is not the key of the `tessera_id` permutation.
@@ -313,21 +313,21 @@ testing whether an item is visible at all. Every tile a request does name pays t
 whatever the client already has.
 
 A third value, the generation a response was answered from, travels as a header,
-`x-tessera-pin`, and a request may echo it back. While the background refresh after a
+`x-mosaica-pin`, and a request may echo it back. While the background refresh after a
 [flush](write-path.md#flush) has not reached a session, the header names the previous generation,
 because the session's visible set is still that generation's projection. Deletions, suppressions
 and segments are current either way. An echoed pin buys one comparison against the
-generation the response was answered from, reported as a flag on the response, `x-tessera-stale`.
+generation the response was answered from, reported as a flag on the response, `x-mosaica-stale`.
 
 ## Serving other map stacks
 
-Most mapping tools outside Tessera address a map by tile rather than by viewport: they ask for one
+Most mapping tools outside Mosaica address a map by tile rather than by viewport: they ask for one
 square at a time, identified by its zoom level and its position, and expect each square to answer
 on its own. MapLibre, OpenLayers and QGIS all work this way, and none of them speaks the viewport
 request directly.
 
 **Not built yet:** a route that accepts a tile address. An integrator wiring one of these tools to
-Tessera today writes an adapter that turns each tile request into its own viewport request, one
+Mosaica today writes an adapter that turns each tile request into its own viewport request, one
 evaluation per tile, rather than the single evaluation a native viewport request would do for the
 same area.
 
@@ -368,18 +368,18 @@ of the one process holding the corpus.
 ## Where this is tested and where it lives
 
 The framed response, and the split between computing counts and streaming points, live in
-`tessera-engine`'s `viewport` module; the frame encoding itself is in `tessera-wire`. A session's
+`mosaica-engine`'s `viewport` module; the frame encoding itself is in `mosaica-wire`. A session's
 kept authorised set and row arrangement, the background pass that keeps them current, and the
 wait-rather-than-refuse behaviour for a request racing a build already in progress live in
-`tessera-engine`'s `cache` and `refresh` modules and in the `tessera-cache` crate. Admission, the
+`mosaica-engine`'s `cache` and `refresh` modules and in the `mosaica-cache` crate. Admission, the
 streaming transport and its deadlines, and the health and readiness routes live in
-`tessera-server`, in its `state`, `stream`, `viewer` and `health` modules. The artifacts of each
-tile are walked in `tessera-engine`'s `viewport::tiled` module and streamed by `tessera-server`'s
+`mosaica-server`, in its `state`, `stream`, `viewer` and `health` modules. The artifacts of each
+tile are walked in `mosaica-engine`'s `viewport::tiled` module and streamed by `mosaica-server`'s
 `artifact_tiles` module. A level's figures, their cache and the files they are written to live in
-`tessera-engine`'s `figures` module, and the member bitmaps and coverings in `tessera-store`'s
+`mosaica-engine`'s `figures` module, and the member bitmaps and coverings in `mosaica-store`'s
 `row_members` module. A bulk read's pages,
-stretches and cursors live in `tessera-engine`'s `records` module, and its admission and streaming
-in `tessera-server`'s `records` module.
+stretches and cursors live in `mosaica-engine`'s `records` module, and its admission and streaming
+in `mosaica-server`'s `records` module.
 
 Coverage of the properties this chapter describes is stated in `conformance.md`'s coverage matrix.
 
@@ -389,10 +389,10 @@ Coverage of the properties this chapter describes is stated in `conformance.md`'
 `docs/design/filter-result-cache.md` §1–§2; `docs/design/tile-addressed-integration.md`;
 `docs/design/concurrency-lifecycle.md` §7.2; `docs/design/system-architecture.md` §5, §6.3, §9;
 decisions 0058, 0059, 0060, 0061; `docs/system/write-path.md`; `docs/system/queries.md`;
-`docs/system/access-control.md`; `crates/tessera-server/src/health.rs`;
-`crates/tessera-server/src/viewer.rs`; `crates/tessera-server/src/state.rs`;
-`crates/tessera-server/src/error.rs`; `crates/tessera-engine/src/cache.rs`;
-`crates/tessera-engine/src/refresh.rs`; `crates/tessera-cache/`;
-`crates/tessera-engine/src/viewport/`; `crates/tessera-engine/src/figures/`;
-`crates/tessera-server/src/artifact_tiles.rs`; `crates/tessera-wire/src/payload.rs`;
+`docs/system/access-control.md`; `crates/mosaica-server/src/health.rs`;
+`crates/mosaica-server/src/viewer.rs`; `crates/mosaica-server/src/state.rs`;
+`crates/mosaica-server/src/error.rs`; `crates/mosaica-engine/src/cache.rs`;
+`crates/mosaica-engine/src/refresh.rs`; `crates/mosaica-cache/`;
+`crates/mosaica-engine/src/viewport/`; `crates/mosaica-engine/src/figures/`;
+`crates/mosaica-server/src/artifact_tiles.rs`; `crates/mosaica-wire/src/payload.rs`;
 `probes/2026-10-06-first-open-fills/README.md`.

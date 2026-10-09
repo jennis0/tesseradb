@@ -12,7 +12,7 @@
 
 mod common;
 
-use tessera_engine::SuggestRequest;
+use mosaica_engine::SuggestRequest;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -25,17 +25,17 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
-use tessera_engine::{
+use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
+use mosaica_engine::{
     AcceptError, AttributeRequest, CategoryQuery, Engine, EngineConfig, ScalarOut, Session,
     ViewportRequest,
 };
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::WalScalar;
-use tessera_lifecycle::ExecError;
-use tessera_store::read::open_bundle;
-use tessera_types::layer::LayerScope;
-use tessera_types::{AttrLocalId, EntityId};
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_lifecycle::ExecError;
+use mosaica_store::read::open_bundle;
+use mosaica_types::layer::LayerScope;
+use mosaica_types::{AttrLocalId, EntityId};
 
 const N_ITEMS: u64 = 120;
 const VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -132,24 +132,24 @@ fn build_fixture_with_schema(root: &Path, tmp: &Path) {
     write_pairs_n(&pairs, N_ITEMS);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+    let schema = mosaica_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the fixture schema parses")
         .schema;
-    tessera_build::build(&tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+    mosaica_build::build(&mosaica_build::BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
         strict: false,
@@ -320,7 +320,7 @@ fn declared_names(engine: &Engine) -> Vec<String> {
 /// (`ingest.md` §6.3), so this is 0 before the fold and every partition after it.
 fn partitions_with_base(root: &Path, column: &str) -> (usize, usize) {
     let bundle = open_bundle(root).expect("the bundle opens");
-    let current: tessera_store::manifest::CurrentPointer =
+    let current: mosaica_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
     let (mut carrying, mut total) = (0, 0);
     for phash in bundle.partitions.keys() {
@@ -331,7 +331,7 @@ fn partitions_with_base(root: &Path, column: &str) -> (usize, usize) {
             .join(phash)
             .join("attrs")
             .join(column)
-            .join(tessera_filter::VALUES_FILE)
+            .join(mosaica_filter::VALUES_FILE)
             .is_file()
         {
             carrying += 1;
@@ -393,7 +393,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
         .iter()
         .find(|d| d.name == "tag")
         .unwrap();
-    assert_eq!(tag.arrow_type, tessera_engine::ScalarType::U8);
+    assert_eq!(tag.arrow_type, mosaica_engine::ScalarType::U8);
     assert_eq!(tag.vocabulary.as_deref(), Some("dept"));
 
     // Rows carrying every column, ingestable at the ack.
@@ -1033,7 +1033,7 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         Err(AcceptError::Exec(ExecError::AttributeRefused { detail })) => detail,
         other => panic!("refused at the door: {other:?}"),
     };
-    // The shared rules are tested in `tessera_store::declaration`; this checks the route applies
+    // The shared rules are tested in `mosaica_store::declaration`; this checks the route applies
     // them, and adds its own: no `render`, and a group that exists.
     for r in [
         request("region", "u8"),

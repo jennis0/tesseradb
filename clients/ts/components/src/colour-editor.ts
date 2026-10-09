@@ -1,11 +1,11 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {CLUSTER_PREFIX, PALETTES, artifactColour, colourLayers, type AggregateSpec, type Layer, type Meta, type PaletteName, type Store} from '@tesseradb/client';
-import {CATEGORY_PALETTES} from '@tesseradb/deck';
-import {hexOf} from '@tesseradb/deck/internal';
+import {CLUSTER_PREFIX, PALETTES, artifactColour, colourLayers, type AggregateSpec, type Layer, type Meta, type PaletteName, type Store} from '@mosaica/client';
+import {CATEGORY_PALETTES} from '@mosaica/deck';
+import {hexOf} from '@mosaica/deck/internal';
 import {HeldAggregate, artifactGroupings, isTree, levelOf, listedGroups, rankedGrouping, type GroupCount} from './aggregate.js';
-import {TesseraElement, UNNAMED, columnCaption, countText, emit, idString, keyTitle} from './base.js';
+import {MosaicaElement, UNNAMED, columnCaption, countText, emit, idString, keyTitle} from './base.js';
 import {ColourPicker, pickerStyles, type PickerTarget} from './colour-picker.js';
 import {clusterColour, colouringOf, holdColours, paletteValueColour, setClusterColours, setValueColours, valueColour, valueMet, watchChoices} from './colouring.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -48,8 +48,8 @@ type Found = {key: string; name: string; path: string; rung: number};
  * Changing `field` or `cluster-level` while the dialog is open lists the new field's rows, and
  * closes the dialog where the field is neither a category nor a layer that colours.
  *
- * The search box is the field card's: `<tessera-filter>`'s typeahead over a category's values, or
- * `<tessera-cluster-filter>`'s over every name in the layer, at any depth of a tree. Choosing a
+ * The search box is the field card's: `<mosaica-filter>`'s typeahead over a category's values, or
+ * `<mosaica-cluster-filter>`'s over every name in the layer, at any depth of a tree. Choosing a
  * match that the list holds moves focus to its row; any other goes at the top of the list, with
  * its count, until the dialog closes.
  *
@@ -59,17 +59,17 @@ type Found = {key: string; name: string; path: string; rung: number};
  * layer, its palette colour back. Under the list is how many colours are chosen for the field or
  * the layer.
  *
- * Each action fires one event: `tessera-valuecolour` for a category, or `tessera-clustercolour`
+ * Each action fires one event: `mosaica-valuecolour` for a category, or `mosaica-clustercolour`
  * for a layer, naming every value or cluster it changed. A category's colours are written to the
  * colour choices every element over the store shares, and a layer's are set on the store with the
  * colours chosen for every layer (`Store.setArtifactColours`); the dialog keeps no colour itself.
  *
  * @summary Every value or cluster's colour, to search, choose and reset.
- * @tagname tessera-colour-editor
+ * @tagname mosaica-colour-editor
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - Colours
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-valuecolour']>} mosaica-valuecolour - Colours
  *   were chosen or reset for values of a category.
- * @fires {CustomEvent<TesseraEventDetails['tessera-clustercolour']>} tessera-clustercolour - Colours
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clustercolour']>} mosaica-clustercolour - Colours
  *   were chosen or reset for clusters of a layer.
  * @csspart dialog - The dialog, while it is open.
  * @csspart title - The field's or the layer's name.
@@ -97,10 +97,10 @@ type Found = {key: string; name: string; path: string; rung: number};
  * @csspart hue - The picker's hue bar, a slider.
  * @csspart hex - The picker's hex field.
  * @csspart reset - The picker's Reset button.
- * @csspart filter-<part> - A part of the inner `<tessera-filter>`.
- * @csspart cluster-filter-<part> - A part of the inner `<tessera-cluster-filter>`.
+ * @csspart filter-<part> - A part of the inner `<mosaica-filter>`.
+ * @csspart cluster-filter-<part> - A part of the inner `<mosaica-cluster-filter>`.
  */
-export class TesseraColourEditor extends TesseraElement {
+export class MosaicaColourEditor extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -115,12 +115,12 @@ export class TesseraColourEditor extends TesseraElement {
         max-width: none;
         max-height: none;
         padding: 0;
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        background: var(--_tessera-surface);
-        color: var(--_tessera-ink);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
+        background: var(--_mosaica-surface);
+        color: var(--_mosaica-ink);
         box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22);
-        font-family: var(--_tessera-font);
+        font-family: var(--_mosaica-font);
         font-size: 13px;
         line-height: 1.45;
       }
@@ -152,14 +152,14 @@ export class TesseraColourEditor extends TesseraElement {
         font-weight: 600;
         letter-spacing: 0;
         text-transform: none;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
       [part='sub'] {
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='close'] {
         flex: none;
@@ -168,15 +168,15 @@ export class TesseraColourEditor extends TesseraElement {
         display: grid;
         place-items: center;
         border-radius: 6px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='close']:hover {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       .search {
         display: block;
         padding: 0 16px 10px;
-        --_tessera-input-height: 30px;
+        --_mosaica-input-height: 30px;
       }
       [part='selected'] {
         display: flex;
@@ -185,8 +185,8 @@ export class TesseraColourEditor extends TesseraElement {
         margin: 0 16px 4px;
         padding: 6px 10px;
         border-radius: 6px;
-        background: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
+        background: var(--_mosaica-accent);
+        color: var(--_mosaica-accent-ink);
         font-size: 12px;
       }
       [part='selected'] b {
@@ -219,7 +219,7 @@ export class TesseraColourEditor extends TesseraElement {
       [part='columns'] {
         padding: 6px 16px 2px;
         font-size: 11px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       [part='columns'] span:last-child,
       [part='count'] {
@@ -238,10 +238,10 @@ export class TesseraColourEditor extends TesseraElement {
       }
       [part~='row']:hover,
       [part~='row'][data-ticked] {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part~='row'][data-found] {
-        box-shadow: inset 2px 0 0 var(--_tessera-ink-3);
+        box-shadow: inset 2px 0 0 var(--_mosaica-ink-3);
       }
       [part='check'] {
         width: 14px;
@@ -257,7 +257,7 @@ export class TesseraColourEditor extends TesseraElement {
       }
       [part='swatch'][data-unmet] {
         background: none;
-        border-color: var(--_tessera-line-control);
+        border-color: var(--_mosaica-line-control);
       }
       .label {
         display: flex;
@@ -272,29 +272,29 @@ export class TesseraColourEditor extends TesseraElement {
       }
       [part='path'] {
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       [part='count'] {
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         font-variant-numeric: tabular-nums;
       }
       .none {
         padding: 12px 16px;
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       .foot {
         display: flex;
         align-items: center;
         gap: 10px;
         padding: 12px 16px;
-        border-top: 1px solid var(--_tessera-line-2);
+        border-top: 1px solid var(--_mosaica-line-2);
       }
       [part='changed'] {
         flex: 1 1 auto;
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       @media (max-width: 480px) {
         [part='dialog'] {
@@ -527,11 +527,11 @@ export class TesseraColourEditor extends TesseraElement {
     if (layer === null) {
       const changes = keys.map((value) => ({value, colour: hex}));
       setValueColours(s, this.field, changes);
-      if (final) emit(this, 'tessera-valuecolour', {column: this.field, changes});
+      if (final) emit(this, 'mosaica-valuecolour', {column: this.field, changes});
       return;
     }
     setClusterColours(s, layer, keys.map((k) => ({tesseraId: BigInt(k), colour: hex})));
-    if (final) emit(this, 'tessera-clustercolour', {layer, changes: keys.map((tesseraId) => ({tesseraId, colour: hex}))});
+    if (final) emit(this, 'mosaica-clustercolour', {layer, changes: keys.map((tesseraId) => ({tesseraId, colour: hex}))});
   }
 
   /** The palette the picker offers: the category palette, or the layer's. */
@@ -604,10 +604,10 @@ export class TesseraColourEditor extends TesseraElement {
     const placeholder = layer || table?.groups == null ? `Search ${noun}` : `Search ${table.groups.toLocaleString('en-GB')} ${noun}`;
     const choose = (f: Found) => this.onFound(f, rows);
     const search = layer
-      ? html`<tessera-cluster-filter class="search" exportparts=${exportparts('cluster-filter')} layer=${layer.name} placeholder=${placeholder} .store=${s}
-          .choose=${(c: {id: string; name: string | null; path: string; rung: number}) => choose({key: c.id, name: c.name ?? UNNAMED, path: c.path, rung: c.rung})}></tessera-cluster-filter>`
-      : html`<tessera-filter class="search" exportparts=${exportparts('filter')} column=${this.field} placeholder=${placeholder} .store=${s}
-          .choose=${(v: {key: string; title: string | null}) => choose({key: v.key, name: v.title ?? keyTitle(s, this.field, v.key), path: '', rung: 0})}></tessera-filter>`;
+      ? html`<mosaica-cluster-filter class="search" exportparts=${exportparts('cluster-filter')} layer=${layer.name} placeholder=${placeholder} .store=${s}
+          .choose=${(c: {id: string; name: string | null; path: string; rung: number}) => choose({key: c.id, name: c.name ?? UNNAMED, path: c.path, rung: c.rung})}></mosaica-cluster-filter>`
+      : html`<mosaica-filter class="search" exportparts=${exportparts('filter')} column=${this.field} placeholder=${placeholder} .store=${s}
+          .choose=${(v: {key: string; title: string | null}) => choose({key: v.key, name: v.title ?? keyTitle(s, this.field, v.key), path: '', rung: 0})}></mosaica-filter>`;
     const ticked = rows.filter((r) => this.ticked.has(r.key));
     const bar =
       ticked.length > 0
@@ -654,10 +654,10 @@ function deepActive(): HTMLElement | null {
 }
 
 attachContextRoot();
-defineOnce('tessera-colour-editor', TesseraColourEditor);
+defineOnce('mosaica-colour-editor', MosaicaColourEditor);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-colour-editor': TesseraColourEditor;
+    'mosaica-colour-editor': MosaicaColourEditor;
   }
 }

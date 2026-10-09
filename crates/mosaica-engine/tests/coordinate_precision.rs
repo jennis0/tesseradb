@@ -3,7 +3,7 @@
 //! Building a database and adding rows to one are the same operation ([decision
 //! 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)), so the two
 //! routes have to agree about where a point is. They quantise in different crates —
-//! `tessera_build::input` at the read of a points file, `tessera_store::flush` at the flush of a
+//! `mosaica_build::input` at the read of a points file, `mosaica_store::flush` at the flush of a
 //! buffered row — and the only thing keeping them in step is that both are handed the same value
 //! at the same width. A narrowing on one side and not the other is invisible in every count, every
 //! digest and every type signature, and shows up only as a point in the wrong cell.
@@ -27,11 +27,11 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_spatial::Bounds;
-use tessera_types::EntityId;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_spatial::Bounds;
+use mosaica_types::EntityId;
 
 /// A frame 16 units wide out of a 65,536-unit coordinate range — 1/4096 of it — placed where the
 /// coordinates are largest and an `f32`'s step is therefore coarsest. One cell is 2.44 × 10⁻⁴
@@ -109,20 +109,20 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
     write_points(points_path, points);
     write_pairs(pairs_path, points.len() as u64);
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: frame(),
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -164,8 +164,8 @@ fn served_positions(engine: &Engine) -> BTreeMap<u64, u64> {
 /// either, the same sub-cell position.
 ///
 /// The two routes are genuinely different code: the built rows were quantised by
-/// `tessera_build::input` against the frame in `MANIFEST.quantisation`, and the ingested rows by
-/// `tessera_store::flush` against the same field, having travelled through an `UnallocatedRow`, a
+/// `mosaica_build::input` against the frame in `MANIFEST.quantisation`, and the ingested rows by
+/// `mosaica_store::flush` against the same field, having travelled through an `UnallocatedRow`, a
 /// WAL record and the ingest buffer on the way. Agreement is asserted on the *positions*, because
 /// counts agree under a narrowing that moves every point.
 #[test]

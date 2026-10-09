@@ -1,4 +1,4 @@
-//! Shared fixtures for `tessera-engine`'s viewport-side integration tests.
+//! Shared fixtures for `mosaica-engine`'s viewport-side integration tests.
 //!
 //! The viewport cases and the pin cases live in separate binaries (`tests/viewport.rs` and
 //! `tests/pins.rs`). This module holds the fixture corpus, the `EngineConfig`s and the credentials
@@ -22,9 +22,9 @@ pub use wait::*;
 pub use ingest_rows::IngestRows;
 
 mod ingest_rows {
-    use tessera_engine::{AcceptError, Engine, IngestRequest};
-    use tessera_lifecycle::{BatchArtifacts, IngestRow, UnallocatedRow};
-    use tessera_types::EntityId;
+    use mosaica_engine::{AcceptError, Engine, IngestRequest};
+    use mosaica_lifecycle::{BatchArtifacts, IngestRow, UnallocatedRow};
+    use mosaica_types::EntityId;
 
     /// Ingest through [`Engine::ingest`] from rows shaped as the executor writes them: each row
     /// names the item its `join` holds by `tessera_id`, or none, carries its label and position,
@@ -108,20 +108,20 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_spatial::Bounds;
-use tessera_store::read::open_bundle;
-use tessera_types::{EntityId, IdentityKey, TesseraId};
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{EntityId, IdentityKey, TesseraId};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
 pub const SUBSET_TERM: u64 = 1;
 
 /// A fixed, non-degenerate test key — the same canonical vector used across the identity
-/// construction's own tests (`tessera_types::identity`'s `CANONICAL_KEY`) and
-/// `tessera-build`'s fixture tests, so a mismatch between crates would show up as a vector
+/// construction's own tests (`mosaica_types::identity`'s `CANONICAL_KEY`) and
+/// `mosaica-build`'s fixture tests, so a mismatch between crates would show up as a vector
 /// disagreement rather than an independently-chosen value.
 pub const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -174,7 +174,7 @@ pub fn config() -> EngineConfig {
         segment_floor_bytes: None,
         coalesce_width: None,
         // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+        compaction: mosaica_engine::CompactionSchedule::off(),
     }
 }
 
@@ -252,27 +252,27 @@ pub fn write_pairs_n(path: &Path, n: u64) {
     w.close().unwrap();
 }
 
-/// Build the fixture bundle at `out` through `tessera_build::build`, over an
+/// Build the fixture bundle at `out` through `mosaica_build::build`, over an
 /// `n`-item synthetic corpus. See [`write_points_n`]'s doc for why this is parameterised.
 pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let schema = id_schema();
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points_path.to_path_buf(),
             &schema,
         ),
@@ -293,7 +293,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     build(&args).expect("fixture build should succeed");
 }
 
-/// Build the fixture bundle at `out` through `tessera_build::build`.
+/// Build the fixture bundle at `out` through `mosaica_build::build`.
 pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
     build_fixture_n(out, points_path, pairs_path, N_ITEMS)
 }
@@ -346,7 +346,7 @@ pub fn build_corpus_fixture(
     out: &Path,
     points_path: &Path,
     pairs_path: &Path,
-    corpus: &tessera_corpus::Corpus,
+    corpus: &mosaica_corpus::Corpus,
 ) {
     // **Beside the sources, not beside the bundle.** A `source` is a path relative to the
     // document that declares it (`configuration.md` §3), and the generator's declaration names
@@ -354,23 +354,23 @@ pub fn build_corpus_fixture(
     let config_path = points_path.with_file_name("corpus-config.toml");
     std::fs::create_dir_all(config_path.parent().expect("the sources have a parent")).ok();
     std::fs::write(&config_path, corpus.config_toml()).expect("the generator's config is writable");
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the generator's config parses");
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: corpus.extent(),
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points_path.to_path_buf(),
             &config.schema,
         ),
@@ -398,12 +398,12 @@ pub fn build_corpus_fixture(
 /// register and publish its *own* layer against the generator's memberships, and reads none of the
 /// artifact fixtures. This one is for the cases that are about the declaration — a layer built by
 /// rule beside the same layer built by list — where what is under test is precisely what
-/// `tessera build` does with the generator's own `[[layer]]` blocks.
+/// `mosaica build` does with the generator's own `[[layer]]` blocks.
 pub fn build_corpus_fixture_with_layers(
     out: &Path,
     points_path: &Path,
     pairs_path: &Path,
-    corpus: &tessera_corpus::Corpus,
+    corpus: &mosaica_corpus::Corpus,
 ) {
     let dir = points_path.parent().expect("the sources have a parent");
     corpus
@@ -411,23 +411,23 @@ pub fn build_corpus_fixture_with_layers(
         .expect("the generator's artifact fixtures are writable");
     let config_path = points_path.with_file_name("corpus-config.toml");
     std::fs::write(&config_path, corpus.config_toml()).expect("the generator's config is writable");
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the generator's config parses");
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: corpus.extent(),
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points_path.to_path_buf(),
             &config.schema,
         ),
@@ -458,25 +458,25 @@ pub fn build_with_layers(
     out: &Path,
     points_path: &Path,
     pairs_path: &Path,
-    corpus: &tessera_corpus::Corpus,
-    config: tessera_build::config::Config,
+    corpus: &mosaica_corpus::Corpus,
+    config: mosaica_build::config::Config,
 ) {
     let schema = with_id(config.schema);
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: corpus.extent(),
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points_path.to_path_buf(),
             &schema,
         ),
@@ -499,13 +499,13 @@ pub fn build_with_layers(
 
 /// The fixture's one declared column: `id`, the points file's `entity_id` declared unique, which
 /// is how a test finds, or names in a row, the item a source row became.
-pub fn id_schema() -> tessera_build::config::Schema {
-    tessera_build::config::Schema {
-        attributes: vec![tessera_build::config::Attribute {
+pub fn id_schema() -> mosaica_build::config::Schema {
+    mosaica_build::config::Schema {
+        attributes: vec![mosaica_build::config::Attribute {
             field: Some("entity_id".to_string()),
             name: "id".to_string(),
             title: None,
-            ty: tessera_spatial::tiler::ScalarType::U64,
+            ty: mosaica_spatial::tiler::ScalarType::U64,
             analyser: None,
             vocabulary: None,
             value_set: None,
@@ -518,7 +518,7 @@ pub fn id_schema() -> tessera_build::config::Schema {
 }
 
 /// `schema` with [`id_schema`]'s `id` declared after its own columns, unless it declares one.
-pub fn with_id(mut schema: tessera_build::config::Schema) -> tessera_build::config::Schema {
+pub fn with_id(mut schema: mosaica_build::config::Schema) -> mosaica_build::config::Schema {
     if !schema.attributes.iter().any(|a| a.name == "id") {
         schema.attributes.extend(id_schema().attributes);
     }
@@ -538,11 +538,11 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
     let mut map = BTreeMap::new();
     let paths = runs.base.iter().map(|run| run.path.as_str()).chain(runs.live.iter().map(String::as_str));
     for rel in paths {
-        tessera_store::unique::for_each_entry(
-            tessera_store::unique::KeyKind::Unsigned,
+        mosaica_store::unique::for_each_entry(
+            mosaica_store::unique::KeyKind::Unsigned,
             &bundle_root.join(prefix).join(rel),
             |key, entity| {
-                if let tessera_store::unique::UniqueKey::Int(source) = key {
+                if let mosaica_store::unique::UniqueKey::Int(source) = key {
                     map.insert(source, u64::from(entity));
                 }
                 Ok(())
@@ -557,7 +557,7 @@ pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64>
 pub fn item_of_id(
     engine: &Engine,
     source: u64,
-) -> Result<Option<EntityId>, tessera_engine::EngineError> {
+) -> Result<Option<EntityId>, mosaica_engine::EngineError> {
     Ok(unique_holders(engine, "id", &[source.to_string()])?[0])
 }
 
@@ -572,8 +572,8 @@ pub fn key_id(key: &str) -> u64 {
 }
 
 /// The row values that give an item the `id` of `key`.
-pub fn keyed(key: &str) -> Vec<tessera_lifecycle::wal::WalScalar> {
-    vec![tessera_lifecycle::wal::WalScalar::U64(key_id(key))]
+pub fn keyed(key: &str) -> Vec<mosaica_lifecycle::wal::WalScalar> {
+    vec![mosaica_lifecycle::wal::WalScalar::U64(key_id(key))]
 }
 
 /// The live item holding the `id` of `key`, if any.
@@ -653,7 +653,7 @@ pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
     engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport over the whole map")
         .artifacts()
@@ -661,7 +661,7 @@ pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
 
 /// Each artifact a tile-by-tile answer served, once, with its filter and highlight bits taken over
 /// every tile it was served in: what one answer over the whole of the request's tiles says.
-pub fn over_every_tile(out: &tessera_engine::ViewportArtifactsOut) -> Vec<ArtifactOut> {
+pub fn over_every_tile(out: &mosaica_engine::ViewportArtifactsOut) -> Vec<ArtifactOut> {
     let mut merged: Vec<ArtifactOut> = Vec::new();
     for artifact in out.frames.iter().flat_map(|frame| &frame.artifacts) {
         match merged.iter_mut().find(|held| held.tessera_id == artifact.tessera_id) {
@@ -742,7 +742,7 @@ pub fn subset_sees(e: u64) -> bool {
 
 /// A credential over the terms a generator grant names.
 pub fn grant_credential(grant: &str) -> Vec<u8> {
-    let terms: Vec<String> = tessera_corpus::Grant::parse(grant)
+    let terms: Vec<String> = mosaica_corpus::Grant::parse(grant)
         .expect("the grant is inside the generator's term space")
         .terms()
         .iter()
@@ -764,20 +764,20 @@ pub fn zero_credential() -> Vec<u8> {
 }
 
 /// The item each of `values` names in the unique field `field`, `None` for a value naming none,
-/// asked of [`tessera_engine::Engine::name_items`].
+/// asked of [`mosaica_engine::Engine::name_items`].
 pub fn unique_holders(
-    engine: &tessera_engine::Engine,
+    engine: &mosaica_engine::Engine,
     field: &str,
     values: &[String],
-) -> Result<Vec<Option<tessera_types::EntityId>>, tessera_engine::EngineError> {
-    let table = tessera_engine::AddressTable {
+) -> Result<Vec<Option<mosaica_types::EntityId>>, mosaica_engine::EngineError> {
+    let table = mosaica_engine::AddressTable {
         rows: values.len(),
         tessera_id: None,
         columns: vec![(
             field.to_string(),
             values
                 .iter()
-                .map(|v| Some(tessera_engine::AddressValue::Text(v.clone())))
+                .map(|v| Some(mosaica_engine::AddressValue::Text(v.clone())))
                 .collect(),
         )],
     };
@@ -786,7 +786,7 @@ pub fn unique_holders(
         .verdicts
         .into_iter()
         .map(|verdict| match verdict {
-            tessera_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
+            mosaica_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
             _ => None,
         })
         .collect())
@@ -828,8 +828,8 @@ pub fn restore_wal(dir: &Path, snapshot: &[(std::ffi::OsString, Vec<u8>)]) {
 
 /// A flat layer that derives a hull, so its levels hold their rows: the declaration a test building
 /// forms directly through `ArtifactProjections::get_or_build` builds them for.
-pub fn held_rows_declaration(name: &str) -> tessera_types::layer::LayerDeclaration {
-    use tessera_types::layer::*;
+pub fn held_rows_declaration(name: &str) -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::*;
     LayerDeclaration {
         scope: Default::default(),
         name: name.into(),

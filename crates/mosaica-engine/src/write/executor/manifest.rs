@@ -10,12 +10,12 @@ use super::*;
 /// version, so it is dropped like any other file.
 pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
-    held: &[tessera_store::manifest::DerivedExtent],
+    held: &[mosaica_store::manifest::DerivedExtent],
     pending: Option<&PendingRetirement>,
     enumerated: &std::collections::BTreeSet<String>,
 ) -> (
-    Vec<tessera_store::manifest::LevelVersion>,
-    Vec<tessera_store::manifest::DerivedExtent>,
+    Vec<mosaica_store::manifest::LevelVersion>,
+    Vec<mosaica_store::manifest::DerivedExtent>,
 ) {
     let expected = |layer: &str, level: u32| match pending {
         Some(pending) => pending.version_after(store, layer, level),
@@ -23,7 +23,7 @@ pub(super) fn artifact_coordinates(
     };
     let versions = store
         .level_versions()
-        .map(|(layer, level, _)| tessera_store::manifest::LevelVersion {
+        .map(|(layer, level, _)| mosaica_store::manifest::LevelVersion {
             layer: layer.to_string(),
             level,
             version: expected(layer, level),
@@ -34,8 +34,8 @@ pub(super) fn artifact_coordinates(
         .filter(|entry| {
             let now = expected(&entry.layer, entry.level);
             match entry.form {
-                tessera_store::manifest::DerivedForm::RowColumn { .. }
-                | tessera_store::manifest::DerivedForm::RowMembers
+                mosaica_store::manifest::DerivedForm::RowColumn { .. }
+                | mosaica_store::manifest::DerivedForm::RowMembers
                     if enumerated.contains(&entry.layer) =>
                 {
                     entry.level_version <= now
@@ -52,7 +52,7 @@ pub(super) fn artifact_coordinates(
 /// state, or the store could not write it.
 pub(super) enum ManifestCommitRefused {
     Regresses(crate::geometry::ManifestRegression),
-    Store(tessera_store::StoreError),
+    Store(mosaica_store::StoreError),
 }
 
 impl std::fmt::Display for ManifestCommitRefused {
@@ -78,7 +78,7 @@ pub(super) fn write_deny_state(manifest: &mut SegmentsManifest, overlay: &Overla
 pub(super) fn write_vocabulary_extensions(
     manifest: &mut SegmentsManifest,
     vocabularies: &Vocabularies,
-    bundle_vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    bundle_vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) {
     for extension in vocabularies.extensions_beyond(bundle_vocabularies) {
         match manifest
@@ -114,22 +114,22 @@ pub(in crate::write) struct SideManifests {
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     pub(super) windows_since_publication: u64,
     /// Every membership extent this node has published.
-    pub(super) membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
+    pub(super) membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
     /// Every derived file the current prefix holds, filtered to what a manifest reaches
     /// ([`artifact_coordinates`]); a fold replaces it wholesale.
-    pub(super) derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
+    pub(super) derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
     /// Every artifact content extent, held and written like `membership_extents`, which it
     /// travels with: a membership without its content withholds the artifact.
-    pub(super) artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
+    pub(super) artifact_record_extents: Vec<mosaica_store::manifest::RecordExtent>,
 }
 
 impl SideManifests {
     /// Open over what the bundle's manifests already carry.
     pub(in crate::write) fn seeded(
         next_n: u64,
-        membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
-        derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
-        artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
+        membership_extents: Vec<mosaica_store::manifest::MembershipExtent>,
+        derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
+        artifact_record_extents: Vec<mosaica_store::manifest::RecordExtent>,
         growth_unpublished: bool,
     ) -> Self {
         SideManifests {
@@ -148,7 +148,7 @@ impl SideManifests {
         &mut self,
         bundle_root: &std::path::Path,
         health: &ExecutorHealth,
-    ) -> tessera_store::Result<u64> {
+    ) -> mosaica_store::Result<u64> {
         self.raise_manifest_floor(bundle_root, health)?;
         Ok(self.take_manifest_n())
     }
@@ -160,8 +160,8 @@ impl SideManifests {
         &mut self,
         bundle_root: &std::path::Path,
         health: &ExecutorHealth,
-    ) -> tessera_store::Result<()> {
-        let on_disk = tessera_store::highest_side_manifest_n(bundle_root)?;
+    ) -> mosaica_store::Result<()> {
+        let on_disk = mosaica_store::highest_side_manifest_n(bundle_root)?;
         let floor = on_disk.map_or(0, |highest| highest + 1);
         if floor > self.next_n {
             health.foreign_side_manifests.fetch_add(1, Ordering::Relaxed);
@@ -193,11 +193,11 @@ impl Executor {
     /// side-manifests, unless it is stepped down.
     pub(super) fn commit_side_manifest(
         &self,
-        partition_data: &tessera_store::read::PartitionData,
+        partition_data: &mosaica_store::read::PartitionData,
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
-        next: &mut tessera_store::manifest::SegmentsManifest,
+        next: &mut mosaica_store::manifest::SegmentsManifest,
         fold: Option<FoldDerived<'_>>,
     ) -> Result<(), ManifestCommitRefused> {
         let live_manifest = &partition_data.manifest;
@@ -216,7 +216,7 @@ impl Executor {
                     .registered_layer(&entry.layer)
                     .is_some_and(|registered| {
                         registered.declaration.membership
-                            == tessera_types::layer::MembershipSource::Enumerated
+                            == mosaica_types::layer::MembershipSource::Enumerated
                     })
             })
             .map(|entry| entry.layer.clone())
@@ -233,12 +233,12 @@ impl Executor {
         }
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
-        tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
+        mosaica_store::write_segments_manifest(prefix_dir, partition, n, next)
             .map_err(ManifestCommitRefused::Store)?;
         // Nothing is pruned on a stepped-down partition: the manifests between its older served
         // `n` and the newest are what a reopen walks back through.
         if !partition_data.stepped_down() {
-            match tessera_store::prune_superseded_segments_manifests(prefix_dir, partition) {
+            match mosaica_store::prune_superseded_segments_manifests(prefix_dir, partition) {
                 Ok(0) => {}
                 Ok(removed) => tracing::debug!(
                     removed,
@@ -295,7 +295,7 @@ impl Executor {
 #[cfg(test)]
 mod vocabulary_extensions_tests {
     use super::*;
-    use tessera_store::manifest::{
+    use mosaica_store::manifest::{
         ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension, VocabularyKind,
     };
 
@@ -304,7 +304,7 @@ mod vocabulary_extensions_tests {
             name: name.to_string(),
             kind: VocabularyKind::Discovered,
             visibility: crate::Visibility::Derived,
-            width: tessera_spatial::tiler::ScalarType::U32,
+            width: mosaica_spatial::tiler::ScalarType::U32,
             values: Vec::new(),
             reserved: Vec::new(),
         }

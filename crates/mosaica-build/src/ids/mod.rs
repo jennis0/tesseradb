@@ -1,7 +1,7 @@
 //! Which item each row of each file a build reads belongs to.
 //!
 //! A build is an ingest into an empty database, so its files are read under the rule an ingest is
-//! ([`tessera_lifecycle::resolve`]), one file at a time in declaration order: each view's points,
+//! ([`mosaica_lifecycle::resolve`]), one file at a time in declaration order: each view's points,
 //! each attribute file, each group-scoped attribute's own file, the access relation, and each
 //! layer's memberships. A row names the item holding each non-null unique value it carries. A
 //! points row naming none creates an item, and a row of any other file naming none is refused. A
@@ -18,7 +18,7 @@
 //!
 //! The streaming build applies the rule by sorting each file's values and merging them against
 //! the values earlier files gave items (`stream`), because a lookup per row is random access at
-//! 10⁹ rows. The linear build asks [`tessera_lifecycle::resolve::resolve`] file by file over maps
+//! 10⁹ rows. The linear build asks [`mosaica_lifecycle::resolve::resolve`] file by file over maps
 //! (`linear`). This module's tests hold the two numberings equal file by file, and
 //! `tests/identity_rule.rs` the two builds byte-identical, which is what checks the sort-merge
 //! against the rule as written.
@@ -33,8 +33,8 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 
-use tessera_lifecycle::resolve::Batch;
-use tessera_spatial::tiler::ScalarType;
+use mosaica_lifecycle::resolve::Batch;
+use mosaica_spatial::tiler::ScalarType;
 
 use crate::config::{Fields, Schema, ViewSelector};
 use crate::error::{BuildError, Result};
@@ -99,12 +99,12 @@ pub fn carried_unique(
 }
 
 /// Where a file whose rows address items has no column to address them by: the sentence both the
-/// build's refusal and `tessera check`'s finding give.
+/// build's refusal and `mosaica check`'s finding give.
 pub fn no_identifier(object: &str, path: &Path) -> String {
     format!(
         "{object} reads {}, and {}",
         path.display(),
-        tessera_lifecycle::resolve::NoIdentifier
+        mosaica_lifecycle::resolve::NoIdentifier
     )
 }
 
@@ -394,8 +394,8 @@ impl Limit {
             [position] => Ok(Some(Limit {
                 position: *position as u16,
                 below,
-                signed: tessera_store::unique::KeyKind::of(schema.attributes[*position].ty)
-                    == Some(tessera_store::unique::KeyKind::Signed),
+                signed: mosaica_store::unique::KeyKind::of(schema.attributes[*position].ty)
+                    == Some(mosaica_store::unique::KeyKind::Signed),
             })),
             _ => Err(BuildError::Invalid(format!(
                 "`--limit` keeps the rows whose value of the unique integer attribute is below \
@@ -418,7 +418,7 @@ impl Limit {
     /// compared as its two's complement, as a file's column is.
     fn beyond(&self, key: u64) -> bool {
         let value = match self.signed {
-            true => tessera_store::key_index::signed_value(key) as u64,
+            true => mosaica_store::key_index::signed_value(key) as u64,
             false => key,
         };
         value >= self.below
@@ -545,7 +545,7 @@ impl Limited {
             .iter()
             .position(|field| field.position == limited.limit.position);
         let beyond = |member: usize| match at.and_then(|at| lists.keys[at][member]) {
-            Some(tessera_store::unique::UniqueKey::Int(key)) => limited.limit.beyond(key),
+            Some(mosaica_store::unique::UniqueKey::Int(key)) => limited.limit.beyond(key),
             _ => true,
         };
         match limited.read(&lists.carried, false) {

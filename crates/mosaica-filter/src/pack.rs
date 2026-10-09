@@ -1,10 +1,10 @@
 //! The filter scan's packing kernel: a predicate evaluated into a bit per entity.
 //!
 //! The container assembly this feeds — and the argument for writing the portable format by hand —
-//! lives in [`tessera_roaring`], which `tessera-store` shares. What stays here is the kernel, which
+//! lives in [`mosaica_roaring`], which `mosaica-store` shares. What stays here is the kernel, which
 //! is the filter's alone and whose inlining is measured against *this* crate's codegen units.
 
-pub(crate) use tessera_roaring::{Sink, BLOCK, WORDS};
+pub(crate) use mosaica_roaring::{Sink, BLOCK, WORDS};
 
 /// Evaluate `pred` over one block's values, one result bit per value, and return the popcount.
 ///

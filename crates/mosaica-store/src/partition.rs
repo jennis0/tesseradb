@@ -5,7 +5,7 @@
 //! pass** (owner ruling, 2026-09-12;
 //! `docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.6). The row column is composed by
 //! one implementation on both sides, so the disk-backed primitive that composition goes through has
-//! to be visible to both — and this crate is the one they share. `tessera-build` re-imports every
+//! to be visible to both — and this crate is the one they share. `mosaica-build` re-imports every
 //! item below under `crate::spill`, so its own call sites read as they always did; what it keeps
 //! for itself is the Morton routing and `boundaries_from_histogram`, which only a build has a key
 //! uneven enough to need.
@@ -45,7 +45,7 @@ fn io(path: &Path, source: std::io::Error) -> StoreError {
 /// build's peak memory.
 pub const SPILL_BUF_BYTES: usize = 4 << 20;
 
-/// splitmix64's finalizer — a private **twin of `tessera_build`'s identity mixer**, same constants (the ones
+/// splitmix64's finalizer — a private **twin of `mosaica_build`'s identity mixer**, same constants (the ones
 /// contracts §2.6 fixes for the identity construction).
 ///
 /// Duplicated rather than shared or passed in: the pipeline's copy is private to a file this
@@ -318,7 +318,7 @@ pub const PARTITION_BUCKET_RECORDS: u64 = (1u64 << 32) / PARTITION_BUCKETS as u6
 /// [`boundaries_from_histogram`] closes a bucket only when the next key would pass the target, so a
 /// closed bucket and the key that closed it exceed it together and consecutive buckets sum to more
 /// than one target. The bound is `2 × rows / target + 1`, so it is 257 only where
-/// `target ≥ rows / 128`. The caller's target is `tessera-build`’s `assembly::MortonHistogram::target`,
+/// `target ≥ rows / 128`. The caller's target is `mosaica-build`’s `assembly::MortonHistogram::target`,
 /// which rounds **up**: a target of `rows / 128` rounded down is one short on all but the exact
 /// multiples, and at 200 rows a floored target of 1 admits 401 buckets against the 257 this claims.
 pub const PARTITION_COUNTED_BUCKETS: u64 = 2 * PARTITION_BUCKETS as u64 + 1;
@@ -659,7 +659,7 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
-    /// Pins the constants against `tessera-build`'s `pipeline::mix64` (both are splitmix64's
+    /// Pins the constants against `mosaica-build`'s `pipeline::mix64` (both are splitmix64's
     /// finalizer): the
     /// widely published first output of splitmix64 seeded with 0. If either twin's constants
     /// drift, one of the two crates' copies of this vector fails.

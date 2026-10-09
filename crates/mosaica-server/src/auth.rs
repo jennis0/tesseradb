@@ -18,7 +18,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use tessera_catalogue::{Catalogue, Permission, PermissionSet, Resolution};
+use mosaica_catalogue::{Catalogue, Permission, PermissionSet, Resolution};
 
 use crate::error::ApiError;
 use crate::state::{now_secs, AppState, Principal, SessionEntry};

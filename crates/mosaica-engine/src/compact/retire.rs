@@ -1,6 +1,6 @@
 use croaring::Bitmap;
 
-use tessera_store::permutation::SegmentExtent;
+use mosaica_store::permutation::SegmentExtent;
 
 /// The entities every carried-forward segment can name: each dense span whole,
 /// and each entity listed below one. Naming too many keeps a tombstone for another fold; naming

@@ -4,7 +4,7 @@
 parent README). Not a rung on the dataset ladder — it measures nothing and is outside the ingest
 campaign. Its job is to be the `corpus.toml` a multi-view build is pointed at.
 
-**`tessera check` and `tessera build` both pass against it, unmodified** (2026-08-31). The whole
+**`mosaica check` and `mosaica build` both pass against it, unmodified** (2026-08-31). The whole
 declaration builds: ten row spaces over one entity space of 21,300 — `world` and `world_flat`,
 `quarter`'s four inline views and `quarter_alt`'s four selected out of one file by its `quarter`
 discriminator — with `sentiment`'s four entity-space columns under `attrs/sentiment/quarter/<key>/`,
@@ -12,8 +12,8 @@ discriminator — with `sentiment`'s four entity-space columns under `attrs/sent
 each resolved only in that quarter's two views (`quarter`'s and `quarter_alt`'s), and `regions`'
 three `wgs84` polygons canonicalised **twice**, once against each of the two frames it spans: the
 three decompose to 26,031 interior tiles in `world` and 29,469 in `world_flat`, which is what
-per-view canonicalisation means and what one frame for both would have hidden. `tessera verify` and
-`tessera verify --deep` pass on the result.
+per-view canonicalisation means and what one frame for both would have hidden. `mosaica verify` and
+`mosaica verify --deep` pass on the result.
 
 **Every file names a place by `geonameid`**, the one attribute the declaration marks `unique`, which
 every file carries as `entity_id`. The two layer files name their members the same way: `members`
@@ -60,7 +60,7 @@ python3 -m test_corpora.multiview.prepare --scale 3.0   # ~300,000 rows
 python3 -m test_corpora.multiview.validate               # structural checks; see below for output
 ```
 
-Output goes to `$TESSERA_LADDER/multiview/` (default `data/ladder/multiview/`, `test_corpora/common/paths.py`).
+Output goes to `$MOSAICA_LADDER/multiview/` (default `data/ladder/multiview/`, `test_corpora/common/paths.py`).
 `prepare.py` copies `corpus.toml` there beside the parquets, matching every other rung.
 
 ## Files

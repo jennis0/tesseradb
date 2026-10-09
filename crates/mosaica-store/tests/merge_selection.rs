@@ -1,7 +1,7 @@
 //! What a merge is allowed to take (write-path §7).
 
-use tessera_store::manifest::SegmentDescriptor;
-use tessera_store::merge::MergePolicy;
+use mosaica_store::manifest::SegmentDescriptor;
+use mosaica_store::merge::MergePolicy;
 
 /// Segments in listed order, with the entity ranges given. Sizes are supplied separately, because
 /// a descriptor carries a row count and the policy reasons in bytes.

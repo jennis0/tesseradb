@@ -8,14 +8,14 @@
 //!
 //! ## What is deliberately not here
 //!
-//! **The delta postings tier.** It is `tessera-authz`-shaped ([`tessera_authz::write_delta_tier`])
+//! **The delta postings tier.** It is `mosaica-authz`-shaped ([`mosaica_authz::write_delta_tier`])
 //! and this crate does not depend on that one — `read.rs`'s module doc states the property, and
 //! the layering is what keeps `RowId` out of the authorisation crate. The flush unit in
-//! `tessera-engine` writes both halves and folds both digests into the one manifest, exactly as
-//! `tessera-build` already composes store and authz writers.
+//! `mosaica-engine` writes both halves and folds both digests into the one manifest, exactly as
+//! `mosaica-build` already composes store and authz writers.
 //!
 //! **The dictionary extent**, for the same reason: a promoted descriptor's durable ordinal is
-//! written through `tessera_authz::DictStreamWriter`.
+//! written through `mosaica_authz::DictStreamWriter`.
 //!
 //! ## The watermark is `entity_hi + 1`
 //!
@@ -32,9 +32,9 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use tessera_spatial::fixed32;
-use tessera_spatial::tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};
-use tessera_types::{EntityId, IdentityKey, TesseraId};
+use mosaica_spatial::fixed32;
+use mosaica_spatial::tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};
+use mosaica_types::{EntityId, IdentityKey, TesseraId};
 
 use crate::error::{Result, StoreError};
 use crate::manifest::{FileDigest, Quantisation, SegmentDescriptor};
@@ -44,7 +44,7 @@ use crate::write::write_segment;
 
 /// One item a flush is about to give geometry to.
 ///
-/// Store-shaped rather than `tessera_lifecycle::BufferedItem`, because this crate does not depend
+/// Store-shaped rather than `mosaica_lifecycle::BufferedItem`, because this crate does not depend
 /// on that one; the engine converts. `x`/`y` are still the caller's coordinates — quantisation
 /// happens here, once, against the bundle's own `quantisation` (contracts §2.5), so there is no
 /// second place a coordinate could become a cell under bounds that have drifted.
@@ -74,7 +74,7 @@ pub struct FlushInput<'a> {
     pub seg_id: &'a str,
     /// The incarnation of the view this segment is written into (decision 0115), stamped into the
     /// descriptor so that a key created again cannot adopt it.
-    pub incarnation: tessera_types::view::ViewIncarnation,
+    pub incarnation: mosaica_types::view::ViewIncarnation,
     /// **Ascending by `entity_id`, with deleted entities already removed**: no row is created for
     /// a deleted entity.
     pub rows: Vec<FlushRow>,

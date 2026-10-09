@@ -35,25 +35,25 @@ use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::artifacts::{
+use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
+use mosaica_engine::artifacts::{
     ArtifactProjections, ArtifactRows, ArtifactVerdict, ArtifactView, MembershipRows,
 };
-use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::projection::RowProjection;
-use tessera_engine::denied_rows_of;
-use tessera_engine::row_column::RowColumn;
-use tessera_engine::tile_index::{Extent, TileIndex, Viewport};
-use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment, ContentSet};
-use tessera_lifecycle::wal::ParentRef;
-use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
-use tessera_store::write::write_permutation;
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::layer::{
+use mosaica_engine::compose::{compose, EffectiveMask};
+use mosaica_engine::projection::RowProjection;
+use mosaica_engine::denied_rows_of;
+use mosaica_engine::row_column::RowColumn;
+use mosaica_engine::tile_index::{Extent, TileIndex, Viewport};
+use mosaica_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment, ContentSet};
+use mosaica_lifecycle::wal::ParentRef;
+use mosaica_lifecycle::{ChangeOp, IngestBuffer, Overlay};
+use mosaica_store::write::write_permutation;
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::layer::{
     ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use tessera_types::{EntityId, TermId};
+use mosaica_types::{EntityId, TermId};
 
 /// Rows in the view. Large enough that the hierarchy has four levels — a corpus that builds one
 /// level would settle everything at the root and prove nothing about the descent.
@@ -167,7 +167,7 @@ fn build_fixture(shape: Shape) -> Fixture {
                 let set: Bitmap = (0..width).map(|_| rng.gen_range(0..UNIVERSE)).collect();
                 ContentSet {
                     values: Some(vec!["text".to_string()]),
-                    digest: tessera_lifecycle::membership::content_digest(&["text".to_string()]),
+                    digest: mosaica_lifecycle::membership::content_digest(&["text".to_string()]),
                     cardinality: set.cardinality(),
                     generated_from: set,
                 }
@@ -300,7 +300,7 @@ impl Fixture {
         let base = Arc::new(RowProjection::walk(&fragment, &self.row_space));
         let buffer = IngestBuffer::new();
         let denied = denied_rows_of(overlay, &self.row_space);
-        let buffered = tessera_engine::buffered_rows_of(&buffer, &self.row_space);
+        let buffered = mosaica_engine::buffered_rows_of(&buffer, &self.row_space);
         let mask = compose(
             &satisfied,
             overlay,
@@ -422,7 +422,7 @@ fn walk(
     // choice as well as the classification. These fixtures are all artifact-major, so the walk is
     // the route taken and the node count is real.
     let candidates = rows.candidacy(&viewport, None);
-    let tessera_engine::artifacts::Candidacy::Indexed(walked) = &candidates else {
+    let mosaica_engine::artifacts::Candidacy::Indexed(walked) = &candidates else {
         panic!("an artifact-major level is answered by the walk");
     };
     let nodes_visited = walked.nodes_visited();
@@ -624,7 +624,7 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
         &fx.store,
         &fx.row_space,
         None,
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),
@@ -720,14 +720,14 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let mut store = fx.store.clone();
     store.seed_level_version(LAYER, 0, 11);
     let projected_at = store.level_version(LAYER, 0);
-    let entry = |view: &str, version: u64| tessera_store::manifest::DerivedExtent {
+    let entry = |view: &str, version: u64| mosaica_store::manifest::DerivedExtent {
         incarnation: Some(0),
         path: rel.to_string(),
         view: Some(view.to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
-        form: tessera_store::manifest::DerivedForm::TileIndex,
+        form: mosaica_store::manifest::DerivedForm::TileIndex,
     };
 
     // The coordinate holds: claimed, and the level's first request derives nothing.
@@ -741,7 +741,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &store,
         &fx.row_space,
         None,
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),
@@ -761,7 +761,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
             &store,
             &fx.row_space,
             None,
-            tessera_types::layer::ServingLayout::ArtifactMajor,
+            mosaica_types::layer::ServingLayout::ArtifactMajor,
             None,
             0,
             &held_rows_declaration(LAYER),
@@ -785,7 +785,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &store,
         &fx.row_space,
         None,
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),
@@ -804,7 +804,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &store,
         &fx.row_space,
         None,
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),
@@ -825,7 +825,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &store,
         &fx.row_space,
         None,
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
         &held_rows_declaration(LAYER),
@@ -936,7 +936,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     std::fs::write(tmp.path().join(column_rel), column.as_bytes()).unwrap();
     std::fs::create_dir_all(tmp.path().join("partitions/default/row-members")).unwrap();
     let members_rel = "partitions/default/row-members/row-members-000001-000.tsrm";
-    let members = tessera_store::derived::stage_row_members(
+    let members = mosaica_store::derived::stage_row_members(
         &tmp.path().join(column_rel),
         ServingLayout::RowMajorLabel,
         tmp.path(),
@@ -951,38 +951,38 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     store.seed_level_version(LAYER, 0, 11);
     let mut later = fx.store.clone();
     later.seed_level_version(LAYER, 0, 12);
-    let index_entry = |version: u64| tessera_store::manifest::DerivedExtent {
+    let index_entry = |version: u64| mosaica_store::manifest::DerivedExtent {
         incarnation: Some(0),
         path: index_rel.to_string(),
         view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
-        form: tessera_store::manifest::DerivedForm::TileIndex,
+        form: mosaica_store::manifest::DerivedForm::TileIndex,
     };
-    let column_entry = |version: u64| tessera_store::manifest::DerivedExtent {
+    let column_entry = |version: u64| mosaica_store::manifest::DerivedExtent {
         incarnation: Some(0),
         path: column_rel.to_string(),
         view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
-        form: tessera_store::manifest::DerivedForm::RowColumn {
+        form: mosaica_store::manifest::DerivedForm::RowColumn {
             layout: ServingLayout::RowMajorLabel,
         },
     };
-    let members_entry = |version: u64| tessera_store::manifest::DerivedExtent {
+    let members_entry = |version: u64| mosaica_store::manifest::DerivedExtent {
         incarnation: Some(0),
         path: members_rel.to_string(),
         view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
-        form: tessera_store::manifest::DerivedForm::RowMembers,
+        form: mosaica_store::manifest::DerivedForm::RowMembers,
     };
     let build = |projections: &ArtifactProjections,
                  prefix: &str,
-                 store: &tessera_lifecycle::membership::ArtifactStore,
+                 store: &mosaica_lifecycle::membership::ArtifactStore,
                  layout: ServingLayout| {
         projections
             .get_or_build(
@@ -1230,7 +1230,7 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
 }
 
 /// A label test admitting every artifact that carries no label: no artifact here carries one.
-fn open_labels() -> tessera_engine::artifacts::LabelGate<'static> {
+fn open_labels() -> mosaica_engine::artifacts::LabelGate<'static> {
     static EMPTY: std::sync::OnceLock<rustc_hash::FxHashSet<Vec<u8>>> = std::sync::OnceLock::new();
-    tessera_engine::artifacts::LabelGate::new(EMPTY.get_or_init(Default::default), true)
+    mosaica_engine::artifacts::LabelGate::new(EMPTY.get_or_init(Default::default), true)
 }

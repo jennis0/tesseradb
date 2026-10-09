@@ -26,12 +26,12 @@ mod common;
 use common::*;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use tessera_engine::{ArtifactOut, Engine};
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_engine::{ArtifactOut, Engine};
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const LAYER: &str = "clusters/scattered";
 
@@ -39,7 +39,7 @@ const LAYER: &str = "clusters/scattered";
 /// automatic pick compares against is ten. A fixture of ten thousand rows is *one* container, so the
 /// axis the heuristic is expressed in cannot be exercised at that size at all.
 const ROWS: u64 = 700_000;
-/// Above [`tessera_engine::layout::ROW_MAJOR_MIN_ARTIFACTS`], which is the count tiebreak.
+/// Above [`mosaica_engine::layout::ROW_MAJOR_MIN_ARTIFACTS`], which is the count tiebreak.
 const ARTIFACTS: u64 = 1_100;
 /// Members per artifact, drawn uniformly, so a membership touches essentially every container:
 /// `11 x (10/11)^100` is under a thousandth of a container missed in expectation.
@@ -54,7 +54,7 @@ fn declaration() -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
@@ -75,7 +75,7 @@ fn answers(engine: &Engine, credential: &[u8]) -> Vec<(Option<String>, u64)> {
     let mut out: Vec<(Option<String>, u64)> = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
         )
         .expect("a viewport")
         .artifacts()
@@ -184,7 +184,7 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         .partitions
         .values()
         .flat_map(|p| p.manifest.derived_extents.iter().cloned())
-        .filter(|e| matches!(e.form, tessera_store::manifest::DerivedForm::RowColumn { .. }))
+        .filter(|e| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. }))
         .collect();
     assert_eq!(
         extents.len(),
@@ -194,7 +194,7 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
     for extent in &extents {
         assert_eq!(
             extent.form,
-            tessera_store::manifest::DerivedForm::RowColumn {
+            mosaica_store::manifest::DerivedForm::RowColumn {
                 layout: ServingLayout::RowMajorList
             }
         );
@@ -212,7 +212,7 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
             p.manifest
                 .derived_extents
                 .iter()
-                .filter(|e| e.form == tessera_store::manifest::DerivedForm::TileIndex)
+                .filter(|e| e.form == mosaica_store::manifest::DerivedForm::TileIndex)
                 .count()
         })
         .sum();
@@ -313,8 +313,8 @@ fn a_flat_level_is_served_from_a_column_from_its_publication() {
         let mut out: Vec<(Option<String>, u64)> = engine
             .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
-                    .layers(tessera_engine::LayerSelection::Named(&[FLAT])),
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                    .layers(mosaica_engine::LayerSelection::Named(&[FLAT])),
             )
             .expect("a viewport")
             .artifacts()

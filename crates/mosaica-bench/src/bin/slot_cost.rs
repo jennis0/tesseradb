@@ -1,7 +1,7 @@
 //! **What does a viewer's first colouring of a layer cost, and how often do neighbours clash?**
 //!
 //! Opens a bundle with an empty cache, authorises the broadest principal, and builds the layer's
-//! cluster slots ([`tessera_engine::SlotStats`]) for palettes of 8, 10, 20 and 22 colours:
+//! cluster slots ([`mosaica_engine::SlotStats`]) for palettes of 8, 10, 20 and 22 colours:
 //!
 //! - **first**: the first build in a fresh process, which also walks each level's masked counts;
 //! - **cold**: a build for a palette size not built yet, the counts already held;
@@ -11,14 +11,14 @@
 //! slot, and how many items the centres were taken from.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin slot_cost -- \
+//! cargo run --release -p mosaica-bench --bin slot_cost -- \
 //!     --bundle data/ladder/arxiv/bundle --view knn --layer clusters/hdbscan
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use tessera_engine::{Engine, EngineConfig};
+use mosaica_engine::{Engine, EngineConfig};
 
 fn main() {
     let mut bundle: Option<PathBuf> = None;
@@ -128,7 +128,7 @@ fn open(root: &Path, cache: &Path, wal: &Path) -> Engine {
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )
     .expect("the bundle opens")

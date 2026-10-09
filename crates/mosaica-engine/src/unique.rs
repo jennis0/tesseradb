@@ -19,10 +19,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use tessera_lifecycle::{IngestBuffer, WalScalar};
-use tessera_store::manifest::{DeclaredScalar, Manifest};
-use tessera_store::unique::{key_of, key_text, value_text, UniqueKey, DUPLICATE_EXAMPLES};
-use tessera_types::EntityId;
+use mosaica_lifecycle::{IngestBuffer, WalScalar};
+use mosaica_store::manifest::{DeclaredScalar, Manifest};
+use mosaica_store::unique::{key_of, key_text, value_text, UniqueKey, DUPLICATE_EXAMPLES};
+use mosaica_types::EntityId;
 
 use crate::Generation;
 
@@ -320,7 +320,7 @@ pub(crate) fn holders(
     generation: &Generation,
     attribute: &str,
     keys: &[UniqueKey],
-) -> Result<Vec<(usize, EntityId)>, tessera_store::StoreError> {
+) -> Result<Vec<(usize, EntityId)>, mosaica_store::StoreError> {
     let mut out: Vec<(usize, EntityId)> = match generation.unique.get(attribute) {
         Some(index) => index
             .lookup(keys)?
@@ -359,7 +359,7 @@ pub(crate) fn moved_since(
     seq: u64,
     creates: bool,
 ) -> bool {
-    use tessera_store::unique::KeyKind;
+    use mosaica_store::unique::KeyKind;
     let live = &generation.unique_live;
     if creates && live.columns_changed_since(seq) {
         return true;
@@ -469,7 +469,7 @@ pub(crate) struct RoundInput {
 
 /// What a round wrote and found.
 pub(crate) struct RoundOutput {
-    pub(crate) runs: Vec<(tessera_store::unique::WrittenUniqueRun, tessera_store::manifest::FileDigest)>,
+    pub(crate) runs: Vec<(mosaica_store::unique::WrittenUniqueRun, mosaica_store::manifest::FileDigest)>,
     /// Keys more than one live or suppressed item holds, and up to
     /// [`DUPLICATE_EXAMPLES`] of their values.
     pub(crate) duplicates: u64,
@@ -482,7 +482,7 @@ pub(crate) struct RoundOutput {
 /// wanted entities into runs, then find every key more than one item holds, among them, against
 /// the earlier rounds' runs, and among and against the buffered rows.
 pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
-    use tessera_store::unique::{KeyKind, UniqueIndex, UniqueSpill};
+    use mosaica_store::unique::{KeyKind, UniqueIndex, UniqueSpill};
     let generation = &input.generation;
     let declared = &generation.bundle.manifest.declared_scalars[input.at];
     let ty = declared.arrow_type;
@@ -522,7 +522,7 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
 
     // Every run so far, this round's and the earlier ones', as one index to look up in.
     let rel = |path: &std::path::Path| {
-        tessera_store::unique::relative(&input.prefix_dir, path).map_err(|e| e.to_string())
+        mosaica_store::unique::relative(&input.prefix_dir, path).map_err(|e| e.to_string())
     };
     let this_round: Vec<String> = written
         .iter()
@@ -535,7 +535,7 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
         .collect::<Result<_, _>>()?;
     let lookup =
         |live: Vec<String>, keys: &[UniqueKey]| -> Result<Vec<(usize, EntityId)>, String> {
-            let runs = tessera_store::manifest::UniqueIndexRuns {
+            let runs = mosaica_store::manifest::UniqueIndexRuns {
                 attribute: declared.name.clone(),
                 base: Vec::new(),
                 live,
@@ -555,7 +555,7 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     if !prior.is_empty() {
         let mut entries: Vec<(UniqueKey, EntityId)> = Vec::new();
         for run in &written {
-            tessera_store::unique::for_each_entry(kind, &run.path, |key, entity| {
+            mosaica_store::unique::for_each_entry(kind, &run.path, |key, entity| {
                 entries.push((key, EntityId::new(u64::from(entity))));
                 Ok(())
             })
@@ -609,9 +609,9 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     };
     let mut runs = Vec::with_capacity(written.len());
     let paths: Vec<std::path::PathBuf> = written.iter().map(|run| run.path.clone()).collect();
-    tessera_store::fsync_written(&paths).map_err(|e| e.to_string())?;
+    mosaica_store::fsync_written(&paths).map_err(|e| e.to_string())?;
     for run in written {
-        let digest = tessera_store::digest_of(&run.path).map_err(|e| e.to_string())?;
+        let digest = mosaica_store::digest_of(&run.path).map_err(|e| e.to_string())?;
         runs.push((run, digest));
     }
     Ok(RoundOutput {
@@ -640,7 +640,7 @@ fn describe_keys(
     keys: &[UniqueKey],
     texts: &FxHashMap<UniqueKey, String>,
 ) -> Result<Vec<String>, String> {
-    use tessera_store::unique::KeyKind;
+    use mosaica_store::unique::KeyKind;
     let declared = &generation.bundle.manifest.declared_scalars[at];
     let kind = KeyKind::of(declared.arrow_type);
     let mut found: FxHashMap<UniqueKey, String> = FxHashMap::default();
@@ -687,7 +687,7 @@ mod tests {
     fn add(live: &mut UniqueLive, entries: &[(UniqueKey, EntityId)]) {
         let declared = [DeclaredScalar {
             name: "id".to_string(),
-            arrow_type: tessera_spatial::tiler::ScalarType::U64,
+            arrow_type: mosaica_spatial::tiler::ScalarType::U64,
             vocabulary: None,
             analyser: None,
             index: false,

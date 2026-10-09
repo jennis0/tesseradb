@@ -49,8 +49,8 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use tessera_types::layer::{HierarchyKind, RegisteredLayer};
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::layer::{HierarchyKind, RegisteredLayer};
+use mosaica_types::{EntityId, TesseraId};
 
 use crate::artifacts::{ArtifactVerdict, ArtifactView};
 use crate::compose::compose;
@@ -60,7 +60,7 @@ use crate::filter::FilterExpr;
 use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
 use crate::viewport::{response_rungs, segments_with_row_bases, DependencyContext, ServedView};
 use crate::Engine;
-use tessera_lifecycle::membership::Attachment;
+use mosaica_lifecycle::membership::Attachment;
 use crate::EngineError;
 
 /// Which of §4's three forms a request takes. One verb, three forms (§9 (a), owner ruling).
@@ -684,7 +684,7 @@ pub(crate) struct Namer<'a, 'c> {
     served: &'a ServedView<'a>,
     mask: &'a EffectiveMask,
     layer: &'a RegisteredLayer,
-    reachable: &'a tessera_lifecycle::ResolvedLayers,
+    reachable: &'a mosaica_lifecycle::ResolvedLayers,
     ctx: &'a DependencyContext<'c>,
     dependency_served: &'a dyn Fn(&Attachment) -> bool,
     attached: &'a AttachedLevels,
@@ -698,7 +698,7 @@ impl<'a, 'c> Namer<'a, 'c> {
         served: &'a ServedView<'a>,
         mask: &'a EffectiveMask,
         layer: &'a RegisteredLayer,
-        reachable: &'a tessera_lifecycle::ResolvedLayers,
+        reachable: &'a mosaica_lifecycle::ResolvedLayers,
         ctx: &'a DependencyContext<'c>,
         dependency_served: &'a dyn Fn(&Attachment) -> bool,
         attached: &'a AttachedLevels,

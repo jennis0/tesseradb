@@ -7,10 +7,10 @@
 //!
 //! - **Per artifact, for the artifact's life**: the canonical shape and its decomposition — the
 //!   interior tiles whole, the boundary cells as code and parity only
-//!   ([`tessera_store::derived::HeldShape`]). Built from the record blobs at open and at every
+//!   ([`mosaica_store::derived::HeldShape`]). Built from the record blobs at open and at every
 //!   publication into the level; never on a request.
 //! - **Per level**: a coarse geometry-derived index from tiles to the artifacts whose bounds meet
-//!   them ([`tessera_store::derived::ShapeIndex`]), so a segment is tested only against the
+//!   them ([`mosaica_store::derived::ShapeIndex`]), so a segment is tested only against the
 //!   shapes it can touch.
 //! - **Per `(view, layer, level)`, the row form**, held and maintained by `crate::artifacts`
 //!   exactly as a stored level's is: one bitmap per artifact over the view's whole row space, with
@@ -29,7 +29,7 @@
 //! **The base segment's piece is persisted and claimed, never resolved twice across a restart.**
 //! The build and every fold write what they resolved in the layout's own form — the row-major
 //! column, or the `shape-rows` row form where the level is artifact-major
-//! (`tessera_store::derived::file_shape_rows`) — keyed by the segment id, the segment's row
+//! (`mosaica_store::derived::file_shape_rows`) — keyed by the segment id, the segment's row
 //! count and the level version. [`ShapeStore::warm`] claims those files at open through
 //! [`PersistedPieces`], refuses one whose key does not equal what it is resolving for (I11: never
 //! adapted), and resolves only the segments no file covers — the flushed ones, which at steady
@@ -44,7 +44,7 @@
 //! form has it, so nothing has to be retired when a merge or a fold consumes a segment.
 //!
 //! **The decompositions are persisted too**, per artifact per view in one `shape-held` file per
-//! level (`tessera_store::derived::shape_held_bytes`), because on Overture's part 0 the descent
+//! level (`mosaica_store::derived::shape_held_bytes`), because on Overture's part 0 the descent
 //! was 8.9 s of a 9.3 s open once the pieces were claimed and the decode alone is 76 ms. An entry
 //! is used only for the canonical bytes it was descended from — length and digest — and under the
 //! level version it was written at; otherwise the shape is decomposed again, counted, and said.
@@ -54,24 +54,24 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use croaring::Bitmap;
-use tessera_lifecycle::membership::ArtifactStore;
-use tessera_store::derived::{resolve_segment, HeldEntry, HeldShape, ShapeIndex};
-use tessera_store::manifest::{DerivedExtent, DerivedForm};
-use tessera_store::read::{Bundle, SegmentData, ViewData};
-use tessera_types::layer::{MembershipSource, RegisteredLayer};
+use mosaica_lifecycle::membership::ArtifactStore;
+use mosaica_store::derived::{resolve_segment, HeldEntry, HeldShape, ShapeIndex};
+use mosaica_store::manifest::{DerivedExtent, DerivedForm};
+use mosaica_store::read::{Bundle, SegmentData, ViewData};
+use mosaica_types::layer::{MembershipSource, RegisteredLayer};
 
 use crate::row_column::RowColumn;
 
 // The publication-side vocabulary, re-exported for the server, which sees engine API types only
 // (`scripts/check-layers.sh`): what a row's shape is read into, how it is canonicalised, and what
 // that reported.
-pub use tessera_spatial::shape::{CanonError, CanonReport, Shape, ShapeF64, Space};
-pub use tessera_spatial::{Bounds, Projection};
-pub use tessera_store::derived::{
+pub use mosaica_spatial::shape::{CanonError, CanonReport, Shape, ShapeF64, Space};
+pub use mosaica_spatial::{Bounds, Projection};
+pub use mosaica_store::derived::{
     authored_shape_input, canonical_shapes, check_shape_span, shape_input, CanonicalShapes,
     ShapeInput, ShapeRefusal, ShapeSpace, ShapeStats, ViewFrame,
 };
-pub use tessera_types::layer::DrawnShape;
+pub use mosaica_types::layer::DrawnShape;
 
 /// The per-artifact vertex budget a served shape is guarded by — the hull's 2,048, for the
 /// hull's reason (`artifact-shapes.md` §8 B): a guard on the wire, not a control on the shape.
@@ -94,7 +94,7 @@ pub fn served_tolerance(zoom: Option<u8>) -> u32 {
 /// depth, under the vertex budget. One function for the predicate and the authored kind, so the two cannot be
 /// simplified differently; the derived kind is the hull and is digested at derivation.
 pub fn served_rings(
-    shape: &tessera_spatial::shape::Shape,
+    shape: &mosaica_spatial::shape::Shape,
     zoom: Option<u8>,
 ) -> Vec<Vec<Vec<[u32; 2]>>> {
     let (parts, _) = shape.rings_guarded(served_tolerance(zoom), SERVED_VERTEX_BUDGET);
@@ -190,7 +190,7 @@ impl ShapeLevel {
                 .and_then(|shapes| shapes.for_view(view))
                 .and_then(|bytes| {
                     let at = Instant::now();
-                    let decoded = tessera_spatial::shape::Shape::decode(bytes);
+                    let decoded = mosaica_spatial::shape::Shape::decode(bytes);
                     decode_ns += at.elapsed().as_nanos();
                     match decoded {
                     Ok(shape) => {
@@ -313,7 +313,7 @@ impl ShapeLevel {
     }
 
     fn cost_of(
-        resolved: &tessera_store::derived::ResolvedSegment,
+        resolved: &mosaica_store::derived::ResolvedSegment,
         started: Instant,
     ) -> ResolutionCost {
         ResolutionCost {
@@ -660,7 +660,7 @@ impl PersistedPieces<'_> {
             );
             return Vec::new();
         }
-        match tessera_store::derived::read_shape_held(&prefix_dir.join(&extent.path), version) {
+        match mosaica_store::derived::read_shape_held(&prefix_dir.join(&extent.path), version) {
             Ok(entries) => entries,
             Err(error) => {
                 tracing::warn!(
@@ -716,7 +716,7 @@ impl PersistedPieces<'_> {
                 );
                 return None;
             }
-            match tessera_store::derived::read_shape_rows(
+            match mosaica_store::derived::read_shape_rows(
                 &prefix_dir.join(&extent.path),
                 level.level_version,
                 &segment.seg_id,

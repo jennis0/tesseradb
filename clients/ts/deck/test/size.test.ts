@@ -1,8 +1,8 @@
 import {describe, expect, it} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import type {LegendProjection, MarksProjection, Meta, ScalarColumn} from '@tesseradb/client';
+import type {LegendProjection, MarksProjection, Meta, ScalarColumn} from '@mosaica/client';
 import {band} from '../../core/test/support.js';
-import {TesseraLayer, type TesseraLayerInternalProps} from '../src/layer.js';
+import {MosaicaLayer, type MosaicaLayerInternalProps} from '../src/layer.js';
 import {MarkSlab} from '../src/slab.js';
 import {sizeEncodingOf, sizeFraction, valueAtSize, type SizeEncoding} from '../src/size.js';
 import {fakeDevice} from './fake-device.js';
@@ -92,11 +92,11 @@ describe('the marks drawn under sizing', () => {
 
   type MarkProps = {sizing: {min: number; max: number} | null; getRadius: number; pickable: boolean};
 
-  function drawn(props: Partial<TesseraLayerInternalProps>): MarkProps {
+  function drawn(props: Partial<MosaicaLayerInternalProps>): MarkProps {
     const manager = new LayerManager(fakeDevice(), {});
-    manager.setLayers([new TesseraLayer({id: 'tessera', depth: 2, status: 'shown', meta, marks, density: 'none', ...props} as TesseraLayerInternalProps)]);
-    const layer = manager.getLayers().find((l) => l.id === 'tessera') as TesseraLayer;
-    const sub = (layer.getSubLayers() as Layer[]).find((l) => l.id === 'tessera-marks-p0')!;
+    manager.setLayers([new MosaicaLayer({id: 'mosaica', depth: 2, status: 'shown', meta, marks, density: 'none', ...props} as MosaicaLayerInternalProps)]);
+    const layer = manager.getLayers().find((l) => l.id === 'mosaica') as MosaicaLayer;
+    const sub = (layer.getSubLayers() as Layer[]).find((l) => l.id === 'mosaica-marks-p0')!;
     return sub.props as unknown as MarkProps;
   }
 

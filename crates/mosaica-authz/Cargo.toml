@@ -1,5 +1,5 @@
 [package]
-name = "tessera-authz"
+name = "mosaica-authz"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -7,17 +7,17 @@ license.workspace = true
 [features]
 default = []
 # Per-stage bench accessors on `DeltaTier` — the record search and the view construction, which
-# `posting_at` does in one call. OFF by default; `tessera-bench` is the only crate that turns it
-# on (mirroring `tessera-engine/bench-timing`), and it adds no behaviour to either path.
+# `posting_at` does in one call. OFF by default; `mosaica-bench` is the only crate that turns it
+# on (mirroring `mosaica-engine/bench-timing`), and it adds no behaviour to either path.
 bench-timing = []
 
 [dependencies]
 croaring = { workspace = true }
-tessera-types = { path = "../tessera-types" }
-tessera-access = { path = "../tessera-access" }
-# The single-flight cache the fragment tier is built on, shared with tessera-engine so the state
+mosaica-types = { path = "../mosaica-types" }
+mosaica-access = { path = "../mosaica-access" }
+# The single-flight cache the fragment tier is built on, shared with mosaica-engine so the state
 # machine and its rules exist once.
-tessera-cache = { path = "../tessera-cache" }
+mosaica-cache = { path = "../mosaica-cache" }
 rustc-hash = "1"
 arrow = { workspace = true }
 memmap2 = { workspace = true }

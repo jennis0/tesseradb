@@ -2,7 +2,7 @@
 //! the one translation between an item's `tessera_id` and the entity holding it.
 //!
 //! An edit gives its item a new entity and keeps the item's number, the entity it was first given,
-//! which its `tessera_id` is taken from ([`tessera_store::edited`]). The window that commits an
+//! which its `tessera_id` is taken from ([`mosaica_store::edited`]). The window that commits an
 //! edit adds its pair here, and the first flush that gives the new entity a row writes a run
 //! holding it, whose publication removes the pair from here. A new entity deleted or edited away
 //! before that flush keeps its pair here until the fold that removes the entity. Every lookup reads
@@ -13,8 +13,8 @@
 //! the number itself.
 
 use rustc_hash::FxHashMap;
-use tessera_store::StoreError;
-use tessera_types::{EntityId, TesseraId};
+use mosaica_store::StoreError;
+use mosaica_types::{EntityId, TesseraId};
 
 use crate::Generation;
 
@@ -33,8 +33,8 @@ impl EditedLive {
     /// pair is in a run, so an entity flushed and then deleted keeps no pair here.
     pub(crate) fn derive(
         edits: &[(EntityId, EntityId)],
-        buffer: &tessera_lifecycle::IngestBuffer,
-        overlay: &tessera_lifecycle::Overlay,
+        buffer: &mosaica_lifecycle::IngestBuffer,
+        overlay: &mosaica_lifecycle::Overlay,
     ) -> EditedLive {
         let mut live = EditedLive::default();
         let pairs: Vec<(u32, u32)> = edits
@@ -195,7 +195,7 @@ pub(crate) fn follow_moves(
 /// to the entity the item holds now. The change to the old entity stays, so the log names both.
 pub(crate) fn follow_changes(
     generation: &Generation,
-    changes: &mut Vec<(EntityId, tessera_lifecycle::ChangeOp)>,
+    changes: &mut Vec<(EntityId, mosaica_lifecycle::ChangeOp)>,
 ) -> Result<(), StoreError> {
     let mut followed = Vec::new();
     for &(entity, op) in changes.iter() {
@@ -213,7 +213,7 @@ pub(crate) fn follow_changes(
 /// Every entity set of `artifacts`, members and generating sets, following moves.
 pub(crate) fn follow_artifacts(
     generation: &Generation,
-    artifacts: &mut [tessera_lifecycle::IncomingArtifact],
+    artifacts: &mut [mosaica_lifecycle::IncomingArtifact],
 ) -> Result<(), StoreError> {
     for artifact in artifacts {
         follow_moves(generation, &mut artifact.members)?;
@@ -230,7 +230,7 @@ pub(crate) fn follow_artifacts(
 /// Every entity set of `joins`, following moves.
 pub(crate) fn follow_growth(
     generation: &Generation,
-    joins: &mut [tessera_lifecycle::IncomingGrowth],
+    joins: &mut [mosaica_lifecycle::IncomingGrowth],
 ) -> Result<(), StoreError> {
     for join in joins {
         follow_moves(generation, &mut join.joining)?;

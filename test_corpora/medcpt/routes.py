@@ -19,7 +19,7 @@ was committed: cuML's UMAP over a precomputed graph peaks at **1,417 bytes a row
 past the 47 GB of host RAM that RMM's managed memory would have to oversubscribe into. It does not
 fit, and no managed-memory run was attempted for that reason.
 
-The owner's framing (2026-09-02) is that this corpus tests Tessera's speed and memory rather than
+The owner's framing (2026-09-02) is that this corpus tests Mosaica's speed and memory rather than
 the UMAP pipeline, so the first route that works is the one taken; nothing about layout fidelity is
 measured or claimed.
 
@@ -358,7 +358,7 @@ def main() -> None:
     ap.add_argument("--shard", type=int, default=SHARD_ROWS, help="rows per CAGRA index")
     ap.add_argument("--managed", action="store_true", help="RMM managed memory for the layout")
     ap.add_argument("--graph-only", action="store_true", help="stop after the kNN graph")
-    ap.add_argument("--out", type=Path, default=None, help="default $TESSERA_LADDER/medcpt")
+    ap.add_argument("--out", type=Path, default=None, help="default $MOSAICA_LADDER/medcpt")
     ap.add_argument("--report", type=Path, default=None, help="append the timings here as JSON")
     ap.add_argument("--partial", action="store_true",
                     help="sample the staged prefix while the staging pass is still running")

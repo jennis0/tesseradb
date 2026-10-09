@@ -1,20 +1,20 @@
 {
-  "name": "@tesseradb/react",
+  "name": "@mosaica/react",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
-  "description": "React hooks over the headless store, and typed wrappers for the tessera-* elements behind a separate entry.",
+  "description": "React hooks over the headless store, and typed wrappers for the mosaica-* elements behind a separate entry.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "tessera-source": "./src/index.ts",
+      "mosaica-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./components": {
-      "tessera-source": "./src/components.ts",
+      "mosaica-source": "./src/components.ts",
       "types": "./dist/components.d.ts",
       "default": "./dist/components.js"
     }
@@ -31,24 +31,24 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@tesseradb/client": "^0.1.0"
+    "@mosaica/client": "^0.1.0"
   },
   "peerDependencies": {
     "@lit/react": "^1.0.0",
-    "@tesseradb/components": "^0.1.0",
+    "@mosaica/components": "^0.1.0",
     "react": "^18.0.0 || ^19.0.0"
   },
   "peerDependenciesMeta": {
     "@lit/react": {
       "optional": true
     },
-    "@tesseradb/components": {
+    "@mosaica/components": {
       "optional": true
     }
   },
   "devDependencies": {
     "@lit/react": "^1.0.8",
-    "@tesseradb/components": "^0.1.0",
+    "@mosaica/components": "^0.1.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "happy-dom": "^20.0.0",

@@ -1,14 +1,14 @@
-# Tessera's HTTP API: the viewer, session and control planes, as an OpenAPI 3.1 description.
+# Mosaica's HTTP API: the viewer, session and control planes, as an OpenAPI 3.1 description.
 #
-# Hand-authored, and kept true by `crates/tessera-server/tests/openapi.rs`, which starts the
+# Hand-authored, and kept true by `crates/mosaica-server/tests/openapi.rs`, which starts the
 # server, exercises every route below (a success and at least one refusal each) and validates
 # every JSON request and response body against the schemas in `components`. A field added to a
 # response and not to this file fails that test, because every closed DTO is declared
 # `additionalProperties: false`. Where this file and the server disagree, the server is right and
 # this file is wrong.
 #
-# Each server names its plane and the prefix of the routes it serves in `x-tessera-plane` and
-# `x-tessera-route-prefix`, which `clients/ts/core/test/contract.test.ts` reads to send each
+# Each server names its plane and the prefix of the routes it serves in `x-mosaica-plane` and
+# `x-mosaica-route-prefix`, which `clients/ts/core/test/contract.test.ts` reads to send each
 # operation to its listener.
 #
 # What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items`,
@@ -19,9 +19,9 @@
 # schemas below (`ItemsHead`, `ArtifactsHead`, `AggregateTableHead`, `PageEnd`, `RecordsTrailer`).
 openapi: 3.1.0
 info:
-  title: Tessera HTTP API
+  title: Mosaica HTTP API
   version: "1"
-  summary: The viewer, session and control planes of a Tessera server.
+  summary: The viewer, session and control planes of a Mosaica server.
   description: |
     Three listeners. The **viewer plane** answers about the corpus as one principal may see it and
     is authenticated by a *session token*; `POST /v1/login` mints one from a password, an API key
@@ -63,22 +63,22 @@ info:
 servers:
   - url: http://{viewer-host}
     description: The viewer plane's listener, `serve.viewer`. Routes under `/v1/`, and the probes.
-    x-tessera-plane: viewer
-    x-tessera-route-prefix: /v1/
+    x-mosaica-plane: viewer
+    x-mosaica-route-prefix: /v1/
     variables:
       viewer-host:
         default: 127.0.0.1:8080
   - url: http://{session-host}
     description: The session plane's listener, `serve.session`. Routes under `/session/`, and the probes.
-    x-tessera-plane: session
-    x-tessera-route-prefix: /session/
+    x-mosaica-plane: session
+    x-mosaica-route-prefix: /session/
     variables:
       session-host:
         default: 127.0.0.1:8081
   - url: http://{control-host}
     description: "The control plane's listener, `serve.control`: a TCP address, or a Unix socket written `unix:<path>`. The server does not check that a TCP address is loopback. Routes under `/control/`."
-    x-tessera-plane: control
-    x-tessera-route-prefix: /control/
+    x-mosaica-plane: control
+    x-mosaica-route-prefix: /control/
     variables:
       control-host:
         default: 127.0.0.1:8082
@@ -504,7 +504,7 @@ paths:
         - name: counts
           in: query
           required: false
-          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only the items `/v1/viewport` would show this session in that view count: an item holds a row there once it is flushed and the refresh after the flush reaches this session (`x-tessera-pin` describes that window), and a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
+          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only the items `/v1/viewport` would show this session in that view count: an item holds a row there once it is flushed and the refresh after the flush reaches this session (`x-mosaica-pin` describes that window), and a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
           schema:
             type: boolean
         - name: view
@@ -587,7 +587,7 @@ paths:
         "200":
           description: At most `limit` values this principal may be told about, in matched-entry order.
           headers:
-            x-tessera-region:
+            x-mosaica-region:
               description: "Present where counts were taken and `filters` carries a `region` leaf, as on `/v1/viewport`: `exact`, or `cover; depth=<d>` where a shape's edge crossed more than `max_region_cells` cells and the counts are exact for a larger shape covering it."
               required: false
               schema:
@@ -675,35 +675,35 @@ paths:
               required: true
               schema:
                 type: string
-            x-tessera-identity-key:
+            x-mosaica-identity-key:
               description: The identity key, derived from the credential, its mask fragment and the view. The mask fragment's identity is keyed by the bundle, so a rebuilt bundle, whose `tessera_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
               required: true
               schema:
                 type: string
-            x-tessera-pin:
-              description: The generation this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set. Until the refresh that follows a flush reaches this session, that is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Send it back as `pin`; its only effect is `x-tessera-stale`.
+            x-mosaica-pin:
+              description: The generation this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set. Until the refresh that follows a flush reaches this session, that is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Send it back as `pin`; its only effect is `x-mosaica-stale`.
               required: true
               schema:
                 type: string
-            x-tessera-stale:
-              description: "`1` where the request's `pin` differs from this response's `x-tessera-pin`, and `0` otherwise. It moves at every flush, merge and compaction, whether or not anything this principal can see changed, and after a flush it moves when the refresh reaches this session. Advisory."
+            x-mosaica-stale:
+              description: "`1` where the request's `pin` differs from this response's `x-mosaica-pin`, and `0` otherwise. It moves at every flush, merge and compaction, whether or not anything this principal can see changed, and after a flush it moves when the refresh reaches this session. Advisory."
               required: true
               schema:
                 type: string
                 enum: ["0", "1"]
-            x-tessera-region:
+            x-mosaica-region:
               description: "Present exactly when the request's `filters` carry a `region` leaf. `exact` where every region is answered exactly against each point's stored position; `cover; depth=<d>` where a shape's edge crossed more than `max_region_cells` cells, and the answer is exact for a larger shape covering it, taken at depth `d`. It depends on the shape and the grid alone, not on the rows. With several region leaves it is the coarsest. A leaf naming an artifact is always exact."
               required: false
               schema:
                 type: string
                 pattern: "^(exact|cover; depth=[0-9]+)$"
-            x-tessera-server-us:
+            x-mosaica-server-us:
               description: Server time from admission until the first frames were ready, in microseconds. The whole stream's time is the trailer's `stream_us`.
               required: true
               schema:
                 type: string
                 pattern: "^[0-9]+$"
-            x-tessera-admission-us:
+            x-mosaica-admission-us:
               description: Time spent waiting for compute admission, in microseconds.
               required: true
               schema:
@@ -775,15 +775,15 @@ paths:
         the requests of one read, and the page schema changes with them.
 
         **Columns.** `tessera_id` (`uint64`) first, then the named fields in the order named, then
-        the system fields in the order named, then `tessera:matched` (`bool`) under
+        the system fields in the order named, then `mosaica:matched` (`bool`) under
         `keep_unmatched`. Every named field is present whether or not an item carries a value. A
         number or boolean arrives as its declared type, `timestamp_us` as `timestamp[us, UTC]`, a
         keyword or text field as `utf8`, and a category as `dictionary<int32, utf8>` holding its
         keys, each frame's dictionary holding only the keys its rows carry. An absent value is
-        null. `position` is two `float64` columns, `tessera:x` and `tessera:y`: the centre of the
+        null. `position` is two `float64` columns, `mosaica:x` and `mosaica:y`: the centre of the
         step of the view's 32-bit grid the item is stored in, converted back through the view's
         projection and frame, so degrees on a geographic view, and within half a step of the
-        position the item was given. `labels` is `list<utf8>` as `tessera:labels`: the clauses of the item's labels this principal satisfies, as the item card serves them. A rendered field is read
+        position the item was given. `labels` is `list<utf8>` as `mosaica:labels`: the clauses of the item's labels this principal satisfies, as the item card serves them. A rendered field is read
         from `view`, where the item card reads the first view the principal can reach, so the two
         can differ. An item joined into `view` before its own ingest is flushed has null record
         fields until that flush.
@@ -831,24 +831,24 @@ paths:
         "200":
           description: The framed body. The headers are the viewport's, without its cache coordinates.
           headers:
-            x-tessera-identity-key:
+            x-mosaica-identity-key:
               description: The viewport's identity key for this principal and view, equal to the one a viewport over the same view returns. Absent only from a response cancelled before its first page, which is a head and a trailer ending by `deadline`.
               required: false
               schema:
                 type: string
-            x-tessera-region:
+            x-mosaica-region:
               description: "Present exactly when the request's `filters` carry a `region` leaf, with the viewport's values: the coarsest answer the head's count and the first page reached."
               required: false
               schema:
                 type: string
                 pattern: "^(exact|cover; depth=[0-9]+)$"
-            x-tessera-server-us:
+            x-mosaica-server-us:
               description: Server time from admission to the head, in microseconds. The whole response's time is the trailer's `stream_us`.
               required: true
               schema:
                 type: string
                 pattern: "^[0-9]+$"
-            x-tessera-admission-us:
+            x-mosaica-admission-us:
               description: Time spent being admitted, in microseconds. Near zero, since a bulk read does not wait for a slot.
               required: true
               schema:
@@ -1031,24 +1031,24 @@ paths:
         "200":
           description: The framed body, with `POST /v1/items`' headers.
           headers:
-            x-tessera-identity-key:
+            x-mosaica-identity-key:
               description: As on `POST /v1/items`.
               required: false
               schema:
                 type: string
-            x-tessera-region:
+            x-mosaica-region:
               description: "Present exactly when the request's `filters` carry a `region` leaf, with the viewport's values."
               required: false
               schema:
                 type: string
                 pattern: "^(exact|cover; depth=[0-9]+)$"
-            x-tessera-server-us:
+            x-mosaica-server-us:
               description: Server time from admission to the head, in microseconds.
               required: true
               schema:
                 type: string
                 pattern: "^[0-9]+$"
-            x-tessera-admission-us:
+            x-mosaica-admission-us:
               description: Time spent being admitted, in microseconds.
               required: true
               schema:
@@ -1175,35 +1175,35 @@ paths:
               required: true
               schema:
                 type: string
-            x-tessera-identity-key:
+            x-mosaica-identity-key:
               description: The identity key, as on `POST /v1/viewport`.
               required: true
               schema:
                 type: string
-            x-tessera-pin:
+            x-mosaica-pin:
               description: The generation this response was computed from, as on `POST /v1/viewport`.
               required: true
               schema:
                 type: string
-            x-tessera-stale:
-              description: "`1` where the request's `pin` differs from this response's `x-tessera-pin`, and `0` otherwise."
+            x-mosaica-stale:
+              description: "`1` where the request's `pin` differs from this response's `x-mosaica-pin`, and `0` otherwise."
               required: true
               schema:
                 type: string
                 enum: ["0", "1"]
-            x-tessera-region:
+            x-mosaica-region:
               description: Present exactly when `filters` or `highlight` carry a `region` leaf, as on `POST /v1/viewport`.
               required: false
               schema:
                 type: string
                 pattern: "^(exact|cover; depth=[0-9]+)$"
-            x-tessera-server-us:
+            x-mosaica-server-us:
               description: Server time from admission until the first frame was ready, in microseconds.
               required: true
               schema:
                 type: string
                 pattern: "^[0-9]+$"
-            x-tessera-admission-us:
+            x-mosaica-admission-us:
               description: Time spent waiting for admission, in microseconds.
               required: true
               schema:
@@ -1591,24 +1591,24 @@ paths:
         "200":
           description: The framed body, with the headers `POST /v1/items` sends.
           headers:
-            x-tessera-identity-key:
+            x-mosaica-identity-key:
               description: The viewport's identity key for this principal and view. Absent only from a response cancelled before its first page.
               required: false
               schema:
                 type: string
-            x-tessera-region:
+            x-mosaica-region:
               description: "Present exactly when `filters` or `reference` carries a `region` leaf, with the viewport's values: the coarsest answer either reached on the first page."
               required: false
               schema:
                 type: string
                 pattern: "^(exact|cover; depth=[0-9]+)$"
-            x-tessera-server-us:
+            x-mosaica-server-us:
               description: Server time from admission to the start of the body, in microseconds.
               required: true
               schema:
                 type: string
                 pattern: "^[0-9]+$"
-            x-tessera-admission-us:
+            x-mosaica-admission-us:
               description: Time spent being admitted, in microseconds.
               required: true
               schema:
@@ -1670,7 +1670,7 @@ paths:
         each keyed by column name; `application/vnd.apache.arrow.stream` is an Arrow IPC stream of
         one or more record batches. Any other `content-type` is `422`.
 
-        **The view.** The batch's view is the one `x-tessera-view` names. With no header, a
+        **The view.** The batch's view is the one `x-mosaica-view` names. With no header, a
         deployment with one view takes that view, and one with several gives the batch no view,
         whose rows carry no coordinates and change only what is stored in no view.
 
@@ -1733,7 +1733,7 @@ paths:
         is written. A deleted item names nothing, so its values may be given to a new item. A null
         is no value.
 
-        **Retries.** `x-tessera-batch-id` names the batch. The same bytes sent again under the same
+        **Retries.** `x-mosaica-batch-id` names the batch. The same bytes sent again under the same
         id answer `200` with `replayed: true`, the first acceptance's `tessera_ids` and `refused`,
         and change nothing, whatever `strict` says; different bytes under a used id are `409`.
 
@@ -1780,7 +1780,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: "`x-tessera-view` names no view."
+          description: "`x-mosaica-view` names no view."
           content:
             application/json:
               schema:
@@ -1802,9 +1802,9 @@ paths:
             The detail names a row by its index. Nothing was written.
 
             - The body is over the byte cap or cannot be read
-            - `x-tessera-batch-id` is missing
+            - `x-mosaica-batch-id` is missing
             - `content-type` names another encoding
-            - No `x-tessera-view` on a deployment with several views
+            - No `x-mosaica-view` on a deployment with several views
             - A column is misnamed, undeclared or of the wrong type
             - A cell does not fit its column
             - A key is not in a closed vocabulary or layer
@@ -3443,7 +3443,7 @@ paths:
     get:
       tags: ["control: identity"]
       operationId: listProviders
-      summary: "Every OIDC provider, declared through the API or in `tessera.toml`."
+      summary: "Every OIDC provider, declared through the API or in `mosaica.toml`."
       security:
         - controlCredential: []
       responses:
@@ -3494,7 +3494,7 @@ paths:
       summary: "Declare an OIDC provider, or replace one whole."
       description: |
         A `jwks_url` is `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`, unless the
-        service runs with `TESSERA_ALLOW_INSECURE_JWKS=1`. A claim rule whose template could produce
+        service runs with `MOSAICA_ALLOW_INSECURE_JWKS=1`. A claim rule whose template could produce
         only `public`, or holds a control character, is refused. Replacing a provider ends every
         session authorised through it.
       security:
@@ -3521,7 +3521,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: "The provider is declared in `tessera.toml`; change it there and restart. Or another provider has the same issuer and audience, so a token from either would be accepted by both."
+          description: "The provider is declared in `mosaica.toml`; change it there and restart. Or another provider has the same issuer and audience, so a token from either would be accepted by both."
           content:
             application/json:
               schema:
@@ -3564,7 +3564,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: "The provider is declared in `tessera.toml`; remove it there and restart."
+          description: "The provider is declared in `mosaica.toml`; remove it there and restart."
           content:
             application/json:
               schema:
@@ -3733,14 +3733,14 @@ components:
         type: boolean
         default: false
     BatchId:
-      name: x-tessera-batch-id
+      name: x-mosaica-batch-id
       in: header
       required: true
       description: The batch's identity, chosen by the caller, for retries. The same body sent again under the same id is answered as it was and changes nothing; a different body under a used id is `409`. Missing, or not UTF-8, is `422`.
       schema:
         type: string
     WriteView:
-      name: x-tessera-view
+      name: x-mosaica-view
       in: header
       required: false
       description: The view the batch writes into, by id. Required where the deployment has more than one view. A name no view has is `404`; a value that is not UTF-8 is `422`.
@@ -4307,7 +4307,7 @@ components:
             $ref: "#/components/schemas/RoleMapping"
         read_only:
           type: boolean
-          description: Declared in `tessera.toml`, so the API cannot change or remove it.
+          description: Declared in `mosaica.toml`, so the API cannot change or remove it.
 
     ProviderList:
       type: object
@@ -4694,7 +4694,7 @@ components:
         max_region_cells:
           type: integer
           minimum: 0
-          description: The most boundary cells a `region` leaf's shape may cross at one depth. Over it the request is not refused; the server stops at the deepest depth that fits, answers exactly for a shape covering the requested one, and says so in `x-tessera-region`.
+          description: The most boundary cells a `region` leaf's shape may cross at one depth. Over it the request is not refused; the server stops at the deepest depth that fits, answers exactly for a shape covering the requested one, and says so in `x-mosaica-region`.
         max_suggestions:
           type: integer
           minimum: 1
@@ -4895,7 +4895,7 @@ components:
       type: object
       additionalProperties: false
       required: [prefix, segments_version]
-      description: A generation, the JSON of the `x-tessera-pin` header, sent back. Advisory; it grants nothing.
+      description: A generation, the JSON of the `x-mosaica-pin` header, sent back. Advisory; it grants nothing.
       properties:
         prefix:
           type: string
@@ -5015,7 +5015,7 @@ components:
             `"highlight"` is the same points as `(tessera_id, highlighted)`, the other columns
             absent from the schema. Nine bytes a point. It is for a client that changed only its
             highlight and holds every point it needs; it joins the bits to its points by
-            `tessera_id`. When `x-tessera-stale` moves, the held points may no longer be what the
+            `tessera_id`. When `x-mosaica-stale` moves, the held points may no longer be what the
             same request serves, and the client asks again with its columns. Without a `highlight`
             it answers as `"full"`. Any other string is `422`.
           oneOf:
@@ -5214,7 +5214,7 @@ components:
         `region` is a leaf of its own, not a column, and the name is reserved at the build. It is
         a set of rows over the whole view, composes with every other leaf, and can be negated with
         `none_of`, since every placed item has a position. It is cached per generation across
-        principals. `x-tessera-region` says how exact its answer is.
+        principals. `x-mosaica-region` says how exact its answer is.
 
         `member_of` is another leaf of its own, also reserved at the build: `{"layer",
         "artifact"}`, the artifact's members this principal can see, as a set of rows over the
@@ -5386,7 +5386,7 @@ components:
           $ref: "#/components/schemas/FilterExpr"
         keep_unmatched:
           type: boolean
-          description: Return every visible item with a `tessera:matched` column, rather than the matching ones only. Without `filters` every row is marked matched.
+          description: Return every visible item with a `mosaica:matched` column, rather than the matching ones only. Without `filters` every row is marked matched.
         count:
           type: boolean
           description: Put the numbers of visible and matching items in the head. Only on a request with no `cursor`; it costs one evaluation of the whole filter.

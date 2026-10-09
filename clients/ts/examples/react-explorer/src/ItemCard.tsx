@@ -1,4 +1,4 @@
-import {useProjection, type Store} from '@tesseradb/react';
+import {useProjection, type Store} from '@mosaica/react';
 
 /**
  * A host's own item card: the selected item's record from the `selection` projection, its fields

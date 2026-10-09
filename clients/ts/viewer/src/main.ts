@@ -1,8 +1,8 @@
-import '@tesseradb/components';
-import type {TesseraExplorer, MapProbe} from '@tesseradb/components';
-import {DEFAULT_BUDGET, TesseraClient, createStore, dataToWorldXY, type Store as DataStore} from '@tesseradb/client';
-import {refusalOf} from '@tesseradb/client/internal';
-import type {ViewInfo} from '@tesseradb/client';
+import '@mosaica/components';
+import type {MosaicaExplorer, MapProbe} from '@mosaica/components';
+import {DEFAULT_BUDGET, MosaicaClient, createStore, dataToWorldXY, type Store as DataStore} from '@mosaica/client';
+import {refusalOf} from '@mosaica/client/internal';
+import type {ViewInfo} from '@mosaica/client';
 import {basemapLayer, coverFor, type BasemapCover, type Camera} from './basemap.js';
 import {loadDatasets, readConfig, type Dataset} from './config.js';
 import {esc} from './html.js';
@@ -14,7 +14,7 @@ import {installTrace, installTraceBar, trace} from './trace.js';
 import {coalesce, createStore as createAppState, type Store} from './state.js';
 
 /**
- * The viewer: `<tessera-explorer layout="overlay">` and a column of instruments.
+ * The viewer: `<mosaica-explorer layout="overlay">` and a column of instruments.
  *
  * The viewer hands the explorer a store it opened per dataset and principal through its own
  * session client, which holds the session URL and credential; the store only gets a token
@@ -28,15 +28,15 @@ import {coalesce, createStore as createAppState, type Store} from './state.js';
 
 const config = readConfig();
 
-let client: TesseraClient | null = null;
+let client: MosaicaClient | null = null;
 let dataStore: DataStore | null = null;
 let unsubscribe: (() => void) | null = null;
 let datasets: Dataset[] = [];
 /** The active dataset's presets; term ids are per bundle. */
 let presets: Dataset['presets'] = [];
 
-type Session = Awaited<ReturnType<TesseraClient['authorise']>>;
-type Meta = Awaited<ReturnType<TesseraClient['meta']>>;
+type Session = Awaited<ReturnType<MosaicaClient['authorise']>>;
+type Meta = Awaited<ReturnType<MosaicaClient['meta']>>;
 
 /**
  * The principal `dataStore` was opened on and the session its supplier last returned, or null
@@ -78,12 +78,12 @@ const store = createAppState({
   artifactLayer: null
 });
 
-const explorer = document.getElementById('explorer') as TesseraExplorer;
+const explorer = document.getElementById('explorer') as MosaicaExplorer;
 const instrumentsEl = document.getElementById('instruments')!;
 
 declare global {
   interface Window {
-    __tesseraProbe?: MapProbe & {lanes: Lanes};
+    __mosaicaProbe?: MapProbe & {lanes: Lanes};
   }
 }
 
@@ -137,7 +137,7 @@ function followCameraWithBasemap(view: ViewInfo): void {
   }
   if (followListening) return;
   followListening = true;
-  explorer.addEventListener('tessera-viewchange', (event) => {
+  explorer.addEventListener('mosaica-viewchange', (event) => {
     const followed = followedView;
     // A view with no tiling (every embedding) has no basemap to follow.
     if (!followed || followed.tileScheme === null || followed.tile === null) return;
@@ -231,7 +231,7 @@ async function publishProbe(): Promise<void> {
   map.measure = true;
   const probe = map.probe as MapProbe & {lanes: Lanes};
   probe.lanes ??= {decode: [], absorb: {split: [], store: [], remap: [], remapPoints: [], sliceMaxMs: 0}, region: null, coverage: null, longTasks: []};
-  window.__tesseraProbe = probe;
+  window.__mosaicaProbe = probe;
   observeLongTasks(probe.lanes);
 }
 
@@ -474,7 +474,7 @@ function openSession(
     replica: {
       // The absorb lane: the split and store phases per response, and the longest single slice.
       onPhase: (kind, ms, n) => {
-        const lanes = window.__tesseraProbe?.lanes;
+        const lanes = window.__mosaicaProbe?.lanes;
         if (!lanes) return;
         if (kind === 'split' || kind === 'store' || kind === 'remap') lanes.absorb[kind].push(ms);
         if (kind === 'slice') lanes.absorb.sliceMaxMs = Math.max(lanes.absorb.sliceMaxMs, ms);
@@ -484,7 +484,7 @@ function openSession(
     },
     instruments: {
       onFrame: (info) => {
-        const probe = window.__tesseraProbe;
+        const probe = window.__mosaicaProbe;
         if (probe) {
           probe.requests += 1;
           probe['instruments'] = {
@@ -506,7 +506,7 @@ function openSession(
       },
       onTrace: (kind, fields) => {
         trace.event(kind, fields);
-        const lanes = window.__tesseraProbe?.lanes;
+        const lanes = window.__mosaicaProbe?.lanes;
         if (!lanes) return;
         // The region's counting request, in its three lanes, and the coverage check per settle.
         if (kind === 'region') lanes.region = {...fields};
@@ -541,14 +541,14 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
   client?.close();
   presets = dataset.presets;
 
-  client = new TesseraClient({
+  client = new MosaicaClient({
     viewerUrl: dataset.viewerUrl,
     sessionUrl: dataset.sessionUrl,
     sessionCredential: dataset.apiKey,
     // Per-response decode time as seen from this thread and in the worker; the difference is
     // the queue.
     onDecode: (ms, bytes, points, workerMs) => {
-      const probe = window.__tesseraProbe;
+      const probe = window.__mosaicaProbe;
       if (!probe) return;
       probe.timings.decodeMs.push(ms);
       if (probe.timings.decodeMs.length > 50) probe.timings.decodeMs.shift();
@@ -643,7 +643,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     store.update((s) => {
       s.switching = false;
       s.status = 'refused';
-      s.lastError = {code: 'no-principals', detail: `dataset '${dataset.id}' names no principal to authorise as. Open the viewer with ?datasets=<document> (run_demo.sh prints the address), or set VITE_TESSERA_DATASETS`};
+      s.lastError = {code: 'no-principals', detail: `dataset '${dataset.id}' names no principal to authorise as. Open the viewer with ?datasets=<document> (run_demo.sh prints the address), or set VITE_MOSAICA_DATASETS`};
       s.failures = [...s.failures.slice(-19), {...s.lastError, at: Date.now()}];
     });
   }
@@ -668,6 +668,6 @@ async function start() {
 start().catch((error) => {
   readoutsEl.innerHTML = `<section class="panel"><h2>Startup failed</h2>
     <div class="bad">${esc(error)}</div>
-    <div class="muted">Is <code>tessera serve</code> running, and is this origin listed in
+    <div class="muted">Is <code>mosaica serve</code> running, and is this origin listed in
     <code>serve.dev_cors_origins</code>?</div></section>`;
 });

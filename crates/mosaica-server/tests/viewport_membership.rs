@@ -7,7 +7,7 @@
 //! no layers, `"all"` is every reachable one, anything else a `422` — and `all` cannot be a
 //! layer's name.
 //!
-//! The engine's own cases (`tessera-engine/tests/membership_column.rs`) cover the resolution; this
+//! The engine's own cases (`mosaica-engine/tests/membership_column.rs`) cover the resolution; this
 //! file is about the frame — the name, the nullability, the position after the scalars, and the
 //! column's presence following the request and the response rather than the registry.
 
@@ -74,8 +74,8 @@ fn decode_points(body: &[u8]) -> Points {
     let mut names = Vec::new();
     let mut ids = Vec::new();
     let mut membership: BTreeMap<String, Vec<Option<u64>>> = BTreeMap::new();
-    for (kind, payload) in tessera_wire::split_frames(body).unwrap() {
-        if kind != tessera_wire::FRAME_POINTS {
+    for (kind, payload) in mosaica_wire::split_frames(body).unwrap() {
+        if kind != mosaica_wire::FRAME_POINTS {
             continue;
         }
         let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();

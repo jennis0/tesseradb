@@ -23,16 +23,16 @@ paths = [
 # Issue #141: a keyword column's flush extents coalesce between folds, dictionary and all.
 [track.keyword-coalesce]
 paths = [
-  "crates/tessera-filter-write/*",
-  "crates/tessera-filter/*",
-  "crates/tessera-engine/src/coalesce.rs",
-  "crates/tessera-engine/src/compose.rs",
-  "crates/tessera-engine/src/filter.rs",
-  "crates/tessera-engine/src/write/*",
-  "crates/tessera-engine/src/lib.rs",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-store/src/manifest.rs",
-  "crates/tessera-server/tests/*",
+  "crates/mosaica-filter-write/*",
+  "crates/mosaica-filter/*",
+  "crates/mosaica-engine/src/coalesce.rs",
+  "crates/mosaica-engine/src/compose.rs",
+  "crates/mosaica-engine/src/filter.rs",
+  "crates/mosaica-engine/src/write/*",
+  "crates/mosaica-engine/src/lib.rs",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-store/src/manifest.rs",
+  "crates/mosaica-server/tests/*",
   "conformance/suite/test_endurance.py",
   "conformance/tests/*",
 ]
@@ -43,22 +43,22 @@ paths = [
 # tracks needs in system-architecture §7 or configuration.md is reported, and the controller adds it.
 [track.sdk-serve]
 paths = [
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
-  "crates/tessera-engine/src/write/*",
-  "crates/tessera-engine/src/session.rs",
-  "crates/tessera-engine/tests/*",
+  "crates/mosaica-server/src/*",
+  "crates/mosaica-server/tests/*",
+  "crates/mosaica-engine/src/write/*",
+  "crates/mosaica-engine/src/session.rs",
+  "crates/mosaica-engine/tests/*",
   "conformance/tests/test_restart_replay.py",
 ]
 
 # The build's supplied id column and the check note (python-sdk §11.2 A and §11.1).
 [track.sdk-build]
 paths = [
-  "crates/tessera-build/src/*",
-  "crates/tessera-build/tests/*",
-  "crates/tessera-cli/src/*",
-  "crates/tessera-cli/tests/*",
-  "crates/tessera-types/src/*",
+  "crates/mosaica-build/src/*",
+  "crates/mosaica-build/tests/*",
+  "crates/mosaica-cli/src/*",
+  "crates/mosaica-cli/tests/*",
+  "crates/mosaica-types/src/*",
 ]
 
 [track.sdk-py]
@@ -70,24 +70,24 @@ paths = [
 # members of its own is served over its target's membership. Types, build, engine and server.
 [track.sdk-labels]
 paths = [
-  "crates/tessera-lifecycle/src/membership.rs",
-  "crates/tessera-types/src/*",
-  "crates/tessera-build/src/*",
-  "crates/tessera-build/tests/*",
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
-  "crates/tessera-cli/tests/*",
+  "crates/mosaica-lifecycle/src/membership.rs",
+  "crates/mosaica-types/src/*",
+  "crates/mosaica-build/src/*",
+  "crates/mosaica-build/tests/*",
+  "crates/mosaica-engine/src/*",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-server/src/*",
+  "crates/mosaica-server/tests/*",
+  "crates/mosaica-cli/tests/*",
 ]
 
 # The values route reads a layer column (python-sdk §11.2 F, owner ruling 2026-09-18). Engine and server.
 [track.sdk-values]
 paths = [
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
+  "crates/mosaica-engine/src/*",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-server/src/*",
+  "crates/mosaica-server/tests/*",
 ]
 
 # Owner rulings 2026-09-18 on the SDK campaign's findings. `fix-wire` is four small fixes (#151 a
@@ -97,23 +97,23 @@ paths = [
 # commit window publishes its buffered rows in the same cycle.
 [track.fix-wire]
 paths = [
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-build/src/*",
-  "crates/tessera-build/tests/*",
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
-  "crates/tessera-lifecycle/src/*",
+  "crates/mosaica-engine/src/*",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-build/src/*",
+  "crates/mosaica-build/tests/*",
+  "crates/mosaica-server/src/*",
+  "crates/mosaica-server/tests/*",
+  "crates/mosaica-lifecycle/src/*",
   "conformance/tests/*",
   "clients/py/*",
 ]
 
 [track.fix-group-cycle]
 paths = [
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
+  "crates/mosaica-engine/src/*",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-server/src/*",
+  "crates/mosaica-server/tests/*",
   "conformance/tests/*",
   "clients/py/tests/*",
 ]
@@ -123,9 +123,9 @@ paths = [
 # ordinal whose set reaches above the base rows. The write-cycle document's §4.1 is the controller's.
 [track.fix-generating]
 paths = [
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-server/tests/*",
+  "crates/mosaica-engine/src/*",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-server/tests/*",
   "conformance/tests/*",
   "clients/py/tests/*",
 ]
@@ -137,23 +137,23 @@ paths = [
 [track.fix-batch-id]
 paths = [
   "clients/py/*",
-  "crates/tessera-engine/src/write/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-lifecycle/src/*",
-  "crates/tessera-server/tests/*",
+  "crates/mosaica-engine/src/write/*",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-lifecycle/src/*",
+  "crates/mosaica-server/tests/*",
   "conformance/tests/*",
 ]
 
 [track.fix-label-target]
 paths = [
-  "crates/tessera-engine/src/viewport.rs",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-wire/*",
-  "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
+  "crates/mosaica-engine/src/viewport.rs",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-wire/*",
+  "crates/mosaica-server/src/*",
+  "crates/mosaica-server/tests/*",
   "conformance/*",
   "clients/ts/*",
-  "clients/py/tesseradb/static/*",
+  "clients/py/mosaica/static/*",
   "clients/py/tests/*",
 ]
 
@@ -161,10 +161,10 @@ paths = [
 # view's artifact (key and tessera_id, count zero). A view of a scoped layer serves its own artifacts only.
 [track.fix-scoped-roster]
 paths = [
-  "crates/tessera-engine/src/*",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-build/tests/*",
-  "crates/tessera-server/tests/*",
+  "crates/mosaica-engine/src/*",
+  "crates/mosaica-engine/tests/*",
+  "crates/mosaica-build/tests/*",
+  "crates/mosaica-server/tests/*",
   "conformance/tests/*",
   "clients/py/tests/*",
 ]

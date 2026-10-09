@@ -1,16 +1,16 @@
 /**
- * React hooks for the headless store. {@link useTesseraStore} creates a store for a component's
+ * React hooks for the headless store. {@link useMosaicaStore} creates a store for a component's
  * lifetime, and {@link useProjection} reads one of its projections and re-renders when it changes.
- * The React components for the elements are in the `@tesseradb/react/components` entry. This
+ * The React components for the elements are in the `@mosaica/react/components` entry. This
  * entry imports neither Lit nor deck.gl.
  *
- * @module @tesseradb/react
+ * @module @mosaica/react
  */
 import {useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore} from 'react';
-import {createStore, type ProjectionName, type Projections, type Store, type StoreOptions, type TokenSupplier} from '@tesseradb/client';
+import {createStore, type ProjectionName, type Projections, type Store, type StoreOptions, type TokenSupplier} from '@mosaica/client';
 
-/** The options of {@link useTesseraStore}: the options of {@link createStore}, with `authorise` read through a ref. */
-export type UseTesseraStoreOptions = Omit<StoreOptions, 'authorise'> & {
+/** The options of {@link useMosaicaStore}: the options of {@link createStore}, with `authorise` read through a ref. */
+export type UseMosaicaStoreOptions = Omit<StoreOptions, 'authorise'> & {
   /**
    * A function the store calls for a new token before the current one expires. The hook reads it
    * through a ref, so an inline function neither rebuilds the store nor goes stale. A store serves
@@ -27,7 +27,7 @@ export type UseTesseraStoreOptions = Omit<StoreOptions, 'authorise'> & {
  * The store is built in an effect, so the first render returns `null`. Options with none of
  * `token`, `authorise` or `client` throw from that effect, as `createStore` does.
  */
-export function useTesseraStore(options: UseTesseraStoreOptions): Store | null {
+export function useMosaicaStore(options: UseMosaicaStoreOptions): Store | null {
   const [store, setStore] = useState<Store | null>(null);
   const latest = useRef(options);
   useLayoutEffect(() => {
@@ -57,7 +57,7 @@ const unsubscribed = () => noop;
  * Reads one projection of `store` through `useSyncExternalStore`, and re-renders the component
  * when that projection is replaced. A change to another projection does not re-render it.
  *
- * @param store - The store, such as the one {@link useTesseraStore} returns.
+ * @param store - The store, such as the one {@link useMosaicaStore} returns.
  * @param name - The projection to read, such as `marks` or `legend`.
  * @returns The projection, or `null` while `store` is `null`.
  */
@@ -69,4 +69,4 @@ export function useProjection<K extends ProjectionName>(store: Store | null, nam
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-export type {ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@tesseradb/client';
+export type {ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@mosaica/client';

@@ -1,13 +1,13 @@
 [package]
-name = "tessera-config"
+name = "mosaica-config"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
 
 [dependencies]
 # `CompactionSchedule` and the engine's own defaults for the keys it owns.
-tessera-engine = { path = "../tessera-engine" }
-tessera-types = { path = "../tessera-types" }
+mosaica-engine = { path = "../mosaica-engine" }
+mosaica-types = { path = "../mosaica-types" }
 serde = { workspace = true }
 toml = "0.8"
 # `Semaphore::MAX_PERMITS`, the bound an admission gate is refused past.
@@ -15,5 +15,5 @@ tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# docs/reference/tessera-toml.md is rendered from this crate's source (`src/reference.rs`).
-tessera-docgen = { path = "../tessera-docgen" }
+# docs/reference/mosaica-toml.md is rendered from this crate's source (`src/reference.rs`).
+mosaica-docgen = { path = "../mosaica-docgen" }

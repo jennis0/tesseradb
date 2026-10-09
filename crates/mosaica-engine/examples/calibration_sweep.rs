@@ -16,7 +16,7 @@
 //! one grant's `StageTimings` figure came in 26x smaller than the other's for the geometrically
 //! IDENTICAL shape, which is the tell — a mask-independent quantity cannot legitimately move
 //! between two sessions over the same tiles). Fixed by computing the true, mask-independent
-//! `rows_in_ranges` directly here (`true_rows_in_ranges`, via `tessera_store::tile_ranges_all` on
+//! `rows_in_ranges` directly here (`true_rows_in_ranges`, via `mosaica_store::tile_ranges_all` on
 //! the bundle opened outright, no session involved) rather than trusting the engine's own
 //! post-request telemetry for a pre-request decision.
 //!
@@ -28,7 +28,7 @@
 //! size, the true zero-overhead serial fallback beats it by at least as much. The crossover this
 //! sweep finds is, if anything, biased toward UNDER-selecting the serial range, never over.
 //!
-//! Run: `cargo run --release --example calibration_sweep -p tessera-engine --features
+//! Run: `cargo run --release --example calibration_sweep -p mosaica-engine --features
 //! bench-timing -- --bundle <path> [--dense]`
 //!
 //! **§14 re-calibration (post-B9, three scales).** Originally hard-coded to a single
@@ -45,10 +45,10 @@
 use std::path::{Path, PathBuf};
 
 use rand::{Rng, SeedableRng};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_spatial::{tiles_for_bbox, Bounds};
-use tessera_store::{open_bundle, tile_ranges_all, Bundle};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_spatial::{tiles_for_bbox, Bounds};
+use mosaica_store::{open_bundle, tile_ranges_all, Bundle};
 
 const REPS: usize = 40;
 
@@ -129,9 +129,9 @@ fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
         .collect()
 }
 
-/// The bench's OWN grant construction (`tessera_bench::corpus::build_grant`'s
-/// `GrantShape::Random` arm, duplicated rather than imported — `tessera-engine` cannot depend on
-/// `tessera-bench`, same layering reason [`viewports`] duplicates `gen_viewports`): shuffle every
+/// The bench's OWN grant construction (`mosaica_bench::corpus::build_grant`'s
+/// `GrantShape::Random` arm, duplicated rather than imported — `mosaica-engine` cannot depend on
+/// `mosaica-bench`, same layering reason [`viewports`] duplicates `gen_viewports`): shuffle every
 /// term with `StdRng::seed_from_u64(seed)`, truncate to `w`. This is the dense-mask grant fix
 /// round 1 asked for — a uniform random sample of the vocabulary rather than deterministic even
 /// spacing, which is what actually produces a mask density comparable to the real validation runs.
@@ -251,7 +251,7 @@ fn main() {
         segment_floor_bytes: None,
         coalesce_width: None,
         // Compaction §9's trigger is off unless a deployment configures one.
-        compaction: tessera_engine::CompactionSchedule::off(),
+        compaction: mosaica_engine::CompactionSchedule::off(),
     };
 
     let tmp1 = tempfile::tempdir().unwrap();
@@ -269,7 +269,7 @@ fn main() {
         &bundle_root,
         &tmp2.path().join("cache"),
         &tmp2.path().join("wal.log"),
-        cfg(tessera_engine::default_compute_threads()),
+        cfg(mosaica_engine::default_compute_threads()),
     )
     .expect("engine (threads=default) should open");
     let session2 = engine_par.authorise(auth.as_bytes()).expect("authorise");

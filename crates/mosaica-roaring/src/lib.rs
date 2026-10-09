@@ -17,7 +17,7 @@
 //! [`BlockRanks`] answers a member's rank in constant time, where croaring's own rank sums every
 //! container below the value.
 //!
-//! The crate sits below `tessera-filter` and `tessera-store` because both use it and neither may
+//! The crate sits below `mosaica-filter` and `mosaica-store` because both use it and neither may
 //! depend on the other.
 
 mod ranks;

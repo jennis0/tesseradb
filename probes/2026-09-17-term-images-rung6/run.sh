@@ -48,7 +48,7 @@ rung="$(dirname "$bundle")"
 
 bin="${BIN:-${CARGO_TARGET_DIR:-$tree/target}/release/route_probe}"
 [ -x "$bin" ] || {
-  echo "missing $bin; build with: cargo build --release -p tessera-bench --bin route_probe" >&2
+  echo "missing $bin; build with: cargo build --release -p mosaica-bench --bin route_probe" >&2
   exit 1
 }
 

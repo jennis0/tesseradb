@@ -1,6 +1,6 @@
 //! **Ask 1: user authorisation performance.**
 //!
-//! Measures `tessera_authz::build_fragment` — design §2.6's step A4, the posting union that
+//! Measures `mosaica_authz::build_fragment` — design §2.6's step A4, the posting union that
 //! dominates session materialisation — against real mmapped postings.
 //!
 //! **Not `Engine::authorise`.** `FragmentCache::get_or_build` memoises by (terms, auth hash), so
@@ -17,7 +17,7 @@
 use crate::arms::{Context, Result};
 use crate::corpus::{build_grant, GrantShape, TermStats};
 use crate::report::Work;
-use tessera_authz::{build_fragment, PostingsReader};
+use mosaica_authz::{build_fragment, PostingsReader};
 
 pub fn run(ctx: &Context, widths: &[usize], shapes: &[String], seed: u64) -> Result<()> {
     let mut run = ctx.open("authorise")?;

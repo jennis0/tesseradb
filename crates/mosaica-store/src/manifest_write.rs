@@ -4,15 +4,15 @@
 //! **A bundle artefact, so its writer lives with the others** (owner ruling, 2026-08-06;
 //! compaction §10's rule paragraph): `SegmentWriter`, `PermutationWriter` and
 //! `PairsParquetWriter` (see [`crate::pairs`]) all sit in this crate because
-//! they write files contracts §2 defines, and `MANIFEST.json` wrote from `tessera-build` alone
+//! they write files contracts §2 defines, and `MANIFEST.json` wrote from `mosaica-build` alone
 //! for as long as a build was the only thing that produced it. Compaction's pass 5 is the second
-//! producer, and it cannot reach `tessera-build`: the fold's driver lives in `tessera-engine`,
-//! which has no edge to `tessera-build`, and `tessera-build` already depends on `tessera-authz` —
+//! producer, and it cannot reach `mosaica-build`: the fold's driver lives in `mosaica-engine`,
+//! which has no edge to `mosaica-build`, and `mosaica-build` already depends on `mosaica-authz` —
 //! so routing the fold's manifest write through it would be the reverse edge, a cycle cargo
 //! refuses. Moving the writer here is the placement the other bundle artefacts already have,
 //! rather than a new exception for this one.
 //!
-//! `tessera-build` is the caller now, not a second implementation: two independent serialisers
+//! `mosaica-build` is the caller now, not a second implementation: two independent serialisers
 //! of the same JSON shape is exactly how a build's bundle and a fold's bundle would come to
 //! disagree about what a given manifest digests to.
 
@@ -38,7 +38,7 @@ use crate::manifest::{CurrentPointer, Manifest, SegmentsManifest};
 /// write pays disc I/O to learn something the write already knows. Serialise once, hash that,
 /// write that.
 ///
-/// **`serde_json::to_vec_pretty`, matching `tessera-build`'s writer exactly.** `to_vec` produces
+/// **`serde_json::to_vec_pretty`, matching `mosaica-build`'s writer exactly.** `to_vec` produces
 /// different bytes for the same value — different whitespace, same digest input, different
 /// digest — and a bundle on disc today was written with the pretty form. Changing it would not
 /// break anything this function checks; it would silently change every future bundle's identity

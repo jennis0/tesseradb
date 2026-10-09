@@ -2,7 +2,7 @@
 //! over one point set re-dealt into 1..512 segments.
 //!
 //! The fixture, the split shapes and the instruments are `occupancy_segments`'s, unchanged —
-//! the corpus's own Morton column inverted through `tessera_spatial::unsplit32`, a visible set
+//! the corpus's own Morton column inverted through `mosaica_spatial::unsplit32`, a visible set
 //! defined over *points* so `N_occ` is constant along the segment axis, a counting
 //! `#[global_allocator]` with `croaring::configure_rust_alloc` routing CRoaring's own `malloc`
 //! through it, and peak **live** bytes rather than a before/after difference. What is new is the
@@ -39,19 +39,19 @@ use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::occupancy::{
+use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
+use mosaica_engine::compose::{compose, EffectiveMask};
+use mosaica_engine::occupancy::{
     for_each_occupied_tile, occupied_tiles_ladder_with_precision, TileSketch,
 };
-use tessera_engine::projection::RowProjection;
-use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::unsplit32;
-use tessera_store::read::{MortonSlice, SegmentData};
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::{EntityId, MortonCode, TermId, TesseraId};
+use mosaica_engine::projection::RowProjection;
+use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_spatial::tiler::{sort_batch, TilerItem};
+use mosaica_spatial::unsplit32;
+use mosaica_store::read::{MortonSlice, SegmentData};
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::{EntityId, MortonCode, TermId, TesseraId};
 
 #[derive(Parser)]
 #[command(about = "N_occ(d): the multi-segment union arm against the single-segment counter")]
@@ -265,7 +265,7 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
             temp.path(),
             &format!("bench-{g}"),
             items.len() as u32,
-            tessera_store::edited::RowEntities::Numbers,
+            mosaica_store::edited::RowEntities::Numbers,
         )
         .expect("the segment opens");
         bases.push(base);
@@ -314,7 +314,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let overlay = Overlay::default();
     let buffer = IngestBuffer::default();
-    let denied = tessera_engine::denied_rows_of(&overlay, &perm);
+    let denied = mosaica_engine::denied_rows_of(&overlay, &perm);
     let mask = compose(&satisfied, &overlay, &buffer, base, &perm, &denied, Some(&[]));
     (temp, mask)
 }
@@ -715,7 +715,7 @@ fn main() {
                         }
                     })
                     .collect();
-                let (flat_ns, flat_peak) = if precision == tessera_engine::occupancy::SKETCH_PRECISION
+                let (flat_ns, flat_peak) = if precision == mosaica_engine::occupancy::SKETCH_PRECISION
                 {
                     let (ns, _, _) = timed(args.repeats, || {
                         route_sketch_flat(&mask, &segments, depth, precision)
@@ -741,7 +741,7 @@ fn main() {
                         "error_pct_ladder": errors,
                     }),
                 );
-                if precision == tessera_engine::occupancy::SKETCH_PRECISION {
+                if precision == mosaica_engine::occupancy::SKETCH_PRECISION {
                     headline = Some((est, flat_ns, ladder_ns, ladder_peak));
                 }
             }

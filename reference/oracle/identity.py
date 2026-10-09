@@ -1,7 +1,7 @@
 """The `tessera_id` keyed bijection — Reference Sheet independent re-derivation.
 
 Written from `docs/evidence/memos/2026-07-30-tessera-id-construction.md` §1 alone, **without
-reading `crates/tessera-types/src/identity.rs`**. The oracle's independence from the Rust
+reading `crates/mosaica-types/src/identity.rs`**. The oracle's independence from the Rust
 implementation is the only thing that makes their agreement over
 `reference/vectors/tessera_id.json` evidence of anything (memo, "Why this document exists at
 all"): if this module were a port, an agreement with the Rust would prove only that

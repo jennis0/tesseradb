@@ -37,7 +37,7 @@ await page.waitForTimeout(settle);
  */
 const readPanels = () =>
   page.evaluate(() => {
-    const p = window.__tesseraProbe;
+    const p = window.__mosaicaProbe;
     if (!p) return {served: null, visible: null, depth: null, tiles: null, actual: null, limitedBy: null, status: 'absent'};
     const i = p.instruments ?? null;
     return {
@@ -64,7 +64,7 @@ for (let step = 0; step <= 5; step++) {
   // A response paints as its slices land, so the marks are read once they have stopped moving.
   for (let last = -1, stable = 0, tries = 0; stable < 4 && tries < 150; tries++) {
     await page.waitForTimeout(400);
-    const now = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    const now = await page.evaluate(() => window.__mosaicaProbe?.marks ?? -1);
     if (now === last) stable++;
     else {
       stable = 0;
@@ -96,7 +96,7 @@ console.log(`marks across zoom: ${marks.join(', ')} (${eligible.length} of ${mar
 console.log(`spread (max/min over non-zero): ${spread.toFixed(2)}x   [MVP was ~25x]`);
 console.log(`console errors: ${errors.length ? errors.slice(0, 3).join(' | ') : 'none'}`);
 
-await page.screenshot({path: args.shot ?? '/tmp/tessera-budget.png'});
+await page.screenshot({path: args.shot ?? '/tmp/mosaica-budget.png'});
 await browser.close();
 
 const failures = [];

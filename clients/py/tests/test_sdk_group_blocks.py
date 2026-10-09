@@ -8,8 +8,8 @@ parameter. Both roster forms are declared and handed to the check; the served pr
 
 import pytest
 
-from tesseradb._database import create
-from tesseradb._refusal import Refusal
+from mosaica._database import create
+from mosaica._refusal import Refusal
 
 pa = pytest.importorskip("pyarrow")
 

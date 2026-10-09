@@ -8,8 +8,8 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::{ChangeOp, UnallocatedRow};
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::{ChangeOp, UnallocatedRow};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -50,7 +50,7 @@ fn delete_then_reingest_gives_the_value_to_the_new_item_across_flush_rotation_an
                 flush_max_items: usize::MAX,
                 max_merged_segment_bytes: None,
                 // Compaction §9's trigger is off unless a deployment configures one.
-                compaction: tessera_engine::CompactionSchedule::off(),
+                compaction: mosaica_engine::CompactionSchedule::off(),
                 ..config()
             },
         )
@@ -139,7 +139,7 @@ fn open_engine(dir: &std::path::Path) -> Engine {
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config()
         },
     )

@@ -18,10 +18,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::UnallocatedRow;
-use tessera_types::EntityId;
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_types::EntityId;
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -43,7 +43,7 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -92,7 +92,7 @@ fn whole_map() -> ViewportRequest<'static> {
     ViewportRequest::new("s0", 4, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize)
 }
 
-fn visible_count(engine: &Engine, session: &tessera_engine::Session) -> u64 {
+fn visible_count(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
     engine
         .viewport(session, whole_map())
         .expect("a viewport")
@@ -117,7 +117,7 @@ fn denied_rows(engine: &Engine) -> croaring::Bitmap {
 /// that names nothing *and* for one that names an invisible item, which is `visible_to`'s answer.
 fn visible_in_entity_space(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     entity: EntityId,
 ) -> bool {
     let id = engine
@@ -132,7 +132,7 @@ fn visible_in_entity_space(
 /// The row-space route: every mark the viewport draws, by `tessera_id`.
 fn drawn_marks(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
 ) -> std::collections::HashSet<u64> {
     engine
         .viewport(session, whole_map())
@@ -320,7 +320,7 @@ fn a_deep_deny_set_changes_no_answer() {
 fn engine_flushing_only_on_request(
     tmp: &Path,
     root: &Path,
-) -> (Engine, std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>) {
+) -> (Engine, std::sync::Arc<mosaica_lifecycle::faults::FaultSwitchboard>) {
     let mut engine = Engine::open(
         root,
         &tmp.join("cache"),
@@ -329,12 +329,12 @@ fn engine_flushing_only_on_request(
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
     .expect("engine opens");
-    let faults = std::sync::Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new());
+    let faults = std::sync::Arc::new(mosaica_lifecycle::faults::FaultSwitchboard::new());
     engine
         .start_write_executor_with_faults(64, std::sync::Arc::clone(&faults))
         .expect("the executor starts once");
@@ -354,7 +354,7 @@ fn engine_flushing_only_on_request(
 /// than waited for.
 #[test]
 fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
-    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+    use mosaica_lifecycle::faults::{PauseAction, PauseSite};
 
     const JOINED_VIEW: &str = "s1";
     let tmp = tempfile::TempDir::new().unwrap();
@@ -362,11 +362,11 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
     let (engine, faults) = engine_flushing_only_on_request(tmp.path(), &root);
 
     engine
-        .create_plain_view(tessera_engine::PlainViewDeclaration {
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
             name: JOINED_VIEW.to_string(),
             title: None,
             projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
+            frame: mosaica_engine::DeclaredFrame {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -432,7 +432,7 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
     };
     let entitled = engine.authorise(&full_coverage_credential()).unwrap();
     let unentitled = engine.authorise(&subset_credential()).unwrap();
-    let served = |session: &tessera_engine::Session| {
+    let served = |session: &mosaica_engine::Session| {
         let response = engine
             .viewport(session, whole(JOINED_VIEW))
             .expect("a viewport");
@@ -474,7 +474,7 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
 /// into exactly the state a park would have held.
 #[test]
 fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
-    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+    use mosaica_lifecycle::faults::{PauseAction, PauseSite};
 
     const JOINED_VIEW: &str = "s1";
     const WHOLE: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -544,11 +544,11 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
     let joiner = {
         let (engine, faults) = engine_flushing_only_on_request(tmp.path(), &root);
         engine
-            .create_plain_view(tessera_engine::PlainViewDeclaration {
+            .create_plain_view(mosaica_engine::PlainViewDeclaration {
                 name: JOINED_VIEW.to_string(),
                 title: None,
                 projection: "none".to_string(),
-                frame: tessera_engine::DeclaredFrame {
+                frame: mosaica_engine::DeclaredFrame {
                     x_min: 0.0,
                     x_max: 1000.0,
                     y_min: 0.0,
@@ -591,7 +591,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
         engine.request_flush();
         faults.await_arrivals(PauseSite::BeforeManifestPublish, 2, Duration::from_secs(30));
         wait_until("the executor's death is reported", || {
-            engine.write_executor_posture() == tessera_engine::ExecutorPosture::Dead
+            engine.write_executor_posture() == mosaica_engine::ExecutorPosture::Dead
         });
 
         assert!(

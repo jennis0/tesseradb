@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 
-use tessera_lifecycle::membership::ArtifactStore;
+use mosaica_lifecycle::membership::ArtifactStore;
 
-use tessera_store::permutation::RowSpace;
+use mosaica_store::permutation::RowSpace;
 
 
 use super::*;

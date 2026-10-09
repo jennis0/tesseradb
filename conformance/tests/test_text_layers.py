@@ -46,7 +46,7 @@ analyses to *no terms*, which must match no predicate while still being served.
 coalesced (`filter-index.md` §5.2, unlike a keyword one), so a window of extents collapses into one
 renumbered layer between folds — but the pass fires on a policy width of eight flushes, and driving
 eight over the control plane to reach a state whose correctness is a merge property would be a slow
-way to test what `crates/tessera-engine/tests/coalesce_text.rs` tests directly against the
+way to test what `crates/mosaica-engine/tests/coalesce_text.rs` tests directly against the
 artefacts. What this module owns is the layered and folded answers, which is where a cross-layer
 defect reaches a client.
 

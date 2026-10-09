@@ -7,7 +7,7 @@
 //! want the same three primitives, and a second copy of [`resident_bytes`]' parser would be a
 //! second answer to "how much of this process is anonymous memory".
 //!
-//! # Why an allocator call is a Tessera concern at all
+//! # Why an allocator call is a Mosaica concern at all
 //!
 //! glibc's `malloc` returns a free chunk to its arena, not to the kernel. The main arena releases
 //! only from the top of the heap, so a pass that allocates a level of Roaring bitmaps and frees
@@ -80,7 +80,7 @@ pub fn set_arena_max(arenas: usize) -> bool {
 ///
 /// Zeros where the file cannot be read or a field is absent.
 ///
-/// **`VmHWM` is not here**, so the two peak-RSS readers in `tessera-bench` and the build's
+/// **`VmHWM` is not here**, so the two peak-RSS readers in `mosaica-bench` and the build's
 /// `observer::peak_rss_kib` still parse the file themselves. Adding it would let those consolidate
 /// onto this type; they are left alone because a high-water mark is a different question from a
 /// current reading — it is reset by `clear_refs` and is meaningless to a cadence — and folding it

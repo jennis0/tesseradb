@@ -55,7 +55,7 @@
 //! # The ordinals are bundle-relative and survive every rewrite
 //!
 //! A stored ordinal is a position in the concatenation of `dict_extents` in listed order
-//! ([`tessera_authz::Dict::load`]), which is append-only: `coalesce_dict_extents` replaces a
+//! ([`mosaica_authz::Dict::load`]), which is append-only: `coalesce_dict_extents` replaces a
 //! *contiguous* window with the same records in the same order, and the compaction fold carries
 //! the dictionary forward by a hard link, never renumbered and never shrunk (compaction §3 pass
 //! 4b). So nothing that rewrites the corpus rewrites these numbers, and this artefact needs no
@@ -333,7 +333,7 @@ pub struct EntityTerms {
     hasrow: Bitmap,
     /// `hasrow`'s block ranks, filled on the first lookup: a rank per entity is otherwise a sum
     /// over every container below it.
-    ranks: std::sync::OnceLock<tessera_roaring::BlockRanks>,
+    ranks: std::sync::OnceLock<mosaica_roaring::BlockRanks>,
     offsets: Mmap,
     terms: Mmap,
     bases: Mmap,
@@ -515,7 +515,7 @@ impl EntityTerms {
         out.clear();
         let ranks = self
             .ranks
-            .get_or_init(|| tessera_roaring::BlockRanks::of(&self.hasrow));
+            .get_or_init(|| mosaica_roaring::BlockRanks::of(&self.hasrow));
         let Some(rank) = ranks.rank_of(&self.hasrow, entity) else {
             return Ok(false);
         };
@@ -540,7 +540,7 @@ impl EntityTerms {
                 Some(at) => at + 1,
                 None => self
                     .ranks
-                    .get_or_init(|| tessera_roaring::BlockRanks::of(&self.hasrow))
+                    .get_or_init(|| mosaica_roaring::BlockRanks::of(&self.hasrow))
                     .rank_of(&self.hasrow, entity)
                     .expect("an entity the bitmap holds has a rank in it"),
             };

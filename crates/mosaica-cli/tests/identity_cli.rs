@@ -1,11 +1,11 @@
-//! The key `tessera build` generates for each bundle it creates: stored in the manifest, never
+//! The key `mosaica build` generates for each bundle it creates: stored in the manifest, never
 //! configured, and never printed.
 
 use std::path::Path;
 use std::process::Command;
 
-fn tessera() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tessera"))
+fn mosaica() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }
 
 fn tiny_points(dir: &Path) -> std::path::PathBuf {
@@ -71,7 +71,7 @@ fn tiny_pairs(dir: &Path) -> std::path::PathBuf {
 /// sources, and the sources beside them (`configuration.md` §3).
 fn project(dir: &Path) {
     std::fs::write(
-        dir.join("tessera.toml"),
+        dir.join("mosaica.toml"),
         r#"
 [bundle]
 path  = "bundle"
@@ -102,15 +102,15 @@ control = "127.0.0.1:45721"
     tiny_pairs(dir);
 }
 
-/// `tessera build` in `dir`, writing to `out`.
+/// `mosaica build` in `dir`, writing to `out`.
 fn build(dir: &Path, out: &Path) -> std::process::Output {
-    tessera()
+    mosaica()
         .arg("build")
         .arg("--out")
         .arg(out)
         .current_dir(dir)
         .output()
-        .expect("failed to run tessera binary")
+        .expect("failed to run mosaica binary")
 }
 
 /// **Every build generates its own key.** Two builds of the same data store two different
@@ -134,7 +134,7 @@ fn each_build_generates_its_own_key_and_prints_none() {
             .as_str()
             .expect("the manifest records the key")
             .to_string();
-        tessera_types::IdentityKey::from_hex(&key).expect("the stored key is a valid key");
+        mosaica_types::IdentityKey::from_hex(&key).expect("the stored key is a valid key");
         assert!(!printed.contains(&key), "the build printed its key: {printed}");
         keys.push(key);
     }

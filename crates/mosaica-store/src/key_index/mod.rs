@@ -81,10 +81,10 @@ pub use view::{Found, KeyIndexView, RunRef};
 pub use write::{KeyRunWriter, WrittenRun};
 
 /// The first eight bytes of every run file.
-pub const MAGIC: [u8; 8] = *b"TSKEYRUN";
+pub const MAGIC: [u8; 8] = *b"MSKEYRUN";
 
 /// The run file's own format number. A file carrying another is refused at open.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// The size of the header page, of every entry page, and of the unit a page checksum covers.
 pub const PAGE_SIZE: usize = 4096;

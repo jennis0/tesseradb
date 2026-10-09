@@ -16,7 +16,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use tessera_catalogue::Permission;
+use mosaica_catalogue::Permission;
 
 use crate::auth::{self, Accepts, Caller};
 use crate::error::ApiError;

@@ -31,11 +31,11 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
-use tessera_types::AttrLocalId;
-use tessera_engine::{Engine, PointRows, ViewportOut, ViewportRequest};
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
+use mosaica_types::AttrLocalId;
+use mosaica_engine::{Engine, PointRows, ViewportOut, ViewportRequest};
 
 /// Enough items that a depth-2 request splits into several non-empty tiles and the cap clause has
 /// something to cap, and small enough that the fixture builds in a moment.
@@ -142,20 +142,20 @@ fn fixture() -> Fixture {
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     let schema = with_id(Config::parse(&schema_path, &HashMap::new()).unwrap().schema);
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &schema),
         out: bundle.clone(),
         limit: None,
         strict: false,
@@ -176,7 +176,7 @@ fn fixture() -> Fixture {
         &dir.path().join("cache"),
         &dir.path().join("wal.log"),
     );
-    let opened = tessera_store::read::open_bundle(&bundle).expect("the fixture opens");
+    let opened = mosaica_store::read::open_bundle(&bundle).expect("the fixture opens");
     let codes = opened
         .manifest
         .vocabularies
@@ -321,7 +321,7 @@ fn the_served_set_is_identical_with_and_without_a_highlight() {
                 for highlight in [category_is(&fx, "archive", "xx"), score_below(-40), FilterExpr::Leaf {
                         column: "archive".into(),
                         operand: FilterOperand::Equals(
-                            tessera_engine::filter::UNRESOLVABLE_VALUE,
+                            mosaica_engine::filter::UNRESOLVABLE_VALUE,
                         ),
                     }] {
                     let lit = viewport(
@@ -640,7 +640,7 @@ fn named_point_columns_serve_only_those_columns_over_the_same_points() {
     );
     assert!(matches!(
         refused,
-        Err(tessera_engine::EngineError::PointRowsRefused(_))
+        Err(mosaica_engine::EngineError::PointRowsRefused(_))
     ));
 }
 

@@ -1,4 +1,4 @@
-//! What `tessera-server`'s integration tests share: building a bundle, serving it, writing to
+//! What `mosaica-server`'s integration tests share: building a bundle, serving it, writing to
 //! it, waiting for what a write publishes, and decoding what a viewer is served. A helper more
 //! than one test file needs lives here and nowhere else.
 
@@ -22,20 +22,20 @@ use parking_lot::Mutex;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
-pub use tessera_build::config::AccessInput;
-use tessera_build::{build, BuildArgs, ViewArgs};
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::faults::FaultSwitchboard;
+pub use mosaica_build::config::AccessInput;
+use mosaica_build::{build, BuildArgs, ViewArgs};
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::faults::FaultSwitchboard;
 use sha2::Digest as _;
-use tessera_catalogue::{Catalogue, Grantee, Permission, PrincipalKind};
-use tessera_server::state::{AppState, ComputeGate, IngestAdmission, ServeLimits, SessionRegistry};
-use tessera_spatial::Bounds;
-use tessera_types::IdentityKey;
+use mosaica_catalogue::{Catalogue, Grantee, Permission, PrincipalKind};
+use mosaica_server::state::{AppState, ComputeGate, IngestAdmission, ServeLimits, SessionRegistry};
+use mosaica_spatial::Bounds;
+use mosaica_types::IdentityKey;
 
 pub const N_ITEMS: u64 = 1_000;
 
 pub const OPERATOR_CREDENTIAL: &str = "operator-secret";
-/// The identity key `tessera-build`'s own test fixtures use. It guards nothing.
+/// The identity key `mosaica-build`'s own test fixtures use. It guards nothing.
 pub const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 pub fn test_key() -> IdentityKey {
@@ -63,9 +63,9 @@ pub fn world_frame() -> Bounds {
 }
 
 /// A view group's quantisation over [`extent`].
-pub fn group_frame() -> tessera_build::Quantisation {
+pub fn group_frame() -> mosaica_build::Quantisation {
     let e = extent();
-    tessera_build::Quantisation {
+    mosaica_build::Quantisation {
         x_min: e.x_min,
         x_max: e.x_max,
         y_min: e.y_min,
@@ -186,13 +186,13 @@ pub fn build_fixture_with_access(dir: &Path, n: u64, access: AccessInput) -> std
 
 /// A declaration of one attribute: `id`, a unique `u64` read from the points file's `entity_id`,
 /// so a test names a built item by its `id` in a change's `match`, a member table or a row.
-pub fn id_schema() -> tessera_build::config::Schema {
-    tessera_build::config::Schema {
-        attributes: vec![tessera_build::config::Attribute {
+pub fn id_schema() -> mosaica_build::config::Schema {
+    mosaica_build::config::Schema {
+        attributes: vec![mosaica_build::config::Attribute {
             field: Some("entity_id".to_string()),
             name: "id".to_string(),
             title: None,
-            ty: tessera_spatial::tiler::ScalarType::U64,
+            ty: mosaica_spatial::tiler::ScalarType::U64,
             analyser: None,
             vocabulary: None,
             value_set: None,
@@ -235,7 +235,7 @@ pub const ID_ATTRIBUTE: &str =
 pub fn with_id(args: BuildArgs, points: &Path) -> BuildArgs {
     let schema = id_schema();
     BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         schema,
         ..args
     }
@@ -267,7 +267,7 @@ fn fixtures_dir() -> std::path::PathBuf {
     static DIR: std::sync::OnceLock<(std::path::PathBuf, std::fs::File)> =
         std::sync::OnceLock::new();
     let (dir, _held) = DIR.get_or_init(|| {
-        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tessera-server-fixtures");
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("mosaica-server-fixtures");
         std::fs::create_dir_all(&root).unwrap();
         for entry in std::fs::read_dir(&root).unwrap().flatten() {
             let path = entry.path();
@@ -398,7 +398,7 @@ pub fn view_args(view_id: &str, points: &Path, access: AccessInput) -> ViewArgs 
     ViewArgs {
         visibility: None,
         view_id: view_id.to_string(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: points.to_path_buf(),
         point_fields: Default::default(),
@@ -412,11 +412,11 @@ pub fn view_args(view_id: &str, points: &Path, access: AccessInput) -> ViewArgs 
 pub fn build_declared(out: &Path, points: &Path, pairs: &Path, schema_toml: &str) {
     let schema_path = points.with_file_name("schema.toml");
     std::fs::write(&schema_path, schema_toml).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+    let schema = mosaica_build::config::Config::parse(&schema_path, &Default::default())
         .unwrap()
         .schema;
     build(&BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         schema,
         ..build_args(
             out,
@@ -519,7 +519,7 @@ pub fn default_engine_config() -> EngineConfig {
         max_underlay_offset: 4,
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
-        compute_threads: tessera_engine::default_compute_threads(),
+        compute_threads: mosaica_engine::default_compute_threads(),
         // The shipped defaults for the two flush triggers.
         flush_max_age_secs: 90,
         flush_max_items: 40_000,
@@ -528,7 +528,7 @@ pub fn default_engine_config() -> EngineConfig {
         segment_floor_bytes: None,
         coalesce_width: None,
         // No scheduled compaction.
-        compaction: tessera_engine::CompactionSchedule::off(),
+        compaction: mosaica_engine::CompactionSchedule::off(),
     }
 }
 
@@ -592,7 +592,7 @@ pub async fn serve(dir: impl AsRef<Path>) -> TestServer {
 pub async fn serve_with_default(default: Option<&str>) -> (TempDir, TestServer) {
     let tmp = TempDir::new().unwrap();
     let access = AccessInput {
-        source: tessera_build::config::AccessSource::Relation(tmp.path().join("pairs.parquet")),
+        source: mosaica_build::config::AccessSource::Relation(tmp.path().join("pairs.parquet")),
         default: default.map(str::to_string),
     };
     build_fixture_with_access(tmp.path(), N_ITEMS, access);
@@ -682,8 +682,8 @@ pub fn generous_password_gate() -> ComputeGate {
 
 /// An OIDC verifier that fetches a provider's keys again whenever a token names one it lacks, so
 /// a test of key rotation need not wait out the refetch interval.
-pub fn test_verifier() -> tessera_server::oidc::Verifier {
-    tessera_server::oidc::Verifier::with_intervals(
+pub fn test_verifier() -> mosaica_server::oidc::Verifier {
+    mosaica_server::oidc::Verifier::with_intervals(
         std::time::Duration::ZERO,
         std::time::Duration::from_secs(3600),
         std::time::Duration::from_secs(24 * 3600),
@@ -1038,9 +1038,9 @@ async fn mount_server_with_flush(
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
-        heap: tessera_server::memory::HeapWatch::default(),
+        heap: mosaica_server::memory::HeapWatch::default(),
         limits,
-        suggest_admission: tessera_server::state::SuggestAdmission::new(),
+        suggest_admission: mosaica_server::state::SuggestAdmission::new(),
         compute_gate,
         password_gate: generous_password_gate(),
         bulk_gate,
@@ -1061,7 +1061,7 @@ pub const INTEGRATOR: &str = "integrator";
 /// Opens the catalogue in `dir` and issues a key for [`INTEGRATOR`], creating it with
 /// `authorise-as` where it is absent.
 pub fn test_identity_at(dir: &Path) -> (Catalogue, String) {
-    let catalogue = Catalogue::open(dir, tessera_catalogue::Options::default())
+    let catalogue = Catalogue::open(dir, mosaica_catalogue::Options::default())
         .expect("the test catalogue opens");
     if catalogue.principal(INTEGRATOR).is_none() {
         catalogue
@@ -1095,9 +1095,9 @@ pub async fn serve_state(
     let control_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_addr = control_listener.local_addr().unwrap();
 
-    let viewer_router = tessera_server::viewer::router(Arc::clone(&state));
-    let session_router = tessera_server::session::router(Arc::clone(&state));
-    let control_router = tessera_server::control::router(Arc::clone(&state));
+    let viewer_router = mosaica_server::viewer::router(Arc::clone(&state));
+    let session_router = mosaica_server::session::router(Arc::clone(&state));
+    let control_router = mosaica_server::control::router(Arc::clone(&state));
 
     let serve_tasks = vec![
         tokio::spawn(async move {
@@ -1407,7 +1407,7 @@ pub async fn wait_until<A: Attempt<()>>(
 
 /// Send `request` until the answer is neither shed nor stale and return it, failing the test
 /// unless a `200` arrives within a minute. A `429` is the admission gate shedding under machine
-/// load and `x-tessera-stale: 1` a stale stamp; neither is the answer a test asks about.
+/// load and `x-mosaica-stale: 1` a stale stamp; neither is the answer a test asks about.
 pub async fn settled(request: impl AsyncFn() -> reqwest::Response) -> reqwest::Response {
     wait_for(
         "a settled answer",
@@ -1421,7 +1421,7 @@ pub async fn settled(request: impl AsyncFn() -> reqwest::Response) -> reqwest::R
             assert_eq!(resp.status().as_u16(), 200, "the request answers");
             let stale = resp
                 .headers()
-                .get("x-tessera-stale")
+                .get("x-mosaica-stale")
                 .is_some_and(|v| v == "1");
             if stale {
                 tokio::time::sleep(std::time::Duration::from_millis(40)).await;
@@ -1437,7 +1437,7 @@ pub async fn settled(request: impl AsyncFn() -> reqwest::Response) -> reqwest::R
 pub async fn wait_for_executor(
     server: &TestServer,
     what: &str,
-    done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
+    done: impl Fn(&mosaica_engine::ExecutorStats) -> bool,
 ) {
     wait_until(what, std::time::Duration::from_secs(180), async || {
         let stats = server.state.engine.write_executor_stats();
@@ -1535,10 +1535,10 @@ pub async fn flush_and_fold(server: &TestServer, view: Option<&str>) {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "flush-and-fold")
+        .header("x-mosaica-batch-id", "flush-and-fold")
         .header("content-type", "application/vnd.apache.arrow.stream");
     if let Some(view) = view {
-        request = request.header("x-tessera-view", view);
+        request = request.header("x-mosaica-view", view);
     }
     let resp = request
         .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
@@ -1658,19 +1658,19 @@ fn u64_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> UInt64Array {
 /// Decode a complete streamed `/v1/viewport` body, failing the test unless the tiles frame is
 /// first, one trailer is last and every frame is of a known kind.
 pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
-    let frames = tessera_wire::split_frames(bytes).expect("well-formed frame sequence");
+    let frames = mosaica_wire::split_frames(bytes).expect("well-formed frame sequence");
     assert!(
         !frames.is_empty(),
         "a response carries at least tiles + trailer"
     );
     assert_eq!(
         frames.first().unwrap().0,
-        tessera_wire::FRAME_TILES,
+        mosaica_wire::FRAME_TILES,
         "the tiles frame is first"
     );
     assert_eq!(
         frames.last().unwrap().0,
-        tessera_wire::FRAME_TRAILER,
+        mosaica_wire::FRAME_TRAILER,
         "the trailer frame is last"
     );
 
@@ -1684,9 +1684,9 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     let mut at = 0usize;
 
     for (index, (kind, payload)) in frames.iter().enumerate() {
-        let frame_len = tessera_wire::FRAME_HEADER_BYTES + payload.len();
+        let frame_len = mosaica_wire::FRAME_HEADER_BYTES + payload.len();
         match *kind {
-            tessera_wire::FRAME_TILES => {
+            mosaica_wire::FRAME_TILES => {
                 assert_eq!(index, 0, "exactly one tiles frame, first");
                 let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
                 for batch in reader {
@@ -1702,7 +1702,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                 }
                 deterministic_end = at + frame_len;
             }
-            tessera_wire::FRAME_SUB_CELLS => {
+            mosaica_wire::FRAME_SUB_CELLS => {
                 assert!(sub_cells.is_none(), "at most one sub-cells frame");
                 assert_eq!(index, 1, "the sub-cells frame immediately follows tiles");
                 let cells = sub_cells.get_or_insert_with(Vec::new);
@@ -1717,7 +1717,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                 }
                 deterministic_end = at + frame_len;
             }
-            tessera_wire::FRAME_POINTS => {
+            mosaica_wire::FRAME_POINTS => {
                 point_frames += 1;
                 let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
                 for batch in reader {
@@ -1730,7 +1730,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                 }
                 deterministic_end = at + frame_len;
             }
-            tessera_wire::FRAME_TRAILER => {
+            mosaica_wire::FRAME_TRAILER => {
                 assert!(trailer.is_none(), "exactly one trailer");
                 let parsed: serde_json::Value = serde_json::from_slice(payload).unwrap();
                 // `stage_ns` is the one optional key.
@@ -1794,16 +1794,16 @@ pub struct DecodedArtifacts {
 /// artifacts frame whose rows all name its one tile, the treed frame comes first and holds a row,
 /// and one trailer is last and counts the rows.
 pub fn decode_artifact_frames(bytes: &[u8]) -> DecodedArtifacts {
-    let frames = tessera_wire::split_frames(bytes).expect("well-formed frame sequence");
+    let frames = mosaica_wire::split_frames(bytes).expect("well-formed frame sequence");
     let (last, body) = frames.split_last().expect("a body ends in a trailer");
-    assert_eq!(last.0, tessera_wire::FRAME_TRAILER, "the trailer frame is last");
+    assert_eq!(last.0, mosaica_wire::FRAME_TRAILER, "the trailer frame is last");
     let trailer: serde_json::Value = serde_json::from_slice(last.1).unwrap();
     let mut keys: Vec<&str> = trailer.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(keys, ["arrow_serialise_ns", "frames", "rows", "stream_us"]);
     let mut decoded = Vec::new();
     for (index, (kind, payload)) in body.iter().enumerate() {
-        assert_eq!(*kind, tessera_wire::FRAME_ARTIFACTS, "frame {index} is an artifacts frame");
+        assert_eq!(*kind, mosaica_wire::FRAME_ARTIFACTS, "frame {index} is an artifacts frame");
         let rows = decode_artifact_rows(payload);
         let tile = rows.first().map_or(Some(u32::MAX), |row| row.tile);
         assert!(
@@ -1927,7 +1927,7 @@ pub fn artifacts_request(mut viewport: serde_json::Value) -> serde_json::Value {
         computed.retain(|word| word != "shape");
     }
     body.entry("per_tile")
-        .or_insert(serde_json::json!(tessera_config::defaults::DEFAULT_MAX_ARTIFACTS_PER_TILE));
+        .or_insert(serde_json::json!(mosaica_config::defaults::DEFAULT_MAX_ARTIFACTS_PER_TILE));
     viewport
 }
 
@@ -2082,8 +2082,8 @@ impl DecodedRecords {
 /// Decodes an items body strictly: one head first, a page end after every records frame and
 /// nowhere else, one trailer last, and one batch in every records frame.
 pub fn decode_records(bytes: &[u8]) -> DecodedRecords {
-    use tessera_wire::{FRAME_RECORDS_HEAD, FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER};
-    let frames = tessera_wire::split_frames(bytes).expect("an items body splits into frames");
+    use mosaica_wire::{FRAME_RECORDS_HEAD, FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER};
+    let frames = mosaica_wire::split_frames(bytes).expect("an items body splits into frames");
     assert!(frames.len() >= 2, "a head and a trailer at least");
     let json = |payload: &[u8]| -> serde_json::Value {
         serde_json::from_slice(payload).expect("a JSON frame parses")
@@ -2142,8 +2142,8 @@ impl DecodedAggregate {
 /// An aggregate body: a table head before each table's first page, each records frame followed by
 /// its page end, then the trailer.
 pub fn decode_aggregate(bytes: &[u8]) -> DecodedAggregate {
-    use tessera_wire::{FRAME_PAGE_END, FRAME_RECORDS, FRAME_TABLE_HEAD, FRAME_TRAILER};
-    let frames = tessera_wire::split_frames(bytes).expect("an aggregate body splits into frames");
+    use mosaica_wire::{FRAME_PAGE_END, FRAME_RECORDS, FRAME_TABLE_HEAD, FRAME_TRAILER};
+    let frames = mosaica_wire::split_frames(bytes).expect("an aggregate body splits into frames");
     let json = |payload: &[u8]| -> serde_json::Value {
         serde_json::from_slice(payload).expect("a JSON frame parses")
     };
@@ -2248,20 +2248,20 @@ pub fn aggregate_rows(batch: &RecordBatch) -> Vec<AggregateRow> {
 }
 
 /// The item each of `values` names in the unique field `field`, `None` for a value naming none,
-/// asked of [`tessera_engine::Engine::name_items`].
+/// asked of [`mosaica_engine::Engine::name_items`].
 pub fn unique_holders(
-    engine: &tessera_engine::Engine,
+    engine: &mosaica_engine::Engine,
     field: &str,
     values: &[String],
-) -> Result<Vec<Option<tessera_types::EntityId>>, tessera_engine::EngineError> {
-    let table = tessera_engine::AddressTable {
+) -> Result<Vec<Option<mosaica_types::EntityId>>, mosaica_engine::EngineError> {
+    let table = mosaica_engine::AddressTable {
         rows: values.len(),
         tessera_id: None,
         columns: vec![(
             field.to_string(),
             values
                 .iter()
-                .map(|v| Some(tessera_engine::AddressValue::Text(v.clone())))
+                .map(|v| Some(mosaica_engine::AddressValue::Text(v.clone())))
                 .collect(),
         )],
     };
@@ -2270,7 +2270,7 @@ pub fn unique_holders(
         .verdicts
         .into_iter()
         .map(|verdict| match verdict {
-            tessera_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
+            mosaica_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
             _ => None,
         })
         .collect())
@@ -2306,7 +2306,7 @@ pub fn write_deployment(tmp: &Path, control: &str, serve_extra: &str) -> std::pa
         catalogue = tmp.join("catalogue").display(),
         operator_cred = operator_credential.display(),
     );
-    let path = tmp.join("tessera.toml");
+    let path = tmp.join("mosaica.toml");
     std::fs::write(&path, text).unwrap();
     path
 }

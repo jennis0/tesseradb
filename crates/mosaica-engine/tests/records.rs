@@ -25,28 +25,28 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::{Attribute, Config, Fields};
-use tessera_build::{
+use mosaica_build::config::{Attribute, Config, Fields};
+use mosaica_build::{
     build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
     ViewArgs,
 };
-use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, MemberOfLeaf, RegionLeaf, Scalar};
-use tessera_engine::shapes::ShapeF64;
-use tessera_engine::{
+use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, MemberOfLeaf, RegionLeaf, Scalar};
+use mosaica_engine::shapes::ShapeF64;
+use mosaica_engine::{
     ColumnBuf, Engine, EngineError, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink,
     RecordsTrailer, LayerSelection, PageEndedBy, RecordsOrder, RecordsRefused, RegionVerdict,
     ResponseEndedBy, Session, SinkResult, ViewportRequest,
 };
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::{IncomingArtifact, UnallocatedRow};
-use tessera_spatial::shape::Space;
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::{Bounds, Projection};
-use tessera_types::layer::{
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::{IncomingArtifact, UnallocatedRow};
+use mosaica_spatial::shape::Space;
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::{Bounds, Projection};
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use tessera_types::{AttrLocalId, EntityId, IdentityKey, TesseraId};
+use mosaica_types::{AttrLocalId, EntityId, IdentityKey, TesseraId};
 
 const N: u64 = 2000;
 const GEO: &str = "geo";
@@ -285,7 +285,7 @@ fn view_args(
         points: points.to_path_buf(),
         point_fields: Fields::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
     }
 }
 
@@ -312,7 +312,7 @@ fn scoped(
             field: None,
             ty,
             analyser: analyser.map(|name| {
-                tessera_analyse::identity_of(name).expect("the analyser is carried")
+                mosaica_analyse::identity_of(name).expect("the analyser is carried")
             }),
             vocabulary: None,
             value_set: None,
@@ -429,7 +429,7 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
             scoped("blurb", ScalarType::Text, Some("unicode"), "quarter", quarter_views),
             scoped("hush", ScalarType::I32, None, "secret", vec![secret_view]),
         ],
-        attribute_sources: tessera_build::config::AttributeSource::over(world.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(world.clone(), &with_id(schema.clone())),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -490,11 +490,11 @@ impl Fx {
                     GEO => {
                         let (lon, lat) = geo_position(s);
                         let (x, y) = Projection::WebMercator.forward(lon, lat);
-                        tessera_spatial::morton_of(x, y, &unit()).raw()
+                        mosaica_spatial::morton_of(x, y, &unit()).raw()
                     }
                     _ => {
                         let (x, y) = position(s);
-                        tessera_spatial::morton_of(x, y, &extent()).raw()
+                        mosaica_spatial::morton_of(x, y, &extent()).raw()
                     }
                 };
                 ((cell, self.tid(s)), s)
@@ -768,7 +768,7 @@ fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> TesseraId {
             membership: MembershipSource::Enumerated,
             value_set: Default::default(),
             visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
             require_member_visibility: Some(ExistenceCriterion::Count(1)),
             hierarchy: Hierarchy {
                 kind: HierarchyKind::Flat,
@@ -799,7 +799,7 @@ fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> TesseraId {
     fx.engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
         )
         .unwrap()
         .artifacts()[0]
@@ -1575,8 +1575,8 @@ fn positions_come_back_within_one_grid_step() {
     let step = 1000.0 / 4_294_967_296.0;
     let mut checked = 0;
     for batch in pages_of(&fx, &session, "s0", &fields, &system) {
-        let x = col::<Float64Array>(&batch, "tessera:x");
-        let y = col::<Float64Array>(&batch, "tessera:y");
+        let x = col::<Float64Array>(&batch, "mosaica:x");
+        let y = col::<Float64Array>(&batch, "mosaica:y");
         let held = col::<UInt64Array>(&batch, "id");
         for (i, tid) in ids_of(&batch).into_iter().enumerate() {
             let s = by_tid[&tid];
@@ -1592,8 +1592,8 @@ fn positions_come_back_within_one_grid_step() {
     let unit_step = 1.0 / 4_294_967_296.0;
     let mut checked = 0;
     for batch in pages_of(&fx, &session, GEO, &fields, &system) {
-        let lon = col::<Float64Array>(&batch, "tessera:x");
-        let lat = col::<Float64Array>(&batch, "tessera:y");
+        let lon = col::<Float64Array>(&batch, "mosaica:x");
+        let lat = col::<Float64Array>(&batch, "mosaica:y");
         for (i, tid) in ids_of(&batch).into_iter().enumerate() {
             let s = by_tid[&tid];
             let (want_lon, want_lat) = geo_position(s);
@@ -1692,7 +1692,7 @@ fn a_group_scoped_field_resolves_as_a_filter_leaf_does() {
 /// its record fields null**, as its item card shows them.
 #[test]
 fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
-    use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+    use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = build_bundle(tmp.path());
@@ -1700,7 +1700,7 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_engine::EngineConfig {
+        mosaica_engine::EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,
             ..config()
@@ -1797,8 +1797,8 @@ fn keep_unmatched_marks_every_visible_row_and_count_heads_the_response() {
         pages.extend(respond(&fx.engine, &session, rest).unwrap().0.pages);
         for (batch, _) in &pages {
             let last = batch.schema().fields().last().unwrap().name().clone();
-            assert_eq!(last, "tessera:matched", "the matched column is last");
-            let matched = col::<BooleanArray>(batch, "tessera:matched");
+            assert_eq!(last, "mosaica:matched", "the matched column is last");
+            let matched = col::<BooleanArray>(batch, "mosaica:matched");
             for (i, tid) in ids_of(batch).into_iter().enumerate() {
                 assert_eq!(matched.value(i), matches(by_tid[&tid]));
                 rows += 1;
@@ -1814,7 +1814,7 @@ fn keep_unmatched_marks_every_visible_row_and_count_heads_the_response() {
     let counts = sink.head.unwrap().counts.unwrap();
     assert_eq!((counts.served, counts.matched), (N, N));
     for (batch, _) in &sink.pages {
-        assert!(col::<BooleanArray>(batch, "tessera:matched").iter().all(|b| b == Some(true)));
+        assert!(col::<BooleanArray>(batch, "mosaica:matched").iter().all(|b| b == Some(true)));
     }
 }
 
@@ -1919,7 +1919,7 @@ fn the_order_follows_the_fields_and_malformed_requests_are_refused() {
     req.pages = Some(1);
     let by_tid = sources_by_tid(&fx);
     let (sink, _) = respond(&fx.engine, &both, req).unwrap();
-    let labels = col::<ListArray>(&sink.pages[0].0, "tessera:labels");
+    let labels = col::<ListArray>(&sink.pages[0].0, "mosaica:labels");
     for (i, tid) in ids_of(&sink.pages[0].0).into_iter().enumerate() {
         let row = labels.value(i);
         let row = row.as_any().downcast_ref::<StringArray>().unwrap();
@@ -1966,7 +1966,7 @@ fn a_response_ends_at_its_pages_its_bytes_and_cancellation_and_the_read_resumes(
 
     // Cancelled before it starts: a head, no page, and a trailer that resumes where it was.
     let mut cancelled = req.clone();
-    let cancel = tessera_engine::CancelToken::new();
+    let cancel = mosaica_engine::CancelToken::new();
     cancel.cancel();
     cancelled.cancel = Some(cancel);
     let next = trailer.next.unwrap();
@@ -1992,7 +1992,7 @@ fn a_response_cancelled_before_it_starts_is_a_head_and_a_deadline_trailer() {
     let mut req = request("s0", &fields);
     req.order = Some(RecordsOrder::Map);
     req.page_rows = Some(100);
-    let cancel = tessera_engine::CancelToken::new();
+    let cancel = mosaica_engine::CancelToken::new();
     cancel.cancel();
     let mut cancelled = req.clone();
     cancelled.cancel = Some(cancel);
@@ -2213,7 +2213,7 @@ fn every_row_is_read_once_across_stretch_boundaries() {
                     let marked: u64 = read
                         .pages
                         .iter()
-                        .map(|(b, _)| col::<BooleanArray>(b, "tessera:matched").true_count() as u64)
+                        .map(|(b, _)| col::<BooleanArray>(b, "mosaica:matched").true_count() as u64)
                         .sum();
                     assert_eq!(marked, matched, "{order:?} {page_rows} {mode}");
                 }
@@ -2255,8 +2255,8 @@ fn a_narrower_viewers_rows_and_labels_are_theirs_row_by_row() {
         let marked = read_all(&fx.engine, &session, &req);
         assert_eq!(marked.ids(), fx.tids(&in_order(visible.clone())), "{order:?}: marked");
         for (batch, _) in &marked.pages {
-            let matched = col::<BooleanArray>(batch, "tessera:matched");
-            let labels = col::<ListArray>(batch, "tessera:labels");
+            let matched = col::<BooleanArray>(batch, "mosaica:matched");
+            let labels = col::<ListArray>(batch, "mosaica:labels");
             for (i, tid) in ids_of(batch).into_iter().enumerate() {
                 let s = by_tid[&tid];
                 assert_eq!(matched.value(i), low(s), "{order:?}: the matched bit of {s}");
@@ -2456,7 +2456,7 @@ fn cancelled_mid_scan(batches: u64) {
             loop {
                 responses += 1;
                 assert!(responses <= 200, "{order:?} {batches}: the read made no progress");
-                let token = tessera_engine::CancelToken::new();
+                let token = mosaica_engine::CancelToken::new();
                 let deadline = {
                     let token = token.clone();
                     std::thread::spawn(move || {
@@ -2597,7 +2597,7 @@ fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
                 assert_eq!(ids, fx.tids(&expected), "{case}: rows");
                 if keep_unmatched {
                     for (batch, _) in &sink.pages {
-                        let matched = col::<BooleanArray>(batch, "tessera:matched");
+                        let matched = col::<BooleanArray>(batch, "mosaica:matched");
                         for (i, tid) in ids_of(batch).into_iter().enumerate() {
                             let s = by_tid[&tid];
                             assert_eq!(matched.value(i), matches(s), "{case}: matched bit of {s}");

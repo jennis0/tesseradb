@@ -34,8 +34,8 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
-use tessera_authz::PostingsReader;
-use tessera_store::read::{open_bundle, SegmentData};
+use mosaica_authz::PostingsReader;
+use mosaica_store::read::{open_bundle, SegmentData};
 
 use crate::arms::{Context, Result};
 use crate::corpus::{build_grant_to_coverage, GrantShape, TermStats};
@@ -158,7 +158,7 @@ fn select(pattern: Pattern, visible: &[u32], k: usize, seed: u64) -> Vec<u32> {
 
 /// The gather itself: read the selected rows out of the mmapped columns.
 ///
-/// Deliberately mirrors `tessera_engine::viewport::row_to_point`'s access shape — index into each
+/// Deliberately mirrors `mosaica_engine::viewport::row_to_point`'s access shape — index into each
 /// column slice per row — without constructing a `PointOut`, so what is measured is the column
 /// reads and not the `Vec<PointOut>` allocation that sits on top of them in the real path. That
 /// allocation is real and is attributed separately by the stage timer's `gather_ns`.

@@ -29,7 +29,7 @@
 //!
 //! # One implementation, not a second transcription
 //!
-//! Every byte written here comes from [`tessera_store::membership`] — the same functions the fold's
+//! Every byte written here comes from [`mosaica_store::membership`] — the same functions the fold's
 //! artifact pass calls, beside the formats they produce. This module supplies the walks (a level's
 //! records against the row space) and the coordinates; it packs nothing and names no file itself.
 //! A build and a fold therefore cannot file the same structure two ways, which is the failure a
@@ -47,18 +47,18 @@ use std::path::Path;
 use std::time::Instant;
 
 use croaring::Bitmap;
-use tessera_authz::postings::{PostingRef, PostingsReader};
-use tessera_lifecycle::membership::ArtifactStore;
-use tessera_store::derived::{resolve_segment, HeldShape, ShapeIndex};
-use tessera_store::read::SegmentData;
+use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_lifecycle::membership::ArtifactStore;
+use mosaica_store::derived::{resolve_segment, HeldShape, ShapeIndex};
+use mosaica_store::read::SegmentData;
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
 // the call sites below reading as what they do rather than as which file they are in.
-use tessera_store::derived;
-use tessera_store::derived::{DerivedIndex, Filed, PostingSlice, SignatureIndex};
-use tessera_store::manifest::DerivedForm;
-use tessera_store::permutation::ProjectScratch;
-use tessera_store::RowSpace;
-use tessera_types::layer::{LevelShape, MembershipSource, RegisteredLayer, ServingLayout};
+use mosaica_store::derived;
+use mosaica_store::derived::{DerivedIndex, Filed, PostingSlice, SignatureIndex};
+use mosaica_store::manifest::DerivedForm;
+use mosaica_store::permutation::ProjectScratch;
+use mosaica_store::RowSpace;
+use mosaica_types::layer::{LevelShape, MembershipSource, RegisteredLayer, ServingLayout};
 
 use crate::layers::PublishedLayers;
 
@@ -105,7 +105,7 @@ impl LevelLayoutReport {
 pub struct ArtifactPass {
     /// Every derived file the pass wrote: tile indexes, row-major columns, shape row forms and
     /// held shapes.
-    pub derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
+    pub derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
     /// Every file this pass wrote, for `MANIFEST.files` — an undigested file is one a torn write
     /// cannot be attributed to.
     pub paths: Vec<std::path::PathBuf>,
@@ -163,7 +163,7 @@ pub fn run(
     // Q1 cluster projected into Q2's row space would be a real, wrong artifact there. The view's
     // own key is what an artifact names, so a group's several layouts over one key set — `quarter`
     // and `quarter_alt` — draw the same artifact in each.
-    let view_key = tessera_store::view_path_components(view)
+    let view_key = mosaica_store::view_path_components(view)
         .last()
         .copied()
         .unwrap_or(view)
@@ -189,9 +189,9 @@ pub fn run(
     // from the sort: the permutation is fsynced by now, and reading it back is what makes this pass
     // a function of the published prefix rather than of a structure that only existed in memory.
     let permutation_path =
-        tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
+        mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), view)
             .join("permutation.bin");
-    let space = match tessera_store::Permutation::load(&permutation_path) {
+    let space = match mosaica_store::Permutation::load(&permutation_path) {
         Ok(permutation) => RowSpace::new(std::sync::Arc::new(permutation), row_count),
         Err(error) => {
             eprintln!(
@@ -218,7 +218,7 @@ pub fn run(
     // whole ranges, boundary-cell rows one by one — and the per-row source that produces is what
     // the pick observes and the column is composed from below, exactly as an enumerated level's
     // member table is. The serving engine resolves the same segment again at open from the same
-    // shapes (`tessera_engine::shapes`), so nothing here is persisted but the layout and the
+    // shapes (`mosaica_engine::shapes`), so nothing here is persisted but the layout and the
     // column; what this pass buys is the pick and the report.
     let segment = load_build_segment(prefix_dir, partition, view, row_count);
     let mut resolved: BTreeMap<(String, u32), Vec<Option<Bitmap>>> = BTreeMap::new();
@@ -321,7 +321,7 @@ pub fn run(
                 );
             }
         });
-        let layout = tessera_types::layer::choose(&registered.declaration, shape);
+        let layout = mosaica_types::layer::choose(&registered.declaration, shape);
         pass.levels.push(LevelLayoutReport {
             view: view.to_string(),
             layer: layer.clone(),
@@ -374,7 +374,7 @@ pub fn run(
             view: Some(view.to_string()),
             // **A build coins each key once, so every structure it writes is the declared
             // incarnation** (decision 0115). There is no drop at a build to leave a predecessor.
-            incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
+            incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
             layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),
@@ -467,7 +467,7 @@ pub fn run(
         );
         let filed = |form: DerivedForm, path: std::path::PathBuf| Filed {
             view: Some(view.to_string()),
-            incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
+            incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
             layer: layer.clone(),
             level: *level,
             level_version,
@@ -559,7 +559,7 @@ pub fn run(
             let level_version = store.level_version(layer, *level);
             shape_rows.push(Filed {
                 view: Some(view.to_string()),
-                incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
+                incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 layer: layer.clone(),
                 level: *level,
                 level_version,
@@ -598,7 +598,7 @@ pub fn run(
                 .collect();
             Filed {
                 view: Some(view.to_string()),
-                incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
+                incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
                 layer: layer.clone(),
                 level: *level,
                 level_version,
@@ -630,14 +630,14 @@ fn load_build_segment(
     view: &str,
     row_count: u32,
 ) -> Option<SegmentData> {
-    let dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
+    let dir = mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), view)
         .join("segments")
         .join(crate::BUILD_SEG_ID);
     match SegmentData::load(
         &dir,
         crate::BUILD_SEG_ID,
         row_count,
-        tessera_store::edited::RowEntities::Numbers,
+        mosaica_store::edited::RowEntities::Numbers,
     ) {
         Ok(segment) => Some(segment),
         Err(error) => {
@@ -674,7 +674,7 @@ pub fn containment(
     prefix_dir: &Path,
     partition: &str,
     index: &mut DerivedIndex,
-) -> Vec<tessera_store::manifest::DerivedExtent> {
+) -> Vec<mosaica_store::manifest::DerivedExtent> {
     let postings_path = prefix_dir
         .join("partitions")
         .join(partition)
@@ -710,8 +710,8 @@ pub fn containment(
         // same. `SignatureIndex::build` returns immediately on an empty set, so the cost of the
         // symmetry is a file header.
         let wanted = derived::generating_entities(&contents);
-        // The one adapter between the postings format and the composer — `tessera-store` may not
-        // depend on `tessera-authz`, so the shape is handed across and the walk is written once.
+        // The one adapter between the postings format and the composer — `mosaica-store` may not
+        // depend on `mosaica-authz`, so the shape is handed across and the walk is written once.
         // The engine holds the identical six lines (`containment::signature_index`).
         let signatures = SignatureIndex::build(&wanted, postings.term_count(), &|term, visit| {
             if let Some(posting) = postings.posting_at(term)? {
@@ -752,7 +752,7 @@ pub fn containment(
 /// into the build show it and neither has to reconstruct it.
 ///
 /// The `everywhere` fraction decides a treed or spatial level's layout
-/// (`tessera_types::layer::ROW_MAJOR_EVERYWHERE_FRACTION`), and blocks per artifact says how much
+/// (`mosaica_types::layer::ROW_MAJOR_EVERYWHERE_FRACTION`), and blocks per artifact says how much
 /// work a membership is; both are reported for every level.
 pub fn report(pass: &ArtifactPass) {
     if pass.levels.is_empty() {

@@ -1,4 +1,4 @@
-import type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregateTable, Layer, Meta, Store} from '@tesseradb/client';
+import type {AggregateEntry, AggregateSpec, AggregateSpecGrouping, AggregateTable, Layer, Meta, Store} from '@mosaica/client';
 
 /**
  * One listed group of an aggregate table: its key (a vocabulary key for a field, an artifact's

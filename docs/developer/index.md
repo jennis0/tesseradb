@@ -1,6 +1,6 @@
 # Developer
 
-These pages are for someone building, testing or changing Tessera itself.
+These pages are for someone building, testing or changing Mosaica itself.
 
 - Building: the toolchains, the workspace's crates and what each is for, the client packages and the Python wheel. Not written yet.
 - Testing: the workspace tests, the conformance suite and its oracle, and the checker scripts. Not written yet.

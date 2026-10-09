@@ -32,12 +32,12 @@ use std::path::Path;
 
 use fixture::{build_bundle, PARTITION, VIEW};
 use proptest::prelude::*;
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use tessera_store::manifest::Quantisation;
-use tessera_store::merge::{execute_merge, MergeInput, MergeSpec};
-use tessera_store::read::{ColumnsRef, MortonSlice};
-use tessera_types::{EntityId, IdentityKey, TesseraId, ROW_ABSENT};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
+use mosaica_store::manifest::Quantisation;
+use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
+use mosaica_store::read::{ColumnsRef, MortonSlice};
+use mosaica_types::{EntityId, IdentityKey, TesseraId, ROW_ABSENT};
 
 fn key() -> IdentityKey {
     IdentityKey::from_hex("0123456789abcdef0123456789abcdef").expect("test key")

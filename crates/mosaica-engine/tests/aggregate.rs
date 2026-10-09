@@ -22,19 +22,19 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::filter::{FilterExpr, FilterOperand, RegionLeaf};
-use tessera_engine::{
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::filter::{FilterExpr, FilterOperand, RegionLeaf};
+use mosaica_engine::{
     AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, AggregateTrailer, By,
     CancelToken, CategoryQuery, Cut, Engine, EngineError, Grouping, ItemsRequest, PageEnd, Pick,
     RecordsHead, RecordsLimits, RecordsSink, Reference, ResponseEndedBy, Session, SinkResult,
     TableHead, ViewportRequest,
 };
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_spatial::shape::{ShapeF64, Space};
-use tessera_types::AttrLocalId;
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_spatial::shape::{ShapeF64, Space};
+use mosaica_types::AttrLocalId;
 
 const N: u64 = 3_000;
 
@@ -205,20 +205,20 @@ fn build_bundle(dir: &Path) -> PathBuf {
         .schema;
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -744,7 +744,7 @@ fn the_size_of_a_set_is_what_the_viewport_and_items_count() {
     assert!(
         matches!(
             collect.head.and_then(|h| h.region),
-            Some(tessera_engine::RegionVerdict::Cover { .. })
+            Some(mosaica_engine::RegionVerdict::Cover { .. })
         ),
         "the region is answered by its cover"
     );
@@ -1098,14 +1098,14 @@ fn a_request_past_a_limit_or_naming_what_cannot_be_counted_is_refused() {
     assert!(matches!(
         refused(&[]),
         Some(EngineError::AggregateRefused(
-            tessera_engine::AggregateRefused::NoGroupings
+            mosaica_engine::AggregateRefused::NoGroupings
         ))
     ));
     let many = vec![size(); 9];
     assert!(matches!(
         refused(&many),
         Some(EngineError::AggregateRefused(
-            tessera_engine::AggregateRefused::OverCap { .. }
+            mosaica_engine::AggregateRefused::OverCap { .. }
         ))
     ));
     for bad in [
@@ -1258,7 +1258,7 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
 #[test]
 fn a_view_counts_only_the_items_with_a_row_in_it() {
     use homes::{band_of, build_homes, open, score_of, QUARTERS};
-    use tessera_engine::filter::{Endpoint, Scalar};
+    use mosaica_engine::filter::{Endpoint, Scalar};
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
     let engine = open(tmp.path(), &root);
@@ -1342,7 +1342,7 @@ fn with_cells(mut grouping: Grouping, depth: u8) -> Grouping {
 fn stored_rows<'a>(fx: &'a Fx, session: &Session) -> Vec<(u64, &'a Item)> {
     let (generation, mask) = fx.engine.composed_mask(session, "s0").unwrap();
     let view_data = &generation.bundle.partitions["default"].views["s0"];
-    let segments = tessera_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
+    let segments = mosaica_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
     let tables = view_data
         .row_space
         .row_entities()
@@ -1552,9 +1552,9 @@ fn planted() -> Vec<(&'static str, Vec<u64>, Option<&'static str>)> {
 /// A flat enumerated layer over `s0` whose artifacts carry their labels in `visibility`.
 fn declaration(
     name: &str,
-    layout: tessera_types::layer::ServingLayout,
-) -> tessera_types::layer::LayerDeclaration {
-    use tessera_types::layer::{
+    layout: mosaica_types::layer::ServingLayout,
+) -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::{
         ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
         MembershipSource,
     };
@@ -1586,13 +1586,13 @@ fn artifact(
     key: &str,
     members: &[u64],
     label: Option<&str>,
-) -> tessera_lifecycle::IncomingArtifact {
+) -> mosaica_lifecycle::IncomingArtifact {
     let map = source_to_new_map(&fx.root, "v00000");
-    let mut artifact = tessera_lifecycle::IncomingArtifact::from_entities(
+    let mut artifact = mosaica_lifecycle::IncomingArtifact::from_entities(
         Some(key.into()),
         members
             .iter()
-            .map(|s| tessera_types::EntityId::new(map[s]))
+            .map(|s| mosaica_types::EntityId::new(map[s]))
             .collect::<Vec<_>>(),
     );
     artifact.access = Some(label.map_or_else(Vec::new, |l| vec![l.as_bytes().to_vec()]));
@@ -1603,8 +1603,8 @@ fn artifact(
 fn plant(
     fx: &Fx,
     name: &str,
-    layout: tessera_types::layer::ServingLayout,
-) -> BTreeMap<&'static str, tessera_types::TesseraId> {
+    layout: mosaica_types::layer::ServingLayout,
+) -> BTreeMap<&'static str, mosaica_types::TesseraId> {
     let engine = &fx.engine;
     engine.register_layer(declaration(name, layout)).unwrap();
     let artifacts = planted()
@@ -1620,7 +1620,7 @@ fn plant(
         .collect()
 }
 
-fn layer(name: &str, pick: Pick<tessera_types::TesseraId>) -> Grouping {
+fn layer(name: &str, pick: Pick<mosaica_types::TesseraId>) -> Grouping {
     Grouping {
         by: Some(By::Layer {
             layer: name.to_string(),
@@ -1641,7 +1641,7 @@ fn layer(name: &str, pick: Pick<tessera_types::TesseraId>) -> Grouping {
 /// answers as an id naming nothing.
 #[test]
 fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     let fx = fixture();
     let engine = &fx.engine;
     let ids = plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
@@ -1682,7 +1682,7 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
             let mut ranked: Vec<&str> = served.iter().copied().filter(|k| count(k) > 0).collect();
             ranked.sort_by(|a, b| count(b).cmp(&count(a)).then(ids[a].cmp(&ids[b])));
             let expected = |listed: &[&str],
-                            ids: &BTreeMap<&str, tessera_types::TesseraId>,
+                            ids: &BTreeMap<&str, mosaica_types::TesseraId>,
                             always: bool| {
                 let mut out: Vec<(String, Option<String>, u64)> = listed
                     .iter()
@@ -1739,8 +1739,8 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
                     "{name}, broad {broad}, {what}: named, the withheld one dropped"
                 );
                 let secret_id = ids["secret"];
-                let nothing = tessera_types::TesseraId::new(secret_id.raw() ^ 0x5555);
-                let answer = |named: Vec<tessera_types::TesseraId>| {
+                let nothing = mosaica_types::TesseraId::new(secret_id.raw() ^ 0x5555);
+                let answer = |named: Vec<mosaica_types::TesseraId>| {
                     let groupings = [layer(name, Pick::Named(named))];
                     let (collect, _) = respond(engine, &session, request(&groupings)).unwrap();
                     collect
@@ -1798,7 +1798,7 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
 /// since the build.
 #[test]
 fn a_column_level_counts_the_whole_set_as_it_counts_the_same_set_filtered() {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     let mut fx = fixture();
     fx.engine.set_background_refresh_for_test(true);
     let session = fx.session(true);
@@ -1837,11 +1837,11 @@ fn a_column_level_counts_the_whole_set_as_it_counts_the_same_set_filtered() {
         let artifacts = planted
             .iter()
             .map(|(key, members)| {
-                let mut artifact = tessera_lifecycle::IncomingArtifact::from_entities(
+                let mut artifact = mosaica_lifecycle::IncomingArtifact::from_entities(
                     Some(key.to_string()),
                     members
                         .iter()
-                        .map(|&s| tessera_types::EntityId::new(entity_of(s)))
+                        .map(|&s| mosaica_types::EntityId::new(entity_of(s)))
                         .collect::<Vec<_>>(),
                 );
                 artifact.access = Some(Vec::new());
@@ -1960,14 +1960,14 @@ fn a_column_level_counts_the_whole_set_as_it_counts_the_same_set_filtered() {
 /// does not reach is refused as an unknown layer.
 #[test]
 fn a_member_of_set_is_what_the_viewport_and_items_count() {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     let fx = fixture();
     let engine = &fx.engine;
     let ids = plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
     for broad in [true, false] {
         let session = fx.session(broad);
         for key in ["t0", "t1", "secret", "mine"] {
-            let filter = Some(FilterExpr::MemberOf(tessera_engine::filter::MemberOfLeaf {
+            let filter = Some(FilterExpr::MemberOf(mosaica_engine::filter::MemberOfLeaf {
                 layer: "topics/major".to_string(),
                 artifact: ids[key],
             }));
@@ -1983,7 +1983,7 @@ fn a_member_of_set_is_what_the_viewport_and_items_count() {
         assert!(matches!(
             respond(engine, &session, request(&groupings)),
             Err(EngineError::RecordsRefused(
-                tessera_engine::RecordsRefused::UnknownLayer(_)
+                mosaica_engine::RecordsRefused::UnknownLayer(_)
             ))
         ));
     }
@@ -2001,7 +2001,7 @@ fn cells_over_the_segments_a_flush_adds_are_the_oracles() {
     ingest_items(&mut fx, 600, "cells");
     flush_and_show(&mut fx, &session);
     let (generation, _) = fx.engine.composed_mask(&session, "s0").unwrap();
-    let segments = tessera_engine::viewport::segments_with_row_bases(
+    let segments = mosaica_engine::viewport::segments_with_row_bases(
         "s0",
         &generation.bundle.partitions["default"].views["s0"],
     )
@@ -2064,7 +2064,7 @@ fn cells_over_the_segments_a_flush_adds_are_the_oracles() {
 struct SuppressAfterFirstPage<'a> {
     inner: Collect,
     engine: &'a Engine,
-    entity: Option<tessera_types::EntityId>,
+    entity: Option<mosaica_types::EntityId>,
 }
 
 impl AggregateSink for SuppressAfterFirstPage<'_> {
@@ -2129,7 +2129,7 @@ fn a_suppression_between_pages_of_a_cell_table_drops_the_rows_held_past_the_page
 /// holding it, else the rest where a served artifact holds it, else none, on both layouts.
 #[test]
 fn artifact_cells_are_the_oracles() {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     let fx = fixture();
     let engine = &fx.engine;
     let ids = plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
@@ -2251,8 +2251,8 @@ impl RecordsSink for Matched {
 /// target's, whatever members it holds of its own.
 #[test]
 fn an_attached_layer_counts_as_the_artifacts_route_does() {
-    use tessera_lifecycle::membership::IncomingAttachment;
-    use tessera_types::layer::ServingLayout;
+    use mosaica_lifecycle::membership::IncomingAttachment;
+    use mosaica_types::layer::ServingLayout;
     let fx = fixture();
     let engine = &fx.engine;
     plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
@@ -2285,7 +2285,7 @@ fn an_attached_layer_counts_as_the_artifacts_route_does() {
             engine
                 .artifacts_stream(
                     &session,
-                    tessera_engine::ArtifactsRequest {
+                    mosaica_engine::ArtifactsRequest {
                         view: "s0",
                         layer: "labels/major",
                         level: None,
@@ -2383,7 +2383,7 @@ fn an_attached_layer_counts_as_the_artifacts_route_does() {
 /// refused.
 #[test]
 fn a_level_is_required_on_a_layer_with_several() {
-    use tessera_types::layer::{HierarchyKind, LevelDeclaration, ServingLayout};
+    use mosaica_types::layer::{HierarchyKind, LevelDeclaration, ServingLayout};
     let fx = fixture();
     let engine = &fx.engine;
     let mut tiers = declaration("clusters/tiers", ServingLayout::ArtifactMajor);
@@ -2423,7 +2423,7 @@ fn a_level_is_required_on_a_layer_with_several() {
     assert!(matches!(
         respond(engine, &session, request(&[at(None)])),
         Err(EngineError::AggregateRefused(
-            tessera_engine::AggregateRefused::LevelRequired(_)
+            mosaica_engine::AggregateRefused::LevelRequired(_)
         ))
     ));
     for (level, per) in [(0u32, 300u64), (1, 350)] {
@@ -2442,7 +2442,7 @@ fn a_level_is_required_on_a_layer_with_several() {
 #[test]
 fn a_cursor_is_refused_under_another_view_or_over_a_dropped_layer() {
     use homes::{build_homes, open};
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
     let engine = open(tmp.path(), &root);
@@ -2477,7 +2477,7 @@ fn a_cursor_is_refused_under_another_view_or_over_a_dropped_layer() {
     assert!(matches!(
         respond(engine, &session, req),
         Err(EngineError::RecordsRefused(
-            tessera_engine::RecordsRefused::UnknownLayer(_)
+            mosaica_engine::RecordsRefused::UnknownLayer(_)
         ))
     ));
 }
@@ -2486,7 +2486,7 @@ fn a_cursor_is_refused_under_another_view_or_over_a_dropped_layer() {
 /// reference's.
 #[test]
 fn a_region_in_the_reference_gives_the_coarsest_verdict() {
-    use tessera_engine::RegionVerdict;
+    use mosaica_engine::RegionVerdict;
     let fx = fixture();
     let engine = &fx.engine;
     let session = fx.session(true);
@@ -2525,7 +2525,7 @@ fn a_region_in_the_reference_gives_the_coarsest_verdict() {
 /// ones `/v1/categories` gives.
 #[test]
 fn every_column_has_its_type_and_a_title_is_the_vocabularys() {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     let fx = fixture();
     let engine = &fx.engine;
     plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
@@ -2630,7 +2630,7 @@ fn every_column_has_its_type_and_a_title_is_the_vocabularys() {
 /// deleted between two pages gives no row after it, and no other artifact takes its place.
 #[test]
 fn a_resumed_table_lists_only_the_artifacts_it_chose() {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     let fx = fixture();
     let engine = &fx.engine;
     let session = fx.session(true);
@@ -2736,7 +2736,7 @@ fn cell_tables_over_many_chunks_and_pages_are_the_oracles() {
         }
         // A page of a sparse group, a response at a time: some window reads past its first
         // batch of chunks, one a thread four times over.
-        let first_batch = 4 * tessera_engine::default_compute_threads() as u64;
+        let first_batch = 4 * mosaica_engine::default_compute_threads() as u64;
         let groupings = [with_cells(field("kind", Pick::Top(3)), depth)];
         let mut req = request(&groupings);
         req.page_rows = Some(200);
@@ -2780,7 +2780,7 @@ fn an_area_lists_only_its_cells_and_leaves_the_head_whole() {
     let session = fx.session(true);
     let area = [120.0, 250.5, 610.0, 580.0];
     for depth in [4u8, 9, 20] {
-        let rect = tessera_spatial::cells_for_bbox(area, depth, &extent());
+        let rect = mosaica_spatial::cells_for_bbox(area, depth, &extent());
         for grouping in [with_cells(size(), depth), with_cells(field("kind", Pick::Top(2)), depth)] {
             let mut req = request(std::slice::from_ref(&grouping));
             req.reference = Some(Reference::Visible);
@@ -2825,7 +2825,7 @@ fn the_cell_limit_counts_the_areas_cells_and_nothing_else() {
         };
         assert!(matches!(
             refused,
-            EngineError::AggregateRefused(tessera_engine::AggregateRefused::TooManyCells {
+            EngineError::AggregateRefused(mosaica_engine::AggregateRefused::TooManyCells {
                 depth: 3,
                 count: 64,
                 limit: 16,
@@ -2908,9 +2908,9 @@ fn plant_tree(
     name: &str,
     dag: bool,
     prune: bool,
-) -> BTreeMap<String, tessera_types::TesseraId> {
-    use tessera_types::layer::HierarchyKind;
-    let mut tree = declaration(name, tessera_types::layer::ServingLayout::ArtifactMajor);
+) -> BTreeMap<String, mosaica_types::TesseraId> {
+    use mosaica_types::layer::HierarchyKind;
+    let mut tree = declaration(name, mosaica_types::layer::ServingLayout::ArtifactMajor);
     tree.layout = None;
     tree.hierarchy.kind = if dag {
         HierarchyKind::Dag
@@ -2936,7 +2936,7 @@ fn plant_tree(
     nodes.into_iter().map(|(key, ..)| key).zip(ids).collect()
 }
 
-fn cut_layer(name: &str, pick: Pick<tessera_types::TesseraId>, cut: Option<Cut>) -> Grouping {
+fn cut_layer(name: &str, pick: Pick<mosaica_types::TesseraId>, cut: Option<Cut>) -> Grouping {
     Grouping {
         by: Some(By::Layer {
             layer: name.to_string(),
@@ -2956,9 +2956,9 @@ fn drawn_keys(engine: &Engine, session: &Session, name: &str, cut: Cut) -> Vec<S
     let out = engine
         .viewport_artifacts(
             session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", cut.zoom, cut.bbox, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", cut.zoom, cut.bbox, usize::MAX)
                 .budget(cut.budget)
-                .layers(tessera_engine::LayerSelection::Named(&names)),
+                .layers(mosaica_engine::LayerSelection::Named(&names)),
         )
         .unwrap();
     out.frames
@@ -3135,14 +3135,14 @@ fn a_suppression_applies_to_the_next_cut() {
 /// naming its artifacts is not.
 #[test]
 fn a_cut_is_refused_where_it_cannot_be_taken() {
-    use tessera_engine::AggregateRefused;
+    use mosaica_engine::AggregateRefused;
     let fx = fixture();
     let engine = &fx.engine;
     let ids = plant_tree(&fx, "tree/refusals", false, true);
     plant(
         &fx,
         "topics/flat",
-        tessera_types::layer::ServingLayout::ArtifactMajor,
+        mosaica_types::layer::ServingLayout::ArtifactMajor,
     );
     let session = fx.session(true);
     let whole = Cut {

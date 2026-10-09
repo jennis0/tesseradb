@@ -1,8 +1,8 @@
-//! `tessera check`, its payloads, and `reports/disclosure.json`.
+//! `mosaica check`, its payloads, and `reports/disclosure.json`.
 //!
 //! Through the real binary, on `build_invocation.rs`'s precedent: what is under test is the verb —
 //! what it reads, what it refuses, what it prints and what it leaves beside the bundle — and the
-//! rules underneath it are `tessera-build`'s own tests'.
+//! rules underneath it are `mosaica-build`'s own tests'.
 
 use std::fs::File;
 use std::path::Path;
@@ -19,8 +19,8 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 const N: u64 = 32;
 
-fn tessera() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tessera"))
+fn mosaica() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }
 
 fn write(path: &Path, schema: Arc<Schema>, columns: Vec<ArrayRef>) {
@@ -48,12 +48,12 @@ fn list_of_strings(rows: usize, value: &str) -> ArrayRef {
 /// A whole project: the deployment file, the declaration, and the sources beside them.
 fn project(dir: &Path) {
     std::fs::write(
-        dir.join("tessera.toml"),
+        dir.join("mosaica.toml"),
         r#"
 [bundle]
 path  = "bundles/corpus"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [disclosure]
 token_max_lifetime = 3600
@@ -238,11 +238,11 @@ field  = "entity_id"
 "#;
 
 fn run(cwd: &Path, args: &[&str]) -> Output {
-    tessera()
+    mosaica()
         .args(args)
         .current_dir(cwd)
         .output()
-        .expect("failed to run tessera")
+        .expect("failed to run mosaica")
 }
 
 fn stderr(output: &Output) -> String {
@@ -257,8 +257,8 @@ fn stdout(output: &Output) -> String {
 // The verb
 // -------------------------------------------------------------------------------------------
 
-/// **`tessera check`, and nothing else** — the same `tessera.toml`, the same declaration, the same
-/// walk up from the working directory `tessera build` does. And it writes no bundle: a check that
+/// **`mosaica check`, and nothing else** — the same `mosaica.toml`, the same declaration, the same
+/// walk up from the working directory `mosaica build` does. And it writes no bundle: a check that
 /// left something behind would not be a check.
 #[test]
 fn check_takes_no_flags_and_writes_nothing() {
@@ -362,7 +362,7 @@ fn payloads_are_the_control_plane_bodies() {
     // not a payload, whatever it looks like.
     let payloads: serde_json::Value =
         serde_json::from_str(&stdout(&output)).expect("stdout is one JSON object of payloads");
-    let bodies: Vec<tessera_types::layer::LayerDeclaration> =
+    let bodies: Vec<mosaica_types::layer::LayerDeclaration> =
         serde_json::from_value(payloads["layers"].clone()).expect("`layers` is the layer bodies");
     assert_eq!(bodies.len(), 2, "the label sugar's layer is a body too");
     assert_eq!(bodies[0].name, "clusters/a");
@@ -411,7 +411,7 @@ require_member_visibility = "any"
         stderr(&output)
     );
     let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
-    let bodies: Vec<tessera_types::layer::LayerDeclaration> =
+    let bodies: Vec<mosaica_types::layer::LayerDeclaration> =
         serde_json::from_value(payloads["layers"].clone()).unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0].visibility.as_deref(), Some("ir:analyst"));
@@ -451,7 +451,7 @@ type  = "f32"
 }
 
 /// **A view group that names no points file and no roster is declared and empty** on the same
-/// rule. `tessera build` refuses it, the points having to come from somewhere, and the refusal
+/// rule. `mosaica build` refuses it, the points having to come from somewhere, and the refusal
 /// names the two roster forms.
 #[test]
 fn a_view_group_naming_no_source_is_a_note_at_check_and_a_refusal_at_build() {
@@ -572,7 +572,7 @@ fn the_disclosure_report_carries_every_decision() {
     );
 }
 
-/// **`tessera check` computes the same document**, which is the whole reason it lives on the
+/// **`mosaica check` computes the same document**, which is the whole reason it lives on the
 /// declaration rather than on the build: a reviewer can read the decisions before anything is
 /// built, and the two cannot disagree.
 #[test]

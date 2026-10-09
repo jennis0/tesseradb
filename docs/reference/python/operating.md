@@ -4,58 +4,58 @@ These methods change what a committed database serves, and reach the server unde
 
 ## Database
 
-::: tesseradb._database.Database.remove
+::: mosaica._database.Database.remove
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.suppress
+::: mosaica._database.Database.suppress
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.unsuppress
+::: mosaica._database.Database.unsuppress
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.addresses
+::: mosaica._database.Database.addresses
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.leave
+::: mosaica._database.Database.leave
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.drop_layer
+::: mosaica._database.Database.drop_layer
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.drop_view
+::: mosaica._database.Database.drop_view
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.compact
+::: mosaica._database.Database.compact
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.status
+::: mosaica._database.Database.status
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.serve
+::: mosaica._database.Database.serve
     options:
       heading_level: 3
 
-::: tesseradb._database.Database.control
+::: mosaica._database.Database.control
     options:
       heading_level: 3
 
-::: tesseradb._reports.ChangeReport
+::: mosaica._reports.ChangeReport
     options:
       show_bases: false
 
-::: tesseradb._instance.Listening
+::: mosaica._instance.Listening
 
-::: tesseradb._control.Control
+::: mosaica._control.Control
     options:
       merge_init_into_class: true
 
-::: tesseradb._control.Answer
+::: mosaica._control.Answer

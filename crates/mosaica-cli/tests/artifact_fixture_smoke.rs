@@ -1,5 +1,5 @@
 //! The artifact scale campaign's end-to-end smoke: materialise a generator corpus with all five
-//! closed-form artifact arms, then run the real `tessera build` over the emitted declaration.
+//! closed-form artifact arms, then run the real `mosaica build` over the emitted declaration.
 //!
 //! **What this checks, and what it deliberately does not.** The two predicate layers
 //! (`generator/partition-attribute`, `generator/boundary`) are declared against machinery the
@@ -12,14 +12,14 @@
 
 use std::process::{Command, Output};
 
-use tessera_corpus::Corpus;
-use tessera_spatial::Bounds;
+use mosaica_corpus::Corpus;
+use mosaica_spatial::Bounds;
 /// ~10⁵ items — large enough that the fixture's counts are not a handful of coincidental small
 /// numbers, small enough that the whole smoke runs in the ordinary test pass.
 const N: u64 = 100_000;
 
-fn tessera() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tessera"))
+fn mosaica() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mosaica"))
 }
 
 fn grid() -> Bounds {
@@ -36,8 +36,8 @@ fn deployment_toml(schema_name: &str) -> String {
         r#"
 [bundle]
 path  = "bundle"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [build]
 schema = "{schema_name}"
@@ -54,7 +54,7 @@ control = "127.0.0.1:45721"
 }
 
 /// Parses `built ... N items, N terms, N pairs, N bytes on disk, N artifact(s) minted, N
-/// unclustered member row(s)` off stdout — the report [`tessera_build::BuildReport`] carries,
+/// unclustered member row(s)` off stdout — the report [`mosaica_build::BuildReport`] carries,
 /// through the one surface a driver actually has (the CLI, on the `corpus` verbs' own precedent).
 fn parse_u64_before(stdout: &str, marker: &str) -> u64 {
     let idx = stdout
@@ -95,16 +95,16 @@ fn a_generator_corpus_with_every_artifact_arm_builds() {
     assert!(counts.treed_member_rows > 0);
 
     std::fs::write(
-        dir.path().join("tessera.toml"),
+        dir.path().join("mosaica.toml"),
         deployment_toml("corpus-config.toml"),
     )
     .unwrap();
 
-    let output: Output = tessera()
+    let output: Output = mosaica()
         .arg("build")
         .current_dir(dir.path())
         .output()
-        .expect("failed to run tessera build");
+        .expect("failed to run mosaica build");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     assert!(

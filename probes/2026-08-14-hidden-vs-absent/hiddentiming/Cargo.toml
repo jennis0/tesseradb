@@ -10,15 +10,15 @@ edition = "2021"
 # **The shipped route, not a model of it.** The whole gate on this campaign (#119) is that the
 # timed call is `FilterColumns::resolve` — the same entry a served request takes — because the
 # `utf8` retirement fence measured a route that did not exist and this branch's review caught the
-# same defect twice more. `tessera-engine` is here to be *called*, not to be reimplemented.
-tessera-engine = { path = "../../../crates/tessera-engine" }
-tessera-analyse = { path = "../../../crates/tessera-analyse" }
-tessera-filter = { path = "../../../crates/tessera-filter" }
-tessera-filter-write = { path = "../../../crates/tessera-filter-write" }
-tessera-authz = { path = "../../../crates/tessera-authz" }
-tessera-store = { path = "../../../crates/tessera-store" }
-tessera-spatial = { path = "../../../crates/tessera-spatial" }
-tessera-types = { path = "../../../crates/tessera-types" }
+# same defect twice more. `mosaica-engine` is here to be *called*, not to be reimplemented.
+mosaica-engine = { path = "../../../crates/mosaica-engine" }
+mosaica-analyse = { path = "../../../crates/mosaica-analyse" }
+mosaica-filter = { path = "../../../crates/mosaica-filter" }
+mosaica-filter-write = { path = "../../../crates/mosaica-filter-write" }
+mosaica-authz = { path = "../../../crates/mosaica-authz" }
+mosaica-store = { path = "../../../crates/mosaica-store" }
+mosaica-spatial = { path = "../../../crates/mosaica-spatial" }
+mosaica-types = { path = "../../../crates/mosaica-types" }
 croaring = "2"
 serde_json = "1"
 tempfile = "3"

@@ -1,14 +1,14 @@
-# tesseradb-native
+# mosaica-native
 
-The platform wheel behind [`tesseradb`](https://pypi.org/project/tesseradb/). It carries two
+The platform wheel behind [`mosaica`](https://pypi.org/project/mosaica/). It carries two
 compiled artifacts and nothing else:
 
-- `tessera`, the server and CLI binary, at `tesseradb_native.binary_path()`.
-- `_tessera`, the extension module that checks a declaration in process.
+- `mosaica`, the server and CLI binary, at `mosaica_native.binary_path()`.
+- `_mosaica`, the extension module that checks a declaration in process.
 
-`tesseradb` depends on this distribution under a platform marker, so `pip install tesseradb` gets
-both by default. An unsupported platform installs `tesseradb` pure Python, and so does
-`pip install tesseradb --no-deps`.
+`mosaica` depends on this distribution under a platform marker, so `pip install mosaica` gets
+both by default. An unsupported platform installs `mosaica` pure Python, and so does
+`pip install mosaica --no-deps`.
 
 The version is pinned exactly. A bundle format change refuses a stale bundle, so the binary and
 the SDK move together.

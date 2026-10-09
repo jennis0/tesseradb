@@ -19,15 +19,15 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::filter::{FilterError, FilterExpr, MemberOfLeaf, RegionLeaf};
-use tessera_engine::{Engine, EngineError, LayerSelection, ViewportOut, ViewportRequest};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_engine::filter::{FilterError, FilterExpr, MemberOfLeaf, RegionLeaf};
+use mosaica_engine::{Engine, EngineError, LayerSelection, ViewportOut, ViewportRequest};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ServingLayout,
 };
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::{EntityId, TesseraId};
 
 const LAYER: &str = "clusters/a";
 /// The artifact's members: source ids `0..300`, which the broad credential sees whole and the
@@ -48,7 +48,7 @@ fn declaration(layout: Option<ServingLayout>, bar: u64) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: Some(ExistenceCriterion::Count(bar)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -130,7 +130,7 @@ fn fixture(layout: Option<ServingLayout>, bar: u64) -> Fixture {
     let served = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::All),
         )
         .unwrap()
         .artifacts();
@@ -163,7 +163,7 @@ impl Fixture {
             .engine
             .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                     .layers(LayerSelection::All),
             )
             .unwrap()
@@ -282,13 +282,13 @@ fn it_composes_under_the_three_combinators() {
         // A region beside it: the same row-space tree with two different leaf kinds in it, which
         // is the shape §3 says a date range or a drawn lasso takes beside this clause.
         let half = FilterExpr::Region(RegionLeaf::Shape(std::sync::Arc::new(
-            tessera_engine::shapes::ShapeF64::Bbox {
+            mosaica_engine::shapes::ShapeF64::Bbox {
                 min_x: 0.0,
                 min_y: 0.0,
                 max_x: 1000.0,
                 max_y: 500.0,
             }
-            .canonical(tessera_engine::shapes::Space::View, &extent())
+            .canonical(mosaica_engine::shapes::Space::View, &extent())
             .expect("a well-formed box")
             .0,
         )));

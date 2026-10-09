@@ -23,7 +23,7 @@
 //! One file per segment, little-endian:
 //!
 //! ```text
-//! header   64 B   magic "TSBD", version u16, first band u16, band count u32 (B), row count u32,
+//! header   64 B   magic "MSBD", version u16, first band u16, band count u32 (B), row count u32,
 //!                 entries u64 (T), copy count u32 (C), zero to the end
 //! starts   (B + 1) x u64   entry index at which each band begins; starts[B] == T
 //! copies   C x 8 B         per copy: name length u16, type tag u8, width u8, held u8, zero
@@ -81,7 +81,7 @@ use std::path::{Path, PathBuf};
 
 use memmap2::{Mmap, MmapMut};
 
-use tessera_types::scalar::{ScalarType, ScalarValue};
+use mosaica_types::scalar::{ScalarType, ScalarValue};
 
 use crate::error::{Result, StoreError};
 use crate::read::{ColumnsRef, ScalarSlice};
@@ -96,8 +96,8 @@ pub const CELL_CODES_FILE: &str = "cell-codes.u32";
 /// band is too wide for the identity column's own scan to lose to it.
 pub const FIRST_BAND: u32 = 6;
 
-const MAGIC: &[u8; 4] = b"TSBD";
-const VERSION: u16 = 2;
+const MAGIC: &[u8; 4] = b"MSBD";
+const VERSION: u16 = 3;
 const HEADER_BYTES: usize = 64;
 const COPY_RECORD_BYTES: usize = 8;
 const SECTION_ALIGN: usize = 4096;
@@ -685,8 +685,8 @@ impl BandCopy<'_> {
     }
 
     /// Entry `e`'s value as a scalar of the copied column's type.
-    pub fn value_at(&self, e: usize) -> tessera_types::scalar::ScalarValue {
-        use tessera_types::scalar::ScalarValue as V;
+    pub fn value_at(&self, e: usize) -> mosaica_types::scalar::ScalarValue {
+        use mosaica_types::scalar::ScalarValue as V;
         let w = self.ty.width();
         let b = &self.bytes[e * w..(e + 1) * w];
         match self.ty {
@@ -728,7 +728,7 @@ copy_values!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
 /// bounds. It does not check that an entry's row is in the segment, or is the row its identity
 /// came from: a reader that indexes a column by an entry's row checks the row against the
 /// segment first. Whether the entries are the segment's rows is [`Bands::check_against`]'s
-/// question, which reads every entry and is `tessera verify --deep`'s to ask.
+/// question, which reads every entry and is `mosaica verify --deep`'s to ask.
 #[derive(Debug)]
 pub struct Bands {
     map: Mmap,
@@ -752,7 +752,7 @@ impl Bands {
             return Err(malformed(&path, "shorter than the band file's header"));
         }
         if &map[0..4] != MAGIC {
-            return Err(malformed(&path, "magic is not TSBD"));
+            return Err(malformed(&path, "magic is not MSBD"));
         }
         let read_u16 = |at: usize| u16::from_le_bytes(map[at..at + 2].try_into().unwrap());
         let read_u32 = |at: usize| u32::from_le_bytes(map[at..at + 4].try_into().unwrap());
@@ -1036,7 +1036,7 @@ impl Bands {
 
     /// Check every entry against the segment it was written for: each band holds exactly the rows
     /// whose identity has that many leading zeros, in row order, with the row's own identity, code
-    /// and residual, and each copy holds the row's stored value. What `tessera verify --deep`
+    /// and residual, and each copy holds the row's stored value. What `mosaica verify --deep`
     /// asks; a request trusts the file.
     pub fn check_against(
         &self,
@@ -1138,7 +1138,7 @@ impl Bands {
 
     /// Check the indexed copy `name`, declared as `declared`, against the value of each entry's
     /// entity: `value_of(row)` is that value, [`ScalarValue::Null`] where the entity has none, or
-    /// `None` where the row is not checked. What `tessera verify --deep` asks of each indexed
+    /// `None` where the row is not checked. What `mosaica verify --deep` asks of each indexed
     /// copy, after [`Bands::check_against`] has checked the entries' rows.
     pub fn check_indexed_against(
         &self,
@@ -1196,10 +1196,10 @@ impl BandEntries<'_> {
 /// Whether two scalars are the same stored bits; a float compares by its bits, so a NaN copy of a
 /// NaN agrees.
 fn scalar_bits_equal(
-    a: &tessera_types::scalar::ScalarValue,
-    b: &tessera_types::scalar::ScalarValue,
+    a: &mosaica_types::scalar::ScalarValue,
+    b: &mosaica_types::scalar::ScalarValue,
 ) -> bool {
-    use tessera_types::scalar::ScalarValue as V;
+    use mosaica_types::scalar::ScalarValue as V;
     match (a, b) {
         (V::F32(x), V::F32(y)) => x.to_bits() == y.to_bits(),
         (V::F64(x), V::F64(y)) => x.to_bits() == y.to_bits(),
@@ -1248,8 +1248,8 @@ impl CellCodes {
 // A level's labels, in band-entry order
 // ---------------------------------------------------------------------------------------------
 
-const LABELS_MAGIC: &[u8; 4] = b"TSBL";
-const LABELS_VERSION: u16 = 1;
+const LABELS_MAGIC: &[u8; 4] = b"MSBL";
+const LABELS_VERSION: u16 = 2;
 const LABELS_HEADER_BYTES: usize = 24;
 
 /// Write `path`: the label `labels` gives each entry of `bands`, in entry order, at the column's
@@ -1382,8 +1382,8 @@ impl BandLabels {
 mod tests {
     use super::*;
     use crate::write::write_segment;
-    use tessera_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
-    use tessera_types::TesseraId;
+    use mosaica_spatial::tiler::{ScalarType, ScalarValue, TilerItem};
+    use mosaica_types::TesseraId;
 
     /// Item `i`'s value of the indexed column `year`: none on every seventh item.
     fn year_of(i: usize) -> ScalarValue {
@@ -1416,14 +1416,14 @@ mod tests {
             .collect();
         let mut order: Vec<usize> = (0..n).collect();
         let key = |i: usize| {
-            let code = tessera_spatial::split32(items[i].qx, items[i].qy).0.raw();
+            let code = mosaica_spatial::split32(items[i].qx, items[i].qy).0.raw();
             (code, items[i].tessera_id.raw())
         };
         order.sort_by_key(|&i| key(i));
         let sorted: Vec<TilerItem> = order.iter().map(|&i| items[i].clone()).collect();
         let codes: Vec<u32> = sorted
             .iter()
-            .map(|it| tessera_spatial::split32(it.qx, it.qy).0.raw())
+            .map(|it| mosaica_spatial::split32(it.qx, it.qy).0.raw())
             .collect();
         write_segment(
             dir,
@@ -1609,7 +1609,7 @@ mod tests {
             qy: 1,
             scalars: vec![],
         }];
-        let code = tessera_spatial::split32(1, 1).0.raw();
+        let code = mosaica_spatial::split32(1, 1).0.raw();
         write_segment(dir.path(), &items, &[code], &[], &[]).unwrap();
         let bands = Bands::open(dir.path(), 1).unwrap();
         assert_eq!(bands.entries(), 0);

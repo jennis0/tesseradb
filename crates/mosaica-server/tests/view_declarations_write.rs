@@ -135,8 +135,8 @@ async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(f32, f32)]
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(batch(rows))
         .send()
@@ -598,8 +598,8 @@ async fn padded_gates_and_point_defaults_are_stored_trimmed() {
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "blank")
-        .header("x-tessera-view", "defaulted")
+        .header("x-mosaica-batch-id", "blank")
+        .header("x-mosaica-view", "defaulted")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(labelled_batch(&[(100.0, 100.0)], &["  "]))
         .send()

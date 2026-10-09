@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
-use tessera_engine::EngineError;
+use mosaica_engine::EngineError;
 
 /// The API's closed set of errors. Every fallible handler maps its failures into one of these.
 #[derive(Debug)]
@@ -215,8 +215,8 @@ impl IntoResponse for ApiError {
 /// `retry_after_s` for [`ShedCause::IngestAdmission`]: one work item's service time, since a
 /// permit frees when one handler completes. It under-states the wait, because a permit is also
 /// held across decoding, term resolution and the receipt wait, which the executor does not time.
-pub fn admission_retry_after_s(stats: &tessera_engine::ExecutorStats) -> u64 {
-    tessera_engine::estimate_retry_after_s(1, stats.service_nanos_for_estimate())
+pub fn admission_retry_after_s(stats: &mosaica_engine::ExecutorStats) -> u64 {
+    mosaica_engine::estimate_retry_after_s(1, stats.service_nanos_for_estimate())
 }
 
 /// Maps an `EngineError` to an API error. A variant not named is a fail-closed 500.
@@ -316,9 +316,9 @@ pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
 /// Maps one write-executor outcome to its answer; every variant is named. A WAL failure's 500
 /// says a delete or suppress may be in force, since those are applied anyway. For a
 /// `/control/changes` batch, use [`map_change_batch_error`].
-pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
-    use tessera_engine::AcceptError;
-    use tessera_lifecycle::{ExecError, SubmitError};
+pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
+    use mosaica_engine::AcceptError;
+    use mosaica_lifecycle::{ExecError, SubmitError};
 
     match e {
         AcceptError::Submit(SubmitError::QueueFull { retry_after_s }) => {
@@ -418,8 +418,8 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
 /// a lost receipt may have completed in full, and a failed log write applies every deletion and
 /// suppression in the request anyway.
 pub fn map_change_batch_error(
-    ops: &[tessera_lifecycle::ChangeOp],
-    failure: tessera_engine::AcceptError,
+    ops: &[mosaica_lifecycle::ChangeOp],
+    failure: mosaica_engine::AcceptError,
 ) -> ApiError {
     let Some(may_be_in_force) = change_request_in_force(ops, &failure) else {
         tracing::error!(detail = %failure, "a change request did not reach the write executor; answering 503 not-ready");
@@ -445,11 +445,11 @@ pub fn map_change_batch_error(
 /// and suppression anyway, and no unsuppression: applied without durability, one would re-expose
 /// an item replay still hides.
 fn change_request_in_force(
-    ops: &[tessera_lifecycle::ChangeOp],
-    failure: &tessera_engine::AcceptError,
+    ops: &[mosaica_lifecycle::ChangeOp],
+    failure: &mosaica_engine::AcceptError,
 ) -> Option<bool> {
-    use tessera_engine::AcceptError;
-    use tessera_lifecycle::{ChangeOp, ExecError};
+    use mosaica_engine::AcceptError;
+    use mosaica_lifecycle::{ChangeOp, ExecError};
     Some(match failure {
         AcceptError::Submit(e) => {
             if !e.may_have_taken_effect() {
@@ -478,11 +478,11 @@ pub fn map_join_error(e: tokio::task::JoinError) -> ApiError {
 mod tests {
     use super::*;
 
-    use tessera_engine::AcceptError;
-    use tessera_lifecycle::{ChangeOp, ExecError, SubmitError};
+    use mosaica_engine::AcceptError;
+    use mosaica_lifecycle::{ChangeOp, ExecError, SubmitError};
 
     fn wal_failure() -> AcceptError {
-        AcceptError::Exec(ExecError::Wal(tessera_lifecycle::wal::WalError::Io(
+        AcceptError::Exec(ExecError::Wal(mosaica_lifecycle::wal::WalError::Io(
             std::io::Error::other("no space left on device"),
         )))
     }
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn map_wal_error_does_not_forward_the_detail_to_the_caller() {
         let leaky = "wal io error: No space left on device (os error 28) at \
-                     /srv/tessera/wal/v00000.log";
+                     /srv/mosaica/wal/v00000.log";
         let (status, code, detail) = map_wal_error(leaky).parts();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(code, "fail-closed");
@@ -612,7 +612,7 @@ mod tests {
     /// A store error's text, which can name a path and an entity, never reaches the body.
     #[test]
     fn map_store_error_does_not_forward_the_detail_to_the_caller() {
-        let leaky = "invalid run at /srv/tessera/v00000/partitions/default/entities/\
+        let leaky = "invalid run at /srv/mosaica/v00000/partitions/default/entities/\
                      unique/doc/base-0.keys: entity 123456 is inconsistent";
         let (status, code, detail) = map_store_error(leaky).parts();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -628,7 +628,7 @@ mod tests {
     async fn map_join_error_does_not_forward_the_detail_to_the_caller() {
         let join_error = tokio::spawn(async {
             panic!(
-                "invalid run at /srv/tessera/v00000/partitions/default/entities/\
+                "invalid run at /srv/mosaica/v00000/partitions/default/entities/\
                  unique/doc/base-0.keys: entity 123456 is inconsistent"
             );
         })
@@ -648,7 +648,7 @@ mod tests {
     #[test]
     fn map_engine_error_sanitises_its_store_and_io_arms() {
         let engine_err = EngineError::Io(std::io::Error::other(
-            "/srv/tessera/v00000/partitions/default/terms/postings.arrow: bad",
+            "/srv/mosaica/v00000/partitions/default/terms/postings.arrow: bad",
         ));
         let (_, _, detail) = map_engine_error(engine_err).parts();
         assert!(
@@ -775,7 +775,7 @@ mod tests {
     #[test]
     fn records_and_cursor_refusals_are_contract_refusals() {
         for e in [
-            EngineError::RecordsRefused(tessera_engine::RecordsRefused::ZeroPageRows),
+            EngineError::RecordsRefused(mosaica_engine::RecordsRefused::ZeroPageRows),
             EngineError::CursorRefused,
         ] {
             let (status, code, _) = map_engine_error(e).parts();

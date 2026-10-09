@@ -1,8 +1,8 @@
-<!-- Generated from crates/tessera-config/src/lib.rs. Edit the doc comments there, then run: TESSERA_WRITE_CONFIG_REFERENCE=1 cargo test -p tessera-config config_reference -->
+<!-- Generated from crates/mosaica-config/src/lib.rs. Edit the doc comments there, then run: MOSAICA_WRITE_CONFIG_REFERENCE=1 cargo test -p mosaica-config config_reference -->
 
-# tessera.toml
+# mosaica.toml
 
-`tessera.toml` describes one deployment: where its bundle and working files are, which corpus declaration `tessera build` reads, and how `tessera serve` listens and bounds its work. `tessera build`, `tessera check`, `tessera health` and `tessera serve` read it from the working directory, or from the nearest directory above it that has one. `--deployment` names another file.
+`mosaica.toml` describes one deployment: where its bundle and working files are, which corpus declaration `mosaica build` reads, and how `mosaica serve` listens and bounds its work. `mosaica build`, `mosaica check`, `mosaica health` and `mosaica serve` read it from the working directory, or from the nearest directory above it that has one. `--deployment` names another file.
 
 Every table refuses a key it does not know. A relative path is read from the directory this file is in, except the `unix:` socket path of `[serve] control`. No integer may be negative.
 
@@ -14,13 +14,13 @@ The table is required.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `path` | string (a path) | required | The bundle directory, which `tessera build` writes unless `--out` names another, and `tessera serve` opens. |
+| `path` | string (a path) | required | The bundle directory, which `mosaica build` writes unless `--out` names another, and `mosaica serve` opens. |
 | `cache` | string (a path) | required | A directory outside the bundle for files the server derives: cached visibility masks, which survive a restart, and suggestion indexes and scratch files, which are rebuilt at each start. |
 | `wal` | string (a path) | required | The write-ahead log. Every write through the control plane is appended and synced to disc here before it is acknowledged, and the log is replayed when the server starts. The path names a series of files: `wal.log` is written as `wal-000001.log`, `wal-000002.log` and so on, and is never itself a file. |
 
 ## `[build]`
 
-What `tessera build` and `tessera check` read.
+What `mosaica build` and `mosaica check` read.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -38,15 +38,15 @@ The table is required.
 
 ## `[serve]`
 
-How `tessera serve` listens, whom it admits, and the limits on each request. `tessera build` reads none of it, and a file for building alone may leave the table out.
+How `mosaica serve` listens, whom it admits, and the limits on each request. `mosaica build` reads none of it, and a file for building alone may leave the table out.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `viewer` | string | not set | The viewer plane's address and port, such as `"127.0.0.1:8141"`: `/v1/meta`, `/v1/viewport`, `/v1/items`, `/v1/artifacts` and `/v1/categories`, for requests carrying a viewer token. `tessera serve` refuses to start without it, and `tessera health` probes it. Port 0 takes a free port, which the server prints when it starts. |
-| `session` | string | not set | The session plane's address and port: `POST /session/authorise`, where a principal holding `authorise-as` mints a session for another principal by API key, and `POST /session/revoke`. `tessera serve` refuses to start without it. |
-| `control` | string | not set | The control plane's address and port, or `"unix:<path>"` for a Unix socket: ingest, deletion and suppression, declarations, flush, compaction and status, all under `/control`. `tessera serve` refuses to start without it. A relative socket path is read from the server's working directory, not from this file's directory, and a file already at the path is removed. |
-| `operator_credential_file` | string (a path) | not set | A file holding the operator credential. It authenticates the built-in superuser, which holds every permission, `read-all` and `write-all` among them, and is not in the catalogue, so an empty catalogue still has an administrator. Its contents are trimmed. Changing the file and restarting rotates it. `tessera serve` refuses to start when the file cannot be read or holds only white space, and when neither this nor `operator_credential_env` is set. When both are set, the file is used. |
-| `operator_credential_env` | string | not set | An environment variable holding the operator credential, trimmed as the file is. `tessera serve` refuses to start when it is unset or holds only white space. |
+| `viewer` | string | not set | The viewer plane's address and port, such as `"127.0.0.1:8141"`: `/v1/meta`, `/v1/viewport`, `/v1/items`, `/v1/artifacts` and `/v1/categories`, for requests carrying a viewer token. `mosaica serve` refuses to start without it, and `mosaica health` probes it. Port 0 takes a free port, which the server prints when it starts. |
+| `session` | string | not set | The session plane's address and port: `POST /session/authorise`, where a principal holding `authorise-as` mints a session for another principal by API key, and `POST /session/revoke`. `mosaica serve` refuses to start without it. |
+| `control` | string | not set | The control plane's address and port, or `"unix:<path>"` for a Unix socket: ingest, deletion and suppression, declarations, flush, compaction and status, all under `/control`. `mosaica serve` refuses to start without it. A relative socket path is read from the server's working directory, not from this file's directory, and a file already at the path is removed. |
+| `operator_credential_file` | string (a path) | not set | A file holding the operator credential. It authenticates the built-in superuser, which holds every permission, `read-all` and `write-all` among them, and is not in the catalogue, so an empty catalogue still has an administrator. Its contents are trimmed. Changing the file and restarting rotates it. `mosaica serve` refuses to start when the file cannot be read or holds only white space, and when neither this nor `operator_credential_env` is set. When both are set, the file is used. |
+| `operator_credential_env` | string | not set | An environment variable holding the operator credential, trimmed as the file is. `mosaica serve` refuses to start when it is unset or holds only white space. |
 | `cors_origins` | array of strings | `[]` | Browser origins, such as `"https://maps.example.org"`, whose pages may call the viewer plane with a viewer token. `"*"` is refused. |
 | `cors_loopback` | boolean | `false` | Admit a page served from `localhost`, `127.0.0.1` or `[::1]`, on any port, to the viewer plane, as for a notebook whose port is not known in advance. |
 | `dev_cors_origins` | array of strings | `[]` | Browser origins whose pages may call both the viewer plane and the session plane, so a page in development can hold an API key that mints sessions for other principals. The server logs a warning at start when it is set. `"*"` is refused. |
@@ -57,7 +57,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `artifact_admission` | integer | one per compute thread | `POST /v1/artifacts/viewport` requests computed at once, apart from `compute_admission`. As many more may wait, each for at most `admission_timeout_ms`; one past that is refused with 429, and `0` refuses every such request. A value above 1152921504606846975 is refused. |
 | `single_flight_wait_ms` | integer | `6000` | Milliseconds a request waits for another request's build of a shared cached structure before it is refused with 429. |
 | `max_k` | integer | `1000` | The largest `k` a viewport request may name; a larger one is lowered to it. A tile draws at most the smaller of this and `k_max_marks`. |
-| `k_min` | integer | `2` | The fewest marks a tile with a visible point draws. `tessera serve` refuses to start with `0`. |
+| `k_min` | integer | `2` | The fewest marks a tile with a visible point draws. `mosaica serve` refuses to start with `0`. |
 | `k_max_marks` | integer | `500` | The most marks a tile draws, and the `k` of a request that names none. |
 | `theta_target_marks` | integer | `16` | The marks the average occupied tile draws at any zoom; the threshold that samples points is derived from it. |
 | `max_tiles_per_request` | integer | `262144` | The most tiles one `POST /v1/viewport` may cover. A request covering more is refused with 422. |
@@ -68,9 +68,9 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `stream_write_stall_ms` | integer | `10000` | Milliseconds a streamed response waits for a client that has stopped reading before it cuts the response off. |
 | `stream_deadline_ms` | integer | `60000` | Milliseconds a streamed response may run. A viewport response is cut off at it. A bulk read ends at it with a cursor to resume from. |
 | `stage_timing` | boolean | `false` | Add each stage's timing, as `stage_ns`, to the last frame of a viewport response. It has an effect only in a binary built with the `bench-timing` feature. |
-| `request_log` | string (a path) | not set | A file to append one JSON line to for each viewer-plane and session-plane request other than `/healthz` and `/readyz`: when it started, its route and body, the session's `token_id`, its status, bytes sent, time to headers and to the end of the body, how long it waited for admission, and whether the client went away before the body ended. Request bodies are written, including `/session/authorise`'s, so that a session can be replayed, with every `password`, `api_key` and `access_token` blanked and a body that is not a JSON object left out, and the file is created readable by its owner only. Tokens and the credentials in headers are never written. The file is written by its own thread and flushed whenever it has caught up, and a restarted server appends to it, marking its lines with a new `run`. `tessera-bench replay` sends a log back at a server. Unset, nothing is logged. |
+| `request_log` | string (a path) | not set | A file to append one JSON line to for each viewer-plane and session-plane request other than `/healthz` and `/readyz`: when it started, its route and body, the session's `token_id`, its status, bytes sent, time to headers and to the end of the body, how long it waited for admission, and whether the client went away before the body ended. Request bodies are written, including `/session/authorise`'s, so that a session can be replayed, with every `password`, `api_key` and `access_token` blanked and a body that is not a JSON object left out, and the file is created readable by its owner only. Tokens and the credentials in headers are never written. The file is written by its own thread and flushed whenever it has caught up, and a restarted server appends to it, marking its lines with a new `run`. `mosaica-bench replay` sends a log back at a server. Unset, nothing is logged. |
 | `max_region_vertices` | integer | `10000` | The most vertices a `region` filter's polygon may have. A filter with more is refused with 422. |
-| `max_region_cells` | integer | `262144` | The most boundary cells a `region` filter is resolved to at one zoom level. Past it the filter is answered for a cover of the polygon, which the `x-tessera-region` header reports, rather than refused. |
+| `max_region_cells` | integer | `262144` | The most boundary cells a `region` filter is resolved to at one zoom level. Past it the filter is answered for a cover of the polygon, which the `x-mosaica-region` header reports, rather than refused. |
 | `region_cache_bytes` | integer | `268435456` (256 MiB) | Bytes of resolved `region` filters kept for reuse, shared by every viewer. |
 | `max_category_values` | integer | `1000` | The most values one page of `GET /v1/categories/{column}` returns, and the page size of a request that names none. A larger `limit` is lowered to it. |
 | `max_suggestions` | integer | `20` | The most values one `/v1/categories/{column}/suggest` returns, `GET` or `POST`, and the `limit` of a request that names none. |
@@ -98,9 +98,9 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `masked_count_give_way_ms` | integer | `2000` | Milliseconds a build of the counts for an annotation level served from a column waits, from its first wait, while viewers are drawing points, so that their reads do not queue behind it. |
 | `occupancy_cache_bytes` | integer | `33554432` (32 MiB) | Bytes of per-viewer counts of occupied tiles, from which the sampling threshold is derived. |
 | `segment_floor_bytes` | integer | `16777216` (16 MiB) | Segments at or below this size are treated as one size tier when choosing which to merge. |
-| `tier_width` | integer | `4` | How many segments of one size tier are merged together. `tessera serve` refuses to start with a value below 2. |
+| `tier_width` | integer | `4` | How many segments of one size tier are merged together. `mosaica serve` refuses to start with a value below 2. |
 | `max_merged_segment_bytes` | integer | not set, and the server merges up to 268435456 bytes (256 MiB) | The largest segment a merge may produce, in bytes. |
-| `coalesce_width` | integer | `8` | How many small files of one size tier, which flushes write for attribute values, records, text indexes and access terms, are combined into one. Unique index runs are combined four at a time whatever this says. `tessera serve` refuses to start with a value below 2. |
+| `coalesce_width` | integer | `8` | How many small files of one size tier, which flushes write for attribute values, records, text indexes and access terms, are combined into one. Unique index runs are combined four at a time whatever this says. `mosaica serve` refuses to start with a value below 2. |
 
 ## `[ingest]`
 
@@ -132,12 +132,12 @@ Writes through the control plane: the limits on each request, and when buffered 
 
 ## `[catalogue]`
 
-The identity catalogue: who may authenticate, with what, and the OIDC providers whose access tokens are accepted. `tessera build` reads none of it.
+The identity catalogue: who may authenticate, with what, and the OIDC providers whose access tokens are accepted. `mosaica build` reads none of it.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `dir` | string (a path) | not set | The directory holding the catalogue, a SQLite database of local principals, their password hashes and API keys, groups, grants and the providers declared through the API. It lives outside the bundle, so principals and grants carry across a rebuild. It is created, readable by the service's user alone, when absent. `tessera serve` refuses to start without it, or when another process holds it open. |
+| `dir` | string (a path) | not set | The directory holding the catalogue, a SQLite database of local principals, their password hashes and API keys, groups, grants and the providers declared through the API. It lives outside the bundle, so principals and grants carry across a rebuild. It is created, readable by the service's user alone, when absent. `mosaica serve` refuses to start without it, or when another process holds it open. |
 | `min_password_length` | integer | `15` | The fewest characters a password may hold when it is set. At least 1. |
 | `failed_attempt_limit` | integer | `10` | Failed password attempts for one name within `failed_attempt_window` after which further attempts for that name are refused, answered as a wrong password is, until the oldest leaves the window. |
 | `failed_attempt_window` | integer | `900` | The window, in seconds, over which failed password attempts are counted. |
-| `providers` | array of tables | `[]` | OIDC providers the service starts with, each a table of `name`, `issuer`, `audience`, `jwks_url`, and optional `claim_rules` (each `{ claim, template }`) and `role_mappings` (each `{ claim, value, group }`). A provider declared here is listed by the API and cannot be changed or removed through it; edit this file and restart. The service refuses to start when a name is declared here and in the catalogue, or twice here. A `jwks_url` is `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`; the environment variable `TESSERA_ALLOW_INSECURE_JWKS=1` accepts any other `http` URL. |
+| `providers` | array of tables | `[]` | OIDC providers the service starts with, each a table of `name`, `issuer`, `audience`, `jwks_url`, and optional `claim_rules` (each `{ claim, template }`) and `role_mappings` (each `{ claim, value, group }`). A provider declared here is listed by the API and cannot be changed or removed through it; edit this file and restart. The service refuses to start when a name is declared here and in the catalogue, or twice here. A `jwks_url` is `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`; the environment variable `MOSAICA_ALLOW_INSECURE_JWKS=1` accepts any other `http` URL. |

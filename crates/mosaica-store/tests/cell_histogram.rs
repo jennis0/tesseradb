@@ -11,14 +11,14 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::{fixed32, Bounds};
-use tessera_store::manifest::{
+use mosaica_spatial::tiler::{sort_batch, TilerItem};
+use mosaica_spatial::{fixed32, Bounds};
+use mosaica_store::manifest::{
     CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 /// A synthetic `tessera_id`-shaped value (splitmix64 over a seed) — same stand-in as
 /// `bundle_read.rs`; the identity construction itself is not under test here.
@@ -97,7 +97,7 @@ fn build_bundle(root: &Path) {
 
     let mut segments_files = BTreeMap::new();
     let rels = std::iter::once("partitions/default/views/main/permutation.bin".to_string()).chain(
-        tessera_store::SEGMENT_FILES
+        mosaica_store::SEGMENT_FILES
             .iter()
             .map(|name| format!("partitions/default/views/main/segments/seg0/{name}")),
     );
@@ -127,7 +127,7 @@ fn build_bundle(root: &Path) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: tessera_types::BUNDLE_FORMAT,
+        bundle_format: mosaica_types::BUNDLE_FORMAT,
         created_at: "2026-07-31T00:00:00Z".to_string(),
         declared_scalars: vec![],
         vocabularies: vec![],
@@ -153,7 +153,7 @@ fn build_bundle(root: &Path) {
                 y_min: extent.y_min,
                 y_max: extent.y_max,
             },
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: "default".to_string(),
@@ -208,7 +208,7 @@ fn reports_the_designed_histogram_globally_and_within_a_region() {
             "run",
             "--quiet",
             "-p",
-            "tessera-store",
+            "mosaica-store",
             "--example",
             "cell_histogram",
             "--",

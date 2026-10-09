@@ -9,7 +9,7 @@ executor's own laps (`executor_laps`) are the driver's and are printed beside th
 Usage is the driver's, with the same flags:
 
     python3 probes/2026-09-05-flush-attribution/flush_attribution.py \\
-        --rung-dir data/ladder/medcpt-1m --work <scratch> --binary <bench-timing tessera> \\
+        --rung-dir data/ladder/medcpt-1m --work <scratch> --binary <bench-timing mosaica> \\
         --out <cell>.json --fraction 0.10 --concurrency 8 --port0 8171 \\
         --stop-after-ingest --reuse-base
 
@@ -73,7 +73,7 @@ def flush_laps(before: dict, after: dict) -> dict:
     if fb is None or fa is None:
         raise SystemExit(
             "this binary's /control/status has no write_executor.flush_stages block; build "
-            "tessera from a tree that carries the flush laps"
+            "mosaica from a tree that carries the flush laps"
         )
     executions = fa["executions"] - fb["executions"]
     flushes = fa["flushes"] - fb["flushes"]

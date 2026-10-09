@@ -29,12 +29,12 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
-use tessera_build::config::{
+use mosaica_build::config::{
     Attribute, Schema, ScopedAttributeFile, ValueSet, Visibility, Vocabulary,
 };
-use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily};
-use tessera_engine::EngineConfig;
-use tessera_spatial::tiler::ScalarType;
+use mosaica_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily};
+use mosaica_engine::EngineConfig;
+use mosaica_spatial::tiler::ScalarType;
 
 /// The analyser identity the manifest records for the text family — the same string the build
 /// resolves from a `[[attribute]]` declaring none, spelt here because this fixture is built
@@ -283,9 +283,9 @@ fn vocabulary(name: &str, values: &[&str], visibility: Visibility) -> Vocabulary
         value_set: ValueSet::Closed,
         width: ScalarType::U8,
         // Codes pinned from one, code 0 being the reserved absent one.
-        values: tessera_build::config::VocabularyMinter::declared(
+        values: mosaica_build::config::VocabularyMinter::declared(
             name,
-            tessera_build::config::VocabularyKind::Declared,
+            mosaica_build::config::VocabularyKind::Declared,
             visibility,
             ScalarType::U8,
             &[],
@@ -377,7 +377,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
     };
     let out = dir.join("bundle");
     build(&BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(&entities, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(&entities, &schema),
         schema,
         groups: vec![GroupDescriptor {
             title: None,
@@ -394,7 +394,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                 })
                 .collect(),
             quantisation: group_frame(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             metadata: Vec::new(),
             // Derived at the manifest write from `scoped_attributes` below, so the family list has
             // one origin.
@@ -458,7 +458,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                 family_views.clone(),
                 Some(ScopedAttributeFile {
                     path: score_source.clone(),
-                    fields: tessera_build::config::Fields::canonical("the score source"),
+                    fields: mosaica_build::config::Fields::canonical("the score source"),
                     view_field: "quarter".to_string(),
                 }),
             ),
@@ -1143,7 +1143,7 @@ const FILLER: Written = Written {
 };
 
 /// An ingest body carrying the reserved columns, each row's `id`, and the scoped families **under
-/// their plain names** (`views.md` §5): the view comes from `x-tessera-view`, so the column is not
+/// their plain names** (`views.md` §5): the view comes from `x-mosaica-view`, so the column is not
 /// qualified and the view decides which of each family's columns the value lands in. A category
 /// arrives as its **key**, never a code. `tone`, and each string column `nulls` names, is null on
 /// every row.
@@ -1224,8 +1224,8 @@ async fn ingest_scoped_with_nulls(
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(scoped_batch(rows, nulls))
         .send()
@@ -1743,7 +1743,7 @@ async fn row_without_view(
         .client
         .post(served.server.control_url(path))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .json(&json!([row]))
         .send()
         .await
@@ -1888,8 +1888,8 @@ async fn a_row_without_coordinates_mints_a_new_key_for_a_group_scoped_family() {
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "scoped-grade")
-        .header("x-tessera-view", "quarter:2026-Q3")
+        .header("x-mosaica-batch-id", "scoped-grade")
+        .header("x-mosaica-view", "quarter:2026-Q3")
         .json(&row)
         .send()
         .await

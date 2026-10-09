@@ -8,8 +8,8 @@
 mod common;
 
 use common::*;
-use tessera_engine::ExecutorStartError;
-use tessera_engine::{Engine, EngineConfig};
+use mosaica_engine::ExecutorStartError;
+use mosaica_engine::{Engine, EngineConfig};
 
 fn engine_over(root: &std::path::Path, tmp: &tempfile::TempDir, wal: &str) -> Engine {
     Engine::open(
@@ -59,7 +59,7 @@ fn a_second_executor_over_one_bundle_root_refuses_to_start() {
     };
     assert_eq!(
         *held,
-        tessera_engine::BundleLockError::Held {
+        mosaica_engine::BundleLockError::Held {
             path: root.clone(),
             holder: Some(std::process::id()),
         },
@@ -100,5 +100,5 @@ fn opening_a_bundle_for_reading_takes_no_lock() {
         reader.generation().bundle.partitions.contains_key("default"),
         "the bundle opens for reading while another process writes it"
     );
-    tessera_store::open_bundle(&root).expect("and opens through the store as well");
+    mosaica_store::open_bundle(&root).expect("and opens through the store as well");
 }

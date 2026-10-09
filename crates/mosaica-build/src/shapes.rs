@@ -1,5 +1,5 @@
 //! **A shape layer's geometry, read and canonicalised at the build** (`polygon-membership.md`
-//! §4.2–§4.4, §6.1, §6.5) — and the report `tessera check` computes from the geometry alone,
+//! §4.2–§4.4, §6.1, §6.5) — and the report `mosaica check` computes from the geometry alone,
 //! before any build.
 //!
 //! One reader for the table and the inline spellings, because the two are one thing in two forms:
@@ -22,11 +22,11 @@ use std::path::Path;
 
 use arrow::array::{Array, BinaryArray, Float64Array, LargeBinaryArray};
 use arrow::record_batch::RecordBatch;
-use tessera_lifecycle::membership::ArtifactShapes;
-use tessera_store::derived::{
+use mosaica_lifecycle::membership::ArtifactShapes;
+use mosaica_store::derived::{
     canonical_shapes, check_shape_span, shape_input, ShapeInput, ShapeSpace, ShapeStats, ViewFrame,
 };
-use tessera_types::layer::{
+use mosaica_types::layer::{
     LayerDeclaration, MembershipSource, ShapeKind, DEFAULT_MAX_SHAPE_VERTICES,
 };
 
@@ -419,7 +419,7 @@ pub struct ShapeReader {
     default_space: ShapeSpace,
     report: ShapeLayerReport,
     /// Per key, the grid-unit bounds per view — for the parent-escape report.
-    bounds: BTreeMap<String, Vec<(String, Option<tessera_spatial::shape::Bbox>)>>,
+    bounds: BTreeMap<String, Vec<(String, Option<mosaica_spatial::shape::Bbox>)>>,
 }
 
 impl ShapeReader {
@@ -478,7 +478,7 @@ impl ShapeReader {
         let shape = match input {
             None => {
                 self.report.no_geometry += 1;
-                tessera_spatial::shape::ShapeF64::Polygon(Vec::new())
+                mosaica_spatial::shape::ShapeF64::Polygon(Vec::new())
             }
             Some(input) => shape_input(self.kind, input).map_err(|e| {
                 BuildError::Invalid(format!(
@@ -527,7 +527,7 @@ impl ShapeReader {
     fn note(
         &mut self,
         view: &str,
-        report: &tessera_spatial::shape::CanonReport,
+        report: &mosaica_spatial::shape::CanonReport,
         stats: &ShapeStats,
     ) {
         if let Some(per_view) = self.report.by_view.iter_mut().find(|v| v.view == view) {
@@ -594,7 +594,7 @@ pub fn shape_declared(declaration: &LayerDeclaration) -> Option<ShapeKind> {
         .flatten()
 }
 
-/// **`tessera check`'s shape report, from the geometry alone** (`polygon-membership.md` §6.5):
+/// **`mosaica check`'s shape report, from the geometry alone** (`polygon-membership.md` §6.5):
 /// every shape layer's rows read and canonicalised against its view's declared extent, and the
 /// decomposition sized, before any build. A view whose extent is `auto` has no frame until the
 /// points are read, and such a layer is reported as unsized rather than guessed at.
@@ -624,7 +624,7 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
             continue;
         };
         // **A frame per view of the layer, not the first view's for all of them** (decision
-        // 0111): `tessera check` sizes what the build will store, and where the frames differ so
+        // 0111): `mosaica check` sizes what the build will store, and where the frames differ so
         // do the decompositions. A view whose extent is `auto` has no frame until the points are
         // read, so the whole layer is reported unsized rather than half-sized.
         let drawn_on = Config::expand_layer_views(&registry, &declaration.views);

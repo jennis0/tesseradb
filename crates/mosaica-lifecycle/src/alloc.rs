@@ -53,14 +53,14 @@
 //! [`low_water_from`], which is [`high_water_from`]'s mirror, and `allocator_floor`'s companion
 //! [`allocator_ceiling`].
 //!
-//! `tessera_lifecycle::buffer` already allocates term-extension ids downward from `u32::MAX` on the
+//! `mosaica_lifecycle::buffer` already allocates term-extension ids downward from `u32::MAX` on the
 //! same argument in a different space; this is that pattern applied to a second population.
 
 use std::ops::Range;
 
 use croaring::Bitmap;
-use tessera_types::layer::RESERVED_BLOCK;
-use tessera_types::{EntityId, TermId};
+use mosaica_types::layer::RESERVED_BLOCK;
+use mosaica_types::{EntityId, TermId};
 
 use crate::wal::WalRecord;
 
@@ -73,9 +73,9 @@ use crate::wal::WalRecord;
 const ENTITY_ID_CEILING: u64 = u32::MAX as u64;
 
 /// Re-exported so this module's callers need only this module. The definition lives beside
-/// [`RESERVED_BLOCK`] in `tessera_types::layer`, because how entity space is divided is a fact
+/// [`RESERVED_BLOCK`] in `mosaica_types::layer`, because how entity space is divided is a fact
 /// several crates read and only this one allocates against.
-pub use tessera_types::layer::ROWLESS_CEILING;
+pub use mosaica_types::layer::ROWLESS_CEILING;
 
 /// Allocator errors. The batch has no effect when this is returned — neither [`Allocator::allocate`]
 /// nor [`Allocator::allocate_rowless`] moves its mark on the error path.
@@ -506,7 +506,7 @@ pub fn allocator_floor(bundle_high_water: u64, side_manifest_high_waters: &[u64]
 ///
 /// `terms` are already-**resolved** `TermId`s — bundle-relative ordinals for descriptors the
 /// dictionary already knows, extended with the deterministic in-memory ordinals a session
-/// assigns to novel descriptors (see `tessera_lifecycle::wal`'s module docs). Resolution happens
+/// assigns to novel descriptors (see `mosaica_lifecycle::wal`'s module docs). Resolution happens
 /// in the caller, not here, so this module stays free of the dictionary/interning machinery.
 pub struct PendingItem {
     pub terms: Vec<TermId>,
@@ -516,11 +516,11 @@ pub struct PendingItem {
 
 /// The signature-sorted assignment key (§11.1): an item's sorted, deduplicated term-ID list.
 ///
-/// This is a deliberate duplicate of `tessera_build::signature_sort_key`, not an import: the
-/// crate dependency direction runs `tessera-build → tessera-lifecycle` (the build pipeline will
-/// depend on this crate's allocator), never the reverse, so importing from `tessera-build` here
+/// This is a deliberate duplicate of `mosaica_build::signature_sort_key`, not an import: the
+/// crate dependency direction runs `mosaica-build → mosaica-lifecycle` (the build pipeline will
+/// depend on this crate's allocator), never the reverse, so importing from `mosaica-build` here
 /// would invert SA §3's crate graph. The two copies must stay in lockstep — this one operates on
-/// resolved `TermId`s exactly as `tessera_build::signature_sort_key` does, and the logic is three
+/// resolved `TermId`s exactly as `mosaica_build::signature_sort_key` does, and the logic is three
 /// lines by design specifically so keeping them in sync is cheap.
 fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     let mut key: Vec<u32> = terms.iter().map(|t| t.raw()).collect();
@@ -719,11 +719,11 @@ mod tests {
     }
 
     fn layer_create(entity: u64, run_start: u64) -> WalRecord {
-        use tessera_types::layer::{
+        use mosaica_types::layer::{
             EntityRun, Hierarchy, HierarchyKind, MembershipSource, ReservedRuns,
         };
         WalRecord::LayerCreate {
-            declaration: Box::new(tessera_types::layer::LayerDeclaration {
+            declaration: Box::new(mosaica_types::layer::LayerDeclaration {
                 scope: Default::default(),
                 name: format!("l{entity}"),
                 title: Some("l".into()),
@@ -731,7 +731,7 @@ mod tests {
                 membership: MembershipSource::Enumerated,
                 value_set: Default::default(),
                 visibility: None,
-                artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+                artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
                 require_member_visibility: None,
                 hierarchy: Hierarchy {
                     kind: HierarchyKind::Flat,
@@ -820,8 +820,8 @@ mod tests {
     }
 
     #[test]
-    fn signature_sort_key_matches_tessera_build_semantics() {
-        // Same three-line rule as tessera_build::signature_sort_key: sorted, deduplicated.
+    fn signature_sort_key_matches_mosaica_build_semantics() {
+        // Same three-line rule as mosaica_build::signature_sort_key: sorted, deduplicated.
         let key = signature_sort_key(&[TermId::new(9), TermId::new(2), TermId::new(2)]);
         assert_eq!(key, vec![2, 9]);
     }

@@ -11,13 +11,13 @@
 mod common;
 
 use common::*;
-use tessera_engine::Engine;
-use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
-use tessera_types::layer::{
+use mosaica_engine::Engine;
+use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
+use mosaica_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
@@ -28,7 +28,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: Some(ExistenceCriterion::Count(2)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -405,7 +405,7 @@ fn an_artifacts_entity_takes_a_suppression_like_any_other() {
 /// low for every viewer, which the existence criterion renders as absent with nothing anywhere to
 /// notice. The `is_mapped` half is the other one — where a membership lives is invisible to every
 /// reader, so without this the seed could stop mapping and only a memory measurement would say so.
-/// The build asserts the same pair over its own publication (`tessera-build`'s `layers.rs`).
+/// The build asserts the same pair over its own publication (`mosaica-build`'s `layers.rs`).
 #[test]
 fn a_membership_seeded_from_an_extent_is_read_through_it() {
     let fx = fixture();

@@ -33,9 +33,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use croaring::Bitmap;
-use tessera_roaring::for_each_run_in;
-use tessera_store::read::SegmentData;
-use tessera_types::EntityId;
+use mosaica_roaring::for_each_run_in;
+use mosaica_store::read::SegmentData;
+use mosaica_types::EntityId;
 
 use super::cursor::{Key, Position};
 use super::{RecordsOrder, ResponseEndedBy};

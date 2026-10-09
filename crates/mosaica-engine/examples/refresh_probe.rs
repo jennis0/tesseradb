@@ -33,7 +33,7 @@
 //!
 //! Run:
 //! ```text
-//! cargo run --release --example refresh_probe -p tessera-engine -- [--entities N] [--grant F] [--dir PATH]
+//! cargo run --release --example refresh_probe -p mosaica-engine -- [--entities N] [--grant F] [--dir PATH]
 //! ```
 //! At the default 10⁹ entities the permutation file is **4 GB on disk and mapped**; the process
 //! peaks around 6 GB. `--entities 100000000` is the 10⁸ rehearsal.
@@ -44,11 +44,11 @@ use std::time::Instant;
 
 use croaring::Bitmap;
 
-use tessera_authz::{build_fragment_with_deltas, write_delta_tier, DeltaTier, PostingsReader};
-use tessera_store::permutation::SegmentExtent;
-use tessera_store::write::write_permutation_iter;
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::{EntityId, TermId, ROW_ABSENT};
+use mosaica_authz::{build_fragment_with_deltas, write_delta_tier, DeltaTier, PostingsReader};
+use mosaica_store::permutation::SegmentExtent;
+use mosaica_store::write::write_permutation_iter;
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::{EntityId, TermId, ROW_ABSENT};
 
 /// How many entities the synthetic row space covers. 10⁹ is the scale every quoted figure in the
 /// corpus is at.
@@ -77,7 +77,7 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_GRANT);
     let dir = PathBuf::from(
-        arg(&args, "--dir").unwrap_or_else(|| "/tmp/tessera-refresh-probe".to_string()),
+        arg(&args, "--dir").unwrap_or_else(|| "/tmp/mosaica-refresh-probe".to_string()),
     );
     std::fs::create_dir_all(&dir).expect("the probe directory");
 
@@ -210,7 +210,7 @@ fn p2(dir: &std::path::Path, entities: u64, grant: f64) {
             per_term[(e as usize / stride as usize) % TERMS].push(e as u32);
         }
         let t = Instant::now();
-        tessera_authz::write_postings(&postings_path, &per_term, 32).expect("postings write");
+        mosaica_authz::write_postings(&postings_path, &per_term, 32).expect("postings write");
         println!(
             "fixture: postings.arrow in {:.1}s",
             t.elapsed().as_secs_f64()

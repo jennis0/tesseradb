@@ -7,7 +7,7 @@ import {fixture} from './support.js';
 /**
  * The highlight's three columns and the browse verb, against captured bytes.
  *
- * Recorded by `scripts/capture-golden.mjs` from `tessera serve` over the notebook corpus. The three
+ * Recorded by `scripts/capture-golden.mjs` from `mosaica serve` over the notebook corpus. The three
  * viewport bodies are one request in three shapes: zoom 3 over the whole of view `s0`, `k = 20`,
  * the taxonomy layer tagging the points, and `filters` on `archive in [cs, math]`, under
  * a principal seeing about half the corpus. Two carry `highlight` on `archive in [cs]`, one of them
@@ -156,12 +156,12 @@ describe('POST /v1/artifacts/browse, off served pages', () => {
 
   it('reads through the client’s own row mapper, identifiers and counts intact', async () => {
     const raw = page('browse-roots.json');
-    const {TesseraClient} = await import('../src/client.js');
+    const {MosaicaClient} = await import('../src/client.js');
     const fetchMock = async () => ({ok: true, status: 200, json: async () => raw, headers: new Headers()});
     const held = globalThis.fetch;
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
     try {
-      const client = new TesseraClient({viewerUrl: 'http://v', sessionUrl: 'http://s'});
+      const client = new MosaicaClient({viewerUrl: 'http://v', sessionUrl: 'http://s'});
       const decoded: BrowsePage = await client.browse('tok', {view: 's0', layer: 'clusters/kmeans'});
       expect(decoded.artifacts).toHaveLength(roots.artifacts.length);
       const first = roots.artifacts[0]!;

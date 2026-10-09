@@ -113,7 +113,7 @@ def highlight_server(tmp_path_factory):
     build_bundle(work, points)
     (work / "gated.toml").write_text(config_toml() + gated_layer_toml())
     bundle = work / "bundle-gated"
-    deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
+    deployment = write_deployment(work / "mosaica-gated.toml", bundle=bundle, schema=work / "gated.toml")
     cli_build(deployment, bundle)
     server, proc = spawn_server(
         bundle,
@@ -257,7 +257,7 @@ def test_highlighted_is_a_reserved_column_name(tmp_path):
     build_bundle(work, points)
     config = work / "shapes.toml"
     config.write_text(config_toml().replace('name   = "fx_key"', 'name   = "highlighted"'))
-    deployment = write_deployment(work / "tessera-reserved.toml", bundle=work / "bundle-reserved", schema=config)
+    deployment = write_deployment(work / "mosaica-reserved.toml", bundle=work / "bundle-reserved", schema=config)
     result = subprocess.run(
         [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(work / "bundle-reserved")],
         cwd=REPO_ROOT,

@@ -47,11 +47,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rayon::slice::ParallelSliceMut;
-use tessera_spatial::split32;
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::columns::{ColumnsFile, ColumnsPlan};
-use tessera_store::write::{CutWriter, PagePlan, PermutationWriter};
-use tessera_types::{EntityId, IdentityKey};
+use mosaica_spatial::split32;
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::columns::{ColumnsFile, ColumnsPlan};
+use mosaica_store::write::{CutWriter, PagePlan, PermutationWriter};
+use mosaica_types::{EntityId, IdentityKey};
 
 use crate::column::EntityColumn;
 use crate::error::{BuildError, Result};
@@ -571,7 +571,7 @@ pub(crate) fn write_segment(
     })?;
 
     let morton_path = job.segment_dir.join("morton.u32");
-    let row_entity_path = job.view_dir.join(tessera_store::ROW_ENTITY_FILE);
+    let row_entity_path = job.view_dir.join(mosaica_store::ROW_ENTITY_FILE);
     let columns_path = job.segment_dir.join("columns.arrow");
     let permutation_path = job.view_dir.join("permutation.bin");
 
@@ -591,8 +591,8 @@ pub(crate) fn write_segment(
         std::fs::File::create(&morton_path).map_err(|e| BuildError::io(&morton_path, e))?,
     );
     // The run-length index of the column being written beside it, from the writer the flush and
-    // the merge use — see `tessera_store::write::CutWriter`.
-    let cuts_path = job.segment_dir.join(tessera_store::read::CutIndex::FILE);
+    // the merge use — see `mosaica_store::write::CutWriter`.
+    let cuts_path = job.segment_dir.join(mosaica_store::read::CutIndex::FILE);
     let mut cuts_out =
         CutWriter::create(job.segment_dir).map_err(|e| BuildError::io(&cuts_path, e))?;
     // The identity bands, from the writer every other producer of a segment uses.
@@ -601,7 +601,7 @@ pub(crate) fn write_segment(
         .iter()
         .map(|column| (column.name.clone(), column.ty))
         .collect();
-    let mut bands_out = tessera_store::bands::BandWriter::create(job.segment_dir, &indexed)
+    let mut bands_out = mosaica_store::bands::BandWriter::create(job.segment_dir, &indexed)
         .map_err(|e| BuildError::io(job.segment_dir, e))?;
     let mut row_entity_out = std::io::BufWriter::new(
         std::fs::File::create(&row_entity_path)
@@ -804,7 +804,7 @@ pub(crate) fn write_segment(
         .finish()
         .map_err(|e| BuildError::io(&columns_path, e))?;
     // The bands copy the render columns out of the finished `columns.arrow`, so they come last.
-    let bands_path = job.segment_dir.join(tessera_store::bands::BANDS_FILE);
+    let bands_path = job.segment_dir.join(mosaica_store::bands::BANDS_FILE);
     bands_out
         .finish(job.segment_dir)
         .map_err(|e| BuildError::io(&bands_path, e))?;
@@ -918,7 +918,7 @@ fn write_render_columns(
             }
         }
         if any_absent {
-            if let Some(path) = tessera_store::flush::write_render_presence(
+            if let Some(path) = mosaica_store::flush::write_render_presence(
                 job.segment_dir,
                 &column.name,
                 present,

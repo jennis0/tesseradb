@@ -1,4 +1,4 @@
-import type {SubCell} from '@tesseradb/client';
+import type {SubCell} from '@mosaica/client';
 
 /**
  * Rasterise a tile's masked sub-cell counts into an RGBA image for a `BitmapLayer`. The counts are
@@ -7,7 +7,7 @@ import type {SubCell} from '@tesseradb/client';
  * Colour is histogram-equalised (datashader's `eq_hist`), since counts span several orders of
  * magnitude, computed only from counts this principal was served.
  *
- * A sub-cell's code is `(parent_prefix << 2·offset) + i`, as in `tessera-spatial::interleave_bits`:
+ * A sub-cell's code is `(parent_prefix << 2·offset) + i`, as in `mosaica-spatial::interleave_bits`:
  * its low `2·offset` bits are the local Morton index, x in the even bits and y in the odd.
  */
 export function subCellsToImage(subCells: SubCell[], offset: number): ImageData {

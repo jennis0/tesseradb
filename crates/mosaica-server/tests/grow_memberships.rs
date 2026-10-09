@@ -541,12 +541,12 @@ async fn a_restated_growth_appends_only_the_members_the_artifact_does_not_hold()
 
     server.shutdown().await;
     let wal =
-        tessera_lifecycle::wal::Wal::open(tmp.path().join("wal.log")).expect("the log reopens");
+        mosaica_lifecycle::wal::Wal::open(tmp.path().join("wal.log")).expect("the log reopens");
     let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
-    let growths: Vec<&Vec<tessera_lifecycle::wal::MembershipGrowth>> = records
+    let growths: Vec<&Vec<mosaica_lifecycle::wal::MembershipGrowth>> = records
         .iter()
         .filter_map(|record| match record {
-            tessera_lifecycle::wal::WalRecord::ArtifactGrow { growth, .. } => Some(growth),
+            mosaica_lifecycle::wal::WalRecord::ArtifactGrow { growth, .. } => Some(growth),
             _ => None,
         })
         .collect();
@@ -558,7 +558,7 @@ async fn a_restated_growth_appends_only_the_members_the_artifact_does_not_hold()
     let joining: Vec<u64> = growths[0]
         .iter()
         .map(|grown| {
-            tessera_lifecycle::membership::deserialise_members(&grown.joining)
+            mosaica_lifecycle::membership::deserialise_members(&grown.joining)
                 .expect("the delta decodes")
                 .cardinality()
         })

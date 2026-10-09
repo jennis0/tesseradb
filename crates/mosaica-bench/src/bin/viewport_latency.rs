@@ -3,13 +3,13 @@
 //!
 //! 300 random viewports at depths 4..=12 over a seeded RNG, so the shape is the same from run to
 //! run, timed against `Engine` directly. The bundle is built from `data/scaled/` at the
-//! 2,422,486-item prefix and kept: `/tmp/tessera-2m4` is the path
-//! `scripts/bench_build_fixtures.sh` links and `tessera-engine`'s criterion bench opens, so the
+//! 2,422,486-item prefix and kept: `/tmp/mosaica-2m4` is the path
+//! `scripts/bench_build_fixtures.sh` links and `mosaica-engine`'s criterion bench opens, so the
 //! three share one copy of the bytes.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin viewport_latency
-//! cargo run --release -p tessera-bench --bin viewport_latency -- --bundle /tmp/x --p99-ms 10
+//! cargo run --release -p mosaica-bench --bin viewport_latency
+//! cargo run --release -p mosaica-bench --bin viewport_latency -- --bundle /tmp/x --p99-ms 10
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -20,11 +20,11 @@ use clap::Parser;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_build::{build, BuildArgs};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_spatial::Bounds;
-use tessera_types::IdentityKey;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_spatial::Bounds;
+use mosaica_types::IdentityKey;
 
 /// The prefix the shared-context fixtures are cut at.
 const ITEM_LIMIT: u64 = 2_422_486;
@@ -42,7 +42,7 @@ const THETA_TARGET: u64 = 16;
 #[command(about = "p99 viewport latency over a 2.4M-item bundle, built from data/scaled/ if absent")]
 struct Args {
     /// Bundle root (the directory holding `CURRENT`), built here if it does not exist.
-    #[arg(long, default_value = "/tmp/tessera-2m4")]
+    #[arg(long, default_value = "/tmp/mosaica-2m4")]
     bundle: PathBuf,
     /// Fail (exit 1) unless the measured p99 is under this many milliseconds.
     #[arg(long, default_value_t = 50)]
@@ -101,15 +101,15 @@ fn ensure_bundle(bundle_root: &Path) -> Result<(), String> {
     }
 
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: geometry,
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
@@ -152,7 +152,7 @@ fn percentile(sorted: &[Duration], q: f64) -> Duration {
 fn measure(args: &Args) -> Result<Vec<Duration>, String> {
     ensure_bundle(&args.bundle)?;
 
-    let tmp = std::env::temp_dir().join(format!("tessera-viewport-latency-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("mosaica-viewport-latency-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
 
@@ -164,7 +164,7 @@ fn measure(args: &Args) -> Result<Vec<Duration>, String> {
             token_max_lifetime_secs: 3600,
             // Production defaults, deliberately: under a saturated θ the threshold clause never
             // binds and the counting/selecting branch is barely exercised, which would measure a
-            // path the server does not take. Keep these in step with `tessera-server`'s DEFAULT_*.
+            // path the server does not take. Keep these in step with `mosaica-server`'s DEFAULT_*.
             max_k: MAX_K,
             k_min: 2,
             k_max_marks: K_MAX_MARKS,
@@ -172,14 +172,14 @@ fn measure(args: &Args) -> Result<Vec<Duration>, String> {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             flush_max_items: 40_000,
             max_merged_segment_bytes: None,
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )
     .map_err(|e| format!("the engine could not open {}: {e}", args.bundle.display()))?;

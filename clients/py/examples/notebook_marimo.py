@@ -1,4 +1,4 @@
-# TesseraDB's Python client, as a marimo notebook: `marimo edit clients/py/examples/notebook_marimo.py`.
+# Mosaica's Python client, as a marimo notebook: `marimo edit clients/py/examples/notebook_marimo.py`.
 #
 # `notebook.ipynb` beside it is generated from this file, and is not edited by hand:
 #
@@ -27,7 +27,7 @@ def _():
     import pyarrow.parquet as pq
     from sklearn.cluster import KMeans
 
-    import tesseradb as td
+    import mosaica as td
 
     return KMeans, datetime, mo, os, pa, pathlib, pc, pd, pq, td, tempfile
 
@@ -35,9 +35,9 @@ def _():
 @app.cell
 def _(mo):
     mo.md("""
-    # TesseraDB in a notebook
+    # Mosaica in a notebook
 
-    TesseraDB is an open-source engine for interactive maps of large datasets. You give it
+    Mosaica is an open-source engine for interactive maps of large datasets. You give it
     records with 2D coordinates, which can be places on Earth or positions in an embedding
     space, and it serves a map you can pan, filter, search and cluster.
 
@@ -68,8 +68,8 @@ def _():
 @app.cell
 def _(SCALE, os, pathlib):
     def corpus_directory():
-        """`data/<corpus>/` above this file or the working directory, or `TESSERA_NOTEBOOK_DATA`."""
-        named = os.environ.get("TESSERA_NOTEBOOK_DATA")
+        """`data/<corpus>/` above this file or the working directory, or `MOSAICA_NOTEBOOK_DATA`."""
+        named = os.environ.get("MOSAICA_NOTEBOOK_DATA")
         if named:
             return pathlib.Path(named).expanduser()
         corpus = {"whole": "notebook-2m4-live", "sample": "notebook-sample"}[SCALE]
@@ -83,7 +83,7 @@ def _(SCALE, os, pathlib):
                     return directory / "data" / corpus
         raise FileNotFoundError(
             f"data/{corpus}/ is above neither this file nor the working directory. "
-            "Set TESSERA_NOTEBOOK_DATA to the corpus directory"
+            "Set MOSAICA_NOTEBOOK_DATA to the corpus directory"
         )
 
     DATA = corpus_directory()
@@ -127,7 +127,7 @@ def _(DATA, pq):
 @app.cell
 def _(mo):
     mo.md("""
-    `td` is the `tesseradb` package, imported in the first cell. `td.create()` makes a new
+    `td` is the `mosaica` package, imported in the first cell. `td.create()` makes a new
     database in a temporary directory, and everything after it is a call on that database.
 
     The declarations say what the database will hold, before it holds anything:
@@ -799,7 +799,7 @@ def _(mo):
 
 @app.cell
 def _(db, td, tempfile):
-    saved_at = db.save(tempfile.mkdtemp(prefix="tessera-arxiv-"))
+    saved_at = db.save(tempfile.mkdtemp(prefix="mosaica-arxiv-"))
     reopened = td.open(saved_at)
     print(saved_at)
     reopened.view("papers").count()
@@ -809,17 +809,17 @@ def _(db, td, tempfile):
 @app.cell
 def _(mo):
     mo.md("""
-    The saved directory runs on any machine with the `tessera` binary:
+    The saved directory runs on any machine with the `mosaica` binary:
 
     ```
-    tessera serve --deployment <path>/tessera.toml
+    mosaica serve --deployment <path>/mosaica.toml
     ```
 
     To use a database somebody else runs, connect with the token its operator gave you. The
     maps and the questions above work the same way, over what that token may see.
 
     ```python
-    v = td.connect("https://tessera.example/viewer", token=my_token)
+    v = td.connect("https://mosaica.example/viewer", token=my_token)
     v.map(colour_by="cluster:topics", layers=["topics"], artifacts_per_tile=50)
     ```
     """)

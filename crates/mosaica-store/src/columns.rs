@@ -49,7 +49,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 
-use tessera_spatial::tiler::ScalarType;
+use mosaica_spatial::tiler::ScalarType;
 
 /// The largest single write the framing keeps as bytes. Above it a write must be uniform — which
 /// is what the validity bitmaps are — and is kept as a fill; anything else that big is a values

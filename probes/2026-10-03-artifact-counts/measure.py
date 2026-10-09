@@ -18,10 +18,10 @@ sys.path.insert(0, str(ROOT))
 from test_corpora.common.deployment import Deployment, read_env_file, tomllib  # noqa: E402
 from test_corpora.common.interactive_bench import principals  # noqa: E402
 
-DEP = Path("/home/joe/code/tessera/data/ladder/gbif")
+DEP = Path("/home/joe/code/mosaica/data/ladder/gbif")
 PORTS = (8991, 8992, 8993)
 VIEWER, SESSION = f"http://127.0.0.1:{PORTS[0]}", f"http://127.0.0.1:{PORTS[1]}"
-CRED = read_env_file(DEP / ".env")["TESSERA_GBIF_SESSION_CRED"]
+CRED = read_env_file(DEP / ".env")["MOSAICA_GBIF_SESSION_CRED"]
 PEOPLE = {p["label"]: p["terms"] for p in principals(json.loads((DEP / "country-ranks.json").read_text()))}
 FULL = [0.00000762939453125, 0.00000762939453125, 0.9999923706054688, 0.9999923706054688]
 
@@ -79,7 +79,7 @@ def together(*jobs):
 
 
 def server(binary, scratch):
-    settings = tomllib.loads((DEP / "tessera.toml").read_text())
+    settings = tomllib.loads((DEP / "mosaica.toml").read_text())
     bundle = (DEP / settings["bundle"]["path"]).resolve()
     d = Deployment(DEP, bundle, scratch, PORTS, binary, cap_bytes=24 * 2**30, swap_bytes=2 * 2**30)
     d.clear_scratch()

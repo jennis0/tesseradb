@@ -1,7 +1,7 @@
 //! Arm 13 — what layer accumulation costs: N per-flush extents between folds.
 //!
 //! A column on the read path is base + one layer per live extent, scanned in turn and unioned
-//! (`filter-index.md` §5; `tessera-engine`'s `FilterColumns::resolve`). Every flush adds a layer
+//! (`filter-index.md` §5; `mosaica-engine`'s `FilterColumns::resolve`). Every flush adds a layer
 //! and nothing removes one until the fold, so both the per-request scan and the generation open
 //! walk a list that grows at flush rate. This arm turns "layers cost something" into a curve:
 //!
@@ -22,8 +22,8 @@
 use std::time::Instant;
 
 use croaring::Bitmap;
-use tessera_filter::{write_extent, Codes, ValueColumn};
-use tessera_types::AttrLocalId;
+use mosaica_filter::{write_extent, Codes, ValueColumn};
+use mosaica_types::AttrLocalId;
 
 const DOMAIN: u32 = 1_000;
 const NEEDLE: u32 = 42;
@@ -149,7 +149,7 @@ fn main() {
         let t = Instant::now();
         let mut covered = Bitmap::new();
         for (values_path, presence_path) in &paths[..k] {
-            let col = tessera_filter::open_extent(values_path, presence_path, true)
+            let col = mosaica_filter::open_extent(values_path, presence_path, true)
                 .expect("open extent");
             let present = col.present();
             assert_eq!(covered.and_cardinality(&present), 0, "layers must be disjoint");

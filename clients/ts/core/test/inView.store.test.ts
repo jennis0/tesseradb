@@ -1,10 +1,10 @@
 import {Table} from 'apache-arrow';
 import {describe, expect, it} from 'vitest';
-import type {TesseraClient} from '../src/client.js';
+import type {MosaicaClient} from '../src/client.js';
 import type {FilterDraft} from '../src/filters.js';
 import {createStore} from '../src/store.js';
 import type {AggregateRequest, AggregateResult, FilterExpr} from '../src/types.js';
-import {TesseraError} from '../src/client.js';
+import {MosaicaError} from '../src/client.js';
 import {tileRectOfBbox} from '../src/budget.js';
 import {mortonOfTile, tileXY} from '../src/coords.js';
 import {fakeClock, fakeScheduler, meta, response, result as viewportResult, tile, view, camera} from './support.js';
@@ -79,11 +79,11 @@ async function storeWith(opts: {refuse?: boolean; points?: boolean} = {}) {
     viewport: async (_token: string, req: {zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]}) => response(opts.points ? onePerTile(req) : viewportResult()),
     aggregate: async (_token: string, req: AggregateRequest) => {
       asked.push(req);
-      if (opts.refuse) throw new TesseraError(422, 'contract', 'refused');
+      if (opts.refuse) throw new MosaicaError(422, 'contract', 'refused');
       return counted(req);
     },
     close: () => {}
-  } as unknown as TesseraClient;
+  } as unknown as MosaicaClient;
   const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false});
   await clock.advance(1);
   return {store, asked, clock, scheduler};

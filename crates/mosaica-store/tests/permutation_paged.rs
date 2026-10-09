@@ -10,9 +10,9 @@
 use std::fs;
 use std::path::Path;
 
-use tessera_store::write::{write_permutation, PagePlan, PermutationWriter};
-use tessera_store::Permutation;
-use tessera_types::EntityId;
+use mosaica_store::write::{write_permutation, PagePlan, PermutationWriter};
+use mosaica_store::Permutation;
+use mosaica_types::EntityId;
 
 /// The 24-byte header, a `u32` per page of directory, zero padding to a 4 KiB boundary.
 const PAYLOAD_ALIGN: usize = 4096;
@@ -295,7 +295,7 @@ fn a_version_one_flat_permutation_is_refused() {
     let path = dir.path().join("flat.bin");
     let bound = 64u64;
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"TSPM");
+    bytes.extend_from_slice(b"MSPM");
     bytes.extend_from_slice(&1u16.to_le_bytes()); // version 1
     bytes.extend_from_slice(&0u16.to_le_bytes()); // reserved
     bytes.extend_from_slice(&bound.to_le_bytes());

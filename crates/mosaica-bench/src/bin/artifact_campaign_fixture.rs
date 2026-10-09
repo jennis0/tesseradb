@@ -1,10 +1,10 @@
 //! The Stage 7 campaign's fixture arithmetic: the two things a driver cannot ask the CLI for.
 //!
-//! `tessera corpus materialise` writes the campaign's fixture, and `tessera corpus artifact-census`
+//! `mosaica corpus materialise` writes the campaign's fixture, and `mosaica corpus artifact-census`
 //! answers it — between them they cover every arm except two facts a measurement driver needs and
 //! neither verb prints:
 //!
-//! - **The boundary arm's geometry.** `tessera-corpus`'s spatial arm carries a roster of authored
+//! - **The boundary arm's geometry.** `mosaica-corpus`'s spatial arm carries a roster of authored
 //!   depth-*d* tile prefixes and no boxes, because it was written while nothing read one
 //!   (`boundary.rs`'s header). A `membership = "spatial"` layer declares `{ key, bbox }` per
 //!   artifact, so the campaign authors the boxes here — **the middle half of each authored tile**,
@@ -27,15 +27,15 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use rayon::prelude::*;
-use tessera_corpus::materialise::{BOUNDARY_LAYER, FIXTURE_LEVEL, PARTITION_LAYER, TREED_LAYER};
-use tessera_corpus::{Corpus, Grant};
-use tessera_spatial::Bounds;
+use mosaica_corpus::materialise::{BOUNDARY_LAYER, FIXTURE_LEVEL, PARTITION_LAYER, TREED_LAYER};
+use mosaica_corpus::{Corpus, Grant};
+use mosaica_spatial::Bounds;
 
 /// The generator's own quantisation extent — the cell grid's coordinates, which is what
-/// `tessera corpus materialise` writes into its declaration and what every census is stated in.
+/// `mosaica corpus materialise` writes into its declaration and what every census is stated in.
 const GRID: f64 = 65536.0;
 
-/// The term levels the generator emits (`tessera_corpus`'s `TERM_LEVELS`). Not importable — it is
+/// The term levels the generator emits (`mosaica_corpus`'s `TERM_LEVELS`). Not importable — it is
 /// private to that crate — and restated here only to bound the ladder's search; the **measured**
 /// breadth beside every rung is what the campaign reports, so a drift in this constant would show
 /// up as a ladder that stops early rather than as a wrong number.
@@ -111,7 +111,7 @@ fn box_of(prefix: u64, depth: u8) -> [f64; 4] {
         at(tx * span + 3 * quarter),
         at(ty * span + 3 * quarter),
     ];
-    let covering = tessera_spatial::tiles_for_bbox(bbox, depth, &extent());
+    let covering = mosaica_spatial::tiles_for_bbox(bbox, depth, &extent());
     assert_eq!(
         covering.len(),
         1,
@@ -174,7 +174,7 @@ fn main() {
     let roster = corpus.boundary_artifacts(BOUNDARY_LAYER, FIXTURE_LEVEL);
     let mut toml = String::new();
     toml.push_str(&format!(
-        "# The campaign's spatial arm: `tessera-corpus`'s authored depth-{depth} tile prefixes,\n\
+        "# The campaign's spatial arm: `mosaica-corpus`'s authored depth-{depth} tile prefixes,\n\
          # given the geometry the generator's roster does not carry. One box per authored tile,\n\
          # its middle half, asserted at emission to cover exactly that tile — so this layer's\n\
          # membership and `artifact-census --layer boundary` are the same set.\n\
@@ -280,7 +280,7 @@ fn main() {
         "term_space": corpus.term_space(),
         "boundary_depth": depth,
         "boundary_artifacts": roster.len(),
-        "flat_artifacts": corpus.artifacts_in(tessera_corpus::materialise::FLAT_LAYER, FIXTURE_LEVEL),
+        "flat_artifacts": corpus.artifacts_in(mosaica_corpus::materialise::FLAT_LAYER, FIXTURE_LEVEL),
         "partition_artifacts": corpus.partition_count(PARTITION_LAYER),
         "treed_artifacts": corpus.treed_count(TREED_LAYER),
         "grants": grants,

@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 
-use tessera_engine::{CancelToken, RegionVerdict, SinkClosed, SinkResult};
+use mosaica_engine::{CancelToken, RegionVerdict, SinkClosed, SinkResult};
 
 use crate::error::ApiError;
 
@@ -274,7 +274,7 @@ impl Opened {
 
 /// The start of every streamed response: a 200 of framed bytes, the identity coordinate, the
 /// server's compute from admission to the opening, the admission wait, and whether counts under a
-/// region leaf are exact. The last is a header for the same reason `x-tessera-stale` is: it
+/// region leaf are exact. The last is a header for the same reason `x-mosaica-stale` is: it
 /// depends on the shape and the grid, never on the rows.
 pub(crate) fn response_head(
     identity_key: Option<&[u8; 16]>,
@@ -288,13 +288,13 @@ pub(crate) fn response_head(
     // The authorisation coordinate: whether a held band may be rendered at all, so it is the
     // client's cache partition key.
     if let Some(key) = identity_key {
-        response = response.header("x-tessera-identity-key", hex16(key));
+        response = response.header("x-mosaica-identity-key", hex16(key));
     }
     let response = response
-        .header("x-tessera-server-us", server_us.to_string())
-        .header("x-tessera-admission-us", admission_us.to_string());
+        .header("x-mosaica-server-us", server_us.to_string())
+        .header("x-mosaica-admission-us", admission_us.to_string());
     match region {
-        Some(verdict) => response.header("x-tessera-region", verdict.header_value()),
+        Some(verdict) => response.header("x-mosaica-region", verdict.header_value()),
         None => response,
     }
 }

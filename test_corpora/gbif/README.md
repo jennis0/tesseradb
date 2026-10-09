@@ -23,18 +23,18 @@ had to be answered before anything was built. It does not
    positionless entity could be drawn nowhere and would still spend an entity id.
 
 ```bash
-export TESSERA_LADDER="$PWD/data/ladder"
+export MOSAICA_LADDER="$PWD/data/ladder"
 
-# a fraction that finishes, into $TESSERA_LADDER/gbif-64p
+# a fraction that finishes, into $MOSAICA_LADDER/gbif-64p
 python3 -m test_corpora.gbif.prepare --parts 64 --spread
 
-# the whole corpus, into $TESSERA_LADDER/gbif
+# the whole corpus, into $MOSAICA_LADDER/gbif
 python3 -m test_corpora.gbif.prepare
 
-cd "$TESSERA_LADDER/gbif" && tessera check --payloads && tessera build --stage-timings
-./run_demo.sh --deployment "$TESSERA_LADDER/gbif/tessera.toml" \
-  --terms-file "$TESSERA_LADDER/gbif/country-terms.txt" \
-  --ranks "$TESSERA_LADDER/gbif/country-ranks.json"
+cd "$MOSAICA_LADDER/gbif" && mosaica check --payloads && mosaica build --stage-timings
+./run_demo.sh --deployment "$MOSAICA_LADDER/gbif/mosaica.toml" \
+  --terms-file "$MOSAICA_LADDER/gbif/country-terms.txt" \
+  --ranks "$MOSAICA_LADDER/gbif/country-ranks.json"
 ```
 
 The pipeline is `sources.py`, `prepare.py` and `corpus.toml`, and it runs on the system `python3`:
@@ -43,7 +43,7 @@ that is local.
 
 ## Why family
 
-`merge_member_runs` (`crates/tessera-build/src/layers.rs`) holds the largest single artifact's
+`merge_member_runs` (`crates/mosaica-build/src/layers.rs`) holds the largest single artifact's
 members resident as `u64` while it sorts them, so a level-0 artifact sets the `layers` stage's
 peak. Extrapolated from the census's 200-part sample:
 
@@ -223,7 +223,7 @@ the whole corpus's, not a 1/137th of it. The census's 200-part sample holds 11,5
 
 ### The build — 25,846,007 rows to a 1.60 GB bundle in 80 s
 
-`tessera build --stage-timings` over the spread fraction. `check` passes with 0 warnings.
+`mosaica build --stage-timings` over the spread fraction. `check` passes with 0 warnings.
 
 | stage | wall | `VmHWM` |
 |---|---|---|
@@ -280,7 +280,7 @@ The prefix fraction's bundle is 1.07 GB over 17,721,800 rows, 60.2 B/row, so the
 
 ### Served — the surface is what the declaration says
 
-`tessera serve` on 8191–8193 against the prefix fraction's 1.07 GB bundle. **Open costs 5.85 s**,
+`mosaica serve` on 8191–8193 against the prefix fraction's 1.07 GB bundle. **Open costs 5.85 s**,
 building every level's artifact row form so no request pays for one.
 
 `/v1/meta` publishes one view `geo`, one layer `taxonomy/tree`, and three filter operands:
@@ -327,7 +327,7 @@ are [`../../docs/ingest-campaign.md`](../../docs/ingest-campaign.md) §4d.
 33 s** (third build, 2026-09-14, record-blob format 11 with a per-segment cut index), against
 3 h 30 m 55 s (format 10) after the bounded-assembly design and 4 h 09 m 35 s (format 9) before
 it. `verify --deep` clean in **15 m 08 s at 0.61 GB peak anonymous**. Served a fourth time,
-2026-09-14, after a fix returning freed memory to the allocator on a cadence: `tessera serve`
+2026-09-14, after a fix returning freed memory to the allocator on a cadence: `mosaica serve`
 opens to `/readyz` in **202 s at 6.7 GB anonymous** under a 24 GiB cap, peak **10.7 GB anonymous**
 (third serve: 197 s, peak 16.0 GB), `oom_kill` 0. The stage that missed the memory budget under
 the second build, `filter_postings`, now fits it: its own stage peak fell to 8.9 GB anonymous,

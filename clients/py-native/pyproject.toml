@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tesseradb-native"
+name = "mosaica-native"
 version = "0.1.0"
-description = "Tessera's platform wheel: the `tessera` executable and the `_tessera` extension module."
+description = "Mosaica's platform wheel: the `mosaica` executable and the `_mosaica` extension module."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
@@ -13,14 +13,14 @@ requires-python = ">=3.10"
 dependencies = []
 
 [tool.hatch.build.targets.wheel]
-packages = ["tesseradb_native"]
+packages = ["mosaica_native"]
 # Both artifacts are produced by the hook and never committed, so they are declared here as well
 # as force-included: hatchling would otherwise drop them as untracked.
 artifacts = [
-  "tesseradb_native/tessera",
-  "tesseradb_native/tessera.exe",
-  "tesseradb_native/_tessera.abi3.so",
-  "tesseradb_native/_tessera.pyd",
+  "mosaica_native/mosaica",
+  "mosaica_native/mosaica.exe",
+  "mosaica_native/_mosaica.abi3.so",
+  "mosaica_native/_mosaica.pyd",
 ]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
@@ -29,7 +29,7 @@ path = "hatch_build.py"
 # An sdist carries no artifacts and cannot build them: the hook needs the Rust workspace, which an
 # sdist does not contain. Build the wheel from the repository.
 [tool.hatch.build.targets.sdist]
-include = ["tesseradb_native", "hatch_build.py", "README.md"]
+include = ["mosaica_native", "hatch_build.py", "README.md"]
 
 [tool.ruff]
 line-length = 100

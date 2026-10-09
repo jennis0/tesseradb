@@ -12,8 +12,8 @@ use arrow::array::{
     UInt64Array, UInt8Array,
 };
 use arrow::datatypes::DataType;
-use tessera_types::layer::ListMeaning;
-pub use tessera_types::layer::LEVEL;
+use mosaica_types::layer::ListMeaning;
+pub use mosaica_types::layer::LEVEL;
 
 /// The types [`KeyColumn::new`] takes, for a refusal to name.
 pub const KEY_TYPES: &str = "utf8, large_utf8, utf8_view or an integer";
@@ -38,7 +38,7 @@ pub enum KeyColumn<'a> {
 /// What one member row's key says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyRead<'a> {
-    /// In no artifact: a null cell, or the integer [`tessera_types::layer::NOISE_KEY`].
+    /// In no artifact: a null cell, or the integer [`mosaica_types::layer::NOISE_KEY`].
     Unclustered,
     Named(&'a str),
     Numbered(i128),
@@ -121,7 +121,7 @@ impl<'a> KeyColumn<'a> {
         }
         match self.value(row) {
             Ok(text) => KeyRead::Named(text),
-            Err(tessera_types::layer::NOISE_KEY) => KeyRead::Unclustered,
+            Err(mosaica_types::layer::NOISE_KEY) => KeyRead::Unclustered,
             Err(integer) => KeyRead::Numbered(integer),
         }
     }
@@ -131,7 +131,7 @@ impl<'a> KeyColumn<'a> {
         match self.read_at(row) {
             KeyRead::Unclustered => None,
             KeyRead::Named(text) => Some(text.to_string()),
-            KeyRead::Numbered(integer) => tessera_types::layer::integer_key(integer),
+            KeyRead::Numbered(integer) => mosaica_types::layer::integer_key(integer),
         }
     }
 }

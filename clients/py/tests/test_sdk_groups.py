@@ -15,7 +15,7 @@ import pyarrow as pa
 import pytest
 
 from conftest import browse, viewport
-from tesseradb._database import create
+from mosaica._database import create
 
 pytest.importorskip("pyarrow")
 

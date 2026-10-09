@@ -6,11 +6,11 @@ use std::collections::HashSet;
 use proptest::prelude::*;
 
 use croaring::Bitmap;
-use tessera_lifecycle::alloc::{
+use mosaica_lifecycle::alloc::{
     allocator_floor, assign_sorted, entities_named, high_water_from, Allocator, PendingItem,
 };
-use tessera_lifecycle::wal::{WalRecord, WalRow};
-use tessera_types::{EntityId, TermId};
+use mosaica_lifecycle::wal::{WalRecord, WalRow};
+use mosaica_types::{EntityId, TermId};
 
 proptest! {
     /// Interleaved `allocate` calls on a single allocator never overlap and always advance the
@@ -103,7 +103,7 @@ proptest! {
     /// rather than crashing a process, and it exercises the composition rule at its real function
     /// rather than re-deriving it. The fold's *own* write — that `SEGMENTS-<n>.json` gets the live
     /// value and `MANIFEST.json` the snapshot's — is a fact about IO and is pinned end to end by
-    /// `tessera-engine`'s `the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot`
+    /// `mosaica-engine`'s `the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot`
     /// and `the_folded_manifests_high_water_is_the_snapshots_entity_space`. Obligation 10 needs
     /// both; neither alone establishes it.
     #[test]

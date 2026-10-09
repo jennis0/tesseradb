@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Evaluate candidate serial/parallel predictors against the two-axis sweep's measured cells.
 
-Input: the `CSV,` lines emitted by `crates/tessera-engine/examples/tile_axis_sweep.rs`, one file
+Input: the `CSV,` lines emitted by `crates/mosaica-engine/examples/tile_axis_sweep.rs`, one file
 per (scale, grant). Every number this reads is a measured median; the only derived quantity is the
 per-cell REGRET — how much slower the arm a rule selects is than the better of the two measured
 arms for that same shape. Regret is arithmetic on measured values, not a model.

@@ -1,5 +1,5 @@
 //! Engine state over HTTP: pin identity and session revocation — the server-plane half of what
-//! `tessera-engine/tests/pins.rs` asserts in-process.
+//! `mosaica-engine/tests/pins.rs` asserts in-process.
 //!
 //! Named for *engine state* rather than for pins alone: it holds session revocation and the
 //! cache-pruning assertions too, all of which are the same subject — server-observable state the
@@ -46,7 +46,7 @@ async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
         .unwrap();
     assert_eq!(resp.status(), 200, "a stamp never refuses a request");
     assert_eq!(
-        resp.headers().get("x-tessera-stale").unwrap(),
+        resp.headers().get("x-mosaica-stale").unwrap(),
         "1",
         "and the client is told its held view is out of date"
     );
@@ -64,7 +64,7 @@ async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.headers().get("x-tessera-stale").unwrap(), "0");
+    assert_eq!(resp.headers().get("x-mosaica-stale").unwrap(), "0");
     assert_eq!(
         decode_viewport(&resp.bytes().await.unwrap()).0,
         stale_tiles,
@@ -91,7 +91,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
         .unwrap();
     let pin_header = resp
         .headers()
-        .get("x-tessera-pin")
+        .get("x-mosaica-pin")
         .unwrap()
         .to_str()
         .unwrap()
@@ -113,7 +113,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
     assert_eq!(resp.status(), 200);
 
     // Re-query WITH the stamp taken before the suppression. A suppression moves the overlay and
-    // not geometry, so the stamp is still current — `x-tessera-stale` stays 0 — and the count
+    // not geometry, so the stamp is still current — `x-mosaica-stale` stays 0 — and the count
     // reflects the suppression immediately. That second half is the one that matters: the stamp
     // has never had any bearing on authorisation state, and does not acquire one by being echoed.
     let resp = server
@@ -129,7 +129,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers().get("x-tessera-stale").unwrap(),
+        resp.headers().get("x-mosaica-stale").unwrap(),
         "0",
         "an overlay swap moves no geometry, so the stamp is not stale"
     );

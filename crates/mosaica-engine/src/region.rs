@@ -33,13 +33,13 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use sha2::{Digest, Sha256};
 
-use tessera_spatial::shape::{BoundaryCell, PolyCtx, Rect, Shape};
-use tessera_spatial::{unsplit32, Tile};
-use tessera_store::read::{tile_ranges_all, SegmentData};
-use tessera_types::MortonCode;
+use mosaica_spatial::shape::{BoundaryCell, PolyCtx, Rect, Shape};
+use mosaica_spatial::{unsplit32, Tile};
+use mosaica_store::read::{tile_ranges_all, SegmentData};
+use mosaica_types::MortonCode;
 
 use crate::compose::EffectiveMask;
-use tessera_cache::CacheWeight;
+use mosaica_cache::CacheWeight;
 
 /// The default `max_region_cells` — the most boundary cells a region's descent may hold at one
 /// depth before it stops and answers a cover (selection-operand §2). A box around the whole world
@@ -57,7 +57,7 @@ pub enum RegionVerdict {
 }
 
 impl RegionVerdict {
-    /// The `x-tessera-region` header's value.
+    /// The `x-mosaica-region` header's value.
     pub fn header_value(self) -> String {
         match self {
             RegionVerdict::Exact => "exact".to_string(),
@@ -296,8 +296,8 @@ impl RegionDecomposition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_spatial::shape::{ShapeF64, Space};
-    use tessera_spatial::Bounds;
+    use mosaica_spatial::shape::{ShapeF64, Space};
+    use mosaica_spatial::Bounds;
 
     #[test]
     fn the_coarsest_of_several_answers_is_the_shallowest_cover_any_reached() {

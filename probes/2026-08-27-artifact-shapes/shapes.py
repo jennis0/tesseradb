@@ -6,7 +6,7 @@ ring an `(m, 2)` array of vertices in order. A one-ring result is what the wire 
 what a multi-ring wire would have to carry, and is reported as such rather than flattened.
 
 `alpha_dig` is a **reimplementation of the engine's construction**
-(`crates/tessera-engine/src/derived.rs`), not a call into it. Two differences are deliberate and
+(`crates/mosaica-engine/src/derived.rs`), not a call into it. Two differences are deliberate and
 stated so a reader does not mistake this for the engine:
 
 - The engine's arithmetic is exact in `i128`; this uses `float64` for the vectorised passes, whose

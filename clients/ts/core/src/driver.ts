@@ -4,7 +4,7 @@ import {plan, worldBbox, type Plan, type PlannerInputs, type Viewport} from './p
 import {rectContains, rectContainsTile, rectIntersection, type TileRect} from './rects.js';
 import type {Replica, ReplicaFrame} from './replica.js';
 import type {Band} from './bands.js';
-import {TesseraError} from './client.js';
+import {MosaicaError} from './client.js';
 
 /**
  * The driver: the scheduler that decides when the client asks, retries, revalidates and fetches
@@ -124,10 +124,10 @@ export const RETRY_DEFAULTS: RetryOptions = {maxRetries: DEFAULTS.maxRetries, no
  * @param attempt - Retries already made, from 0.
  */
 export function retryDelayMs(error: unknown, attempt: number, o: RetryOptions): number | null {
-  const status = error instanceof TesseraError ? error.status : 0;
+  const status = error instanceof MosaicaError ? error.status : 0;
   if ((status !== 429 && status !== 503) || attempt >= o.maxRetries) return null;
   const base = status === 503 ? o.notReadyBackoffMs : 1000;
-  const asked = (error as TesseraError).retryAfterS ?? 0;
+  const asked = (error as MosaicaError).retryAfterS ?? 0;
   return Math.min(Math.max(base * 2 ** attempt, asked * 1000), o.retryBackoffMaxMs);
 }
 

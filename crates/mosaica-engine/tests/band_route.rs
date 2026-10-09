@@ -1,4 +1,4 @@
-//! The band route serves exactly what the shipped scan serves (`tessera_engine::bands`).
+//! The band route serves exactly what the shipped scan serves (`mosaica_engine::bands`).
 //!
 //! Every check below runs one request twice on one engine and one generation: answered from the
 //! identity bands at every zoom, and answered by the scan alone, the reference. The two responses
@@ -19,15 +19,15 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::bands::BANDS_BELOW_ZOOM;
-use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
-use tessera_engine::viewport::{PointRows, ViewportRequest};
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_spatial::tiler::ScalarType;
-use tessera_types::EntityId;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::bands::BANDS_BELOW_ZOOM;
+use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
+use mosaica_engine::viewport::{PointRows, ViewportRequest};
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_types::EntityId;
 
 /// Enough rows that the bands answer tiles down to zoom 3 under [`config`]'s threshold.
 const ROWS: u64 = 60_000;
@@ -137,7 +137,7 @@ fn build_fixture(root: &Path) {
         ("flag", ScalarType::Bool, false),
         ("weight", ScalarType::F64, true),
     ] {
-        schema.attributes.push(tessera_build::config::Attribute {
+        schema.attributes.push(mosaica_build::config::Attribute {
             field: None,
             name: name.to_string(),
             title: None,
@@ -151,20 +151,20 @@ fn build_fixture(root: &Path) {
         });
     }
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
         strict: false,

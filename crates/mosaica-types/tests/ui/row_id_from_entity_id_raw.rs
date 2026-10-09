@@ -9,11 +9,11 @@
 //!
 //! An explicit cast on a `raw()` value is invisible to the type system by construction, and
 //! `scripts/check-layers.sh` does not catch it either — its I4 rule greps for `impl From` between
-//! the ID newtypes in `tessera-types` and nothing else. So the honest statement of I4's
+//! the ID newtypes in `mosaica-types` and nothing else. So the honest statement of I4's
 //! enforcement is: no implicit conversion, no `From` impl, no field access, and a code review for
-//! the cast. `tessera_store::Permutation::row_of` remains the only legitimate crossing.
+//! the cast. `mosaica_store::Permutation::row_of` remains the only legitimate crossing.
 
-use tessera_types::{EntityId, RowId};
+use mosaica_types::{EntityId, RowId};
 
 fn main() {
     let e = EntityId::new(7);

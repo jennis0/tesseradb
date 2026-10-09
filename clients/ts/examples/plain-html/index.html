@@ -2,7 +2,7 @@
 <html lang="en-GB">
   <head>
     <meta charset="utf-8" />
-    <title>Tessera — plain HTML</title>
+    <title>Mosaica — plain HTML</title>
     <link rel="icon" href="data:," />
     <!-- The elements fetch no font; this page loads Instrument Sans, their default face. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -12,15 +12,15 @@
       html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
       body { display: grid; grid-template-rows: auto 1fr; }
       header { display: flex; gap: 1rem; align-items: center; padding: 0.5rem 1rem; border-bottom: 1px solid #ddd; }
-      tessera-explorer { --tessera-explorer-height: 100%; min-height: 0; }
+      mosaica-explorer { --mosaica-explorer-height: 100%; min-height: 0; }
     </style>
     <!-- The self-contained bundle, one file, by relative path, with the integrity hash it was built
          with: the browser refuses a file that differs from what the hash names. No build step. -->
-    <script type="module" src="./tessera-components.js" integrity="__SRI__"></script>
+    <script type="module" src="./mosaica-components.js" integrity="__SRI__"></script>
   </head>
   <body>
     <header>
-      <strong>Tessera</strong>
+      <strong>Mosaica</strong>
       <label>signed in as <select id="principal"></select></label>
       <span id="who"></span>
     </header>
@@ -37,10 +37,10 @@
         // A different user is a different session: the explorer that drew the previous one is
         // disposed and a new one mounted, so nothing of the old picture sits under the new.
         const mount = document.getElementById('mount');
-        for (const old of mount.querySelectorAll('tessera-explorer')) old.dispose();
+        for (const old of mount.querySelectorAll('mosaica-explorer')) old.dispose();
         mount.replaceChildren();
         const {token} = await (await fetch(`/token?user=${encodeURIComponent(user)}`, {method: 'POST'})).json();
-        const explorer = document.createElement('tessera-explorer');
+        const explorer = document.createElement('mosaica-explorer');
         explorer.setAttribute('viewer-url', location.origin);
         explorer.setAttribute('token', token);
         explorer.setAttribute('layout', 'overlay');

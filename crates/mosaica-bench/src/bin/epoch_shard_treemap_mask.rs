@@ -35,7 +35,7 @@
 //! column at its own random offset so consecutive tiles do not share cache lines.
 //!
 //! ```text
-//! nice -n 10 cargo run --release -p tessera-bench --bin epoch_shard_treemap_mask -- \
+//! nice -n 10 cargo run --release -p mosaica-bench --bin epoch_shard_treemap_mask -- \
 //!     --scratch /tmp/epoch-shard --out result.json
 //! ```
 
@@ -52,16 +52,16 @@ use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashSet;
 use serde::Serialize;
 
-use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::projection::RowProjection;
-use tessera_engine::select::{
+use mosaica_engine::compose::{compose, EffectiveMask};
+use mosaica_engine::projection::RowProjection;
+use mosaica_engine::select::{
     decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
 };
-use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::read::SegmentData;
-use tessera_store::write::{write_permutation, SegmentRow, SegmentWriter};
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::TermId;
+use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_store::read::SegmentData;
+use mosaica_store::write::{write_permutation, SegmentRow, SegmentWriter};
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::TermId;
 
 /// 2³⁰ rows: the row space every case is a partition of.
 const UNIVERSE: u64 = 1 << 30;
@@ -373,11 +373,11 @@ fn synthetic_segment(rows: usize, seed: u64, scratch: &Path) -> SegmentData {
     for row in 0..rows as u32 {
         writer
             .append(SegmentRow {
-                tessera_id: tessera_types::TesseraId::new(rng.next()),
+                tessera_id: mosaica_types::TesseraId::new(rng.next()),
                 morton: row,
                 residual: 0,
                 scalars: &[],
-                indexed: &tessera_store::write::no_indexed,
+                indexed: &mosaica_store::write::no_indexed,
             })
             .expect("a synthetic row");
     }
@@ -386,7 +386,7 @@ fn synthetic_segment(rows: usize, seed: u64, scratch: &Path) -> SegmentData {
         scratch,
         "epoch-shard-synthetic",
         rows as u32,
-        tessera_store::edited::RowEntities::Numbers,
+        mosaica_store::edited::RowEntities::Numbers,
     )
     .expect("the synthetic segment opens")
 }
@@ -767,7 +767,7 @@ fn cpu_model() -> String {
 fn main() {
     let args = Args::parse();
     let scratch = args.scratch.clone().unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("tessera-epoch-shard-{}", std::process::id()))
+        std::env::temp_dir().join(format!("mosaica-epoch-shard-{}", std::process::id()))
     });
     std::fs::create_dir_all(&scratch).expect("create scratch dir");
     let id_rows = 1usize << args.id_rows_log2;

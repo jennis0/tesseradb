@@ -12,7 +12,7 @@ import {ContextRoot} from '@lit/context';
  * copies of this module attach one root.
  */
 
-const ROOT_KEY = '__tesseradbContextRoot';
+const ROOT_KEY = '__mosaicaContextRoot';
 
 export function attachContextRoot(): void {
   if (typeof document === 'undefined') return;

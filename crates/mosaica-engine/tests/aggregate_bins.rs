@@ -24,19 +24,19 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::filter::{FilterExpr, FilterOperand, RegionLeaf, Scalar};
-use tessera_engine::IngestRequest;
-use tessera_engine::{
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::filter::{FilterExpr, FilterOperand, RegionLeaf, Scalar};
+use mosaica_engine::IngestRequest;
+use mosaica_engine::{
     AggregateCaps, AggregateHead, AggregateRefused, AggregateRequest, AggregateSink,
     AggregateTrailer, By, Engine, EngineError, Grouping, PageEnd, RecordsLimits, Reference,
     Session, SinkResult, TableHead, ViewportRequest,
 };
-use tessera_lifecycle::command::IngestRow;
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_spatial::shape::{ShapeF64, Space};
+use mosaica_lifecycle::command::IngestRow;
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_spatial::shape::{ShapeF64, Space};
 
 const N: u64 = 3_000;
 
@@ -339,15 +339,15 @@ fn build_gated_views(
         .map(|(view, held, visibility)| {
             let points = dir.join(format!("{view}-points.parquet"));
             write_points(&points, held);
-            tessera_build::ViewArgs {
+            mosaica_build::ViewArgs {
                 visibility: visibility.clone(),
                 view_id: view.to_string(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 extent: extent(),
                 points,
                 point_fields: Default::default(),
                 select: None,
-                access: tessera_build::config::AccessInput::relation(pairs.clone()),
+                access: mosaica_build::config::AccessInput::relation(pairs.clone()),
             }
         })
         .collect();
@@ -357,7 +357,7 @@ fn build_gated_views(
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -425,7 +425,7 @@ impl Fx {
             .categories(
                 &session,
                 "kind",
-                tessera_engine::CategoryQuery::Page {
+                mosaica_engine::CategoryQuery::Page {
                     after: None,
                     limit: 100,
                 },
@@ -435,7 +435,7 @@ impl Fx {
         let code = page.values.iter().find(|v| v.key == key).unwrap().code;
         FilterExpr::Leaf {
             column: "kind".to_string(),
-            operand: FilterOperand::In(vec![tessera_types::AttrLocalId::new(code)]),
+            operand: FilterOperand::In(vec![mosaica_types::AttrLocalId::new(code)]),
         }
     }
 }
@@ -1231,7 +1231,7 @@ fn a_sampled_histogram_counts_the_items_below_one_cut_and_scales_them() {
                     let reference = counted(&all, s, &ids);
                     assert_eq!(
                         counts,
-                        tessera_engine::TableSample {
+                        mosaica_engine::TableSample {
                             sampled: !exact_by_size(s, n) || !exact_by_size(s, v),
                             items: taken.len() as u64,
                             reference_items: Some(reference.len() as u64),
@@ -1318,7 +1318,7 @@ fn a_set_within_the_sample_size_is_counted_exactly() {
     assert_eq!(exact.0.sample, None);
     assert_eq!(
         within.0.sample,
-        Some(tessera_engine::TableSample {
+        Some(mosaica_engine::TableSample {
             sampled: false,
             items: exact.0.total,
             reference_items: None,
@@ -1353,7 +1353,7 @@ fn whether_a_set_is_sampled_depends_on_its_size_alone() {
             let (head, rows) = table(&fx.engine, &session, req);
             assert_eq!(
                 head.sample,
-                Some(tessera_engine::TableSample {
+                Some(mosaica_engine::TableSample {
                     sampled: !exact_by_size(s, n),
                     items: taken.len() as u64,
                     reference_items: None,
@@ -1408,7 +1408,7 @@ fn default_edges_are_exact_however_the_set_is_counted() {
             if name == "region" {
                 assert_eq!(
                     head.sample.unwrap(),
-                    tessera_engine::TableSample {
+                    mosaica_engine::TableSample {
                         sampled: false,
                         items: few.len() as u64,
                         reference_items: None,
@@ -1714,7 +1714,7 @@ fn an_item_joining_another_view_is_sampled_with_its_indexed_values() {
         }
     }
     // Every banded row's copy holds its item's value, as a deep verification reads it.
-    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the bundle verifies");
 }
 
@@ -1776,7 +1776,7 @@ fn a_sample_read_partly_from_the_band_and_partly_by_scanning_is_the_oracles() {
     let items: Vec<&Item> = fx.visible(false, &|_| true).collect();
     let s = 12;
     let cut = cut_of(s, items.len() as u64).unwrap();
-    assert_eq!(tessera_store::bands::band_below(cut), Some(7));
+    assert_eq!(mosaica_store::bands::band_below(cut), Some(7));
     let sample = sample_of(&items, s, &ids);
     let scanned = sample.iter().filter(|i| i.source >= INGESTED).count();
     assert!(

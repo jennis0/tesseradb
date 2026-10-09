@@ -13,7 +13,7 @@
 use std::time::Instant;
 
 use croaring::Bitmap;
-use tessera_filter::{Codes, Endpoint, Scalar, ValueColumn};
+use mosaica_filter::{Codes, Endpoint, Scalar, ValueColumn};
 
 /// Peak resident set size in bytes, from `/proc/self/status`'s `VmHWM` — the high-water mark, which
 /// is what a transient allocation shows up in and `statm`'s current figure does not.

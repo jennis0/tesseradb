@@ -5,14 +5,14 @@ import {existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 
 const entries = {
-  '@tesseradb/client': ['createStore', 'setWorkerFactory', 'TesseraClient', 'RecordsRead', 'Control'],
-  '@tesseradb/client/internal': ['compose', 'workerDecoder'],
-  '@tesseradb/deck': ['TesseraLayer', 'viewInputOf', 'resolvePick'],
-  '@tesseradb/deck/internal': ['MarkSlab'],
-  '@tesseradb/components': ['TesseraExplorer', 'TesseraMap', 'TesseraStore', 'storeContext', 'tokens', 'PARTS'],
-  '@tesseradb/components/count': ['TesseraCount'],
-  '@tesseradb/react': ['useTesseraStore', 'useProjection'],
-  '@tesseradb/react/components': ['TesseraExplorer', 'TesseraMap']
+  '@mosaica/client': ['createStore', 'setWorkerFactory', 'MosaicaClient', 'RecordsRead', 'Control'],
+  '@mosaica/client/internal': ['compose', 'workerDecoder'],
+  '@mosaica/deck': ['MosaicaLayer', 'viewInputOf', 'resolvePick'],
+  '@mosaica/deck/internal': ['MarkSlab'],
+  '@mosaica/components': ['MosaicaExplorer', 'MosaicaMap', 'MosaicaStore', 'storeContext', 'tokens', 'PARTS'],
+  '@mosaica/components/count': ['MosaicaCount'],
+  '@mosaica/react': ['useMosaicaStore', 'useProjection'],
+  '@mosaica/react/components': ['MosaicaExplorer', 'MosaicaMap']
 };
 
 let failed = 0;
@@ -37,7 +37,7 @@ for (const [specifier, names] of Object.entries(entries)) {
 }
 
 // The decoder loads its worker from a file beside it.
-const worker = fileURLToPath(new URL('./decode.worker.js', import.meta.resolve('@tesseradb/client')));
+const worker = fileURLToPath(new URL('./decode.worker.js', import.meta.resolve('@mosaica/client')));
 if (!existsSync(worker)) {
   console.error(`smoke-dist: the decode worker is not at ${worker}`);
   failed++;

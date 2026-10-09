@@ -2,12 +2,12 @@
 
 use std::sync::atomic::Ordering;
 
-use tessera_lifecycle::resolve::{self, Batch, RowIdentity, Verdict};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_store::manifest::DeclaredScalar;
-use tessera_store::unique::{KeyKind, UniqueKey};
-use tessera_store::StoreError;
-use tessera_types::{EntityId, TermId, TesseraId};
+use mosaica_lifecycle::resolve::{self, Batch, RowIdentity, Verdict};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_store::manifest::DeclaredScalar;
+use mosaica_store::unique::{KeyKind, UniqueKey};
+use mosaica_store::StoreError;
+use mosaica_types::{EntityId, TermId, TesseraId};
 
 use crate::engine::Engine;
 use crate::write::joined::flushed_terms_of;
@@ -26,7 +26,7 @@ impl Engine {
     }
 
     /// Which item each row of a call that addresses items names, under the identity rule
-    /// ([`tessera_lifecycle::resolve`]): a row names the item its `tessera_id` and unique values
+    /// ([`mosaica_lifecycle::resolve`]): a row names the item its `tessera_id` and unique values
     /// name, and a row naming none, or naming two, is refused. Many rows may name one item. A
     /// column that is neither `tessera_id` nor a unique field names nothing and is ignored, as a
     /// build ignores it; the answer names it.
@@ -175,7 +175,7 @@ fn key_of_value(
     declared: &DeclaredScalar,
     value: &AddressValue,
 ) -> std::result::Result<Option<UniqueKey>, crate::EngineError> {
-    let keyword = declared.arrow_type == tessera_spatial::tiler::ScalarType::Keyword;
+    let keyword = declared.arrow_type == mosaica_spatial::tiler::ScalarType::Keyword;
     let integer = match (value, keyword) {
         (AddressValue::Text(text), true) => return Ok(Some(UniqueKey::keyword(text))),
         (AddressValue::Integer(n), true) => {
@@ -202,7 +202,7 @@ fn key_of_value(
             ))
         })?,
     };
-    Ok(tessera_store::unique::key_of_integer(
+    Ok(mosaica_store::unique::key_of_integer(
         declared.arrow_type,
         integer,
     ))
@@ -381,7 +381,7 @@ impl Engine {
 
     /// One registered layer's declaration, by name, with no gate. Answers what a declaration
     /// says, never what is served: [`Engine::visible_layers`] resolves reachability.
-    pub fn registered_layer(&self, name: &str) -> Option<tessera_types::layer::RegisteredLayer> {
+    pub fn registered_layer(&self, name: &str) -> Option<mosaica_types::layer::RegisteredLayer> {
         self.write.live().registered_layer(name)
     }
 
@@ -389,7 +389,7 @@ impl Engine {
     /// be suppressed by — entity ids never cross the boundary.
     pub fn register_layer(
         &self,
-        declaration: tessera_types::layer::LayerDeclaration,
+        declaration: mosaica_types::layer::LayerDeclaration,
     ) -> std::result::Result<TesseraId, crate::write::AcceptError> {
         let entity = self.write.register_layer(declaration)?;
         // The blinding is total over the space the allocator will issue, so a row-less entity is
@@ -405,7 +405,7 @@ impl Engine {
         entity: EntityId,
     ) -> std::result::Result<TesseraId, crate::write::AcceptError> {
         self.identity_key.forward(shard, entity).map_err(|_| {
-            crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
+            crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::LayerRefused {
                 detail: "an allocated entity id lies outside the identity space".to_string(),
             })
         })
@@ -423,7 +423,7 @@ impl Engine {
             .sum();
         if rowless > 0 {
             return Err(crate::write::AcceptError::Exec(
-                tessera_lifecycle::ExecError::LayerRefused {
+                mosaica_lifecycle::ExecError::LayerRefused {
                     detail: format!(
                         "{rowless} member(s) of this batch name no point; a membership is a set of \
                          documents, and a member with no row would count towards the artifact's \
@@ -445,7 +445,7 @@ impl Engine {
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn declare_attribute(
         &self,
-        request: tessera_lifecycle::AttributeRequest,
+        request: mosaica_lifecycle::AttributeRequest,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         self.write.declare_attribute(request)
     }
@@ -454,7 +454,7 @@ impl Engine {
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn declare_vocabulary(
         &self,
-        request: tessera_lifecycle::VocabularyRequest,
+        request: mosaica_lifecycle::VocabularyRequest,
     ) -> std::result::Result<(bool, u64, u64), crate::write::AcceptError> {
         self.write.declare_vocabulary(request)
     }
@@ -464,7 +464,7 @@ impl Engine {
     pub fn mint_vocabulary_values(
         &self,
         vocabulary: String,
-        values: Vec<tessera_lifecycle::DeclaredValue>,
+        values: Vec<mosaica_lifecycle::DeclaredValue>,
     ) -> std::result::Result<(u64, u64, u64), crate::write::AcceptError> {
         self.write.mint_vocabulary_values(vocabulary, values)
     }
@@ -474,7 +474,7 @@ impl Engine {
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_view_group(
         &self,
-        mut declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
+        mut declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
         declaration.point_default =
@@ -486,7 +486,7 @@ impl Engine {
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_plain_view(
         &self,
-        mut declaration: tessera_lifecycle::wal::PlainViewDeclaration,
+        mut declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
         declaration.point_default =
@@ -494,30 +494,30 @@ impl Engine {
         self.write.create_plain_view(declaration)
     }
 
-    /// [`tessera_access::point_default`]: the default as stored,
+    /// [`mosaica_access::point_default`]: the default as stored,
     /// or a view refusal.
     fn check_point_default(
         &self,
         default: Option<&str>,
     ) -> std::result::Result<Option<String>, crate::write::AcceptError> {
         default
-            .map(tessera_access::point_default)
+            .map(mosaica_access::point_default)
             .transpose()
             .map_err(|detail| {
-                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused {
+                crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::ViewRefused {
                     detail,
                 })
             })
     }
 
-    /// [`tessera_access::declared_visibility`]: the gate as stored, or a
+    /// [`mosaica_access::declared_visibility`]: the gate as stored, or a
     /// view refusal.
     fn check_visibility(
         &self,
         visibility: Option<&[String]>,
     ) -> std::result::Result<Option<Vec<String>>, crate::write::AcceptError> {
-        tessera_access::declared_visibility(visibility).map_err(|detail| {
-            crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
+        mosaica_access::declared_visibility(visibility).map_err(|detail| {
+            crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::ViewRefused { detail })
         })
     }
 
@@ -528,7 +528,7 @@ impl Engine {
         group: String,
         key: String,
         visibility: Option<Vec<String>>,
-        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
+        metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
         let visibility = self.check_visibility(visibility.as_deref())?;
         self.write.create_view(group, key, visibility, metadata)
@@ -551,7 +551,7 @@ impl Engine {
         &self,
         layer: String,
         level: u32,
-        artifacts: Vec<tessera_lifecycle::IncomingArtifact>,
+        artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
         // A member resolved before an edit moved its item is the item where it is now.
         let mut artifacts = artifacts;
@@ -587,7 +587,7 @@ impl Engine {
         }
         if let Some(first_artifact) = first_artifact {
             return Err(crate::write::AcceptError::Exec(
-                tessera_lifecycle::ExecError::LayerRefused {
+                mosaica_lifecycle::ExecError::LayerRefused {
                     detail: format!(
                         "{deleted} member(s) or content source(s) of this batch are deleted, the \
                          first in artifact {first_artifact}; a deleted member contributes to no \
@@ -622,7 +622,7 @@ impl Engine {
         &self,
         layer: String,
         level: u32,
-        artifacts: Vec<tessera_lifecycle::IncomingArtifact>,
+        artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
     ) -> std::result::Result<Vec<TesseraId>, crate::write::AcceptError> {
         self.put_artifacts(layer, level, artifacts)
             .map(|published| published.tessera_ids)
@@ -640,7 +640,7 @@ impl Engine {
         &self,
         layer: String,
         level: u32,
-        joins: Vec<tessera_lifecycle::IncomingGrowth>,
+        joins: Vec<mosaica_lifecycle::IncomingGrowth>,
     ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
         let mut joins = joins;
         let generation = self.generation();
@@ -666,7 +666,7 @@ impl Engine {
         }
         if let Some(first_key) = first_key {
             return Err(crate::write::AcceptError::Exec(
-                tessera_lifecycle::ExecError::LayerRefused {
+                mosaica_lifecycle::ExecError::LayerRefused {
                     detail: format!(
                         "{deleted} joining member(s) are deleted, the first joining '{first_key}'; a \
                          deleted member contributes to no count, so the batch is refused rather \

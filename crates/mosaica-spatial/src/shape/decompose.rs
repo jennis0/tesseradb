@@ -10,7 +10,7 @@
 //! superset of the shape marked as such by the caller. Breadth-first bounds memory to one level
 //! of crossing tiles. A published shape passes no budget and always reaches the grid.
 
-use tessera_types::MortonCode;
+use mosaica_types::MortonCode;
 
 use crate::morton::{compact, Tile};
 

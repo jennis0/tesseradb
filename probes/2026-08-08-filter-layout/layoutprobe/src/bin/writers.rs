@@ -32,8 +32,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use tessera_authz::{write_delta_tier_at, KeyedPostingsSpool};
-use tessera_filter::{write_value_column, Codes, ColumnKind, ValueColumnWriter};
+use mosaica_authz::{write_delta_tier_at, KeyedPostingsSpool};
+use mosaica_filter::{write_value_column, Codes, ColumnKind, ValueColumnWriter};
 
 /// A field of `/proc/self/status`, in bytes.
 fn status_bytes(field: &str) -> u64 {
@@ -93,7 +93,7 @@ fn main() {
         .map(|s| s.parse().expect("vocab"))
         .unwrap_or(1000);
 
-    let dir = std::env::temp_dir().join("tessera-writers-probe");
+    let dir = std::env::temp_dir().join("mosaica-writers-probe");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let values_path = dir.join("values.arrow");
     let presence_path = dir.join("presence.roaring");

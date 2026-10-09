@@ -1,6 +1,6 @@
 //! **Ask 4: true wire calls with N simultaneous users.**
 //!
-//! An HTTP load generator driving `POST /v1/viewport` against a real `tessera serve`. Orchestration
+//! An HTTP load generator driving `POST /v1/viewport` against a real `mosaica serve`. Orchestration
 //! — booting the server, authorising the sessions, sampling the server's RSS and CPU — lives in
 //! `scripts/bench_concurrency.py`, which reuses the proven `reference/oracle/harness.py` machinery
 //! rather than reimplementing config writing and boot polling here. This file is the hot loop.
@@ -50,7 +50,7 @@
 //! server work. The server is CPU-bound at ~8.6 of 12 cores, with 4 more going to the generator.
 //!
 //! **F4 — Arm A at c=1000 is lock-bound, and the mechanism is `RowProjection::new` running under
-//! the `row_projection_cache` mutex** (`tessera-engine/src/viewport.rs`, the `None` arm of the
+//! the `row_projection_cache` mutex** (`mosaica-engine/src/viewport.rs`, the `None` arm of the
 //! cache lookup). Every distinct session's *first* viewport builds its entity→row projection while
 //! holding one global lock, so 1000 distinct principals serialise there. The signature is
 //! unmistakable: throughput halves (39.8k → 18.6k), end-to-end p99 reaches **1.04 s**, server-side
@@ -65,7 +65,7 @@
 //! *(**That mutex no longer exists.** The paragraph above is the measurement as taken, kept
 //! because the re-measurement below is only meaningful against it — but the code it describes is
 //! gone: D-G replaced the global lock with the per-key slot-state single flight in
-//! `tessera-cache`, wrapped as `RowProjectionCache` in the engine's `cache.rs`, whose map
+//! `mosaica-cache`, wrapped as `RowProjectionCache` in the engine's `cache.rs`, whose map
 //! lock is held only for the O(1) `Building`/`Ready` transition and never across
 //! `RowProjection::new`. Read `viewport.rs`'s cache-lookup comment for the guardrail that keeps it
 //! that way.)*
@@ -491,13 +491,13 @@ struct RawOutcome {
     /// Whether a 429's body carries `retry_after_s: 1`; always `false` for any other status.
     retry_after_body_is_one: bool,
     /// Sum of the tile batch's `served` column — points_gathered per §7.2's `m(T)`, contract-equal
-    /// to the points-stream row count (`tessera-wire::payload`'s module doc). `0` for any status
+    /// to the points-stream row count (`mosaica-wire::payload`'s module doc). `0` for any status
     /// other than 200 (a 429's body is a JSON error, never an Arrow tile stream).
     points_served: u64,
 }
 
 /// Decode just the tiles frame's `served` column and sum it — new bench metric (points served
-/// per second/user/request). Per the wire framing (contracts §3.2 r26; `tessera-wire::payload`'s
+/// per second/user/request). Per the wire framing (contracts §3.2 r26; `mosaica-wire::payload`'s
 /// module doc): the body is tagged length-prefixed frames, the kind-1 tiles frame first, its
 /// payload an Arrow IPC stream (schema `tile/visible/matched/served`, all `uint64`). The point
 /// frames and any sub-cell frame follow but are never touched — every frame is length-prefixed,
@@ -509,12 +509,12 @@ struct RawOutcome {
 /// the caller's accounting simply undercounts that one response's points, which a near-zero rate
 /// elsewhere in the cell would already flag.
 fn sum_served(body: &[u8]) -> u64 {
-    let Ok(frames) = tessera_wire::split_frames(body) else {
+    let Ok(frames) = mosaica_wire::split_frames(body) else {
         return 0;
     };
     let Some((_, tile_bytes)) = frames
         .iter()
-        .find(|(kind, _)| *kind == tessera_wire::FRAME_TILES)
+        .find(|(kind, _)| *kind == mosaica_wire::FRAME_TILES)
     else {
         return 0;
     };
@@ -559,7 +559,7 @@ async fn issue(
     let status = resp.status().as_u16();
     let server_us = resp
         .headers()
-        .get("x-tessera-server-us")
+        .get("x-mosaica-server-us")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);

@@ -18,7 +18,7 @@
 //! order, so within a leaf Morton cell the identities ascend: `C_θ` for that cell is a prefix
 //! length and the cell's smallest visible identities are the head of it. Where a tile's mask is
 //! dense enough to decode as ranges, and the segment's cells are long enough to pay for a cell
-//! step ([`cell_route_pays`]), selection walks the cells (`tessera_store::read::CutIndex` says
+//! step ([`cell_route_pays`]), selection walks the cells (`mosaica_store::read::CutIndex` says
 //! where they begin) and reads a bounded number of identities in each, instead of every visible
 //! row of the tile. Where the mask is sparse it scans, which is cheaper than visiting the many
 //! cells a scattered mask touches, and where the cells are short it scans for the reason the next
@@ -130,7 +130,7 @@
 use std::collections::BinaryHeap;
 use std::ops::Range;
 
-use tessera_store::read::SegmentData;
+use mosaica_store::read::SegmentData;
 
 use crate::compose::EffectiveMask;
 
@@ -423,7 +423,7 @@ pub enum CellRoute {
 #[derive(Debug, Clone)]
 pub struct SelectionPart<'a> {
     pub segment: &'a SegmentData,
-    /// Segment-local, as [`tessera_store::tile_ranges`] returns it.
+    /// Segment-local, as [`mosaica_store::tile_ranges`] returns it.
     pub range: Range<u32>,
     /// This segment's `row_base` in the view's row space; 0 for the build segment.
     pub row_base: u32,
@@ -435,7 +435,7 @@ pub struct SelectionPart<'a> {
 impl<'a> SelectionPart<'a> {
     /// The single-segment case: a view whose only segment is the build one, whose rows therefore
     /// begin at 0, so segment-local and view-space rows coincide. What a bundle straight out of
-    /// `tessera build` presents, and what the equivalence tests and the route-saving example
+    /// `mosaica build` presents, and what the equivalence tests and the route-saving example
     /// construct.
     pub fn base(segment: &'a SegmentData, range: Range<u32>, visible: u64) -> Self {
         SelectionPart {
@@ -513,7 +513,7 @@ impl<'a> SelectionParts<'a> {
 /// so the state belongs to the cell rather than to the piece.
 struct CellWalk<'a> {
     /// The cell starts strictly inside the part's row range, segment-local and ascending — the
-    /// boundaries the walk crosses ([`tessera_store::read::CutIndex`]).
+    /// boundaries the walk crosses ([`mosaica_store::read::CutIndex`]).
     starts: &'a [u32],
     next: usize,
     /// Where the current cell ends, in **view** row space. Starts at the part's own range start,

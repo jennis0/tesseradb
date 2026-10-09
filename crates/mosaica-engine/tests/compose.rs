@@ -19,13 +19,13 @@ use rand::SeedableRng;
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReader};
-use tessera_engine::compose::{compose, visible_to, EffectiveMask};
-use tessera_engine::projection::RowProjection;
-use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
-use tessera_store::write::write_permutation;
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::{EntityId, TermId};
+use mosaica_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReader};
+use mosaica_engine::compose::{compose, visible_to, EffectiveMask};
+use mosaica_engine::projection::RowProjection;
+use mosaica_lifecycle::{ChangeOp, IngestBuffer, Overlay};
+use mosaica_store::write::write_permutation;
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::{EntityId, TermId};
 
 const UNIVERSE: u32 = 10_000;
 const BUFFER_EXT: u32 = 5;
@@ -149,11 +149,11 @@ fn compose_through_the_list(
         &fx.perm,
         // Derived here exactly as a publication derives it, so every case in this file exercises
         // the deny mask rather than the walk that used to answer for deletions and suppressions.
-        &tessera_engine::denied_rows_of(overlay, &fx.perm),
+        &mosaica_engine::denied_rows_of(overlay, &fx.perm),
         // The derived list, on the same rule. Every case here is composed twice, once through it
         // and once through the whole-buffer fallback, and the two are required to agree: the
         // fallback is what a view with no list falls back to.
-        Some(&tessera_engine::buffered_rows_of(buffer, &fx.perm)),
+        Some(&mosaica_engine::buffered_rows_of(buffer, &fx.perm)),
     )
 }
 
@@ -169,7 +169,7 @@ fn compose_with_the_fallback_walk(
         buffer,
         Arc::clone(&fx.base),
         &fx.perm,
-        &tessera_engine::denied_rows_of(overlay, &fx.perm),
+        &mosaica_engine::denied_rows_of(overlay, &fx.perm),
         None,
     )
 }
@@ -497,9 +497,9 @@ fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
 }
 
 /// Insert a buffered item directly with already-resolved `terms`, bypassing descriptor
-/// resolution (irrelevant to these tests — see [`tessera_lifecycle::IngestBuffer::insert_row_with_terms`]).
+/// resolution (irrelevant to these tests — see [`mosaica_lifecycle::IngestBuffer::insert_row_with_terms`]).
 fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
-    use tessera_lifecycle::WalRow;
+    use mosaica_lifecycle::WalRow;
 
     let row = WalRow {
         entity_id: e(entity),
@@ -523,8 +523,8 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
 /// fresh replay of on-disk bytes, exactly as a real process restart would rebuild them.
 #[test]
 fn step3_restart_replay_survives_cross_cause_sequences() {
-    use tessera_lifecycle::wal::{Wal, WalRecord, WalRow};
-    use tessera_lifecycle::{ChangeOp, Replay};
+    use mosaica_lifecycle::wal::{Wal, WalRecord, WalRow};
+    use mosaica_lifecycle::{ChangeOp, Replay};
 
     const ENTITY_X: u64 = 10_002;
     const ENTITY_Y: u64 = 10_003;
@@ -596,14 +596,14 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     // A one-descriptor dictionary: `b"satisfied-term"` resolves to `TermId(0)`, which is exactly
     // `SATISFIED_TERM_A` in the fixture's `satisfied` set below.
     let dict_dir = TempDir::new().unwrap();
-    let mut dict_writer = tessera_authz::DictWriter::new(dict_dir.path());
+    let mut dict_writer = mosaica_authz::DictWriter::new(dict_dir.path());
     dict_writer.intern(b"satisfied-term");
     let dict_paths = dict_writer.finish().unwrap();
-    let dict = tessera_authz::Dict::load(&dict_paths).unwrap();
+    let dict = mosaica_authz::Dict::load(&dict_paths).unwrap();
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
     let wal = Wal::open(&wal_path).unwrap();
-    let mut replay = Replay::new(&dict, Overlay::new(), &tessera_lifecycle::owner_id_only);
+    let mut replay = Replay::new(&dict, Overlay::new(), &mosaica_lifecycle::owner_id_only);
     for record in wal.records() {
         let (position, record) = record.unwrap();
         replay.apply(&record, position, |_, _| false);
@@ -683,8 +683,8 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
         &buffer,
         Arc::clone(&fx.base),
         &fx.perm,
-        &tessera_engine::denied_rows_of(&overlay, &fx.perm),
-        Some(&tessera_engine::buffered_rows_of(&buffer, &fx.perm)),
+        &mosaica_engine::denied_rows_of(&overlay, &fx.perm),
+        Some(&mosaica_engine::buffered_rows_of(&buffer, &fx.perm)),
     );
     assert!(mask.check_structural_invariants());
 
@@ -714,7 +714,7 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
 /// the composed mask differ from the projection at all.
 #[test]
 fn the_materialised_visible_rows_agree_with_the_composed_count() {
-    use tessera_engine::compose::MaskedSet;
+    use mosaica_engine::compose::MaskedSet;
 
     let fx = build_fixture();
     let mut overlay = Overlay::new();
@@ -762,8 +762,8 @@ fn the_materialised_visible_rows_agree_with_the_composed_count() {
 /// differ from the projection at all.
 #[test]
 fn a_filter_moves_neither_the_composed_set_nor_the_whole_map_test() {
-    use tessera_engine::compose::{FilterRows, WholeMask};
-    use tessera_engine::tile_index::Viewport;
+    use mosaica_engine::compose::{FilterRows, WholeMask};
+    use mosaica_engine::tile_index::Viewport;
 
     let fx = build_fixture();
     let mut overlay = Overlay::new();

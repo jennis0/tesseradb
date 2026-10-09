@@ -5,7 +5,7 @@ mod arrow;
 mod json;
 mod membership;
 
-use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar};
+use mosaica_engine::{DeclaredScalar, ScalarType, ScopedScalar};
 
 pub(crate) use self::arrow::{labels_col, parse_ingest_batch, Frame, ParsedBatch};
 

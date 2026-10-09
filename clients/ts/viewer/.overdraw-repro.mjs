@@ -5,7 +5,7 @@ const page = await browser.newPage({viewport: {width: 1000, height: 700}});
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
 await page.goto('http://localhost:5173/?trace=1', {waitUntil: 'load'});
-await page.waitForFunction(() => (window.__tesseraProbe?.marks ?? 0) > 0, null, {timeout: 120000});
+await page.waitForFunction(() => (window.__mosaicaProbe?.marks ?? 0) > 0, null, {timeout: 120000});
 await page.waitForTimeout(3000);
 // Deep in: six notches at centre, settling between, so exact ground accumulates at depth.
 for (let i = 0; i < 6; i++) { await page.mouse.move(500, 350); await page.mouse.wheel(0, -300); await page.waitForTimeout(1200); }
@@ -17,7 +17,7 @@ await page.mouse.up(); await page.waitForTimeout(1500);
 for (let i = 0; i < 8; i++) { await page.mouse.wheel(0, 300); await page.waitForTimeout(150); }
 await page.mouse.down(); for (let s = 1; s <= 6; s++) { await page.mouse.move(500 + 25 * s, 350); await page.waitForTimeout(40); } await page.mouse.up();
 await page.waitForTimeout(2500);
-const dump = await page.evaluate(() => window.__tesseraTrace.toJSON());
+const dump = await page.evaluate(() => window.__mosaicaTrace.toJSON());
 const t0 = dump.events[0].t;
 const od = dump.events.filter((e) => e.kind === 'overdraw');
 console.log('overdraw events:', od.length);

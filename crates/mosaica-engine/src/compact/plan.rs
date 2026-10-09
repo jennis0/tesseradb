@@ -1,6 +1,6 @@
 use croaring::Bitmap;
 
-use tessera_store::manifest::{AttrExtent, RecordExtent};
+use mosaica_store::manifest::{AttrExtent, RecordExtent};
 
 use crate::Generation;
 
@@ -22,7 +22,7 @@ pub(crate) enum PlannedEntities {
 
 pub(crate) struct FoldViewPlan {
     pub(crate) view: String,
-    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
+    pub(crate) incarnation: mosaica_types::view::ViewIncarnation,
     /// The base and every extent at the snapshot, in any order.
     pub(crate) segments: Vec<PlannedSegment>,
     /// One past the highest entity the snapshot's row space covers, which can be below the live
@@ -40,12 +40,12 @@ pub(crate) struct FoldPlan {
     pub(crate) tiers: Vec<String>,
     pub(crate) attr_extents: Vec<AttrExtent>,
     pub(crate) record_extents: Vec<RecordExtent>,
-    pub(crate) entity_terms_extents: Vec<tessera_store::manifest::EntityTermsExtent>,
-    pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
+    pub(crate) entity_terms_extents: Vec<mosaica_store::manifest::EntityTermsExtent>,
+    pub(crate) text_extents: Vec<mosaica_store::manifest::TextExtent>,
     /// Every unique column's index runs at the snapshot, each folded into new base runs.
-    pub(crate) unique: Vec<tessera_store::manifest::UniqueIndexRuns>,
+    pub(crate) unique: Vec<mosaica_store::manifest::UniqueIndexRuns>,
     /// The edited-items runs the fold merges, base and live.
-    pub(crate) edited: tessera_store::manifest::EditedItemsRuns,
+    pub(crate) edited: mosaica_store::manifest::EditedItemsRuns,
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity with a row in this partition at the snapshot.
     pub(crate) entity_bound: u64,
@@ -174,7 +174,7 @@ fn term_image_estimate(dict_len: u64, permutation_bound: u64, base_rows: u64) ->
     };
     let image = widest(base_rows);
     let scratch =
-        tessera_store::permutation::project_scratch_bound(permutation_bound, base_rows).total();
+        mosaica_store::permutation::project_scratch_bound(permutation_bound, base_rows).total();
     let held = widest(permutation_bound)
         .saturating_add(image)
         .saturating_add(image)
@@ -246,7 +246,7 @@ pub(crate) fn plan_fold(
                 .map(|segment| {
                     let dir = format!(
                         "partitions/{partition}/{}/segments/{}",
-                        tessera_store::view_rel(view),
+                        mosaica_store::view_rel(view),
                         segment.seg_id
                     );
                     let base = !row_space
@@ -256,12 +256,12 @@ pub(crate) fn plan_fold(
                     let entities = match (base, row_space.row_entity()) {
                         (true, Some(_)) => PlannedEntities::Table(format!(
                             "partitions/{partition}/{}/{}",
-                            tessera_store::view_rel(view),
-                            tessera_store::ROW_ENTITY_FILE
+                            mosaica_store::view_rel(view),
+                            mosaica_store::ROW_ENTITY_FILE
                         )),
                         (true, None) => PlannedEntities::Numbers,
                         (false, _) => {
-                            let rel = format!("{dir}/{}", tessera_store::edited::EDITED_ROWS_FILE);
+                            let rel = format!("{dir}/{}", mosaica_store::edited::EDITED_ROWS_FILE);
                             // A segment a fold carried is listed in the bundle's manifest.
                             PlannedEntities::Listed(
                                 manifest.files.contains_key(&rel)
@@ -380,7 +380,7 @@ mod tests {
             "no rows, so no images"
         );
         let scratch = |bound: u64, rows: u64| {
-            tessera_store::permutation::project_scratch_bound(bound, rows).total()
+            mosaica_store::permutation::project_scratch_bound(bound, rows).total()
         };
         // One container of rows: an 8 KiB image and a buffer of the same width.
         assert_eq!(

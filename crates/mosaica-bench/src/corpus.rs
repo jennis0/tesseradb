@@ -3,7 +3,7 @@
 //! **This is the cheap variant axis, and the reason the label-set axis stays small.** Within one
 //! bundle you can synthesise principals of any width, coverage and scatter for free by choosing
 //! which terms to grant. What you cannot synthesise is signature-sorted entity contiguity — that
-//! is decided at build time by `tessera_build::signature_sort_key` and is permanent under I9 — so
+//! is decided at build time by `mosaica_build::signature_sort_key` and is permanent under I9 — so
 //! the label set is the only way to vary it, and varying it costs a rebuild. Hence: a handful of
 //! label sets spanning the contiguity spectrum, and everything else swept here.
 //!
@@ -23,8 +23,8 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
-use tessera_authz::PostingsReader;
-use tessera_types::TermId;
+use mosaica_authz::PostingsReader;
+use mosaica_types::TermId;
 
 /// How a principal's granted term set is chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,14 +1,14 @@
 //! Reading one term's postings as an owned `Bitmap`.
 //!
-//! `tessera_authz::build_fragment` unions many terms at once and is the thing the authorise arm
+//! `mosaica_authz::build_fragment` unions many terms at once and is the thing the authorise arm
 //! measures; this is the per-term accessor the *setup* needs — computing `TermStats`, choosing
 //! grants by shape, and building the synthetic masks the gather probe drives. Deliberately
 //! separate from `build_fragment` so no arm accidentally times a helper that does extra work.
 
 use croaring::Bitmap;
 
-use tessera_authz::{PostingRef, PostingsReader};
-use tessera_types::TermId;
+use mosaica_authz::{PostingRef, PostingsReader};
+use mosaica_types::TermId;
 
 /// One term's postings as an owned bitmap.
 ///

@@ -22,11 +22,11 @@ use std::path::Path;
 use common::*;
 use homes::fixture::*;
 use homes::Home;
-use tessera_engine::filter::{Endpoint, FilterOperand, Scalar};
-use tessera_engine::{ColumnBuf, Engine, IngestRequest, ItemOut, ScalarOut, ViewportRequest};
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::IngestRow;
-use tessera_types::{AttrLocalId, EntityId, TesseraId};
+use mosaica_engine::filter::{Endpoint, FilterOperand, Scalar};
+use mosaica_engine::{ColumnBuf, Engine, IngestRequest, ItemOut, ScalarOut, ViewportRequest};
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::IngestRow;
+use mosaica_types::{AttrLocalId, EntityId, TesseraId};
 
 /// What the edited item should hold, and what it held at the build.
 struct Expected {
@@ -423,13 +423,13 @@ fn an_edit_carries_every_home() {
     check(&engine, &expected, "a restart before the edit's flush");
     // Two edits, each giving the item an entity with a row in its three views; the first entity
     // is deleted and still on disc until the fold.
-    let verified = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    let verified = mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the edited items agree with the rows");
     assert_eq!((verified.edited_pairs, verified.edited_rows), (2, 6));
 
     fold(&engine);
     check(&engine, &expected, "a fold");
-    let verified = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    let verified = mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the folded edited items agree with the rows");
     assert_eq!((verified.edited_pairs, verified.edited_rows), (1, 3));
     drop(engine);
@@ -468,7 +468,7 @@ fn a_scoped_value_needs_a_row_under_its_key() {
     };
     let refused = send("alone", None);
     assert!(
-        matches!(refused, Err(tessera_engine::AcceptError::Contract(_))),
+        matches!(refused, Err(mosaica_engine::AcceptError::Contract(_))),
         "a scoped value with no row to hold it is refused: {refused:?}"
     );
     assert_eq!(engine.buffered_items(), 0, "and nothing is written");
@@ -563,8 +563,8 @@ fn a_view_dropped_behind_an_edit_in_one_window_keeps_the_item() {
 /// is served, before and after the fold that retires the entity they named.
 #[test]
 fn a_growth_and_a_publication_queued_behind_an_edit_follow_the_item() {
-    use tessera_lifecycle::membership::IncomingContent;
-    use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
     let engine = open(tmp.path(), &root);
@@ -733,7 +733,7 @@ fn verify_refuses_edited_items_that_disagree() {
     publish_buffered(&engine);
     drop(engine);
     let verify =
-        |root: &Path| tessera_build::verify_deep(root, &tessera_build::VerifyOpts::default());
+        |root: &Path| mosaica_build::verify_deep(root, &mosaica_build::VerifyOpts::default());
     let verified = verify(&root).expect("the edited bundle verifies");
     assert_eq!((verified.edited_pairs, verified.edited_rows), (1, 3));
 
@@ -752,7 +752,7 @@ fn verify_refuses_edited_items_that_disagree() {
     let files = manifest["files"].as_object_mut().unwrap();
     let listed: Vec<String> = files
         .keys()
-        .filter(|rel| rel.ends_with(tessera_store::edited::EDITED_ROWS_FILE))
+        .filter(|rel| rel.ends_with(mosaica_store::edited::EDITED_ROWS_FILE))
         .cloned()
         .collect();
     assert_eq!(listed.len(), 3, "one list per view the item holds a row in");
@@ -770,7 +770,7 @@ fn verify_refuses_edited_items_that_disagree() {
     copy_tree(&root, &missing);
     std::fs::remove_file(missing.join(current_prefix(&missing)).join(&listed[0])).unwrap();
     assert!(
-        tessera_store::read::open_bundle(&missing).is_err(),
+        mosaica_store::read::open_bundle(&missing).is_err(),
         "a listed edited-rows file that is missing refuses the open"
     );
 }
@@ -782,7 +782,7 @@ fn verify_refuses_edited_items_that_disagree() {
 /// by that `tessera_id` reaches the second edit's entity, and neither earlier entity answers it.
 #[test]
 fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_restart() {
-    use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
+    use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
     let mut engine = open(tmp.path(), &root);
@@ -830,11 +830,11 @@ fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_resta
     );
     drop(engine);
 
-    let wal = tessera_lifecycle::Wal::open(tmp.path().join("wal.log")).unwrap();
+    let wal = mosaica_lifecycle::Wal::open(tmp.path().join("wal.log")).unwrap();
     let edits = wal
         .records()
         .map(|r| r.unwrap().1)
-        .filter(|r| matches!(r, tessera_lifecycle::WalRecord::IngestBatch { edits, .. } if !edits.is_empty()))
+        .filter(|r| matches!(r, mosaica_lifecycle::WalRecord::IngestBatch { edits, .. } if !edits.is_empty()))
         .count();
     assert_eq!(edits, 2, "the growth held both edits in the log");
     drop(wal);

@@ -118,7 +118,7 @@ pub(crate) struct StageDeps {
     /// same mask and the same column as a request's.
     pub(crate) counters: Arc<crate::status::ServeCounters>,
     pub(crate) occupancy:
-        Arc<tessera_cache::SingleFlightCache<OccupancyKey, OccupiedTiles>>,
+        Arc<mosaica_cache::SingleFlightCache<OccupancyKey, OccupiedTiles>>,
     pub(crate) pool: Arc<rayon::ThreadPool>,
     /// `occupancy_stage_enabled`, whether the fill runs at all.
     pub(crate) switches: Arc<crate::switches::TestSwitches>,
@@ -187,7 +187,7 @@ impl StageDeps {
 
 /// Fill `0..=`[`BACKGROUND_DEPTH`] for one `(session, view, generation)`.
 fn run(
-    occupancy: &tessera_cache::SingleFlightCache<OccupancyKey, OccupiedTiles>,
+    occupancy: &mosaica_cache::SingleFlightCache<OccupancyKey, OccupiedTiles>,
     counters: &crate::status::ServeCounters,
     task: &LadderTask,
     cancel: &CancelToken,
@@ -205,7 +205,7 @@ fn run(
     // **The memo first, before anything is composed.** A session already served at this depth has
     // every rung below it too, so there is nothing here to do and no mask worth building.
     if cancel.is_cancelled()
-        || matches!(occupancy.peek(&key), tessera_cache::Peek::Ready(_))
+        || matches!(occupancy.peek(&key), mosaica_cache::Peek::Ready(_))
     {
         return;
     }

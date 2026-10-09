@@ -3,7 +3,7 @@
 //! A value column is written once by the batch build and covers `[0, entity_id_high_water)`; every
 //! flush since has published entities above it, and each appends its own values here
 //! (`filter-index.md` §2.1, §2.5). The reader composes base and extents into one column, which is
-//! `tessera-engine`'s `filter` module rather than this crate's: an extent is a [`ValueColumn`] like
+//! `mosaica-engine`'s `filter` module rather than this crate's: an extent is a [`ValueColumn`] like
 //! any other, and the layering is a property of a *bundle* rather than of a column.
 //!
 //! **A separate module from [`crate::values`], and that is measured rather than tidy.** Adding

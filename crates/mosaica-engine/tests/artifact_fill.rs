@@ -13,14 +13,14 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine};
-use tessera_lifecycle::membership::IncomingContent;
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
-use tessera_types::layer::{
+use mosaica_engine::{ArtifactOut, Engine};
+use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent, SuppliedRequirement,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 /// **No existence criterion**, so a count that moved is a membership that moved and an artifact
 /// that vanished is one withheld — the two things these cases distinguish.
@@ -33,7 +33,7 @@ fn declaration(name: &str, kind: HierarchyKind) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind,
@@ -359,7 +359,7 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
         engine
             .accept_change(
                 fx.members(900..901)[0],
-                tessera_lifecycle::wal::ChangeOp::Delete,
+                mosaica_lifecycle::wal::ChangeOp::Delete,
             )
             .unwrap();
         fold(&engine);
@@ -516,7 +516,7 @@ fn a_content_fill_reaches_an_artifact_published_bare_and_survives_a_fold() {
     engine
         .accept_change(
             fx.members(150..151)[0],
-            tessera_lifecycle::wal::ChangeOp::Delete,
+            mosaica_lifecycle::wal::ChangeOp::Delete,
         )
         .unwrap();
     fold(&engine);

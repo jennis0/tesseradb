@@ -29,7 +29,7 @@ pub struct AttributeSource<'a> {
     /// The code an artifact's key stands for — a vocabulary binding where the column has one, and
     /// the key's own decimal spelling where it has not.
     ///
-    /// **The inverse of the rule the mint uses** (`tessera_types::layer::attribute_value_key`), and
+    /// **The inverse of the rule the mint uses** (`mosaica_types::layer::attribute_value_key`), and
     /// it is a closure rather than a map because the two callers hold different things: the build
     /// holds a schema and the serving path holds a live generation's bindings.
     pub code_of_key: &'a dyn Fn(&str) -> Option<u32>,
@@ -42,7 +42,7 @@ pub struct SpatialSource<'a> {
     /// The level's shapes, index and staged pieces, at this generation's level version.
     pub level: Arc<crate::shapes::ShapeLevel>,
     /// This generation's segments and their row bases, base first.
-    pub segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
+    pub segments: &'a [(&'a mosaica_store::read::SegmentData, u32)],
     /// The generation's whole row count, base and extents — what the joined form is sized to.
     pub total_rows: u32,
 }

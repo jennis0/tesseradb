@@ -7,7 +7,7 @@ quarters of the width, **two views of one entity space**, and the ladder's first
 layer.
 
 It is a **demonstrator and a speed benchmark** (owner rulings 2026-09-01 and 2026-09-02: this
-corpus tests Tessera's speed and memory, not the UMAP pipeline; layout quality matters only as far
+corpus tests Mosaica's speed and memory, not the UMAP pipeline; layout quality matters only as far
 as the demo looks good). Recall against an exact neighbour search is not measured and layout
 fidelity is not judged.
 
@@ -25,7 +25,7 @@ fidelity is not judged.
    measures what 2.33×10⁸ rows do to one without them.
 
 ```bash
-export TESSERA_LADDER="$PWD/data/ladder"
+export MOSAICA_LADDER="$PWD/data/ladder"
 
 # the join track's two passes over the share — see README-join.md
 ~/venvs/projection/bin/python -m test_corpora.treeoflife.stage --scan --combine
@@ -36,7 +36,7 @@ export TESSERA_LADDER="$PWD/data/ladder"
 ~/venvs/projection/bin/python -m test_corpora.treeoflife.prepare --sample 0 --layout-only
 ~/venvs/projection/bin/python -m test_corpora.treeoflife.prepare --sample 0 --reuse-layout
 
-cd "$TESSERA_LADDER/treeoflife" && tessera check --payloads && tessera build --stage-timings
+cd "$MOSAICA_LADDER/treeoflife" && mosaica check --payloads && mosaica build --stage-timings
 ```
 
 ## Two tracks, one package
@@ -158,7 +158,7 @@ terms. 760,259 of 1,000,000 (**76.03%**) rows carry a coordinate.
 is on the share, and a scattered 10⁶-row draw would touch nearly every data page of all 666 files —
 a three-hour pass to sample what the 2,500,000-row staged file already holds uniformly over them.
 
-`tessera build` **18.4 s** to a **162.3 MB** bundle over 377 terms; `verify --deep` clean in
+`mosaica build` **18.4 s** to a **162.3 MB** bundle over 377 terms; `verify --deep` clean in
 **0.13 s at 67.7 MB**. The build's memory split, by the text-peak probe's method:
 
 | | anonymous | file-backed | `VmHWM` |
@@ -219,7 +219,7 @@ into 544 terms nobody holds. `branch-ranks.json` is JSON and is what the drivers
 
 ### The build — 70 minutes to a 40 GB bundle, and it converges
 
-`tessera build --stage-timings` **4,233 s — 1 h 10 m 33 s** over twenty stages, **39.97 GB** on
+`mosaica build --stage-timings` **4,233 s — 1 h 10 m 33 s** over twenty stages, **39.97 GB** on
 disk, 1,001,193 artifacts minted, 34 unclustered member rows. `verify --deep` clean in **37.1 s at
 10.29 GB**.
 
@@ -285,7 +285,7 @@ route and is the price of not staging 346 GB.
 
 ### Served, and a 24 GiB cap does not break it
 
-`tessera serve` on 8141 against the 39.97 GB bundle. **Open costs 87.7 s** building every level's
+`mosaica serve` on 8141 against the 39.97 GB bundle. **Open costs 87.7 s** building every level's
 artifact row form over 1,001,193 artifacts across two views, and leaves **15.96 GB anonymous**
 resident before any request — the per-process floor rung 3 first measured, here over a membership
 26× larger than that rung's clustering. Driven by `drive.py`: three principals × a 25-request pan
@@ -471,8 +471,8 @@ sixth being the wire difference above.
 
 ### What is on disk
 
-`$TESSERA_LADDER/treeoflife` is **78 GB**, `treeoflife-1m` beside it 221 MB, and the measurement
-work under `$TESSERA_LADDER/.measure/treeoflife` **40 GB** — almost all of it the ingest cell's base
+`$MOSAICA_LADDER/treeoflife` is **78 GB**, `treeoflife-1m` beside it 221 MB, and the measurement
+work under `$MOSAICA_LADDER/.measure/treeoflife` **40 GB** — almost all of it the ingest cell's base
 bundle and its folded copy, which is deletable once the cell's JSON is committed.
 
 | | |

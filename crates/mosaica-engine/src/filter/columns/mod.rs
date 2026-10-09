@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_filter::{ColumnPostings, RecordStack, RecordValue, SortedDict, ValueColumn};
+use mosaica_filter::{ColumnPostings, RecordStack, RecordValue, SortedDict, ValueColumn};
 
 use super::declared::{Family, Placement};
 use super::error::ComposeError;
@@ -29,15 +29,15 @@ pub struct FilterColumns {
     pub(in crate::filter) placements: BTreeMap<String, Placement>,
     /// The access mode this generation was opened with, so a successor opens its own extents the
     /// same way.
-    pub(in crate::filter) access: tessera_filter::Access,
+    pub(in crate::filter) access: mosaica_filter::Access,
     /// The record blob's base, present when the schema has a blob-resident column, plus every
     /// flush extent named.
     pub(in crate::filter) records: Arc<RecordStack>,
     /// The entity to term transpose's base plus every flush extent named, read by drill-down and
     /// the write path's join arm.
-    pub(in crate::filter) entity_terms: Arc<tessera_store::EntityTermsStack>,
+    pub(in crate::filter) entity_terms: Arc<mosaica_store::EntityTermsStack>,
     /// The unique columns and their types: `eq` and `in` on one are answered from its index.
-    pub(in crate::filter) unique: BTreeMap<String, tessera_spatial::tiler::ScalarType>,
+    pub(in crate::filter) unique: BTreeMap<String, mosaica_spatial::tiler::ScalarType>,
 }
 
 // Hand-written since `RecordStack` carries no `Debug` of its own.
@@ -55,9 +55,9 @@ impl Default for FilterColumns {
         FilterColumns {
             columns: BTreeMap::new(),
             placements: BTreeMap::new(),
-            access: tessera_filter::Access::Read,
+            access: mosaica_filter::Access::Read,
             records: Arc::new(empty_record_stack()),
-            entity_terms: Arc::new(tessera_store::EntityTermsStack::empty()),
+            entity_terms: Arc::new(mosaica_store::EntityTermsStack::empty()),
             unique: BTreeMap::new(),
         }
     }
@@ -92,7 +92,7 @@ impl<'a> ValueLayers<'a> {
 /// A stack of zero layers, infallible since `RecordStack::open` touches no file when given
 /// nothing to open.
 pub(in crate::filter) fn empty_record_stack() -> RecordStack {
-    RecordStack::open(None, &[], tessera_filter::Access::Read)
+    RecordStack::open(None, &[], mosaica_filter::Access::Read)
         .expect("a record stack over no layers opens without IO")
 }
 
@@ -148,7 +148,7 @@ enum ColumnLayers {
         layers: Vec<TextLayer>,
         /// The analyser this column was indexed with. A query is analysed with it, keeping the
         /// two token streams the same one.
-        analyser: Arc<tessera_analyse::Analyser>,
+        analyser: Arc<mosaica_analyse::Analyser>,
     },
 }
 
@@ -184,7 +184,7 @@ impl Column {
     fn text(
         declared_index: usize,
         filterable: bool,
-        analyser: Arc<tessera_analyse::Analyser>,
+        analyser: Arc<mosaica_analyse::Analyser>,
         layers: Vec<TextLayer>,
     ) -> Column {
         Column {
@@ -289,7 +289,7 @@ struct TextLayer {
     /// The manifest path that named this layer, or `None` for the base build's index.
     dict_rel: Option<String>,
     /// A group-scoped column's prose for the entities this layer holds.
-    prose: Option<Arc<tessera_filter::RecordBlob>>,
+    prose: Option<Arc<mosaica_filter::RecordBlob>>,
 }
 
 /// One text layer's two halves, checked against each other before the layer is served: a
@@ -303,12 +303,12 @@ impl TextLayer {
         column: &str,
         dir: &Path,
         scoped: bool,
-        access: tessera_filter::Access,
+        access: mosaica_filter::Access,
     ) -> Result<TextLayer, ComposeError> {
         let prose = match scoped {
             true => Some(
-                tessera_filter::RecordBlob::open_dir(
-                    &dir.join(tessera_store::manifest::SCOPED_PROSE_DIR),
+                mosaica_filter::RecordBlob::open_dir(
+                    &dir.join(mosaica_store::manifest::SCOPED_PROSE_DIR),
                     access,
                 )
                 .map_err(|e| prose_unreadable(column, e))?,
@@ -319,7 +319,7 @@ impl TextLayer {
             SortedDict::open_dir(dir, access)?,
             ColumnPostings::open(
                 &dir.join("postings.arrow"),
-                access != tessera_filter::Access::Read,
+                access != mosaica_filter::Access::Read,
             )?,
             column,
             "base",
@@ -332,19 +332,19 @@ impl TextLayer {
     /// One published text layer, from the files the manifest names it by.
     fn open(
         paths: &crate::filter::TextExtentPaths,
-        access: tessera_filter::Access,
+        access: mosaica_filter::Access,
     ) -> Result<TextLayer, ComposeError> {
         let prose = paths
             .prose
             .as_ref()
             .map(|p| {
-                tessera_filter::RecordBlob::open(&p.blocks, &p.hasrow, &p.directory, access)
+                mosaica_filter::RecordBlob::open(&p.blocks, &p.hasrow, &p.directory, access)
                     .map_err(|e| prose_unreadable(&paths.column, e))
             })
             .transpose()?;
         text_layer(
             SortedDict::open(&paths.dict, access)?,
-            ColumnPostings::open(&paths.postings, access != tessera_filter::Access::Read)?,
+            ColumnPostings::open(&paths.postings, access != mosaica_filter::Access::Read)?,
             &paths.column,
             &paths.dict_rel,
             Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&paths.presence)?),
@@ -354,9 +354,9 @@ impl TextLayer {
     }
 }
 
-fn prose_unreadable(column: &str, e: tessera_filter::RecordError) -> ComposeError {
+fn prose_unreadable(column: &str, e: mosaica_filter::RecordError) -> ComposeError {
     match e {
-        tessera_filter::RecordError::Io(io) => ComposeError::Io(io),
+        mosaica_filter::RecordError::Io(io) => ComposeError::Io(io),
         malformed => {
             ComposeError::RecordUnreadable(format!("the prose of column '{column}': {malformed}"))
         }
@@ -370,7 +370,7 @@ fn text_layer(
     which: &str,
     present: Bitmap,
     dict_rel: Option<String>,
-    prose: Option<tessera_filter::RecordBlob>,
+    prose: Option<mosaica_filter::RecordBlob>,
 ) -> Result<TextLayer, ComposeError> {
     if dict.len() != postings.record_count() {
         return Err(ComposeError::TermsAndPostingsDisagree {
@@ -407,20 +407,20 @@ pub(in crate::filter) struct Layer {
 
 /// The request path's two modes, and only those: `MappedSequential` is the fold's and is never
 /// returned here.
-fn request_access(mmap: bool) -> tessera_filter::Access {
+fn request_access(mmap: bool) -> mosaica_filter::Access {
     if mmap {
-        tessera_filter::Access::Mapped
+        mosaica_filter::Access::Mapped
     } else {
-        tessera_filter::Access::Read
+        mosaica_filter::Access::Read
     }
 }
 
 /// A record-blob open failure, in the refusal this opener speaks. Fail-closed either way: a
 /// missing, short or malformed layer refuses the whole open, never "those entities have no
 /// record".
-fn record_open_error(e: tessera_filter::RecordError) -> ComposeError {
+fn record_open_error(e: mosaica_filter::RecordError) -> ComposeError {
     match e {
-        tessera_filter::RecordError::Io(io) => ComposeError::Io(io),
+        mosaica_filter::RecordError::Io(io) => ComposeError::Io(io),
         malformed => ComposeError::RecordUnreadable(malformed.to_string()),
     }
 }
@@ -454,12 +454,12 @@ impl FilterColumns {
     }
 
     /// The entity→term transpose this prefix answers a label question from.
-    pub fn entity_terms(&self) -> &tessera_store::EntityTermsStack {
+    pub fn entity_terms(&self) -> &mosaica_store::EntityTermsStack {
         &self.entity_terms
     }
 
     /// The access mode every layer of this generation was opened with.
-    pub(crate) fn access(&self) -> tessera_filter::Access {
+    pub(crate) fn access(&self) -> mosaica_filter::Access {
         self.access
     }
 
@@ -485,7 +485,7 @@ impl FilterColumns {
         &self,
         column: &str,
         entity: u32,
-    ) -> Result<Option<String>, tessera_filter::RecordError> {
+    ) -> Result<Option<String>, mosaica_filter::RecordError> {
         let Some(column) = self.columns.get(column) else {
             return Ok(None);
         };

@@ -29,17 +29,17 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
-use tessera_corpus::{Corpus, Grant};
-use tessera_engine::Engine;
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::WalScalar;
+use mosaica_corpus::{Corpus, Grant};
+use mosaica_engine::Engine;
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::WalScalar;
 
 /// Small enough for the ordinary test pass, and large enough that the partition arm has more than a
 /// handful of values and the masked counts are numbers rather than zeros and ones.
 const N: u64 = 3_000;
 const SEED: u64 = 0x5EED;
 
-/// The generator's two spellings of one relation (`tessera_corpus::materialise`'s declaration).
+/// The generator's two spellings of one relation (`mosaica_corpus::materialise`'s declaration).
 const BY_LIST: &str = "generator/partition-enumerated";
 const BY_RULE: &str = "generator/partition-attribute";
 
@@ -87,8 +87,8 @@ fn served(
 ) -> BTreeMap<String, u64> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
-    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
-    request.layers = tessera_engine::LayerSelection::Named(&names);
+    let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
+    request.layers = mosaica_engine::LayerSelection::Named(&names);
     engine
         .viewport_artifacts(&session, request)
         .expect("a viewport over the fixture")
@@ -222,7 +222,7 @@ fn the_rule_serves_the_masked_count_the_generator_computes() {
         }
         let value = fx
             .corpus
-            .partition_artifact_of(tessera_corpus::materialise::PARTITION_LAYER, e);
+            .partition_artifact_of(mosaica_corpus::materialise::PARTITION_LAYER, e);
         *expected.entry(value.to_string()).or_default() += 1;
     }
     // An artifact this principal can see nothing of is absent from a response rather than served
@@ -241,7 +241,7 @@ fn the_rule_serves_the_masked_count_the_generator_computes() {
 // ---------------------------------------------------------------------------------------------
 
 /// The generator's schema, in declared order — `fx_key`, `weight`, `seen_at`, `bay`, `tag`,
-/// `blurb`, `partition` (`tessera_corpus::materialise`'s `CONFIG_TOML`). The ingest wire builds a
+/// `blurb`, `partition` (`mosaica_corpus::materialise`'s `CONFIG_TOML`). The ingest wire builds a
 /// row's vector in that order, so a value lands in the column its position names.
 const PARTITION_SCALAR: usize = 6;
 
@@ -415,7 +415,7 @@ const LABELS: &str = "labels/on-bands";
 /// The value entity 0 carries — the band the label below attaches to, and the artifact whose
 /// suppression must take the label with it.
 fn anchor_value(c: &Corpus) -> u32 {
-    c.partition_artifact_of(tessera_corpus::materialise::PARTITION_LAYER, 0) as u32
+    c.partition_artifact_of(mosaica_corpus::materialise::PARTITION_LAYER, 0) as u32
 }
 
 fn own_config(c: &Corpus, criterion: &str) -> String {
@@ -494,7 +494,7 @@ fn own_fixture(criterion: &str) -> Own {
     corpus.write_pairs_parquet(&pairs).expect("pairs");
     let config_path = tmp.path().join("own-config.toml");
     std::fs::write(&config_path, own_config(&corpus, criterion)).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("this file's own declaration parses");
     build_with_layers(&root, &points, &pairs, &corpus, config);
     let engine = open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal"));
@@ -538,11 +538,11 @@ fn an_absolute_criterion_fires_on_an_attribute_predicate() {
 
 /// The entity behind a served artifact, through the admin plane's own resolver — the address a
 /// suppression names, and the one drill-down inverts.
-fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> tessera_types::TesseraId {
+fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> mosaica_types::TesseraId {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
-    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
-    request.layers = tessera_engine::LayerSelection::Named(&names);
+    let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
+    request.layers = mosaica_engine::LayerSelection::Named(&names);
     engine
         .viewport_artifacts(&session, request)
         .expect("a viewport")
@@ -626,7 +626,7 @@ fn a_label_attached_to_a_predicate_artifact_follows_its_target() {
     let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0]
         .expect("a served artifact's identifier names an entity");
     fx.engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is accepted");
 
     assert!(
@@ -653,7 +653,7 @@ fn a_suppressed_values_key_never_mints_again() {
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
     let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0].unwrap();
     fx.engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is accepted");
     let artifacts = fx.engine.published_artifacts();
 
@@ -694,7 +694,7 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
     let entity = fx.engine.resolve_tessera_ids(&[before_id]).unwrap()[0].unwrap();
 
     fx.engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Delete)
         .expect("a deletion is accepted");
     fold(&fx.engine);
     assert!(

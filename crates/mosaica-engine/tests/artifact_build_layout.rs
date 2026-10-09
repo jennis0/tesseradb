@@ -35,9 +35,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
-use tessera_build::BuildArgs;
-use tessera_engine::LayerSelection;
-use tessera_types::layer::ServingLayout;
+use mosaica_build::BuildArgs;
+use mosaica_engine::LayerSelection;
+use mosaica_types::layer::ServingLayout;
 
 const SPREAD: &str = "clusters/spread";
 const CLUMPED: &str = "clusters/clumped";
@@ -189,7 +189,7 @@ fn fixture() -> Fixture {
     write_points_n(&points, N);
     write_pairs_n(&pairs, N);
     std::fs::write(&config_path, CONFIG_TOML).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture config parses");
 
     let (spread_keys, spread_rows) = spread_members();
@@ -200,20 +200,20 @@ fn fixture() -> Fixture {
     write_members(&tmp.path().join("clumped_members.parquet"), &clumped_rows);
 
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &config.schema),
         out: root.clone(),
         limit: None,
         strict: false,
@@ -228,7 +228,7 @@ fn fixture() -> Fixture {
         band_rows: None,
         schema: config.schema,
     };
-    tessera_build::build(&args).expect("a build carrying three enumerated layers");
+    mosaica_build::build(&args).expect("a build carrying three enumerated layers");
     Fixture {
         root,
         cache: tmp.path().join("cache"),
@@ -237,7 +237,7 @@ fn fixture() -> Fixture {
     }
 }
 
-fn manifest(fx: &Fixture) -> tessera_store::manifest::SegmentsManifest {
+fn manifest(fx: &Fixture) -> mosaica_store::manifest::SegmentsManifest {
     let engine = open_engine(&fx.root, &fx.cache.join("m"), &fx.wal.with_extension("m"));
     let generation = engine.generation();
     generation
@@ -308,8 +308,8 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
     let fx = fixture();
     let manifest = manifest(&fx);
 
-    let is_column = |e: &&tessera_store::manifest::DerivedExtent| matches!(e.form, tessera_store::manifest::DerivedForm::RowColumn { .. });
-    let is_index = |e: &&tessera_store::manifest::DerivedExtent| e.form == tessera_store::manifest::DerivedForm::TileIndex;
+    let is_column = |e: &&mosaica_store::manifest::DerivedExtent| matches!(e.form, mosaica_store::manifest::DerivedForm::RowColumn { .. });
+    let is_index = |e: &&mosaica_store::manifest::DerivedExtent| e.form == mosaica_store::manifest::DerivedForm::TileIndex;
     let columns: Vec<_> = manifest
         .derived_extents
         .iter()
@@ -320,7 +320,7 @@ fn the_manifest_names_a_column_for_each_flat_level_and_an_index_for_the_treed_on
     assert_eq!(columns[0].view.as_deref(), Some("s0"));
     assert_eq!(
         columns[0].form,
-        tessera_store::manifest::DerivedForm::RowColumn {
+        mosaica_store::manifest::DerivedForm::RowColumn {
             layout: ServingLayout::RowMajorLabel
         }
     );
@@ -383,7 +383,7 @@ fn the_first_request_over_a_fresh_bundle_adopts_and_composes_nothing() {
     let out = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(&[SPREAD, CLUMPED, TREED])),
         )
         .expect("the first viewport over a freshly built bundle")
@@ -431,7 +431,7 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
     let row_major = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::Named(&[SPREAD])),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::Named(&[SPREAD])),
         )
         .expect("a viewport over the row-major level")
         .artifacts();
@@ -441,7 +441,7 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
     let artifact_major = engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::Named(&[TREED])),
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX).layers(LayerSelection::Named(&[TREED])),
         )
         .expect("a viewport over the artifact-major level")
         .artifacts();
@@ -485,13 +485,13 @@ fn a_layer_published_at_runtime_takes_the_layout_a_build_gives_it() {
 
     let map = source_to_new_map(&fx.root, "v00000");
     let (_, rows) = clumped_members();
-    let mut members: std::collections::BTreeMap<String, Vec<tessera_types::EntityId>> =
+    let mut members: std::collections::BTreeMap<String, Vec<mosaica_types::EntityId>> =
         Default::default();
     for (key, source) in &rows {
         members
             .entry(key.clone())
             .or_default()
-            .push(tessera_types::EntityId::new(map[source]));
+            .push(mosaica_types::EntityId::new(map[source]));
     }
     let publish = |name: &str, overlap: bool| {
         let mut declaration = built.declaration.clone();
@@ -505,7 +505,7 @@ fn a_layer_published_at_runtime_takes_the_layout_a_build_gives_it() {
                 if overlap && i == 1 {
                     entities.push(members.values().next().unwrap()[0]);
                 }
-                tessera_lifecycle::IncomingArtifact::from_entities(Some(key.clone()), entities)
+                mosaica_lifecycle::IncomingArtifact::from_entities(Some(key.clone()), entities)
             })
             .collect();
         engine.publish_artifacts(name.into(), 0, artifacts).unwrap();
@@ -514,12 +514,12 @@ fn a_layer_published_at_runtime_takes_the_layout_a_build_gives_it() {
     publish(OVERLAPPING, true);
     tick(&engine);
 
-    let counts = |engine: &tessera_engine::Engine, layer: &str| {
+    let counts = |engine: &mosaica_engine::Engine, layer: &str| {
         let session = engine.authorise(&subset_credential()).unwrap();
         let mut out: Vec<(Option<String>, u64)> = engine
             .viewport_artifacts(
                 &session,
-                tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+                mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                     .layers(LayerSelection::Named(&[layer])),
             )
             .expect("a viewport")
@@ -530,7 +530,7 @@ fn a_layer_published_at_runtime_takes_the_layout_a_build_gives_it() {
         out.sort();
         out
     };
-    let check = |engine: &tessera_engine::Engine, when: &str| {
+    let check = |engine: &mosaica_engine::Engine, when: &str| {
         assert_eq!(
             engine.recorded_layout(RUNTIME, 0),
             Some(ServingLayout::RowMajorLabel),

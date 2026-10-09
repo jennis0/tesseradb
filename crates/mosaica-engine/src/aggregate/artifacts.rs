@@ -12,8 +12,8 @@
 
 use croaring::Bitmap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_types::layer::{HierarchyKind, RegisteredLayer, ServingLayout};
-use tessera_types::{EntityId, TesseraId};
+use mosaica_types::layer::{HierarchyKind, RegisteredLayer, ServingLayout};
+use mosaica_types::{EntityId, TesseraId};
 
 use super::set::Cx;
 use super::table::{Groups, Key};
@@ -493,7 +493,7 @@ impl Targets {
         cx: &Cx<'_>,
         read: &ReadLevel,
         ordinals: &[u32],
-        dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+        dependency_served: &dyn Fn(&mosaica_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Targets> {
         let (engine, served, mask) = (cx.engine, &cx.open.served, &cx.open.mask);
         let mut targets = Targets::default();

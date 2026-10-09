@@ -1,4 +1,4 @@
-//! `tessera-lifecycle` — the write-ahead log and the I9 entity-ID allocator.
+//! `mosaica-lifecycle` — the write-ahead log and the I9 entity-ID allocator.
 //!
 //! Fail-closed durability machinery: an unpersisted deny entry fails open, and the [`wal`]
 //! module's positional CRC rule is the difference between ordinary crash recovery and silent
@@ -9,7 +9,7 @@
 //!
 //! [`command`] is what a write command carries and [`window`] the commit window ingest is gathered
 //! into. The commands themselves, and the executor thread that consumes them, live in
-//! `tessera-engine`: only that crate can see both a `Wal` and a `Generation`.
+//! `mosaica-engine`: only that crate can see both a `Wal` and a `Generation`.
 //!
 //! [`roster`] is the view roster — which views of which groups exist, and which keys are burnt.
 //! It sits beside the layer registry because the two problems are one: a named object created

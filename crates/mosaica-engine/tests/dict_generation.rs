@@ -9,9 +9,9 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use tessera_authz::{Dict, DictWriter};
-use tessera_engine::GeometryPublication;
-use tessera_types::TermId;
+use mosaica_authz::{Dict, DictWriter};
+use mosaica_engine::GeometryPublication;
+use mosaica_types::TermId;
 
 /// Ordinals are stable across an extension: a term that resolved to 3 before still does, or
 /// every session authorised before the flush is now evaluating against a different term.
@@ -166,16 +166,16 @@ fn extent_in(dir: &std::path::Path, descriptors: &[&[u8]]) -> Vec<std::path::Pat
 /// mapped to a 429 with `Retry-After` at the server boundary — so a conforming caller retries,
 /// and this test is not the place to treat the shed as a verdict.
 fn viewport_settling(
-    engine: &tessera_engine::Engine,
-    session: &tessera_engine::Session,
-) -> tessera_engine::ViewportOut {
-    use tessera_engine::ViewportRequest;
+    engine: &mosaica_engine::Engine,
+    session: &mosaica_engine::Session,
+) -> mosaica_engine::ViewportOut {
+    use mosaica_engine::ViewportRequest;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         let request = ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize);
         match engine.viewport(session, request) {
             Ok(response) => return response,
-            Err(tessera_engine::EngineError::ProjectionBuilding)
+            Err(mosaica_engine::EngineError::ProjectionBuilding)
                 if std::time::Instant::now() < deadline =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -210,7 +210,7 @@ fn viewport_settling(
 
 #[test]
 fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descriptor() {
-    use tessera_lifecycle::UnallocatedRow;
+    use mosaica_lifecycle::UnallocatedRow;
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -304,8 +304,8 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
 #[test]
 fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential() {
     use std::time::{Duration, Instant};
-    use tessera_engine::{Engine, EngineConfig};
-    use tessera_lifecycle::UnallocatedRow;
+    use mosaica_engine::{Engine, EngineConfig};
+    use mosaica_lifecycle::UnallocatedRow;
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -324,7 +324,7 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
                 // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
                 // what bounds the window close's O(buffered) copy. Nothing here reaches it.
                 flush_max_items: 40_000,
-                compaction: tessera_engine::CompactionSchedule::off(),
+                compaction: mosaica_engine::CompactionSchedule::off(),
                 ..config_uncapped()
             },
         )
@@ -387,9 +387,9 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
 /// **Every session holds `public` by construction** (`per-point-attributes.md` §3.8), added inside
 /// the engine rather than by the credential — so counting `satisfied` directly would count a term
 /// this file's cases are not about, in every one of them.
-fn resolved(session: &tessera_engine::Session) -> usize {
+fn resolved(session: &mosaica_engine::Session) -> usize {
     assert!(
-        session.satisfied_for_test().contains(&tessera_authz::PUBLIC_TERM),
+        session.satisfied_for_test().contains(&mosaica_authz::PUBLIC_TERM),
         "every session holds the reserved `public` term"
     );
     session.satisfied_for_test().len() - 1

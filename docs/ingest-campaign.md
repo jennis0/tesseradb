@@ -24,9 +24,9 @@ is the owner's to settle.
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
 | **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
 | **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
-| **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged and prepared whole; built, verified and served at a 10⁷ prefix; ⊘ stalled at 10⁸** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reached the abstract text index and stalled there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. Both stalls that produced are fixed, and **the whole corpus now builds: 2 h 56 m to a 70.78 GB bundle, `verify --deep` clean, served under a 24 GiB cap with `oom_kill` 0** (2026-09-04, §4b), and **1 h 09 m for the same bundle byte for byte** once the prose stopped being held in entity order at all (§4c). The rung's finding is that negative and its resolution |
+| **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged and prepared whole; built, verified and served at a 10⁷ prefix; ⊘ stalled at 10⁸** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`mosaica build` reached the abstract text index and stalled there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. Both stalls that produced are fixed, and **the whole corpus now builds: 2 h 56 m to a 70.78 GB bundle, `verify --deep` clean, served under a 24 GiB cap with `oom_kill` 0** (2026-09-04, §4b), and **1 h 09 m for the same bundle byte for byte** once the prose stopped being held in entity order at all (§4c). The rung's finding is that negative and its resolution |
 | **5** | **TreeOfLife-200M** | **233,055,986** | **Built, verified and served** 2026-09-04 — see §4b. The ladder's largest rung and its first with **two geometries over one entity space**: `bioclip` over every row and `geo` over the 75.90% the GBIF join placed on the ground. A **seven-level tiered taxonomy over every row** — 1,001,193 artifacts, 1.63×10⁹ membership entries — drawn on both views. **39.97 GB bundle in 1 h 10 m at 35.3 GB peak**, `verify --deep` clean in 37.1 s, served under a 24 GiB cap with every masked count identical, and the *f* = 50% ingest cell run: 116,527,993 rows in at 11,060 items/s and a 1,313 s fold. The vectors are 346 GB and were **never staged**: the layout is fitted on 2.5M rows and every row placed in one 2 h 55 m pass off the share |
-| 6 | GBIF | **3,495,729,729** | **Built, verified and served under a 24 GiB cap** 2026-09-14 — see §4d. The whole corpus, built three times: 4 h 09 m 35 s (207 GiB, format 9); after [the bounded-assembly design](evidence/memos/2026-09-12-bounded-assembly-design.md), 3 h 30 m 55 s (196 GiB, format 10), with `filter_postings` 7.6 GB over the 24 GB budget; after the serve fixes (candidacy off the cached histogram, extents opened rows-only, a windowed session projection, a per-segment cut index), **2 h 52 m 33 s** (**196 GiB, format 11**), with `filter_postings`'s own stage peak inside the budget at 8.9 GB. `verify --deep` clean in **15 m 08 s at 0.61 GB anonymous**. Served a fourth time after a fix returning freed memory to the allocator on a cadence: `tessera serve` opens to `/readyz` in **202 s at 6.7 GB anonymous** under the cap, peak **10.7 GB** (third serve: 197 s, peak 16.0 GB), `oom_kill` 0. Hot zoom 0 for the sparse principals still falls 4 to 6× on the per-cell route; the 50% principal now falls onto that route's resident cost too, 13.2 s → 2.2 s, while the 100% principal stays disk-bound on the 28 GB identity column, 16.9 s → 14.6 s, open at the time of writing (§4d). The taxonomy still starts at **family**, ruled 2026-09-09: kingdom Animalia's 2.81×10⁹ members would set `layers`' peak by itself |
+| 6 | GBIF | **3,495,729,729** | **Built, verified and served under a 24 GiB cap** 2026-09-14 — see §4d. The whole corpus, built three times: 4 h 09 m 35 s (207 GiB, format 9); after [the bounded-assembly design](evidence/memos/2026-09-12-bounded-assembly-design.md), 3 h 30 m 55 s (196 GiB, format 10), with `filter_postings` 7.6 GB over the 24 GB budget; after the serve fixes (candidacy off the cached histogram, extents opened rows-only, a windowed session projection, a per-segment cut index), **2 h 52 m 33 s** (**196 GiB, format 11**), with `filter_postings`'s own stage peak inside the budget at 8.9 GB. `verify --deep` clean in **15 m 08 s at 0.61 GB anonymous**. Served a fourth time after a fix returning freed memory to the allocator on a cadence: `mosaica serve` opens to `/readyz` in **202 s at 6.7 GB anonymous** under the cap, peak **10.7 GB** (third serve: 197 s, peak 16.0 GB), `oom_kill` 0. Hot zoom 0 for the sparse principals still falls 4 to 6× on the per-cell route; the 50% principal now falls onto that route's resident cost too, 13.2 s → 2.2 s, while the 100% principal stays disk-bound on the 28 GB identity column, 16.9 s → 14.6 s, open at the time of writing (§4d). The taxonomy still starts at **family**, ruled 2026-09-09: kingdom Animalia's 2.81×10⁹ members would set `layers`' peak by itself |
 | 7 | Overture buildings | 2.53×10⁹ | Not started. Staged; needs a second local volume |
 
 **Disk, and a trap in clearing it.** `/` had **23 GB free** on 2026-08-28, not the 117 GB recorded
@@ -136,7 +136,7 @@ The plan's bar for *done* is six things. Two are met.
 
 | | |
 |---|---|
-| ✅ declaration passes `tessera check` | 6 sources, 1 view, 8 vocabularies, 13 attributes, 2 layers |
+| ✅ declaration passes `mosaica check` | 6 sources, 1 view, 8 vocabularies, 13 attributes, 2 layers |
 | ✅ bundle exists, frame report recorded | 1,341,841,220 bytes; the build's own frame report, which now names the projection and the snap |
 | ❌ decision 0091's build-vs-ingest test on real data | not attempted |
 | ❌ masked-count census exact against an oracle | not attempted |
@@ -147,7 +147,7 @@ The plan's bar for *done* is six things. Two are met.
 projection:
 
 ```
-prepare.py       2:54            tessera build   2:59 wall, 3.55 GB peak RSS
+prepare.py       2:54            mosaica build   2:59 wall, 3.55 GB peak RSS
 bundle           1.34 GB         verify          1.03 s
                  99.7 B/point    artifacts       688 minted, 464,655 declared
 resolution       85.7% of points have a cell of their own — 11,544,034 distinct cells
@@ -177,8 +177,8 @@ on 2026-08-30 on a declared projection, which is the run below.
 ```
 prepare.py    divisions 109 s · join 2,560 s · entity ids 1,130 s · outputs 162 s
               points.parquet 3.09 GB · members-taxonomy 293 MB · artifacts-divisions 4.62 GB
-tessera check OK in 526 s, and it reports the polygon decomposition from the geometry alone
-tessera build 31:18 wall · 26.75 GB peak RSS · exit 0
+mosaica check OK in 526 s, and it reports the polygon decomposition from the geometry alone
+mosaica build 31:18 wall · 26.75 GB peak RSS · exit 0
 bundle        12,565,390,654 bytes — 170.7 B/point
 verify        OK in 5.98 s — 1 partition, 1 view, 1 segment, high-water 73,631,092
 artifacts     625,754 divisions, every one with a polygon · 2,097 taxonomy across 6 levels · 9 predicate
@@ -202,7 +202,7 @@ the peak are upper bounds. Bytes and counts are unaffected.
 lineage-depth histogram, the containing-areas histogram, the per-tier counts and the 46,844
 unplaced places matched exactly. `arg_max(a.lineage, a.depth)` picks an arbitrary maximum among
 equal-depth containing areas and 18.2M places sit in two or more. It is a property of the rung's
-own pipeline rather than of anything Tessera does, and it means an artifact count from this rung
+own pipeline rather than of anything Mosaica does, and it means an artifact count from this rung
 carries ±0.25% between runs.
 
 **Both walls the plan expected here did not fire.**
@@ -223,7 +223,7 @@ frame is full-world and the points span it. Places cluster into cities, so 73.6M
 
 ### 3.0 Where the build's time goes, at last
 
-`tessera build --stage-timings` was added for this (§4). Its first run charged one 615.0 s number to
+`mosaica build --stage-timings` was added for this (§4). Its first run charged one 615.0 s number to
 `filter_postings`, which turned out to be four jobs sharing a stage name; splitting them is what
 this table records. 73,631,092 points, one 23:03 run:
 
@@ -422,7 +422,7 @@ registry's count and says the shape is not observed.
 - §7.1's bar: the 0091 build-vs-ingest test, the oracle census, the write cycle, ingest rows/s, p99
   at three zooms and a screenshot. None attempted.
 - **The roster's ±0.25% run-to-run drift** (§3), which is `prepare.py`'s tie-break and not
-  Tessera's, and which nothing yet needs to be stable.
+  Mosaica's, and which nothing yet needs to be stable.
 - The **spatial** boundary layer has been built but never served. 386 s of the build goes into
   resolving 73.6M rows against 625,754 polygons, and what that costs a request is unmeasured.
 
@@ -538,11 +538,11 @@ Plan §6.2 proposed building the arXiv geometry both ways — full-dimension cos
 against the shipped PCA-64 route — and judging which distorts the geometry less. It was run over
 all 2,422,486 papers on 2026-09-01, as two views of one entity space (owner direction), both on
 cuML's GPU UMAP ("this is a demonstrator; speed wins over accuracy"). **Then the question was
-re-scoped by the owner**: the ladder's corpora are demos and speed benchmarks for Tessera, the
+re-scoped by the owner**: the ladder's corpora are demos and speed benchmarks for Mosaica, the
 layout exists to make a useful view, and how faithfully UMAP preserves neighbourhoods is not a
 question this campaign asks. The recall and purity apparatus built to answer it was deleted.
 
-What survives is what bears on Tessera. **The kNN route is the pipeline for the larger rungs**:
+What survives is what bears on Mosaica. **The kNN route is the pipeline for the larger rungs**:
 CAGRA in fp16 builds the graph over 2.4×10⁶ × 1024 in about a minute on a 10 GB card, cuML lays it
 out in under half a minute, and the whole route is **3× faster** than PCA-then-UMAP (94 s against
 280 s on an idle box) — reducing to 64 dimensions leaves UMAP a slower graph to build than the card
@@ -556,7 +556,7 @@ views over one membership, and it is why `knn` is the anchor.
 **The arXiv rung now carries the two views** — `knn` (*Topic map*) and `pca64` — both clustering
 layers on both, titles, abstracts and authors indexed, dates filterable, and each cluster titled by
 its own c-TF-IDF text as supplied content. Whole corpus: `prepare.py` 13 m 0 s at 22.9 GB peak,
-`tessera build` 54.5 s to a 1.5 GB bundle, `verify --deep` clean; the rung README carries the
+`mosaica build` 54.5 s to a 1.5 GB bundle, `verify --deep` clean; the rung README carries the
 build's own per-view report verbatim.
 
 **A layer earns its place by drawing something in the view it is declared over** (the ruling that
@@ -580,7 +580,7 @@ yet merged.
 **`run_demo.sh` wrote into `clients/ts/`** — 5.5 GB of bundles, WAL and cache under `.dev/`, the
 viewer's `public/datasets.json`, an `.env.local` — and held port 5173, so two sessions on one
 checkout overwrote each other's demo. **Ruled 2026-09-01, and done the same day**: everything it
-produces is under `./tessera-demo/` in the checkout (`TESSERA_DEMO_DIR` moves it), gitignored; the
+produces is under `./mosaica-demo/` in the checkout (`MOSAICA_DEMO_DIR` moves it), gitignored; the
 viewer is handed its dataset list by the URL the script prints (`?datasets=/@fs/<path>`, served
 through Vite's `fs.allow`) and its session credential through the environment of the `npm run dev`
 process; and `VITE_PORT` chooses the viewer's port, which is the one written into every
@@ -611,8 +611,8 @@ in the code, unused, and unmeasured at scale.
 | | |
 |---|---|
 | `prepare.py --sample 0` | **17 m 27 s**, **43.3 GB peak RSS** — route 480 s (CAGRA build 18.1 s, search 22.1 s at 111,872 q/s, UMAP 36.6 s, placement of 35,920,666 rows 361 s), MeSH 421 s, k-means 22 s, titles 25 s |
-| `tessera build` | **12 m 10 s**, **16.03 GB peak RSS**, **11.15 GB bundle**, 165,272,740 pairs, 90.6% of points with a cell of their own, none on the frame's edge |
-| `tessera verify --deep` | clean in **5.1 s** at 1.15 GB — 1 partition, 1 view, 1 segment, 35,920,666 rows |
+| `mosaica build` | **12 m 10 s**, **16.03 GB peak RSS**, **11.15 GB bundle**, 165,272,740 pairs, 90.6% of points with a cell of their own, none on the frame's edge |
+| `mosaica verify --deep` | clean in **5.1 s** at 1.15 GB — 1 partition, 1 view, 1 segment, 35,920,666 rows |
 | served | `run_demo.sh` on its own deployment; principals 4,910 / 4,910 / 6,024,843 / 25,357,425 / 35,920,666 visible |
 
 **The rung's scaling finding: 1,658,437,807 closed membership entries against rung 2's 5.07×10⁸ —
@@ -642,7 +642,7 @@ boundability in row space are different properties and this rung is the first co
 them.
 
 **The abstracts ruling stays open, and now has numbers** (§8). The 10⁶-row sample was built both
-ways: `points.parquet` 118.6 → 634.6 MB, `tessera build` 19.7 → 34.3 s, **build peak RSS 716 MB →
+ways: `points.parquet` 118.6 → 634.6 MB, `mosaica build` 19.7 → 34.3 s, **build peak RSS 716 MB →
 2,246 MB**, bundle 333 → 799 MB. Linearly ×36 that is a 28.7 GB bundle and ~81 GB of build RSS on a
 47 GB box — modelled, not measured, and W2 says the peak is not bounded by `--memory-budget`, so it
 is a wall to meet rather than a refusal to expect.
@@ -683,7 +683,7 @@ waited on the other and the merge was clean.
 |---|---|
 | staging | **164.7 min** over SMB, 22.2 GB peak, 254 GB written locally (195 GiB of `float16` vectors, 59 GB of per-chunk parquet). ⊘ Not comparable with rung 3's 60.5 min — the OpenAlex track's own scan of `works` shared the share for half of it |
 | `prepare.py --sample 0` | **43.8 min**, **18.44 GB** peak — route 1,487 s (1,208 s placing 102,117,343 rows against a 1.5M-row fit set), the one streaming pass 980 s at a flat 18.4 GB |
-| `tessera build` | **10,578.4 s (2 h 56 m) to a 70.78 GB bundle** over the whole corpus, 2026-09-04 — §4b. **545 s to a 7.44 GB bundle** at a 10⁷ prefix |
+| `mosaica build` | **10,578.4 s (2 h 56 m) to a 70.78 GB bundle** over the whole corpus, 2026-09-04 — §4b. **545 s to a 7.44 GB bundle** at a 10⁷ prefix |
 | the 10⁶ sample, end to end | prepare 601 s at 12.53 GB · build **23.3 s** to **744.3 MB**, anonymous high-water **968 MB** against 2,398 MB of `VmHWM` · `verify --deep` clean in 0.33 s at 52.5 MB · served, driven, counts move with the mask |
 
 **The compartment is the first on the ladder that is a property of the row.** GeoNames and Overture
@@ -696,7 +696,7 @@ a 77% floor every principal would hold for free. The ladder is then **0 / 14,028
 
 ### The build stalls in the abstract text index, and the mechanism is measured
 
-`tessera build --stage-timings` got through every stage before the text index and then stopped
+`mosaica build --stage-timings` got through every stage before the text index and then stopped
 making useful progress. It was **neither refused nor killed** — no OOM, no pre-flight refusal, no
 signal; it is stalled on I/O.
 
@@ -773,7 +773,7 @@ index that would not finish at 10⁸ takes **178 seconds**.
 
 | | |
 |---|---|
-| `tessera build --limit 10000000` | **545 s**, **7.44 GB** bundle, anonymous high-water **1,685 MB** against 15,705 MB of `VmHWM` |
+| `mosaica build --limit 10000000` | **545 s**, **7.44 GB** bundle, anonymous high-water **1,685 MB** against 15,705 MB of `VmHWM` |
 | `verify --deep` | clean in **5.45 s** at 342 MB |
 | bundle | `attrs` 6.6 GB — `record` 4.4 GB, `abstract` 1.8 GB, `title` 242 MB — `views` 286 MB, `entities` 77 MB, `members` 54 MB. **Two thirds of it is prose**, which scales to a **~76 GB bundle** at 10⁸ |
 | served, uncapped and under `MemoryMax=24G` | **survives, and the cap never binds**: `oom 0`, `oom_kill 0`, scope `memory.peak` **242.5 MB**, and **85 of 85 count-bearing responses identical** between the two runs. p50 0.05–9.3 ms across every request kind either way |
@@ -810,11 +810,11 @@ breakdown, the serve-under-cap result and the layer spread at full scale. §4b.
 below are unaffected history.
 
 **2026-09-04.** The same corpus, the same declaration, the same box — 102,117,343 rows,
-118.9 GB of abstracts indexed as text, 47 GB of RAM. `tessera build --stage-timings
+118.9 GB of abstracts indexed as text, 47 GB of RAM. `mosaica build --stage-timings
 --stage-timings-json --arena-order auto`, under `sample_rss.py`, on 448 GB of free disk. It is the
 first build of this corpus to finish, and it took **10,578.4 s — 2 h 56 m 18 s**.
 
-⊘ **The box carried rung 5's staging throughout** — share passes and GPU work, no local `tessera
+⊘ **The box carried rung 5's staging throughout** — share passes and GPU work, no local `mosaica
 build` and no serve battery. The disk was this build's alone.
 
 | stage | wall | what changed since §4a |
@@ -886,7 +886,7 @@ every level of one layer.
 
 `serve_battery.py` on 8131–8133 inside a transient scope at `MemoryMax=24G`, over the ladder the
 rung's compartment gives it. **The cap held**: `memory.peak` sat exactly at the cap, `memory.events`
-counted **110,266** reclaim-at-max events, and **`oom_kill` was 0**. The open — `tessera serve` to
+counted **110,266** reclaim-at-max events, and **`oom_kill` was 0**. The open — `mosaica serve` to
 `/readyz`, which on this rung is five levels of artifact projection being built — is **98.9 s**.
 
 | principal | terms | visible | authorise | first viewport | hot p50 (z0 / z6 / z12) |
@@ -915,7 +915,7 @@ below are unaffected history.
 
 **2026-09-04.** Same corpus, same declaration, same box, and **byte-identical output**: 46 files
 compared against §4b's bundle, none differing but `MANIFEST.json`'s `created_at` and the `CURRENT`
-that carries its digest. `tessera build --stage-timings --arena-order auto` under `sample_rss.py`
+that carries its digest. `mosaica build --stage-timings --arena-order auto` under `sample_rss.py`
 on branch `build/prose-extents`. **4,169.9 s — 1 h 09 m 30 s**, against 10,578.4 s.
 
 What changed is that a `text` column's prose is no longer placed at an entity index at all
@@ -977,7 +977,7 @@ on the other.
 | the fit sample, off the share | **33.9 min** at 25.0 MB/s — 2,500,000 rows drawn evenly from all 666 files, 3.84 GB. **The 346 GB of vectors were never staged**: 217 GB free |
 | the placement pass, off the share | **2 h 55 m**, 20,977 rows/s, 32.2 MB/s — every row positioned at the similarity-weighted mean of its 15 fit-set neighbours, nothing kept but a 1.86 GB layout |
 | `prepare.py --sample 0 --reuse-layout` | **10.6 min** at **9.44 GB** peak |
-| `tessera build --stage-timings` | **4,233 s — 1 h 10 m 33 s**, **39.97 GB** bundle, **35.3 GB** peak `VmHWM` of which **15.9 GB anonymous** |
+| `mosaica build --stage-timings` | **4,233 s — 1 h 10 m 33 s**, **39.97 GB** bundle, **35.3 GB** peak `VmHWM` of which **15.9 GB anonymous** |
 | `verify --deep` | clean in **37.1 s at 10.29 GB** |
 | the 10⁶ sample, end to end | prepare 111.8 s at 9.24 GB · build **18.4 s** to **162.3 MB** · verify clean in 0.13 s · served, driven, counts move with the mask in both views |
 
@@ -1041,7 +1041,7 @@ greedy composition under a 50% budget takes every *other* publisher — 473 term
 
 ### Served, and the anon floor at open is now 16 GB
 
-`tessera serve` over the 39.97 GB bundle **opens in 87.7 s** building every level's artifact row
+`mosaica serve` over the 39.97 GB bundle **opens in 87.7 s** building every level's artifact row
 form over 1,001,193 artifacts across two views, and sits at **15.96 GB anonymous** before any
 request. Rung 3 sat at 2.06–2.17 GB over a 1.66×10⁹-row DAG membership and rung 4's prefix at 166
 MB; this is the third data point and the largest, and it is the same fixed cost §6 identified.
@@ -1127,7 +1127,7 @@ The rung is [`../test_corpora/gbif/`](../test_corpora/gbif/README.md); the fract
 describes are §"Modelled — the whole corpus" there, superseded below. Two whole-corpus builds are
 compared, one before the bounded-assembly changes and one after, over the same **3,495,729,729**
 placed rows and the same ten signature batches of 369,098,752 items, so the entity-id assignment is
-identical between them (I9). Both `tessera build --memory-budget 24g --no-oracle-pairs
+identical between them (I9). Both `mosaica build --memory-budget 24g --no-oracle-pairs
 --stage-timings` on this box (WSL2, 12 cores, 47 GiB in the VM, local NVMe): **run 1** on main
 `a4152e79`, 2026-09-13 01:01; **run 2** on main `d7d26c16`, 2026-09-13 21:52, after six branches
 merged. The observations that drove the design are
@@ -1184,7 +1184,7 @@ two runs, and neither change is explained** — assumed to be the page cache the
 from the stage before it, not measured. ⊘ The `peak=` figure stage timings print is `VmHWM`, the
 process's lifetime high-water RSS including file pages, not the anonymous figure below, and a
 stage's number in that column can belong to an earlier stage that mapped the file — read from the
-code (`crates/tessera-build/src/observer.rs`), not from a profile of this run.
+code (`crates/mosaica-build/src/observer.rs`), not from a profile of this run.
 
 **Six branches landed between the runs, all on main `d7d26c16`.**
 
@@ -1211,7 +1211,7 @@ row-column lanes at 40 GB, and the ordinal geometry) and is known to overstate; 
 
 **Finding A: `filter_postings` held 7.6 GB over budget for twenty minutes, and the residency model
 has no term for it.** Diagnosed from the code and the on-disk file sizes, not from a heap profile.
-`ExtentColumn::open` (`crates/tessera-build/src/extents.rs`) deserialises every extent's has-row
+`ExtentColumn::open` (`crates/mosaica-build/src/extents.rs`) deserialises every extent's has-row
 bitmap onto the heap and builds a per-extent live set by subtracting later extents' rows
 (`andnot_inplace`). Each of the two string columns spilled 988 extents; the has-row files are
 run-encoded on disk (2.2 GB for `scientificname`), but the subtraction produces array containers
@@ -1230,7 +1230,7 @@ no disk, and about no change to the pass's time. Not built.
 
 ### Verify
 
-`tessera verify --deep` under `systemd-run --user --scope -p MemoryMax=24G -p
+`mosaica verify --deep` under `systemd-run --user --scope -p MemoryMax=24G -p
 MemorySwapMax=2G`. Run 2's format-10 bundle verified **clean in 14 m 42 s at 0.61 GB peak
 anonymous**: 254 terms, 254 dictionary records, 3,495,729,729 record-blob rows, 1 segment,
 `entity_id_high_water` 3,495,729,729. Run 1's format-9 bundle took **20 m 50 s at 47 GB
@@ -1239,7 +1239,7 @@ anonymous figure is the direct measurement of it.
 
 ### Served, under a 24 GiB cap
 
-`tessera serve` on run 2's bundle under `systemd-run --user --scope -p MemoryMax=24G -p
+`mosaica serve` on run 2's bundle under `systemd-run --user --scope -p MemoryMax=24G -p
 MemorySwapMax=0`. Opened to `/readyz` in **193 s at 6.5 GB anonymous** — three taxonomy levels'
 row forms built at open cost 1.03 s of that. Before this merge set, the open was modelled at about
 60 GB anonymous and could not be attempted on this box. `memory.peak` sat at the cap (file pages),
@@ -1295,7 +1295,7 @@ rows-only with one duplicate map a column replacing the per-extent live sets (Fi
 above); the session projection built in windows with a whole-grant short-circuit and
 run-optimised; and a per-segment cut index, `cuts.u32`, of leaf Morton cell starts (bundle format
 11), with selection evaluated per cell on dense tiles. Same corpus, the same ten batches (I9
-identity preserved), `tessera build --memory-budget 24g --no-oracle-pairs`, the box otherwise idle
+identity preserved), `mosaica build --memory-budget 24g --no-oracle-pairs`, the box otherwise idle
 during the build.
 
 **The wall fell a further 18%, and `filter_postings` now fits the budget.** 3 h 30 m 55 s →
@@ -1345,14 +1345,14 @@ the cell count is read from the Morton column).
 
 #### Verify
 
-`tessera verify --deep` ran under `systemd-run --user --scope -p MemoryMax=24G -p
+`mosaica verify --deep` ran under `systemd-run --user --scope -p MemoryMax=24G -p
 MemorySwapMax=2G`: clean in **15 m 08 s at 0.61 GB peak anonymous**, checking 3,495,729,729
 record-blob rows and 41,899,178 Morton cells — the cut index is a new deep check, added with
 format 11.
 
 #### Served, under a 24 GiB cap
 
-`tessera serve` ran under `systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=0`. ⊘ The
+`mosaica serve` ran under `systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=0`. ⊘ The
 battery harness authorises once and never re-authorises, so the deployment's token lifetime was
 raised to 43,200 s for this run. Opened to `/readyz` in **197 s at 6.7 GB anonymous**.
 
@@ -1459,20 +1459,20 @@ The battery's `k = 30` understates a client's request, which carries a 1 to 2 mi
 ## 5. The machinery this campaign built
 
 - **[`../test_corpora/`](../test_corpora/README.md)** — one directory per rung, in git: `prepare.py`,
-  `corpus.toml`, `README.md`. Derived files go to `$TESSERA_LADDER/<rung>` (default
+  `corpus.toml`, `README.md`. Derived files go to `$MOSAICA_LADDER/<rung>` (default
   `data/ladder/<rung>`), so the second volume is one environment variable rather than an edit to
   every script.
 - **`test_corpora/common/projection.py`** — the WGS84 → Web Mercator transform, unit square,
-  **y south**. It placed both geographic rungs while Tessera had no projection layer and places
+  **y south**. It placed both geographic rungs while Mosaica had no projection layer and places
   none now; what it is instead is the **second implementation** the engine's own transform is held
-  to. `tessera_spatial::projection` runs it over 100,000 sampled coordinates and requires the same
+  to. `mosaica_spatial::projection` runs it over 100,000 sampled coordinates and requires the same
   *stored* position, its `TEST_VECTORS` and `TILE_VECTORS` (the only real test of the y direction)
   are data both languages read, and each rebuilt bundle was checked by recomputing every point's
   expected 32-bit fixed-point position through it from the source degrees.
 - **`~/venvs/ingest`** — DuckDB and PyArrow, with `spatial` installed for rung 2's point-in-polygon
   join (§3). ⊘ Its Python is 3.10, so it has no `tomllib`; `~/venvs/projection` does.
 - **`run_demo.sh --terms / --ranks / --label`**, and `custom` on ports of its own — see §6.
-- **The measurement drivers** (2026-09-03) — `tessera build --stage-timings-json`,
+- **The measurement drivers** (2026-09-03) — `mosaica build --stage-timings-json`,
   [`../test_corpora/common/serve_battery.py`](../test_corpora/common/serve_battery.py) and
   [`../test_corpora/common/ingest_cycle/`](../test_corpora/common/ingest_cycle/), booted by
   [`../test_corpora/common/deployment.py`](../test_corpora/common/deployment.py) and collated by
@@ -1489,7 +1489,7 @@ The battery's `k = 30` understates a client's request, which carries a 1 to 2 mi
   reason that has nothing to do with the write path; `ingest_cycle.py --state-extent` copies
   `MANIFEST.views[].quantisation` out of the all-in bundle into the measurement's own copy of the
   declaration, never the rung's committed one. Stating the frame is also what makes the *f* = 100%
-  cell expressible: with the frame given there is nothing to fit, so `tessera build` writes a bundle
+  cell expressible: with the frame given there is nothing to fit, so `mosaica build` writes a bundle
   with no points and the whole corpus arrives through `/control/ingest` (decision 0091). `auto` over
   no rows stays a refusal, and it names the remedy.
 - **Everything is ingested after the build** (owner ruling, 2026-09-03). A cell's base bundle
@@ -1521,8 +1521,8 @@ the plan expected its first walls at rung 2 on the build side.
 **A geographic corpus is reproducible, and an embedding corpus is not** — and this was spent
 rather than merely asserted. A projection is a pure function, so a geographic rung built on a frame
 that later changes costs a rerun rather than the loss `data/geometry.parquet` would be. Both rungs
-were placed by a Python module before Tessera had a projection layer and both were rebuilt on the
-declared projection on 2026-08-30 for the price of a `prepare.py` and a `tessera build` each. It
+were placed by a Python module before Mosaica had a projection layer and both were rebuilt on the
+declared projection on 2026-08-30 for the price of a `prepare.py` and a `mosaica build` each. It
 does not transfer to rungs 3–5.
 
 **Declare a width from a measured range, never from a maximum.** `population` was declared `u64`
@@ -1546,7 +1546,7 @@ is not in doubt. GeoNames is the first corpus where the two come apart, and the 
 spelling for both. Routed around here by materialising the hole as an explicit artifact (1,373 of
 them, against 464,000 real); **not raised as an issue and not designed**.
 
-**A 4 GiB cgroup cap survives `tessera serve`'s open and then OOM-kills on the first request; 12
+**A 4 GiB cgroup cap survives `mosaica serve`'s open and then OOM-kills on the first request; 12
 GiB serves the whole drive cleanly, with byte-identical masked counts to an uncapped run.** Tested
 against `data/ladder/medcpt` (11.15 GB) under `systemd-run --user --scope -p MemoryMax=…`: open
 always completes and `/readyz` answers 200 at anon ≈ 2.06–2.17 GB resident, but at 4 GiB the first
@@ -1590,7 +1590,7 @@ directory copied one hardcoded `branch.parquet` and one points file, so a rung d
 vocabularies and a second view refused the base build on a missing file; its wire batch named
 MedCPT's own four attribute columns, so every batch was a 422 — *every declared column must be
 present, the scalar tail being read back by position* — and the access column may be a scalar and a
-declared attribute rather than a list that is neither; and it sent no `x-tessera-view`, which a
+declared attribute rather than a list that is neither; and it sent no `x-mosaica-view`, which a
 bundle with more than one view requires and rightly refuses without (contracts §3.4). **Fixed**: all
 three are read off the rung's own declaration, and `wire_columns` returns MedCPT's four unchanged,
 so rung 3's cells are unaffected. ⊘ **The hold-out still enters the anchor view alone**: a second
@@ -1615,7 +1615,7 @@ is now the only path an item's labels take at either entry point, and the driver
 - Whether this tracker is the campaign's status record or the campaign moves to issues.
 - ~~Whether rung 3 takes its abstracts~~ (§4.1) — **ruled 2026-09-05: taken** (`prepare.py
   --abstracts`; the rebuild and re-measurement follow). The memory objection had been answered
-  first. The 10⁶ figures behind it (`tessera build` 716 MB against 2,246 MB, extrapolating to
+  first. The 10⁶ figures behind it (`mosaica build` 716 MB against 2,246 MB, extrapolating to
   ~81 GB) were `VmHWM`, which counts file-backed pages the kernel may evict alongside heap it must
   keep — and since 2026-08-30 the columns are mapped, the text index spills under a budget and the
   blob streams, so on prose most of that is page cache.
@@ -1667,9 +1667,9 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
 
 - ⊘ **The artifact drill-down omits the DAG's edges.** `POST /v1/artifacts/{tessera_id}` answers
   `layer`, `key`, `masked_count`, `centroid`, `box`, `shape`, `content` and `rung`
-  (`tessera-server/src/viewer.rs`, the `ArtifactResp` construction) — **no `parent_ids`**, where the
-  viewport's artifact frame carries them (`tessera-wire/src/payload.rs`, `ArtifactRow::parent_ids`;
-  `tessera-engine/src/viewport.rs`). A client that drills into a descriptor is told its count and
+  (`mosaica-server/src/viewer.rs`, the `ArtifactResp` construction) — **no `parent_ids`**, where the
+  viewport's artifact frame carries them (`mosaica-wire/src/payload.rs`, `ArtifactRow::parent_ids`;
+  `mosaica-engine/src/viewport.rs`). A client that drills into a descriptor is told its count and
   not where it sits, so a DAG cannot be walked from a drill-down. Read from the source 2026-09-02;
   no test asserts either way.
 - ⊘ **`clients/ts/viewer/smoke-artifacts.mjs` draws no hull ring on this corpus.** Its own report
@@ -1680,16 +1680,16 @@ depth, `parent_ids` on the wire and the client — the engine and client tracks'
   Two of its failures are its own calibration against arXiv — this rung's `narrow` and `sparse`
   presets resolve to the same single term — and are not defects.
 
-**Host, not Tessera**
+**Host, not Mosaica**
 
 - ⊘ **Run a memtest on this box before chasing any further one-off.** Three corruption-class
   symptoms on 2026-08-22/23, and rung 3 added three more on 2026-09-02 — in three different places,
   in three different shapes, across two processes, none reproducing (§4.6):
   45 member rows of 1.66×10⁹ shifted under the wrong article in a structured way no code path
   accounts for; one entity missing two ancestor rows in the next run, which had the first run's
-  window right; and a `SIGSEGV` in `tessera build` — `signal 11 … error 6`, a write to a
+  window right; and a `SIGSEGV` in `mosaica build` — `signal 11 … error 6`, a write to a
   non-present page — that did not recur when the same binary was relaunched on the same inputs.
-  Each run is otherwise bit-consistent with a recompute. None is attributed to Tessera and none
+  Each run is otherwise bit-consistent with a recompute. None is attributed to Mosaica and none
   should be until a reproduction exists. ⊘ **The per-slice check rung 3 added catches the first
   shape and not the second** — a dropped ancestor row leaves every explicit id in place — and that
   gap is deliberate: closing it would mean recomputing the closure to compare against itself, and

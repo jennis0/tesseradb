@@ -19,9 +19,9 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_types::EntityId;
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -32,8 +32,8 @@ const CORPUS: u64 = 64;
 
 fn viewport(
     engine: &Engine,
-    session: &tessera_engine::Session,
-) -> tessera_engine::viewport::ViewportOut {
+    session: &mosaica_engine::Session,
+) -> mosaica_engine::viewport::ViewportOut {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match engine.viewport(
@@ -89,7 +89,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -251,7 +251,7 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -310,7 +310,7 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
 }
 
 /// How many live runs of keys the fixture's unique `id` holds.
-fn live_runs(manifest: &tessera_store::manifest::SegmentsManifest) -> usize {
+fn live_runs(manifest: &mosaica_store::manifest::SegmentsManifest) -> usize {
     let index = manifest.unique_indexes.iter().find(|i| i.attribute == "id");
     index.expect("`id` is unique").live.len()
 }

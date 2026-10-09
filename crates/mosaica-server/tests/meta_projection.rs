@@ -19,9 +19,9 @@ use std::path::Path;
 use common::*;
 use serde_json::Value;
 use tempfile::TempDir;
-use tessera_build::build;
-use tessera_spatial::frame::AlignedSquare;
-use tessera_spatial::{Bounds, Projection};
+use mosaica_build::build;
+use mosaica_spatial::frame::AlignedSquare;
+use mosaica_spatial::{Bounds, Projection};
 
 /// A bundle built under `projection` against `frame`.
 ///
@@ -43,13 +43,13 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
     write_pairs_n(&pairs, N_ITEMS);
     let args = build_args(
         out,
-        vec![tessera_build::ViewArgs {
+        vec![mosaica_build::ViewArgs {
             projection,
             extent: frame,
             // `lon`/`lat` become the canonical `x`/`y` at the declaration, which is what
             // `compile_projected_fields` does for a `[[view]]` block; built outright here because
             // there is no document around this build.
-            point_fields: tessera_build::config::Fields::moved(
+            point_fields: mosaica_build::config::Fields::moved(
                 "points",
                 [("x", "lon"), ("y", "lat")],
             ),

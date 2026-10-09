@@ -58,7 +58,7 @@ impl PendingRetirement {
         store: &'s ArtifactStore,
         layer: &str,
         level: u32,
-    ) -> impl Iterator<Item = (u32, &'s tessera_lifecycle::membership::ArtifactRecord)> + 's {
+    ) -> impl Iterator<Item = (u32, &'s mosaica_lifecycle::membership::ArtifactRecord)> + 's {
         let retired = &self.retired;
         store
             .level(layer, level)
@@ -70,7 +70,7 @@ impl PendingRetirement {
 /// which is the length the reader sizes the level at (`ArtifactRows::build_over`). A hole below
 /// it is covered and a hole at the top is not.
 fn level_length<'a>(
-    records: impl Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
+    records: impl Iterator<Item = (u32, &'a mosaica_lifecycle::membership::ArtifactRecord)>,
 ) -> u32 {
     records.map(|(ordinal, _)| ordinal + 1).max().unwrap_or(0)
 }
@@ -78,10 +78,10 @@ fn level_length<'a>(
 /// What a fold hands the manifest commit in place of the held list: the derived files it has just
 /// written, and the retirement its levels are stamped for.
 pub(super) struct FoldDerived<'a> {
-    pub(super) written: &'a [tessera_store::manifest::DerivedExtent],
+    pub(super) written: &'a [mosaica_store::manifest::DerivedExtent],
     pub(super) pending_retirement: &'a PendingRetirement,
     /// The ids this fold frees, held back from the WAL position beside them.
-    pub(super) freed: &'a tessera_store::manifest::HeldEntities,
+    pub(super) freed: &'a mosaica_store::manifest::HeldEntities,
 }
 
 /// The entities of `executed` the allocator may issue again: each one whose number, the entity
@@ -90,7 +90,7 @@ pub(super) struct FoldDerived<'a> {
 fn freed_by(
     live: &Generation,
     executed: &croaring::Bitmap,
-) -> Result<croaring::Bitmap, tessera_store::StoreError> {
+) -> Result<croaring::Bitmap, mosaica_store::StoreError> {
     const CHUNK: usize = 1 << 16;
     let mut freed = croaring::Bitmap::new();
     let mut entities: Vec<EntityId> = Vec::with_capacity(CHUNK);
@@ -116,8 +116,8 @@ fn freed_by(
 /// has run; every other one is dropped and named. See [`PendingRetirement`].
 fn held_at_current_version(
     store: &ArtifactStore,
-    entries: &[tessera_store::manifest::DerivedExtent],
-) -> Vec<tessera_store::manifest::DerivedExtent> {
+    entries: &[mosaica_store::manifest::DerivedExtent],
+) -> Vec<mosaica_store::manifest::DerivedExtent> {
     entries
         .iter()
         .filter(|entry| {
@@ -160,7 +160,7 @@ pub(in crate::write) fn sweep_orphan_prefixes(bundle_root: &Path, live: &str) {
         if !is_prefix || name == live || !entry.path().is_dir() {
             continue;
         }
-        match tessera_store::reclaim_prefix(&entry.path()) {
+        match mosaica_store::reclaim_prefix(&entry.path()) {
             Ok(()) => {
                 swept += 1;
                 tracing::info!(
@@ -331,11 +331,11 @@ struct DerivedPass<'a> {
     prefix_dir: &'a std::path::Path,
     partition: &'a str,
     n: u64,
-    incarnations: FxHashMap<String, tessera_types::view::ViewIncarnation>,
-    spaces: Vec<(String, tessera_store::RowSpace)>,
-    segments: Vec<(String, tessera_store::read::SegmentData)>,
+    incarnations: FxHashMap<String, mosaica_types::view::ViewIncarnation>,
+    spaces: Vec<(String, mosaica_store::RowSpace)>,
+    segments: Vec<(String, mosaica_store::read::SegmentData)>,
     pending: &'a PendingRetirement,
-    index: tessera_store::derived::DerivedIndex,
+    index: mosaica_store::derived::DerivedIndex,
 }
 
 /// What a fold carries forward: everything the live manifest still lists that the fold did not
@@ -346,17 +346,17 @@ struct DerivedPass<'a> {
 /// dead incarnation is carried; a dropped view's segments are left behind with the superseded
 /// prefix's files instead of naming an incarnation the new manifest does not declare.
 pub(super) struct CarriedExtents<'a> {
-    segments: Vec<&'a tessera_store::manifest::SegmentDescriptor>,
+    segments: Vec<&'a mosaica_store::manifest::SegmentDescriptor>,
     tiers: Vec<String>,
-    attrs: Vec<tessera_store::manifest::AttrExtent>,
-    records: Vec<tessera_store::manifest::RecordExtent>,
-    texts: Vec<tessera_store::manifest::TextExtent>,
-    entity_terms: Vec<tessera_store::manifest::EntityTermsExtent>,
+    attrs: Vec<mosaica_store::manifest::AttrExtent>,
+    records: Vec<mosaica_store::manifest::RecordExtent>,
+    texts: Vec<mosaica_store::manifest::TextExtent>,
+    entity_terms: Vec<mosaica_store::manifest::EntityTermsExtent>,
     /// Every unique index the live manifest holds, less what the fold consumed: a folded
     /// column's base runs are the fold's own and are left out here.
-    unique: Vec<tessera_store::manifest::UniqueIndexRuns>,
+    unique: Vec<mosaica_store::manifest::UniqueIndexRuns>,
     /// The edited-items live runs written during the fold's flight; the fold's own are its base.
-    edited: tessera_store::manifest::EditedItemsRuns,
+    edited: mosaica_store::manifest::EditedItemsRuns,
     /// The dropped views whose segments were left behind, and how many segments that was.
     omitted_views: Vec<String>,
     omitted_segments: usize,
@@ -377,12 +377,12 @@ pub(super) fn not_consumed<T: Clone>(
 pub(super) fn carried_forward<'a>(
     plan: &crate::compact::FoldPlan,
     live_manifest: &'a SegmentsManifest,
-    live_incarnations: &FxHashMap<&str, tessera_types::view::ViewIncarnation>,
+    live_incarnations: &FxHashMap<&str, mosaica_types::view::ViewIncarnation>,
     consumed_segments: &FxHashSet<(&str, &str)>,
 ) -> CarriedExtents<'a> {
     let mut omitted_views: Vec<String> = Vec::new();
     let mut omitted_segments = 0usize;
-    let segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
+    let segments: Vec<&mosaica_store::manifest::SegmentDescriptor> = live_manifest
         .segments
         .iter()
         .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
@@ -465,7 +465,7 @@ pub(super) fn carried_forward<'a>(
                     None => index.clone(),
                     Some(folded) => {
                         let consumed: FxHashSet<&str> = folded.files().collect();
-                        tessera_store::manifest::UniqueIndexRuns {
+                        mosaica_store::manifest::UniqueIndexRuns {
                             attribute: index.attribute.clone(),
                             base: Vec::new(),
                             live: index
@@ -482,7 +482,7 @@ pub(super) fn carried_forward<'a>(
         edited: {
             let consumed: FxHashSet<&str> = plan.edited.files().collect();
             let unconsumed =
-                |runs: &tessera_store::manifest::KeyRuns| tessera_store::manifest::KeyRuns {
+                |runs: &mosaica_store::manifest::KeyRuns| mosaica_store::manifest::KeyRuns {
                     base: Vec::new(),
                     live: runs
                         .live
@@ -491,7 +491,7 @@ pub(super) fn carried_forward<'a>(
                         .cloned()
                         .collect(),
                 };
-            tessera_store::manifest::EditedItemsRuns {
+            mosaica_store::manifest::EditedItemsRuns {
                 by_number: unconsumed(&live_manifest.edited_items.by_number),
                 by_entity: unconsumed(&live_manifest.edited_items.by_entity),
             }
@@ -506,7 +506,7 @@ pub(super) fn carried_forward<'a>(
 pub(super) fn carried_files(
     partition: &str,
     live_manifest: &SegmentsManifest,
-    bundle_files: &std::collections::BTreeMap<String, tessera_store::manifest::FileDigest>,
+    bundle_files: &std::collections::BTreeMap<String, mosaica_store::manifest::FileDigest>,
     forward: &CarriedExtents,
 ) -> std::collections::BTreeSet<String> {
     // A segment an earlier fold carried has its files listed in the bundle's manifest.
@@ -517,10 +517,10 @@ pub(super) fn carried_files(
         let segment_prefix = format!(
             "partitions/{}/{}/segments/{}",
             partition,
-            tessera_store::view_rel(&descriptor.view),
+            mosaica_store::view_rel(&descriptor.view),
             descriptor.seg_id
         );
-        for name in tessera_store::SEGMENT_FILES {
+        for name in mosaica_store::SEGMENT_FILES {
             rels.insert(format!("{segment_prefix}/{name}"));
         }
         let presence_prefix = format!("{segment_prefix}/{}/", RENDER_PRESENCE_DIR);
@@ -534,7 +534,7 @@ pub(super) fn carried_files(
         );
         let edited_rows = format!(
             "{segment_prefix}/{}",
-            tessera_store::edited::EDITED_ROWS_FILE
+            mosaica_store::edited::EDITED_ROWS_FILE
         );
         if listed(&edited_rows) {
             rels.insert(edited_rows);
@@ -785,7 +785,7 @@ impl Executor {
         let health = Arc::clone(&self.health);
         let switches = Arc::clone(&self.deps.switches);
         let spawned = std::thread::Builder::new()
-            .name("tessera-fold".to_string())
+            .name("mosaica-fold".to_string())
             .spawn(move || {
                 match crate::compact::execute(plan, ctx) {
                     Ok(mut completed) => {
@@ -855,7 +855,7 @@ impl Executor {
         completed: &crate::compact::CompletedFold,
         manifest_n: u64,
         pending: &PendingRetirement,
-    ) -> Vec<tessera_store::manifest::DerivedExtent> {
+    ) -> Vec<mosaica_store::manifest::DerivedExtent> {
         let plan = &completed.plan;
         let views: Vec<(String, u32)> = completed
             .segments
@@ -942,7 +942,7 @@ impl Executor {
         // Which incarnations are live is decided from the `MANIFEST.json` roster, not the
         // partition's view map (a cache of open row spaces), so it cannot disagree with what the
         // new manifest declares.
-        let live_incarnations: FxHashMap<&str, tessera_types::view::ViewIncarnation> = live
+        let live_incarnations: FxHashMap<&str, mosaica_types::view::ViewIncarnation> = live
             .bundle
             .manifest
             .views
@@ -1172,9 +1172,9 @@ impl Executor {
         let mut published_overlay = (*live.overlay).clone();
         published_overlay.retire(&executed);
         // At the log position no later record can name the freed ids at.
-        let freed = tessera_store::manifest::HeldEntities {
+        let freed = mosaica_store::manifest::HeldEntities {
             position: self.log.wal.position(),
-            entities: tessera_store::manifest::EntitySet::of(&freed),
+            entities: mosaica_store::manifest::EntitySet::of(&freed),
         };
 
         let (runtime_attributes, runtime_scoped_attributes) =
@@ -1241,12 +1241,12 @@ impl Executor {
                     index
                 })
                 .collect(),
-            edited_items: tessera_store::manifest::EditedItemsRuns {
-                by_number: tessera_store::manifest::KeyRuns {
+            edited_items: mosaica_store::manifest::EditedItemsRuns {
+                by_number: mosaica_store::manifest::KeyRuns {
                     base: completed.edited.by_number.base.clone(),
                     live: forward.edited.by_number.live.clone(),
                 },
-                by_entity: tessera_store::manifest::KeyRuns {
+                by_entity: mosaica_store::manifest::KeyRuns {
                     base: completed.edited.by_entity.base.clone(),
                     live: forward.edited.by_entity.live.clone(),
                 },
@@ -1286,7 +1286,7 @@ impl Executor {
             carried_rels.extend(extent.files().map(String::from));
         }
         if let Err(e) =
-            tessera_store::hard_link_forward(&from_prefix_dir, &to_prefix_dir, &carried_rels)
+            mosaica_store::hard_link_forward(&from_prefix_dir, &to_prefix_dir, &carried_rels)
         {
             discard(&format!("its carry-forwards would not link ({e})"));
             return;
@@ -1298,12 +1298,12 @@ impl Executor {
             .iter()
             .map(|rel| to_prefix_dir.join(rel))
             .collect();
-        if let Err(e) = tessera_store::fsync_written(&carried_paths) {
+        if let Err(e) = mosaica_store::fsync_written(&carried_paths) {
             discard(&format!("its carry-forwards would not sync ({e})"));
             return;
         }
         let manifest_digest =
-            match tessera_store::write_manifest_json(&to_prefix_dir, &bundle_manifest) {
+            match mosaica_store::write_manifest_json(&to_prefix_dir, &bundle_manifest) {
                 Ok(digest) => digest,
                 Err(e) => {
                     discard(&format!("its MANIFEST.json would not commit ({e})"));
@@ -1344,7 +1344,7 @@ impl Executor {
 
         self.pause_point(PauseSiteArg::BeforeCurrentFlip);
         if let Err(e) =
-            tessera_store::write_current(&self.deps.bundle_root, &completed.prefix, &manifest_digest)
+            mosaica_store::write_current(&self.deps.bundle_root, &completed.prefix, &manifest_digest)
         {
             discard(&format!("CURRENT would not flip ({e})"));
             return;
@@ -1523,7 +1523,7 @@ impl Executor {
         live: &Generation,
         completed: &crate::compact::CompletedFold,
         plan: &crate::compact::FoldPlan,
-    ) -> tessera_store::manifest::Manifest {
+    ) -> mosaica_store::manifest::Manifest {
         let mut bundle_manifest = live.bundle.manifest.clone();
         let (runtime_attributes, runtime_scoped_attributes) =
             self.live.attributes_for_publication();
@@ -1559,7 +1559,7 @@ impl Executor {
             .values()
             .flat_map(|partition| partition.manifest.vocabulary_extensions.iter().cloned())
             .collect();
-        tessera_store::vocabulary::fold_extensions_into(
+        mosaica_store::vocabulary::fold_extensions_into(
             &mut bundle_manifest.vocabularies,
             &carried_bindings,
         );
@@ -1636,7 +1636,7 @@ impl Executor {
                 continue;
             }
             let prefix_dir = pending.prefix_dir;
-            match tessera_store::reclaim_prefix(&prefix_dir) {
+            match mosaica_store::reclaim_prefix(&prefix_dir) {
                 Ok(()) => tracing::info!(
                     prefix = %prefix_dir.display(),
                     "the superseded prefix is reclaimed: the build's base, every merged-away \
@@ -1661,7 +1661,7 @@ impl Executor {
     pub(super) fn write_fold_report(
         &self,
         prefix: &str,
-        degraded: &[tessera_lifecycle::membership::Degradation],
+        degraded: &[mosaica_lifecycle::membership::Degradation],
     ) -> std::io::Result<()> {
         let dir = self.deps.bundle_root.join("reports");
         std::fs::create_dir_all(&dir)?;
@@ -1689,9 +1689,9 @@ impl Executor {
         });
         let bytes = serde_json::to_vec_pretty(&body)?;
         let path = dir.join(format!("fold-{prefix}.json"));
-        tessera_store::write_and_fsync(&path, &bytes)
+        mosaica_store::write_and_fsync(&path, &bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        tessera_store::fsync_dir(&dir).map_err(|e| std::io::Error::other(e.to_string()))?;
+        mosaica_store::fsync_dir(&dir).map_err(|e| std::io::Error::other(e.to_string()))?;
         // The in-memory copy is set by the caller, after the flip, not here: the fold can still
         // be discarded after this file is written.
         Ok(())
@@ -1710,7 +1710,7 @@ impl Executor {
         partition: &str,
         n: u64,
         retired: &croaring::Bitmap,
-    ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
+    ) -> mosaica_store::Result<Vec<mosaica_store::manifest::MembershipExtent>> {
         let ready = self.live.with_artifacts(|store| store.repack_all(retired));
         pack_membership_extents(prefix_dir, partition, n, ready)
     }
@@ -1723,7 +1723,7 @@ impl Executor {
     fn write_containment_partitions(
         &self,
         pass: &mut DerivedPass<'_>,
-    ) -> Vec<tessera_store::manifest::DerivedExtent> {
+    ) -> Vec<mosaica_store::manifest::DerivedExtent> {
         let prefix_dir = pass.prefix_dir;
         let partition = pass.partition;
         let n = pass.n;
@@ -1733,7 +1733,7 @@ impl Executor {
             .join(partition)
             .join("terms")
             .join("postings.arrow");
-        let postings = match tessera_authz::PostingsReader::open(&postings_path, true) {
+        let postings = match mosaica_authz::PostingsReader::open(&postings_path, true) {
             Ok(postings) => postings,
             Err(error) => {
                 tracing::warn!(
@@ -1777,7 +1777,7 @@ impl Executor {
             return Vec::new();
         }
 
-        tessera_store::derived::file_derived(
+        mosaica_store::derived::file_derived(
             prefix_dir,
             partition,
             n,
@@ -1785,14 +1785,14 @@ impl Executor {
             composed
                 .into_iter()
                 .map(
-                    |(layer, level, level_version, bytes)| tessera_store::derived::Filed {
+                    |(layer, level, level_version, bytes)| mosaica_store::derived::Filed {
                         view: None,
                         incarnation: None,
                         layer,
                         level,
                         level_version,
-                        form: tessera_store::manifest::DerivedForm::Containment,
-                        bytes: tessera_store::derived::FiledBytes::InHand(bytes),
+                        form: mosaica_store::manifest::DerivedForm::Containment,
+                        bytes: mosaica_store::derived::FiledBytes::InHand(bytes),
                     },
                 )
                 .collect(),
@@ -1810,15 +1810,15 @@ impl Executor {
         prefix_dir: &std::path::Path,
         partition: &str,
         views: &[(String, u32)],
-    ) -> Vec<(String, tessera_store::RowSpace)> {
-        let mut spaces: Vec<(String, tessera_store::RowSpace)> = Vec::new();
+    ) -> Vec<(String, mosaica_store::RowSpace)> {
+        let mut spaces: Vec<(String, mosaica_store::RowSpace)> = Vec::new();
         for (view, row_count) in views {
             let partition_dir = prefix_dir.join("partitions").join(partition);
-            let path = tessera_store::view_path(&partition_dir, view).join("permutation.bin");
-            match tessera_store::Permutation::load(&path) {
+            let path = mosaica_store::view_path(&partition_dir, view).join("permutation.bin");
+            match mosaica_store::Permutation::load(&path) {
                 Ok(permutation) => spaces.push((
                     view.clone(),
-                    tessera_store::RowSpace::new(std::sync::Arc::new(permutation), *row_count),
+                    mosaica_store::RowSpace::new(std::sync::Arc::new(permutation), *row_count),
                 )),
                 Err(error) => tracing::warn!(
                     view = %view,
@@ -1844,7 +1844,7 @@ impl Executor {
         !pending.is_pending(layer, level)
             || self.live.registered_layer(layer).is_some_and(|registered| {
                 registered.declaration.membership
-                    == tessera_types::layer::MembershipSource::Enumerated
+                    == mosaica_types::layer::MembershipSource::Enumerated
             })
     }
 
@@ -1857,11 +1857,11 @@ impl Executor {
     /// the levels whose observed memberships overlap.
     pub(super) fn choose_layouts(
         &self,
-        spaces: &[(String, tessera_store::RowSpace)],
+        spaces: &[(String, mosaica_store::RowSpace)],
         pending: &PendingRetirement,
-        fold_segments: &[(String, tessera_store::read::SegmentData)],
+        fold_segments: &[(String, mosaica_store::read::SegmentData)],
     ) -> (
-        Vec<(String, u32, tessera_types::layer::ServingLayout)>,
+        Vec<(String, u32, mosaica_types::layer::ServingLayout)>,
         Overlapping,
     ) {
         let mut overlapping = std::collections::BTreeSet::new();
@@ -1910,7 +1910,7 @@ impl Executor {
                             "the fold re-resolved a segment against a spatial level's shapes"
                         );
                         if view == first_view {
-                            observed = Some(tessera_store::derived::observe_shape(
+                            observed = Some(mosaica_store::derived::observe_shape(
                                 space.base_rows(),
                                 &|visit| {
                                     for (ordinal, rows) in piece.iter().enumerate() {
@@ -1927,7 +1927,7 @@ impl Executor {
                     // A borrowing level's filed column is true when written and not read
                     // afterwards: the borrowed set moves with the target's version, so the engine
                     // serves it artifact-major instead (`crate::artifacts::ArtifactRows::inherit`).
-                    tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
+                    mosaica_store::derived::observe_shape(space.base_rows(), &|visit| {
                         for (ordinal, record) in pending.records(store, &layer, level) {
                             visit(
                                 ordinal,
@@ -1980,15 +1980,15 @@ impl Executor {
 
     /// Write this prefix's columns, one file per `(view, layer, level)`: a row-major level's column,
     /// and for a level served artifact-major a label column where its memberships partition the
-    /// rows (`tessera_store::derived::level_column`). Every label column is copied into the order of
+    /// rows (`mosaica_store::derived::level_column`). Every label column is copied into the order of
     /// the fold's segment's bands beside it. A row-major level whose column will not compose gets no
     /// file, and is served artifact-major instead (see `ArtifactProjections::get_or_build`).
     fn write_row_columns(
         &self,
         pass: &mut DerivedPass<'_>,
-        layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
+        layouts: &[(String, u32, mosaica_types::layer::ServingLayout)],
         overlapping: &Overlapping,
-    ) -> Vec<tessera_store::manifest::DerivedExtent> {
+    ) -> Vec<mosaica_store::manifest::DerivedExtent> {
         let prefix_dir = pass.prefix_dir;
         let partition = pass.partition;
         let n = pass.n;
@@ -1996,7 +1996,7 @@ impl Executor {
         let spaces = &pass.spaces;
         let pending = pass.pending;
         let fold_segments = &pass.segments;
-        let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
+        let wanted: Vec<(String, u32, mosaica_types::layer::ServingLayout)> = layouts
             .iter()
             .filter(|(layer, level, _)| {
                 self.composes_row_structures(pending, layer, *level)
@@ -2007,8 +2007,8 @@ impl Executor {
                         .is_some_and(|registered| {
                             matches!(
                                 registered.declaration.membership,
-                                tessera_types::layer::MembershipSource::Enumerated
-                                    | tessera_types::layer::MembershipSource::Spatial
+                                mosaica_types::layer::MembershipSource::Enumerated
+                                    | mosaica_types::layer::MembershipSource::Spatial
                             )
                         })
             })
@@ -2024,14 +2024,14 @@ impl Executor {
             String,
             u32,
             u64,
-            tessera_store::manifest::DerivedForm,
+            mosaica_store::manifest::DerivedForm,
             std::path::PathBuf,
         )> = self.live.with_artifacts(|store| {
             let mut out = Vec::with_capacity(wanted.len() * spaces.len());
             for (layer, level, layout) in &wanted {
                 let partitions = !overlapping.contains(&(layer.clone(), *level));
                 let Some((composed_as, form)) =
-                    tessera_store::derived::level_column(*layout, partitions)
+                    mosaica_store::derived::level_column(*layout, partitions)
                 else {
                     continue;
                 };
@@ -2039,7 +2039,7 @@ impl Executor {
                 let ordinals = level_length(pending.records(store, layer, *level));
                 let spatial = self.live.registered_layer(layer).is_some_and(|registered| {
                     registered.declaration.membership
-                        == tessera_types::layer::MembershipSource::Spatial
+                        == mosaica_types::layer::MembershipSource::Spatial
                 });
                 for (view, space) in spaces {
                     let segment = fold_segments
@@ -2055,7 +2055,7 @@ impl Executor {
                         match piece {
                             Some(piece) => {
                                 let rows = piece.as_ref();
-                                tessera_store::derived::project_row_column(
+                                mosaica_store::derived::project_row_column(
                                     rows.len() as u32,
                                     space.base_rows(),
                                     composed_as,
@@ -2072,7 +2072,7 @@ impl Executor {
                             None => Ok(None),
                         }
                     } else {
-                        tessera_store::derived::project_row_column(
+                        mosaica_store::derived::project_row_column(
                             ordinals,
                             space.base_rows(),
                             composed_as,
@@ -2094,9 +2094,9 @@ impl Executor {
                             // A served column is filed only with its members beside it.
                             if matches!(
                                 form,
-                                tessera_store::manifest::DerivedForm::RowColumn { .. }
+                                mosaica_store::manifest::DerivedForm::RowColumn { .. }
                             ) {
-                                match tessera_store::derived::stage_row_members(
+                                match mosaica_store::derived::stage_row_members(
                                     &path,
                                     composed_as,
                                     scratch,
@@ -2106,7 +2106,7 @@ impl Executor {
                                         layer.clone(),
                                         *level,
                                         version,
-                                        tessera_store::manifest::DerivedForm::RowMembers,
+                                        mosaica_store::manifest::DerivedForm::RowMembers,
                                         members,
                                     )),
                                     Err(error) => {
@@ -2124,10 +2124,10 @@ impl Executor {
                                 }
                             }
                             let labelled = segment.filter(|_| {
-                                composed_as == tessera_types::layer::ServingLayout::RowMajorLabel
+                                composed_as == mosaica_types::layer::ServingLayout::RowMajorLabel
                             });
                             if let Some(segment) = labelled {
-                                match tessera_store::derived::stage_band_labels(
+                                match mosaica_store::derived::stage_band_labels(
                                     &path,
                                     &segment.bands,
                                     scratch,
@@ -2137,7 +2137,7 @@ impl Executor {
                                         layer.clone(),
                                         *level,
                                         version,
-                                        tessera_store::manifest::DerivedForm::BandLabels {
+                                        mosaica_store::manifest::DerivedForm::BandLabels {
                                             seg_id: segment.seg_id.clone(),
                                         },
                                         copy,
@@ -2191,7 +2191,7 @@ impl Executor {
             return Vec::new();
         }
 
-        tessera_store::derived::file_derived(
+        mosaica_store::derived::file_derived(
             prefix_dir,
             partition,
             n,
@@ -2205,14 +2205,14 @@ impl Executor {
                         let _ = std::fs::remove_file(&path);
                         return None;
                     };
-                    Some(tessera_store::derived::Filed {
+                    Some(mosaica_store::derived::Filed {
                         view: Some(view),
                         incarnation: Some(incarnation),
                         layer,
                         level,
                         level_version,
                         form,
-                        bytes: tessera_store::derived::FiledBytes::Staged(path),
+                        bytes: mosaica_store::derived::FiledBytes::Staged(path),
                     })
                 })
                 .collect(),
@@ -2228,8 +2228,8 @@ impl Executor {
     fn write_shape_rows(
         &self,
         pass: &mut DerivedPass<'_>,
-        columns: &[tessera_store::manifest::DerivedExtent],
-    ) -> Vec<tessera_store::manifest::DerivedExtent> {
+        columns: &[mosaica_store::manifest::DerivedExtent],
+    ) -> Vec<mosaica_store::manifest::DerivedExtent> {
         let prefix_dir = pass.prefix_dir;
         let partition = pass.partition;
         let n = pass.n;
@@ -2242,7 +2242,7 @@ impl Executor {
                 .filter(|(layer, _)| self.live.spatial_layer(layer))
                 .collect()
         });
-        let mut filed: Vec<tessera_store::derived::Filed> = Vec::new();
+        let mut filed: Vec<mosaica_store::derived::Filed> = Vec::new();
         for (layer, level) in &levels {
             let version = self
                 .live
@@ -2251,7 +2251,7 @@ impl Executor {
                 let covered = columns.iter().any(|c| {
                     matches!(
                         c.form,
-                        tessera_store::manifest::DerivedForm::RowColumn { .. }
+                        mosaica_store::manifest::DerivedForm::RowColumn { .. }
                     ) && &c.layer == layer
                         && c.level == *level
                         && c.view.as_ref() == Some(view)
@@ -2279,18 +2279,18 @@ impl Executor {
                 let Some(incarnation) = incarnations.get(view).copied() else {
                     continue;
                 };
-                filed.push(tessera_store::derived::Filed {
+                filed.push(mosaica_store::derived::Filed {
                     view: Some(view.clone()),
                     incarnation: Some(incarnation),
                     layer: layer.clone(),
                     level: *level,
                     level_version: version,
-                    form: tessera_store::manifest::DerivedForm::ShapeRows {
+                    form: mosaica_store::manifest::DerivedForm::ShapeRows {
                         seg_id: segment.seg_id.clone(),
                         row_count: segment.row_count,
                     },
-                    bytes: tessera_store::derived::FiledBytes::InHand(
-                        tessera_store::derived::shape_rows_bytes(
+                    bytes: mosaica_store::derived::FiledBytes::InHand(
+                        mosaica_store::derived::shape_rows_bytes(
                             version,
                             &segment.seg_id,
                             segment.row_count,
@@ -2300,7 +2300,7 @@ impl Executor {
                 });
             }
         }
-        tessera_store::derived::file_derived(prefix_dir, partition, n, &mut pass.index, filed)
+        mosaica_store::derived::file_derived(prefix_dir, partition, n, &mut pass.index, filed)
     }
 
     /// Write this prefix's persisted decompositions: every spatial level's held shapes for each
@@ -2308,14 +2308,14 @@ impl Executor {
     fn write_shape_held(
         &self,
         pass: &mut DerivedPass<'_>,
-    ) -> Vec<tessera_store::manifest::DerivedExtent> {
+    ) -> Vec<mosaica_store::manifest::DerivedExtent> {
         let prefix_dir = pass.prefix_dir;
         let partition = pass.partition;
         let n = pass.n;
         let incarnations = &pass.incarnations;
         let pending = pass.pending;
         let fold_segments = &pass.segments;
-        let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
+        let filed: Vec<mosaica_store::derived::Filed> = self.live.with_artifacts(|store| {
             let mut out = Vec::new();
             let levels: Vec<(String, u32)> = levels_of(store)
                 .filter(|(layer, level)| !pending.is_pending(layer, *level))
@@ -2330,7 +2330,7 @@ impl Executor {
                     if held.level_version != version {
                         continue;
                     }
-                    let shapes: Vec<(Option<&[u8]>, Option<&tessera_store::derived::HeldShape>)> =
+                    let shapes: Vec<(Option<&[u8]>, Option<&mosaica_store::derived::HeldShape>)> =
                         (0..held.shapes.len() as u32)
                             .map(|ordinal| {
                                 (
@@ -2344,22 +2344,22 @@ impl Executor {
                     let Some(incarnation) = incarnations.get(view).copied() else {
                         continue;
                     };
-                    out.push(tessera_store::derived::Filed {
+                    out.push(mosaica_store::derived::Filed {
                         view: Some(view.clone()),
                         incarnation: Some(incarnation),
                         layer: layer.clone(),
                         level: *level,
                         level_version: version,
-                        form: tessera_store::manifest::DerivedForm::ShapeHeld,
-                        bytes: tessera_store::derived::FiledBytes::InHand(
-                            tessera_store::derived::shape_held_bytes(version, &shapes),
+                        form: mosaica_store::manifest::DerivedForm::ShapeHeld,
+                        bytes: mosaica_store::derived::FiledBytes::InHand(
+                            mosaica_store::derived::shape_held_bytes(version, &shapes),
                         ),
                     });
                 }
             }
             out
         });
-        tessera_store::derived::file_derived(prefix_dir, partition, n, &mut pass.index, filed)
+        mosaica_store::derived::file_derived(prefix_dir, partition, n, &mut pass.index, filed)
     }
 
     /// Project and write this prefix's tile-index extent columns, one file per
@@ -2367,8 +2367,8 @@ impl Executor {
     fn write_tile_indexes(
         &self,
         pass: &mut DerivedPass<'_>,
-        layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
-    ) -> Vec<tessera_store::manifest::DerivedExtent> {
+        layouts: &[(String, u32, mosaica_types::layer::ServingLayout)],
+    ) -> Vec<mosaica_store::manifest::DerivedExtent> {
         let prefix_dir = pass.prefix_dir;
         let partition = pass.partition;
         let n = pass.n;
@@ -2393,7 +2393,7 @@ impl Executor {
                     .filter(|(layer, _)| {
                         !self.live.registered_layer(layer).is_some_and(|registered| {
                             registered.declaration.membership
-                                == tessera_types::layer::MembershipSource::Spatial
+                                == mosaica_types::layer::MembershipSource::Spatial
                         })
                     })
                     .collect();
@@ -2423,7 +2423,7 @@ impl Executor {
             return Vec::new();
         }
 
-        tessera_store::derived::file_derived(
+        mosaica_store::derived::file_derived(
             prefix_dir,
             partition,
             n,
@@ -2432,14 +2432,14 @@ impl Executor {
                 .into_iter()
                 .filter_map(|(view, layer, level, level_version, bytes)| {
                     let incarnation = *incarnations.get(&view)?;
-                    Some(tessera_store::derived::Filed {
+                    Some(mosaica_store::derived::Filed {
                         view: Some(view),
                         incarnation: Some(incarnation),
                         layer,
                         level,
                         level_version,
-                        form: tessera_store::manifest::DerivedForm::TileIndex,
-                        bytes: tessera_store::derived::FiledBytes::InHand(bytes),
+                        form: mosaica_store::manifest::DerivedForm::TileIndex,
+                        bytes: mosaica_store::derived::FiledBytes::InHand(bytes),
                     })
                 })
                 .collect(),
@@ -2483,11 +2483,11 @@ impl Executor {
                         .is_some_and(|r| spatial_membership(&r.declaration));
                     if matches!(
                         membership,
-                        Some(tessera_types::layer::MembershipSource::Attribute(_))
+                        Some(mosaica_types::layer::MembershipSource::Attribute(_))
                     ) || (!spatial
                         && !matches!(
                             membership,
-                            Some(tessera_types::layer::MembershipSource::Enumerated)
+                            Some(mosaica_types::layer::MembershipSource::Enumerated)
                         ))
                     {
                         continue;
@@ -2570,24 +2570,24 @@ impl Executor {
 pub(super) fn fold_segments(
     prefix_dir: &std::path::Path,
     partition: &str,
-    segments: &[tessera_store::manifest::SegmentDescriptor],
-) -> Vec<(String, tessera_store::read::SegmentData)> {
+    segments: &[mosaica_store::manifest::SegmentDescriptor],
+) -> Vec<(String, mosaica_store::read::SegmentData)> {
     let mut out = Vec::with_capacity(segments.len());
     for descriptor in segments {
         let partition_dir = prefix_dir.join("partitions").join(partition);
-        let dir = tessera_store::view_path(&partition_dir, &descriptor.view)
+        let dir = mosaica_store::view_path(&partition_dir, &descriptor.view)
             .join("segments")
             .join(&descriptor.seg_id);
         // A fold writes each view's base, whose rows name their entities in the view's table.
         let table = dir
             .parent()
             .and_then(std::path::Path::parent)
-            .map(|view| view.join(tessera_store::ROW_ENTITY_FILE))
+            .map(|view| view.join(mosaica_store::ROW_ENTITY_FILE))
             .filter(|path| path.exists())
-            .map(|path| tessera_store::RowToEntity::load(&path));
+            .map(|path| mosaica_store::RowToEntity::load(&path));
         let entities = match table {
             Some(Ok(table)) => {
-                tessera_store::edited::RowEntities::Table(std::sync::Arc::new(table))
+                mosaica_store::edited::RowEntities::Table(std::sync::Arc::new(table))
             }
             Some(Err(e)) => {
                 tracing::warn!(
@@ -2598,9 +2598,9 @@ pub(super) fn fold_segments(
                 );
                 continue;
             }
-            None => tessera_store::edited::RowEntities::Numbers,
+            None => mosaica_store::edited::RowEntities::Numbers,
         };
-        match tessera_store::read::SegmentData::load(
+        match mosaica_store::read::SegmentData::load(
             &dir,
             &descriptor.seg_id,
             descriptor.row_count,

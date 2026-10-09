@@ -17,15 +17,15 @@ use proptest::prelude::*;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_store::derived::PostingSlice;
-use tessera_store::permutation::Permutation;
-use tessera_store::term_images::{
+use mosaica_store::derived::PostingSlice;
+use mosaica_store::permutation::Permutation;
+use mosaica_store::term_images::{
     chooser_inputs, derive_term_images, DeriveOptions, TermImageStamp, TermImages,
     KEEP_ROWS_PER_CONTAINER,
 };
-use tessera_store::write::write_permutation;
-use tessera_store::RowSpace;
-use tessera_types::{EntityId, TermId};
+use mosaica_store::write::write_permutation;
+use mosaica_store::RowSpace;
+use mosaica_types::{EntityId, TermId};
 
 /// Entities in row order, ascending in entity id, taken from `[0, bound)` at `density`, with the
 /// entities in `absent_page` left out altogether so one whole permutation page is missing.

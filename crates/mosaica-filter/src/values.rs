@@ -76,7 +76,7 @@ use croaring::{Bitmap, Portable};
 
 use crate::pack;
 use crate::record::RecordValue;
-use tessera_types::AttrLocalId;
+use mosaica_types::AttrLocalId;
 
 /// Matched entities, folded into the result bitmap in bounded chunks.
 ///
@@ -383,7 +383,7 @@ impl CodeSet {
 /// to a handful of ranges, and the caller then walks a plain integer range instead of stepping a
 /// bitmap cursor per entity.
 ///
-/// Its own loop rather than [`tessera_roaring::Runs`]: this is every universal column's scan, and
+/// Its own loop rather than [`mosaica_roaring::Runs`]: this is every universal column's scan, and
 /// the shared iterator measured slower here.
 fn for_each_run(bitmap: &Bitmap, mut f: impl FnMut(u32, u32)) {
     let mut cursor = bitmap.cursor();
@@ -661,17 +661,17 @@ pub struct ValueColumn {
     /// entity id is the slot — the case that costs nothing to address.
     presence: Option<Bitmap>,
     /// For a partial column, its presence's block ranks, filled on the first lookup that needs it.
-    block_ranks: std::sync::OnceLock<tessera_roaring::BlockRanks>,
+    block_ranks: std::sync::OnceLock<mosaica_roaring::BlockRanks>,
 }
 
 /// A field's values over a set of entities: each entity of the set holding one, ascending, with
 /// its value as a number.
 pub type NumbersOver =
-    Box<dyn Fn(&Bitmap, &mut dyn FnMut(u32, tessera_types::scalar::Number)) + Sync + Send>;
+    Box<dyn Fn(&Bitmap, &mut dyn FnMut(u32, mosaica_types::scalar::Number)) + Sync + Send>;
 
 /// Attribute `name`'s base column under a partition's directory, read as numbers over a set of
 /// entities, or `None` where no base column was written for it: what a build and a fold tally a
-/// field's values over a view's base rows from (`tessera_store::field_tallies`).
+/// field's values over a view's base rows from (`mosaica_store::field_tallies`).
 pub fn base_numbers(partition_dir: &Path, name: &str) -> io::Result<Option<NumbersOver>> {
     let dir = partition_dir.join("attrs").join(name);
     if !dir.join(VALUES_FILE).exists() {
@@ -782,7 +782,7 @@ impl ValueColumn {
                 // Intersected first: croaring's `and` is cheaper than merging a scattered
                 // candidate's runs against the presence.
                 let live = candidate.and(presence);
-                for (lo, hi, rank) in tessera_roaring::RankedRuns::new(presence, &live) {
+                for (lo, hi, rank) in mosaica_roaring::RankedRuns::new(presence, &live) {
                     let slot0 = rank as usize;
                     let count = (hi - lo) as usize + 1;
                     if slot0 < len {
@@ -1007,7 +1007,7 @@ impl ValueColumn {
             // A whole-bitmap rank sums every container below the entity.
             Some(presence) => self
                 .block_ranks
-                .get_or_init(|| tessera_roaring::BlockRanks::of(presence))
+                .get_or_init(|| mosaica_roaring::BlockRanks::of(presence))
                 .rank_of(presence, entity)
                 .map(|rank| rank as usize),
         }
@@ -1214,7 +1214,7 @@ impl ValueColumn {
     ///
     /// **Slots, not entities**: reaching one from an entity id is [`Self::value_of`]'s business,
     /// and a caller that indexes this by an entity id has silently assumed universal presence.
-    /// Public because `tessera-filter-write` is a separate crate *deliberately* — see its own
+    /// Public because `mosaica-filter-write` is a separate crate *deliberately* — see its own
     /// module doc: nothing that writes this artefact may share a codegen unit with the scan.
     pub fn codes(&self) -> &Codes {
         &self.codes
@@ -1384,7 +1384,7 @@ fn read_values(path: &Path, access: Access) -> io::Result<Codes> {
     // One record batch, refused rather than concatenated if there are more: the reader borrows its
     // values from the batch's buffers instead of copying them, and concatenating is the copy this
     // exists to avoid. `decode_single_batch` is where that rule is enforced.
-    let batch = tessera_authz::decode_single_batch(&buffer, &format!("{}", path.display()))?;
+    let batch = mosaica_authz::decode_single_batch(&buffer, &format!("{}", path.display()))?;
     if batch.num_columns() != 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

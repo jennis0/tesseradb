@@ -37,16 +37,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::{
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::{
     BatchArtifacts, BatchMembership, IncomingArtifact, IncomingGrowth, UnallocatedRow,
 };
-use tessera_types::layer::{
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ValueSet,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const LAYER: &str = "clusters/a";
 /// Generous on purpose: every wait here is on a counter the executor moves, so a timeout is a hang
@@ -69,7 +69,7 @@ fn declaration(name: &str, value_set: ValueSet) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set,
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -876,7 +876,7 @@ fn a_batchs_rows_and_its_joins_are_durable_together_and_applied_together() {
 /// membership is absent.
 ///
 /// An injected failure is indistinguishable from a real one in variant and in order
-/// (`tessera_lifecycle::faults`'s fidelity rule), so this is the disk-full a real close would meet.
+/// (`mosaica_lifecycle::faults`'s fidelity rule), so this is the disk-full a real close would meet.
 #[test]
 fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
     let fx = fixture();
@@ -906,7 +906,7 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
             .expect_err("the window's append failed, so the batch is refused");
         assert_eq!(
             engine.write_executor_posture(),
-            tessera_engine::ExecutorPosture::WalPoisoned,
+            mosaica_engine::ExecutorPosture::WalPoisoned,
             "the refusal was the durability failure it was, not a check further up: {refused}"
         );
         assert_eq!(
@@ -1138,7 +1138,7 @@ fn built_fixture() -> Fixture {
 
     let config_path = tmp.path().join("config.toml");
     std::fs::write(&config_path, BUILT_CONFIG).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture config parses");
 
     let clusters_schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
@@ -1172,21 +1172,21 @@ fn built_fixture() -> Fixture {
         .unwrap(),
     );
 
-    tessera_build::build(&tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+    mosaica_build::build(&mosaica_build::BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &id_schema()),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &id_schema()),
         out: root.clone(),
         limit: None,
         strict: false,
@@ -1330,7 +1330,7 @@ fn ingest_with_edges(
                     .collect(),
                 edges: edges
                     .iter()
-                    .map(|(child, parent)| tessera_lifecycle::BatchEdge {
+                    .map(|(child, parent)| mosaica_lifecycle::BatchEdge {
                         layer: layer.to_string(),
                         level: 0,
                         view: None,
@@ -1345,7 +1345,7 @@ fn ingest_with_edges(
 }
 
 /// The parents the viewport names for `key`.
-fn parents_of(engine: &Engine, key: &str) -> Vec<tessera_types::TesseraId> {
+fn parents_of(engine: &Engine, key: &str) -> Vec<mosaica_types::TesseraId> {
     artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .find(|a| a.key.as_deref() == Some(key))

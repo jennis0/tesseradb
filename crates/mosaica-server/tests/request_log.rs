@@ -12,9 +12,9 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use common::{wait_until, write_deployment, OPERATOR_CREDENTIAL};
-use tessera_server::state::AppState;
+use mosaica_server::state::AppState;
 
-/// A server prepared from the deployment at `deployment`, as `tessera serve` prepares one, with
+/// A server prepared from the deployment at `deployment`, as `mosaica serve` prepares one, with
 /// its viewer and session routers served on tasks this test can stop.
 struct Running {
     state: Arc<AppState>,
@@ -24,13 +24,13 @@ struct Running {
 }
 
 async fn start(deployment: &Path) -> Running {
-    let prepared = tessera_server::prepare(deployment).expect("the deployment must start");
+    let prepared = mosaica_server::prepare(deployment).expect("the deployment must start");
     let state = prepared.state;
     let mut serving = Vec::new();
     let mut urls = Vec::new();
     for router in [
-        tessera_server::viewer::router(Arc::clone(&state)),
-        tessera_server::session::router(Arc::clone(&state)),
+        mosaica_server::viewer::router(Arc::clone(&state)),
+        mosaica_server::session::router(Arc::clone(&state)),
     ] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         urls.push(format!("http://{}", listener.local_addr().unwrap()));

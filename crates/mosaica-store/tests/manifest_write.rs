@@ -1,5 +1,5 @@
 //! `write_manifest_json` and `write_current` — the two bundle-artefact writers pass 5 of a fold
-//! needs and `tessera-build`'s `write_manifests` now calls instead of writing the bytes itself
+//! needs and `mosaica-build`'s `write_manifests` now calls instead of writing the bytes itself
 //! (compaction §10's rule paragraph).
 //!
 //! These tests exercise the writers exactly as a caller must: build a minimal but real bundle's
@@ -14,17 +14,17 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use tessera_spatial::tiler::{sort_batch, TilerItem};
-use tessera_spatial::{fixed32, Bounds};
-use tessera_store::manifest::{
+use mosaica_spatial::tiler::{sort_batch, TilerItem};
+use mosaica_spatial::{fixed32, Bounds};
+use mosaica_store::manifest::{
     EntitySet, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
     SegmentsManifest, ViewDescriptor,
 };
-use tessera_store::manifest_write::{write_current, write_manifest_json};
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::write_segments_manifest;
-use tessera_store::{open_bundle, StoreError};
-use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use mosaica_store::manifest_write::{write_current, write_manifest_json};
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::write_segments_manifest;
+use mosaica_store::{open_bundle, StoreError};
+use mosaica_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 /// A synthetic `tessera_id`-shaped value for test fixtures — see `bundle_read.rs`'s copy of the
 /// same helper for why full splitmix64 output rather than a raw seed.
@@ -87,7 +87,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
 
     let file_digest = |path: &Path| {
         let bytes = fs::read(path).expect("read for digest");
-        tessera_store::manifest::FileDigest {
+        mosaica_store::manifest::FileDigest {
             size: bytes.len() as u64,
             sha256: hex_sha256(&bytes),
         }
@@ -97,7 +97,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         "partitions/default/views/main/permutation.bin".to_string(),
         file_digest(&view_dir.join("permutation.bin")),
     );
-    for name in tessera_store::SEGMENT_FILES {
+    for name in mosaica_store::SEGMENT_FILES {
         segments_files.insert(
             format!("partitions/default/views/main/segments/seg0/{name}"),
             file_digest(&seg_dir.join(name)),
@@ -130,7 +130,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     .expect("write SEGMENTS-0.json");
 
     let manifest = Manifest {
-        bundle_format: tessera_types::BUNDLE_FORMAT,
+        bundle_format: mosaica_types::BUNDLE_FORMAT,
         created_at: created_at.to_string(),
         declared_scalars: vec![],
         vocabularies: vec![],
@@ -156,7 +156,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
                 y_min: extent.y_min,
                 y_max: extent.y_max,
             },
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: "default".to_string(),
@@ -184,7 +184,7 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
     write_current(dir.path(), "v00000", &digest).expect("write_current");
 
     let bundle = open_bundle(dir.path()).expect("open_bundle over a bundle these writers built");
-    assert_eq!(bundle.manifest.bundle_format, tessera_types::BUNDLE_FORMAT);
+    assert_eq!(bundle.manifest.bundle_format, mosaica_types::BUNDLE_FORMAT);
     assert_eq!(bundle.manifest.entity_id_high_water, 64);
 
     let partition = bundle.partitions.get("default").expect("default partition");
@@ -196,7 +196,7 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
 /// The digest `write_manifest_json` returns is the SHA-256 of the bytes actually sitting on
 /// disc afterwards — read back independently here, outside the function under test — and those
 /// bytes are byte-for-byte `serde_json::to_vec_pretty` of the manifest. Pinning the exact
-/// serialiser matters beyond this one test: `tessera-build` wrote every bundle on disc today
+/// serialiser matters beyond this one test: `mosaica-build` wrote every bundle on disc today
 /// with `to_vec_pretty`, and swapping in `to_vec` (same JSON value, different bytes, different
 /// digest) would silently change every future bundle's identity against every bundle already
 /// written — the trap the task brief calls out by name.
@@ -218,7 +218,7 @@ fn write_manifest_json_returns_the_digest_of_the_exact_bytes_on_disc() {
     assert_eq!(
         on_disc, pretty,
         "MANIFEST.json's bytes must be exactly to_vec_pretty of the manifest, matching \
-         tessera-build's serialiser"
+         mosaica-build's serialiser"
     );
 }
 
@@ -307,7 +307,7 @@ fn manifest_fixture() -> SegmentsManifest {
 /// acked and published rows went missing from what a restart opens.
 ///
 /// Asserted at the filesystem operation rather than through two views, because
-/// `tessera build` emits one and `dispatch_flushes` now sends one plan: the collision is a
+/// `mosaica build` emits one and `dispatch_flushes` now sends one plan: the collision is a
 /// property of the write, and this is the guard at the artefact that stands behind the rule at
 /// the caller.
 ///
@@ -329,7 +329,7 @@ fn a_side_manifest_is_never_replaced() {
     assert!(
         matches!(
             refused,
-            tessera_store::StoreError::SideManifestExists { .. }
+            mosaica_store::StoreError::SideManifestExists { .. }
         ),
         "a collision is its own error, not a filesystem fault: {refused}"
     );
@@ -374,7 +374,7 @@ fn the_side_manifest_floor_is_every_file_present() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     assert_eq!(
-        tessera_store::highest_side_manifest_n(root).unwrap(),
+        mosaica_store::highest_side_manifest_n(root).unwrap(),
         None,
         "an empty tree takes nothing"
     );
@@ -385,7 +385,7 @@ fn the_side_manifest_floor_is_every_file_present() {
     // Not a candidate at any n: the name does not end in `.json`, and a crashed write leaves one.
     std::fs::write(live.join("default").join("SEGMENTS-40.json.tmp"), b"{}").unwrap();
     assert_eq!(
-        tessera_store::highest_side_manifest_n(root).unwrap(),
+        mosaica_store::highest_side_manifest_n(root).unwrap(),
         Some(3)
     );
 
@@ -393,7 +393,7 @@ fn the_side_manifest_floor_is_every_file_present() {
     std::fs::create_dir_all(live.join("other")).unwrap();
     std::fs::write(live.join("other").join("SEGMENTS-7.json"), b"{}").unwrap();
     assert_eq!(
-        tessera_store::highest_side_manifest_n(root).unwrap(),
+        mosaica_store::highest_side_manifest_n(root).unwrap(),
         Some(7)
     );
 
@@ -402,7 +402,7 @@ fn the_side_manifest_floor_is_every_file_present() {
     std::fs::create_dir_all(&pending).unwrap();
     std::fs::write(pending.join("SEGMENTS-11.json"), b"{}").unwrap();
     assert_eq!(
-        tessera_store::highest_side_manifest_n(root).unwrap(),
+        mosaica_store::highest_side_manifest_n(root).unwrap(),
         Some(11)
     );
 
@@ -410,7 +410,7 @@ fn the_side_manifest_floor_is_every_file_present() {
     // asking which numbers may be taken is told that 12 may be.
     std::fs::write(pending.join("SEGMENTS-012.json"), b"{}").unwrap();
     assert_eq!(
-        tessera_store::highest_side_manifest_n(root).unwrap(),
+        mosaica_store::highest_side_manifest_n(root).unwrap(),
         Some(12)
     );
 }
@@ -435,7 +435,7 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
     std::fs::create_dir_all(&bundle).unwrap();
     std::os::unix::fs::symlink(elsewhere.join("v00000"), bundle.join("v00000")).unwrap();
     assert_eq!(
-        tessera_store::highest_side_manifest_n(&bundle).unwrap(),
+        mosaica_store::highest_side_manifest_n(&bundle).unwrap(),
         Some(5),
         "a symlinked prefix directory is walked"
     );
@@ -452,7 +452,7 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
     )
     .unwrap();
     assert_eq!(
-        tessera_store::highest_side_manifest_n(&live).unwrap(),
+        mosaica_store::highest_side_manifest_n(&live).unwrap(),
         Some(8),
         "a symlinked partition directory is walked"
     );
@@ -460,7 +460,7 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
     // A link to nothing: skipped, not an error.
     std::os::unix::fs::symlink(elsewhere.join("gone"), live.join("v00001")).unwrap();
     assert_eq!(
-        tessera_store::highest_side_manifest_n(&live).unwrap(),
+        mosaica_store::highest_side_manifest_n(&live).unwrap(),
         Some(8),
         "a broken link holds no numbers and is not a failure"
     );
@@ -489,7 +489,7 @@ fn pruning_keeps_the_newest_manifests_and_never_the_lowest() {
         fs::write(dir.join(format!("SEGMENTS-{n}.json")), b"{}").unwrap();
     }
     assert_eq!(
-        tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap(),
+        mosaica_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap(),
         0
     );
     assert_eq!(names(), vec!["SEGMENTS-0.json", "SEGMENTS-1.json"]);
@@ -498,7 +498,7 @@ fn pruning_keeps_the_newest_manifests_and_never_the_lowest() {
         fs::write(dir.join(format!("SEGMENTS-{n}.json")), b"{}").unwrap();
     }
     assert_eq!(
-        tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap(),
+        mosaica_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap(),
         2
     );
     assert_eq!(
@@ -510,6 +510,6 @@ fn pruning_keeps_the_newest_manifests_and_never_the_lowest() {
     // A name this reader would not open is a name it will not delete around, either: the
     // directory is left as it stands.
     fs::write(dir.join("SEGMENTS-05.json"), b"{}").unwrap();
-    assert!(tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").is_err());
+    assert!(mosaica_store::prune_superseded_segments_manifests(&prefix_dir, "default").is_err());
     assert_eq!(names().len(), 4);
 }

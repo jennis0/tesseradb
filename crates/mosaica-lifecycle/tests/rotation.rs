@@ -3,19 +3,19 @@
 //!
 //! Everything here is a property of the WAL *sequence*. The engine-level obligations — that a row
 //! acked during a flush survives, that a suppression outlives every checkpoint, that the allocator
-//! floor comes from the side-manifest — live in `tessera-engine`'s `rotation_e2e.rs`, because they
+//! floor comes from the side-manifest — live in `mosaica-engine`'s `rotation_e2e.rs`, because they
 //! need a flush to have happened.
 
 use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
-use tessera_lifecycle::overlay::Replay;
-use tessera_lifecycle::wal::{
+use mosaica_lifecycle::overlay::Replay;
+use mosaica_lifecycle::wal::{
     ChangeOp, OverlaySnapshotEntry, Wal, WalError, WalRecord, HEADER_LEN,
 };
-use tessera_lifecycle::Overlay;
-use tessera_types::EntityId;
+use mosaica_lifecycle::Overlay;
+use mosaica_types::EntityId;
 
 fn member(base: &Path, n: u64) -> PathBuf {
     base.with_file_name(format!("wal-{n:06}.log"))
@@ -148,8 +148,8 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     let dir = tempdir().unwrap();
     let base = dir.path().join("wal.log");
     let temp = tempdir().unwrap();
-    let dict = tessera_authz::Dict::load(
-        &tessera_authz::DictWriter::new(temp.path())
+    let dict = mosaica_authz::Dict::load(
+        &mosaica_authz::DictWriter::new(temp.path())
             .finish()
             .unwrap(),
     )
@@ -173,7 +173,7 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     }
 
     let wal = Wal::open(&base).unwrap();
-    let mut replay = Replay::new(&dict, Overlay::new(), &tessera_lifecycle::owner_id_only);
+    let mut replay = Replay::new(&dict, Overlay::new(), &mosaica_lifecycle::owner_id_only);
     for record in wal.records() {
         let (position, record) = record.unwrap();
         replay.apply(&record, position, |_, _| false);

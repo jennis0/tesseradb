@@ -9,10 +9,10 @@
 //! A declaration here gives the frame in frame coordinates and never `auto`: there is no data to
 //! fit a frame to.
 
-use tessera_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
-use tessera_lifecycle::ExecError;
-use tessera_store::manifest::{GroupDescriptor, Manifest, Quantisation, ViewDescriptor};
-use tessera_types::view::{
+use mosaica_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
+use mosaica_lifecycle::ExecError;
+use mosaica_store::manifest::{GroupDescriptor, Manifest, Quantisation, ViewDescriptor};
+use mosaica_types::view::{
     check_metadata_name, check_view_key, GroupMetadataField, ViewMetadataType, DECLARED_INCARNATION,
 };
 
@@ -203,14 +203,14 @@ fn compile_common(
     taken: bool,
     projection: &str,
     frame: &DeclaredFrame,
-) -> Result<(tessera_spatial::Projection, Quantisation), String> {
+) -> Result<(mosaica_spatial::Projection, Quantisation), String> {
     check_view_key(name)?;
     if taken {
         return Err(format!("'{name}' already names a view or a view group"));
     }
-    let projection = tessera_spatial::Projection::from_name(projection)
+    let projection = mosaica_spatial::Projection::from_name(projection)
         .ok_or_else(|| format!("'{name}': no projection named '{projection}'"))?;
-    tessera_spatial::Bounds {
+    mosaica_spatial::Bounds {
         x_min: frame.x_min,
         x_max: frame.x_max,
         y_min: frame.y_min,

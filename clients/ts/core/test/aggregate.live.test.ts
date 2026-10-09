@@ -1,12 +1,12 @@
 import type {Table} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, type TestContext} from 'vitest';
-import {TesseraClient} from '../src/client.js';
+import {MosaicaClient} from '../src/client.js';
 import {createStore} from '../src/store.js';
 import type {AggregateRequest, FilterExpr, Meta, Session} from '../src/types.js';
 import {start, type Served} from './served.js';
 
 /**
- * `TesseraClient.aggregate` and the store's `aggregates` projection against a real `tessera serve`
+ * `MosaicaClient.aggregate` and the store's `aggregates` projection against a real `mosaica serve`
  * over the notebook corpus (`served.ts`). Each count is compared with what the viewport or the items
  * read counts for the same set, and a result carried over many small responses with the same result
  * read in one.
@@ -16,7 +16,7 @@ const TERMS = ['cs.LG', 'cs.CV', 'hep-ph'];
 const CS: FilterExpr = {archive: {in: ['cs']}};
 
 let served: Served | string = 'the server has not started';
-let client: TesseraClient;
+let client: MosaicaClient;
 let session: Session;
 let meta: Meta;
 /** The aggregate requests `client` has sent, one per response. */
@@ -29,7 +29,7 @@ beforeAll(async () => {
     if (String(url).endsWith('/v1/aggregate')) requests += 1;
     return fetch(url, init);
   };
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential, fetch: counting});
+  client = new MosaicaClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential, fetch: counting});
   session = await client.authorise({terms: TERMS});
   meta = await client.meta(session.token);
 }, 120_000);

@@ -20,17 +20,17 @@
 //!
 //! Run:
 //! ```text
-//! cargo run --release --example maintenance_memory -p tessera-store -- [--rows N] [--segments K]
+//! cargo run --release --example maintenance_memory -p mosaica-store -- [--rows N] [--segments K]
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use tessera_store::manifest::Quantisation;
-use tessera_store::merge::{execute_merge, MergeInput, MergeSpec};
-use tessera_types::{EntityId, IdentityKey};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::flush::{write_flush_segment, FlushInput, FlushRow};
+use mosaica_store::manifest::Quantisation;
+use mosaica_store::merge::{execute_merge, MergeInput, MergeSpec};
+use mosaica_types::{EntityId, IdentityKey};
 
 const PARTITION: &str = "p0";
 const VIEW: &str = "s0";
@@ -139,7 +139,7 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_SEGMENTS);
     let root = PathBuf::from(
-        arg(&args, "--dir").unwrap_or_else(|| "/tmp/tessera-maintenance-memory".to_string()),
+        arg(&args, "--dir").unwrap_or_else(|| "/tmp/mosaica-maintenance-memory".to_string()),
     );
 
     match arg(&args, "--stage").as_deref() {

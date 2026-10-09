@@ -1,13 +1,13 @@
 import {act, createElement, createRef} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
-import {formatCount} from '@tesseradb/client';
+import {formatCount} from '@mosaica/client';
 import {deep, fakeStore, settle, status} from '../../components/test/fake-store.js';
-import {TesseraCount, TesseraExplorer, TesseraHierarchy, TesseraItemCard, TesseraKeyPicker, TesseraStatus, TesseraStore, TesseraViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type StoreElement, type ViewPickerElement} from '../src/components.js';
+import {MosaicaCount, MosaicaExplorer, MosaicaHierarchy, MosaicaItemCard, MosaicaKeyPicker, MosaicaStatus, MosaicaStore, MosaicaViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type StoreElement, type ViewPickerElement} from '../src/components.js';
 
 /**
  * The wrappers: an object prop lands as a property (never an attribute), an `on*` prop receives
- * the element's own event with its detail, and a `<TesseraStore>` above provides by context to a
+ * the element's own event with its detail, and a `<MosaicaStore>` above provides by context to a
  * wrapped panel below — the same store precedence the elements decide (`base.ts`).
  */
 (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
@@ -24,10 +24,10 @@ afterEach(async () => {
   host.remove();
 });
 
-describe('@tesseradb/react/components', () => {
+describe('@mosaica/react/components', () => {
   it('an object prop is set as a property and the element renders it', async () => {
     const ref = createRef<CountElement>();
-    await act(async () => root.render(createElement(TesseraCount, {ref, label: 'shown', count: {shown: 221, total: 1_994_089, exact: true}})));
+    await act(async () => root.render(createElement(MosaicaCount, {ref, label: 'shown', count: {shown: 221, total: 1_994_089, exact: true}})));
     await settle(host);
     expect(ref.current?.count).toEqual({shown: 221, total: 1_994_089, exact: true});
     expect(ref.current?.hasAttribute('count')).toBe(false);
@@ -39,7 +39,7 @@ describe('@tesseradb/react/components', () => {
     const seen: string[] = [];
     await act(async () =>
       root.render(
-        createElement(TesseraItemCard, {
+        createElement(MosaicaItemCard, {
           ref,
           item: {id: 7n, detail: {fields: {title: 'x'}, labels: [], views: [], scoped: {}}},
           onOpen: (e) => seen.push(e.detail.id)
@@ -73,18 +73,18 @@ describe('@tesseradb/react/components', () => {
     await act(async () =>
       root.render(
         createElement(
-          TesseraStore,
+          MosaicaStore,
           {store},
-          createElement(TesseraViewPicker, {ref, onViewSwitch: (e) => seen.push({to: e.detail.to, sameFrame: e.detail.sameFrame})}),
-          createElement(TesseraKeyPicker, {})
+          createElement(MosaicaViewPicker, {ref, onViewSwitch: (e) => seen.push({to: e.detail.to, sameFrame: e.detail.sameFrame})}),
+          createElement(MosaicaKeyPicker, {})
         )
       )
     );
     await settle(host);
     // The store arrives by context, as it does for every other wrapped panel.
     expect(ref.current?.source).toBe('context');
-    expect((deep(host, 'tessera-view-picker') as HTMLElement).shadowRoot!.querySelector('select')).not.toBeNull();
-    const roster = (deep(host, 'tessera-key-picker') as HTMLElement).shadowRoot!.querySelector('select') as HTMLSelectElement;
+    expect((deep(host, 'mosaica-view-picker') as HTMLElement).shadowRoot!.querySelector('select')).not.toBeNull();
+    const roster = (deep(host, 'mosaica-key-picker') as HTMLElement).shadowRoot!.querySelector('select') as HTMLSelectElement;
     roster.value = 'quarter:b';
     roster.dispatchEvent(new Event('change'));
     expect(store.calls.filter((c) => c.name === 'setCurrentView').map((c) => c.args)).toEqual([['quarter:b']]);
@@ -110,9 +110,9 @@ describe('@tesseradb/react/components', () => {
     const store = fakeStore({meta, status: status({status: 'shown'})});
     store.set('view', {...store.get('view'), id: 'knn'});
     const seen: {from: string; to: string; sameFrame: boolean}[] = [];
-    await act(async () => root.render(createElement(TesseraViewPicker, {store, onViewSwitch: (e) => seen.push(e.detail)})));
+    await act(async () => root.render(createElement(MosaicaViewPicker, {store, onViewSwitch: (e) => seen.push(e.detail)})));
     await settle(host);
-    const select = (deep(host, 'tessera-view-picker') as HTMLElement).shadowRoot!.querySelector('select') as HTMLSelectElement;
+    const select = (deep(host, 'mosaica-view-picker') as HTMLElement).shadowRoot!.querySelector('select') as HTMLSelectElement;
     select.value = 'v:pca64';
     select.dispatchEvent(new Event('change'));
     expect(seen).toEqual([{from: 'knn', to: 'pca64', sameFrame: false}]);
@@ -120,13 +120,13 @@ describe('@tesseradb/react/components', () => {
 
   it('titleField on the explorer reaches its map', async () => {
     const ref = createRef<ExplorerElement>();
-    await act(async () => root.render(createElement(TesseraExplorer, {ref, titleField: 'name'})));
+    await act(async () => root.render(createElement(MosaicaExplorer, {ref, titleField: 'name'})));
     await settle(host);
     expect(ref.current?.titleField).toBe('name');
     expect(ref.current?.map?.titleField).toBe('name');
   });
 
-  it('TesseraHierarchy hands its clause event to an on* prop, the id a decimal string', async () => {
+  it('MosaicaHierarchy hands its clause event to an on* prop, the id a decimal string', async () => {
     const meta = {
       apiVersion: 1,
       views: [{id: 's0', displayName: 's0', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
@@ -140,7 +140,7 @@ describe('@tesseradb/react/components', () => {
     const store = fakeStore({meta, status: status({status: 'shown'})});
     store.setBrowse('roots', {artifacts: [{tesseraId: 2n ** 63n, key: 'd-1', name: 'Neoplasms', maskedCount: 10n, matchedCount: null, rung: 0, parentIds: [], childCount: 0, slot: null}], parents: [], next: null});
     const seen: {id: string; verb: string; on: boolean}[] = [];
-    await act(async () => root.render(createElement(TesseraHierarchy, {store, onClauseChange: (e) => seen.push({id: e.detail.id, verb: e.detail.verb, on: e.detail.on})})));
+    await act(async () => root.render(createElement(MosaicaHierarchy, {store, onClauseChange: (e) => seen.push({id: e.detail.id, verb: e.detail.verb, on: e.detail.on})})));
     await settle(host);
     await settle(host);
     (deep(host, '[part="row"] [part="name"]') as HTMLButtonElement).click();
@@ -154,7 +154,7 @@ describe('@tesseradb/react/components', () => {
       throw new Error('no server in this test');
     };
     const ref = createRef<StoreElement>();
-    const draw = (n: number) => root.render(createElement(TesseraStore, {ref, viewerUrl: 'http://127.0.0.1:1', authorise: async () => ({token: `t${n}`, expiresAt: 1})}));
+    const draw = (n: number) => root.render(createElement(MosaicaStore, {ref, viewerUrl: 'http://127.0.0.1:1', authorise: async () => ({token: `t${n}`, expiresAt: 1})}));
     await act(async () => draw(1));
     await settle(host);
     const built = ref.current?.activeStore;
@@ -166,11 +166,11 @@ describe('@tesseradb/react/components', () => {
     globalThis.fetch = fetched;
   });
 
-  it('a TesseraStore above provides by context to a wrapped panel below', async () => {
+  it('a MosaicaStore above provides by context to a wrapped panel below', async () => {
     const store = fakeStore({status: status({status: 'shown'}), view: {...fakeStore().get('view'), served: {shown: 5, total: 9, exact: true}}});
-    await act(async () => root.render(createElement(TesseraStore, {store}, createElement(TesseraStatus))));
+    await act(async () => root.render(createElement(MosaicaStore, {store}, createElement(MosaicaStatus))));
     await settle(host);
-    const el = host.querySelector('tessera-status') as {activeStore: unknown; source: string};
+    const el = host.querySelector('mosaica-status') as {activeStore: unknown; source: string};
     expect(el.activeStore).toBe(store);
     expect(el.source).toBe('context');
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('shown');

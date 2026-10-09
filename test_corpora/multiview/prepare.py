@@ -11,7 +11,7 @@ prepare and validate in seconds, at a default of about 100,000 rows total across
 **Positions are a mix of real-derived and synthetic, and this is the whole of what "real" means
 here.** No network call and no staged dataset is touched. Instead this script samples entity rows
 from `data/ladder/geonames/points.parquet` — the GeoNames rung's own **built** output, already on
-local disk from an earlier run of `test_corpora/geonames/prepare.py` and `tessera build` — and
+local disk from an earlier run of `test_corpora/geonames/prepare.py` and `mosaica build` — and
 carries three of its columns straight through:
 
 - `world` and `quarter_alt`'s positions are that sample's `x`/`y`, **un-projected back to WGS84

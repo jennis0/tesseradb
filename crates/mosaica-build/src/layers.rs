@@ -16,15 +16,15 @@
 //! ## One implementation of the rules, not two
 //!
 //! Every validation and every allocation here runs through
-//! [`LayerRegistry`](tessera_lifecycle::LayerRegistry) and
-//! [`Allocator`](tessera_lifecycle::alloc::Allocator) — the same calls
+//! [`LayerRegistry`](mosaica_lifecycle::LayerRegistry) and
+//! [`Allocator`](mosaica_lifecycle::alloc::Allocator) — the same calls
 //! `PUT /control/layers` makes, in the same order, producing the same WAL records, which this
 //! module then throws away because a build's durable output is its manifest. So a declaration
 //! refused online is refused here with the same words, an artifact's ordinals and entities come out
 //! where the control plane would have put them, and the two routes cannot drift into disagreeing
 //! about what a layer is. The one rule that has no build-plane meaning is publish-time member
 //! validation against the deny lane (`annotation-write-cycle.md` §3.1): a bundle straight out of
-//! `tessera build` has no overlay, so no declared member can be deleted or suppressed yet.
+//! `mosaica build` has no overlay, so no declared member can be deleted or suppressed yet.
 //!
 //! ## Addressing: by the values a member carries
 //!
@@ -72,28 +72,28 @@ use std::path::{Path, PathBuf};
 use arrow::array::{Array, ListArray, UInt32Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use tessera_lifecycle::alloc::Allocator;
-use tessera_lifecycle::membership::{
+use mosaica_lifecycle::alloc::Allocator;
+use mosaica_lifecycle::membership::{
     ArtifactShapes, ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
-use tessera_lifecycle::LayerRegistry;
-use tessera_store::manifest::{MembershipExtent, RecordExtent};
-use tessera_types::layer::RegisteredLayer;
-use tessera_types::layer::{parent_edges, LayerDeclaration, ValueSet};
-use tessera_types::EntityId;
+use mosaica_lifecycle::LayerRegistry;
+use mosaica_store::manifest::{MembershipExtent, RecordExtent};
+use mosaica_types::layer::RegisteredLayer;
+use mosaica_types::layer::{parent_edges, LayerDeclaration, ValueSet};
+use mosaica_types::EntityId;
 
 use rayon::prelude::*;
 
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources, MemberTable, MemberValue};
 use crate::ids::{Numbering, Numbers, ReadKind, NO_SOURCE};
-use tessera_store::unique::UniqueKey;
+use mosaica_store::unique::UniqueKey;
 use crate::error::{BuildError, Result};
 use crate::shapes::{
     inline_shape, shape_declared, space_at, space_column, ShapeColumns, ShapeContext,
     ShapeLayerReport, ShapeReader,
 };
 use crate::spill;
-use tessera_store::derived::authored_shape_input;
+use mosaica_store::derived::authored_shape_input;
 
 /// One artifact as the build inputs describe it, before any id has been resolved.
 #[derive(Debug, Default)]
@@ -560,11 +560,11 @@ pub struct PublishedLayers {
     ///
     /// **The build now writes every derived structure a fold does** — see `crate::artifact_pass`,
     /// which runs after the segment write and fills the three extent lists below. It composes
-    /// through `tessera_store::membership`, beside the formats, rather than through the engine: a
-    /// build-side edge on `tessera-engine` is what an earlier revision of this comment ruled out,
+    /// through `mosaica_store::membership`, beside the formats, rather than through the engine: a
+    /// build-side edge on `mosaica-engine` is what an earlier revision of this comment ruled out,
     /// and moving the writer down to the format's own crate is what made the edge unnecessary
     /// rather than merely avoided.
-    pub level_versions: Vec<tessera_store::manifest::LevelVersion>,
+    pub level_versions: Vec<mosaica_store::manifest::LevelVersion>,
     pub artifact_record_extents: Vec<RecordExtent>,
     /// Every file written here, for `MANIFEST.files` — an undigested file is one a torn write
     /// cannot be attributed to.
@@ -592,7 +592,7 @@ pub struct PublishedLayers {
     pub store: ArtifactStore,
     /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`. Empty until it
     /// runs.
-    pub derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
+    pub derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
 }
 
 impl Default for PublishedLayers {
@@ -604,7 +604,7 @@ impl Default for PublishedLayers {
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
             hierarchy_shapes: Vec::new(),
-            low_water: tessera_types::layer::ROWLESS_CEILING,
+            low_water: mosaica_types::layer::ROWLESS_CEILING,
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             artifact_record_extents: Vec::new(),
@@ -636,7 +636,7 @@ pub(crate) fn read(
     // **Every view this build materialises, each with its own frame** (decision 0111): a shape
     // layer is canonicalised against the frame of each view it is drawn in, and a layer spanning
     // views whose frames differ therefore stores a different canonical form under each name.
-    frames: &[tessera_store::derived::ViewFrame],
+    frames: &[mosaica_store::derived::ViewFrame],
     max_shape_vertices: u64,
     scratch: &Path,
     memory_budget: u64,
@@ -666,7 +666,7 @@ pub(crate) fn read(
             )));
         };
         let enumerated =
-            declaration.membership == tessera_types::layer::MembershipSource::Enumerated;
+            declaration.membership == mosaica_types::layer::MembershipSource::Enumerated;
         // **A shape layer's rows are canonicalised as they are read** — against the frame the
         // points are quantised in and for every view the layer is drawn in — and what that did is
         // reported beside the layer, never refused (`crate::shapes`).
@@ -675,12 +675,12 @@ pub(crate) fn read(
         // resolves against the same value the membership shape does.
         let default_space = match &input.artifacts {
             Some(ArtifactSource::File { default_space, .. }) => *default_space,
-            _ => tessera_store::derived::ShapeSpace::View,
+            _ => mosaica_store::derived::ShapeSpace::View,
         };
         // **This layer's own views, each with its own frame** — never the build's first, which a
         // layer need not be drawn on at all. A view the layer names and this build does not
         // materialise is absent here, and the layer is canonicalised for the views that exist.
-        let layer_frames: Vec<tessera_store::derived::ViewFrame> = declaration
+        let layer_frames: Vec<mosaica_store::derived::ViewFrame> = declaration
             .views
             .iter()
             .filter_map(|name| frames.iter().find(|f| &f.view == name))
@@ -689,9 +689,9 @@ pub(crate) fn read(
         // Decision 0111's layer-level rule, at the declaration and before a row is read: a mix of
         // projected and unprojected row spaces is a refusal naming the layer and the views.
         if shape_declared(declaration).is_some() {
-            tessera_store::derived::check_shape_span(
+            mosaica_store::derived::check_shape_span(
                 &layer_frames,
-                tessera_store::derived::ShapeSpace::Wgs84,
+                mosaica_store::derived::ShapeSpace::Wgs84,
             )
             .map_err(|e| BuildError::Invalid(format!("layer '{}': {e}", input.name)))?;
         }
@@ -1174,9 +1174,9 @@ fn plan_inline(
 }
 
 /// An artifact's labels as they are stored, by the rule a running service applies to a published
-/// artifact ([`tessera_access::artifact_access`]).
+/// artifact ([`mosaica_access::artifact_access`]).
 fn descriptors_of(layer: &str, labels: &[String]) -> Result<Vec<Vec<u8>>> {
-    tessera_access::artifact_access(labels)
+    mosaica_access::artifact_access(labels)
         .map(|labels| labels.into_iter().map(String::into_bytes).collect())
         .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))
 }
@@ -1441,7 +1441,7 @@ fn resolve_member(
                 None => {
                     // The one decimal string an integer key ever costs: once per artifact minted,
                     // never once per point. The spelling is the one
-                    // `tessera_types::layer::integer_key` states for the wire — `3` and "3" name
+                    // `mosaica_types::layer::integer_key` states for the wire — `3` and "3" name
                     // one artifact — taken here without allocating for the point that matched.
                     let address = (
                         layer.to_string(),
@@ -1631,21 +1631,21 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
 /// The views this build writes, each at the incarnation a build gives it.
 struct DeclaredViews<'a>(&'a [String]);
 
-impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
+impl mosaica_lifecycle::GroupViews for DeclaredViews<'_> {
     fn incarnation_of(
         &self,
         group: &str,
         key: &str,
-    ) -> Option<tessera_types::view::ViewIncarnation> {
-        let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
+    ) -> Option<mosaica_types::view::ViewIncarnation> {
+        let id = format!("{group}{}{key}", mosaica_store::GROUP_SEPARATOR);
         self.0
             .contains(&id)
-            .then_some(tessera_types::view::DECLARED_INCARNATION)
+            .then_some(mosaica_types::view::DECLARED_INCARNATION)
     }
     fn keys_of(&self, group: &str) -> Vec<String> {
         self.0
             .iter()
-            .filter_map(|id| id.split_once(tessera_store::GROUP_SEPARATOR))
+            .filter_map(|id| id.split_once(mosaica_store::GROUP_SEPARATOR))
             .filter(|(held, _)| *held == group)
             .map(|(_, key)| key.to_string())
             .collect()
@@ -1853,7 +1853,7 @@ pub fn publish(
         );
         let ordinal_lo = store.next_ordinal(layer, level);
         let pack_path = members_dir.join(format!("streaming-{:03}.tsmb", streamed.len()));
-        let mut writer = tessera_store::membership::PackWriter::create(
+        let mut writer = mosaica_store::membership::PackWriter::create(
             &pack_path,
             ordinal_lo,
             artifacts.len() as u32,
@@ -1900,7 +1900,7 @@ pub fn publish(
                     &incoming,
                     &store,
                     &mut alloc,
-                    &tessera_lifecycle::no_pending,
+                    &mosaica_lifecycle::no_pending,
                     &DeclaredViews(views),
                 )
                 .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
@@ -1998,7 +1998,7 @@ pub fn publish(
     published.level_versions = store
         .level_versions()
         .map(
-            |(layer, level, version)| tessera_store::manifest::LevelVersion {
+            |(layer, level, version)| mosaica_store::manifest::LevelVersion {
                 layer: layer.to_string(),
                 level,
                 version,
@@ -2240,10 +2240,10 @@ impl MemberRunMerge {
 pub fn predicate_artifact_keys(
     layers: &[LayerDeclaration],
     schema: &crate::config::Schema,
-    minters: &std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    minters: &std::collections::HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
     codes_of: &dyn Fn(usize) -> std::collections::BTreeSet<u32>,
 ) -> Result<BTreeMap<String, Vec<String>>> {
-    use tessera_types::layer::{attribute_value_key, MembershipSource};
+    use mosaica_types::layer::{attribute_value_key, MembershipSource};
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for declaration in layers {
         let MembershipSource::Attribute(field) = &declaration.membership else {
@@ -2285,7 +2285,7 @@ pub fn predicate_artifact_keys(
         // key, so it names no value and no artifact. A plain integer column has no such
         // reservation and 0 is an ordinary value there.
         if attribute.vocabulary.is_some() {
-            codes.remove(&tessera_store::vocabulary::ABSENT_CODE);
+            codes.remove(&mosaica_store::vocabulary::ABSENT_CODE);
         }
         out.insert(
             declaration.name.clone(),
@@ -2399,7 +2399,7 @@ fn verify_hierarchies(
     // themselves. A layer that declares no lineage may carry none; a nested layer's edges stay
     // within a level; a tiered layer's run from a coarser level to a finer one, and it is
     // the levels that carry the resolution rather than the edges.
-    let kind_of: BTreeMap<&str, tessera_types::layer::HierarchyKind> = declarations
+    let kind_of: BTreeMap<&str, mosaica_types::layer::HierarchyKind> = declarations
         .iter()
         .map(|d| (d.name.as_str(), d.hierarchy.kind))
         .collect();
@@ -2412,8 +2412,8 @@ fn verify_hierarchies(
         if let Some(kind) = kind_of.get(layer.as_str()).filter(|k| {
             !matches!(
                 k,
-                tessera_types::layer::HierarchyKind::Flat
-                    | tessera_types::layer::HierarchyKind::Stacked
+                mosaica_types::layer::HierarchyKind::Flat
+                    | mosaica_types::layer::HierarchyKind::Stacked
             )
         }) {
             let named = resolved[*index].parent_keys.len() as u64;
@@ -2441,12 +2441,12 @@ fn verify_hierarchies(
             let kind = kind_of
                 .get(layer.as_str())
                 .copied()
-                .unwrap_or(tessera_types::layer::HierarchyKind::Flat);
-            let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Tiered);
-            let several = matches!(kind, tessera_types::layer::HierarchyKind::Dag);
+                .unwrap_or(mosaica_types::layer::HierarchyKind::Flat);
+            let cross_level = matches!(kind, mosaica_types::layer::HierarchyKind::Tiered);
+            let several = matches!(kind, mosaica_types::layer::HierarchyKind::Dag);
             if !cross_level
                 && !several
-                && !matches!(kind, tessera_types::layer::HierarchyKind::Nested)
+                && !matches!(kind, mosaica_types::layer::HierarchyKind::Nested)
             {
                 return Err(BuildError::Invalid(format!(
                 "{layer} is declared {kind:?} and so has no lineage, but {key} names a parent — \
@@ -2673,7 +2673,7 @@ type ParentLevels<'a> = BTreeMap<(&'a str, u32, Option<&'a str>), ParentsByKey<'
 fn detect_cycles(
     index_of: &BTreeMap<Address, usize>,
     resolved: &[ResolvedArtifact],
-    kind_of: &BTreeMap<&str, tessera_types::layer::HierarchyKind>,
+    kind_of: &BTreeMap<&str, mosaica_types::layer::HierarchyKind>,
 ) -> Result<()> {
     // One `key → parent` map per nested level, in key order. The walk below reads nothing else, so
     // building this once is what lets it borrow rather than clone an `Address` at every step — the
@@ -2686,8 +2686,8 @@ fn detect_cycles(
         if !matches!(
             kind_of.get(layer.as_str()),
             Some(
-                tessera_types::layer::HierarchyKind::Nested
-                    | tessera_types::layer::HierarchyKind::Dag
+                mosaica_types::layer::HierarchyKind::Nested
+                    | mosaica_types::layer::HierarchyKind::Dag
             )
         ) {
             continue;
@@ -3018,7 +3018,7 @@ struct StreamedPack {
 /// nested layer's edges and a dag layer's are exactly the ones that can do that; a tiered layer's
 /// parents sit at coarser levels, already published, and a flat or stacked layer has none.
 fn within_level_edges(declarations: &[LayerDeclaration], layer: &str) -> bool {
-    use tessera_types::layer::HierarchyKind;
+    use mosaica_types::layer::HierarchyKind;
     declarations
         .iter()
         .find(|d| d.name == layer)
@@ -3078,7 +3078,7 @@ fn publication_batches(
 /// closed MeSH member rows, carried across the build's peak
 /// (`probes/2026-09-02-mapped-memberships/README.md`). The bytes have just been written and
 /// fsynced, so each record's bitmap is replaced by a view over the extent's own bytes
-/// ([`tessera_lifecycle::Members::mapped`]) — one write, no second format, and what stays on the
+/// ([`mosaica_lifecycle::Members::mapped`]) — one write, no second format, and what stays on the
 /// heap is a container descriptor rather than the members.
 ///
 /// ⊘ **A rehousing that does not take is reported and not refused.** Every failure route leaves
@@ -3141,7 +3141,7 @@ fn write_membership_extents(
             // was encoded before the publication was batched.
             None => {
                 let mut writer =
-                    tessera_store::membership::PackWriter::create(&path, ordinal_lo, count)
+                    mosaica_store::membership::PackWriter::create(&path, ordinal_lo, count)
                         .map_err(BuildError::Store)?;
                 let mut pushed = 0u32;
                 for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
@@ -3177,7 +3177,7 @@ fn write_membership_extents(
     for (_, pack) in std::mem::take(streamed) {
         let _ = std::fs::remove_file(&pack.path);
     }
-    tessera_store::fsync_dir(&dir).map_err(BuildError::Store)?;
+    mosaica_store::fsync_dir(&dir).map_err(BuildError::Store)?;
     // **A vacated artifact holds the empty set** ([`ArtifactStore::vacate_members`]), so one left
     // standing is an artifact this bundle would serve as absent. The heap copy the publication
     // encoded from is gone by now, so there is nothing to fall back to and the build refuses.
@@ -3213,7 +3213,7 @@ fn map_level_memberships(
     kept: &mut u64,
 ) -> Result<u64> {
     let pack = std::sync::Arc::new(
-        tessera_store::membership::MembershipPack::open(path).map_err(BuildError::Store)?,
+        mosaica_store::membership::MembershipPack::open(path).map_err(BuildError::Store)?,
     );
     let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> = pack.clone();
     let mut rehoused = 0;
@@ -3222,7 +3222,7 @@ fn map_level_memberships(
         // the `Members` this produces holds `owner` for as long as it holds the view. The file is
         // written, fsynced and closed for writing before this runs, and nothing in the build
         // reopens it for writing.
-        let mapped = unsafe { tessera_lifecycle::membership::mapped_members(blob, owner.clone()) };
+        let mapped = unsafe { mosaica_lifecycle::membership::mapped_members(blob, owner.clone()) };
         let took = match mapped {
             Some(members) => store.rehouse_members(layer, level, ordinal, members),
             None => false,
@@ -3268,11 +3268,11 @@ fn write_content_extent(
     let blocks = prefix_dir.join(&extent.blocks);
     let hasrow = prefix_dir.join(&extent.hasrow);
     let directory = prefix_dir.join(&extent.directory);
-    let mut writer = tessera_filter_write::RecordBlobWriter::create(
+    let mut writer = mosaica_filter_write::RecordBlobWriter::create(
         &blocks,
         &hasrow,
         &directory,
-        tessera_filter::RECORD_BLOCK_TARGET,
+        mosaica_filter::RECORD_BLOCK_TARGET,
     )
     .map_err(|e| BuildError::io(&blocks, e))?;
     // **Ascending by entity**, which the blob's block directory requires. Artifact ids descend as
@@ -3286,11 +3286,11 @@ fn write_content_extent(
                 entity.raw()
             ))
         })?;
-        let fields: Vec<tessera_filter::RecordFieldRef<'_>> = fields
+        let fields: Vec<mosaica_filter::RecordFieldRef<'_>> = fields
             .iter()
-            .map(|(tag, value)| tessera_filter::RecordFieldRef {
+            .map(|(tag, value)| mosaica_filter::RecordFieldRef {
                 tag: *tag,
-                value: tessera_filter::RecordValueRef::Utf8(value),
+                value: mosaica_filter::RecordValueRef::Utf8(value),
             })
             .collect();
         writer
@@ -3304,7 +3304,7 @@ fn write_content_extent(
         let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
         file.sync_all().map_err(|e| BuildError::io(path, e))?;
     }
-    tessera_store::fsync_dir(&dir).map_err(BuildError::Store)?;
+    mosaica_store::fsync_dir(&dir).map_err(BuildError::Store)?;
     published.paths.extend([blocks, hasrow, directory]);
     published.artifact_record_extents.push(extent);
     Ok(())
@@ -3806,10 +3806,10 @@ fn member_value_key(
 ) -> Result<UniqueKey> {
     let object = format!("layer '{layer}': artifact {key}");
     let integer = match (field.ty, value) {
-        (tessera_spatial::tiler::ScalarType::Keyword, MemberValue::Text(text)) => {
+        (mosaica_spatial::tiler::ScalarType::Keyword, MemberValue::Text(text)) => {
             return Ok(UniqueKey::keyword(text))
         }
-        (tessera_spatial::tiler::ScalarType::Keyword, MemberValue::Integer(integer)) => {
+        (mosaica_spatial::tiler::ScalarType::Keyword, MemberValue::Integer(integer)) => {
             return Err(BuildError::Invalid(format!(
                 "{object}: the member {integer} of '{}' is an integer, and the field holds \
                  strings. Write it as \"{integer}\"",
@@ -3825,7 +3825,7 @@ fn member_value_key(
             ))
         })?,
     };
-    tessera_store::unique::key_of_integer(field.ty, integer).ok_or_else(|| {
+    mosaica_store::unique::key_of_integer(field.ty, integer).ok_or_else(|| {
         BuildError::Invalid(format!(
             "{object}: the member {integer} of '{}' is outside what a `{}` holds",
             field.attribute,
@@ -3916,7 +3916,7 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 // ---------------------------------------------------------------------------------------------
 
 /// A `key` column: text, or an integer canonicalised to its decimal string, so `3` and `"3"` name
-/// one artifact. Which types, and how a cell reads, is [`tessera_store::member_key`]'s, the rule the
+/// one artifact. Which types, and how a cell reads, is [`mosaica_store::member_key`]'s, the rule the
 /// running service reads a batch's layer column by.
 ///
 /// **A key is one type below this reader**: the plan, the store and the manifest all hold a string,
@@ -3929,7 +3929,7 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// already has: a point whose cluster is on the roster formats nothing and allocates nothing, and
 /// the only decimal string an open layer writes is the one it mints an artifact under, once per
 /// cluster.
-pub(crate) use tessera_store::member_key::{
+pub(crate) use mosaica_store::member_key::{
     level_in, read_levels, KeyCells, KeyColumn, KeyRead, MemberColumn, LEVEL,
 };
 
@@ -3961,7 +3961,7 @@ fn scalar_key_column<'a>(
              spelling, so `3` and \"3\" name one artifact",
             path.display(),
             array.data_type(),
-            tessera_store::member_key::KEY_TYPES
+            mosaica_store::member_key::KEY_TYPES
         ))
     })
 }
@@ -4295,9 +4295,9 @@ fn address(
 mod tests {
     use super::*;
     use crate::config::{ArtifactSource, InlineArtifact, LayerSources};
-    use tessera_lifecycle::membership::ArtifactShapes;
-    use tessera_spatial::{AlignedSquare, Bounds, Projection};
-    use tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES;
+    use mosaica_lifecycle::membership::ArtifactShapes;
+    use mosaica_spatial::{AlignedSquare, Bounds, Projection};
+    use mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES;
 
     /// A triangle whose diagonal is straight in the longitude/latitude plane and a curve in the
     /// frame — 8°W 50°N → 2°E 58°N → 8°W 58°N, the fixture `projected_build.rs` measures the two
@@ -4377,7 +4377,7 @@ mod tests {
             &sources,
             &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
-            &[tessera_store::derived::ViewFrame::new(
+            &[mosaica_store::derived::ViewFrame::new(
                 "world", projection, extent,
             )],
             DEFAULT_MAX_SHAPE_VERTICES,
@@ -4492,7 +4492,7 @@ mod tests {
             &sources,
             &numbering,
             &BTreeMap::new(),
-            &[tessera_store::derived::ViewFrame::new(
+            &[mosaica_store::derived::ViewFrame::new(
                 "world",
                 Projection::None,
                 AlignedSquare::WORLD.bounds(),
@@ -4550,12 +4550,12 @@ mod tests {
             &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             &[
-                tessera_store::derived::ViewFrame::new(
+                mosaica_store::derived::ViewFrame::new(
                     "world",
                     Projection::WebMercator,
                     AlignedSquare::WORLD.bounds(),
                 ),
-                tessera_store::derived::ViewFrame::new(
+                mosaica_store::derived::ViewFrame::new(
                     "embedding",
                     Projection::None,
                     Bounds {
@@ -4591,7 +4591,7 @@ mod tests {
             &sources,
             &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
-            &[tessera_store::derived::ViewFrame::new(
+            &[mosaica_store::derived::ViewFrame::new(
                 "world", projection, extent,
             )],
             DEFAULT_MAX_SHAPE_VERTICES,

@@ -5,14 +5,14 @@ use crate::label::LabelIndex;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use tessera_types::TermId;
+use mosaica_types::TermId;
 
 /// The reserved access label every principal holds.
 ///
 /// Every build interns this descriptor first, so term `0` is `public` in every bundle and is
 /// minted for no other descriptor. Every session resolved by the engine gains it by construction.
 /// It is not a grant.
-pub const PUBLIC_LABEL: &[u8] = tessera_access::PUBLIC.as_bytes();
+pub const PUBLIC_LABEL: &[u8] = mosaica_access::PUBLIC.as_bytes();
 
 /// [`PUBLIC_LABEL`]'s term id. `0` is the first ordinal a dictionary assigns, not an absent
 /// sentinel; reserving it makes the label's identity a property of the format rather than of the

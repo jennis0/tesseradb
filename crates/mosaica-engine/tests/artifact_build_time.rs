@@ -16,10 +16,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
-use tessera_build::BuildArgs;
-use tessera_engine::{ArtifactOut, Engine};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_types::EntityId;
+use mosaica_build::BuildArgs;
+use mosaica_engine::{ArtifactOut, Engine};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_types::EntityId;
 
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
@@ -187,7 +187,7 @@ fn fixture() -> Fixture {
 
 /// The same build, with the label file written by `topics` — so a case about what the build
 /// *refuses* runs the whole pipeline the accepted case runs, rather than a reconstruction of it.
-fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> {
+fn try_fixture(topics: fn(&Path)) -> Result<Fixture, mosaica_build::BuildError> {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let points = tmp.path().join("points.parquet");
@@ -196,7 +196,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
     write_points_n(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
     std::fs::write(&config_path, CONFIG_TOML).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture config parses");
     write_clusters(&tmp.path().join("clusters.parquet"));
     topics(&tmp.path().join("topics.parquet"));
@@ -207,20 +207,20 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
     write_members(&tmp.path().join("topics_members.parquet"), &topic_members());
 
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &config.schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &config.schema),
         out: root.clone(),
         limit: None,
         strict: false,
@@ -235,7 +235,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         band_rows: None,
         schema: config.schema,
     };
-    tessera_build::build(&args)?;
+    mosaica_build::build(&args)?;
     Ok(Fixture {
         root,
         cache: tmp.path().join("cache"),
@@ -340,7 +340,7 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
             .publish_artifacts(
                 CLUSTERS.into(),
                 0,
-                vec![tessera_lifecycle::IncomingArtifact::from_entities(
+                vec![mosaica_lifecycle::IncomingArtifact::from_entities(
                     Some("c-online".into()),
                     entities,
                 )],
@@ -382,18 +382,18 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
     assert_eq!(built.len(), 2);
 
     let id = engine
-        .register_layer(tessera_types::layer::LayerDeclaration {
+        .register_layer(mosaica_types::layer::LayerDeclaration {
             scope: Default::default(),
             name: "clusters/online".into(),
             title: Some("registered against the running node".into()),
             views: vec!["s0".into()],
-            membership: tessera_types::layer::MembershipSource::Enumerated,
+            membership: mosaica_types::layer::MembershipSource::Enumerated,
             value_set: Default::default(),
             visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
             require_member_visibility: None,
-            hierarchy: tessera_types::layer::Hierarchy {
-                kind: tessera_types::layer::HierarchyKind::Flat,
+            hierarchy: mosaica_types::layer::Hierarchy {
+                kind: mosaica_types::layer::HierarchyKind::Flat,
                 prune_children: false,
             },
             content: Default::default(),
@@ -448,7 +448,7 @@ fn a_built_bundle_carries_its_containment_partitions_and_the_first_request_claim
         manifest
             .derived_extents
             .iter()
-            .any(|e| e.form == tessera_store::manifest::DerivedForm::Containment && e.layer == LABELS),
+            .any(|e| e.form == mosaica_store::manifest::DerivedForm::Containment && e.layer == LABELS),
         "the label layer's generating sets have a partition the build composed: {:?}",
         manifest.derived_extents
     );

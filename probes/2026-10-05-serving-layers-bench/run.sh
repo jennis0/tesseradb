@@ -7,7 +7,7 @@
 # start and end.
 #
 #   DEPLOYMENT=<deployment dir> [SIDES="old new"] [MODES="off on"] \
-#     bash probes/2026-10-05-serving-layers-bench/run.sh <old tessera> <old core index.js> <new tessera> \
+#     bash probes/2026-10-05-serving-layers-bench/run.sh <old mosaica> <old core index.js> <new mosaica> \
 #       [rounds] [first round] [prefix]
 #
 # SIDES names the binaries to run: "new" alone takes "-" for the old binary and core.

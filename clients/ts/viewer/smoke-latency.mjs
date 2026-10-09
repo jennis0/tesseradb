@@ -4,11 +4,11 @@
 //   node clients/ts/viewer/smoke-latency.mjs [--clients N] [--url http://localhost:5173]
 //     [--headed] [--executable /path/to/chrome]
 //
-// Requires a running `tessera serve` and `vite dev`.
+// Requires a running `mosaica serve` and `vite dev`.
 //
 // It measures:
 //
-//  1. Pan-to-paint latency, timed in the page from `window.__tesseraProbe`. Request counts cannot
+//  1. Pan-to-paint latency, timed in the page from `window.__mosaicaProbe`. Request counts cannot
 //     show a pan answered from held bands, which makes no request.
 //  2. How it varies with pan speed: look-ahead covers a fixed distance, which a fast pan crosses
 //     sooner, so the script sweeps speeds.
@@ -33,7 +33,7 @@ async function runClient(index, prefetch) {
   const serverUs = {total: 0};
   page.on('response', (r) => {
     if (new URL(r.url()).pathname === '/v1/viewport') {
-      serverUs.total += Number(r.headers()['x-tessera-server-us'] ?? 0);
+      serverUs.total += Number(r.headers()['x-mosaica-server-us'] ?? 0);
     }
   });
 
@@ -105,14 +105,14 @@ async function timedPan(page, dx, speed) {
   // Counters are read after mouse-up: a fast drag outlives the debounce, so a repaint mid-pan
   // answers an earlier position.
   const before = await page.evaluate(() => ({
-    paints: window.__tesseraProbe?.paints ?? 0,
-    requests: window.__tesseraProbe?.requests ?? 0
+    paints: window.__mosaicaProbe?.paints ?? 0,
+    requests: window.__mosaicaProbe?.requests ?? 0
   }));
   const t0 = Date.now();
   const settled = await page
     .waitForFunction(
       (b) => {
-        const p = window.__tesseraProbe;
+        const p = window.__mosaicaProbe;
         return p && p.paints > b.paints ? {requests: p.requests, marks: p.marks} : null;
       },
       before,

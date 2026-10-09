@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use tessera_store::permutation::{Permutation, RowSpace, SegmentExtent};
-use tessera_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
-use tessera_store::write::write_permutation;
-use tessera_types::{EntityId, RowId};
+use mosaica_store::permutation::{Permutation, RowSpace, SegmentExtent};
+use mosaica_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
+use mosaica_store::write::write_permutation;
+use mosaica_types::{EntityId, RowId};
 
 /// `row_order[row] = entity`, the shape both producers hand the writer.
 fn build(dir: &std::path::Path, row_order: &[u32], bound: u64) -> (Permutation, RowToEntity) {

@@ -1,6 +1,6 @@
 //! The index over access labels, and their evaluation from a credential's terms.
 //!
-//! The grammar, normalisation and the label DAG are in [`tessera_access`], below every crate that
+//! The grammar, normalisation and the label DAG are in [`mosaica_access`], below every crate that
 //! reads a label. This module decides what an item is indexed under, in the one dictionary every
 //! posting is addressed by:
 //!

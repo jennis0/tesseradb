@@ -45,11 +45,11 @@ server, the first opening is whatever the server has already seen, and the resul
 
     python3 -m test_corpora.common.interactive_bench \\
         --deployment data/ladder/gbif --out run.json [--compare old.json] \\
-        [--start --binary /path/to/tessera [--keep-serving] [--reopen]] \\
+        [--start --binary /path/to/mosaica [--keep-serving] [--reopen]] \\
         [--core /path/to/clients/ts/core/dist/index.js] [--targets 0.01,0.25,1] [--per-tile 50] \\
         [--prefetch [--reference prefetch-off-run.json]]
 
-Build the TypeScript core first: `npm --prefix clients/ts run build -w @tesseradb/client`.
+Build the TypeScript core first: `npm --prefix clients/ts run build -w @mosaica/client`.
 """
 
 from __future__ import annotations
@@ -593,7 +593,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--deployment",
         required=True,
-        help="the rung directory holding tessera.toml and .env",
+        help="the rung directory holding mosaica.toml and .env",
     )
     ap.add_argument("--viewer", help="the viewer URL; defaults to the deployment's")
     ap.add_argument("--session", help="the session URL; defaults to the deployment's")
@@ -615,7 +615,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="start a server, with an empty cache, first",
     )
-    ap.add_argument("--binary", help="with --start, the tessera binary")
+    ap.add_argument("--binary", help="with --start, the mosaica binary")
     ap.add_argument("--cap", default="24G", help="with --start, the scope's MemoryMax")
     ap.add_argument(
         "--swap", default="2G", help="with --start, the scope's MemorySwapMax"
@@ -665,14 +665,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not Path(args.core).is_file():
         ap.error(
-            f"{args.core} is missing; build it with `npm --prefix clients/ts run build -w @tesseradb/client`"
+            f"{args.core} is missing; build it with `npm --prefix clients/ts run build -w @mosaica/client`"
         )
     if args.reopen and not args.start:
         ap.error("--reopen needs --start, since it restarts the server")
     targets = tuple(float(t) for t in args.targets.split(","))
     started = time.time()
     directory = Path(args.deployment).resolve()
-    settings = tomllib.loads((directory / "tessera.toml").read_text())
+    settings = tomllib.loads((directory / "mosaica.toml").read_text())
     serve = settings["serve"]
     env = dict(os.environ) | read_env_file(directory / ".env")
     cred = env[serve["operator_credential_env"]]
@@ -760,7 +760,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         work.mkdir(exist_ok=True)
         write_plan(work / "plan.json", args, people)
         log("session and map, in the TypeScript core")
-        node_env = dict(os.environ, TESSERA_BENCH_SESSION_CRED=cred)
+        node_env = dict(os.environ, MOSAICA_BENCH_SESSION_CRED=cred)
         subprocess.run(
             [
                 "node",

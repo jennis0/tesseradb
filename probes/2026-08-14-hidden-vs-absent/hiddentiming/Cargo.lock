@@ -630,14 +630,14 @@ dependencies = [
  "croaring",
  "serde_json",
  "tempfile",
- "tessera-analyse",
- "tessera-authz",
- "tessera-engine",
- "tessera-filter",
- "tessera-filter-write",
- "tessera-spatial",
- "tessera-store",
- "tessera-types",
+ "mosaica-analyse",
+ "mosaica-authz",
+ "mosaica-engine",
+ "mosaica-filter",
+ "mosaica-filter-write",
+ "mosaica-spatial",
+ "mosaica-store",
+ "mosaica-types",
 ]
 
 [[package]]
@@ -1379,7 +1379,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-analyse"
+name = "mosaica-analyse"
 version = "0.1.0"
 dependencies = [
  "icu_casemap",
@@ -1389,7 +1389,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-authz"
+name = "mosaica-authz"
 version = "0.1.0"
 dependencies = [
  "arrow",
@@ -1397,19 +1397,19 @@ dependencies = [
  "memmap2",
  "rustc-hash",
  "sha2",
- "tessera-cache",
- "tessera-types",
+ "mosaica-cache",
+ "mosaica-types",
 ]
 
 [[package]]
-name = "tessera-cache"
+name = "mosaica-cache"
 version = "0.1.0"
 dependencies = [
  "rustc-hash",
 ]
 
 [[package]]
-name = "tessera-engine"
+name = "mosaica-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -1422,48 +1422,48 @@ dependencies = [
  "rustc-hash",
  "serde_json",
  "sha2",
- "tessera-analyse",
- "tessera-authz",
- "tessera-cache",
- "tessera-filter",
- "tessera-filter-write",
- "tessera-lifecycle",
- "tessera-plugin",
- "tessera-roaring",
- "tessera-spatial",
- "tessera-store",
- "tessera-types",
+ "mosaica-analyse",
+ "mosaica-authz",
+ "mosaica-cache",
+ "mosaica-filter",
+ "mosaica-filter-write",
+ "mosaica-lifecycle",
+ "mosaica-plugin",
+ "mosaica-roaring",
+ "mosaica-spatial",
+ "mosaica-store",
+ "mosaica-types",
  "tracing",
 ]
 
 [[package]]
-name = "tessera-filter"
+name = "mosaica-filter"
 version = "0.1.0"
 dependencies = [
  "arrow",
  "croaring",
  "memchr",
  "memmap2",
- "tessera-authz",
- "tessera-roaring",
- "tessera-types",
+ "mosaica-authz",
+ "mosaica-roaring",
+ "mosaica-types",
  "zstd",
 ]
 
 [[package]]
-name = "tessera-filter-write"
+name = "mosaica-filter-write"
 version = "0.1.0"
 dependencies = [
  "arrow",
  "croaring",
- "tessera-authz",
- "tessera-filter",
- "tessera-types",
+ "mosaica-authz",
+ "mosaica-filter",
+ "mosaica-types",
  "zstd",
 ]
 
 [[package]]
-name = "tessera-lifecycle"
+name = "mosaica-lifecycle"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
@@ -1472,12 +1472,12 @@ dependencies = [
  "rustc-hash",
  "serde",
  "sha2",
- "tessera-authz",
- "tessera-types",
+ "mosaica-authz",
+ "mosaica-types",
 ]
 
 [[package]]
-name = "tessera-plugin"
+name = "mosaica-plugin"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1486,21 +1486,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-roaring"
+name = "mosaica-roaring"
 version = "0.1.0"
 dependencies = [
  "croaring",
 ]
 
 [[package]]
-name = "tessera-spatial"
+name = "mosaica-spatial"
 version = "0.1.0"
 dependencies = [
- "tessera-types",
+ "mosaica-types",
 ]
 
 [[package]]
-name = "tessera-store"
+name = "mosaica-store"
 version = "0.1.0"
 dependencies = [
  "arrow",
@@ -1512,15 +1512,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tessera-analyse",
- "tessera-roaring",
- "tessera-spatial",
- "tessera-types",
+ "mosaica-analyse",
+ "mosaica-roaring",
+ "mosaica-spatial",
+ "mosaica-types",
  "tracing",
 ]
 
 [[package]]
-name = "tessera-types"
+name = "mosaica-types"
 version = "0.1.0"
 dependencies = [
  "libc",

@@ -1,5 +1,5 @@
-# The platform wheels for `tesseradb-native` — the companion distribution that carries the
-# `tessera` executable and the `_tessera` extension module.
+# The platform wheels for `mosaica-native` — the companion distribution that carries the
+# `mosaica` executable and the `_mosaica` extension module.
 #
 # Not part of the per-PR gate and deliberately not attached to it. Seven cross-builds of the whole
 # workspace is minutes of runner time per platform, and nothing here checks behaviour: what a wheel
@@ -7,11 +7,11 @@
 # other question — whether the build works for a platform this machine is not.
 #
 # Nothing is published from here. The wheels are uploaded as artifacts and a human decides what to
-# do with them, because the version is pinned `==` on both sides: a `tesseradb` that reached PyPI
-# without its matching `tesseradb-native` is uninstallable, and the reverse is a stale binary
+# do with them, because the version is pinned `==` on both sides: a `mosaica` that reached PyPI
+# without its matching `mosaica-native` is uninstallable, and the reverse is a stale binary
 # against a bundle format that refuses it.
 #
-# **One object per platform, not one per Python.** `tessera-python` builds against the stable ABI
+# **One object per platform, not one per Python.** `mosaica-python` builds against the stable ABI
 # (`abi3-py310`), so a platform's wheel is `cp310-abi3` and serves every Python from 3.10 up. That
 # is why this is cargo and not cibuildwheel: cibuildwheel's value is a matrix over interpreter
 # versions, and there is no such matrix here. Seven cargo builds and seven `python -m build` calls
@@ -102,9 +102,9 @@ jobs:
         working-directory: clients/py-native
         shell: bash
         env:
-          TESSERA_NATIVE_TARGET: ${{ matrix.target }}
-          TESSERA_NATIVE_CARGO: ${{ matrix.cargo }}
-          TESSERA_NATIVE_PLATFORM: ${{ matrix.platform }}
+          MOSAICA_NATIVE_TARGET: ${{ matrix.target }}
+          MOSAICA_NATIVE_CARGO: ${{ matrix.cargo }}
+          MOSAICA_NATIVE_PLATFORM: ${{ matrix.platform }}
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
           # A cdylib for a musl target is linked against a static libc unless this says otherwise,
           # and a statically linked libc inside a shared object is not loadable by an interpreter.
@@ -115,8 +115,8 @@ jobs:
       - name: the glibc versions the artifacts require
         if: contains(matrix.target, 'linux-gnu')
         run: |
-          cd clients/py-native/tesseradb_native
-          highest=$(objdump -T tessera _tessera.abi3.so \
+          cd clients/py-native/mosaica_native
+          highest=$(objdump -T mosaica _mosaica.abi3.so \
                     | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -n 1)
           echo "highest required: $highest"
           test "$highest" = "GLIBC_2.28" || {
@@ -133,8 +133,8 @@ jobs:
           with zipfile.ZipFile(sys.argv[1]) as z:
               names = z.namelist()
               print("\n".join(f"{i.file_size:>10}  {i.filename}" for i in z.infolist()))
-          binary = [n for n in names if n.rsplit("/", 1)[-1] in ("tessera", "tessera.exe")]
-          extension = [n for n in names if "_tessera." in n and not n.endswith(".py")]
+          binary = [n for n in names if n.rsplit("/", 1)[-1] in ("mosaica", "mosaica.exe")]
+          extension = [n for n in names if "_mosaica." in n and not n.endswith(".py")]
           if not binary or not extension:
               sys.exit(f"{sys.argv[1]} holds {binary} and {extension}; it needs one of each")
           PY
@@ -149,16 +149,16 @@ jobs:
           "$vpy" -m pip install --force-reinstall clients/py-native/dist/*.whl
           cd /tmp
           "$vpy" -c "
-          import subprocess, tesseradb_native, _tessera
-          print(_tessera)
-          print(subprocess.run([tesseradb_native.binary_path(), '--version'], check=True))
+          import subprocess, mosaica_native, _mosaica
+          print(_mosaica)
+          print(subprocess.run([mosaica_native.binary_path(), '--version'], check=True))
           "
       - uses: actions/upload-artifact@v7
         with:
-          name: tesseradb-native-${{ matrix.platform }}
+          name: mosaica-native-${{ matrix.platform }}
           path: clients/py-native/dist/*.whl
 
-  # `tesseradb` itself: one `py3-none-any` wheel for every platform, built where the components'
+  # `mosaica` itself: one `py3-none-any` wheel for every platform, built where the components'
   # bundle can be built, which is the only reason this needs Node.
   pure:
     runs-on: ubuntu-24.04
@@ -182,20 +182,20 @@ jobs:
           with zipfile.ZipFile(sys.argv[1]) as z:
               tag = dict(
                   line.split(": ", 1)
-                  for line in z.read("tesseradb-0.1.0.dist-info/WHEEL").decode().splitlines()
+                  for line in z.read("mosaica-0.1.0.dist-info/WHEEL").decode().splitlines()
                   if ": " in line
               )["Tag"]
               requires = [
-                  line for line in z.read("tesseradb-0.1.0.dist-info/METADATA").decode().splitlines()
+                  line for line in z.read("mosaica-0.1.0.dist-info/METADATA").decode().splitlines()
                   if line.startswith("Requires-Dist:")
               ]
           print(tag, *requires, sep="\n")
           if tag != "py3-none-any":
-              sys.exit(f"tesseradb is tagged {tag}; the base wheel carries no compiled artifact")
-          if not any("tesseradb-native==" in r and "platform_machine" in r for r in requires):
-              sys.exit("tesseradb must pin tesseradb-native exactly, behind a platform marker")
+              sys.exit(f"mosaica is tagged {tag}; the base wheel carries no compiled artifact")
+          if not any("mosaica-native==" in r and "platform_machine" in r for r in requires):
+              sys.exit("mosaica must pin mosaica-native exactly, behind a platform marker")
           PY
       - uses: actions/upload-artifact@v7
         with:
-          name: tesseradb
+          name: mosaica
           path: dist/*.whl

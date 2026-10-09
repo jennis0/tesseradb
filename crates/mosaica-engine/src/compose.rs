@@ -20,11 +20,11 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_authz::FrozenFragment;
-use tessera_lifecycle::{BufferedItem, IngestBuffer, Overlay};
-use tessera_roaring::for_each_run_in;
-use tessera_store::{Bundle, RowSpace};
-use tessera_types::{EntityId, TermId};
+use mosaica_authz::FrozenFragment;
+use mosaica_lifecycle::{BufferedItem, IngestBuffer, Overlay};
+use mosaica_roaring::for_each_run_in;
+use mosaica_store::{Bundle, RowSpace};
+use mosaica_types::{EntityId, TermId};
 
 use crate::projection::RowProjection;
 use crate::session::SatisfiedKeys;
@@ -409,7 +409,7 @@ impl EffectiveMask {
     }
 
     /// The three bitmaps composition produced, and whether a filter narrows them.
-    // Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
+    // Public for `mosaica-bench`'s `identity_bands_probe`; not part of the engine's API.
     #[doc(hidden)]
     pub fn parts(&self) -> (&Bitmap, &Bitmap, &Bitmap, bool) {
         (
@@ -723,11 +723,11 @@ mod walk_tests {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
     use rustc_hash::FxHashSet;
-    use tessera_types::TermId;
-    use tessera_lifecycle::wal::WalRow;
-    use tessera_lifecycle::ChangeOp;
-    use tessera_store::write::write_permutation;
-    use tessera_store::Permutation;
+    use mosaica_types::TermId;
+    use mosaica_lifecycle::wal::WalRow;
+    use mosaica_lifecycle::ChangeOp;
+    use mosaica_store::write::write_permutation;
+    use mosaica_store::Permutation;
 
     const BOUND: u64 = 2_000;
 

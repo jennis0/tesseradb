@@ -25,7 +25,7 @@ mod values;
 use std::time::Instant;
 
 use arrow::record_batch::RecordBatch;
-use tessera_types::TesseraId;
+use mosaica_types::TesseraId;
 
 use crate::cancel::CancelToken;
 use crate::engine::Engine;

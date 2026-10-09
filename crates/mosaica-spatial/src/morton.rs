@@ -3,7 +3,7 @@
 //! The grid is 2^16 x 2^16; Morton codes are 32-bit, low-aligned in a `u64` on disk.
 //! Cells are half-open: `v = max` lands in the top cell (65535), clamped otherwise.
 
-use tessera_types::MortonCode;
+use mosaica_types::MortonCode;
 
 /// The spatial extent (bounding box) used to quantise `(x, y)` coordinates into cells.
 #[derive(Debug, Clone, Copy, PartialEq)]

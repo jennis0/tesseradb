@@ -14,16 +14,16 @@ mod common;
 mod ring;
 
 use common::*;
-use tessera_engine::derived::DerivedContent;
-use tessera_engine::Engine;
-use tessera_lifecycle::membership::IncomingContent;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_spatial::morton::fixed32;
-use tessera_types::layer::{
+use mosaica_engine::derived::DerivedContent;
+use mosaica_engine::Engine;
+use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_spatial::morton::fixed32;
+use mosaica_types::layer::{
     ContentDeclaration, DeclarationError, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
     LayerDeclaration {
@@ -34,7 +34,7 @@ fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -360,13 +360,13 @@ fn a_layer_declaring_a_property_the_engine_does_not_compute_is_refused() {
 
 fn label_layer(name: &str, requires_all_members: bool) -> LayerDeclaration {
     let mut d = declaration(name, &[]);
-    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+    d.content.supplied = vec![mosaica_types::layer::SuppliedContent {
         name: "topic".into(),
         ty: "text".into(),
         require_member_visibility: if requires_all_members {
-            tessera_types::layer::SuppliedRequirement::All
+            mosaica_types::layer::SuppliedRequirement::All
         } else {
-            tessera_types::layer::SuppliedRequirement::Inherited
+            mosaica_types::layer::SuppliedRequirement::Inherited
         },
     }];
     d

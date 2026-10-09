@@ -4,7 +4,7 @@
 //! ack before fsync — everything below exists to make that fsync boundary the one place acked
 //! state can be trusted from, and everything past it disposable.
 //!
-//! On-disk layout: a fixed 22-byte header (`b"TWAL"` ‖ `u16 LE` format version ‖ `u64 LE` member
+//! On-disk layout: a fixed 22-byte header (`b"MWAL"` ‖ `u16 LE` format version ‖ `u64 LE` member
 //! number ‖ `u64 LE` base position), then framed records:
 //! `u32 LE len ‖ postcard bytes ‖ u32 LE crc32(postcard bytes)`.
 //!
@@ -93,12 +93,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use tessera_types::layer::{EntityRun, LayerDeclaration, ReservedRuns};
-use tessera_types::EntityId;
+use mosaica_types::layer::{EntityRun, LayerDeclaration, ReservedRuns};
+use mosaica_types::EntityId;
 
 /// One declared-scalar value carried by a WAL row: the value type a build writes, under the name the
 /// log's records use.
-pub use tessera_types::scalar::ScalarValue as WalScalar;
+pub use mosaica_types::scalar::ScalarValue as WalScalar;
 
 /// One item within an `IngestBatch` record.
 ///
@@ -329,7 +329,7 @@ pub enum WalRecord {
     /// **It names the owner group only.** Groups sharing these views (`members`, `views.md` §3.3)
     /// take their copies from this one record, because the key and the ordinal are the owner's.
     ViewCreate {
-        view: tessera_types::view::CreatedView,
+        view: mosaica_types::view::CreatedView,
     },
     /// An accepted view drop. **The key is freed and the incarnation dies** (decision 0115): a
     /// key is a name the caller chose, so it may be created again, and what must not come back is
@@ -345,7 +345,7 @@ pub enum WalRecord {
     /// never holds a drop without its deletions. Each is an ordinary deletion: replay applies it to
     /// the overlay as a `ChangeBatch` delete would be, and the fold that executes it retires it.
     ViewDrop {
-        view: tessera_types::view::DeadIncarnation,
+        view: mosaica_types::view::DeadIncarnation,
         /// The entities the drop left with a row in no view, flushed or buffered.
         deleted: Vec<EntityId>,
     },
@@ -568,7 +568,7 @@ pub struct BatchIdentity<'a> {
 pub struct RowReceipt {
     pub outcome: RowOutcome,
     pub tessera_id: Option<u64>,
-    /// The row created an item indexed under more than [`tessera_authz::MAX_KEYS_PER_ITEM`] keys.
+    /// The row created an item indexed under more than [`mosaica_authz::MAX_KEYS_PER_ITEM`] keys.
     /// It is stored all the same.
     pub over_bound: bool,
 }
@@ -610,7 +610,7 @@ pub struct WalEdit {
 /// The batch a record was written for, if it was written for one — **the one rule the accepted-batch
 /// index is built by**, at restart and at every accept.
 ///
-/// The index that answers `x-tessera-batch-id` is a cache of this log: what it holds after a
+/// The index that answers `x-mosaica-batch-id` is a cache of this log: what it holds after a
 /// restart is whatever the retained members say, so anything that decides "does this record carry
 /// a batch id" twice can forget a kind of batch on one of the two paths and not the other.
 ///
@@ -737,7 +737,7 @@ pub struct AttributeDeclaration {
     pub index: bool,
     pub render: bool,
     /// Entity-scoped, or a family per view of a group (`views.md` §5).
-    pub scope: tessera_types::layer::LayerScope,
+    pub scope: mosaica_types::layer::LayerScope,
     /// A column declared `unique` starts with an empty index: it holds no value yet.
     pub unique: bool,
 }
@@ -750,8 +750,8 @@ pub struct AttributeDeclaration {
 pub struct VocabularyDeclaration {
     pub name: String,
     pub title: Option<String>,
-    pub kind: tessera_types::vocabulary::VocabularyKind,
-    pub visibility: tessera_types::vocabulary::Visibility,
+    pub kind: mosaica_types::vocabulary::VocabularyKind,
+    pub visibility: mosaica_types::vocabulary::Visibility,
     /// The code space's width, by its contracts §2.2 name, on [`AttributeDeclaration::ty`]'s
     /// terms.
     pub width: String,
@@ -793,7 +793,7 @@ pub struct ViewGroupDeclaration {
     /// The group whose views these are, where this group declares `members` (`views.md` §3.3).
     pub members: Option<String>,
     /// The per-view metadata names and types, in declaration order.
-    pub metadata: Vec<tessera_types::view::GroupMetadataField>,
+    pub metadata: Vec<mosaica_types::view::GroupMetadataField>,
 }
 
 /// A declared quantisation frame, the four bounds `MANIFEST.views[..].quantisation` carries.
@@ -828,7 +828,7 @@ pub struct PublishedArtifact {
     pub view: Option<String>,
     /// The incarnation of `view` the artifact was published under, and `DECLARED_INCARNATION`
     /// where there is no view. A drop of the view retires the artifact.
-    pub incarnation: tessera_types::view::ViewIncarnation,
+    pub incarnation: mosaica_types::view::ViewIncarnation,
     /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
@@ -980,7 +980,7 @@ impl From<postcard::Error> for WalError {
 pub type Result<T> = std::result::Result<T, WalError>;
 
 /// File format magic, checked at open.
-const WAL_MAGIC: [u8; 4] = *b"TWAL";
+const WAL_MAGIC: [u8; 4] = *b"MWAL";
 /// File format version, checked at open. Bump on any incompatible change to record framing or
 /// the header itself — and on any change to a record's *field* layout or the variant table, since
 /// postcard encodes struct fields and enum discriminants positionally and would otherwise decode
@@ -1013,7 +1013,7 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// Version 13 gives it `attached_to`, on the same rule — and here the guard is load-bearing twice
 /// over, because an attachment is a *visibility* term: a log read on version 12's rules restores
 /// the label of a suppressed cluster as an unattached artifact, and serves it. Version 14 gives
-/// [`tessera_types::layer::LayerDeclaration`] its `value_set` — an *inserted* struct field, so
+/// [`mosaica_types::layer::LayerDeclaration`] its `value_set` — an *inserted* struct field, so
 /// every field after it decodes from the wrong bytes on version 13's rules, and the fields after it
 /// are the gate and the membership requirement. A registration whose criterion decoded out of
 /// alignment is a disclosure control read from whatever follows it. Version 15 adds
@@ -1067,7 +1067,8 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // refused.
 // **33**: a row's descriptors are the operands of its labels read as one disjunction: a term,
 // `public`, or a conjunction under its own key. A log at 32 is refused.
-const WAL_VERSION: u16 = 33;
+// **34**: the magic is `MWAL`. A log at 33 is refused.
+const WAL_VERSION: u16 = 34;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2541,7 +2542,7 @@ mod tests {
         // The whole declaration has to survive, not just the name: a registration that replayed
         // carrying only its identity would come back reachable by everyone, since the gate, the
         // criterion and the own-terms flag are what decide who may see it and what may be served.
-        use tessera_types::layer::{
+        use mosaica_types::layer::{
             ContentDeclaration, EntityRun, ExistenceCriterion, Hierarchy, HierarchyKind,
             LevelDeclaration, MembershipSource, SuppliedContent,
         };
@@ -2558,7 +2559,7 @@ mod tests {
                 membership: MembershipSource::Spatial,
                 value_set: Default::default(),
                 visibility: Some("public".into()),
-                artifact_visibility: tessera_types::layer::ArtifactVisibility::carried(
+                artifact_visibility: mosaica_types::layer::ArtifactVisibility::carried(
                     "visibility",
                 ),
                 require_member_visibility: Some(ExistenceCriterion::Count(25)),
@@ -2572,7 +2573,7 @@ mod tests {
                         name: "polygon".into(),
                         ty: "polygon".into(),
                         require_member_visibility:
-                            tessera_types::layer::SuppliedRequirement::Inherited,
+                            mosaica_types::layer::SuppliedRequirement::Inherited,
                     }],
                 },
                 depends_on: vec!["clusters/hdbscan-2026-08".into()],
@@ -2628,7 +2629,7 @@ mod tests {
         // field that failed to survive here is a served cluster that comes back empty.
         use crate::membership::{deserialise_members, serialise_members};
         use croaring::Bitmap;
-        use tessera_types::layer::EntityRun;
+        use mosaica_types::layer::EntityRun;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal");
@@ -2742,8 +2743,8 @@ mod tests {
     fn the_ingest_designs_records_round_trip_and_name_their_tracks() {
         use crate::membership::{content_digest, serialise_members, ArtifactShapes};
         use croaring::Bitmap;
-        use tessera_types::view::{GroupMetadataField, ViewMetadataType};
-        use tessera_types::vocabulary::{Visibility, VocabularyKind};
+        use mosaica_types::view::{GroupMetadataField, ViewMetadataType};
+        use mosaica_types::vocabulary::{Visibility, VocabularyKind};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal");
@@ -2847,7 +2848,7 @@ mod tests {
                     analyser: None,
                     index: true,
                     render: true,
-                    scope: tessera_types::layer::LayerScope::Group("quarter".into()),
+                    scope: mosaica_types::layer::LayerScope::Group("quarter".into()),
                     unique: false,
                 }),
             },

@@ -6,8 +6,8 @@
 //! the stream, and that the announced viewer address is already answering when it appears.
 //!
 //! The process writes the line to stdout; `serve_announcing` is the same code with the stream
-//! supplied, which is the seam a test can read. That `tessera serve` passes stdout, and its
-//! diagnostics stderr, is in `tessera-cli`.
+//! supplied, which is the seam a test can read. That `mosaica serve` passes stdout, and its
+//! diagnostics stderr, is in `mosaica-cli`.
 
 mod common;
 
@@ -65,12 +65,12 @@ async fn announce_line(stream: &SharedStream) -> String {
 async fn port_zero_planes_announce_the_ports_the_kernel_chose() {
     let tmp = TempDir::new().unwrap();
     let deployment = write_deployment(tmp.path(), "127.0.0.1:0", "");
-    let prepared = tessera_server::prepare(&deployment).expect("the deployment must start");
+    let prepared = mosaica_server::prepare(&deployment).expect("the deployment must start");
 
     let stream = SharedStream::new();
     let serving = tokio::spawn({
         let stream = stream.clone();
-        async move { tessera_server::serve_announcing(prepared, stream).await }
+        async move { mosaica_server::serve_announcing(prepared, stream).await }
     });
 
     let line = announce_line(&stream).await;
@@ -142,12 +142,12 @@ async fn a_unix_control_plane_is_announced_by_its_path() {
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("control.sock");
     let deployment = write_deployment(tmp.path(), &format!("unix:{}", socket.display()), "");
-    let prepared = tessera_server::prepare(&deployment).expect("the deployment must start");
+    let prepared = mosaica_server::prepare(&deployment).expect("the deployment must start");
 
     let stream = SharedStream::new();
     let serving = tokio::spawn({
         let stream = stream.clone();
-        async move { tessera_server::serve_announcing(prepared, stream).await }
+        async move { mosaica_server::serve_announcing(prepared, stream).await }
     });
 
     let line = announce_line(&stream).await;

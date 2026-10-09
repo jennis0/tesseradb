@@ -1,11 +1,11 @@
 /**
  * The map's probe. The viewer publishes its first map's on `window` with its timing lanes.
- * `__tesseraProbeOf` is the harness's accessor, installed before any page script, which falls
+ * `__mosaicaProbeOf` is the harness's accessor, installed before any page script, which falls
  * back to the explorer's map's probe on a page that publishes none.
  */
 interface Window {
-  __tesseraProbeOf: () => Window['__tesseraProbe'] | null;
-  __tesseraProbe?: {
+  __mosaicaProbeOf: () => Window['__mosaicaProbe'] | null;
+  __mosaicaProbe?: {
     paints: number;
     at: number;
     marks: number;

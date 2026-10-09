@@ -1,21 +1,21 @@
-//! Stamps the commit this binary was built from into `TESSERA_BUILD_COMMIT`.
+//! Stamps the commit this binary was built from into `MOSAICA_BUILD_COMMIT`.
 //!
-//! A build's log and `tessera --version` both print it. The campaign of 2026-09-12 spent two
+//! A build's log and `mosaica --version` both print it. The campaign of 2026-09-12 spent two
 //! hours and three-quarters on a binary seven commits behind the tree it was read against,
 //! because nothing the run emitted said which source it came from.
 //!
 //! "unknown" where `git` is absent or the source is not a checkout — a tarball build is a build,
 //! and refusing one to stamp a provenance string would be the wrong trade.
 //!
-//! A `TESSERA_BUILD_COMMIT` already in the environment wins, for a build whose source has no
+//! A `MOSAICA_BUILD_COMMIT` already in the environment wins, for a build whose source has no
 //! `.git` beside it, such as the Docker image's.
 
 use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=TESSERA_BUILD_COMMIT");
-    let commit = std::env::var("TESSERA_BUILD_COMMIT")
+    println!("cargo:rerun-if-env-changed=MOSAICA_BUILD_COMMIT");
+    let commit = std::env::var("MOSAICA_BUILD_COMMIT")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
@@ -29,7 +29,7 @@ fn main() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
-    println!("cargo:rustc-env=TESSERA_BUILD_COMMIT={commit}");
+    println!("cargo:rustc-env=MOSAICA_BUILD_COMMIT={commit}");
     // A commit change moves `HEAD` and the ref it names, so both are watched — and **where git
     // says they are**, not at `../../.git`. A worktree's `.git` is a *file* naming the real
     // directory, so the guessed paths do not exist there and the stamp went stale on every commit

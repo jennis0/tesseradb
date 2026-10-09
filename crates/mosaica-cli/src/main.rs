@@ -1,4 +1,4 @@
-//! `tessera`: the one binary that builds, checks, verifies and serves a bundle.
+//! `mosaica`: the one binary that builds, checks, verifies and serves a bundle.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -7,20 +7,20 @@ mod identity;
 mod records;
 
 use clap::{Parser, Subcommand};
-use tessera_spatial::Bounds;
-use tessera_types::IdentityKey;
+use mosaica_spatial::Bounds;
+use mosaica_types::IdentityKey;
 
 #[cfg(test)]
 mod reference;
 
 #[derive(Parser)]
 #[command(
-    name = "tessera",
-    about = "Build a Tessera bundle from a corpus declaration, check the declaration, verify the \
+    name = "mosaica",
+    about = "Build a Mosaica bundle from a corpus declaration, check the declaration, verify the \
              bundle and serve it.",
     // The commit rather than the crate version: a measurement is read against a tree, and the
     // crate version does not move between two of them.
-    version = tessera_build::BUILD_COMMIT
+    version = mosaica_build::BUILD_COMMIT
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,7 +31,7 @@ struct Cli {
 enum Command {
     /// Build a bundle from the corpus declaration and the source files it names.
     ///
-    /// `tessera build` needs no flags. It reads `tessera.toml` from the
+    /// `mosaica build` needs no flags. It reads `mosaica.toml` from the
     /// working directory, or from the nearest directory above it that has one. That file names
     /// the corpus declaration in `[build] schema` (default `schema.toml`) and the bundle
     /// directory in `[bundle] path`, each relative to the file's own directory. The declaration
@@ -41,15 +41,15 @@ enum Command {
     /// read from an earlier bundle does not name an item in this one. A copy of a bundle keeps
     /// its `tessera_id`s.
     ///
-    /// The other flags override `tessera.toml` or tune the build.
+    /// The other flags override `mosaica.toml` or tune the build.
     Build {
-        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// Read this `mosaica.toml` instead of searching for one upward from the working
         /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
-        /// Write the bundle to this directory instead of `[bundle] path` in `tessera.toml`.
+        /// Write the bundle to this directory instead of `[bundle] path` in `mosaica.toml`.
         ///
-        /// `tessera serve` opens `[bundle] path`, so it does not serve a bundle written
+        /// `mosaica serve` opens `[bundle] path`, so it does not serve a bundle written
         /// elsewhere.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
@@ -75,7 +75,7 @@ enum Command {
         /// bundle where there are any.
         #[arg(long)]
         strict: bool,
-        /// Read this corpus declaration instead of `[build] schema` in `tessera.toml`.
+        /// Read this corpus declaration instead of `[build] schema` in `mosaica.toml`.
         ///
         /// The declaration is compiled into the bundle's `MANIFEST.json`, and the server reads
         /// it from there.
@@ -91,7 +91,7 @@ enum Command {
         file: Vec<(String, PathBuf)>,
         /// Do not write `pairs.parquet`.
         ///
-        /// The server does not read the file. The conformance suite and `tessera verify --deep`
+        /// The server does not read the file. The conformance suite and `mosaica verify --deep`
         /// do, and `verify --deep` passes a bundle without one.
         #[arg(long)]
         no_oracle_pairs: bool,
@@ -132,8 +132,8 @@ enum Command {
     /// Check the declaration against the column schemas of the files it names, without reading
     /// a row.
     ///
-    /// `tessera check` finds `tessera.toml`, the declaration and the `--file` overrides as
-    /// `tessera build` does, and stops at the first error in `tessera.toml` or the declaration,
+    /// `mosaica check` finds `mosaica.toml`, the declaration and the `--file` overrides as
+    /// `mosaica build` does, and stops at the first error in `mosaica.toml` or the declaration,
     /// such as a missing key or a TOML syntax error. Once both parse, it reads the footer of
     /// each source Parquet file and reports every column that is missing or has the wrong type,
     /// not only the first. It reads no rows except the geometry of shape layers, which it reads
@@ -147,17 +147,17 @@ enum Command {
     ///
     /// It cannot check anything that needs a row: whether a closed vocabulary covers the values
     /// in the data, which rows the identity rule refuses, or where the data lies in its view's
-    /// extent. `tessera build` reports those.
+    /// extent. `mosaica build` reports those.
     Check {
-        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// Read this `mosaica.toml` instead of searching for one upward from the working
         /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
-        /// Read this corpus declaration instead of `[build] schema` in `tessera.toml`.
+        /// Read this corpus declaration instead of `[build] schema` in `mosaica.toml`.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
         /// Read the source NAME in the declaration's `[sources]` from PATH instead. Repeatable,
-        /// and the same override `tessera build` takes.
+        /// and the same override `mosaica build` takes.
         #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
         /// Print the declaration to stdout as the JSON request bodies the control plane takes,
@@ -217,7 +217,7 @@ enum Command {
         text: Vec<String>,
         /// The analyser to use, by name. An unknown name is refused with the list of names this
         /// binary carries.
-        #[arg(long, value_name = "NAME", default_value = tessera_analyse::UNICODE)]
+        #[arg(long, value_name = "NAME", default_value = mosaica_analyse::UNICODE)]
         analyser: String,
         /// Print the analyser's identity, the value a text column records, and exit.
         #[arg(long)]
@@ -231,14 +231,14 @@ enum Command {
     },
     /// Ask a running server whether it is ready, and exit 0 if it is or 1 if it is not.
     ///
-    /// Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address
+    /// Finds `mosaica.toml` as `mosaica build` does and sends `GET /readyz` to the viewer address
     /// in `[serve]`. The server answers 503 while its write-ahead log cannot be written, when the
     /// thread that applies writes has stopped, and when part of the bundle is served from an
     /// older list of segments because the newest could not be used. Otherwise it answers 200,
     /// even while a write to disc hangs.
     ///
     /// The command exits 0 on a 200. It exits 1, with the reason on stderr, on any other answer,
-    /// on no answer within `--timeout`, when nothing is listening, and when `tessera.toml` is
+    /// on no answer within `--timeout`, when nothing is listening, and when `mosaica.toml` is
     /// refused or declares no viewer address. A server starts listening only once it has opened
     /// its bundle, so the check fails until then.
     ///
@@ -250,7 +250,7 @@ enum Command {
     /// A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run the command on the
     /// machine or in the container the server runs in. The Docker image's health check runs it.
     Health {
-        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// Read this `mosaica.toml` instead of searching for one upward from the working
         /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
@@ -267,7 +267,7 @@ enum Command {
     /// name, sent only when given, so the server's own setting applies otherwise.
     ///
     /// The columns are `tessera_id`, the fields in the order named, the system fields in the order
-    /// named, then `tessera:matched` under `--keep-unmatched`. A category field is a dictionary
+    /// named, then `mosaica:matched` under `--keep-unmatched`. A category field is a dictionary
     /// column of its value keys, each page's dictionary holding the keys of its own rows. A read
     /// that returns no row writes these columns with no rows.
     ///
@@ -275,19 +275,19 @@ enum Command {
     /// the cursor to read the rest with. The first response's head, with the counts under
     /// `--count`, is printed on stderr at the end.
     ///
-    /// For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields
+    /// For example, `mosaica items --server http://127.0.0.1:8080 --view papers --fields
     /// title,year --system-fields labels --out papers.parquet`.
     Items(records::ItemsArgs),
     /// Read every artifact of one layer a session token is served, with the properties named, from
     /// a running server, and write them as Arrow IPC or Parquet.
     ///
     /// An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read is
-    /// carried across `POST /v1/artifacts` responses, and written, as `tessera items` carries and
+    /// carried across `POST /v1/artifacts` responses, and written, as `mosaica items` carries and
     /// writes one. The columns are `tessera_id`, the properties in the order named, then
     /// `matched_count` under `--filters`. The rows are in order of level, and in the order they
     /// were published within a level.
     ///
-    /// For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --layer
+    /// For example, `mosaica artifacts --server http://127.0.0.1:8080 --view papers --layer
     /// clusters --fields key,masked_count --format ipc > clusters.arrows`.
     Artifacts(records::ArtifactsArgs),
     /// Count how the items a session token may see in one view are distributed, by one grouping,
@@ -304,16 +304,16 @@ enum Command {
     /// {"zoom": 3, "bbox": [0, 0, 100, 100], "budget": 1000}}}` the largest of those the map draws
     /// at that tile depth, box and cluster budget, and with `"palette_size": 10` beside `layer` a
     /// `slot` column, each artifact's colour among ten; `{"cells": {"depth": 8}}` a density
-    /// surface. The read is carried across responses, and written, as `tessera items` carries and
+    /// surface. The read is carried across responses, and written, as `mosaica items` carries and
     /// writes one. The table's head, with the set's total, is printed on
     /// stderr at the end.
     ///
-    /// For example, `tessera aggregate --server http://127.0.0.1:8080 --view papers --grouping
+    /// For example, `mosaica aggregate --server http://127.0.0.1:8080 --view papers --grouping
     /// '{"by": {"field": "submitted_at", "bins": 12}}' --format ipc > submitted.arrows`.
     Aggregate(records::AggregateArgs),
-    /// Serve the bundle that `tessera.toml` names.
+    /// Serve the bundle that `mosaica.toml` names.
     ///
-    /// Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and
+    /// Finds `mosaica.toml` as `mosaica build` does, opens the bundle at `[bundle] path` and
     /// replays the write-ahead log at `[bundle] wal`, all before it binds any address. It then
     /// listens on the viewer, session and control addresses in `[serve]`. When all three are bound
     /// it prints one line of JSON to stdout naming them. Diagnostics go to stderr, in colour only
@@ -326,7 +326,7 @@ enum Command {
     /// be written is in force but not on disc, and a restart undoes it until the change is sent
     /// again.
     ///
-    /// It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would
+    /// It refuses to start, and exits 1, when `mosaica.toml` is refused as `mosaica build` would
     /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the operator
     /// credential is not set, is empty, or its file cannot be read: under `[serve]`,
     /// `operator_credential_file` or `operator_credential_env` names the file or environment
@@ -335,7 +335,7 @@ enum Command {
     /// and when the write-ahead log fails its checksum. An address that cannot be bound, such as
     /// one already in use, stops it with exit 1 after the bundle has opened.
     Serve {
-        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// Read this `mosaica.toml` instead of searching for one upward from the working
         /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
@@ -345,40 +345,40 @@ enum Command {
     /// The password, API key or OIDC access token is read from the first line of stdin, never
     /// from an argument. The principal must hold `read`.
     ///
-    /// For example, `tessera login --server http://127.0.0.1:8080 --principal ann <
+    /// For example, `mosaica login --server http://127.0.0.1:8080 --principal ann <
     /// password.txt`.
     Login(identity::LoginArgs),
-    /// End a session on the viewer plane. The session token is read from `TESSERA_TOKEN`, never
+    /// End a session on the viewer plane. The session token is read from `MOSAICA_TOKEN`, never
     /// from an argument.
     Logout(identity::LogoutArgs),
     /// Mint and revoke sessions on the session plane, and list and end sessions on the control
     /// plane.
     ///
-    /// The session plane's verbs read their credential from `TESSERA_API_KEY`: an API key holding
+    /// The session plane's verbs read their credential from `MOSAICA_API_KEY`: an API key holding
     /// `authorise-as`, or the operator credential, which alone may name the session's terms or ask
     /// for a session reading every item.
-    /// The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
+    /// The control plane's read their credential from `MOSAICA_CREDENTIAL` and need `admin`.
     Session {
         #[command(subcommand)]
         command: identity::SessionCommand,
     },
     /// Manage local principals on the control plane: people and services.
     ///
-    /// Every verb reads the control plane's credential from `TESSERA_CREDENTIAL`, which is the
+    /// Every verb reads the control plane's credential from `MOSAICA_CREDENTIAL`, which is the
     /// operator credential, an API key or an OIDC access token, and needs `admin`. Each prints the
     /// server's JSON answer; a change answers how many sessions it ended.
     Principal {
         #[command(subcommand)]
         command: identity::PrincipalCommand,
     },
-    /// Manage API keys on the control plane. The credential is read as `tessera principal` reads
+    /// Manage API keys on the control plane. The credential is read as `mosaica principal` reads
     /// it.
     Key {
         #[command(subcommand)]
         command: identity::KeyCommand,
     },
     /// Manage local groups and their members on the control plane. The credential is read as
-    /// `tessera principal` reads it.
+    /// `mosaica principal` reads it.
     Group {
         #[command(subcommand)]
         command: identity::GroupCommand,
@@ -387,12 +387,12 @@ enum Command {
     ///
     /// A term says what the grantee may see, and a permission what it may do. The sessions the
     /// grant affects end, so they pick it up when they authorise again. The credential is read as
-    /// `tessera principal` reads it.
+    /// `mosaica principal` reads it.
     Grant(identity::GrantArgs),
     /// Revoke a term or a permission from a principal or a group, on the control plane. The
-    /// credential is read as `tessera principal` reads it.
+    /// credential is read as `mosaica principal` reads it.
     RevokeGrant(identity::GrantArgs),
-    /// Manage OIDC providers on the control plane. The credential is read as `tessera principal`
+    /// Manage OIDC providers on the control plane. The credential is read as `mosaica principal`
     /// reads it.
     Provider {
         #[command(subcommand)]
@@ -449,7 +449,7 @@ enum CorpusCommand {
         #[arg(long, value_parser = parse_extent, default_value = GRID_EXTENT)]
         extent: Bounds,
     },
-    /// Write a `tessera build`-able fixture to disk: `points.parquet`, `pairs.parquet`, the
+    /// Write a `mosaica build`-able fixture to disk: `points.parquet`, `pairs.parquet`, the
     /// `[[layer]]`-bearing declaration (`corpus-config.toml`), and the artifact scale campaign's
     /// four fixture files — a flat (interval-plus-scatter) layer's roster and membership, the
     /// partition arm's roster and its enumerated twin's membership, and the boundary arm's roster
@@ -482,7 +482,7 @@ enum CorpusCommand {
     /// principal — an Arrow IPC stream on stdout, `(artifact, count)` ascending, non-empty
     /// artifacts only (the campaign's oracle; `artifact-delivery.md` §5.1).
     ///
-    /// One O(*n*) pass per call, on [`tessera_corpus::Corpus::bucket_census`]'s shared driver — the
+    /// One O(*n*) pass per call, on [`mosaica_corpus::Corpus::bucket_census`]'s shared driver — the
     /// same rule [`CorpusCommand::Census`] follows for tiles, extended to artifacts: an artifact
     /// this grant sees nothing of is absent, never a zero-count row.
     ArtifactCensus {
@@ -513,7 +513,7 @@ enum CorpusCommand {
 }
 
 /// [`CorpusCommand::ArtifactCensus`]'s `--layer` values — the four closed-form arms
-/// `tessera-corpus` states a census over.
+/// `mosaica-corpus` states a census over.
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum ArtifactCensusLayer {
     Flat,
@@ -574,7 +574,7 @@ fn exit_on_termination() {
     {
         Ok(runtime) => runtime,
         Err(e) => {
-            eprintln!("tessera serve: SIGTERM and SIGINT will not stop the server: {e}");
+            eprintln!("mosaica serve: SIGTERM and SIGINT will not stop the server: {e}");
             return;
         }
     };
@@ -587,7 +587,7 @@ fn exit_on_termination() {
     let (mut term, mut int) = match (term, int) {
         (Ok(term), Ok(int)) => (term, int),
         (Err(e), _) | (_, Err(e)) => {
-            eprintln!("tessera serve: SIGTERM and SIGINT will not stop the server: {e}");
+            eprintln!("mosaica serve: SIGTERM and SIGINT will not stop the server: {e}");
             return;
         }
     };
@@ -598,7 +598,7 @@ fn exit_on_termination() {
                 _ = int.recv() => "SIGINT",
             }
         });
-        eprintln!("tessera serve: stopped on {name}");
+        eprintln!("mosaica serve: stopped on {name}");
         std::process::exit(0);
     });
 }
@@ -642,30 +642,30 @@ fn parse_byte_size(value: &str) -> Result<u64, String> {
         .ok_or_else(|| "byte size overflows u64".to_string())
 }
 
-/// Everything `tessera build` and `tessera check` both resolve, before either does its own work.
+/// Everything `mosaica build` and `mosaica check` both resolve, before either does its own work.
 ///
 /// **One resolution, not two.** The deployment file found by walking up, the declaration it names,
 /// the `--file` overrides against it — a second copy of that in the check verb would be a copy
 /// free to drift, and the whole value of a check is that it saw what the build will see.
 struct Declaration {
-    deployment: tessera_config::Config,
-    config: tessera_build::config::Config,
+    deployment: mosaica_config::Config,
+    config: mosaica_build::config::Config,
 }
 
 fn resolve_declaration(
     deployment: Option<&Path>,
     config: Option<PathBuf>,
     file: Vec<(String, PathBuf)>,
-    strictness: tessera_build::config::Strictness,
+    strictness: mosaica_build::config::Strictness,
 ) -> Result<Declaration, String> {
     // **The deployment file first, because everything else is read through it**: where the
     // declaration is and where the bundle goes. A missing one is a refusal naming what to create
     // (configuration.md §3) — never a silent set of defaults, since every path in it is a decision.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (_, deployment) = tessera_config::open(deployment, &cwd)?;
+    let (_, deployment) = mosaica_config::open(deployment, &cwd)?;
     let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
     let bindings = collect_bindings(file)?;
-    let config = tessera_build::config::Config::parse_with(&schema_path, &bindings, strictness)
+    let config = mosaica_build::config::Config::parse_with(&schema_path, &bindings, strictness)
         .map_err(|e| e.to_string())?;
     Ok(Declaration {
         deployment,
@@ -710,13 +710,13 @@ struct StageTimings {
     /// Print a line per stage — `--stage-timings`. Off when only the JSON path was asked for.
     print: bool,
     /// Collect the records — `--stage-timings-json`. `None` when only the lines were asked for.
-    json: Option<tessera_build::observer::JsonStageTimings>,
+    json: Option<mosaica_build::observer::JsonStageTimings>,
 }
 
-impl tessera_build::observer::BuildObserver for StageTimings {
+impl mosaica_build::observer::BuildObserver for StageTimings {
     fn stage_end(
         &self,
-        stage: tessera_build::observer::BuildStage,
+        stage: mosaica_build::observer::BuildStage,
         elapsed: std::time::Duration,
         rows: u64,
         peak_rss_kib: u64,
@@ -730,7 +730,7 @@ impl tessera_build::observer::BuildObserver for StageTimings {
             );
         }
         if let Some(json) = &self.json {
-            tessera_build::observer::BuildObserver::stage_end(
+            mosaica_build::observer::BuildObserver::stage_end(
                 json,
                 stage,
                 elapsed,
@@ -776,7 +776,7 @@ fn parse_file_binding(raw: &str) -> Result<(String, PathBuf), String> {
 /// they can see** — §3.3's membership-derived visibility, which is a property of the read path,
 /// not of how an author numbered their codes. A cardinality warning here would be mechanism that
 /// looks like access control and is not.
-fn report_residency(schema: &tessera_build::config::Schema, limit: Option<u64>) {
+fn report_residency(schema: &mosaica_build::config::Schema, limit: Option<u64>) {
     let columns = schema.attributes.len();
     match schema.row_bits() {
         Some(per_row_bits) => {
@@ -806,10 +806,10 @@ fn report_residency(schema: &tessera_build::config::Schema, limit: Option<u64>) 
     );
 }
 
-/// `tessera corpus items` (correctness-suite §12.1): served `fx_key` values in, their expected
+/// `mosaica corpus items` (correctness-suite §12.1): served `fx_key` values in, their expected
 /// items out. The corpus is constructed with `n = 0` because the lookups take no part in it —
 /// see the verb's own doc. The `partition` column is answered here for the same reason: it is a
-/// function of `(seed, layer, e)`, not of the corpus's size (`tessera-corpus`'s `partition.rs`).
+/// function of `(seed, layer, e)`, not of the corpus's size (`mosaica-corpus`'s `partition.rs`).
 fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
     use arrow::array::{
         ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
@@ -819,7 +819,7 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    let corpus = match tessera_corpus::Corpus::new(seed, 0, extent) {
+    let corpus = match mosaica_corpus::Corpus::new(seed, 0, extent) {
         Ok(corpus) => corpus,
         Err(e) => {
             eprintln!("corpus items: {e}");
@@ -881,7 +881,7 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
         tag.append_option(item.tag.as_deref());
         blurb.append_option(item.blurb.as_deref());
         partition.append_value(
-            corpus.partition_artifact_of(tessera_corpus::materialise::PARTITION_LAYER, e) as u32,
+            corpus.partition_artifact_of(mosaica_corpus::materialise::PARTITION_LAYER, e) as u32,
         );
     }
 
@@ -921,7 +921,7 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
     write_arrow_stdout(&schema, &[batch], "corpus items")
 }
 
-/// `tessera corpus census` (correctness-suite §9.2, §12.1): the expected masked count per tile,
+/// `mosaica corpus census` (correctness-suite §9.2, §12.1): the expected masked count per tile,
 /// computed in one O(n) pass here so the driver compares two count vectors.
 fn corpus_census(seed: u64, n: u64, zoom: u8, grant: &str, extent: Bounds) -> ExitCode {
     use arrow::array::{ArrayRef, UInt64Array};
@@ -933,14 +933,14 @@ fn corpus_census(seed: u64, n: u64, zoom: u8, grant: &str, extent: Bounds) -> Ex
         eprintln!("corpus census: zoom {zoom} exceeds grid depth 16 (contracts §2.5)");
         return ExitCode::FAILURE;
     }
-    let grant = match tessera_corpus::Grant::parse(grant) {
+    let grant = match mosaica_corpus::Grant::parse(grant) {
         Ok(grant) => grant,
         Err(e) => {
             eprintln!("corpus census: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let corpus = match tessera_corpus::Corpus::new(seed, n, extent) {
+    let corpus = match mosaica_corpus::Corpus::new(seed, n, extent) {
         Ok(corpus) => corpus,
         Err(e) => {
             eprintln!("corpus census: {e}");
@@ -977,14 +977,14 @@ fn corpus_with_terms_per_level(
     n: u64,
     extent: Bounds,
     terms_per_level: Option<u32>,
-) -> Result<tessera_corpus::Corpus, String> {
+) -> Result<mosaica_corpus::Corpus, String> {
     match terms_per_level {
-        Some(width) => tessera_corpus::Corpus::with_terms_per_level(seed, n, extent, width),
-        None => tessera_corpus::Corpus::new(seed, n, extent),
+        Some(width) => mosaica_corpus::Corpus::with_terms_per_level(seed, n, extent, width),
+        None => mosaica_corpus::Corpus::new(seed, n, extent),
     }
 }
 
-/// `tessera corpus materialise` (`artifact-delivery.md` §5.1, §5.4): the generator's build inputs
+/// `mosaica corpus materialise` (`artifact-delivery.md` §5.1, §5.4): the generator's build inputs
 /// plus the artifact scale campaign's fixture, written to `out`.
 fn corpus_materialise(
     seed: u64,
@@ -1040,7 +1040,7 @@ fn corpus_materialise(
     ExitCode::SUCCESS
 }
 
-/// `tessera corpus artifact-census` (`artifact-delivery.md` §5.1): the expected masked count per
+/// `mosaica corpus artifact-census` (`artifact-delivery.md` §5.1): the expected masked count per
 /// artifact of one closed-form layer, for one principal.
 fn corpus_artifact_census(
     seed: u64,
@@ -1062,7 +1062,7 @@ fn corpus_artifact_census(
             return ExitCode::FAILURE;
         }
     };
-    let grant = match tessera_corpus::Grant::parse_bounded(grant, corpus.term_space()) {
+    let grant = match mosaica_corpus::Grant::parse_bounded(grant, corpus.term_space()) {
         Ok(grant) => grant,
         Err(e) => {
             eprintln!("corpus artifact-census: {e}");
@@ -1071,20 +1071,20 @@ fn corpus_artifact_census(
     };
     let counts = match layer {
         ArtifactCensusLayer::Flat => corpus.flat_artifact_census(
-            tessera_corpus::materialise::FLAT_LAYER,
-            tessera_corpus::materialise::FIXTURE_LEVEL,
+            mosaica_corpus::materialise::FLAT_LAYER,
+            mosaica_corpus::materialise::FIXTURE_LEVEL,
             &grant,
         ),
         ArtifactCensusLayer::Partition => {
-            corpus.partition_artifact_census(tessera_corpus::materialise::PARTITION_LAYER, &grant)
+            corpus.partition_artifact_census(mosaica_corpus::materialise::PARTITION_LAYER, &grant)
         }
         ArtifactCensusLayer::Boundary => corpus.boundary_artifact_census(
-            tessera_corpus::materialise::BOUNDARY_LAYER,
-            tessera_corpus::materialise::FIXTURE_LEVEL,
+            mosaica_corpus::materialise::BOUNDARY_LAYER,
+            mosaica_corpus::materialise::FIXTURE_LEVEL,
             &grant,
         ),
         ArtifactCensusLayer::Treed => {
-            corpus.treed_artifact_census(tessera_corpus::materialise::TREED_LAYER, &grant)
+            corpus.treed_artifact_census(mosaica_corpus::materialise::TREED_LAYER, &grant)
         }
     };
 
@@ -1154,8 +1154,8 @@ fn main() -> ExitCode {
             //
             // Parsed and refused before any work: a declaration refusal is an operator's typo, and
             // discovering it after a multi-minute build has written a bundle prefix costs the
-            // whole build. Every rule in `tessera_build::config`
-            // fires here, against no data at all — which is also the whole of what `tessera check`
+            // whole build. Every rule in `mosaica_build::config`
+            // fires here, against no data at all — which is also the whole of what `mosaica check`
             // does, through this same function.
             let Declaration {
                 deployment,
@@ -1164,7 +1164,7 @@ fn main() -> ExitCode {
                 deployment.as_deref(),
                 config,
                 file,
-                tessera_build::config::Strictness::Build,
+                mosaica_build::config::Strictness::Build,
             ) {
                 Ok(resolved) => resolved,
                 Err(detail) => {
@@ -1197,7 +1197,7 @@ fn main() -> ExitCode {
             };
             // `--limit`'s attribute: the declaration's one unique integer attribute, refused
             // before any file is read where there is not exactly one.
-            let limited = match tessera_build::ids::Limit::of(&config.schema, limit) {
+            let limited = match mosaica_build::ids::Limit::of(&config.schema, limit) {
                 Ok(found) => found.is_some(),
                 Err(e) => {
                     eprintln!("build refused: {e}");
@@ -1220,7 +1220,7 @@ fn main() -> ExitCode {
             // are only checkable beside the data's own box.
             let mut acquired_views = Vec::with_capacity(registry.len());
             for view in &registry {
-                match tessera_build::config::acquire_view(view) {
+                match mosaica_build::config::acquire_view(view) {
                     Ok(acquired) => acquired_views.push(acquired),
                     Err(e) => {
                         eprintln!("build refused: {e}");
@@ -1236,8 +1236,8 @@ fn main() -> ExitCode {
             //
             // Under `--limit` the build fits each frame once the identity pass has decided which
             // rows it keeps, and each view holds a placeholder until then.
-            let mut framings: Vec<tessera_build::Framing> = Vec::new();
-            let mut extents: Vec<tessera_spatial::Bounds> = Vec::with_capacity(registry.len());
+            let mut framings: Vec<mosaica_build::Framing> = Vec::new();
+            let mut extents: Vec<mosaica_spatial::Bounds> = Vec::with_capacity(registry.len());
             let mut frame_of: std::collections::BTreeMap<&str, usize> =
                 std::collections::BTreeMap::new();
             for (index, view) in registry.iter().enumerate() {
@@ -1266,13 +1266,13 @@ fn main() -> ExitCode {
                     None => format!("view '{}'", view.id),
                 };
                 if limited {
-                    framings.push(tessera_build::Framing {
+                    framings.push(mosaica_build::Framing {
                         subject,
                         projection: view.projection,
                         extent: view.extent,
                         views: members,
                     });
-                    extents.push(tessera_spatial::Bounds {
+                    extents.push(mosaica_spatial::Bounds {
                         x_min: 0.0,
                         x_max: 1.0,
                         y_min: 0.0,
@@ -1280,16 +1280,16 @@ fn main() -> ExitCode {
                     });
                     continue;
                 }
-                let sources: Vec<tessera_build::config::FrameSource> = members
+                let sources: Vec<mosaica_build::config::FrameSource> = members
                     .iter()
-                    .map(|&i| tessera_build::config::FrameSource {
+                    .map(|&i| mosaica_build::config::FrameSource {
                         points: &acquired_views[i].points,
                         fields: &acquired_views[i].point_fields,
                         select: acquired_views[i].select.as_ref(),
                         kept: None,
                     })
                     .collect();
-                let frame = match tessera_build::config::frame_of(
+                let frame = match mosaica_build::config::frame_of(
                     &subject,
                     view.projection,
                     &view.extent,
@@ -1305,11 +1305,11 @@ fn main() -> ExitCode {
                 extents.push(frame.extent);
             }
 
-            let view_args: Vec<tessera_build::ViewArgs> = registry
+            let view_args: Vec<mosaica_build::ViewArgs> = registry
                 .iter()
                 .zip(acquired_views)
                 .zip(&extents)
-                .map(|((view, acquired_view), extent)| tessera_build::ViewArgs {
+                .map(|((view, acquired_view), extent)| mosaica_build::ViewArgs {
                     // **This view's own gate** (`views.md` §6), as the declaration compiled it:
                     // the plain view's `visibility`, or — for a view of a group — its roster
                     // record's own. The group's half travels on the group descriptor beside it.
@@ -1326,10 +1326,10 @@ fn main() -> ExitCode {
             // **One column per view of the group** (`views.md` §5), resolved against the registry
             // the build just enumerated: the views a family covers are the ones its group owns,
             // and each of them already says where its rows are.
-            let scoped_attributes: Vec<tessera_build::ScopedColumnFamily> = config
+            let scoped_attributes: Vec<mosaica_build::ScopedColumnFamily> = config
                 .scoped_attributes
                 .iter()
-                .map(|scoped| tessera_build::ScopedColumnFamily {
+                .map(|scoped| mosaica_build::ScopedColumnFamily {
                     attribute: scoped.attribute.clone(),
                     group: scoped.group.clone(),
                     views: registry
@@ -1348,18 +1348,18 @@ fn main() -> ExitCode {
             // **A layer naming a group is drawn on every view of it** (`views.md` §2, §3.5),
             // and the expansion happens here, against the registry the build just enumerated: a
             // build materialises the views that exist, and a layer's extents are per row space.
-            // The rule itself is [`Config::expand_layer_views`], which `tessera check` sizes its
+            // The rule itself is [`Config::expand_layer_views`], which `mosaica check` sizes its
             // shape layers through so that the two entry points cannot disagree about which views
             // a layer is drawn on.
             let mut config = config;
             for layer in &mut config.layers {
                 layer.views =
-                    tessera_build::config::Config::expand_layer_views(&registry, &layer.views);
+                    mosaica_build::config::Config::expand_layer_views(&registry, &layer.views);
             }
             // **A scoped layer is a different artifact set per view of one group** (§3.5): its
             // rows say which view each artifact belongs to, under the layer's own `fields.view`,
             // and the group's keys are what a stray value is refused against.
-            let scoped_layers: std::collections::BTreeMap<String, tessera_build::ScopedLayer> =
+            let scoped_layers: std::collections::BTreeMap<String, mosaica_build::ScopedLayer> =
                 config
                     .scopes
                     .layers
@@ -1381,7 +1381,7 @@ fn main() -> ExitCode {
                             .iter()
                             .find(|source| &source.name == layer)
                             .and_then(|source| match &source.artifacts {
-                                Some(tessera_build::config::ArtifactSource::File {
+                                Some(mosaica_build::config::ArtifactSource::File {
                                     fields,
                                     ..
                                 }) => Some(fields.of("view").to_string()),
@@ -1390,7 +1390,7 @@ fn main() -> ExitCode {
                             .unwrap_or_else(|| "view".to_string());
                         (
                             layer.clone(),
-                            tessera_build::ScopedLayer {
+                            mosaica_build::ScopedLayer {
                                 group: group.clone(),
                                 column,
                                 keys,
@@ -1400,7 +1400,7 @@ fn main() -> ExitCode {
                     .collect();
             // Read out before the declaration is broken up into build arguments: it is a
             // property of the declaration, and every value in it exists by now.
-            let disclosure = tessera_build::disclosure::Disclosure::of(&config);
+            let disclosure = mosaica_build::disclosure::Disclosure::of(&config);
             // The group registry beside it, and before the declaration is broken up for the same
             // reason: it reads the declaration's groups and the frames the views resolved to
             // (`views.md` §3.2).
@@ -1416,7 +1416,7 @@ fn main() -> ExitCode {
                 report_residency(&schema, limit);
             }
 
-            let args = tessera_build::BuildArgs {
+            let args = mosaica_build::BuildArgs {
                 views: view_args,
                 anchor,
                 groups,
@@ -1440,12 +1440,12 @@ fn main() -> ExitCode {
                 print: stage_timings,
                 json: stage_timings_json
                     .is_some()
-                    .then(tessera_build::observer::JsonStageTimings::new),
+                    .then(mosaica_build::observer::JsonStageTimings::new),
             };
             let built = if stage_timings || stage_timings_json.is_some() {
-                tessera_build::build_framed(&args, &framings, &observer)
+                mosaica_build::build_framed(&args, &framings, &observer)
             } else {
-                tessera_build::build_framed(&args, &framings, &tessera_build::NoopObserver)
+                mosaica_build::build_framed(&args, &framings, &mosaica_build::NoopObserver)
             };
             // Written whether the build succeeded or failed: a build that died in `layers` is
             // exactly the one whose per-stage record is worth having, and the records collected
@@ -1479,17 +1479,17 @@ fn main() -> ExitCode {
                             eprintln!("{}", images.report(&view.view_id));
                         }
                     }
-                    if let Err(e) = tessera_build::write_disclosure_report(&out, &disclosure) {
+                    if let Err(e) = mosaica_build::write_disclosure_report(&out, &disclosure) {
                         eprintln!("build FAILED: writing reports/disclosure.json: {e}");
                         return ExitCode::FAILURE;
                     }
                     // **The rows the identity rule refused**, counted by file and reason with a few
                     // of the values they carried: the build went on without them, as an ingest
                     // refusing rows one at a time would.
-                    for line in tessera_build::describe_refused(&report.refused) {
+                    for line in mosaica_build::describe_refused(&report.refused) {
                         eprintln!("refused: {line}");
                     }
-                    if let Err(e) = tessera_build::write_refused_report(&out, &report.refused) {
+                    if let Err(e) = mosaica_build::write_refused_report(&out, &report.refused) {
                         eprintln!("build FAILED: writing reports/refused.json: {e}");
                         return ExitCode::FAILURE;
                     }
@@ -1529,10 +1529,10 @@ fn main() -> ExitCode {
             analyser,
             identity,
         } => {
-            let Some(analyser) = tessera_analyse::analyser(&analyser) else {
+            let Some(analyser) = mosaica_analyse::analyser(&analyser) else {
                 eprintln!(
                     "'{analyser}' is not an analyser this binary carries. Available: {}",
-                    tessera_analyse::ANALYSER_NAMES.join(", ")
+                    mosaica_analyse::ANALYSER_NAMES.join(", ")
                 );
                 return ExitCode::FAILURE;
             };
@@ -1558,7 +1558,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Verify { bundle, deep } => {
-            let print_shallow = |report: &tessera_build::VerifyReport| {
+            let print_shallow = |report: &mosaica_build::VerifyReport| {
                 println!(
                     "OK {} ({}): {} partition(s), {} view(s), {} segment(s), {} rows, \
                      entity_id_high_water {}",
@@ -1572,7 +1572,7 @@ fn main() -> ExitCode {
                 );
                 // Each indexed keyword against the rows carrying it, and the warning a key unique
                 // per row earns: the same figures the build printed, read back from the bundle
-                // (`tessera_build::unique_key`). Reported, never a failure.
+                // (`mosaica_build::unique_key`). Reported, never a failure.
                 for column in &report.keyword_cardinalities {
                     eprintln!("{}", column.report());
                     if let Some(warning) = column.warning(report.bundle_bytes) {
@@ -1581,7 +1581,7 @@ fn main() -> ExitCode {
                 }
             };
             if deep {
-                match tessera_build::verify_deep(&bundle, &tessera_build::VerifyOpts::default()) {
+                match mosaica_build::verify_deep(&bundle, &mosaica_build::VerifyOpts::default()) {
                     Ok(report) => {
                         print_shallow(&report.shallow);
                         println!(
@@ -1612,7 +1612,7 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                match tessera_build::verify(&bundle) {
+                match mosaica_build::verify(&bundle) {
                     Ok(report) => {
                         print_shallow(&report);
                         ExitCode::SUCCESS
@@ -1659,7 +1659,7 @@ fn main() -> ExitCode {
                 deployment.as_deref(),
                 config,
                 file,
-                tessera_build::config::Strictness::Declared,
+                mosaica_build::config::Strictness::Declared,
             ) {
                 Ok(resolved) => resolved,
                 Err(detail) => {
@@ -1668,18 +1668,18 @@ fn main() -> ExitCode {
                 }
             };
             let config = declaration.config;
-            let report = tessera_build::check::check(&config);
+            let report = mosaica_build::check::check(&config);
             // The page is rendered where the report is, so the binary and the Python extension
             // module print the same bytes. Stdout carries the payloads and nothing else, which is
             // what a CI job pipes into `curl`.
-            eprint!("{}", tessera_build::check::page(&config, &report));
+            eprint!("{}", mosaica_build::check::page(&config, &report));
             if !report.is_clean() {
                 return ExitCode::FAILURE;
             }
             if payloads {
                 // The declaration, minus its acquisition keys, is the payload, so this is a
                 // serialisation and not a translation and there is no second authority to drift.
-                match serde_json::to_string_pretty(&tessera_build::config::control_payloads(
+                match serde_json::to_string_pretty(&mosaica_build::config::control_payloads(
                     &config,
                 )) {
                     Ok(json) => println!("{json}"),
@@ -1708,16 +1708,16 @@ fn main() -> ExitCode {
             timeout,
         } => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let config = match tessera_config::open(deployment.as_deref(), &cwd) {
+            let config = match mosaica_config::open(deployment.as_deref(), &cwd) {
                 Ok((_, config)) => config,
                 Err(e) => {
-                    eprintln!("tessera health: {e}");
+                    eprintln!("mosaica health: {e}");
                     return ExitCode::FAILURE;
                 }
             };
             let Some(viewer) = config.viewer_addr else {
                 eprintln!(
-                    "tessera health: this deployment declares no viewer address; add one under \
+                    "mosaica health: this deployment declares no viewer address; add one under \
                      `[serve]`, such as `viewer = \"127.0.0.1:8080\"`"
                 );
                 return ExitCode::FAILURE;
@@ -1725,7 +1725,7 @@ fn main() -> ExitCode {
             match readyz(viewer, std::time::Duration::from_secs(timeout)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("tessera health: {e}");
+                    eprintln!("mosaica health: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -1733,7 +1733,7 @@ fn main() -> ExitCode {
         Command::Serve { deployment } => {
             // Diagnostics on stderr, because stdout carries one thing: the JSON line naming the
             // three bound addresses, which a supervisor reads as the process's first stdout line
-            // (`tessera_server::serve_announcing`).
+            // (`mosaica_server::serve_announcing`).
             // Colour only for a terminal, so a container's or a supervisor's log is plain text.
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
@@ -1744,20 +1744,20 @@ fn main() -> ExitCode {
             // and the next start replays the log. A deletion or suppression answered 500 because
             // the log could not be written is applied but not logged, so stopping undoes it.
             exit_on_termination();
-            let deployment = match tessera_config::discover(
+            let deployment = match mosaica_config::discover(
                 deployment.as_deref(),
                 &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ) {
                 Ok(path) => path,
                 Err(e) => {
-                    eprintln!("tessera serve: refused to start: {e}");
+                    eprintln!("mosaica serve: refused to start: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let prepared = match tessera_server::prepare(&deployment) {
+            let prepared = match mosaica_server::prepare(&deployment) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("tessera serve: refused to start: {e}");
+                    eprintln!("mosaica serve: refused to start: {e}");
                     return ExitCode::FAILURE;
                 }
             };
@@ -1775,7 +1775,7 @@ fn main() -> ExitCode {
             // Derived rather than asserted-against: `serving_blocking_threads` covers every bound
             // plus a reserve, so there is no configuration in which an admitted request finds no
             // thread.
-            let blocking_threads = tessera_config::serving_blocking_threads(&prepared.config);
+            let blocking_threads = mosaica_config::serving_blocking_threads(&prepared.config);
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .max_blocking_threads(blocking_threads)
                 .enable_all()
@@ -1783,14 +1783,14 @@ fn main() -> ExitCode {
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    eprintln!("tessera serve: could not start async runtime: {e}");
+                    eprintln!("mosaica serve: could not start async runtime: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            match runtime.block_on(tessera_server::run(prepared)) {
+            match runtime.block_on(mosaica_server::run(prepared)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("tessera serve: {e}");
+                    eprintln!("mosaica serve: {e}");
                     ExitCode::FAILURE
                 }
             }

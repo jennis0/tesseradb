@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tessera_store::manifest::Visibility;
+use mosaica_store::manifest::Visibility;
 
 use super::error::ComposeError;
 
@@ -29,13 +29,13 @@ impl Family {
     /// One column's family, from its declaration: the single derivation used by routing, `/v1/meta`
     /// and the request parser alike. An unrecognised type falls to `Keyword`, which refuses to open
     /// without a dictionary, rather than to `Numeric`, which would compare ordinals as values.
-    pub fn of(scalar: &tessera_store::manifest::DeclaredScalar) -> Family {
+    pub fn of(scalar: &mosaica_store::manifest::DeclaredScalar) -> Family {
         family_of(scalar.vocabulary.as_deref(), scalar.arrow_type)
     }
 
     /// A group-scoped family's family, the same derivation as [`Family::of`]. A scope changes only
     /// which column file a predicate reads, never how its values are read.
-    pub fn of_scoped(scoped: &tessera_store::manifest::ScopedScalar) -> Family {
+    pub fn of_scoped(scoped: &mosaica_store::manifest::ScopedScalar) -> Family {
         family_of(scoped.vocabulary.as_deref(), scoped.arrow_type)
     }
 
@@ -72,14 +72,14 @@ impl Family {
 }
 
 /// The family a declaration's two deciding fields name.
-fn family_of(vocabulary: Option<&str>, arrow_type: tessera_spatial::tiler::ScalarType) -> Family {
+fn family_of(vocabulary: Option<&str>, arrow_type: mosaica_spatial::tiler::ScalarType) -> Family {
     if vocabulary.is_some() {
         return Family::Category;
     }
     if is_numeric(arrow_type) {
         return Family::Numeric;
     }
-    if arrow_type == tessera_spatial::tiler::ScalarType::Text {
+    if arrow_type == mosaica_spatial::tiler::ScalarType::Text {
         return Family::Text;
     }
     Family::Keyword
@@ -87,8 +87,8 @@ fn family_of(vocabulary: Option<&str>, arrow_type: tessera_spatial::tiler::Scala
 
 /// The types whose values are numbers, listed because [`Family::of`] must not reach `Numeric` by
 /// default.
-fn is_numeric(ty: tessera_spatial::tiler::ScalarType) -> bool {
-    use tessera_spatial::tiler::ScalarType as T;
+fn is_numeric(ty: mosaica_spatial::tiler::ScalarType) -> bool {
+    use mosaica_spatial::tiler::ScalarType as T;
     matches!(
         ty,
         T::Bool
@@ -124,8 +124,8 @@ impl Placement {
     /// The spaces one declared column affords, or `None` where it affords neither: a column stored
     /// and served at the drill-down and on no filter surface at all.
     pub(in crate::filter) fn of(
-        scalar: &tessera_store::manifest::DeclaredScalar,
-        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+        scalar: &mosaica_store::manifest::DeclaredScalar,
+        vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     ) -> Option<Placement> {
         // A rendered fixed-width column affords the row route. The entity route needs a value
         // column plus `index` or `render`. Text is entity-routed from postings with no value
@@ -151,18 +151,18 @@ impl Placement {
 ///
 /// Render counts only for a family that reaches the hot column: `utf8`, `keyword` and `text` are
 /// fixed-width refusals at the schema, so a rendered one of those never reaches this check true.
-pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
+pub fn is_filterable(scalar: &mosaica_store::manifest::DeclaredScalar) -> bool {
     scalar.unique || filterable_by_value(scalar)
 }
 
 /// Filterable by its stored values rather than by a unique index alone.
-fn filterable_by_value(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
+fn filterable_by_value(scalar: &mosaica_store::manifest::DeclaredScalar) -> bool {
     scalar.index || (scalar.render && Family::of(scalar).reaches_hot_column())
 }
 
 /// The operators a filter may apply to a filterable column, in the order `/v1/meta` publishes
 /// them: its family's, or `eq` and `in` alone for a unique column with no other filter home.
-pub fn operands_of(scalar: &tessera_store::manifest::DeclaredScalar) -> &'static [&'static str] {
+pub fn operands_of(scalar: &mosaica_store::manifest::DeclaredScalar) -> &'static [&'static str] {
     if unique_only(scalar) {
         return &["eq", "in"];
     }
@@ -170,7 +170,7 @@ pub fn operands_of(scalar: &tessera_store::manifest::DeclaredScalar) -> &'static
 }
 
 /// Whether a column's unique index is its only filter home, so it takes `eq` and `in` alone.
-pub fn unique_only(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
+pub fn unique_only(scalar: &mosaica_store::manifest::DeclaredScalar) -> bool {
     scalar.unique && !filterable_by_value(scalar)
 }
 
@@ -200,9 +200,9 @@ pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
 /// `(None, None)` (entity-scoped) is always live. A half-stamped pair matches nothing and is
 /// omitted: fail-closed rather than served under a guessed incarnation.
 pub(crate) fn carries_live_view(
-    incarnation_of: &dyn Fn(&str) -> Option<tessera_types::view::ViewIncarnation>,
+    incarnation_of: &dyn Fn(&str) -> Option<mosaica_types::view::ViewIncarnation>,
     view: Option<&str>,
-    incarnation: Option<tessera_types::view::ViewIncarnation>,
+    incarnation: Option<mosaica_types::view::ViewIncarnation>,
 ) -> bool {
     match (view, incarnation) {
         (None, None) => true,
@@ -216,7 +216,7 @@ pub(crate) fn carries_live_view(
 ///
 /// Every family but `text`. Wider than [`scoped_is_filterable`]: a family declaring neither `index`
 /// nor `render` is stored and served at the drill-down without being searchable.
-pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+pub fn scoped_has_value_column(scoped: &mosaica_store::manifest::ScopedScalar) -> bool {
     scoped.has_value_column()
 }
 
@@ -226,7 +226,7 @@ pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -
 /// because a pin may name another view's column. `text` is excluded from the render arm, as
 /// [`is_filterable`] excludes the string families from its own. The rule lives on
 /// `ScopedScalar::is_filterable`, one crate down.
-pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+pub fn scoped_is_filterable(scoped: &mosaica_store::manifest::ScopedScalar) -> bool {
     scoped.is_filterable()
 }
 
@@ -234,14 +234,14 @@ pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> b
 ///
 /// A category's, and only a category's: the postings answer `eq`/`in` on a `public` vocabulary and
 /// derive value visibility for `/v1/categories` on a `derived` one.
-pub(crate) fn scoped_owes_postings(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+pub(crate) fn scoped_owes_postings(scoped: &mosaica_store::manifest::ScopedScalar) -> bool {
     scoped.vocabulary.is_some() && scoped_is_filterable(scoped)
 }
 
 /// The `visibility` of the vocabulary a scoped category's codes index.
 pub(crate) fn scoped_visibility_of(
-    scoped: &tessera_store::manifest::ScopedScalar,
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    scoped: &mosaica_store::manifest::ScopedScalar,
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> Option<Visibility> {
     visibility_of_vocabulary(scoped.vocabulary.as_deref(), vocabularies)
 }
@@ -249,7 +249,7 @@ pub(crate) fn scoped_visibility_of(
 /// The `visibility` of the vocabulary a declaration names, or `None` where it names none.
 fn visibility_of_vocabulary(
     vocabulary: Option<&str>,
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> Option<Visibility> {
     let name = vocabulary?;
     vocabularies
@@ -260,8 +260,8 @@ fn visibility_of_vocabulary(
 
 /// The `visibility` of the vocabulary a column draws from, or `None` where it is not a category.
 pub(in crate::filter) fn visibility_of(
-    scalar: &tessera_store::manifest::DeclaredScalar,
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    scalar: &mosaica_store::manifest::DeclaredScalar,
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> Option<Visibility> {
     visibility_of_vocabulary(scalar.vocabulary.as_deref(), vocabularies)
 }
@@ -271,11 +271,11 @@ pub(in crate::filter) fn visibility_of(
 /// `index = true`, or a `derived` vocabulary, since that control's membership postings are derived
 /// from this column. Must agree with the build's own rule for the same question.
 pub(crate) fn owes_value_column(
-    scalar: &tessera_store::manifest::DeclaredScalar,
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    scalar: &mosaica_store::manifest::DeclaredScalar,
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> bool {
     // Text owes none: it has many terms per entity and no per-entity slot.
-    if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Text {
+    if scalar.arrow_type == mosaica_spatial::tiler::ScalarType::Text {
         return false;
     }
     scalar.index || visibility_of(scalar, vocabularies) == Some(Visibility::Derived)
@@ -287,10 +287,10 @@ pub(crate) fn owes_value_column(
 /// `render` is blob-resident like any other field with no other home.
 /// Text is always blob-resident: its postings answer `match` but cannot reconstruct prose.
 pub(crate) fn blob_resident(
-    scalar: &tessera_store::manifest::DeclaredScalar,
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    scalar: &mosaica_store::manifest::DeclaredScalar,
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> bool {
-    if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Text {
+    if scalar.arrow_type == mosaica_spatial::tiler::ScalarType::Text {
         return true;
     }
     !scalar.render && !owes_value_column(scalar, vocabularies)
@@ -311,8 +311,8 @@ pub struct FieldHomes {
 impl FieldHomes {
     /// One declared field's homes, by the rules the build writes them by.
     pub fn of(
-        scalar: &tessera_store::manifest::DeclaredScalar,
-        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+        scalar: &mosaica_store::manifest::DeclaredScalar,
+        vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     ) -> FieldHomes {
         FieldHomes {
             rendered: scalar.render,
@@ -336,8 +336,8 @@ impl FieldHomes {
 
 /// Does the build write derived postings for this column? Only a category earns them.
 pub(crate) fn owes_postings(
-    scalar: &tessera_store::manifest::DeclaredScalar,
-    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    scalar: &mosaica_store::manifest::DeclaredScalar,
+    vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
 ) -> bool {
     scalar.vocabulary.is_some() && owes_value_column(scalar, vocabularies)
 }
@@ -349,11 +349,11 @@ pub(crate) fn owes_postings(
 pub(in crate::filter) fn resolve_analyser(
     column: &str,
     identity: Option<&str>,
-) -> Result<Arc<tessera_analyse::Analyser>, ComposeError> {
+) -> Result<Arc<mosaica_analyse::Analyser>, ComposeError> {
     let identity = identity.ok_or_else(|| ComposeError::NoAnalyserRecorded {
         column: column.to_string(),
     })?;
-    tessera_analyse::analyser_with_identity(identity)
+    mosaica_analyse::analyser_with_identity(identity)
         .map(Arc::new)
         .ok_or_else(|| ComposeError::UnknownAnalyser {
             column: column.to_string(),
@@ -366,10 +366,10 @@ mod tests {
     use super::*;
 
     /// A declaration as the manifest carries it.
-    fn declared(name: &str, spelling: &str) -> tessera_store::manifest::DeclaredScalar {
-        tessera_store::manifest::DeclaredScalar {
+    fn declared(name: &str, spelling: &str) -> mosaica_store::manifest::DeclaredScalar {
+        mosaica_store::manifest::DeclaredScalar {
             name: name.to_string(),
-            arrow_type: tessera_spatial::tiler::ScalarType::parse(spelling)
+            arrow_type: mosaica_spatial::tiler::ScalarType::parse(spelling)
                 .expect("the caller checked the spelling parses"),
             vocabulary: None,
             analyser: None,
@@ -384,7 +384,7 @@ mod tests {
     /// landing on `Numeric` instead of the refusal `Keyword` gives it.
     #[test]
     fn every_declared_type_lands_on_a_deliberate_family() {
-        use tessera_spatial::tiler::ScalarType;
+        use mosaica_spatial::tiler::ScalarType;
         let cases = [
             ("bool", Family::Numeric),
             ("u8", Family::Numeric),
@@ -433,12 +433,12 @@ mod tests {
     /// or a text field in the record store.
     #[test]
     fn a_declarations_homes_follow_its_flags_and_its_vocabulary() {
-        use tessera_store::manifest::{ManifestVocabulary, Visibility, VocabularyKind};
+        use mosaica_store::manifest::{ManifestVocabulary, Visibility, VocabularyKind};
         let vocabulary = |name: &str, visibility| ManifestVocabulary {
             name: name.to_string(),
             kind: VocabularyKind::Declared,
             visibility,
-            width: tessera_spatial::tiler::ScalarType::U8,
+            width: mosaica_spatial::tiler::ScalarType::U8,
             values: Vec::new(),
             reserved: Vec::new(),
         };

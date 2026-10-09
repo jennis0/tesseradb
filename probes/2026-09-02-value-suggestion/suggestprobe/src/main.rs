@@ -18,9 +18,9 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use tessera_authz::{encode_posting, PostingRef, PostingsReader, PostingsSpool};
-use tessera_filter::{Access, ColumnPostings, SortedDict, SortedDictWriter};
-use tessera_types::AttrLocalId;
+use mosaica_authz::{encode_posting, PostingRef, PostingsReader, PostingsSpool};
+use mosaica_filter::{Access, ColumnPostings, SortedDict, SortedDictWriter};
+use mosaica_types::AttrLocalId;
 use unicode_normalization::UnicodeNormalization;
 
 // ------------------------------------------------------------------------------------------

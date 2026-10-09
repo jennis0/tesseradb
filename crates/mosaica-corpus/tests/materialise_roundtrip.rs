@@ -9,9 +9,9 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use tessera_corpus::materialise::PARTITION_LAYER;
-use tessera_corpus::Corpus;
-use tessera_spatial::Bounds;
+use mosaica_corpus::materialise::PARTITION_LAYER;
+use mosaica_corpus::Corpus;
+use mosaica_spatial::Bounds;
 
 fn corpus(n: u64) -> Corpus {
     Corpus::new(
@@ -232,7 +232,7 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
 /// comparison is affordable in the test itself.
 #[test]
 fn the_artifact_fixture_agrees_with_the_closed_forms() {
-    use tessera_corpus::materialise::{
+    use mosaica_corpus::materialise::{
         ArtifactFixtureCounts, BOUNDARY_LAYER, FIXTURE_LEVEL, FLAT_LAYER,
     };
 

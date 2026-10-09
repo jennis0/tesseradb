@@ -6,7 +6,7 @@ use std::fmt;
 
 use arrow::array::Array;
 use arrow::datatypes::DataType;
-use tessera_spatial::{Bounds, Projection};
+use mosaica_spatial::{Bounds, Projection};
 
 use crate::scalar_column::f64_values;
 

@@ -134,7 +134,7 @@ class Trace {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `tessera-trace-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    a.download = `mosaica-trace-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -155,10 +155,10 @@ export const trace = new Trace(
 
 declare global {
   interface Window {
-    __tesseraTrace?: Trace;
+    __mosaicaTrace?: Trace;
   }
 }
-if (trace.enabled && typeof window !== 'undefined') window.__tesseraTrace = trace;
+if (trace.enabled && typeof window !== 'undefined') window.__mosaicaTrace = trace;
 
 /**
  * Frame gaps longer than this are recorded as events; every frame is still counted for the score.

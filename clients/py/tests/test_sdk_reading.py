@@ -18,8 +18,8 @@ import time
 import pytest
 
 from conftest import notebook_corpus  # noqa: F401  (the fixtures below use `corpus`)
-from tesseradb import Token, authorise, connect, login, logout
-from tesseradb._refusal import Refusal
+from mosaica import Token, authorise, connect, login, logout
+from mosaica._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
 
@@ -37,11 +37,11 @@ def db(served, corpus):
 
 
 def served_count(table) -> int:
-    return json.loads(table.schema.metadata[b"tessera.counts"])["served"]
+    return json.loads(table.schema.metadata[b"mosaica.counts"])["served"]
 
 
 def visible_count(table) -> int:
-    return json.loads(table.schema.metadata[b"tessera.counts"])["visible"]
+    return json.loads(table.schema.metadata[b"mosaica.counts"])["visible"]
 
 
 # ---------------------------------------------------------------------------- the widget
@@ -121,7 +121,7 @@ def test_a_sample_carries_the_rendered_columns_and_the_served_count(db):
     # A served set is not the whole set: `k` bounds it, and the counts are what say by how much.
     assert table.num_rows == served_count(table)
     assert served_count(table) < visible_count(table)
-    assert json.loads(table.schema.metadata[b"tessera.trailer"])["points"] == table.num_rows
+    assert json.loads(table.schema.metadata[b"mosaica.trailer"])["points"] == table.num_rows
 
 
 def test_a_sample_naming_its_columns_carries_those_alone_over_the_same_points(db):
@@ -134,7 +134,7 @@ def test_a_sample_naming_its_columns_carries_those_alone_over_the_same_points(db
     assert named.column("tessera_id") == full.column("tessera_id")
     assert named.column("code") == full.column("code")
     assert named.column(rendered[0]) == full.column(rendered[0])
-    assert named.schema.metadata[b"tessera.counts"] == full.schema.metadata[b"tessera.counts"]
+    assert named.schema.metadata[b"mosaica.counts"] == full.schema.metadata[b"mosaica.counts"]
     with pytest.raises(Refusal):
         db.view("s0").sample(k=64, point_rows=["no_such_column"])
 
@@ -155,7 +155,7 @@ def test_a_sample_that_serves_no_point_still_has_the_two_fixed_columns(db):
     empty = db.view("s0").filter({"arxiv_id": {"eq": "no-such-paper"}}).sample()
     assert empty.num_rows == 0
     assert empty.column_names == ["tessera_id", "code"]
-    assert json.loads(empty.schema.metadata[b"tessera.counts"])["matched"] == 0
+    assert json.loads(empty.schema.metadata[b"mosaica.counts"])["matched"] == 0
 
 
 def test_an_items_join_value_is_one_of_its_fields_and_finds_it_again(db):
@@ -206,7 +206,7 @@ def test_connect_takes_a_string_a_token_or_a_callable(db):
 
 def test_reading_an_uncommitted_database_names_the_commit_that_would_build_it(tmp_path, corpus):
     """There is no server yet, so every read says so rather than failing on a missing key file."""
-    from tesseradb._database import create
+    from mosaica._database import create
 
     db = create(tmp_path / "unbuilt")
     try:

@@ -5,7 +5,7 @@
 //! /control/attributes` declares `unique` on a column that exists, `409` where the column holds a
 //! value twice.
 //!
-//! The engine-level cases are `tessera-engine/tests/unique_fields.rs`; this file pins the routes.
+//! The engine-level cases are `mosaica-engine/tests/unique_fields.rs`; this file pins the routes.
 
 mod common;
 
@@ -127,8 +127,8 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> (u16, Value) 
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()

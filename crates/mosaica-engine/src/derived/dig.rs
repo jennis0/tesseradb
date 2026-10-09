@@ -10,7 +10,7 @@ use super::reduce::{quantise, QUANTISE_DIVISIONS, REDUCTION_FLOOR};
 /// follows the members rather than the budget. A shape that does run out stops refining its
 /// shortest remaining bridges first, since digging spends the budget longest edge first, which is
 /// coarser but never wrong. Rerun with
-/// `cargo run --release -p tessera-bench --bin hull_cost -- <bundle>`.
+/// `cargo run --release -p mosaica-bench --bin hull_cost -- <bundle>`.
 pub(super) const DIG_BUDGET: usize = 2_048;
 
 /// How many times the median edge an edge must exceed before it is treated as bridging a void.
@@ -54,7 +54,7 @@ pub(super) fn concave_rings(points: &[[u32; 2]], bounds: Option<[u32; 4]>) -> Ve
 }
 
 /// [`concave_rings`] at a budget the caller names, with whether the budget bound the dig: a seam
-/// for `tessera-bench`'s `hull_cost` and the budget's own test.
+/// for `mosaica-bench`'s `hull_cost` and the budget's own test.
 #[doc(hidden)]
 pub fn dig_rings(points: &[[u32; 2]], budget: usize) -> (Vec<Vec<[u32; 2]>>, bool) {
     dig_rings_within(points, budget, QUANTISE_DIVISIONS, None)

@@ -5,14 +5,14 @@ use crate::Error;
 
 /// The term every session holds. It is added where a credential is evaluated, and no grant or
 /// claim rule may name it in any case.
-pub use tessera_access::PUBLIC;
+pub use mosaica_access::PUBLIC;
 
 /// Trims a term, by the rule a session applies to the terms it holds
-/// ([`tessera_access::held_term`]). An empty term, a term holding a control character, and a term
+/// ([`mosaica_access::held_term`]). An empty term, a term holding a control character, and a term
 /// equal to `public` ignoring ASCII case are refused.
 pub fn term(raw: &str) -> Result<String, Error> {
     let t = raw.trim();
-    match tessera_access::held_term(t) {
+    match mosaica_access::held_term(t) {
         Some(t) => Ok(t.to_owned()),
         None if t.is_empty() => Err(Error::Invalid(
             "a term is empty after trimming; write at least one visible character".into(),

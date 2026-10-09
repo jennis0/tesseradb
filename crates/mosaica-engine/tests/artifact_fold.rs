@@ -19,14 +19,14 @@
 mod common;
 
 use common::*;
-use tessera_engine::Engine;
-use tessera_lifecycle::membership::IncomingContent;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_engine::Engine;
+use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
@@ -37,7 +37,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         // **No criterion**, deliberately: these cases are about what the membership *is* after a
         // fold, and a criterion would turn a wrong count into an absence, which is a weaker
         // assertion than a wrong number.
@@ -54,7 +54,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         levels: Vec::new(),
         // Pinned to rows: these cases are about the tile index and the containment partition an
         // artifact-major level folds into, which a flat level is not served in otherwise.
-        layout: Some(tessera_types::layer::ServingLayout::ArtifactMajor),
+        layout: Some(mosaica_types::layer::ServingLayout::ArtifactMajor),
         shape: None,
     }
 }
@@ -190,7 +190,7 @@ fn publish(
     fx: &Fixture,
     engine: &Engine,
     sources: std::ops::Range<u64>,
-) -> tessera_types::TesseraId {
+) -> mosaica_types::TesseraId {
     engine.register_layer(declaration("clusters/a")).unwrap();
     let ids = engine
         .publish_artifacts(
@@ -391,7 +391,7 @@ fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
             .grow_memberships(
                 "clusters/a".into(),
                 0,
-                vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                vec![mosaica_lifecycle::IncomingGrowth::from_entities(
                     "c0".into(),
                     joining,
                 )],
@@ -523,7 +523,7 @@ fn a_growth_after_the_fold_leaves_the_tile_index_unadopted() {
             .grow_memberships(
                 "clusters/a".into(),
                 0,
-                vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                vec![mosaica_lifecycle::IncomingGrowth::from_entities(
                     "c0".into(),
                     joining,
                 )],
@@ -712,7 +712,7 @@ fn ingest(engine: &Engine, name: &[u8]) -> EntityId {
     for (slot, byte) in key.iter_mut().zip(name) {
         *slot = *byte;
     }
-    let row = tessera_lifecycle::command::UnallocatedRow {
+    let row = mosaica_lifecycle::command::UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -868,10 +868,10 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
 /// A layer carrying corpus-derived content.
 fn content_layer() -> LayerDeclaration {
     let mut d = declaration("clusters/a");
-    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+    d.content.supplied = vec![mosaica_types::layer::SuppliedContent {
         name: "topic".into(),
         ty: "text".into(),
-        require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+        require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
     }];
     d
 }
@@ -1156,10 +1156,10 @@ fn the_fold_reports_what_its_deletions_took_from_every_artifact_that_held_them()
     let fx = fixture();
     let engine = fx.open();
     let mut layer = declaration("clusters/a");
-    layer.content.supplied = vec![tessera_types::layer::SuppliedContent {
+    layer.content.supplied = vec![mosaica_types::layer::SuppliedContent {
         name: "topic".into(),
         ty: "text".into(),
-        require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+        require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
     }];
     engine.register_layer(layer).unwrap();
     engine
@@ -1309,10 +1309,10 @@ fn a_fold_whose_report_cannot_be_written_is_discarded_and_retires_nothing() {
 /// withholding below comes from the arm under test rather than from an access label.
 fn labels_over(target: &str) -> LayerDeclaration {
     let mut d = declaration("topics/x");
-    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+    d.content.supplied = vec![mosaica_types::layer::SuppliedContent {
         name: "topic".into(),
         ty: "text".into(),
-        require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited,
+        require_member_visibility: mosaica_types::layer::SuppliedRequirement::Inherited,
     }];
     d.depends_on = vec![target.into()];
     d
@@ -1502,7 +1502,7 @@ fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
                     vec!["shipping and logistics".into()],
                     Vec::new(),
                 )],
-                tessera_lifecycle::membership::IncomingAttachment {
+                mosaica_lifecycle::membership::IncomingAttachment {
                     layer: "clusters/a".into(),
                     level: 0,
                     key: "c0".into(),
@@ -1547,10 +1547,10 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
     {
         let engine = fx.open();
         let mut layer = declaration("topics/a");
-        layer.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        layer.content.supplied = vec![mosaica_types::layer::SuppliedContent {
             name: "topic".into(),
             ty: "text".into(),
-            require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+            require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
         }];
         engine.register_layer(layer).unwrap();
         engine
@@ -1626,7 +1626,7 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
                         vec!["shipping and logistics".into()],
                         Vec::new(),
                     )],
-                    tessera_lifecycle::membership::IncomingAttachment {
+                    mosaica_lifecycle::membership::IncomingAttachment {
                         layer: "clusters/a".into(),
                         level: 0,
                         key: "c0".into(),
@@ -1802,7 +1802,7 @@ fn publish_borrowing_label(engine: &Engine) {
                 Some("l0".into()),
                 Vec::new(),
                 Vec::new(),
-                tessera_lifecycle::membership::IncomingAttachment {
+                mosaica_lifecycle::membership::IncomingAttachment {
                     layer: "clusters/a".into(),
                     level: 0,
                     key: "c0".into(),

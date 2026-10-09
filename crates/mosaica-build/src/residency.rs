@@ -127,7 +127,7 @@
 //! runs out of disk is recoverable: it writes no `CURRENT`, publishes no identity, mints no id that
 //! survives, and its partial prefix is swept on the way out.
 
-use tessera_spatial::ScalarType;
+use mosaica_spatial::ScalarType;
 
 /// The unenumerated transients: decode buffers, a stage's scratch, the allocator's slack. The
 /// batch loop's own model carries a constant of the same size and for the same reason.
@@ -456,7 +456,7 @@ fn carries_characters(ty: ScalarType) -> bool {
 const EXTENT_SHARE: u64 = 2;
 
 /// What one record-blob row costs beyond its characters: **3 bytes a row and 3 a field**, plus a
-/// `u32` length on each `utf8` one (`tessera_filter::record` — an entity gap and a row length,
+/// `u32` length on each `utf8` one (`mosaica_filter::record` — an entity gap and a row length,
 /// then `tag u16 | kind u8 | value` a field).
 ///
 /// Charged over the blob-resident columns and their rows because for a short value it is more
@@ -484,7 +484,7 @@ fn record_framing_bytes(schema: &crate::config::Schema, rows: u64) -> u64 {
 
 /// What the record blob's writer holds a block while it writes: 32 B in the vector it seals blocks
 /// into, which may stand at twice its length while it grows, and 28 B in the Arrow columns it
-/// copies them into at the end, with the vector still held (`tessera_filter_write::record`).
+/// copies them into at the end, with the vector still held (`mosaica_filter_write::record`).
 const BLOB_DIRECTORY_BYTES_PER_BLOCK: u64 = 2 * 32 + 28;
 
 /// The uncompressed rows the record blob is cut into blocks from: every blob-resident column's
@@ -534,7 +534,7 @@ const RECORD_UTF8_FIELD_BYTES: u64 = RECORD_FIELD_BYTES + 4;
 /// What `pairs.parquet` costs a pair, in tenths of a byte.
 ///
 /// `(entity_id u64, term_id u32)` under `DELTA_BINARY_PACKED` and Snappy with no dictionary
-/// (`tessera_store::pairs`). Entities ascend within a term and reset at each term boundary, so a
+/// (`mosaica_store::pairs`). Entities ascend within a term and reset at each term boundary, so a
 /// relation of short terms makes every mini-block pay for its outlier — and the delta is bounded
 /// by the entity space, which I9 bounds at 2³². **The encoding therefore saturates at about 4.2
 /// bytes a pair**, which is what is charged: measured 4.185 and 4.176 at the corner (10⁶ terms of
@@ -559,7 +559,7 @@ const TEXT_INDEX_SHARE_PERCENT: u64 = 35;
 
 /// What one `dict.bin` entry costs beyond the characters it holds, in tenths of a byte: two
 /// varints a key — the shared prefix length and the suffix length — and 8 bytes of restart offset
-/// a block of 16 keys (`tessera_filter::dict`'s format and its `DEFAULT_RESTART_INTERVAL`).
+/// a block of 16 keys (`mosaica_filter::dict`'s format and its `DEFAULT_RESTART_INTERVAL`).
 ///
 /// Charged beside the characters rather than folded into them, because for a column of short
 /// distinct values it is most of the file: 12-character keys are 2.5 bytes of entry against 12 of
@@ -572,8 +572,8 @@ const TEXT_INDEX_SHARE_PERCENT: u64 = 35;
 const DICT_BYTES_PER_KEY_TENTHS: u64 = 25;
 
 /// The count at or below which a term's postings are a raw `u32` array rather than Roaring
-/// (`tessera_authz::postings`, tag 0). The threshold the build passes is
-/// `tessera_types::SMALL_TERM_THRESHOLD_DEFAULT`.
+/// (`mosaica_authz::postings`, tag 0). The threshold the build passes is
+/// `mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT`.
 const SMALL_TERM_ENTITIES: u64 = 32;
 
 /// The entity span one Roaring container addresses, and what one costs: a descriptor and a key,
@@ -963,11 +963,11 @@ pub(crate) fn entity_order_residency(
     // **The record blob's block directory, on the heap until the blob is finished.** The writer
     // keeps each sealed block's offsets, lengths and ranks, and copies them into the Arrow columns
     // it writes only at the end ([`BLOB_DIRECTORY_BYTES_PER_BLOCK`]). A block is
-    // [`tessera_filter::RECORD_BLOCK_TARGET`] of rows, so this rises with the blob and not with a
+    // [`mosaica_filter::RECORD_BLOCK_TARGET`] of rows, so this rises with the blob and not with a
     // constant: about 390 MB over 128 GiB of prose.
     let blob_row_bytes = blob_row_bytes(n, columns);
     if blob_row_bytes > 0 {
-        let blocks = blob_row_bytes.div_ceil(tessera_filter::RECORD_BLOCK_TARGET as u64);
+        let blocks = blob_row_bytes.div_ceil(mosaica_filter::RECORD_BLOCK_TARGET as u64);
         terms.push(Term {
             what: format!(
                 "the record blob's block directory, {BLOB_DIRECTORY_BYTES_PER_BLOCK} B a block \
@@ -1266,12 +1266,12 @@ fn fit(
     // expressible and one held by every row the widest image. The frozen buffer is charged at the
     // image's width: it is the containers' payloads with five bytes of key, count and typecode
     // each, which is under the resident form for every shape but an image of full bitsets. The
-    // scratch is `tessera_store`'s own bound over this corpus's entity space, so a small build pays
+    // scratch is `mosaica_store`'s own bound over this corpus's entity space, so a small build pays
     // its own rows rather than the ceiling a 10⁹ one reaches.
     //
     // ⊘ **Modelled**, and a ceiling rather than an expectation: a term over a third of the corpus
     // in run-friendly order is kilobytes (assumed).
-    let scratch = tessera_store::permutation::project_scratch_bound(n, n);
+    let scratch = mosaica_store::permutation::project_scratch_bound(n, n);
     let per_worker = term_image_bitmap_bytes(n).saturating_add(scratch.total());
     let term_image_workers = (room(&residency, Phase::Assemble) / per_worker.max(1))
         .clamp(1, crate::term_images_pass::derive_threads() as u64);
@@ -1516,7 +1516,7 @@ fn scoped_render_types(args: &crate::BuildArgs) -> Vec<ScalarType> {
     args.views
         .iter()
         .map(|view| {
-            let Some((group, _)) = view.view_id.split_once(tessera_store::GROUP_SEPARATOR) else {
+            let Some((group, _)) = view.view_id.split_once(mosaica_store::GROUP_SEPARATOR) else {
                 // A plain view is in no group, so no scope reaches it.
                 return Vec::new();
             };
@@ -1918,7 +1918,7 @@ pub(crate) fn disk(
             Phases::INDEX.onwards(),
         );
         // `values.arrow` is assembled from a spool of the same values beside it
-        // (`tessera_filter::values_writer`), so the column's slots stand twice while it is
+        // (`mosaica_filter::values_writer`), so the column's slots stand twice while it is
         // written. Measured on the GBIF prefix: `specieskey` 473,983,152 bytes of spool and `year`
         // 243,206,776, both alive at the index phase's peak.
         push(
@@ -2126,7 +2126,7 @@ pub(crate) fn report_identity_disk(
 /// every row creates an item and none is refused, which the footer cannot tell. The holdings a
 /// file leaves are its unset keys.
 pub(crate) fn identity_disk(args: &crate::BuildArgs) -> crate::error::Result<(u64, u64)> {
-    use tessera_lifecycle::resolve::Batch;
+    use mosaica_lifecycle::resolve::Batch;
     let mut held: std::collections::BTreeMap<u16, u64> = Default::default();
     let mut numbers = 0u64;
     let mut peak = 0u64;
@@ -2215,7 +2215,7 @@ pub(crate) fn identity_disk(args: &crate::BuildArgs) -> crate::error::Result<(u6
 /// What the artifact pass's row-column lanes cost **one** view.
 ///
 /// **The lane's size depends on which of two forms a level takes, and a flat `4 × n` a level is
-/// only one of them.** `tessera_types::layer::choose` picks from the memberships the build has
+/// only one of them.** `mosaica_types::layer::choose` picks from the memberships the build has
 /// just resolved: a level whose memberships partition the corpus is a label lane (`.tslb`) at one
 /// narrow ordinal a row, and one whose memberships overlap is a list lane (`.tsll`) — a `u32`
 /// offset a row *and* one ordinal an entry. The 10⁷ MedCPT sample's MeSH list lane is
@@ -2239,7 +2239,7 @@ pub(crate) fn identity_disk(args: &crate::BuildArgs) -> crate::error::Result<(u6
 /// — one byte under 255 artifacts, two under 65,535, four above — and the artifact count is not
 /// known before the level is published.
 fn row_column_bytes(args: &crate::BuildArgs, n: u64, entries: &[u64]) -> u64 {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     let mut bytes = 0u64;
     for (layer, &declared) in args.layers.iter().zip(entries) {
         let views = layer_views(args, layer);
@@ -2271,7 +2271,7 @@ fn row_column_bytes(args: &crate::BuildArgs, n: u64, entries: &[u64]) -> u64 {
 /// three taxonomy levels, where nearly every container is an array of two-byte members. A level of
 /// one member to a container costs several times that, and one of long runs a fraction of it.
 fn row_member_bytes(args: &crate::BuildArgs, entries: &[u64]) -> u64 {
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
     args.layers
         .iter()
         .zip(entries)
@@ -2295,7 +2295,7 @@ fn row_member_bytes(args: &crate::BuildArgs, entries: &[u64]) -> u64 {
 /// refuses an unknown name long before here (`config`'s layer compilation), so a name that reaches
 /// this and resolves to nothing is arguments assembled without the view; a lane charged twice
 /// costs a rerun, and one charged at nothing is the ENOSPC the forecast exists to name.
-fn layer_views(args: &crate::BuildArgs, layer: &tessera_types::layer::LayerDeclaration) -> u64 {
+fn layer_views(args: &crate::BuildArgs, layer: &mosaica_types::layer::LayerDeclaration) -> u64 {
     let total = args.views.len().max(1) as u64;
     if layer.views.is_empty() {
         return total;
@@ -2311,7 +2311,7 @@ fn layer_views(args: &crate::BuildArgs, layer: &tessera_types::layer::LayerDecla
                     // The view's own id, or the group's — a group name draws the layer on every
                     // view of it, and `<group>` is the first component of `group:key`.
                     &view.view_id == name
-                        || tessera_store::view_path_components(&view.view_id)
+                        || mosaica_store::view_path_components(&view.view_id)
                             .first()
                             .is_some_and(|head| head == name)
                 })
@@ -3060,7 +3060,7 @@ mod tests {
             images,
             crate::term_images_pass::derive_threads() as u64
                 * (term_image_bitmap_bytes(N)
-                    + tessera_store::permutation::project_scratch_bound(N, N).total()),
+                    + mosaica_store::permutation::project_scratch_bound(N, N).total()),
             "the two term-image terms must be the pass's own width times what one worker holds"
         );
         assert!(
@@ -3407,7 +3407,7 @@ mod tests {
     /// writes no lane at all.
     #[test]
     fn a_row_column_lane_is_charged_its_entries_where_the_form_is_open() {
-        use tessera_types::layer::ServingLayout;
+        use mosaica_types::layer::ServingLayout;
         let (mut args, _temp) = fixture(2_000);
         let n = 2_000;
         let entries = member_entries_by_layer(&args);
@@ -3540,7 +3540,7 @@ mod tests {
     /// not a gate's business. Run it by name when the model's constants are in question:
     ///
     /// ```text
-    /// cargo test -p tessera-build --release residency::tests::the_model -- --ignored --nocapture
+    /// cargo test -p mosaica-build --release residency::tests::the_model -- --ignored --nocapture
     /// ```
     /// A corpus of `n` items with one `u32` and one `text` column, and a flat layer whose member
     /// table names every item — the smallest fixture that has each term of the model in it.
@@ -3708,7 +3708,7 @@ require_member_visibility = "none"
                 visibility: None,
                 view_id: "s0".into(),
                 projection: parsed.views[0].projection,
-                extent: tessera_spatial::Bounds {
+                extent: mosaica_spatial::Bounds {
                     x_min: 0.0,
                     x_max: 1024.0,
                     y_min: 0.0,
@@ -3726,7 +3726,7 @@ require_member_visibility = "none"
             out: dir.join("bundle"),
             limit: None,
             strict: false,
-            identity_key: tessera_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
+            identity_key: mosaica_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
                 .unwrap(),
             shard_id: 0,
             layers: parsed.layers.clone(),
@@ -4064,11 +4064,11 @@ require_member_visibility = "none"
         // the keyword's 8 characters and the text's 400, a `u8` and a `u32`, with 7 bytes of frame
         // around each string, 3 around each fixed value and 3 around the row: 436 bytes.
         let directory = |n: u64| {
-            (436 * n).div_ceil(tessera_filter::RECORD_BLOCK_TARGET as u64)
+            (436 * n).div_ceil(mosaica_filter::RECORD_BLOCK_TARGET as u64)
                 * BLOB_DIRECTORY_BYTES_PER_BLOCK
         };
         let image_scratch =
-            |n: u64| workers * tessera_store::permutation::project_scratch_bound(n, n).total();
+            |n: u64| workers * mosaica_store::permutation::project_scratch_bound(n, n).total();
         let small = residency(10_000_000);
         let large = residency(100_000_000);
         assert_eq!(

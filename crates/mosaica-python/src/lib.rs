@@ -1,6 +1,6 @@
-//! `_tessera` — the declaration check, in the Python process.
+//! `_mosaica` — the declaration check, in the Python process.
 //!
-//! Two calls, and they are the two the Python SDK ran `tessera check` for: whether a deployment's
+//! Two calls, and they are the two the Python SDK ran `mosaica check` for: whether a deployment's
 //! declaration checks, and the control-plane payloads it serialises to. What they call is what the
 //! binary calls, so there is no second reading of the declaration to drift from the first.
 //!
@@ -8,7 +8,7 @@
 //! page of text, so a client that wants to raise an error naming the block an author wrote has to
 //! re-implement the rule in Python to know it first. Here the findings arrive as objects that name
 //! their block and its name, and a refusal is [`DeclarationError`] carrying them. The page itself
-//! is rendered by `tessera_build::check::page`, which is what the binary prints, so a caller that
+//! is rendered by `mosaica_build::check::page`, which is what the binary prints, so a caller that
 //! has the module installed and one that shells out read the same bytes.
 
 use std::collections::HashMap;
@@ -19,14 +19,14 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
 create_exception!(
-    _tessera,
+    _mosaica,
     DeclarationError,
     PyException,
     "The declaration was not read, or was read and refused. `.findings` holds why."
 );
 
 /// The declaration a finding or a source is about, in its parts.
-#[pyclass(frozen, skip_from_py_object, module = "_tessera")]
+#[pyclass(frozen, skip_from_py_object, module = "_mosaica")]
 #[derive(Clone)]
 pub struct Object {
     /// The block kind as the declaration spells it — `source`, `attribute`, `view`, `view group`,
@@ -58,7 +58,7 @@ impl Object {
 }
 
 impl Object {
-    fn of(object: &tessera_build::check::Object) -> Object {
+    fn of(object: &mosaica_build::check::Object) -> Object {
         Object {
             block: object.block.to_string(),
             name: object.name.clone(),
@@ -77,7 +77,7 @@ impl Object {
 }
 
 /// One thing wrong, or one thing worth an eye that refuses nothing.
-#[pyclass(frozen, skip_from_py_object, module = "_tessera")]
+#[pyclass(frozen, skip_from_py_object, module = "_mosaica")]
 #[derive(Clone)]
 pub struct Finding {
     #[pyo3(get)]
@@ -98,7 +98,7 @@ impl Finding {
 }
 
 impl Finding {
-    fn of(finding: &tessera_build::check::Finding) -> Finding {
+    fn of(finding: &mosaica_build::check::Finding) -> Finding {
         Finding {
             object: Object::of(&finding.object),
             detail: finding.detail.clone(),
@@ -108,7 +108,7 @@ impl Finding {
 
 /// One source the check looked at. **The count of what was looked at is part of the answer**: a
 /// check that examined nothing passes as loudly as one that examined everything.
-#[pyclass(frozen, skip_from_py_object, module = "_tessera")]
+#[pyclass(frozen, skip_from_py_object, module = "_mosaica")]
 #[derive(Clone)]
 pub struct Source {
     #[pyo3(get)]
@@ -120,7 +120,7 @@ pub struct Source {
 }
 
 /// What a check found. `ok` is false exactly when `findings` is non-empty; warnings leave it true.
-#[pyclass(frozen, module = "_tessera")]
+#[pyclass(frozen, module = "_mosaica")]
 pub struct CheckResult {
     #[pyo3(get)]
     ok: bool,
@@ -130,7 +130,7 @@ pub struct CheckResult {
     warnings: Vec<Finding>,
     #[pyo3(get)]
     sources: Vec<Source>,
-    /// The page `tessera check` prints, rendered by the renderer the binary renders with, so the
+    /// The page `mosaica check` prints, rendered by the renderer the binary renders with, so the
     /// two paths cannot disagree.
     #[pyo3(get)]
     page: String,
@@ -166,21 +166,21 @@ fn refuse(py: Python<'_>, findings: Vec<Finding>) -> PyErr {
     }
 }
 
-/// The deployment file at `deployment_path`, and the declaration it names, read as `tessera check`
+/// The deployment file at `deployment_path`, and the declaration it names, read as `mosaica check`
 /// reads them: a block that names no file is declared and empty rather than refused.
-fn declaration(deployment_path: &str) -> Result<(Object, tessera_build::config::Config), Finding> {
+fn declaration(deployment_path: &str) -> Result<(Object, mosaica_build::config::Config), Finding> {
     let path = Path::new(deployment_path);
     let from = path.parent().unwrap_or(Path::new("."));
     let (_, deployment) =
-        tessera_config::open(Some(path), from).map_err(|detail| Finding {
+        mosaica_config::open(Some(path), from).map_err(|detail| Finding {
             object: Object::file("deployment", path.display()),
             detail,
         })?;
     let named = Object::file("declaration", deployment.schema_path.display());
-    let config = tessera_build::config::Config::parse_with(
+    let config = mosaica_build::config::Config::parse_with(
         &deployment.schema_path,
         &HashMap::new(),
-        tessera_build::config::Strictness::Declared,
+        mosaica_build::config::Strictness::Declared,
     )
     .map_err(|e| Finding {
         object: named.clone(),
@@ -201,7 +201,7 @@ fn declaration(deployment_path: &str) -> Result<(Object, tessera_build::config::
 #[pyfunction]
 fn check(py: Python<'_>, deployment_path: &str) -> PyResult<CheckResult> {
     let (_, config) = declaration(deployment_path).map_err(|finding| refuse(py, vec![finding]))?;
-    Ok(report(&config, &tessera_build::check::check(&config)))
+    Ok(report(&config, &mosaica_build::check::check(&config)))
 }
 
 /// The control-plane payloads the declaration serialises to, as JSON text.
@@ -218,11 +218,11 @@ fn check(py: Python<'_>, deployment_path: &str) -> PyResult<CheckResult> {
 fn payloads(py: Python<'_>, deployment_path: &str) -> PyResult<String> {
     let (named, config) =
         declaration(deployment_path).map_err(|finding| refuse(py, vec![finding]))?;
-    let checked = tessera_build::check::check(&config);
+    let checked = mosaica_build::check::check(&config);
     if !checked.is_clean() {
         return Err(refuse(py, checked.findings.iter().map(Finding::of).collect()));
     }
-    serde_json::to_string_pretty(&tessera_build::config::control_payloads(&config)).map_err(|e| {
+    serde_json::to_string_pretty(&mosaica_build::config::control_payloads(&config)).map_err(|e| {
         refuse(
             py,
             vec![Finding {
@@ -234,11 +234,11 @@ fn payloads(py: Python<'_>, deployment_path: &str) -> PyResult<String> {
 }
 
 fn report(
-    config: &tessera_build::config::Config,
-    checked: &tessera_build::check::CheckReport,
+    config: &mosaica_build::config::Config,
+    checked: &mosaica_build::check::CheckReport,
 ) -> CheckResult {
     CheckResult {
-        page: tessera_build::check::page(config, checked),
+        page: mosaica_build::check::page(config, checked),
         ok: checked.is_clean(),
         findings: checked.findings.iter().map(Finding::of).collect(),
         warnings: checked.warnings.iter().map(Finding::of).collect(),
@@ -254,7 +254,7 @@ fn report(
 }
 
 #[pymodule]
-fn _tessera(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _mosaica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Object>()?;
     m.add_class::<Finding>()?;
     m.add_class::<Source>()?;

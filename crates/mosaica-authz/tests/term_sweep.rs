@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_authz::{
+use mosaica_authz::{
     sweep_term_postings, write_delta_tier, write_postings, DeltaTier, PostingRef, PostingsReader,
     PostingsSpool,
 };
-use tessera_types::TermId;
+use mosaica_types::TermId;
 
 const THRESHOLD: u32 = 4;
 

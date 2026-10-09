@@ -1,9 +1,9 @@
 use croaring::Bitmap;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_filter::{Codes, ColumnPostings, ValueColumn};
-use tessera_store::vocabulary::ABSENT_CODE;
-use tessera_types::AttrLocalId;
+use mosaica_filter::{Codes, ColumnPostings, ValueColumn};
+use mosaica_store::vocabulary::ABSENT_CODE;
+use mosaica_types::AttrLocalId;
 
 use super::columns::{Column, FilterColumns};
 use super::error::FilterError;
@@ -379,7 +379,7 @@ mod tests {
     use std::sync::Arc;
 
     use croaring::Bitmap;
-    use tessera_filter::{Codes, ColumnPostings, ValueColumn};
+    use mosaica_filter::{Codes, ColumnPostings, ValueColumn};
 
     use super::super::columns::{Column, FilterColumns, Layer, Route};
     use super::super::declared::Family;
@@ -406,7 +406,7 @@ mod tests {
             }
             let path = dir.join("postings.arrow");
             let records: Vec<(u32, Vec<u32>)> = by_code.into_iter().collect();
-            tessera_authz::write_delta_tier_at(&path, &records, 32).expect("postings write");
+            mosaica_authz::write_delta_tier_at(&path, &records, 32).expect("postings write");
             Arc::new(ColumnPostings::open_keyed(&path).expect("postings open"))
         });
         let mut held = Column::values(

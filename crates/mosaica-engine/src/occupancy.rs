@@ -106,7 +106,7 @@
 //!
 //! # What it costs, measured
 //!
-//! `tessera-bench`'s `occupancy_sketch` prices four **complete** routes — walk and accumulator
+//! `mosaica-bench`'s `occupancy_sketch` prices four **complete** routes — walk and accumulator
 //! together — against one mask in one process: `main`'s Roaring union, the tiered branch's
 //! bitset-and-buffer pair, one sketch per requested depth, and this ladder. Each corpus's own
 //! Morton column, re-dealt into 1 to 512 segments as a base plus flush ticks, whole mask, minimum
@@ -171,7 +171,7 @@
 
 use std::ops::Range;
 
-use tessera_store::read::SegmentData;
+use mosaica_store::read::SegmentData;
 
 use crate::compose::EffectiveMask;
 
@@ -259,7 +259,7 @@ impl<F: FnMut(u64)> Walk<'_, F> {
 /// of its rows.
 ///
 /// **Public so a measurement prices an accumulator over the identical walk.**
-/// `tessera-bench`'s `occupancy_sketch` compares this arm against the ones it replaced, and a
+/// `mosaica-bench`'s `occupancy_sketch` compares this arm against the ones it replaced, and a
 /// transcription of the walk in the harness would compare two walks rather than two accumulators.
 pub fn for_each_occupied_tile(
     mask: &EffectiveMask,
@@ -314,7 +314,7 @@ pub fn for_each_occupied_tile(
 pub struct OccupancyLadder {
     counts: [u64; 17],
     /// Each depth's rung **before** the running maximum, clamped to `4^d`. Kept so the
-    /// monotonicity claim above is measurable rather than asserted: `tessera-bench`'s
+    /// monotonicity claim above is measurable rather than asserted: `mosaica-bench`'s
     /// `occupancy_sketch` counts the inversions this array has and the one [`Self::at`] answers
     /// from does not.
     raw: [u64; 17],
@@ -474,7 +474,7 @@ pub fn occupied_tiles_ladder_exact(
 }
 
 /// [`occupied_tiles_ladder`]'s **sketch** route at an arbitrary precision, whatever the segment
-/// count. The engine takes [`SKETCH_PRECISION`] and only above one segment; `tessera-bench`'s
+/// count. The engine takes [`SKETCH_PRECISION`] and only above one segment; `mosaica-bench`'s
 /// `occupancy_sketch` sweeps this to choose it, and prices it at one segment against the counted
 /// route above.
 pub fn occupied_tiles_ladder_with_precision(
@@ -640,7 +640,7 @@ impl TileSketch {
         Self::with_precision(SKETCH_PRECISION)
     }
 
-    /// A sketch at an arbitrary precision. `tessera-bench` sweeps this; the engine takes
+    /// A sketch at an arbitrary precision. `mosaica-bench` sweeps this; the engine takes
     /// [`SKETCH_PRECISION`].
     pub fn with_precision(precision: u32) -> Self {
         assert!(
@@ -820,7 +820,7 @@ pub(crate) struct OccupancyKey {
 /// 32 MiB admits 65,536 entries, which is 480 publications' worth of ladders for eight sessions
 /// over one view before the LRU begins removing the coldest — and the coldest are exactly the
 /// superseded ones, because a live rung is re-read on every request that composes θ. A bound below
-/// the live set would cost walks, not correctness (`tessera-cache`'s rule 3).
+/// the live set would cost walks, not correctness (`mosaica-cache`'s rule 3).
 ///
 /// **What a deployment should set it to** (`serve.occupancy_cache_bytes`): the live set is 17
 /// rungs, one per depth in `0..=16`, at the cache's per-entry floor, per concurrently-querying
@@ -836,7 +836,7 @@ pub const DEFAULT_OCCUPANCY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OccupiedTiles(pub u64);
 
-impl tessera_cache::CacheWeight for OccupiedTiles {
+impl mosaica_cache::CacheWeight for OccupiedTiles {
     fn cache_weight_bytes(&self) -> u64 {
         // The value is a `u64`; the per-entry floor the cache applies is what actually bounds the
         // entry count, and it is the honest charge for a key holding a view name.
@@ -869,7 +869,7 @@ mod tests {
     /// accumulate, which is what the bound is for.
     #[test]
     fn the_memo_holds_the_live_set_and_bounds_the_superseded_one() {
-        let cache = tessera_cache::SingleFlightCache::new(DEFAULT_OCCUPANCY_CACHE_BYTES);
+        let cache = mosaica_cache::SingleFlightCache::new(DEFAULT_OCCUPANCY_CACHE_BYTES);
         for token_id in 0..8u64 {
             for depth in 0..=16u8 {
                 let _ = cache.get_or_derive(rung(token_id, depth, 0), None, |_| OccupiedTiles(1));
@@ -883,7 +883,7 @@ mod tests {
         // one at a time to watch the 65,537th evict is a minute of a debug build for a property
         // the per-entry charge already fixes. `an_undersized_bound_evicts` below is where the
         // eviction itself is exercised.
-        let admitted = DEFAULT_OCCUPANCY_CACHE_BYTES / tessera_cache::PER_ENTRY_FLOOR_BYTES;
+        let admitted = DEFAULT_OCCUPANCY_CACHE_BYTES / mosaica_cache::PER_ENTRY_FLOOR_BYTES;
         assert_eq!(admitted, 65_536);
         assert!(
             admitted > 400 * (8 * 17),
@@ -899,8 +899,8 @@ mod tests {
     /// [`DEFAULT_OCCUPANCY_CACHE_BYTES`], whose size is argued there.
     #[test]
     fn an_undersized_bound_evicts() {
-        let bound = 8 * tessera_cache::PER_ENTRY_FLOOR_BYTES;
-        let cache = tessera_cache::SingleFlightCache::new(bound);
+        let bound = 8 * mosaica_cache::PER_ENTRY_FLOOR_BYTES;
+        let cache = mosaica_cache::SingleFlightCache::new(bound);
         for publication in 0..32u64 {
             let _ = cache.get_or_derive(rung(0, 0, publication), None, |_| OccupiedTiles(1));
         }

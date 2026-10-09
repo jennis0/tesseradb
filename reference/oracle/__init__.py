@@ -39,7 +39,7 @@ carries none: its one property — the two principals being exactly one entity a
 from the engine's own masked counts in the test that uses it, before anything rests on it.
 
 **Drivers — they talk to, and *mutate*, the system under test.** ``harness`` (spawns
-``tessera serve``), ``journal`` (drives the control plane and records what was acked). These are
+``mosaica serve``), ``journal`` (drives the control plane and records what was acked). These are
 the only modules that can change the thing being measured, and the only ones where "what did we
 actually ask for, and what did it say?" is a question worth a type — which is what ``AckedJournal``
 is.

@@ -159,7 +159,7 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     viewport, decode the points batch, and check each served point's `fx_key` against the value the
     fixture planted for that item.
 
-    The xfail was removed on 2026-08-07, when `tessera build` gained `--schema` and the catalogue
+    The xfail was removed on 2026-08-07, when `mosaica build` gained `--schema` and the catalogue
     fixture began declaring `fx_key`. That the marker was **strict** is why this became a test that
     flipped rather than a gap somebody had to remember.
     """
@@ -206,7 +206,7 @@ def test_the_catalogues_principals_reach_the_split_route(catalogue_server):
     """**A session whose terms have images is served through them**, not merely offered them.
 
     A row projection is built by one of three routes, chosen from the principal's own grant
-    (`architecture.md` Appendix C, C19; `tessera_engine::compose::RowProjection::new`): the walk
+    (`architecture.md` Appendix C, C19; `mosaica_engine::compose::RowProjection::new`): the walk
     over the fragment, the row range where the grant covers the whole entity domain, or the split —
     the union of the bundle's images of the terms the session holds plus a walk over the residual.
     Every route returns the identical served set, which is exactly why no differential in this

@@ -45,7 +45,7 @@ def read_all(server, token: str) -> dict[int, tuple[int, list[str]]]:
                     rows = zip(
                         batch.column(JOIN_FIELD).to_pylist(),
                         batch.column("tessera_id").to_pylist(),
-                        batch.column("tessera:labels").to_pylist(),
+                        batch.column("mosaica:labels").to_pylist(),
                     )
                     for source_id, tessera_id, labels in rows:
                         assert source_id not in out, f"source id {source_id} returned twice"

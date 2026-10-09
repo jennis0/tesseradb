@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 
 use croaring::Bitmap;
 
-use tessera_lifecycle::membership::ArtifactStore;
-use tessera_types::layer::LayerDeclaration;
+use mosaica_lifecycle::membership::ArtifactStore;
+use mosaica_types::layer::LayerDeclaration;
 
 
 use crate::containment::ContainmentPartition;
 use crate::row_column::RowColumn;
-use tessera_store::membership::LabelColumnPack;
+use mosaica_store::membership::LabelColumnPack;
 use crate::tile_index::TileIndex;
 
 use super::*;
@@ -205,7 +205,7 @@ pub(super) struct HeldBandLabels {
     /// The segment whose band entries the copy follows.
     seg_id: String,
     path: std::path::PathBuf,
-    opened: std::sync::OnceLock<Option<Arc<tessera_store::bands::BandLabels>>>,
+    opened: std::sync::OnceLock<Option<Arc<mosaica_store::bands::BandLabels>>>,
 }
 
 /// The engine cache directory's subdirectory for row-column compositions. Its own directory rather
@@ -331,7 +331,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[tessera_store::manifest::DerivedExtent],
+        extents: &[mosaica_store::manifest::DerivedExtent],
         store: &ArtifactStore,
     ) {
         self.adopt_all(prefix_dir, prefix, extents, store);
@@ -348,7 +348,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[tessera_store::manifest::DerivedExtent],
+        extents: &[mosaica_store::manifest::DerivedExtent],
         store: &ArtifactStore,
     ) {
         let mut labels = self.labels_held.lock().unwrap_or_else(|e| e.into_inner());
@@ -366,7 +366,7 @@ impl ArtifactProjections {
             let key = DerivedKey::of(prefix, extent.level_version);
             let path = prefix_dir.join(&extent.path);
             match &extent.form {
-                tessera_store::manifest::DerivedForm::LevelLabels => {
+                mosaica_store::manifest::DerivedForm::LevelLabels => {
                     match LabelColumnPack::open(&path) {
                         Ok(pack) => {
                             labels.insert(address, (key, Arc::new(pack)));
@@ -382,7 +382,7 @@ impl ArtifactProjections {
                         ),
                     }
                 }
-                tessera_store::manifest::DerivedForm::BandLabels { seg_id } => {
+                mosaica_store::manifest::DerivedForm::BandLabels { seg_id } => {
                     copies.insert(
                         address,
                         (
@@ -425,8 +425,8 @@ impl ArtifactProjections {
         layer: &str,
         level: u32,
         level_version: u64,
-        segment: &tessera_store::read::SegmentData,
-    ) -> Option<Arc<tessera_store::bands::BandLabels>> {
+        segment: &mosaica_store::read::SegmentData,
+    ) -> Option<Arc<mosaica_store::bands::BandLabels>> {
         let held = {
             let held = self.band_labels_held.lock().unwrap_or_else(|e| e.into_inner());
             let (key, copy) = held.get(&(view.to_string(), layer.to_string(), level))?;
@@ -437,7 +437,7 @@ impl ArtifactProjections {
         };
         held.opened
             .get_or_init(|| {
-                match tessera_store::bands::BandLabels::open(&held.path, &segment.bands) {
+                match mosaica_store::bands::BandLabels::open(&held.path, &segment.bands) {
                     Ok(copy) => Some(Arc::new(copy)),
                     Err(error) => {
                         tracing::error!(
@@ -467,7 +467,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[tessera_store::manifest::DerivedExtent],
+        extents: &[mosaica_store::manifest::DerivedExtent],
         store: &ArtifactStore,
     ) {
         // Everything held for another prefix leaves here, so a request still building on the
@@ -478,7 +478,7 @@ impl ArtifactProjections {
             .retain(|_, (key, _)| key.prefix == prefix);
         for extent in extents
             .iter()
-            .filter(|e| e.form == tessera_store::manifest::DerivedForm::Containment)
+            .filter(|e| e.form == mosaica_store::manifest::DerivedForm::Containment)
         {
             let level_version = store.level_version(&extent.layer, extent.level);
             if level_version != extent.level_version {
@@ -529,7 +529,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[tessera_store::manifest::DerivedExtent],
+        extents: &[mosaica_store::manifest::DerivedExtent],
         store: &ArtifactStore,
     ) {
         self.indexes_held
@@ -537,7 +537,7 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (key, _)| key.prefix == prefix);
         for extent in extents {
-            let (tessera_store::manifest::DerivedForm::TileIndex, Some(view)) =
+            let (mosaica_store::manifest::DerivedForm::TileIndex, Some(view)) =
                 (&extent.form, extent.view.as_deref())
             else {
                 continue;
@@ -597,7 +597,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[tessera_store::manifest::DerivedExtent],
+        extents: &[mosaica_store::manifest::DerivedExtent],
         store: &ArtifactStore,
     ) {
         self.columns_held
@@ -605,7 +605,7 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (key, _)| key.prefix == prefix);
         for extent in extents {
-            let (tessera_store::manifest::DerivedForm::RowColumn { layout }, Some(view)) =
+            let (mosaica_store::manifest::DerivedForm::RowColumn { layout }, Some(view)) =
                 (&extent.form, extent.view.as_deref())
             else {
                 continue;
@@ -626,7 +626,7 @@ impl ArtifactProjections {
             }
             let path = prefix_dir.join(&extent.path);
             let members = extents.iter().find(|m| {
-                m.form == tessera_store::manifest::DerivedForm::RowMembers && m.same_level(extent)
+                m.form == mosaica_store::manifest::DerivedForm::RowMembers && m.same_level(extent)
             });
             let Some(members) = members else {
                 tracing::error!(

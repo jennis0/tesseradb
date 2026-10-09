@@ -20,7 +20,7 @@ use arrow::ipc::writer::StreamWriter;
 use common::*;
 use serde_json::json;
 use tempfile::TempDir;
-use tessera_engine::EngineConfig;
+use mosaica_engine::EngineConfig;
 
 const TOPICS: &str = "topics/generating";
 
@@ -108,7 +108,7 @@ async fn ingest(server: &TestServer, batch_id: &str, rows: &[(u64, f32, f32, &[&
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(ingest_batch(rows))
         .send()

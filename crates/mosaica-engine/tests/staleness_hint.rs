@@ -25,9 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use common::*;
-use tessera_authz::DictWriter;
-use tessera_engine::GeometryPublication;
-use tessera_engine::{Engine, Session, ViewportRequest};
+use mosaica_authz::DictWriter;
+use mosaica_engine::GeometryPublication;
+use mosaica_engine::{Engine, Session, ViewportRequest};
 
 /// A descriptor no fixture dictionary carries, so it resolves to `None` at authorise.
 const NOVEL: &[u8] = b"dept:secret";
@@ -253,9 +253,9 @@ fn visible(engine: &Engine, session: &Session) -> u64 {
 /// **Every session holds `public` by construction** (`per-point-attributes.md` §3.8), added inside
 /// the engine rather than by the credential — so counting `satisfied` directly would count a term
 /// this file's cases are not about, in every one of them.
-fn resolved(session: &tessera_engine::Session) -> usize {
+fn resolved(session: &mosaica_engine::Session) -> usize {
     assert!(
-        session.satisfied_for_test().contains(&tessera_authz::PUBLIC_TERM),
+        session.satisfied_for_test().contains(&mosaica_authz::PUBLIC_TERM),
         "every session holds the reserved `public` term"
     );
     session.satisfied_for_test().len() - 1

@@ -1,6 +1,6 @@
 """Writing a declaration as TOML.
 
-The SDK writes `schema.toml` and `tessera.toml` and the binary reads them, so the mapping from
+The SDK writes `schema.toml` and `mosaica.toml` and the binary reads them, so the mapping from
 verb to block is checked by the binary rather than mirrored here. The output is
 the document the caller would have written by hand: block order preserved, one table per block,
 and every value spelled the way the declaration spells it.

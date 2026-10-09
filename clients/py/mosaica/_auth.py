@@ -21,7 +21,7 @@ from ._refusal import Refusal
 
 @dataclass
 class Token:
-    """A token for reading a Tessera database, and when it expires.
+    """A token for reading a Mosaica database, and when it expires.
 
     - `token`: the token itself, a string to keep secret.
     - `expires_at`: when its session ends, in seconds since 1970, or `None` if not known. A
@@ -115,8 +115,8 @@ def login(
     credential the server does not accept raises `PermissionError`; the answer is the same
     whatever the reason, so it does not say whether a principal exists.
 
-        token = tesseradb.login(viewer_url, principal="ann", password=password)
-        tesseradb.connect(viewer_url, token).view("papers").count()
+        token = mosaica.login(viewer_url, principal="ann", password=password)
+        mosaica.connect(viewer_url, token).view("papers").count()
     """
     if not viewer_url:
         raise ValueError("login needs the viewer plane's URL")
@@ -199,9 +199,9 @@ def authorise(
     `ValueError`, and a request the server refuses raises `PermissionError` with its status and
     answer.
 
-        token = tesseradb.authorise(session_url, api_key, principal="ann")
-        token = tesseradb.authorise(session_url, operator_credential, terms=["cs.LG"])
-        tesseradb.connect(viewer_url, token).view("papers").count()
+        token = mosaica.authorise(session_url, api_key, principal="ann")
+        token = mosaica.authorise(session_url, operator_credential, terms=["cs.LG"])
+        mosaica.connect(viewer_url, token).view("papers").count()
     """
     if not credential:
         raise ValueError(
@@ -267,7 +267,7 @@ def revoke(
     The token ends, not the credential that made it: a reader holding the `Token` gets another
     with its `renew()`. A reader given the token as a string has none to get.
 
-        tesseradb.revoke(session_url, credential, token)
+        mosaica.revoke(session_url, credential, token)
     """
     if not credential:
         raise ValueError(

@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tessera_authz::DeltaTier;
-use tessera_store::manifest::{
+use mosaica_authz::DeltaTier;
+use mosaica_store::manifest::{
     AttrExtent, DictExtent, EntityTermsExtent, FileDigest, RecordExtent,
     TextExtent,
 };
@@ -83,7 +83,7 @@ pub(crate) struct CoalescePlan {
 /// dropped.
 #[derive(Debug, Clone)]
 pub(crate) struct EditedWindow {
-    pub(crate) direction: tessera_store::edited::Direction,
+    pub(crate) direction: mosaica_store::edited::Direction,
     /// Prefix-relative, in the direction's live order.
     pub(crate) runs: Vec<String>,
 }
@@ -102,7 +102,7 @@ pub(crate) struct UniqueWindow {
 fn coalesced_column_rel(out_rel: &str, column: &str, view: Option<&str>) -> String {
     let mut rel = format!("{out_rel}/attrs/{column}");
     if let Some(view) = view {
-        for component in tessera_store::view_path_components(view) {
+        for component in mosaica_store::view_path_components(view) {
             rel.push('/');
             rel.push_str(component);
         }
@@ -115,7 +115,7 @@ fn coalesced_column_rel(out_rel: &str, column: &str, view: Option<&str>) -> Stri
 type WindowKey<'a> = (
     &'a str,
     Option<&'a str>,
-    Option<tessera_types::view::ViewIncarnation>,
+    Option<mosaica_types::view::ViewIncarnation>,
 );
 
 trait ColumnExtent {
@@ -141,7 +141,7 @@ pub(crate) struct ColumnWindow<E> {
     /// `None` for an entity-scoped column. A group-scoped family's views share one column name.
     pub(crate) view: Option<String>,
     /// `None` exactly when `view` is.
-    pub(crate) incarnation: Option<tessera_types::view::ViewIncarnation>,
+    pub(crate) incarnation: Option<mosaica_types::view::ViewIncarnation>,
     pub(crate) extents: Vec<E>,
 }
 

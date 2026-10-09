@@ -91,7 +91,7 @@ impl Executor {
     pub(super) fn follow_since(
         &self,
         stamp: crate::edited::Stamp,
-        follow: impl FnOnce(&crate::Generation) -> Result<(), tessera_store::StoreError>,
+        follow: impl FnOnce(&crate::Generation) -> Result<(), mosaica_store::StoreError>,
     ) -> bool {
         let generation = self.generation.load();
         match stamp.since(&generation) {

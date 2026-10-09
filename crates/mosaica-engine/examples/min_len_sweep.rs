@@ -16,15 +16,15 @@
 //! the TRUE, mask-independent row-range predictor rather than `StageTimings.rows_in_ranges` — see
 //! `calibration_sweep`'s module doc for the bug this works around.
 //!
-//! Run: `cargo run --release --example min_len_sweep -p tessera-engine --features bench-timing --
+//! Run: `cargo run --release --example min_len_sweep -p mosaica-engine --features bench-timing --
 //! --bundle <path> [--dense] [--reps N]`
 
 use std::path::PathBuf;
 
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_spatial::{tiles_for_bbox, Bounds};
-use tessera_store::{open_bundle, tile_ranges_all, Bundle};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_spatial::{tiles_for_bbox, Bounds};
+use mosaica_store::{open_bundle, tile_ranges_all, Bundle};
 
 const REPS: usize = 60;
 
@@ -58,7 +58,7 @@ fn spread_descriptors(all: &[String], w: usize) -> Vec<String> {
 }
 
 /// See `calibration_sweep::random_grant`'s doc — identical duplication of
-/// `tessera_bench::corpus::build_grant`'s `GrantShape::Random` arm.
+/// `mosaica_bench::corpus::build_grant`'s `GrantShape::Random` arm.
 fn random_grant(all: &[String], w: usize, seed: u64) -> Vec<String> {
     use rand::seq::SliceRandom;
     use rand::SeedableRng;
@@ -146,7 +146,7 @@ fn main() {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
             // what bounds the window close's O(buffered) copy. Nothing here reaches it.
@@ -156,7 +156,7 @@ fn main() {
             segment_floor_bytes: None,
             coalesce_width: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )
     .expect("engine should open");

@@ -487,7 +487,7 @@ def test_filtered_counts_equal_the_oracles(
     )
     assert resp.status_code == 200, resp.text
     if "region" in str(expr):
-        assert resp.headers["x-tessera-region"] == "exact"
+        assert resp.headers["x-mosaica-region"] == "exact"
     values_served = resp.json()["values"]
     assert values_served, "no values served — the counts assertion below would be vacuous"
 

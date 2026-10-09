@@ -1,8 +1,8 @@
 //! Minting at the commit-window close (issue #82's engine half).
 //!
-//! `tessera-build`'s `discovered_vocabulary.rs` covers the build-time mint — a corpus supplying
+//! `mosaica-build`'s `discovered_vocabulary.rs` covers the build-time mint — a corpus supplying
 //! keys the schema does not pin. This file covers the other producer: a novel key arriving through
-//! `/control/ingest`, which travels as `WalScalar::Utf8` (`tessera-server`'s `category_code`
+//! `/control/ingest`, which travels as `WalScalar::Utf8` (`mosaica-server`'s `category_code`
 //! deliberately does not mint — see that function's own doc) and is resolved to a code once, on the
 //! write executor, at the close of the commit window the row lands in.
 //!
@@ -23,13 +23,13 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::{Config, Schema};
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{AcceptError, Engine, EngineConfig};
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::{Wal, WalRecord, WalScalar};
-use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use tessera_types::EntityId;
+use mosaica_build::config::{Config, Schema};
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{AcceptError, Engine, EngineConfig};
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::{Wal, WalRecord, WalScalar};
+use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
+use mosaica_types::EntityId;
 
 /// A discovered `department` vocabulary, wide enough that ordinary tests never see exhaustion.
 const DISCOVERED_WIDE: &str = r#"
@@ -129,20 +129,20 @@ fn write_points_with_absent_category(path: &Path, n: u64, column: &str) {
 
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
@@ -208,7 +208,7 @@ fn ingest_row(engine: &Engine, batch: &str, scalar: WalScalar) -> EntityId {
 /// route the serving path reads it. `None` if the entity has not reached a segment (not flushed).
 fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
     let bundle = open_bundle(root).expect("the bundle opens");
-    let current: tessera_store::manifest::CurrentPointer =
+    let current: mosaica_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
             .expect("CURRENT parses");
     let prefix = &current.prefix;
@@ -530,18 +530,18 @@ fn a_predicate_layer_over_a_category_names_its_artifact_by_the_key() {
 
     const LAYER: &str = "departments/by-value";
     engine
-        .register_layer(tessera_types::layer::LayerDeclaration {
+        .register_layer(mosaica_types::layer::LayerDeclaration {
             scope: Default::default(),
             name: LAYER.to_string(),
             title: None,
             views: vec!["s0".to_string()],
-            membership: tessera_types::layer::MembershipSource::Attribute("department".to_string()),
+            membership: mosaica_types::layer::MembershipSource::Attribute("department".to_string()),
             value_set: Default::default(),
             visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
             require_member_visibility: None,
-            hierarchy: tessera_types::layer::Hierarchy {
-                kind: tessera_types::layer::HierarchyKind::Flat,
+            hierarchy: mosaica_types::layer::Hierarchy {
+                kind: mosaica_types::layer::HierarchyKind::Flat,
                 prune_children: false,
             },
             content: Default::default(),

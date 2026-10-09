@@ -131,6 +131,6 @@ def build_bundle(work_dir: Path) -> Path:
     config = work_dir / "expressions.toml"
     config.write_text(CONFIG_TOML)
     bundle = work_dir / "bundle"
-    deployment = write_deployment(work_dir / "tessera.toml", bundle=bundle, schema=config)
+    deployment = write_deployment(work_dir / "mosaica.toml", bundle=bundle, schema=config)
     cli_build(deployment, bundle)
     return bundle

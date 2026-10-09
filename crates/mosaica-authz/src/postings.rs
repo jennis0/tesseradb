@@ -23,7 +23,7 @@ use arrow::ipc::{root_as_footer, MetadataVersion};
 use arrow::record_batch::RecordBatch;
 use croaring::{Bitmap, BitmapView, Portable};
 
-use tessera_types::TermId;
+use mosaica_types::TermId;
 
 const POSTING_COLUMN_NAME: &str = "posting";
 

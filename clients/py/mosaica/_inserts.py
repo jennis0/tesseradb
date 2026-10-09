@@ -10,7 +10,7 @@ columns it ignored.
 group's view column are named on every call and never matched. A table names the item each row
 belongs to by the columns it carries of the attributes declared `unique`: each attribute's own
 column, or the one `columns=` names for it. An artifacts table, a members
-table, a roster and a value set are tables in Tessera's own shape, so a column of theirs
+table, a roster and a value set are tables in Mosaica's own shape, so a column of theirs
 carrying its canonical name is named on the call like any other, and one the call passed over
 is refused rather than read silently: the build and the publication routes read such a column
 under its own name whatever this package prints. Two of them are read under their own names
@@ -21,8 +21,8 @@ shape is named by its kind, `shape="polygon"`, its columns being read under thei
 **Where the table goes.** Before the first commit an insert binds the table to its target for the
 build: a frame is written under `sources/` and a path is recorded, and the declaration names the
 file and the columns. After the first commit the same insert is sent at the next `commit()` by the
-route its target owns, so its frame goes under `.tessera/inserts/`, out of `[sources]`, which
-`tessera check` reads as the whole corpus, and nothing is written under `sources/`.
+route its target owns, so its frame goes under `.mosaica/inserts/`, out of `[sources]`, which
+`mosaica check` reads as the whole corpus, and nothing is written under `sources/`.
 """
 
 from __future__ import annotations
@@ -38,9 +38,9 @@ import pyarrow.parquet as pq
 from ._refusal import Refusal
 from ._reports import Summarised, _count
 
-#: Where a frame inserted after the first commit is written. Not `sources/`: `tessera check` reads
+#: Where a frame inserted after the first commit is written. Not `sources/`: `mosaica check` reads
 #: every key of `[sources]` as a file the declaration is built from.
-INSERT_FOLDER = ".tessera/inserts"
+INSERT_FOLDER = ".mosaica/inserts"
 
 #: An artifacts table's columns, in the build's own field set: the ones a declaration's `fields`
 #: map can move, so the call may name a column of any name for each.
@@ -96,7 +96,7 @@ class Contract:
     optional: tuple[str, ...] = ()
     #: One of these must be named, where the contract names a pair.
     either: tuple[str, ...] = ()
-    #: The column names this kind of table carries meaning under. A table in Tessera's own shape
+    #: The column names this kind of table carries meaning under. A table in Mosaica's own shape
     #: is no exception to the rule that every column a target reads is named on the call: one of
     #: these the call did not name is refused, naming the column and the two remedies, so nothing
     #: is read silently at either door.
@@ -446,7 +446,7 @@ def _refuse_a_column_read_silently(
 ) -> None:
     """A canonical column the call did not name.
 
-    A table in Tessera's own shape is no exception to the rule that every column a target reads
+    A table in Mosaica's own shape is no exception to the rule that every column a target reads
     is named on the call: the build reads such a column under its own name whatever the SDK
     prints, so a column the call passed over is refused rather than read silently at one door and
     ignored at the other.

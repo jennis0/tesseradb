@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_lifecycle::membership::ArtifactRecord;
-use tessera_types::layer::ServingLayout;
+use mosaica_lifecycle::membership::ArtifactRecord;
+use mosaica_types::layer::ServingLayout;
 
-use tessera_store::permutation::RowSpace;
+use mosaica_store::permutation::RowSpace;
 
 use crate::tile_index::TileIndex;
 
@@ -176,7 +176,7 @@ impl ArtifactRows {
     /// that has grown is larger than its labels. This holds one artifact's rows and the pairs
     /// found, never the level.
     ///
-    /// [`Members::joined`]: tessera_lifecycle::membership::Members::joined
+    /// [`Members::joined`]: mosaica_lifecycle::membership::Members::joined
     pub(super) fn base_joins<'a>(
         &self,
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
@@ -473,7 +473,7 @@ impl ArtifactRows {
         };
         let live = self.membership.live_slots();
         self.index = Arc::new(TileIndex::of_bytes(
-            tessera_store::membership::pack_tile_index(row_count, &listed.extents(&live)),
+            mosaica_store::membership::pack_tile_index(row_count, &listed.extents(&live)),
         ));
         self.layout = listed.layout();
         self.column = Some(Arc::new(listed));

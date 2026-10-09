@@ -23,7 +23,7 @@
 
         <text x="480" y="52" font-size="11.5" fill="#5b6a75" letter-spacing="1">WHAT THE BUILD DOES WITH IT</text>
         <g font-size="11.5">
-          <text x="480" y="78"  fill="#101820">tessera build compiles the schema into the bundle's</text>
+          <text x="480" y="78"  fill="#101820">mosaica build compiles the schema into the bundle's</text>
           <text x="480" y="94"  fill="#101820">MANIFEST; the engine serves only what it declares, and</text>
           <text x="480" y="110" fill="#101820">/v1/meta advertises the filter operands derived from it</text>
           <text x="480" y="140" fill="#5b6a75">name and type are required; every flag defaults to false —</text>

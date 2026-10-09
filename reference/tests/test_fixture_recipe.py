@@ -1,6 +1,6 @@
 """The fixture-reuse receipt, which is the fix for a defect that has now happened twice.
 
-A fixture bundle is built once per `tessera` binary under `/tmp` and reused across sessions, so
+A fixture bundle is built once per `mosaica` binary under `/tmp` and reused across sessions, so
 "may this one be reused?" is answered on every run of both suites. Answering it by *inspecting the
 bundle* is an allowlist — it has to be extended in step with every new build input, and the input
 nobody adds is the one that then goes wrong silently. It failed that way on MANIFEST's `identity`
@@ -9,7 +9,7 @@ with a `CURRENT`-plus-`identity` predicate over inputs it shares none of.
 
 The receipt inverts it: the builder stamps the whole input set beside the bundle, and reuse is
 equality against the input set wanted now. Adding an input can then only fail in the safe
-direction. **These tests are of the mechanism, not of a build** — no `tessera build` runs here, so
+direction. **These tests are of the mechanism, not of a build** — no `mosaica build` runs here, so
 they cost milliseconds and can enumerate the cases a real build never would.
 """
 
@@ -34,11 +34,11 @@ def work_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def binary(monkeypatch, tmp_path: Path) -> Path:
-    """A stand-in for the `tessera` binary, with the session's digest fixed to its contents, and a
+    """A stand-in for the `mosaica` binary, with the session's digest fixed to its contents, and a
     fixture root under `tmp_path`: nothing here builds the binary or touches `/tmp`."""
-    fake = tmp_path / "bin" / "tessera"
+    fake = tmp_path / "bin" / "mosaica"
     fake.parent.mkdir()
-    fake.write_bytes(b"one tessera binary")
+    fake.write_bytes(b"one mosaica binary")
     digest = hashlib.sha256(fake.read_bytes()).hexdigest()
     monkeypatch.setattr(harness, "CLI_BIN", fake)
     monkeypatch.setattr(harness, "builder_identity", lambda: digest)
@@ -186,7 +186,7 @@ def test_a_binary_rebuilt_during_the_build_leaves_no_receipt(binary: Path, work_
     binary's, or a session still on the old binary would reuse it."""
     bundle_root = work_dir / "bundle"
     wanted = cat.recipe(work_dir, bundle_root)
-    binary.write_bytes(b"the tessera binary cargo rebuilt")
+    binary.write_bytes(b"the mosaica binary cargo rebuilt")
 
     _stamped(bundle_root, wanted)
 
@@ -210,14 +210,14 @@ def test_a_fixture_directory_prunes_only_its_own_idle_directories(monkeypatch):
             os.utime(path, (eight_days_ago, eight_days_ago))
         return path
 
-    ours = made(f"tessera-catalogue-{harness.builder_identity()[:12]}", idle=True)
-    stale = made(f"tessera-catalogue-{'a' * 12}", idle=True)
+    ours = made(f"mosaica-catalogue-{harness.builder_identity()[:12]}", idle=True)
+    stale = made(f"mosaica-catalogue-{'a' * 12}", idle=True)
     kept = [
-        made(f"tessera-catalogue-{'b' * 12}", idle=False),
-        made(f"tessera-multiview-{'c' * 12}", idle=True),
-        made("tessera-catalogue", idle=True),
-        made(f"tessera-catalogue-{'d' * 12}-copy", idle=True),
-        made(f"tessera-catalogue-{'E' * 12}", idle=True),
+        made(f"mosaica-catalogue-{'b' * 12}", idle=False),
+        made(f"mosaica-multiview-{'c' * 12}", idle=True),
+        made("mosaica-catalogue", idle=True),
+        made(f"mosaica-catalogue-{'d' * 12}-copy", idle=True),
+        made(f"mosaica-catalogue-{'E' * 12}", idle=True),
     ]
 
     assert harness.fixture_dir("catalogue") == ours
@@ -231,7 +231,7 @@ def test_a_fixture_directory_prunes_only_its_own_idle_directories(monkeypatch):
 
 
 def test_the_receipt_lives_beside_the_bundle_and_not_inside_it(work_dir: Path):
-    """The bundle is a `tessera build` output and the suite audits it byte by byte; a
+    """The bundle is a `mosaica build` output and the suite audits it byte by byte; a
     fixture-management file inside it would be the suite planting something in its own evidence."""
     bundle_root = work_dir / "bundle"
     assert harness.recipe_path(bundle_root).parent == bundle_root.parent
@@ -283,7 +283,7 @@ def test_regenerating_an_input_in_place_changes_the_recipe(work_dir: Path):
 
 
 def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
-    """`ensure_fixture_bundle`'s inputs are all `tessera build` arguments, so the argv is the
+    """`ensure_fixture_bundle`'s inputs are all `mosaica build` arguments, so the argv is the
     recipe — with `--out` and the binary path dropped, since neither is a property of the fixture
     and both differ per worktree.
     """

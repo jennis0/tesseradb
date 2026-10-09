@@ -17,7 +17,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 
 from conftest import post  # noqa: E402
-from tesseradb import PartialRead, Refusal, connect  # noqa: E402
+from mosaica import PartialRead, Refusal, connect  # noqa: E402
 from test_sdk_records import Proxy, end_of, papers  # noqa: E402
 
 
@@ -27,7 +27,7 @@ def db(served, corpus):
 
 
 def head(table) -> dict:
-    return json.loads(table.schema.metadata[b"tessera.head"])
+    return json.loads(table.schema.metadata[b"mosaica.head"])
 
 
 def rows(table) -> list:
@@ -50,8 +50,8 @@ def test_the_size_a_breakdown_and_a_density_surface(db):
     assert head(venues) == {"grouping": 1, "total": 20, "groups": 4}
     assert sum(cells.column("count").to_pylist()) == 20
     assert len(cells) > 1
-    assert size.schema.metadata[b"tessera.recomposed"] == b"false"
-    assert b"tessera.region" not in size.schema.metadata
+    assert size.schema.metadata[b"mosaica.recomposed"] == b"false"
+    assert b"mosaica.region" not in size.schema.metadata
 
 
 def test_a_filtered_set_against_a_reference(db):
@@ -111,7 +111,7 @@ def test_a_selection_counts_what_count_counts(db):
     part = db.view("map").filter({"n": {"range": {"gte": 3}}}).within((0.0, 0.0, 12.0, 1.0))
     (size,) = part.aggregate([{}])
     assert head(size)["total"] == part.count() > 0
-    assert size.schema.metadata[b"tessera.region"] == b"exact"
+    assert size.schema.metadata[b"mosaica.region"] == b"exact"
     (with_reference,) = part.aggregate([{}], reference={})
     assert head(with_reference)["reference_total"] == 20
 

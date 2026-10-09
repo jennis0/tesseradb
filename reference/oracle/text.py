@@ -13,7 +13,7 @@ being agreed with.
 **One analyser, reached over the CLI, and that is the load-bearing design decision.**
 Reimplementing UAX #29 segmentation in Python would compare PyICU's ICU4C against the engine's
 icu4x — two implementations of one standard, which disagree at the margins, so every disagreement
-would be a research question rather than a defect. `tessera tokenise` exists for exactly this
+would be a research question rather than a defect. `mosaica tokenise` exists for exactly this
 (decision 0070): the oracle asks the shipped binary for the token stream and then does its own
 *set and sequence* arithmetic over it, which is the part under test.
 
@@ -65,7 +65,7 @@ def tokenise(texts: list[str], binary: Path, analyser: str = "unicode") -> list[
         lines.pop()
     if len(lines) != len(texts):
         raise AssertionError(
-            f"`tessera tokenise` answered {len(lines)} lines for {len(texts)} inputs — the "
+            f"`mosaica tokenise` answered {len(lines)} lines for {len(texts)} inputs — the "
             "oracle's token stream is no longer aligned with its documents"
         )
     # An input analysing to no tokens at all — punctuation, the empty string — is an empty line,

@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 
-use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore};
-use tessera_types::layer::ServingLayout;
+use mosaica_lifecycle::membership::{ArtifactRecord, ArtifactStore};
+use mosaica_types::layer::ServingLayout;
 
-use tessera_store::permutation::RowSpace;
+use mosaica_store::permutation::RowSpace;
 
 use crate::containment::ContainmentPartition;
 use crate::row_column::RowColumn;
@@ -122,7 +122,7 @@ impl ArtifactRows {
         // artifact-major half.
         if column_only {
             let live: Vec<bool> = membership.live_slots();
-            let index = TileIndex::of_bytes(tessera_store::membership::pack_tile_index(
+            let index = TileIndex::of_bytes(mosaica_store::membership::pack_tile_index(
                 total_rows(space),
                 &column.extents(&live),
             ));
@@ -274,7 +274,7 @@ impl ArtifactRows {
     /// criterion reads that number, and its proportional denominator is the cluster's declared
     /// size. A label that declares members keeps them, and `content_requires = "all"` gates on
     /// them unchanged. The rule is the store's, in
-    /// [`tessera_lifecycle::membership::ArtifactStore::members_of`], applied here on the level's
+    /// [`mosaica_lifecycle::membership::ArtifactStore::members_of`], applied here on the level's
     /// row form, once, so the tile index, the masked count, the criterion and every derived
     /// property follow from one membership.
     /// A borrowing artifact gains nothing its target's gate would withhold: every count is taken
@@ -299,7 +299,7 @@ impl ArtifactRows {
         let mut taken = 0usize;
         let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
         for (ordinal, record) in store.level_in_view(layer, level, view) {
-            if !tessera_lifecycle::membership::borrows_membership(record) {
+            if !mosaica_lifecycle::membership::borrows_membership(record) {
                 continue;
             }
             // The store's own rule, not a second walk: the hops are what this form records so it

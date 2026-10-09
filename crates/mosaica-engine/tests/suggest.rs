@@ -10,7 +10,7 @@
 //! rather than from the index.
 //!
 //! The index's own shape — the sorted order, the runs, the side map, the retraction set — is
-//! covered by `tessera_engine::suggest`'s unit tests. This is the layer above them.
+//! covered by `mosaica_engine::suggest`'s unit tests. This is the layer above them.
 
 mod common;
 
@@ -25,17 +25,17 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
 use rustc_hash::FxHashSet;
-use tessera_analyse::SuggestionField;
-use tessera_build::config::{Config, Schema};
-use tessera_build::{build, BuildArgs};
-use tessera_engine::filter::{FilterExpr, FilterOperand, RegionLeaf};
-use tessera_engine::shapes::ShapeF64;
-use tessera_engine::{Engine, EngineError, SuggestPage, SuggestRequest};
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::WalScalar;
-use tessera_spatial::fixed32;
-use tessera_spatial::shape::Space;
-use tessera_types::AttrLocalId;
+use mosaica_analyse::SuggestionField;
+use mosaica_build::config::{Config, Schema};
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::filter::{FilterExpr, FilterOperand, RegionLeaf};
+use mosaica_engine::shapes::ShapeF64;
+use mosaica_engine::{Engine, EngineError, SuggestPage, SuggestRequest};
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::WalScalar;
+use mosaica_spatial::fixed32;
+use mosaica_spatial::shape::Space;
+use mosaica_types::AttrLocalId;
 
 const N: u64 = 60;
 
@@ -263,15 +263,15 @@ struct Fixture {
 
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
     let schema = with_id(schema);
-    let view = |view_id: &str, points: &Path| tessera_build::ViewArgs {
+    let view = |view_id: &str, points: &Path| mosaica_build::ViewArgs {
         visibility: None,
         view_id: view_id.to_string(),
-        projection: tessera_spatial::Projection::None,
+        projection: mosaica_spatial::Projection::None,
         extent: extent(),
         points: points.to_path_buf(),
         point_fields: Default::default(),
         select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
     };
     let second = points.with_file_name("second-view.parquet");
     let mut views = vec![view("s0", points)];
@@ -283,7 +283,7 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
@@ -373,7 +373,7 @@ fn page_with(
 #[allow(clippy::too_many_arguments)]
 fn suggest_with(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     column: &str,
     view: Option<&str>,
     q: &str,
@@ -797,7 +797,7 @@ fn a_count_takes_in_an_item_buffered_before_its_flush() {
         .ingest_rows(vec![row("kept"), row("suppressed")], "batch-1".to_string(), [0u8; 32])
         .expect("the ingest is accepted");
     engine
-        .accept_change(entities[1], tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(entities[1], mosaica_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is an ordinary change");
 
     assert_eq!(count_of(None), before + 1, "the buffered item counts, the suppressed one does not");
@@ -879,7 +879,7 @@ fn in_view(view: &str, e: u64) -> bool {
 /// One counted page under `filter` in `view`, on the probe route.
 fn filtered(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     column: &str,
     view: &str,
     filter: &FilterExpr,
@@ -1045,13 +1045,13 @@ fn a_suppression_between_two_requests_moves_the_filtered_count() {
     assert_eq!(before, inside.len() as u64);
 
     let entity =
-        tessera_types::EntityId::new(source_to_new_map(&fx.bundle, &fx.prefix)[&inside[0]]);
+        mosaica_types::EntityId::new(source_to_new_map(&fx.bundle, &fx.prefix)[&inside[0]]);
     engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is an ordinary change");
     assert_eq!(count_of_eng(), before - 1);
     engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Unsuppress)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Unsuppress)
         .expect("an unsuppress is an ordinary change");
     assert_eq!(count_of_eng(), before);
 }
@@ -1079,9 +1079,9 @@ fn a_deletion_between_two_requests_moves_the_filtered_count() {
     let before = count_of_eng();
     assert_eq!(before, inside.len() as u64);
     let entity =
-        tessera_types::EntityId::new(source_to_new_map(&fx.bundle, &fx.prefix)[&inside[0]]);
+        mosaica_types::EntityId::new(source_to_new_map(&fx.bundle, &fx.prefix)[&inside[0]]);
     engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Delete)
         .expect("a deletion is an ordinary change");
     assert_eq!(count_of_eng(), before - 1);
 }
@@ -1117,7 +1117,7 @@ fn a_cancelled_filtered_count_ends_as_cancelled() {
     let fx = fixture();
     let engine = engine_for(&fx, "filtered-cancel");
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let cancel = tessera_engine::CancelToken::new();
+    let cancel = mosaica_engine::CancelToken::new();
     cancel.cancel();
     let filter = boxed(200.5, 700.5);
     let got = engine.suggest(
@@ -1375,7 +1375,7 @@ fn a_column_with_no_index_refuses_rather_than_answering_empty() {
         .categories(
             &session,
             "department",
-            tessera_engine::CategoryQuery::Page {
+            mosaica_engine::CategoryQuery::Page {
                 after: None,
                 limit: 20,
             },
@@ -1442,8 +1442,8 @@ fn suppressing_a_values_last_visible_member_retires_it_from_the_base_index() {
         );
         engine
             .accept_change(
-                tessera_types::EntityId::new(entity_of[source]),
-                tessera_lifecycle::wal::ChangeOp::Suppress,
+                mosaica_types::EntityId::new(entity_of[source]),
+                mosaica_lifecycle::wal::ChangeOp::Suppress,
             )
             .expect("a suppression is an ordinary change");
     }
@@ -1462,8 +1462,8 @@ fn suppressing_a_values_last_visible_member_retires_it_from_the_base_index() {
     // derivation retires and un-retires with it because it is derived per request.
     engine
         .accept_change(
-            tessera_types::EntityId::new(entity_of[&members[0]]),
-            tessera_lifecycle::wal::ChangeOp::Unsuppress,
+            mosaica_types::EntityId::new(entity_of[&members[0]]),
+            mosaica_lifecycle::wal::ChangeOp::Unsuppress,
         )
         .expect("an unsuppress is an ordinary change");
     assert!(keys(&page(&engine, &full, "department", "eng")).contains(&"eng".to_string()));
@@ -1539,7 +1539,7 @@ fn suppressing_a_minted_values_only_member_retires_it_from_the_side_map() {
     );
 
     engine
-        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .accept_change(entity, mosaica_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is an ordinary change");
     assert!(
         keys(&page(&engine, &full, "team", "platform")).is_empty(),
@@ -1565,7 +1565,7 @@ const WIDE_CEILING: u64 = 10_000_000;
 /// on-demand rule itself, asserted by every case that uses this rather than by one of its own.
 /// Returns the number of admitted sweeps, so a caller can tell "the set answered" from "the probe
 /// route answered a second time".
-fn wait_for_set(engine: &Engine, session: &tessera_engine::Session, column: &str) -> u64 {
+fn wait_for_set(engine: &Engine, session: &mosaica_engine::Session, column: &str) -> u64 {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         // A **hit** is the signal, not a finished sweep: the counters are process-wide, so a build
@@ -1729,8 +1729,8 @@ fn a_suppression_between_the_sweep_and_the_read_retires_the_value() {
     for source in &members {
         engine
             .accept_change(
-                tessera_types::EntityId::new(entity_of[source]),
-                tessera_lifecycle::wal::ChangeOp::Suppress,
+                mosaica_types::EntityId::new(entity_of[source]),
+                mosaica_lifecycle::wal::ChangeOp::Suppress,
             )
             .expect("a suppression is an ordinary change");
     }

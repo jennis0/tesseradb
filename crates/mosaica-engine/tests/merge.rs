@@ -60,9 +60,9 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::{ChangeOp, UnallocatedRow};
-use tessera_types::EntityId;
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::{ChangeOp, UnallocatedRow};
+use mosaica_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -82,7 +82,7 @@ fn open_engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
             flush_max_items: usize::MAX,
             max_merged_segment_bytes: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
             ..config_uncapped()
         },
     )
@@ -104,10 +104,10 @@ fn engine_at_with_faults(
     root: &std::path::Path,
 ) -> (
     Engine,
-    std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>,
+    std::sync::Arc<mosaica_lifecycle::faults::FaultSwitchboard>,
 ) {
     let mut engine = open_engine_at(tmp, root);
-    let faults = std::sync::Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new());
+    let faults = std::sync::Arc::new(mosaica_lifecycle::faults::FaultSwitchboard::new());
     engine
         .start_write_executor_with_faults(64, std::sync::Arc::clone(&faults))
         .expect("the executor starts once");
@@ -123,8 +123,8 @@ fn whole_extent() -> ViewportRequest<'static> {
 /// and a test that did not retry would be asserting the residual does not exist.
 fn viewport(
     engine: &Engine,
-    session: &tessera_engine::Session,
-) -> tessera_engine::viewport::ViewportOut {
+    session: &mosaica_engine::Session,
+) -> mosaica_engine::viewport::ViewportOut {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match engine.viewport(session, whole_extent()) {
@@ -155,8 +155,8 @@ const ROWS_EACH: usize = 8;
 /// set equality across the swap is the discrimination a count cannot make.
 fn served_ids(
     engine: &Engine,
-    session: &tessera_engine::Session,
-) -> BTreeSet<tessera_types::TesseraId> {
+    session: &mosaica_engine::Session,
+) -> BTreeSet<mosaica_types::TesseraId> {
     viewport(engine, session)
         .points
         .iter()
@@ -882,7 +882,7 @@ fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
         .viewport(&session, whole_extent())
         .expect_err("a racer inside the refresh window must be shed");
     assert!(
-        matches!(refused, tessera_engine::EngineError::ProjectionBuilding),
+        matches!(refused, mosaica_engine::EngineError::ProjectionBuilding),
         "and shed as backpressure with a Retry-After, never as a failure: {refused}"
     );
     assert_eq!(
@@ -939,7 +939,7 @@ fn a_session_established_inside_a_merges_refresh_window_is_served_rather_than_sh
         .viewport(&established, whole_extent())
         .expect_err("the session with a resident predecessor is shed");
     assert!(
-        matches!(refused, tessera_engine::EngineError::ProjectionBuilding),
+        matches!(refused, mosaica_engine::EngineError::ProjectionBuilding),
         "and shed as backpressure: {refused}"
     );
 
@@ -1152,7 +1152,7 @@ fn a_configured_segment_floor_reaches_selection_and_changes_which_segments_merge
 /// a reliable failure rather than a racy pass.
 #[test]
 fn the_merge_publication_seam_parks_the_executor_between_execution_and_publication() {
-    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+    use mosaica_lifecycle::faults::{PauseAction, PauseSite};
     const WAIT: Duration = Duration::from_secs(30);
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1240,7 +1240,7 @@ fn the_merge_publication_seam_parks_the_executor_between_execution_and_publicati
 /// its tick, and the held flush is released into that window.
 #[test]
 fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
-    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+    use mosaica_lifecycle::faults::{PauseAction, PauseSite};
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -1312,7 +1312,7 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
     );
 
     // And the bundle on disc is one a restart opens, holding each late item at one row.
-    let bundle = tessera_store::open_bundle(&root).expect("the bundle on disc opens");
+    let bundle = mosaica_store::open_bundle(&root).expect("the bundle on disc opens");
     let row_space = &bundle.partitions["default"].views["s0"].row_space;
     let mut rows: Vec<u32> = late
         .iter()
@@ -1329,7 +1329,7 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
 /// from the partition's state at the last flush would leave the layer nowhere.
 #[test]
 fn a_layer_registered_before_a_merge_survives_it_and_a_restart() {
-    use tessera_types::layer::{
+    use mosaica_types::layer::{
         ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     };
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1346,7 +1346,7 @@ fn a_layer_registered_before_a_merge_survives_it_and_a_restart() {
             membership: MembershipSource::Enumerated,
             value_set: Default::default(),
             visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
             require_member_visibility: None,
             hierarchy: Hierarchy {
                 kind: HierarchyKind::Nested,

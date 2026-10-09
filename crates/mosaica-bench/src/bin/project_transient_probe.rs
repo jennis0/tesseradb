@@ -29,10 +29,10 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde_json::{json, Value};
 
-use tessera_authz::{build_fragment, Dict, PostingsReader};
-use tessera_filter::{Access, CodeSet, Codes, Scalar, ValueColumn};
-use tessera_store::manifest::CurrentPointer;
-use tessera_store::read::open_bundle;
+use mosaica_authz::{build_fragment, Dict, PostingsReader};
+use mosaica_filter::{Access, CodeSet, Codes, Scalar, ValueColumn};
+use mosaica_store::manifest::CurrentPointer;
+use mosaica_store::read::open_bundle;
 
 #[derive(Parser)]
 struct Args {
@@ -241,7 +241,7 @@ fn term_sets<T: Copy + Into<u32>>(presence: &Bitmap, values: &[T]) -> Vec<Bitmap
         .collect()
 }
 
-fn term_images(args: &Args, row_space: &tessera_store::RowSpace, dir: &std::path::Path) {
+fn term_images(args: &Args, row_space: &mosaica_store::RowSpace, dir: &std::path::Path) {
     let name = args.term_images.as_deref().expect("a dimension");
     let column = ValueColumn::open_dir(&dir.join("attrs").join(name), Access::MappedSequential)
         .expect("the value column");
@@ -263,7 +263,7 @@ fn term_images(args: &Args, row_space: &tessera_store::RowSpace, dir: &std::path
     for rep in 0..args.reps {
         for (order, masks) in [("term", &in_order), ("rising", &rising)] {
             trim_heap();
-            let mut scratch = tessera_store::permutation::ProjectScratch::default();
+            let mut scratch = mosaica_store::permutation::ProjectScratch::default();
             let faults = minor_faults();
             let cpu = thread_cpu_s();
             let t = Instant::now();

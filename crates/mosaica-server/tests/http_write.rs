@@ -17,8 +17,8 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use tempfile::TempDir;
 
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
 
 use common::*;
 
@@ -148,7 +148,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "batch-1")
+        .header("x-mosaica-batch-id", "batch-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body.clone())
         .send()
@@ -164,7 +164,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "batch-1")
+        .header("x-mosaica-batch-id", "batch-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body.clone())
         .send()
@@ -178,7 +178,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "batch-1")
+        .header("x-mosaica-batch-id", "batch-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(different_body)
         .send()
@@ -193,7 +193,7 @@ async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, 
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -288,7 +288,7 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "big-batch")
+        .header("x-mosaica-batch-id", "big-batch")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -330,7 +330,7 @@ fn concurrent_ingest_and_change_both_survive() {
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
             // what bounds the window close's O(buffered) copy. Nothing here reaches it.
@@ -340,7 +340,7 @@ fn concurrent_ingest_and_change_both_survive() {
             segment_floor_bytes: None,
             coalesce_width: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )
     .expect("engine should open");
@@ -361,7 +361,7 @@ fn concurrent_ingest_and_change_both_survive() {
     let change_thread = std::thread::spawn(move || {
         barrier_a.wait();
         engine_a
-            .accept_change(suppress_entity, tessera_lifecycle::ChangeOp::Suppress)
+            .accept_change(suppress_entity, mosaica_lifecycle::ChangeOp::Suppress)
             .expect("change should be accepted");
     });
 
@@ -369,7 +369,7 @@ fn concurrent_ingest_and_change_both_survive() {
     let barrier_b = Arc::clone(&barrier);
     let ingest_thread = std::thread::spawn(move || {
         // A caller does not name the entity id at all: the executor assigns it.
-        let row = tessera_lifecycle::IngestRow {
+        let row = mosaica_lifecycle::IngestRow {
             tessera_id: None,
             labels: Some(vec![b"0".to_vec()]),
             position: Some((5.0, 5.0)),
@@ -379,7 +379,7 @@ fn concurrent_ingest_and_change_both_survive() {
         };
         barrier_b.wait();
         let receipt = engine_b
-            .ingest(tessera_engine::IngestRequest {
+            .ingest(mosaica_engine::IngestRequest {
                 batch_id: "concurrent-batch".to_string(),
                 body_hash: [7u8; 32],
                 view: Some("s0".to_string()),
@@ -447,7 +447,7 @@ async fn ingest_without_an_id_returns_a_genuinely_resolvable_tessera_id() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "null-id-batch")
+        .header("x-mosaica-batch-id", "null-id-batch")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -460,7 +460,7 @@ async fn ingest_without_an_id_returns_a_genuinely_resolvable_tessera_id() {
     assert_eq!(tessera_ids.len(), 1);
     let tessera_id = tessera_ids[0];
 
-    let (shard, entity) = test_key().invert(tessera_types::TesseraId::new(tessera_id));
+    let (shard, entity) = test_key().invert(mosaica_types::TesseraId::new(tessera_id));
     assert_eq!(shard, 0, "the fixture bundle is shard 0");
     assert!(
         entity.raw() >= N_ITEMS,
@@ -502,7 +502,7 @@ async fn ingest_mixed_batch_only_supplied_ids_name_an_item() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "mixed-batch")
+        .header("x-mosaica-batch-id", "mixed-batch")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -541,7 +541,7 @@ async fn ingest_two_rows_without_an_id_in_one_batch_do_not_collide() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "two-nulls-batch")
+        .header("x-mosaica-batch-id", "two-nulls-batch")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -575,7 +575,7 @@ async fn ingest_answers_each_rows_tessera_id_as_the_string_the_viewer_serves() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "string-ids")
+        .header("x-mosaica-batch-id", "string-ids")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -792,7 +792,7 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
             client
                 .post(url)
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .header("x-tessera-batch-id", batch_id)
+                .header("x-mosaica-batch-id", batch_id)
                 .header("content-type", "application/vnd.apache.arrow.stream")
                 .body(body)
                 .send()
@@ -847,11 +847,11 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
 ///
 /// `Wal::fsync` writes a sidecar tmp-then-rename, whose `open` needs write permission on the
 /// *directory*, so this fails with a genuine `EACCES` and sets the real poison flag —
-/// `tessera-lifecycle`'s `a_real_fsync_failure_poisons_the_handle` is the unit test that pins the
+/// `mosaica-lifecycle`'s `a_real_fsync_failure_poisons_the_handle` is the unit test that pins the
 /// exact branch and its `Io`-then-`Poisoned` sequence.
 ///
-/// **Deliberately not fault injection.** `tessera-lifecycle`'s `faults` module is gated behind a
-/// feature whose own module doc says nothing outside that crate and `tessera-engine`'s tests may
+/// **Deliberately not fault injection.** `mosaica-lifecycle`'s `faults` module is gated behind a
+/// feature whose own module doc says nothing outside that crate and `mosaica-engine`'s tests may
 /// depend on it, and reaching it from here would have meant a new dev-dependency plus falsifying
 /// three in-tree statements to buy two tests. A real `EACCES` needs none of that and is a stronger
 /// witness besides: these tests exercise the failure the WAL actually produces, not a switchboard's
@@ -969,9 +969,9 @@ async fn a_stepped_down_partition_is_not_ready() {
 /// Driven with `NotStarted` rather than `Dead`, and the reason is a **dependency**, not a race.
 /// `ExecutorPosture` is published with `fetch_max`, so it is monotone and `Dead` is absorbing: a
 /// bounded poll of `/readyz` after inducing a panic is sound, and is exactly the form
-/// `tessera-engine`'s `an_executor_panic_is_reported_dead` uses. What this crate's test binary
-/// cannot do is **induce** the panic — that needs `tessera-engine/fault-injection` as a
-/// `tessera-server` dev-dependency, which this crate deliberately does not take. The `Dead` row is
+/// `mosaica-engine`'s `an_executor_panic_is_reported_dead` uses. What this crate's test binary
+/// cannot do is **induce** the panic — that needs `mosaica-engine/fault-injection` as a
+/// `mosaica-server` dev-dependency, which this crate deliberately does not take. The `Dead` row is
 /// asserted exactly instead, in `health.rs`'s `only_a_running_executor_is_ready`.
 ///
 /// **What this leaves uncovered, stated rather than counted as coverage:** no test drives a
@@ -1439,7 +1439,7 @@ async fn post_ingest(
     let mut req = server
         .client
         .post(server.control_url("/control/ingest"))
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(rows));
     if auth {
@@ -1520,7 +1520,7 @@ async fn ingest_is_refused_by_buffer_occupancy() {
     let response = server
         .client
         .post(server.control_url("/control/ingest"))
-        .header("x-tessera-batch-id", "over")
+        .header("x-mosaica-batch-id", "over")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .bearer_auth(OPERATOR_CREDENTIAL)
         .body(build_ingest_batch(&rows_from(1000, 1)))
@@ -1543,7 +1543,7 @@ async fn ingest_is_refused_by_buffer_occupancy() {
     // to its first tick, which the harness's period puts under the ceiling.
     assert_eq!(body["retry_after_s"], header, "{body}");
     assert!(
-        (tessera_engine::RETRY_AFTER_MIN_SECS..=tessera_engine::RETRY_AFTER_MAX_SECS)
+        (mosaica_engine::RETRY_AFTER_MIN_SECS..=mosaica_engine::RETRY_AFTER_MAX_SECS)
             .contains(&header),
         "within the estimator's bounds: {header}"
     );
@@ -1562,7 +1562,7 @@ fn served_cells(engine: &Engine, bbox: [f64; 4]) -> std::collections::BTreeMap<u
         .map(|(id, code)| {
             (
                 id.raw(),
-                tessera_build::input::deinterleave((code >> 32) as u32),
+                mosaica_build::input::deinterleave((code >> 32) as u32),
             )
         })
         .collect()
@@ -1641,7 +1641,7 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
         async move {
             let response = client
                 .post(url)
-                .header("x-tessera-batch-id", batch_id)
+                .header("x-mosaica-batch-id", batch_id)
                 .header("content-type", "application/vnd.apache.arrow.stream")
                 .bearer_auth(OPERATOR_CREDENTIAL)
                 .body(body)
@@ -1720,7 +1720,7 @@ async fn control_flush_is_accepted_and_deferred() {
 /// **What is asserted here is acceptance, not completion**, and there is no way for this test to
 /// assert the fold itself: what happens next is a corpus rewrite on its own thread, whose
 /// observable is `/control/status`'s `compaction` block and whose end-to-end behaviour is
-/// `tessera-engine/tests/fold.rs`'s subject. What this covers is the seam — that the route is
+/// `mosaica-engine/tests/fold.rs`'s subject. What this covers is the seam — that the route is
 /// wired, is on the credentialled plane, and answers the code contracts §3.4 specifies.
 #[tokio::test]
 async fn control_compact_is_accepted_and_deferred() {
@@ -2007,7 +2007,7 @@ async fn status_reports_a_held_refresh_and_a_held_merge_as_in_flight() {
 }
 
 /// While the refresh after a flush is held, a session is served from its previous projection, and
-/// `x-tessera-pin` names the previous generation. Once the refresh publishes, it names the new one.
+/// `x-mosaica-pin` names the previous generation. Once the refresh publishes, it names the new one.
 #[tokio::test]
 async fn the_pin_names_the_generation_a_response_was_served_from_during_a_refresh() {
     let tmp = TempDir::new().unwrap();
@@ -2032,9 +2032,9 @@ async fn the_pin_names_the_generation_a_response_was_served_from_during_a_refres
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let stale = resp.headers()["x-tessera-stale"].to_str().unwrap() == "1";
+        let stale = resp.headers()["x-mosaica-stale"].to_str().unwrap() == "1";
         let pin: serde_json::Value =
-            serde_json::from_str(resp.headers()["x-tessera-pin"].to_str().unwrap()).unwrap();
+            serde_json::from_str(resp.headers()["x-mosaica-pin"].to_str().unwrap()).unwrap();
         (pin, stale)
     };
     let live_version = async || {
@@ -2132,7 +2132,7 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
                 client
                     .post(url)
                     .bearer_auth(OPERATOR_CREDENTIAL)
-                    .header("x-tessera-batch-id", format!("parked-{i}"))
+                    .header("x-mosaica-batch-id", format!("parked-{i}"))
                     .header("content-type", "application/vnd.apache.arrow.stream")
                     .body(body)
                     .send()
@@ -2258,7 +2258,7 @@ fn changes_never_429s() {
                 client
                     .post(url)
                     .bearer_auth(OPERATOR_CREDENTIAL)
-                    .header("x-tessera-batch-id", format!("parked-{i}"))
+                    .header("x-mosaica-batch-id", format!("parked-{i}"))
                     .header("content-type", "application/vnd.apache.arrow.stream")
                     .body(body)
                     .send()
@@ -2326,8 +2326,8 @@ fn changes_never_429s() {
 ///
 /// This test still uses the rendezvous spelling, deliberately: reproducing a real *transition* into
 /// fullness needs a controllable stall inside the executor, i.e. the `fault-injection`
-/// dev-dependency this stage declines for `tessera-server` (four in-tree statements say nothing
-/// outside `tessera-lifecycle` and `tessera-engine`'s tests may depend on it). Racing 33 real
+/// dev-dependency this stage declines for `mosaica-server` (four in-tree statements say nothing
+/// outside `mosaica-lifecycle` and `mosaica-engine`'s tests may depend on it). Racing 33 real
 /// submitters against a real executor would be a flake, not a test. What this pins is the wire path;
 /// what makes the wire path *live* is the defaults relation, and that is pinned in `config.rs`.
 ///
@@ -2337,8 +2337,8 @@ fn changes_never_429s() {
 /// anything about the *transition* into fullness — a queue that is never not full cannot
 /// distinguish "429 on Full" from "429 always". Inducing a real transition needs a controllable
 /// stall inside the executor, i.e. the `fault-injection` dev-dependency this stage deliberately
-/// declines for `tessera-server` (four in-tree statements say nothing outside `tessera-lifecycle`
-/// and `tessera-engine`'s tests may depend on it).
+/// declines for `mosaica-server` (four in-tree statements say nothing outside `mosaica-lifecycle`
+/// and `mosaica-engine`'s tests may depend on it).
 ///
 /// **The discriminator is the body, not the status**, because the admission 429 shares the status.
 /// This fixture's admission bound is 8 and one request is in flight, so the admission bound cannot
@@ -2379,7 +2379,7 @@ async fn ingest_429s_when_the_queue_is_full() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "queue-full")
+        .header("x-mosaica-batch-id", "queue-full")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(&rows_from(700, 1)))
         .send()
@@ -3185,10 +3185,10 @@ async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
         .await
         .unwrap();
     // A gigabyte promised, no credential offered, and not one byte of body sent after the blank
-    // line. `x-tessera-batch-id` is present so that nothing but the credential can be the refusal.
+    // line. `x-mosaica-batch-id` is present so that nothing but the credential can be the refusal.
     sock.write_all(
         format!(
-            "POST /control/ingest HTTP/1.1\r\nHost: {}\r\nx-tessera-batch-id: never-sent\r\n\
+            "POST /control/ingest HTTP/1.1\r\nHost: {}\r\nx-mosaica-batch-id: never-sent\r\n\
              Content-Type: application/vnd.apache.arrow.stream\r\nContent-Length: 1073741824\r\n\r\n",
             server.control_addr
         )
@@ -3891,7 +3891,7 @@ async fn control_status_serves_its_pinned_shape() {
 /// first flush publishes, with the window-scope raw counters under `allocation`.
 ///
 /// The arithmetic lives where it is computed (`FragmentationTally`) and the executor wiring in
-/// `tessera-engine`'s `tests/write.rs`. What this asserts is the **endpoint**: that the two
+/// `mosaica-engine`'s `tests/write.rs`. What this asserts is the **endpoint**: that the two
 /// contract fields exist under the specified names at the scope the body declares, that they are
 /// `null` rather than `0` when nothing has been measured — a flushless process has encoded no
 /// tier, however many windows have closed — and that the allocation counters move with ingest
@@ -3927,7 +3927,7 @@ async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishe
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "frag-1")
+        .header("x-mosaica-batch-id", "frag-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -4012,7 +4012,7 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "seg-1")
+        .header("x-mosaica-batch-id", "seg-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -4088,7 +4088,7 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "undeclared-1")
+        .header("x-mosaica-batch-id", "undeclared-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -4109,7 +4109,7 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     );
 }
 
-/// `x-tessera-view` (contracts §3.4): a known view is accepted, an unknown one is `404`.
+/// `x-mosaica-view` (contracts §3.4): a known view is accepted, an unknown one is `404`.
 ///
 /// **404, not 422**: an unknown view is an unknown name, as the viewer plane answers it. A 422 is
 /// for *ambiguity*: a bundle with two or more views and no header. This fixture has one view, so
@@ -4125,8 +4125,8 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "view-bad")
-        .header("x-tessera-view", "no-such-view")
+        .header("x-mosaica-batch-id", "view-bad")
+        .header("x-mosaica-view", "no-such-view")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]))
         .send()
@@ -4151,8 +4151,8 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "view-good")
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", "view-good")
+        .header("x-mosaica-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]))
         .send()
@@ -4164,7 +4164,7 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "view-absent")
+        .header("x-mosaica-batch-id", "view-absent")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(&[(N_ITEMS + 2, 10.0, 10.0, "0")]))
         .send()
@@ -4193,7 +4193,7 @@ async fn over_bound_rows_names_each_over_bound_row_by_its_position() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "over-bound-1")
+        .header("x-mosaica-batch-id", "over-bound-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_labels(&[&["0"], &labels, &["0"]]))
         .send()
@@ -4250,7 +4250,7 @@ async fn a_deleted_holder_names_nothing_and_a_suppressed_one_is_named() {
             client
                 .post(url)
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .header("x-tessera-batch-id", batch)
+                .header("x-mosaica-batch-id", batch)
                 .header("content-type", "application/vnd.apache.arrow.stream")
                 .body(body)
                 .send()
@@ -4488,7 +4488,7 @@ async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
-        .header("x-tessera-batch-id", "scalar-tail")
+        .header("x-mosaica-batch-id", "scalar-tail")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .bearer_auth(OPERATOR_CREDENTIAL)
         .body(build_scalar_tail_ingest_batch())

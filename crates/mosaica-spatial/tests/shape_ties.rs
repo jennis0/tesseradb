@@ -13,8 +13,8 @@
 
 use std::collections::BTreeSet;
 
-use tessera_spatial::morton::{split32, Bounds, Tile};
-use tessera_spatial::shape::{
+use mosaica_spatial::morton::{split32, Bounds, Tile};
+use mosaica_spatial::shape::{
     Decomposition, Part, PolyCtx, Polygon, PreparedShape, Rect, Ring, Shape, ShapeF64, Space,
     Vertex,
 };

@@ -9,7 +9,7 @@
 //! one coordinate is `422`. A resent batch answers its first `tessera_id`s and refused rows across
 //! a restart.
 //!
-//! The engine's rules are pinned by `tessera-engine/tests/identity_model.rs`; this file pins the
+//! The engine's rules are pinned by `mosaica-engine/tests/identity_model.rs`; this file pins the
 //! route's decode and answers.
 
 mod common;
@@ -83,8 +83,8 @@ async fn send(served: &Served, path: &str, batch_id: &str, rows: Value) -> (u16,
         .client
         .post(served.server.control_url(path))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
         .json(&rows)
         .send()
         .await

@@ -37,13 +37,13 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_authz::{PostingRef, PostingsReader};
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use tessera_types::{AttrLocalId, EntityId, TermId};
+use mosaica_authz::{PostingRef, PostingsReader};
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
+use mosaica_types::{AttrLocalId, EntityId, TermId};
 
 use homes::Home;
 
@@ -253,20 +253,20 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the every-home fixture schema parses");
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -298,7 +298,7 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
 }
 
 /// Items a full-coverage principal is served across the whole extent.
-fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
+fn visible(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
     engine
         .viewport(
             session,
@@ -356,7 +356,7 @@ impl Files for Home {
                 let view = partition.join("views/s0");
                 vec![
                     view.join("permutation.bin"),
-                    view.join(tessera_store::ROW_ENTITY_FILE),
+                    view.join(mosaica_store::ROW_ENTITY_FILE),
                 ]
             }
             Home::RenderColumn => segment_dirs(root)
@@ -365,24 +365,24 @@ impl Files for Home {
                 .collect(),
             Home::RenderPresence => segment_dirs(root)
                 .iter()
-                .map(|dir| tessera_store::render_presence::render_presence_path(dir, "score"))
+                .map(|dir| mosaica_store::render_presence::render_presence_path(dir, "score"))
                 .collect(),
             // `band` is dense — every item carries one — so it owns no presence bitmap until the
             // fold takes a slot out of it. The two columns with absences own theirs from the build.
             Home::ValueColumn => vec![
-                attrs.join("band").join(tessera_filter::VALUES_FILE),
-                attrs.join("score").join(tessera_filter::VALUES_FILE),
-                attrs.join("score").join(tessera_filter::PRESENCE_FILE),
-                attrs.join("tag").join(tessera_filter::VALUES_FILE),
-                attrs.join("tag").join(tessera_filter::PRESENCE_FILE),
+                attrs.join("band").join(mosaica_filter::VALUES_FILE),
+                attrs.join("score").join(mosaica_filter::VALUES_FILE),
+                attrs.join("score").join(mosaica_filter::PRESENCE_FILE),
+                attrs.join("tag").join(mosaica_filter::VALUES_FILE),
+                attrs.join("tag").join(mosaica_filter::PRESENCE_FILE),
             ],
             Home::CategoryPostings => vec![attrs.join("band/postings.arrow")],
-            Home::KeywordDictionary => vec![attrs.join("tag").join(tessera_filter::DICT_FILE)],
+            Home::KeywordDictionary => vec![attrs.join("tag").join(mosaica_filter::DICT_FILE)],
             // Both halves, because they are one record: a posting is a position in *this*
             // dictionary, so a fold that rewrote one and carried the other forward answers every
             // `match` from the wrong words with no symptom.
             Home::TextIndex => vec![
-                attrs.join("prose").join(tessera_filter::DICT_FILE),
+                attrs.join("prose").join(mosaica_filter::DICT_FILE),
                 attrs.join("prose/postings.arrow"),
             ],
             Home::RecordBlob => files_under(&attrs.join("record")),
@@ -481,7 +481,7 @@ fn rendered_rows(root: &Path) -> Vec<(u64, u8, i32, bool)> {
 /// that is not a category width), so `score` is read through [`scored_entities`] instead.
 fn value_column_code(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
     let dir = partition_dir(root).join("attrs").join(column);
-    tessera_filter::ValueColumn::open_dir(&dir, tessera_filter::Access::Read)
+    mosaica_filter::ValueColumn::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the column opens")
         .value_of(entity.raw() as u32)
         .map(|code| code.raw())
@@ -490,7 +490,7 @@ fn value_column_code(root: &Path, column: &str, entity: EntityId) -> Option<u32>
 /// `Home::ValueColumn`, for the numeric column: the entities the column holds any value for.
 fn scored_entities(root: &Path) -> croaring::Bitmap {
     let dir = partition_dir(root).join("attrs/score");
-    tessera_filter::ValueColumn::open_dir(&dir, tessera_filter::Access::Read)
+    mosaica_filter::ValueColumn::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the score column opens")
         .present()
 }
@@ -498,7 +498,7 @@ fn scored_entities(root: &Path) -> croaring::Bitmap {
 /// `Home::CategoryPostings`: the entities `band` says carry `code`.
 fn band_carriers(root: &Path, code: u8) -> croaring::Bitmap {
     let path = partition_dir(root).join("attrs/band/postings.arrow");
-    tessera_filter::ColumnPostings::open_keyed(&path)
+    mosaica_filter::ColumnPostings::open_keyed(&path)
         .expect("the category postings open")
         .entities(AttrLocalId::new(u32::from(code)))
         .expect("the postings read")
@@ -507,7 +507,7 @@ fn band_carriers(root: &Path, code: u8) -> croaring::Bitmap {
 /// `Home::KeywordDictionary`: every key the `tag` dictionary holds, in ordinal order.
 fn keyword_dictionary(root: &Path) -> Vec<(u32, String)> {
     let dir = partition_dir(root).join("attrs/tag");
-    let dict = tessera_filter::SortedDict::open_dir(&dir, tessera_filter::Access::Read)
+    let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the keyword dictionary opens");
     let mut keys = Vec::new();
     dict.walk(|ordinal, key| keys.push((ordinal, key.to_string())))
@@ -522,9 +522,9 @@ fn keyword_dictionary(root: &Path) -> Vec<(u32, String)> {
 /// that rewrote only one half would break.
 fn text_index(root: &Path) -> BTreeMap<String, croaring::Bitmap> {
     let dir = partition_dir(root).join("attrs/prose");
-    let dict = tessera_filter::SortedDict::open_dir(&dir, tessera_filter::Access::Read)
+    let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the token dictionary opens");
-    let postings = tessera_filter::ColumnPostings::open(&dir.join("postings.arrow"), false)
+    let postings = mosaica_filter::ColumnPostings::open(&dir.join("postings.arrow"), false)
         .expect("the token postings open");
     assert_eq!(
         dict.len(),
@@ -545,10 +545,10 @@ fn text_index(root: &Path) -> BTreeMap<String, croaring::Bitmap> {
 }
 
 /// `Home::RecordBlob`: the blob's base, opened at the artefact — no mask, no overlay, no session.
-fn record_blob(root: &Path) -> tessera_filter::RecordBlob {
-    tessera_filter::RecordBlob::open_dir(
+fn record_blob(root: &Path) -> mosaica_filter::RecordBlob {
+    mosaica_filter::RecordBlob::open_dir(
         &partition_dir(root).join("attrs/record"),
-        tessera_filter::Access::Read,
+        mosaica_filter::Access::Read,
     )
     .expect("the record blob opens")
 }
@@ -569,7 +569,7 @@ fn all_term(root: &Path) -> TermId {
         .iter()
         .map(|extent| prefix.join(&extent.path))
         .collect();
-    tessera_authz::Dict::load(&paths)
+    mosaica_authz::Dict::load(&paths)
         .expect("the dictionary loads")
         .lookup(ALL_TERM.to_string().as_bytes())
         .expect("every item carries ALL_TERM")
@@ -947,7 +947,7 @@ fn a_deletion_reaches_every_home() {
     // and consults no overlay, so it cannot be a reader filtering the row out. The raw scan below
     // it is the cheap second guard — vacuous on its own, since the blocks are zstd frames, but it
     // catches a block that reached the artefact uncompressed. The decompressed grep is the unit
-    // half's (`tessera-filter-write`'s `a_blanked_rows_bytes_are_not_in_the_folded_blob`).
+    // half's (`mosaica-filter-write`'s `a_blanked_rows_bytes_are_not_in_the_folded_blob`).
     let blob = record_blob(&root);
     assert!(
         !blob
@@ -974,7 +974,7 @@ fn a_deletion_reaches_every_home() {
         );
         assert_eq!(
             fields[0].value,
-            tessera_filter::RecordValue::Utf8(note_of(source)),
+            mosaica_filter::RecordValue::Utf8(note_of(source)),
             "Home::RecordBlob: source {source}'s note"
         );
         // The text column's **other** home. Its words are in the token index above; its bytes are
@@ -982,12 +982,12 @@ fn a_deletion_reaches_every_home() {
         // readable through a drill-down while `match` no longer names it.
         assert_eq!(
             fields[1].value,
-            tessera_filter::RecordValue::Utf8(prose_of(source)),
+            mosaica_filter::RecordValue::Utf8(prose_of(source)),
             "Home::RecordBlob: source {source}'s prose"
         );
         assert_eq!(
             fields[2].value,
-            tessera_filter::RecordValue::U64(source),
+            mosaica_filter::RecordValue::U64(source),
             "Home::RecordBlob: source {source}'s id"
         );
         walked += 1;
@@ -1002,7 +1002,7 @@ fn a_deletion_reaches_every_home() {
     let blocks = std::fs::read(
         partition_dir(&root)
             .join("attrs/record")
-            .join(tessera_filter::RECORD_BLOCKS_FILE),
+            .join(mosaica_filter::RECORD_BLOCKS_FILE),
     )
     .expect("the folded blocks read");
     let needle = note_of(DELETED_SOURCE).into_bytes();
@@ -1069,7 +1069,7 @@ struct Stored {
 }
 
 fn stored(root: &Path, entities: &[EntityId]) -> Stored {
-    use tessera_filter::{Access, RecordBlob, SortedDict, ValueColumn};
+    use mosaica_filter::{Access, RecordBlob, SortedDict, ValueColumn};
     let mut out = Stored {
         values: Vec::new(),
         rows: Vec::new(),
@@ -1078,20 +1078,20 @@ fn stored(root: &Path, entities: &[EntityId]) -> Stored {
     for dir in dirs_under(&partition_dir(root).join("attrs")) {
         let holds =
             |present: &dyn Fn(u32) -> bool| entities.iter().any(|e| present(e.raw() as u32));
-        if dir.join(tessera_filter::VALUES_FILE).is_file() {
+        if dir.join(mosaica_filter::VALUES_FILE).is_file() {
             let column = ValueColumn::open_dir(&dir, Access::Read).expect("a value column opens");
             let present = column.present();
             if holds(&|e| present.contains(e)) {
                 out.values.push(dir.clone());
             }
         }
-        if dir.join(tessera_filter::RECORD_BLOCKS_FILE).is_file() {
+        if dir.join(mosaica_filter::RECORD_BLOCKS_FILE).is_file() {
             let blob = RecordBlob::open_dir(&dir, Access::Read).expect("a record blob opens");
             if holds(&|e| blob.has_row(e).expect("the has-row bitmap reads")) {
                 out.rows.push(dir.clone());
             }
         }
-        if dir.join(tessera_filter::DICT_FILE).is_file() {
+        if dir.join(mosaica_filter::DICT_FILE).is_file() {
             SortedDict::open_dir(&dir, Access::Read)
                 .expect("a dictionary opens")
                 .walk(|_, key| {
@@ -1113,10 +1113,10 @@ fn stored(root: &Path, entities: &[EntityId]) -> Stored {
 #[test]
 fn a_deletion_of_an_edited_item_reaches_every_home() {
     use homes::fixture as every;
-    use tessera_engine::filter::{FilterExpr, FilterOperand, Scalar};
-    use tessera_engine::IngestRequest;
-    use tessera_lifecycle::wal::WalScalar;
-    use tessera_lifecycle::IngestRow;
+    use mosaica_engine::filter::{FilterExpr, FilterOperand, Scalar};
+    use mosaica_engine::IngestRequest;
+    use mosaica_lifecycle::wal::WalScalar;
+    use mosaica_lifecycle::IngestRow;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = every::build_homes(tmp.path());
@@ -1157,7 +1157,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
     let moved = engine.resolve_tessera_ids(&[tid]).unwrap()[0].expect("the edited item resolves");
     assert_ne!(moved, first, "the edit gave the item a new entity");
     let entities = [first, moved];
-    let verified = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+    let verified = mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
         .expect("the edited bundle verifies");
     assert_eq!((verified.edited_pairs, verified.edited_rows), (1, 3));
 
@@ -1297,7 +1297,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                     "{home:?}: the item's tessera_id still resolves"
                 );
                 let verified =
-                    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+                    mosaica_build::verify_deep(&root, &mosaica_build::VerifyOpts::default())
                         .expect("the folded bundle verifies");
                 assert_eq!(
                     (verified.edited_pairs, verified.edited_rows),
@@ -1339,11 +1339,11 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                 for (slot, (key, _)) in every::QUARTERS.iter().enumerate() {
                     let heat = f64::from(every::heat(slot, every::X));
                     let exactly = FilterOperand::Range {
-                        lo: Some(tessera_engine::filter::Endpoint {
+                        lo: Some(mosaica_engine::filter::Endpoint {
                             value: Scalar::Float(heat),
                             inclusive: true,
                         }),
-                        hi: Some(tessera_engine::filter::Endpoint {
+                        hi: Some(mosaica_engine::filter::Endpoint {
                             value: Scalar::Float(heat),
                             inclusive: true,
                         }),

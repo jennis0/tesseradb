@@ -160,7 +160,7 @@ key on the owning group creates or drops it on every group sharing those views a
 ## Addressing: `<group>:<key>`, and nothing else
 
 A view of a group is addressed `group:key` everywhere a view id goes — the request body, the
-`x-tessera-view` ingest header, `/v1/meta`. A plain view is addressed by its bare `name`. Keys are
+`x-mosaica-view` ingest header, `/v1/meta`. A plain view is addressed by its bare `name`. Keys are
 the caller's own strings, required at creation, under the column-name charset (ASCII letters,
 digits, `_`, `-`); `:`, `#` and `@` are reserved out of names and keys because they already mean
 something in the addressing grammar. **There are no ordinals.** A group's views are served in
@@ -230,8 +230,8 @@ Create the view (above), then ingest into it:
 
 ```
 POST /control/ingest
-x-tessera-view: quarter:2026-Q4
-x-tessera-batch-id: <uuid>
+x-mosaica-view: quarter:2026-Q4
+x-mosaica-batch-id: <uuid>
 
 (geonameid, x, y, access, sentiment, mood, note, coverage)   # Arrow, application/vnd.apache.arrow.stream
 ```
@@ -371,12 +371,12 @@ it answers `match` and appears in no drill-down.
 ### Populating one by ingest
 
 A batch into a view of the group carries the group's scoped columns **under their plain names** —
-`sentiment`, not `sentiment@2026-Q3`. The view comes from `x-tessera-view`, so the column is not
+`sentiment`, not `sentiment@2026-Q3`. The view comes from `x-mosaica-view`, so the column is not
 qualified and the view decides which of the family's columns the value lands in:
 
 ```
 POST /control/ingest
-x-tessera-view: quarter:2026-Q3
+x-mosaica-view: quarter:2026-Q3
 
 geonameid | x | y | access | kind | sentiment
 ```
@@ -486,9 +486,9 @@ geographic layout, an entity-scoped `kind` attribute, a group-scoped `sentiment`
 `collections` layer over `world` and `quarter` together. Build and check it:
 
 ```
-tessera check  data/ladder/multiview/corpus.toml
-tessera build  data/ladder/multiview/corpus.toml  -o bundle/
-tessera serve  bundle/
+mosaica check  data/ladder/multiview/corpus.toml
+mosaica build  data/ladder/multiview/corpus.toml  -o bundle/
+mosaica serve  bundle/
 ```
 
 Ten row spaces come out of one entity space: `world`, `quarter:2026-Q1..Q4`, and
@@ -515,7 +515,7 @@ This also creates `quarter_alt:2026-Q5`, empty, immediately. Ingest its points:
 
 ```
 POST /control/ingest
-x-tessera-view: quarter:2026-Q5
+x-mosaica-view: quarter:2026-Q5
 (geonameid, x, y, access, sentiment, mood, note, coverage)
 ```
 
@@ -536,7 +536,7 @@ quarter — before that a request under it simply has no `sentiment`.
   holding a bookmark into the old one gets the new one's contents under that name.
 - **Visibility is fixed per session.** A view created mid-session is invisible to that session until
   it re-authorises, whatever its gate says.
-- **A typo on ingest is a 404, never a new view.** `x-tessera-view: quater:2026-Q1` does not mint
+- **A typo on ingest is a 404, never a new view.** `x-mosaica-view: quater:2026-Q1` does not mint
   `quater`; creation is always the explicit `PUT` first.
 - **There are no ordinals.** Sort a group's views by your own metadata (`starts`, a numeric key you
   minted) — creation order is served order and nothing else.

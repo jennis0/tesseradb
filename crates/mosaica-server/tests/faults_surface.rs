@@ -2,8 +2,8 @@
 //! the way the correctness suite's driver will use it (correctness-suite §12.3).
 //!
 //! This binary runs against the faults build unconditionally: the crate's self dev-dependency
-//! enables `fault-injection` for every integration test, exactly as `tessera-lifecycle`'s and
-//! `tessera-engine`'s do. What it proves is the whole reachability chain the decision ruled on —
+//! enables `fault-injection` for every integration test, exactly as `mosaica-lifecycle`'s and
+//! `mosaica-engine`'s do. What it proves is the whole reachability chain the decision ruled on —
 //! a *booted server* whose `/control/faults/*` routes arm the same switchboard the write
 //! executor consults — not just the switchboard's own semantics, which its home crate's tests
 //! already pin.
@@ -11,7 +11,7 @@
 //! The one seam driven here is the flush's side-manifest commit, because it is the seam a driver
 //! reaches with nothing but the five control routes: ingest, pull the tick, watch the executor
 //! park, release, watch the publication land. The other seams are exercised at the engine layer
-//! (`tessera-engine/tests/seam_pause.rs`, `tests/merge.rs`), where a fold and a merge can be
+//! (`mosaica-engine/tests/seam_pause.rs`, `tests/merge.rs`), where a fold and a merge can be
 //! provoked without a server-sized fixture.
 
 mod common;
@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::Engine;
-use tessera_lifecycle::faults::FaultSwitchboard;
+use mosaica_engine::Engine;
+use mosaica_lifecycle::faults::FaultSwitchboard;
 
 /// The wire analogue of `FaultSwitchboard::arrivals`, polled: how many times the executor has
 /// reached `site` since it was armed, read over the control plane.
@@ -84,7 +84,7 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "faults-surface-1")
+        .header("x-mosaica-batch-id", "faults-surface-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -194,15 +194,15 @@ async fn an_executor_panic_fails_readiness_and_reports_dead() {
     assert_eq!(ready.status(), 200);
 
     server.state.faults.arm_pause(
-        tessera_lifecycle::faults::PauseSite::BeforeManifestPublish,
-        tessera_lifecycle::faults::PauseAction::Panic,
+        mosaica_lifecycle::faults::PauseSite::BeforeManifestPublish,
+        mosaica_lifecycle::faults::PauseAction::Panic,
     );
     let body = build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]);
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "faults-surface-panic")
+        .header("x-mosaica-batch-id", "faults-surface-panic")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()

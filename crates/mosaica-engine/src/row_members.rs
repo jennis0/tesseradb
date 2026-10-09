@@ -1,11 +1,11 @@
 //! **A row-major level's members by artifact, and the coverings that say where each could be** —
-//! the reading half of [`tessera_store::row_members`], held inside the
+//! the reading half of [`mosaica_store::row_members`], held inside the
 //! [`crate::row_column::RowColumn`] it was written from, so nothing can replace or drop the column
 //! without them.
 //!
 //! Both are over the column's base rows and are viewer-independent: a member bitmap is every base
 //! row the artifact holds, whoever is looking, and a covering is at most
-//! [`tessera_store::derived::COVERING_RANGES`] row ranges holding them all. Neither is ever an
+//! [`mosaica_store::derived::COVERING_RANGES`] row ranges holding them all. Neither is ever an
 //! answer to a viewer. A covering proposes candidates, and every candidate is still tested against
 //! the viewer's visible rows before anything about it is served.
 //!
@@ -33,8 +33,8 @@ use std::sync::{Arc, OnceLock};
 
 use croaring::{Bitmap, BitmapView};
 
-use tessera_store::derived::COVERING_RANGES;
-use tessera_store::row_members::RowMembersPack;
+use mosaica_store::derived::COVERING_RANGES;
+use mosaica_store::row_members::RowMembersPack;
 
 /// One level's members and coverings: the mapped file, and what growths have added since.
 #[derive(Clone)]

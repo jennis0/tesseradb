@@ -47,7 +47,7 @@ the whole label, and admits every viewer. A term that equals `public` or `inheri
 case, or holds a control character, is refused. An item, a view or an artifact may carry a list
 of labels, and admits a viewer who satisfies any one of them.
 
-One parser in `tessera-access` reads every label: an item's access column at a build, the `access`
+One parser in `mosaica-access` reads every label: an item's access column at a build, the `access`
 of an ingest row, a view's, a group's or a layer's `visibility`, an artifact's own label, and a
 default. The build and a running service call it below both paths, so a label one accepts the
 other accepts, and each stores the label's canonical text: nested operators flattened, operands
@@ -259,7 +259,7 @@ or been revoked; a corpus change on its own produces no such refusal.
 The `tessera_id` a client holds for an item is derived from the item's
 [entity id](data-model.md#what-an-item-carries) by a keyed permutation
 ([security](security.md#a-client-never-sees-an-entity-id) covers what that hides). The key is
-drawn at random by `tessera build` each time it creates a bundle and is stored in the bundle's
+drawn at random by `mosaica build` each time it creates a bundle and is stored in the bundle's
 manifest. Nobody configures, supplies or changes it. A rebuild creates a new bundle with a new key,
 so every `tessera_id` changes, and one from the old bundle does not name an item in the new one.
 The change takes effect on the restart that loads the new bundle. A client holding `tessera_id`s
@@ -268,13 +268,13 @@ from the old bundle reads its items again, by a unique field's values or afresh.
 ## Where this is tested and where it lives
 
 The grammar, normalisation, the rules for a declared or a held label and the expression graph
-live in `tessera-access`, which depends on no other crate of the workspace. The index keys an
+live in `mosaica-access`, which depends on no other crate of the workspace. The index keys an
 item's labels give it, the term index, authorised-set construction and the on-disk cache live in
-`tessera-authz`. Session composition
+`mosaica-authz`. Session composition
 against the overlay, the row-space projection it feeds, and the background refresh that keeps a
-resident projection current live in `tessera-engine`. The catalogue lives in `tessera-catalogue`.
+resident projection current live in `mosaica-engine`. The catalogue lives in `mosaica-catalogue`.
 Login, the session plane, OIDC token checks, the session registry that ends sessions on a
-catalogue change, and the catalogue's verbs on the control plane live in `tessera-server`.
+catalogue change, and the catalogue's verbs on the control plane live in `mosaica-server`.
 
 ## Sources
 
@@ -282,9 +282,9 @@ catalogue change, and the catalogue's verbs on the control plane live in `tesser
 §2.2, §4.2, §4.3; `docs/design/concurrency-lifecycle.md` §1.1, §2.4, §3.3;
 `docs/design/core-access-expressions.md`; `docs/system/write-path.md`; `docs/system/security.md`;
 `docs/system/data-model.md`; `docs/system/queries.md`; decisions 0005, 0014, 0020, 0025, 0027,
-0102; `docs/users-and-access.md`; `crates/tessera-access/src/lib.rs`;
-`crates/tessera-authz/src/label/index.rs`; `crates/tessera-authz/src/fragment.rs`;
-`crates/tessera-engine/src/session.rs`; `crates/tessera-engine/src/compose.rs`;
-`crates/tessera-engine/src/refresh.rs`; `crates/tessera-server/src/session.rs`;
-`crates/tessera-server/src/viewer.rs`; `crates/tessera-server/src/error.rs`;
-`crates/tessera-store/src/manifest.rs`; `crates/tessera-cli/src/main.rs`.
+0102; `docs/users-and-access.md`; `crates/mosaica-access/src/lib.rs`;
+`crates/mosaica-authz/src/label/index.rs`; `crates/mosaica-authz/src/fragment.rs`;
+`crates/mosaica-engine/src/session.rs`; `crates/mosaica-engine/src/compose.rs`;
+`crates/mosaica-engine/src/refresh.rs`; `crates/mosaica-server/src/session.rs`;
+`crates/mosaica-server/src/viewer.rs`; `crates/mosaica-server/src/error.rs`;
+`crates/mosaica-store/src/manifest.rs`; `crates/mosaica-cli/src/main.rs`.

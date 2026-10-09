@@ -212,13 +212,13 @@ class Cycle:
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(base_dir / "corpus.toml", self.all_in)
             self.log(f"stated the all-in frame in the base declaration: {self.result['stated_extent']}")
-        # At f = 1.0 this is `tessera build` over an empty points file.
+        # At f = 1.0 this is `mosaica build` over an empty points file.
         self.result["build"] = build_bundle(
             self.binary,
             base_dir,
             bundle,
             base_dir / "stage-timings.json",
-            extra=["--deployment", str(base_dir / "tessera.toml")],
+            extra=["--deployment", str(base_dir / "mosaica.toml")],
         )
         if self.result["build"]["returncode"] != 0:
             self.result["blocked"] = {

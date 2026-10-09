@@ -21,7 +21,7 @@
 //! mask, mean run ≈ 1-3 rows — was a measured +7.8% end-to-end regression at 2.4M, while the
 //! batch decode's cost is flat in run length.
 //!
-//! Run with: `cargo run --release --example decode_tiers -p tessera-engine`
+//! Run with: `cargo run --release --example decode_tiers -p mosaica-engine`
 
 use std::collections::BinaryHeap;
 use std::hint::black_box;
@@ -34,13 +34,13 @@ use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
-use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::projection::RowProjection;
-use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::write::write_permutation;
-use tessera_store::{Permutation, RowSpace};
-use tessera_types::{EntityId, TermId};
+use mosaica_authz::{write_postings, FragmentCache, PostingsReader};
+use mosaica_engine::compose::{compose, EffectiveMask};
+use mosaica_engine::projection::RowProjection;
+use mosaica_lifecycle::{IngestBuffer, Overlay};
+use mosaica_store::write::write_permutation;
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::{EntityId, TermId};
 
 const ROWS: u32 = 1 << 20;
 const TILE_SPAN: u32 = 1 << 14; // 64 tiles of 16k rows each

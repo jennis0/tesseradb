@@ -10,9 +10,9 @@
 //! produce, at positions between the two boundaries. Under the chord reading the two shapes are
 //! equal and every one of these fails.
 
-use tessera_spatial::morton::{fixed32, Bounds};
-use tessera_spatial::shape::{Shape, ShapeF64, Space, DENSIFY_TOLERANCE_CELLS};
-use tessera_spatial::Projection;
+use mosaica_spatial::morton::{fixed32, Bounds};
+use mosaica_spatial::shape::{Shape, ShapeF64, Space, DENSIFY_TOLERANCE_CELLS};
+use mosaica_spatial::Projection;
 
 /// The whole Web Mercator world: the frame the United Kingdom takes, straddling the meridian.
 const WORLD: Bounds = Bounds {
@@ -142,7 +142,7 @@ fn the_band_between_the_two_readings_is_tens_of_cells_wide_the_whole_way() {
 #[test]
 fn no_point_of_the_true_image_leaves_the_densified_boundary_by_a_cell() {
     // The tile at zoom offset 6 whose square contains the edge's eastern half, inside the triangle.
-    let sub = tessera_spatial::snap_outward(&Bounds {
+    let sub = mosaica_spatial::snap_outward(&Bounds {
         x_min: WM.forward(-5.5, 56.0).0,
         x_max: WM.forward(-4.5, 56.0).0,
         y_min: WM.forward(-5.0, 56.5).1,
@@ -281,7 +281,7 @@ fn the_report_counts_the_declared_vertices_not_the_densified_ones() {
 /// A `wgs84` coordinate outside ±180 × ±90 is not a coordinate; a view with no projection refuses.
 #[test]
 fn what_a_view_cannot_honour_refuses() {
-    use tessera_spatial::shape::CanonError;
+    use mosaica_spatial::shape::CanonError;
     let over = ShapeF64::Polygon(vec![vec![vec![(-8.0, 50.0), (2.0, 90.5), (-8.0, 58.0)]]]);
     assert_eq!(
         over.canonical(Space::Wgs84(WM), &WORLD),

@@ -1,7 +1,7 @@
 //! **A multi-view bundle, served** (`views.md` §3.2): the roster on the wire, and every view of it
 //! answering a viewer verb.
 //!
-//! What is at stake here is not the build — `tessera-build`'s own tests cover that a declaration
+//! What is at stake here is not the build — `mosaica-build`'s own tests cover that a declaration
 //! becomes nine row spaces — but the half above it: whether a client that reads `/v1/meta` can
 //! name any of them, order a group's views without interpreting a key, and get *that view's*
 //! geometry back. Four facts carry it, and each is a way the serving half could be wrong while
@@ -28,7 +28,7 @@ use std::path::Path;
 
 use common::*;
 use serde_json::{json, Value};
-use tessera_build::{
+use mosaica_build::{
     build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewMetadataType,
     ViewMetadataValue,
 };
@@ -133,7 +133,7 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
                 members_of: None,
                 scoped_scalars: Vec::new(),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 // The declared metadata schema, which is what a view created while the service
                 // runs is measured against (`views.md` §3.2).
                 metadata: vec![
@@ -158,7 +158,7 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
                 members_of: Some("quarter".to_string()),
                 scoped_scalars: Vec::new(),
                 quantisation: group_frame(),
-                projection: tessera_spatial::Projection::None,
+                projection: mosaica_spatial::Projection::None,
                 // A `members` group declares none: they belong to the group that owns the views.
                 metadata: Vec::new(),
                 views: roster(false),
@@ -208,13 +208,13 @@ async fn points(served: &Served, view: &str) -> Vec<PointRow> {
     points
 }
 
-/// The `Meta` schema `docs/openapi/tessera.yaml` publishes, compiled in its own context so
+/// The `Meta` schema `docs/openapi/mosaica.yaml` publishes, compiled in its own context so
 /// `$ref`s resolve as they do in the file — `tests/openapi.rs`' own mechanism, reused here because
 /// the roster's non-null branch exists only under a multi-view bundle and that file's fixture has
 /// one view.
 fn meta_schema() -> jsonschema::Validator {
-    let doc: Value = serde_yaml_ng::from_str(include_str!("../../../docs/openapi/tessera.yaml"))
-        .expect("tessera.yaml parses as YAML");
+    let doc: Value = serde_yaml_ng::from_str(include_str!("../../../docs/openapi/mosaica.yaml"))
+        .expect("mosaica.yaml parses as YAML");
     jsonschema::draft202012::new(&json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$ref": "#/components/schemas/Meta",
@@ -401,8 +401,8 @@ async fn a_key_addresses_its_view_on_both_planes() {
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "key-address")
-        .header("x-tessera-view", "quarter:2026-Q2")
+        .header("x-mosaica-batch-id", "key-address")
+        .header("x-mosaica-view", "quarter:2026-Q2")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(None, 42.0, 42.0, "0")]))
         .send()

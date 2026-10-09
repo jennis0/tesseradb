@@ -5,9 +5,9 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 
-use tessera_lifecycle::membership::Attachment;
-use tessera_lifecycle::Overlay;
-use tessera_types::layer::{LayerDeclaration, ServingLayout};
+use mosaica_lifecycle::membership::Attachment;
+use mosaica_lifecycle::Overlay;
+use mosaica_types::layer::{LayerDeclaration, ServingLayout};
 
 
 use crate::tile_index::TileIndex;

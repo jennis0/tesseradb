@@ -11,7 +11,7 @@
 //! skewed cluster-size distribution, and clusters compact in Morton order —
 //! which is the only property either representation is sensitive to.
 //!
-//! Run: cargo run --release --example artifact_layers -p tessera-store -- \
+//! Run: cargo run --release --example artifact_layers -p mosaica-store -- \
 //!        [--rows N] [--artifacts K] [--noise F] [--reps R]
 
 use croaring::Bitmap;

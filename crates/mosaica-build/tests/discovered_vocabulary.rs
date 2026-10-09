@@ -2,7 +2,7 @@
 //!
 //! `schema.rs`'s unit tests cover the parse-time rules (the refusal lifted, the empty-start
 //! case, the relaxed `visibility = "public"` combination). These exercise the whole build: minting
-//! through `tessera_store::vocabulary::VocabularyMinter`, the batch-level pre-pass in
+//! through `mosaica_store::vocabulary::VocabularyMinter`, the batch-level pre-pass in
 //! `input::scan_attributes`, and the result landing in `MANIFEST.vocabularies`.
 
 use std::collections::HashMap;
@@ -15,11 +15,11 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Config, Schema};
-use tessera_build::{build, build_in_memory, BuildArgs};
-use tessera_spatial::Bounds;
-use tessera_store::{open_bundle, ScalarSlice};
-use tessera_types::{EntityId, IdentityKey};
+use mosaica_build::config::{Config, Schema};
+use mosaica_build::{build, build_in_memory, BuildArgs};
+use mosaica_spatial::Bounds;
+use mosaica_store::{open_bundle, ScalarSlice};
+use mosaica_types::{EntityId, IdentityKey};
 
 mod common;
 
@@ -122,20 +122,20 @@ fn parse_schema(text: &str, values: &HashMap<String, PathBuf>) -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     let schema = common::with_id(schema);
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
@@ -259,7 +259,7 @@ fn discovered_vocabulary_mints_every_novel_key_and_records_it() {
         .expect("MANIFEST.vocabularies carries 'department'");
     assert_eq!(
         vocab.visibility,
-        tessera_store::manifest::Visibility::Derived
+        mosaica_store::manifest::Visibility::Derived
     );
     assert!(vocab.reserved.is_empty());
     let mut got_keys: Vec<&str> = vocab.values.iter().map(|v| v.key.as_str()).collect();
@@ -488,7 +488,7 @@ vocabulary = "department"
 ///
 /// `Schema::open_minters` seeds each minter's assigned set with the vocabulary's `reserved`
 /// list as well as its pinned values, and this is the only test that proves it: the minter's own
-/// unit tests in `tessera-store` exercise `seed_reserved` directly, so deleting the `reserved` loop
+/// unit tests in `mosaica-store` exercise `seed_reserved` directly, so deleting the `reserved` loop
 /// from the *build's* seeding leaves every one of them green while every later build quietly
 /// re-issues a retired code to a new key. Rows written under the retirement and rows written under
 /// the new key would then be the same colour, with no error and no digest mismatch.

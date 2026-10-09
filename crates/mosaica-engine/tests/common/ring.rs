@@ -3,7 +3,7 @@
 //!
 //! **Written from the definitions rather than shared with the engine's.** A hull is checked here for
 //! containing every member and for being tighter than the wrap it replaced, and a check that called
-//! `tessera_engine::derived`'s own arithmetic would agree with it by construction. Compiled into
+//! `mosaica_engine::derived`'s own arithmetic would agree with it by construction. Compiled into
 //! each test binary that needs it (`#[path = "common/ring.rs"] mod ring;`), which is why the
 //! unused-item allowance is here rather than at each use.
 
@@ -94,7 +94,7 @@ pub fn double_area(poly: &[[u32; 2]]) -> i128 {
 /// α², as the squared length an edge must exceed to be treated as bridging a void: three times the
 /// median edge of the convex wrap, squared.
 ///
-/// **A second implementation of `tessera_engine::derived`'s rule, and here for the same reason the
+/// **A second implementation of `mosaica_engine::derived`'s rule, and here for the same reason the
 /// wrap above is.** It is what a measurement compares the engine's α against — the quantisation
 /// sweep asks whether binning the members moves it — and a comparison that called the engine's own
 /// arithmetic would agree by construction.

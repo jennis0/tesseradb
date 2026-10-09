@@ -6,7 +6,7 @@
 //! chosen route and each forced route over the same fragment and reports what each cost.
 //!
 //! **The shipped code, not a transcription of it.** The bundle is opened with `open_bundle`, the
-//! call `tessera serve` makes, so the base permutation's `dense_rows` state and the view's mapped
+//! call `mosaica serve` makes, so the base permutation's `dense_rows` state and the view's mapped
 //! images are the ones a server has. The fragment is built through `FragmentCache::get_or_build`,
 //! the engine's own path. Each arm is `RowProjection::new(&inputs, &row_space)` with
 //! `ProjectionInputs::force` set, which is the one constructor the request path uses. A probe that
@@ -62,16 +62,16 @@ use croaring::bitmap::Statistics;
 use croaring::{Bitmap, Portable};
 use serde_json::{json, Value};
 
-use tessera_authz::{Dict, FragmentCache, FrozenFragment, PostingsReader};
-use tessera_engine::{ProjectionInputs, ProjectionRoute, RowProjection};
-use tessera_store::manifest::CurrentPointer;
-use tessera_store::read::open_bundle;
-use tessera_store::term_images::{
+use mosaica_authz::{Dict, FragmentCache, FrozenFragment, PostingsReader};
+use mosaica_engine::{ProjectionInputs, ProjectionRoute, RowProjection};
+use mosaica_store::manifest::CurrentPointer;
+use mosaica_store::read::open_bundle;
+use mosaica_store::term_images::{
     choose, chooser_inputs, ChooserInputs, Route, TermImages, ROUTE_COSTS,
 };
-use tessera_store::RowSpace;
-use tessera_types::process::{self, resident_bytes};
-use tessera_types::TermId;
+use mosaica_store::RowSpace;
+use mosaica_types::process::{self, resident_bytes};
+use mosaica_types::TermId;
 
 #[derive(Parser)]
 #[command(about = "Time the four session projection routes against each other over one bundle")]
@@ -842,7 +842,7 @@ fn mismatched(principals: &[Value]) -> Vec<String> {
 }
 
 fn run(args: Args) -> Result<(), String> {
-    // ---- The bundle, opened as `tessera serve` opens it.
+    // ---- The bundle, opened as `mosaica serve` opens it.
     let opened = Counters::now();
     let bundle = open_bundle(&args.bundle).map_err(|e| format!("opening the bundle: {e}"))?;
     let opened = opened.since();

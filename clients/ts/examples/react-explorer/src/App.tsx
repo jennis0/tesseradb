@@ -1,13 +1,13 @@
 import {useCallback, useEffect, useState} from 'react';
-import {useProjection, useTesseraStore} from '@tesseradb/react';
-import {TesseraExplorer} from '@tesseradb/react/components';
+import {useProjection, useMosaicaStore} from '@mosaica/react';
+import {MosaicaExplorer} from '@mosaica/react/components';
 import {ItemCard} from './ItemCard.js';
 
 /**
  * The explorer in React 19 through the wrappers, with the `detail` slot holding a host component
- * that reads `useProjection` in place of `<tessera-item-card>`.
+ * that reads `useProjection` in place of `<mosaica-item-card>`.
  *
- * The host builds the store with `useTesseraStore` and passes it to the explorer as a property,
+ * The host builds the store with `useMosaicaStore` and passes it to the explorer as a property,
  * so the host's components and the explorer read one store. The token comes from the app server
  * (`../plain-html/server.mjs`) through `authorise`, which the store calls to renew.
  */
@@ -27,7 +27,7 @@ export function App() {
   return (
     <div style={{display: 'grid', gridTemplateRows: 'auto 1fr', height: '100%'}}>
       <header style={{display: 'flex', gap: '1rem', alignItems: 'center', padding: '0.5rem 1rem', borderBottom: '1px solid #ddd'}}>
-        <strong>Tessera</strong>
+        <strong>Mosaica</strong>
         <label>
           signed in as{' '}
           <select id="principal" value={user} onChange={(e) => setUser(e.target.value)}>
@@ -52,14 +52,14 @@ function Session({user}: {user: string}) {
     return (await r.json()) as {token: string; expiresAt: number};
   }, [user]);
   // The most clusters each level shows in one tile of the map, largest first.
-  const store = useTesseraStore({viewerUrl: location.origin, authorise, artifacts: {perTile: 50}});
+  const store = useMosaicaStore({viewerUrl: location.origin, authorise, artifacts: {perTile: 50}});
   const status = useProjection(store, 'status');
   if (!store) return null;
   return (
-    <TesseraExplorer store={store} layout="overlay" style={{minHeight: 0}} title={status?.status}>
+    <MosaicaExplorer store={store} layout="overlay" style={{minHeight: 0}} title={status?.status}>
       <div slot="detail">
         <ItemCard store={store} />
       </div>
-    </TesseraExplorer>
+    </MosaicaExplorer>
   );
 }

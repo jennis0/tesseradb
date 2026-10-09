@@ -2,7 +2,7 @@
 //! bundle `tests/pins.rs` uses.
 //!
 //! **These cases go through the real request path on purpose.** The single-flight state machine,
-//! the eviction rules and the lock accounting are unit-tested in `tessera-cache`, where a
+//! the eviction rules and the lock accounting are unit-tested in `mosaica-cache`, where a
 //! synthetic `V` makes every interleaving schedulable. What cannot be tested there is the thing
 //! that matters most here: that a *rebuilt* projection is the same projection. A test that
 //! constructed two `RowProjection`s in-process and compared them would never exercise the hit path
@@ -22,13 +22,13 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig, Session};
-use tessera_store::read::open_bundle;
-use tessera_store::Bundle;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig, Session};
+use mosaica_store::read::open_bundle;
+use mosaica_store::Bundle;
 
 use common::*;
-use tessera_engine::GeometryPublication;
+use mosaica_engine::GeometryPublication;
 
 /// The whole-extent, depth-0 request every count assertion below uses: one tile, so
 /// `tiles[0].visible` is the session's total visible count (θ is saturated by `common::config`).
@@ -144,7 +144,7 @@ fn tighten_to_one_entry(engine: &Engine, sessions: &[&Session]) -> u64 {
 
 /// A revoke drops that session's projections and nobody else's.
 ///
-/// The *disclosure* control for a revoked session is the registry removal in `tessera-server`,
+/// The *disclosure* control for a revoked session is the registry removal in `mosaica-server`,
 /// not this — see
 /// `RowProjectionCache::prune_token`; what this asserts is that the memory is actually released,
 /// and released selectively.
@@ -334,14 +334,14 @@ fn eviction_never_widens_a_mask() {
 /// A bound below the working set costs rebuilds, never refusals, and never a wrong answer. *The
 /// bound holding is not the risk; the bound biting is.*
 ///
-/// The engine-level companion to `tessera-cache`'s unit test of the same name, which covers the
+/// The engine-level companion to `mosaica-cache`'s unit test of the same name, which covers the
 /// refusal accounting deterministically. What this adds is that a real `RowProjection` round-robin
 /// under a biting bound still serves correct responses to every session.
 ///
 /// **What this does not cover, stated rather than implied.** The dominant failure at an undersized
 /// bound in a *server* is not this: every miss holds an admission permit for the whole rebuild, so
 /// once most requests are misses the compute gate saturates and warm requests are shed too. That is
-/// a `tessera-server` property, not an engine one, and it is why the startup validation refuses the
+/// a `mosaica-server` property, not an engine one, and it is why the startup validation refuses the
 /// configuration rather than relying on the engine degrading gracefully.
 #[test]
 fn an_undersized_bound_does_not_livelock() {

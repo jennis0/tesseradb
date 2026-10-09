@@ -6,7 +6,7 @@
 //! what is stored after a build, a fold, a restart and a publication at runtime, and what the engine
 //! holds after a growth, a recomposition and a dropped column, each against the column's own labels
 //! transposed by hand, and each covering must hold every member in at most 32 ranges. Which split
-//! a fresh covering takes is the writer's own test, beside it in `tessera-store`.
+//! a fresh covering takes is the writer's own test, beside it in `mosaica-store`.
 
 mod common;
 
@@ -19,15 +19,15 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
-use tessera_build::BuildArgs;
-use tessera_engine::row_column::RowColumn;
-use tessera_engine::{Engine, LayerSelection};
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
-use tessera_store::manifest::{DerivedForm, SegmentsManifest};
-use tessera_types::layer::{
+use mosaica_build::BuildArgs;
+use mosaica_engine::row_column::RowColumn;
+use mosaica_engine::{Engine, LayerSelection};
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
+use mosaica_store::manifest::{DerivedForm, SegmentsManifest};
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 const N: u64 = 3_000;
 /// Sources at or past this are in no artifact of the built layers, so a growth can take them
@@ -175,7 +175,7 @@ fn fixture_with(extra: &[(String, u64)]) -> Fixture {
     write_pairs_n(&pairs, N);
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, config_toml()).unwrap();
-    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture's declaration parses");
     let mut label = memberships(LABEL);
     label.extend_from_slice(extra);
@@ -183,20 +183,20 @@ fn fixture_with(extra: &[(String, u64)]) -> Fixture {
     write_layer(dir, LIST, LIST_ARTIFACTS, &memberships(LIST));
     write_layer(dir, HULL, HULL_ARTIFACTS, &memberships(HULL));
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &config.schema),
         out: root.clone(),
         limit: None,
         strict: false,
@@ -211,7 +211,7 @@ fn fixture_with(extra: &[(String, u64)]) -> Fixture {
         band_rows: None,
         schema: config.schema,
     };
-    tessera_build::build(&args).expect("the fixture builds");
+    mosaica_build::build(&args).expect("the fixture builds");
     let map = source_to_new_map(&root, "v00000");
     Fixture {
         root,
@@ -293,7 +293,7 @@ fn held_forms(column: &RowColumn, what: &str) -> Forms {
 
 /// The prefix `CURRENT` names and its partition manifest.
 fn manifest_at(root: &Path) -> (PathBuf, SegmentsManifest) {
-    let bundle = tessera_store::read::open_bundle(root).expect("the bundle opens");
+    let bundle = mosaica_store::read::open_bundle(root).expect("the bundle opens");
     let prefix = root.join(current_prefix(root));
     let manifest = bundle.partitions["default"].manifest.clone();
     (prefix, manifest)
@@ -319,7 +319,7 @@ fn stored_forms(root: &Path) -> BTreeMap<(String, u32), Forms> {
             column.layer
         );
         let labels = RowColumn::open_labels(&prefix.join(&column.path), layout).unwrap();
-        let pack = tessera_store::row_members::RowMembersPack::open(&prefix.join(&beside[0].path))
+        let pack = mosaica_store::row_members::RowMembersPack::open(&prefix.join(&beside[0].path))
             .expect("the member file opens");
         assert_eq!(pack.rows(), labels.base_rows());
         assert_eq!(pack.ordinals() as usize, labels.len());
@@ -358,7 +358,7 @@ fn touch(engine: &Engine, layers: &[&str]) {
     engine
         .viewport_artifacts(
             &session,
-            tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX)
                 .layers(LayerSelection::Named(layers)),
         )
         .expect("a viewport naming the layers");
@@ -394,7 +394,7 @@ fn a_build_writes_the_members_and_coverings_beside_every_row_major_column() {
         CLAIMED + CLAIMED.div_ceil(11),
         "an overlapping row is a member of each artifact claiming it"
     );
-    let report = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+    let report = mosaica_build::verify_deep(&fx.root, &mosaica_build::VerifyOpts::default())
         .expect("the bundle verifies");
     assert_eq!(report.row_member_files, 3);
 }
@@ -507,7 +507,7 @@ fn runtime_declaration(name: &str, layout: ServingLayout) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,

@@ -1,8 +1,8 @@
-<!-- Generated from crates/tessera-build/src/config.rs. Edit the doc comments there, then run: TESSERA_WRITE_CORPUS_REFERENCE=1 cargo test -p tessera-build corpus_reference -->
+<!-- Generated from crates/mosaica-build/src/config.rs. Edit the doc comments there, then run: MOSAICA_WRITE_CORPUS_REFERENCE=1 cargo test -p mosaica-build corpus_reference -->
 
 # corpus.toml
 
-`corpus.toml` declares a corpus: the files a build reads, the views that place each item on a map, the vocabularies and attributes each item carries, and the annotation layers drawn over the items. `tessera build` and `tessera check` read the file that `[build] schema` in `tessera.toml` names, `schema.toml` by default, or the one `--config` names. `tessera check --payloads` prints the same declaration as the request bodies that declare it on a running service.
+`corpus.toml` declares a corpus: the files a build reads, the views that place each item on a map, the vocabularies and attributes each item carries, and the annotation layers drawn over the items. `mosaica build` and `mosaica check` read the file that `[build] schema` in `mosaica.toml` names, `schema.toml` by default, or the one `--config` names. `mosaica check --payloads` prints the same declaration as the request bodies that declare it on a running service.
 
 Every table refuses a key it does not know. Where a key is refused beside another, or needs another, its description says so.
 
@@ -34,7 +34,7 @@ One coordinate system: a position for each item it holds, the frame those positi
 | `name` | string | required | The view's name, which a request names it by. ASCII letters, digits, `_` and `-`, unique among views and view groups. |
 | `title` | string | not set | A display title. Not built yet: the title is accepted and not published. |
 | `projection` | string | `"none"` | How a longitude and latitude become a position on the map: `web_mercator`, `equirectangular` (also written `plate_carree`), `gall_isographic`, or `none` for coordinates that are not places on the Earth. It decides which spellings `extent` and `fields` take. Any other name is refused. |
-| `source` | string | the value of `[defaults].source` | A name in `[sources]`: the file holding the view's points, one row per item. A build refuses a view with no source; `tessera check` accepts one. |
+| `source` | string | the value of `[defaults].source` | A name in `[sources]`: the file holding the view's points, one row per item. A build refuses a view with no source; `mosaica check` accepts one. |
 | `fields` | table of strings | not set | Where the points file keeps each field, as `field = "column"`. The fields are either `x` and `y` or `morton` and `residual`, or on a projected view `lon` and `lat`, and each attribute declared `unique`, whose column is its `field` or its name where this map does not move it. A field not named here is read from the column of its own name. A field the view does not have, both kinds of position, `residual` without `morton`, and `fields` where the view has no source are refused. |
 | `extent` | string or table | required | The frame positions are stored across, as a 32-bit position on each axis. A point outside it is stored on its edge, and a build refuses a frame that more than half the points fall outside. The spellings are under `[view.extent]`. |
 | `point_visibility` | table | required | Where each point's access label comes from: keys under `[view.point_visibility]`. |

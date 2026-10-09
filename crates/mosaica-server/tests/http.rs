@@ -1,6 +1,6 @@
 //! The viewer plane, the session plane, config, byte shape and the compute-admission gate, end to
 //! end — spawned in-process on port 0 against a small synthetic bundle (the same fixture pattern
-//! `tessera-engine`'s `tests/viewport.rs` uses).
+//! `mosaica-engine`'s `tests/viewport.rs` uses).
 //!
 //! The **write-path** cases live in `tests/http_write.rs` — `/control/ingest`, `/control/changes`,
 //! `/control/status`, batch-id idempotency, allocation and the health endpoints — and pins and
@@ -11,9 +11,9 @@ mod common;
 
 use tempfile::TempDir;
 
-use tessera_engine::{Engine, EngineConfig};
-use tessera_server::state::ComputeGate;
-use tessera_spatial::tiles_for_bbox;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_server::state::ComputeGate;
+use mosaica_spatial::tiles_for_bbox;
 
 use common::*;
 
@@ -50,7 +50,7 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert!(resp.headers().contains_key("x-tessera-pin"));
+    assert!(resp.headers().contains_key("x-mosaica-pin"));
     let bytes = resp.bytes().await.unwrap();
     let (tiles, points) = decode_viewport(&bytes);
     assert_eq!(tiles.len(), 1);
@@ -89,7 +89,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
             .unwrap();
         assert_eq!(resp.status(), 200);
         let etag = resp.headers()["etag"].to_str().unwrap().to_string();
-        let identity = resp.headers()["x-tessera-identity-key"]
+        let identity = resp.headers()["x-mosaica-identity-key"]
             .to_str()
             .unwrap()
             .to_string();
@@ -130,7 +130,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
         .await
         .unwrap();
     assert_ne!(
-        resp.headers()["x-tessera-identity-key"].to_str().unwrap(),
+        resp.headers()["x-mosaica-identity-key"].to_str().unwrap(),
         identity,
         "a different mask must not share a render partition — that is decision 0029's disclosure"
     );
@@ -261,8 +261,8 @@ fn build_under_key(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
     write_pairs_n(&dir.join("pairs.parquet"), N_ITEMS);
     let view = view_args("s0", &points, AccessInput::relation(dir.join("pairs.parquet")));
     let out = dir.join("bundle");
-    tessera_build::build(&tessera_build::BuildArgs {
-        identity_key: tessera_types::IdentityKey::from_hex(key).unwrap(),
+    mosaica_build::build(&mosaica_build::BuildArgs {
+        identity_key: mosaica_types::IdentityKey::from_hex(key).unwrap(),
         ..with_id(build_args(&out, vec![view]), &points)
     })
     .expect("the build succeeds");
@@ -283,7 +283,7 @@ async fn identity_coordinate(server: &TestServer) -> String {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    resp.headers()["x-tessera-identity-key"]
+    resp.headers()["x-mosaica-identity-key"]
         .to_str()
         .unwrap()
         .to_string()
@@ -451,7 +451,7 @@ async fn h_config_missing_disclosure_refuses_to_start() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = standard_fixture(tmp.path());
 
-    std::env::set_var("TESSERA_TEST_H_OPERATOR", OPERATOR_CREDENTIAL);
+    std::env::set_var("MOSAICA_TEST_H_OPERATOR", OPERATOR_CREDENTIAL);
 
     let toml_text = format!(
         r#"
@@ -463,16 +463,16 @@ async fn h_config_missing_disclosure_refuses_to_start() {
         viewer = "127.0.0.1:0"
         session = "127.0.0.1:0"
         control = "127.0.0.1:0"
-        operator_credential_env = "TESSERA_TEST_H_OPERATOR"
+        operator_credential_env = "MOSAICA_TEST_H_OPERATOR"
         "#,
         bundle = bundle_root.display(),
         cache = tmp.path().join("cache").display(),
         wal = tmp.path().join("wal.log").display(),
     );
-    let config_path = tmp.path().join("tessera.toml");
+    let config_path = tmp.path().join("mosaica.toml");
     std::fs::write(&config_path, toml_text).unwrap();
 
-    let result = tessera_server::prepare(&config_path);
+    let result = mosaica_server::prepare(&config_path);
     assert!(
         result.is_err(),
         "a config missing [disclosure] must refuse to start"
@@ -505,7 +505,7 @@ async fn viewer_meta_never_carries_the_identity_key() {
     );
 }
 
-/// The trailer's `stage_ns` key (formerly the `x-tessera-stage-ns` header — contracts §3.2 r26)
+/// The trailer's `stage_ns` key (formerly the `x-mosaica-stage-ns` header — contracts §3.2 r26)
 /// obeys **both** of its gates, and carries no identifier.
 ///
 /// `spawn_server` sets `stage_timing: true`, so the runtime gate is open throughout this test.
@@ -514,7 +514,7 @@ async fn viewer_meta_never_carries_the_identity_key() {
 /// the breakdown would otherwise pass a test written for the instrumented build. The retired
 /// header is asserted absent in BOTH directions: nothing may quietly resurrect it.
 ///
-/// The field-count assertion pins the CSV contract `tessera-bench` and `scripts/bench_*.py`
+/// The field-count assertion pins the CSV contract `mosaica-bench` and `scripts/bench_*.py`
 /// parse. Append-only: adding a stage means bumping the expected count here deliberately.
 #[tokio::test]
 async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier() {
@@ -537,7 +537,7 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
     assert_eq!(resp.status(), 200);
 
     assert!(
-        resp.headers().get("x-tessera-stage-ns").is_none(),
+        resp.headers().get("x-mosaica-stage-ns").is_none(),
         "the stage header is retired (contracts §3.2 r26): the breakdown rides the trailer"
     );
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
@@ -612,7 +612,7 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
 
 // ---------------------------------------------------------------------------------------------
 // The two-stage admission gate, the 429 `backpressure` contract, and the
-// x-tessera-server-us / x-tessera-admission-us timing split.
+// x-mosaica-server-us / x-mosaica-admission-us timing split.
 // ---------------------------------------------------------------------------------------------
 
 /// A slow viewport request, engineered exactly as `healthz_stays_prompt_while_a_long_viewport_runs`
@@ -985,9 +985,9 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
     );
 }
 
-/// `x-tessera-server-us`'s clock starts AFTER admission, so it stays close to what an
+/// `x-mosaica-server-us`'s clock starts AFTER admission, so it stays close to what an
 /// unqueued request measures even when this request was forced to queue for a long time; the
-/// queueing itself shows up only in `x-tessera-admission-us`, which must grow to reflect it.
+/// queueing itself shows up only in `x-mosaica-admission-us`, which must grow to reflect it.
 ///
 /// Self-scaling, not a fixed wall-clock bet (this file's established pattern): rather than
 /// asserting an absolute microsecond bound, this compares the *queued* fast request's own two
@@ -1001,7 +1001,7 @@ async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     let bundle_root = standard_fixture(tmp.path());
     // compute_queue = 1 (not 0): the queued fast request below must be ADMITTED (a slot) and
     // then WAIT for a compute permit, rather than being shed outright by stage 1 — that wait is
-    // exactly what `x-tessera-admission-us` needs to capture. A generous timeout so it is never
+    // exactly what `x-mosaica-admission-us` needs to capture. A generous timeout so it is never
     // shed by stage 2 either; this test is about the timing split, not the shedding contract.
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
@@ -1024,8 +1024,8 @@ async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
         .await
         .unwrap();
     assert_eq!(baseline_resp.status(), 200);
-    let baseline_admission_us: u64 = header_u64(&baseline_resp, "x-tessera-admission-us");
-    let baseline_server_us: u64 = header_u64(&baseline_resp, "x-tessera-server-us");
+    let baseline_admission_us: u64 = header_u64(&baseline_resp, "x-mosaica-admission-us");
+    let baseline_server_us: u64 = header_u64(&baseline_resp, "x-mosaica-server-us");
     // Drain and wait for the slot back before contending for it: this gate has two slots, so a
     // baseline still in its emit phase leaves only one for the slow request and the queued
     // request below is shed instead of queued. See `poll_until_gate_idle`.
@@ -1056,8 +1056,8 @@ async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
         .await
         .unwrap();
     assert_eq!(queued_resp.status(), 200);
-    let queued_admission_us = header_u64(&queued_resp, "x-tessera-admission-us");
-    let queued_server_us = header_u64(&queued_resp, "x-tessera-server-us");
+    let queued_admission_us = header_u64(&queued_resp, "x-mosaica-admission-us");
+    let queued_server_us = header_u64(&queued_resp, "x-mosaica-server-us");
 
     let slow_resp = slow_task.await.unwrap();
     assert_eq!(slow_resp.status(), 200);
@@ -1124,7 +1124,7 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
 /// tearing down a stale fetch produces. On the server side this is indistinguishable from any
 /// other broken connection: axum/hyper notice the peer went away and drop the handler's own
 /// future, which is the ONLY signal this transport gives for "the client left" and exactly what
-/// `CancelGuard` (`tessera-server::viewer`) is wired to.
+/// `CancelGuard` (`mosaica-server::viewer`) is wired to.
 ///
 /// **Why each request is drained and the gate polled idle between them.** With one slot and no
 /// queue, a request sent while its predecessor is still in its emit phase is shed with a 429 —
@@ -1135,7 +1135,7 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
 ///
 /// **What this test does NOT claim.** Like the engine-level timing test
 /// (`cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes` in
-/// `tessera-engine`'s `tests/viewport.rs`), this does not pin down which of `Engine::viewport`'s
+/// `mosaica-engine`'s `tests/viewport.rs`), this does not pin down which of `Engine::viewport`'s
 /// three checkpoints the disconnect is caught at — `poll_until_in_flight(&server, 1)` only proves
 /// the request has been admitted and started running compute, not how far into the sweep it has
 /// gotten by the time `abort()` fires. The disconnect could equally land at the pre-compose
@@ -1260,7 +1260,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 
 /// THE HEADLINE TEST, server-side: the full Arrow response **body** `POST /v1/viewport`
 /// returns is byte-for-byte identical whether `serve.compute_threads` is 1 or 8 — the same claim
-/// `tessera-engine`'s own
+/// `mosaica-engine`'s own
 /// `viewport_output_is_byte_identical_at_compute_threads_1_and_8` pins at the engine level,
 /// carried one layer further to what a real client actually receives on the wire, through
 /// `run_viewport`'s Arrow IPC framing (`viewer.rs`) and axum's response body.
@@ -1269,8 +1269,8 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 /// authorisation terms (so both sessions see the identical mask) and the identical request body.
 /// The compared region is the body **minus its trailer frame** (`streamed-serving.md` §7): the
 /// trailer carries wall-clock figures of this specific run and is canonicalised by key set in
-/// `decode_viewport_frames` rather than compared by bytes; `x-tessera-server-us` and
-/// `x-tessera-admission-us` are likewise timing headers outside the claim. `x-tessera-pin` IS
+/// `decode_viewport_frames` rather than compared by bytes; `x-mosaica-server-us` and
+/// `x-mosaica-admission-us` are likewise timing headers outside the claim. `x-mosaica-pin` IS
 /// compared -- it is derived from the bundle's own `(prefix, segments_version)`, not from
 /// timing, so it must agree too.
 ///
@@ -1341,7 +1341,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     assert_eq!(resp_1.status(), 200);
     let pin_1 = resp_1
         .headers()
-        .get("x-tessera-pin")
+        .get("x-mosaica-pin")
         .unwrap()
         .to_str()
         .unwrap()
@@ -1359,7 +1359,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     assert_eq!(resp_8.status(), 200);
     let pin_8 = resp_8
         .headers()
-        .get("x-tessera-pin")
+        .get("x-mosaica-pin")
         .unwrap()
         .to_str()
         .unwrap()
@@ -1514,7 +1514,7 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     let token = token_for(&server, &["0"]).await;
     server.state.engine.hold_next_projection_build_for_test();
     // Released on drop, so a failed wait still frees the blocking thread the build holds.
-    struct ReleaseOnDrop(std::sync::Arc<tessera_server::state::AppState>);
+    struct ReleaseOnDrop(std::sync::Arc<mosaica_server::state::AppState>);
     impl Drop for ReleaseOnDrop {
         fn drop(&mut self) {
             self.0.engine.release_projection_build_for_test();
@@ -1851,7 +1851,7 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     // Observed through `TestServer::state` after driving the requests over HTTP, the
     // observe-not-drive licence that field's doc grants. `/control/status` publishes the same
     // gauge; the direct read spares the operator credential and a JSON parse per poll.
-    let wait_for_streaming = |state: std::sync::Arc<tessera_server::state::AppState>,
+    let wait_for_streaming = |state: std::sync::Arc<mosaica_server::state::AppState>,
                               want: usize,
                               patience_ms: u64| async move {
         let what = format!("the streaming gauge reaching {want}");
@@ -1911,10 +1911,10 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     )
     .await;
     let (payload, terminated) = dechunk(&rest);
-    let frames = tessera_wire::split_frames(&payload);
+    let frames = mosaica_wire::split_frames(&payload);
     let complete = matches!(
         &frames,
-        Ok(frames) if frames.last().map(|(k, _)| *k) == Some(tessera_wire::FRAME_TRAILER)
+        Ok(frames) if frames.last().map(|(k, _)| *k) == Some(mosaica_wire::FRAME_TRAILER)
     );
     assert!(
         !complete,
@@ -1962,7 +1962,7 @@ async fn the_whole_stream_deadline_cuts_a_viewport_after_its_first_flush() {
         "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
     });
     let mut bodies = Vec::new();
-    for deadline_ms in [0, tessera_config::defaults::DEFAULT_STREAM_DEADLINE_MS] {
+    for deadline_ms in [0, mosaica_config::defaults::DEFAULT_STREAM_DEADLINE_MS] {
         let dir = tmp.path().join(format!("serve-{deadline_ms}"));
         std::fs::create_dir_all(&dir).unwrap();
         let server = spawn_server_with_bulk_reads(

@@ -2,8 +2,8 @@
 //! own.
 
 use rustc_hash::FxHashMap;
-use tessera_access::{disjuncts, Expr, Label, LabelId, Labels, Scratch, DEFAULT_MAX_NODES};
-use tessera_types::TermId;
+use mosaica_access::{disjuncts, Expr, Label, LabelId, Labels, Scratch, DEFAULT_MAX_NODES};
+use mosaica_types::TermId;
 
 use crate::dict::PUBLIC_LABEL;
 

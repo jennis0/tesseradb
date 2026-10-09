@@ -24,8 +24,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::input::read_points;
-use tessera_spatial::{
+use mosaica_build::input::read_points;
+use mosaica_spatial::{
     shape::{ShapeF64, Space},
     Bounds,
 };
@@ -85,8 +85,8 @@ fn write_points(path: &Path, xs: &[f64], ys: &[f64], width: &DataType) {
 fn positions(path: &Path, extent: &Bounds) -> Vec<(u32, u32)> {
     let fields = Default::default();
     let mut rows = read_points(
-        tessera_build::input::Source::every_row(path, &fields),
-        tessera_spatial::Projection::None,
+        mosaica_build::input::Source::every_row(path, &fields),
+        mosaica_spatial::Projection::None,
         extent,
     )
     .expect("the points read");
@@ -156,7 +156,7 @@ fn two_positions_inside_one_f32_step_land_in_different_cells() {
 /// **A point inside a small polygon at its source coordinates is inside it at its stored
 /// position** — the asymmetry between the shape path and the point path, as a test.
 ///
-/// `tessera_spatial::shape` quantises a shape's vertices through the same `fixed32` at the full 32
+/// `mosaica_spatial::shape` quantises a shape's vertices through the same `fixed32` at the full 32
 /// bits per axis, so a polygon a fraction of a cell wide survives with room to spare: the square
 /// here is 8 × 10⁻⁴ units across, which is 52 grid steps at the whole-world frame. A coordinate
 /// read at `f32` moves by up to half of that frame's 3.9 × 10⁻³ step — an order of magnitude
@@ -205,8 +205,8 @@ fn a_point_inside_a_small_polygon_is_inside_it_at_its_stored_position() {
     // And the position an `f32` path would have stored is outside it — which is what makes the
     // assertion above a property of the width rather than of the fixture.
     let narrowed = (
-        tessera_spatial::fixed32(f64::from(cx as f32), extent.x_min, extent.x_max),
-        tessera_spatial::fixed32(f64::from(cy as f32), extent.y_min, extent.y_max),
+        mosaica_spatial::fixed32(f64::from(cx as f32), extent.x_min, extent.x_max),
+        mosaica_spatial::fixed32(f64::from(cy as f32), extent.y_min, extent.y_max),
     );
     assert!(
         !shape.contains(narrowed),

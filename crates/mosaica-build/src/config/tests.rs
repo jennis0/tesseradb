@@ -591,7 +591,7 @@ fn a_views_own_visibility_is_a_list_of_access_expressions() {
             &format!("name             = \"s0\"\nvisibility       = {declared}"),
         ))
     };
-    // The rules are tested in `tessera_access::declared_visibility`; here, that the build
+    // The rules are tested in `mosaica_access::declared_visibility`; here, that the build
     // applies them.
     refusal("[]");
     refusal("[\"public\", \"finance\"]");
@@ -938,7 +938,7 @@ fn a_stated_box_snaps_to_the_smallest_containing_square() {
         "web_mercator",
         "extent = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }",
     );
-    assert_eq!(world.square, tessera_spatial::AlignedSquare::WORLD);
+    assert_eq!(world.square, mosaica_spatial::AlignedSquare::WORLD);
     assert!(!world.floored);
     assert_eq!(
         world.square.bounds(),
@@ -956,7 +956,7 @@ fn a_stated_box_snaps_to_the_smallest_containing_square() {
     );
     assert_eq!(
         boundary.square,
-        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 0 }
+        mosaica_spatial::AlignedSquare { z: 1, x: 0, y: 0 }
     );
     assert!(!boundary.floored);
 
@@ -966,7 +966,7 @@ fn a_stated_box_snaps_to_the_smallest_containing_square() {
     );
     assert_eq!(
         inside.square,
-        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 1 }
+        mosaica_spatial::AlignedSquare { z: 1, x: 0, y: 1 }
     );
 
     // A single point: contained in aligned squares at every offset, so it takes the cap of 16 and
@@ -978,7 +978,7 @@ fn a_stated_box_snaps_to_the_smallest_containing_square() {
     );
     assert_eq!(
         point.square,
-        tessera_spatial::AlignedSquare {
+        mosaica_spatial::AlignedSquare {
             z: 16,
             x: 32768,
             y: 32768
@@ -987,7 +987,7 @@ fn a_stated_box_snaps_to_the_smallest_containing_square() {
     assert!(point.floored);
 }
 
-/// **`tessera check` prints the frame and the snap for a stated box without opening a data file**
+/// **`mosaica check` prints the frame and the snap for a stated box without opening a data file**
 /// (`projections.md` §8), and says it cannot under `auto`.
 ///
 /// The declaration here names no points source at all, which is legal, so nothing readable exists:
@@ -1008,7 +1008,7 @@ fn a_check_answers_a_projected_views_frame_from_the_declaration_alone() {
     // `x [0, 0.25], y [0, 0.25]`, whose maxima are the z2 boundary and so belong to the next tile.
     assert_eq!(
         snap.square,
-        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 0 }
+        mosaica_spatial::AlignedSquare { z: 1, x: 0, y: 0 }
     );
     assert!(!snap.floored);
 
@@ -1930,7 +1930,7 @@ fn a_declaration_past_the_most_unique_fields_is_refused() {
         }
         parse_str(&text)
     };
-    let most = tessera_store::declaration::UNIQUE_FIELDS_MAX;
+    let most = mosaica_store::declaration::UNIQUE_FIELDS_MAX;
     assert!(declaring(most).is_ok());
     assert!(declaring(most + 1).is_err());
 }
@@ -2382,7 +2382,7 @@ fn the_sugar_and_the_layer_written_out_are_one_declaration() {
     assert_eq!(label.content.supplied[0].ty, "text");
     assert_eq!(
         label.artifact_visibility,
-        tessera_types::layer::ArtifactVisibility {
+        mosaica_types::layer::ArtifactVisibility {
             field: None,
             default: MemberDefault::Inherited
         }
@@ -3024,7 +3024,7 @@ fn stub_view_args(registry: &[BuildView]) -> Vec<crate::ViewArgs> {
         .map(|view| crate::ViewArgs {
             view_id: view.id.clone(),
             projection: view.projection,
-            extent: tessera_spatial::Bounds {
+            extent: mosaica_spatial::Bounds {
                 x_min: -40.0,
                 x_max: 40.0,
                 y_min: -40.0,

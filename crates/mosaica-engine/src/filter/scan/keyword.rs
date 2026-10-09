@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use croaring::Bitmap;
-use tessera_filter::{CodeSet, Codes, DictError, KeyMatcher, SortedDict, ValueColumn};
-use tessera_types::AttrLocalId;
+use mosaica_filter::{CodeSet, Codes, DictError, KeyMatcher, SortedDict, ValueColumn};
+use mosaica_types::AttrLocalId;
 
 use crate::filter::expr::FilterOperand;
 use crate::filter::{Endpoint, Scalar};
@@ -285,7 +285,7 @@ mod tests {
     use super::*;
     use crate::filter::test_support::*;
     use crate::filter::FilterColumns;
-    use tessera_filter::{take_scan_work, ScanWork};
+    use mosaica_filter::{take_scan_work, ScanWork};
 
     // The sentinel rule
 
@@ -368,7 +368,7 @@ mod tests {
     //
     // The unit is traversed slots and runs, never elapsed time. A stopwatch assertion would be
     // flaky in exactly the direction that lets the channel reopen, going green on a loaded machine,
-    // so what is compared is the count `tessera_filter::take_scan_work` reports.
+    // so what is compared is the count `mosaica_filter::take_scan_work` reports.
     //
     // Each of these routes through `FilterColumns::resolve` rather than `scan_ordinals`, since the
     // early return this guards against can hide in the resolve, the predicate, the scan or the
@@ -402,7 +402,7 @@ mod tests {
             baseline.runs > 0 && baseline.slots > 0,
             "{}: the scan traversed nothing, so the comparisons below would hold vacuously. A \
              --release build is the ordinary cause — the counter is compiled under debug_assertions \
-             (tessera_filter::take_scan_work)",
+             (mosaica_filter::take_scan_work)",
             first.0
         );
         for (label, operand) in rest {

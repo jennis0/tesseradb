@@ -22,7 +22,7 @@
 //! nothing else here would notice. Every vocabulary in that fixture is **fully seeded**, so no
 //! code is minted and the bundle is reproducible. A *freshly minting* vocabulary is deliberately
 //! out of scope: its codes are drawn from OS entropy at first build and are pinned rather than
-//! reproduced (`tessera_store::vocabulary`), so two independent builds must differ and byte
+//! reproduced (`mosaica_store::vocabulary`), so two independent builds must differ and byte
 //! equality is the wrong instrument. The equivalence that does hold there — the same key set, and
 //! the same key per row — is asserted in `discovered_vocabulary.rs`'s
 //! `both_implementations_agree_on_keys_though_fresh_codes_differ`. Threading a seeded RNG in to
@@ -44,9 +44,9 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::{build, build_in_memory, BuildArgs};
-use tessera_spatial::Bounds;
-use tessera_types::IdentityKey;
+use mosaica_build::{build, build_in_memory, BuildArgs};
+use mosaica_spatial::Bounds;
+use mosaica_types::IdentityKey;
 
 const N_ITEMS: u64 = 4_000;
 const N_TERMS: u64 = 61;
@@ -239,7 +239,7 @@ render = true
 
 /// The keys the attributed fixture uses, with **scattered** codes — a seed file is the one place
 /// a test can pin codes, and pinning them densely would model something the minter never
-/// produces (`tessera_store::vocabulary`: a dense code is a lower bound on cardinality).
+/// produces (`mosaica_store::vocabulary`: a dense code is a lower bound on cardinality).
 const ARCHIVE_VALUES: &[(&str, u32)] = &[("astro-ph", 211), ("cs", 37), ("math", 149)];
 const DEPARTMENT_VALUES: &[(&str, u32)] = &[
     ("eng", 40_351),
@@ -277,14 +277,14 @@ fn write_values(path: &Path, values: &[(&str, u32)]) {
 /// **Both vocabularies are seeded with every key the data uses**, which is what keeps this
 /// fixture byte-reproducible: a seeded key returns its pinned code without touching the draw, so
 /// nothing here consumes entropy.
-fn attributed_schema(dir: &Path) -> tessera_build::config::Schema {
+fn attributed_schema(dir: &Path) -> mosaica_build::config::Schema {
     write_values(&dir.join("archive-values.parquet"), ARCHIVE_VALUES);
     write_values(&dir.join("department-values.parquet"), DEPARTMENT_VALUES);
     let schema_path = dir.join("config.toml");
     std::fs::write(&schema_path, ATTRIBUTED_SCHEMA).unwrap();
     // Each vocabulary names its own file, relative to this document (`configuration.md` §3), so
     // the fixture needs no bindings at all.
-    tessera_build::config::Config::parse(&schema_path, &Default::default())
+    mosaica_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the fixture schema parses")
         .schema
 }
@@ -365,20 +365,20 @@ fn write_attributed_points(path: &Path) {
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     let schema = common::with_id(Default::default());
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+            access: mosaica_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,
         ),
@@ -508,8 +508,8 @@ fn a_field_sourced_build_is_byte_identical_to_the_reference_build() {
     write_field_sourced_points(&points);
 
     let mut reference_args = args_for(&points, &points, temp.path().join("reference"));
-    reference_args.views[0].access = tessera_build::config::AccessInput {
-        source: tessera_build::config::AccessSource::Field("categories".to_string()),
+    reference_args.views[0].access = mosaica_build::config::AccessInput {
+        source: mosaica_build::config::AccessSource::Field("categories".to_string()),
         default: Some("public".to_string()),
     };
     let mut streaming_args = reference_args.clone();
@@ -611,7 +611,7 @@ fn attributed_build_is_byte_identical_to_the_reference_build() {
         let mut args = args_for(&points, &pairs, out);
         args.schema = common::with_id(attributed_schema(temp.path()));
         args.attribute_sources =
-            tessera_build::config::AttributeSource::over(points.clone(), &args.schema);
+            mosaica_build::config::AttributeSource::over(points.clone(), &args.schema);
         args.batch_items = batch;
         args
     };
@@ -807,7 +807,7 @@ fn a_build_without_pairs_is_byte_identical_and_verifiable() {
         );
     }
 
-    let report = tessera_build::verify(&streaming_out).unwrap();
+    let report = mosaica_build::verify(&streaming_out).unwrap();
     assert_eq!(report.rows, N_ITEMS);
 }
 
@@ -953,7 +953,7 @@ fn entity_ids_follow_signature_order() {
     build(&args_for(&points, &pairs, out.clone())).unwrap();
 
     // Recover each entity's signature from pairs.parquet, which is the (term, entity) relation.
-    let bundle = tessera_store::read::open_bundle(&out).unwrap();
+    let bundle = mosaica_store::read::open_bundle(&out).unwrap();
     let partition = bundle.partitions.values().next().unwrap();
     let n = partition.manifest.entity_id_high_water as usize;
     let pairs_path = out
@@ -1008,21 +1008,21 @@ fn entity_ids_follow_signature_order() {
 /// A manual scale check, ignored by default: builds the probe corpus prefix through the
 /// **reference** path so its peak RSS can be compared against the streaming one under
 /// `/usr/bin/time -v`. Run as
-/// `cargo test --release -p tessera-build --test build_equivalence -- --ignored reference_build_at_scale`.
+/// `cargo test --release -p mosaica-build --test build_equivalence -- --ignored reference_build_at_scale`.
 #[test]
 #[ignore = "reads the probe corpus; run manually for a memory comparison"]
 fn reference_build_at_scale() {
-    let limit: u64 = std::env::var("TESSERA_SCALE_LIMIT")
+    let limit: u64 = std::env::var("MOSAICA_SCALE_LIMIT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2_400_000);
-    let out = PathBuf::from("/tmp/tessera-reference-scale");
+    let out = PathBuf::from("/tmp/mosaica-reference-scale");
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: Bounds {
                 x_min: 0.0,
                 x_max: 65536.0,
@@ -1032,7 +1032,7 @@ fn reference_build_at_scale() {
             points: PathBuf::from("data/scaled/geometry.parquet"),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(PathBuf::from(
+            access: mosaica_build::config::AccessInput::relation(PathBuf::from(
                 "data/scaled/pairs/categories-subclass.pairs.parquet",
             )),
         }],

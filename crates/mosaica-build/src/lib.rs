@@ -1,4 +1,4 @@
-//! `tessera build` — the batch build.
+//! `mosaica build` — the batch build.
 //!
 //! Composes the tiler, the dictionary, the postings writer and the segment writers into one
 //! verifiable bundle whose layout is contracts §2.1. Two builds live here and must agree
@@ -41,22 +41,22 @@ pub(crate) mod spill;
 pub mod term_images_pass;
 mod unique_index;
 pub mod unique_key;
-pub use tessera_store::utf8;
+pub use mosaica_store::utf8;
 
 /// The commit this binary was built from, or `"unknown"` where the source was not a git checkout.
 ///
-/// `tessera --version` prints it and a build logs it on its first line, so a measurement can be
+/// `mosaica --version` prints it and a build logs it on its first line, so a measurement can be
 /// tied to the source it came from. `build.rs` stamps it.
-pub const BUILD_COMMIT: &str = env!("TESSERA_BUILD_COMMIT");
+pub const BUILD_COMMIT: &str = env!("MOSAICA_BUILD_COMMIT");
 
-/// Return the allocator's free pages to the kernel — [`tessera_types::process::trim_heap`], which
+/// Return the allocator's free pages to the kernel — [`mosaica_types::process::trim_heap`], which
 /// carries the argument and the platform gate.
 ///
 /// Called at each stage boundary ([`observer::StageTimer::end`]) and after the layer publication
 /// rehouses its memberships. The build holds 34 GB without it
 /// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5).
 pub(crate) fn trim_heap() {
-    tessera_types::process::trim_heap();
+    mosaica_types::process::trim_heap();
 }
 
 use rayon::prelude::*;
@@ -67,17 +67,17 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use tessera_authz::{write_postings, DictWriter};
-use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
-use tessera_spatial::{split32, Bounds};
-use tessera_store::manifest::{
+use mosaica_authz::{write_postings, DictWriter};
+use mosaica_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
+use mosaica_spatial::{split32, Bounds};
+use mosaica_store::manifest::{
     CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
     IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
     SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
-use tessera_types::{
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{write_current, write_manifest_json, PairsParquetWriter};
+use mosaica_types::{
     EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
     SMALL_TERM_THRESHOLD_DEFAULT,
 };
@@ -87,10 +87,10 @@ pub use ids::RefusedRows;
 pub use disclosure::write_disclosure_report;
 pub use error::{BuildError, Result};
 // [`BuildArgs::groups`]' own types. A caller assembling build arguments has to name them, and a
-// caller that cannot reach `tessera-store` — every test above the store layer — could not
+// caller that cannot reach `mosaica-store` — every test above the store layer — could not
 // otherwise declare a group at all (`views.md` §3.2).
 pub use observer::{BuildObserver, BuildStage, NoopObserver};
-pub use tessera_store::manifest::{
+pub use mosaica_store::manifest::{
     GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation, ViewMetadataType,
     ViewMetadataValue,
 };
@@ -144,12 +144,12 @@ pub(crate) fn report_hierarchies(shapes: &[crate::layers::HierarchyShape]) {
 #[derive(Debug, Clone)]
 pub struct ViewArgs {
     /// The view this row space belongs to: a plain view's name, or a group's view as the joined
-    /// `group:key` id (`views.md` §3.2). [`tessera_store::view_path`] derives the on-disc path.
+    /// `group:key` id (`views.md` §3.2). [`mosaica_store::view_path`] derives the on-disc path.
     pub view_id: String,
     /// What turns each row's coordinates into a position in this view's frame, before anything is
-    /// quantised (`projections.md` §3). [`tessera_spatial::Projection::None`] — the default —
+    /// quantised (`projections.md` §3). [`mosaica_spatial::Projection::None`] — the default —
     /// transforms nothing, and is the exact identity.
-    pub projection: tessera_spatial::Projection,
+    pub projection: mosaica_spatial::Projection,
     /// The quantisation extent this view's Morton codes are computed against (contracts §2.5),
     /// **per view and never per bundle** (decision 0040): an embedding and a map cannot share a
     /// frame without one of them wasting most of the grid.
@@ -179,7 +179,7 @@ pub struct ViewArgs {
     /// **This view's own gate** (`views.md` §6), compiled from the declaration
     /// (`config::compile_view_gate`): a list of access labels, each one term (decision 0132), or
     /// `None` for `public`. It reaches the manifest as
-    /// [`tessera_store::manifest::ViewDescriptor::visibility`], which is the one input
+    /// [`mosaica_store::manifest::ViewDescriptor::visibility`], which is the one input
     /// `Engine::authorise` evaluates a view's own half of the gate from.
     ///
     /// For a view of a group this is the **roster record's** gate — the group's own half is on
@@ -248,7 +248,7 @@ pub struct BuildArgs {
     /// **Recorded, never evaluated**: ⊘ no gate is evaluated anywhere (`views.md` §6), so a
     /// roster entry's `visibility` is a record of the declaration rather than a means of
     /// restricting reachability.
-    pub groups: Vec<tessera_store::manifest::GroupDescriptor>,
+    pub groups: Vec<mosaica_store::manifest::GroupDescriptor>,
     /// The declared attributes **grouped by the file each is read from**, with where that file
     /// keeps the unique fields its rows name items by.
     ///
@@ -306,7 +306,7 @@ pub struct BuildArgs {
     /// seeds its registry from there before replaying a WAL record. What it is *not* is a second
     /// authority: the declarations run through the same registry and the same allocator the
     /// control plane uses, so both routes refuse the same declarations and place the same ids.
-    pub layers: Vec<tessera_types::layer::LayerDeclaration>,
+    pub layers: Vec<mosaica_types::layer::LayerDeclaration>,
     /// Where each layer's artifacts come from — its own Parquet of one row per artifact, or the
     /// rows written inline — and the `[layer.members]` source beside it, one row per
     /// `(artifact, entity)`. Parallel to [`BuildArgs::layers`] and refused against it: an input
@@ -352,7 +352,7 @@ pub struct BuildArgs {
     ///
     /// **Default-empty, and that case must stay byte-identical.** Every bundle built before a
     /// config existed declared no scalar, and an empty schema must go on producing exactly the
-    /// bytes it did — `tessera-cli`'s identity test asserts a byte-identical `columns.arrow`
+    /// bytes it did — `mosaica-cli`'s identity test asserts a byte-identical `columns.arrow`
     /// across rebuilds carrying one key, and a schema that widened the fixed table by default
     /// would break it for reasons unrelated to identity.
     pub schema: crate::config::Schema,
@@ -610,7 +610,7 @@ pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// a disagreement about every permanent entity id (I9).
 pub(crate) struct AccessPlan {
     /// The dictionary key each source term names. For a field-sourced view a source term is a
-    /// position among the sorted keys its labels are indexed under ([`tessera_authz::index_keys`]).
+    /// position among the sorted keys its labels are indexed under ([`mosaica_authz::index_keys`]).
     pub descriptors: input::TermDescriptors,
     /// A field-sourced view's distinct labels, sorted, as its access column and its default carry
     /// them. Empty for the relation route.
@@ -715,7 +715,7 @@ pub(crate) fn scoped_selector(
 ) -> config::ViewSelector {
     let key_of = |view_id: &str| {
         view_id
-            .split_once(tessera_store::GROUP_SEPARATOR)
+            .split_once(mosaica_store::GROUP_SEPARATOR)
             .map_or(view_id, |(_, key)| key)
             .to_string()
     };
@@ -796,7 +796,7 @@ pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Resul
     // it is indexed under. A source term is a key's position in their sorted union.
     let label_keys = vocabulary
         .iter()
-        .map(|label| tessera_authz::index_keys([label.as_str()]).map_err(BuildError::Invalid))
+        .map(|label| mosaica_authz::index_keys([label.as_str()]).map_err(BuildError::Invalid))
         .collect::<Result<Vec<Vec<Vec<u8>>>>>()?;
     let mut keys: Vec<String> = label_keys
         .iter()
@@ -810,7 +810,7 @@ pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Resul
         .map(|label| {
             label
                 .iter()
-                .any(|key| tessera_authz::label::label_of_key(key).is_some())
+                .any(|key| mosaica_authz::label::label_of_key(key).is_some())
         })
         .collect();
     let keys_of_label = label_keys
@@ -836,7 +836,7 @@ pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Resul
 
 impl AccessPlan {
     /// The source terms a row carrying the labels at `labels` (positions in [`Self::labels`]) is
-    /// indexed under, into `out`, sorted and distinct: [`tessera_authz::index_keys`] over the row's
+    /// indexed under, into `out`, sorted and distinct: [`mosaica_authz::index_keys`] over the row's
     /// labels. Where no label names a conjunction, or there is one label, that is the union of each
     /// label's own keys, and no label is read again.
     fn row_keys(&self, labels: &[u64], out: &mut Vec<u64>) {
@@ -845,7 +845,7 @@ impl AccessPlan {
             labels.len() > 1 && labels.iter().any(|&l| self.names_conjunction[l as usize]);
         if together {
             let texts = labels.iter().map(|&l| self.labels[l as usize].as_str());
-            let keys = tessera_authz::index_keys(texts)
+            let keys = mosaica_authz::index_keys(texts)
                 .expect("each label of the vocabulary was read at the plan");
             out.extend(keys.iter().map(|key| {
                 let key = std::str::from_utf8(key).expect("a key is a label's own text");
@@ -1110,7 +1110,7 @@ pub fn write_refused_report(out: &Path, refused: &[RefusedRows]) -> Result<()> {
     write_json(&dir.join("refused.json"), &refused)
 }
 
-/// The refused rows as `tessera build` prints them, one line per file and reason.
+/// The refused rows as `mosaica build` prints them, one line per file and reason.
 pub fn describe_refused(refused: &[RefusedRows]) -> Vec<String> {
     ids::describe_refused(refused)
 }
@@ -1164,9 +1164,9 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
     config::require_sources(&args.schema, &args.attribute_sources)?;
     // **The path is derived from the id, never the id used as a path** (`views.md` §3.2): a
     // group's view is `group:key` and lives at `views/<group>/<key>/`, so what has to be safe is
-    // each component [`tessera_store::view_path`] derives, not the joined form.
+    // each component [`mosaica_store::view_path`] derives, not the joined form.
     for view in &args.views {
-        for component in tessera_store::view_path_components(&view.view_id) {
+        for component in mosaica_store::view_path_components(&view.view_id) {
             if component.is_empty()
                 || component.contains('/')
                 || component.contains('\\')
@@ -1229,7 +1229,7 @@ pub fn build(args: &BuildArgs) -> Result<BuildReport> {
 pub struct Framing {
     /// The view or group, as the frame's report names it.
     pub subject: String,
-    pub projection: tessera_spatial::Projection,
+    pub projection: mosaica_spatial::Projection,
     pub extent: config::Extent,
     /// The views it covers, by index into [`BuildArgs::views`].
     pub views: Vec<usize>,
@@ -1313,7 +1313,7 @@ pub fn build_routed(args: &BuildArgs, route: ExtentRoute) -> Result<BuildReport>
 ///
 /// Identical to `build` in every respect but the notifications — the same code path, not a
 /// parallel one, so a measurement taken here describes the build that actually ships. Exists for
-/// `tessera-bench`'s ingest arm, which asks which of the eleven stages bends with scale.
+/// `mosaica-bench`'s ingest arm, which asks which of the eleven stages bends with scale.
 pub fn build_observed(
     args: &BuildArgs,
     observer: &dyn observer::BuildObserver,
@@ -1403,11 +1403,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let mut dict = DictWriter::new(&dict_dir);
 
     // **`public` is interned first, so it is term 0 in every bundle** and is minted for no other
-    // descriptor (`tessera_authz::PUBLIC_TERM`). Reserved unconditionally, whether or not any point
+    // descriptor (`mosaica_authz::PUBLIC_TERM`). Reserved unconditionally, whether or not any point
     // carries it: the label's identity has to be a property of the format rather than of the input,
     // since `Engine::authorise` adds it to every principal's satisfied set and a term whose number
     // moved with the data would make that addition mean something different per bundle.
-    dict.intern(tessera_authz::PUBLIC_LABEL);
+    dict.intern(mosaica_authz::PUBLIC_LABEL);
 
     let mut staged: Vec<StagedItem> = Vec::with_capacity(points.len());
     let mut over_bound_items = 0u64;
@@ -1417,7 +1417,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .iter()
             .map(|t| access.descriptors.descriptor(*t).into_owned().into_bytes())
             .collect();
-        if descriptors.len() > tessera_authz::MAX_KEYS_PER_ITEM {
+        if descriptors.len() > mosaica_authz::MAX_KEYS_PER_ITEM {
             // A declared bound is a *declaration*: record it and carry on. Dropping terms here
             // would silently widen the item's visibility (I2/I3).
             //
@@ -1447,7 +1447,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         eprintln!(
             "warning: {over_bound_items} item(s) are indexed under more than {} keys; no key \
              was dropped",
-            tessera_authz::MAX_KEYS_PER_ITEM
+            mosaica_authz::MAX_KEYS_PER_ITEM
         );
     }
 
@@ -1501,7 +1501,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
-    let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
+    let view_dir = mosaica_store::view_path(&partition_dir, &view.view_id);
     let segment_dir = view_dir.join("segments").join(SEG_ID);
     for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
         fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
@@ -1537,8 +1537,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // **Unconditional, unlike `pairs.parquet`.** That file is an oracle input a deployment may
     // legitimately omit; this one backs a request path and the write path's refusal, so a bundle
     // without it would answer a drill-down short and accept a re-label through a second view.
-    let entity_terms_dir = partition_dir.join(tessera_store::ENTITY_TERMS_DIR);
-    let mut entity_terms = tessera_store::EntityTermsWriter::create(&entity_terms_dir)
+    let entity_terms_dir = partition_dir.join(mosaica_store::ENTITY_TERMS_DIR);
+    let mut entity_terms = mosaica_store::EntityTermsWriter::create(&entity_terms_dir)
         .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
     for (position, item) in staged.iter().enumerate() {
         entity_terms
@@ -1783,7 +1783,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 .iter()
                 .enumerate()
                 .filter_map(|(entity, item)| match &item.scalars[index] {
-                    tessera_spatial::ScalarValue::Utf8(value) => {
+                    mosaica_spatial::ScalarValue::Utf8(value) => {
                         Some((entity as u32, value.as_str()))
                     }
                     _ => None,
@@ -1869,7 +1869,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         );
         let Some(rows) = rows else { continue };
         if let Some(path) =
-            tessera_store::flush::write_render_presence(&segment_dir, name, rows, n as u32)
+            mosaica_store::flush::write_render_presence(&segment_dir, name, rows, n as u32)
                 .map_err(|e| BuildError::Invalid(format!("attribute '{name}': {e}")))?
         {
             presence_paths.push(path);
@@ -1887,7 +1887,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     write_segment(&segment_dir, &tiler_items, &codes, &scalar_schema, &band_schema)
         .map_err(|e| BuildError::io(&segment_dir, e))?;
-    for name in tessera_store::SEGMENT_FILES {
+    for name in mosaica_store::SEGMENT_FILES {
         fsync_file(&segment_dir.join(name))?;
     }
 
@@ -1900,11 +1900,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     fsync_file(&permutation_path)?;
 
     // The other direction, for the filtered viewport's per-tile route
-    // (`tessera_store::row_entity`). `row_order` is already the row→entity vector, so this writes
+    // (`mosaica_store::row_entity`). `row_order` is already the row→entity vector, so this writes
     // what the permutation was just scattered from rather than deriving anything.
-    let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
+    let row_entity_path = view_dir.join(mosaica_store::ROW_ENTITY_FILE);
     let rows_by_index: Vec<u32> = row_order.iter().map(|e| e.raw() as u32).collect();
-    tessera_store::write_row_entity(&row_entity_path, &rows_by_index)
+    mosaica_store::write_row_entity(&row_entity_path, &rows_by_index)
         .map_err(|e| BuildError::io(&row_entity_path, e))?;
     fsync_file(&row_entity_path)?;
 
@@ -1927,12 +1927,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &args.scoped_layers,
                 // The oracle build materialises exactly one view, so its one frame is the whole
                 // of decision 0111's per-view slice.
-                &[tessera_store::derived::ViewFrame::new(
+                &[mosaica_store::derived::ViewFrame::new(
                     &view.view_id,
                     view.projection,
                     view.extent,
                 )],
-                tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+                mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
                 tmp.path(),
                 args.memory_budget
                     .unwrap_or_else(pipeline::detect_memory_budget),
@@ -1983,7 +1983,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // exists here — the batched build has to wait for its tiler sort, which is the only reason the
     // two call sites sit at different step numbers. See `crate::artifact_pass`.
     let artifact_store = std::mem::take(&mut published_layers.store);
-    let mut derived_index = tessera_store::derived::DerivedIndex::default();
+    let mut derived_index = mosaica_store::derived::DerivedIndex::default();
     // **The pass's own `.build-tmp/`.** A row column is composed through a partition on disk, so
     // the pass needs scratch of its own; the emit above closed the directory it used, and this is
     // the last stage that wants one.
@@ -2027,7 +2027,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // that covers the file this writes. The streaming build calls the same pass at the same point
     // in its own view loop.
     let term_images = {
-        let postings = tessera_authz::postings::PostingsReader::open(&postings_path, true)
+        let postings = mosaica_authz::postings::PostingsReader::open(&postings_path, true)
             .map_err(|e| BuildError::io(&postings_path, e))?;
         vec![crate::term_images_pass::run(
             &postings,
@@ -2040,23 +2040,23 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         )?]
     };
 
-    // ---- 8d. the view's field tallies (`tessera_store::field_tallies`) -------------------
+    // ---- 8d. the view's field tallies (`mosaica_store::field_tallies`) -------------------
     //
     // After every file they read: the segment, the row-to-entity table, the entity terms and the
     // value columns. The streaming build calls the same function at the same point.
-    other_paths.push(tessera_store::field_tallies::derive_view(
+    other_paths.push(mosaica_store::field_tallies::derive_view(
         &partition_dir,
         &view.view_id,
         SEG_ID,
         n as u32,
         &declared_scalars_of(&args.schema),
-        &|name| tessera_filter::base_numbers(&partition_dir, name),
+        &|name| mosaica_filter::base_numbers(&partition_dir, name),
     )?);
 
     // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([permutation_path, row_entity_path]);
     other_paths.extend(
-        tessera_store::SEGMENT_FILES
+        mosaica_store::SEGMENT_FILES
             .iter()
             .map(|name| segment_dir.join(name)),
     );
@@ -2091,7 +2091,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &published_layers,
         &[SegmentDescriptor {
             view: view.view_id.clone(),
-            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+            incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
             seg_id: SEG_ID.to_string(),
             row_count: n as u32,
             entity_lo: 0,
@@ -2127,7 +2127,7 @@ fn spilled_column_names(
 /// for a reason that is not the entity assignment it exists to check.
 fn scalar_schema_of(
     schema: &crate::config::Schema,
-) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+) -> Vec<(String, mosaica_spatial::tiler::ScalarType)> {
     // Render columns only — the segment's tail and the assembly's render lanes must name the same
     // columns in the same order, or every row's values land under the wrong headings.
     schema
@@ -2159,7 +2159,7 @@ pub(crate) fn declared_scalars_of(schema: &crate::config::Schema) -> Vec<Declare
 
 /// Whether the identity bands copy `attribute` beside the render columns.
 pub(crate) fn band_copied(attribute: &crate::config::Attribute) -> bool {
-    tessera_store::bands::copied_beside(
+    mosaica_store::bands::copied_beside(
         attribute.ty,
         attribute.vocabulary.is_some(),
         attribute.index,
@@ -2180,7 +2180,7 @@ pub(crate) fn band_copied_columns(
 }
 
 /// The columns the identity bands copy beside the render columns, in declared order.
-fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
+fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, mosaica_spatial::tiler::ScalarType)> {
     band_copied_columns(schema)
         .map(|(_, a)| (a.name.clone(), a.ty))
         .collect()
@@ -2192,7 +2192,7 @@ struct BundleFiles {
     dict_records: u64,
     other_paths: Vec<PathBuf>,
     /// Each unique column's base runs, by attribute, in declaration order.
-    unique: Vec<(String, Vec<tessera_store::unique::WrittenUniqueRun>)>,
+    unique: Vec<(String, Vec<mosaica_store::unique::WrittenUniqueRun>)>,
 }
 
 /// Write `SEGMENTS-0.json`, `MANIFEST.json` and `CURRENT` over the files a build produced.
@@ -2206,7 +2206,7 @@ fn write_manifests(
     term_count: u64,
     pair_count: u64,
     batch_items_recorded: Option<u64>,
-    minters: &HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    minters: &HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
     published_layers: &crate::layers::PublishedLayers,
     segments_written: &[SegmentDescriptor],
     occupancies: &[Occupancy],
@@ -2241,7 +2241,7 @@ fn write_manifests(
         .unique
         .iter()
         .map(|(attribute, runs)| {
-            Ok(tessera_store::manifest::UniqueIndexRuns {
+            Ok(mosaica_store::manifest::UniqueIndexRuns {
                 attribute: attribute.clone(),
                 base: runs
                     .iter()
@@ -2325,7 +2325,7 @@ fn write_manifests(
                 .values()
                 .map(|v| {
                     let minter = minters.get(&v.name).unwrap_or(&v.values);
-                    let values = tessera_store::vocabulary::values_of(minter)
+                    let values = mosaica_store::vocabulary::values_of(minter)
                         .into_iter()
                         .map(|value| ManifestVocabularyValue {
                             title: minter.title_of(&value.key).map(str::to_string),
@@ -2368,12 +2368,12 @@ fn write_manifests(
         groups: args
             .groups
             .iter()
-            .map(|group| tessera_store::manifest::GroupDescriptor {
+            .map(|group| mosaica_store::manifest::GroupDescriptor {
                 scoped_scalars: args
                     .scoped_attributes
                     .iter()
                     .filter(|family| family.group == group.name)
-                    .map(|family| tessera_store::manifest::ScopedScalar {
+                    .map(|family| mosaica_store::manifest::ScopedScalar {
                         name: family.attribute.name.clone(),
                         group: family.group.clone(),
                         arrow_type: family.attribute.ty,
@@ -2402,7 +2402,7 @@ fn write_manifests(
                 // **The declared incarnation** (decision 0115). A key a build declared and a
                 // running service later drops comes back at 1 or above, which is what keeps the
                 // build's own segments out of the view created under the reused name.
-                incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+                incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
                 quantisation: Quantisation {
                     x_min: view.extent.x_min,
                     x_max: view.extent.x_max,
@@ -2442,13 +2442,13 @@ fn write_manifests(
     };
     // Read back from the files just written, before the manifest is, so a keyword column whose
     // dictionary does not open refuses here rather than after `CURRENT` has moved. The same pass
-    // runs at `tessera verify`, so the two report one set of figures.
+    // runs at `mosaica verify`, so the two report one set of figures.
     let keyword_cardinalities =
         unique_key::keyword_cardinalities(&prefix_dir, &manifest, &[(PHASH, &segments)])?;
     unique_key::report_keyword_cardinalities(&keyword_cardinalities, bundle_bytes);
     // Both bundle artefacts, not written here: MANIFEST.json and CURRENT are pass 5's writers
     // too (compaction §10's rule paragraph — a bundle artefact's writer lives in
-    // `tessera-store`), so this build and a fold cannot serialise the same shape two different
+    // `mosaica-store`), so this build and a fold cannot serialise the same shape two different
     // ways and disagree about what a manifest digests to.
     let manifest_digest = write_manifest_json(&prefix_dir, &manifest)?;
 
@@ -2486,7 +2486,7 @@ fn write_manifests(
     })
 }
 
-/// What `tessera verify` checked.
+/// What `mosaica verify` checked.
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
     pub prefix: String,
@@ -2506,7 +2506,7 @@ pub struct VerifyReport {
 /// file's size and SHA-256, and each permutation's bijectivity onto its segment's rows), then
 /// re-confirm the row space covers exactly the rows the segments claim, and re-derive every
 /// row's `tessera_id` from `(identity.key, identity.shard_id, entity_id)`, failing if a single
-/// row disagrees (contracts §2.6 r6: "`tessera verify` checks the whole column against" the
+/// row disagrees (contracts §2.6 r6: "`mosaica verify` checks the whole column against" the
 /// key).
 pub fn verify(root: &Path) -> Result<VerifyReport> {
     verified_open(root, DIRECT_WINDOW_ROWS).map(|(_, report)| report)
@@ -2527,11 +2527,11 @@ pub fn verify_with_window_rows(root: &Path, direct_window_rows: u64) -> Result<V
 fn verified_open(
     root: &Path,
     direct_window_rows: u64,
-) -> Result<(tessera_store::read::Bundle, VerifyReport)> {
-    let bundle = tessera_store::read::open_bundle(root)?;
+) -> Result<(mosaica_store::read::Bundle, VerifyReport)> {
+    let bundle = mosaica_store::read::open_bundle(root)?;
     // The key is parsed here, not by `open_bundle`: `IdentityDescriptor::validate` (run at
     // open) checks `construction` and `rounds` but never parses `key`'s hex, since
-    // `tessera-store` has no need to hold a live `IdentityKey` at all — only `tessera verify`
+    // `mosaica-store` has no need to hold a live `IdentityKey` at all — only `mosaica verify`
     // and the build do.
     let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
         .map_err(|e| BuildError::Invalid(format!("MANIFEST identity.key: {e}")))?;
@@ -2550,7 +2550,7 @@ fn verified_open(
     };
     for partition in bundle.partitions.values() {
         let prefix_dir = root.join(&current.prefix);
-        let edited = tessera_store::edited::EditedIndex::open(
+        let edited = mosaica_store::edited::EditedIndex::open(
             &partition.manifest.edited_items,
             &prefix_dir,
             None,
@@ -2582,7 +2582,7 @@ fn verified_open(
         }
     }
     // Sorted so two runs over one bundle report the columns in one order.
-    let mut partitions: Vec<(&str, &tessera_store::manifest::SegmentsManifest)> = bundle
+    let mut partitions: Vec<(&str, &mosaica_store::manifest::SegmentsManifest)> = bundle
         .partitions
         .iter()
         .map(|(phash, data)| (phash.as_str(), &data.manifest))
@@ -2725,7 +2725,7 @@ fn sweep_dead_scratch(base: &Path) {
 }
 
 /// One segment's rows in view row space: where they begin, how many there are, and the segment.
-type SegmentRows<'a> = (u64, u32, &'a tessera_store::read::SegmentData);
+type SegmentRows<'a> = (u64, u32, &'a mosaica_store::read::SegmentData);
 
 /// A view id as a filename component: letters, digits, `-` and `_` kept, everything else one
 /// underscore.
@@ -2789,7 +2789,7 @@ fn check_view_identity(
     scratch: &mut Option<VerifyTmp>,
     direct_window_rows: u64,
     view_id: &str,
-    view: &tessera_store::read::ViewData,
+    view: &mosaica_store::read::ViewData,
     identity: Identity<'_>,
 ) -> Result<()> {
     let total_rows = view.row_space.total_rows();
@@ -2895,7 +2895,7 @@ fn check_view_identity(
 /// Every `(row, entity)` the view's row space claims, base first and then each extent, to `claim`.
 /// Returns how many there were.
 fn claim_rows(
-    view: &tessera_store::read::ViewData,
+    view: &mosaica_store::read::ViewData,
     mut claim: impl FnMut(u32, u64) -> Result<()>,
 ) -> Result<u64> {
     let mut claimed = 0u64;
@@ -2920,7 +2920,7 @@ fn claim_rows(
 struct Identity<'a> {
     key: &'a IdentityKey,
     shard_id: u32,
-    edited: &'a tessera_store::edited::EditedIndex,
+    edited: &'a mosaica_store::edited::EditedIndex,
 }
 
 fn walk_window(
@@ -2967,7 +2967,7 @@ fn walk_window(
             }
             // A row an edit moved records its entity, and its `tessera_id` is its number's, whose
             // entries in the edited items name the entity.
-            let (shard, number) = identity_key.invert(tessera_types::TesseraId::new(id));
+            let (shard, number) = identity_key.invert(mosaica_types::TesseraId::new(id));
             let moved = recorded.is_some()
                 && shard == shard_id
                 && u32::try_from(number.raw()).is_ok_and(|number| {

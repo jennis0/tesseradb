@@ -2,14 +2,14 @@
 // The acceptance harness: DOM-level assertions against the viewer page through the components'
 // parts, and the viewer's measurements.
 //
-//   node clients/ts/harness/harness.mjs [--url http://localhost:5173] [--shot /tmp/tessera-harness.png] [--headed]
+//   node clients/ts/harness/harness.mjs [--url http://localhost:5173] [--shot /tmp/mosaica-harness.png] [--headed]
 //
 // The same assertions run against the plain HTML example (`examples/plain-html`,
 // `--url http://localhost:5180`), which is the explorer without the viewer's layout. There the
 // probe is the explorer's map's, and the instruments panel is optional. Both pages carry a
 // `#principal` select for who is signed in.
 //
-// Requires a running `tessera serve` with a published layer and a running `vite dev`. It is not
+// Requires a running `mosaica serve` with a published layer and a running `vite dev`. It is not
 // part of `check-clients.sh`. Headless under swiftshader by default; `--headed` runs the browser
 // on a display (WSLg, or `xvfb-run`) so GPU and frame timings are real.
 //
@@ -43,7 +43,7 @@ const args = Object.fromEntries(
     .reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1]]] : acc), [])
 );
 const url = args.url ?? 'http://localhost:5173';
-const shot = args.shot ?? '/tmp/tessera-harness.png';
+const shot = args.shot ?? '/tmp/mosaica-harness.png';
 const headed = 'headed' in args;
 /** A Chromium other than Playwright's own, from `--executable /path/to/chrome`. */
 const executablePath = args.executable;
@@ -62,9 +62,9 @@ const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 // The probe: the viewer publishes its first map's on `window` with measuring on. On another page
 // with an explorer the map's own probe is read, and the first read turns measuring on.
 await page.addInitScript(() => {
-  const explorer = () => /** @type {{map: {probe: Window['__tesseraProbe']; measure: boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
-  window.__tesseraProbeOf = () => {
-    if (window.__tesseraProbe) return window.__tesseraProbe;
+  const explorer = () => /** @type {{map: {probe: Window['__mosaicaProbe']; measure: boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
+  window.__mosaicaProbeOf = () => {
+    if (window.__mosaicaProbe) return window.__mosaicaProbe;
     const map = explorer()?.map ?? null;
     if (map) map.measure = true;
     return map?.probe ?? null;
@@ -107,7 +107,7 @@ const check = (claim, ok, evidence) => {
 
 // ---- locators, all shadow-piercing -----------------------------------------------------------
 
-const strip = page.locator('tessera-status').first();
+const strip = page.locator('mosaica-status').first();
 const stripState = () => strip.locator('[part="state"]').first().getAttribute('data-state');
 const stripCounts = async () => {
   const parts = strip.locator('[part="count"]');
@@ -139,7 +139,7 @@ const settled = async (limitMs = 45_000) => {
   let stable = 0;
   while (Date.now() - started < limitMs) {
     await page.waitForTimeout(400);
-    const marks = await page.evaluate(() => window.__tesseraProbeOf()?.marks ?? -1);
+    const marks = await page.evaluate(() => window.__mosaicaProbeOf()?.marks ?? -1);
     if (marks === last) {
       if (++stable >= 4) return true;
     } else {
@@ -231,7 +231,7 @@ const refusedState = await untilState(['refused', 'expired'], 30_000);
   );
 }
 await page.unroute('**/v1/viewport');
-await page.locator('tessera-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
+await page.locator('mosaica-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
 await untilState(['shown'], 60_000);
 await settled();
 
@@ -292,8 +292,8 @@ await settled();
 
 // At the overview the world is 512 px, so any cover under the 4,096-tile bound is coarser than a
 // pixel. The box is shift-dragged in pan mode.
-await page.locator('tessera-map').first().focus();
-await page.locator('tessera-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
+await page.locator('mosaica-map').first().focus();
+await page.locator('mosaica-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
 await settled();
 const requestsBefore = viewportRequests.length;
 const selectStarted = Date.now();
@@ -304,7 +304,7 @@ await page.mouse.down();
 await page.mouse.move(1000, 520, {steps: 8});
 await page.mouse.up();
 await page.keyboard.up('Shift');
-const selection = page.locator('tessera-selection').first();
+const selection = page.locator('mosaica-selection').first();
 await selection.locator('[part="count-matched"] [part="count"]').first().waitFor({timeout: 30_000}).catch(() => {});
 const regionMs = Date.now() - selectStarted;
 {
@@ -313,7 +313,7 @@ const regionMs = Date.now() - selectStarted;
   const exact = await matched.getAttribute('data-exact').catch(() => null);
   const state = await selection.locator('[part="state"]').first().textContent().catch(() => '');
   const request = viewportRequests.slice(requestsBefore).find((r) => Array.isArray(r.tiles) && r.k === 0 && !(Array.isArray(r.layers) && r.layers.length > 0));
-  const probe = await page.evaluate(() => window.__tesseraProbeOf()?.region ?? null);
+  const probe = await page.evaluate(() => window.__mosaicaProbeOf()?.region ?? null);
   check(
     'a region’s count renders as inexact when its cell exceeds a pixel',
     exact === 'false' && text.startsWith('≈') && request !== undefined && request.tiles.length <= 4096,
@@ -327,7 +327,7 @@ const regionMs = Date.now() - selectStarted;
 // Fill the item card through the selection's list.
 const item = selection.locator('[part="item"]').first();
 if ((await item.count()) > 0) await item.click();
-const card = page.locator('tessera-item-card').first();
+const card = page.locator('mosaica-item-card').first();
 await card.locator('[part="field"]').first().waitFor({timeout: 20_000}).catch(() => {});
 const fieldsBefore = await card.locator('[part="field"]').count();
 const options = await page.locator('#principal option').evaluateAll((els) => els.map((el) => /** @type {HTMLOptionElement} */ (el).value));
@@ -337,7 +337,7 @@ await page.selectOption('#principal', other);
 await page.waitForTimeout(300);
 {
   const fieldsAfter = await card.locator('[part="field"]').count();
-  const selectionAfter = await page.locator('tessera-selection').count();
+  const selectionAfter = await page.locator('mosaica-selection').count();
   const stripAfter = await nonEmptyCounts();
   const state = await stripState();
   check(
@@ -369,7 +369,7 @@ await settled();
  */
 const listCounts = async () =>
   page
-    .locator('tessera-field-card[data-field^="cluster:"]')
+    .locator('mosaica-field-card[data-field^="cluster:"]')
     .first()
     .evaluate((root) => {
       const scope = root.shadowRoot ?? root;
@@ -384,12 +384,12 @@ const listCounts = async () =>
     })
     .catch(() => ({}));
 
-await page.locator('tessera-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
+await page.locator('mosaica-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
 // The viewer opens with a layer on; on a page with none on, turn the first on for the claims below.
-if ((await page.evaluate(() => window.__tesseraProbeOf()?.cluster.layersOn.length ?? 0)) === 0) {
+if ((await page.evaluate(() => window.__mosaicaProbeOf()?.cluster.layersOn.length ?? 0)) === 0) {
   // A minute, since headless swiftshader can block the main thread for 10 to 14 s drawing a
   // million marks. A click that cannot land is reported.
-  const on = await page.locator('tessera-layer-picker [part="entry"] input').first().click({timeout: 60_000}).then(() => true, () => false);
+  const on = await page.locator('mosaica-layer-picker [part="entry"] input').first().click({timeout: 60_000}).then(() => true, () => false);
   console.log(`  ·    no layer was on; the first layer ${on ? 'turned on through the picker' : 'could not be turned on — the picker did not take a click'}`);
 }
 await settled();
@@ -418,9 +418,9 @@ const countsAfter = await listCounts();
 
 // ---- 9: a coloured point's ordinal resolves to a served artifact ---------------------------------
 
-await page.locator('tessera-explorer [part="layers-toggle"]').first().click().catch(() => null);
-await page.locator('tessera-explorer [part="colour-by"]').first().click().catch(() => null);
-const clusterEntry = page.locator('tessera-explorer [part~="colour-option"][data-value^="cluster:"]').first();
+await page.locator('mosaica-explorer [part="layers-toggle"]').first().click().catch(() => null);
+await page.locator('mosaica-explorer [part="colour-by"]').first().click().catch(() => null);
+const clusterEntry = page.locator('mosaica-explorer [part~="colour-option"][data-value^="cluster:"]').first();
 const clusterOption = await clusterEntry.getAttribute('data-value', {timeout: 5_000}).catch(() => null);
 const refillStarted = Date.now();
 if (clusterOption) await clusterEntry.click();
@@ -429,7 +429,7 @@ await settled();
 await page.waitForTimeout(800);
 {
   const probe = await page.evaluate(() => {
-    const p = window.__tesseraProbeOf();
+    const p = window.__mosaicaProbeOf();
     return p ? {encoding: p.encoding, cluster: p.cluster, lutWrites: p.timings.lutWrites} : null;
   });
   const served = new Set(probe?.cluster.servedIds ?? []);
@@ -461,7 +461,7 @@ for (const notch of [-400, -400, 400, 400]) {
 }
 // The layer-switch refill: the layer off, then on, and the time until every band in view is
 // colour-current again.
-const pickerBox = page.locator('tessera-layer-picker [part="entry"] input').first();
+const pickerBox = page.locator('mosaica-layer-picker [part="entry"] input').first();
 let refillMs = null;
 let refillStale = null;
 // Under headless swiftshader a click may not land in time; that is a measurement not taken, not
@@ -473,7 +473,7 @@ if (clickable) {
   await pickerBox.click({timeout: 15_000}).catch(() => {}); // on: a band lacking the column is colour-stale until it refetches
   let firstStale = null;
   while (Date.now() - switchedAt < 60_000) {
-    const c = await page.evaluate(() => window.__tesseraProbeOf()?.cluster ?? null);
+    const c = await page.evaluate(() => window.__mosaicaProbeOf()?.cluster ?? null);
     if (c && c.layersOn.length > 0) {
       if (c.coverage.stale > 0 && firstStale === null) firstStale = c.coverage.stale;
       if (firstStale !== null && c.coverage.stale === 0) {
@@ -494,7 +494,7 @@ if (clickable) {
 await settled();
 
 const probe = await page.evaluate(() => {
-  const p = window.__tesseraProbeOf();
+  const p = window.__mosaicaProbeOf();
   if (!p) return null;
   return {marks: p.marks, paints: p.paints, requests: p.requests, timings: p.timings, view: p.view, instruments: p.instruments ?? null, lanes: p.lanes ?? null, cluster: p.cluster};
 });
@@ -521,7 +521,7 @@ if (probe) {
   }
   console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, density ${probe.timings.densityMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes?.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not recorded'}`);
   console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (${headed ? 'headed chromium on the display' : 'software GL under headless chromium'}), colouring by ${probe.cluster.layer ? 'cluster' : 'column'} through the lookup texture, ${probe.timings.lutWrites} writes to the lookup texture since the layer made it`);
-  const region = await page.evaluate(() => window.__tesseraProbeOf()?.region ?? null);
+  const region = await page.evaluate(() => window.__mosaicaProbeOf()?.region ?? null);
   console.log(`  box selection — ${region?.ms?.toFixed(0) ?? '?'} ms select-to-counted (200 ms settle, the request, the sum); ${regionMs} ms mouse-up to panel under ${headed ? 'headed' : 'headless'} input; lanes: ${lanes?.region ? `settle ${lanes.region.settleMs.toFixed(0)} ms, wire ${lanes.region.wireMs.toFixed(0)} ms (server ${lanes.region.serverMs.toFixed(1)} ms, ${lanes.region.tiles} tiles), projection ${lanes.region.projectMs.toFixed(1)} ms` : 'not recorded'}`);
   if (lanes) console.log(`  main thread — longest tasks: ${lanes.longTasks.slice(0, 5).map((t) => `${t.ms.toFixed(0)} ms at ${(t.at / 1000).toFixed(1)} s`).join(', ') || 'none over 50 ms'}; decode replies that waited through a long task: ${lanes.decode.filter((x) => lanes.longTasks.some((t) => x.at - x.ms <= t.at + t.ms && x.at >= t.at)).length} of ${lanes.decode.length}`);
   console.log(`  layer switch — ${refillMs === null ? 'not measured' : refillMs === 0 ? 'no band went colour-stale: the columns survived the switch' : `${refillMs} ms from the layer back on to colours exact, ${refillStale} tiles refetched`} (${Date.now() - refillStarted > 0 ? 'measured after colour by cluster was chosen' : ''})`);

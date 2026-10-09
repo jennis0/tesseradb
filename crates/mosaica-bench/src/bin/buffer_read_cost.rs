@@ -26,7 +26,7 @@
 //!   for the lists E1's requests then read.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin buffer_read_cost -- [--only r] \
+//! cargo run --release -p mosaica-bench --bin buffer_read_cost -- [--only r] \
 //!     [--fixture target/tmp/arxiv/bundle]
 //! ```
 //!
@@ -44,12 +44,12 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::wal::{ChangeOp, WalRow};
-use tessera_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
-use tessera_store::read::open_bundle;
-use tessera_types::{EntityId, TermId};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_lifecycle::wal::{ChangeOp, WalRow};
+use mosaica_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
+use mosaica_store::read::open_bundle;
+use mosaica_types::{EntityId, TermId};
 
 /// Live heap bytes: every allocation this process makes, less every free. Read either side of a
 /// structure's construction, the difference is what that structure holds.
@@ -530,9 +530,9 @@ fn inspect(root: &Path, prefix: &str) -> Result<Fixture, Box<dyn std::error::Err
                 scalar.vocabulary.is_none()
                     && !matches!(
                         scalar.arrow_type,
-                        tessera_spatial::tiler::ScalarType::Text
-                            | tessera_spatial::tiler::ScalarType::Keyword
-                            | tessera_spatial::tiler::ScalarType::Utf8
+                        mosaica_spatial::tiler::ScalarType::Text
+                            | mosaica_spatial::tiler::ScalarType::Keyword
+                            | mosaica_spatial::tiler::ScalarType::Utf8
                     )
             })
             .map(|scalar| scalar.name.clone()),
@@ -557,7 +557,7 @@ fn open_engine(fx: &Fixture, scratch: &Path, tag: &str) -> Result<Engine, Box<dy
             max_underlay_offset: 4,
             max_underlay_cells: 8192,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             // The flush never fires, so every viewport below is answered with the rows still
             // buffered — which is the state this whole binary is about.
             flush_max_age_secs: 86_400,
@@ -566,7 +566,7 @@ fn open_engine(fx: &Fixture, scratch: &Path, tag: &str) -> Result<Engine, Box<dy
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
     engine.start_write_executor(4096)?;
@@ -655,9 +655,9 @@ fn experiment_e1(
             let filtered = match &fx.filter_column {
                 None => 0,
                 Some(column) => {
-                    let expr = tessera_engine::filter::FilterExpr::Leaf {
+                    let expr = mosaica_engine::filter::FilterExpr::Leaf {
                         column: column.clone(),
-                        operand: tessera_engine::filter::FilterOperand::Range { lo: None, hi: None },
+                        operand: mosaica_engine::filter::FilterOperand::Range { lo: None, hi: None },
                     };
                     let mut request =
                         ViewportRequest::new(&fx.view, 6, [x_min, y_min, x_max, y_max], 30);
@@ -665,9 +665,9 @@ fn experiment_e1(
                     // Refused (an unfilterable column) is reported as zero rather than guessed at.
                     match engine.viewport(&session, request) {
                         Ok(_) => {
-                            let expr = tessera_engine::filter::FilterExpr::Leaf {
+                            let expr = mosaica_engine::filter::FilterExpr::Leaf {
                                 column: column.clone(),
-                                operand: tessera_engine::filter::FilterOperand::Range {
+                                operand: mosaica_engine::filter::FilterOperand::Range {
                                     lo: None,
                                     hi: None,
                                 },
@@ -734,7 +734,7 @@ fn experiment_e2(root: &Path, depths: &[usize], runs: usize) -> Result<(), Box<d
     println!("(min of {runs}; entity ids past the bundle's high water, so every lookup misses)");
     println!("{:>10} {:>14} {:>16}", "buffered", "per view ms", "all views ms");
     let bundle = open_bundle(root)?;
-    let spaces: Vec<&tessera_store::RowSpace> = bundle
+    let spaces: Vec<&mosaica_store::RowSpace> = bundle
         .partitions
         .values()
         .flat_map(|partition| partition.views.values().map(|view| &view.row_space))
@@ -748,7 +748,7 @@ fn experiment_e2(root: &Path, depths: &[usize], runs: usize) -> Result<(), Box<d
         let all = best(runs, || {
             spaces
                 .iter()
-                .map(|space| tessera_engine::buffered_rows_of(&buffer, space))
+                .map(|space| mosaica_engine::buffered_rows_of(&buffer, space))
                 .collect::<Vec<_>>()
         });
         println!(
@@ -817,7 +817,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         };
         let scratch =
-            std::env::temp_dir().join(format!("tessera-buffer-read-{}", std::process::id()));
+            std::env::temp_dir().join(format!("mosaica-buffer-read-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch)?;
         let root = scratch.join("bundle");

@@ -144,16 +144,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use tessera_spatial::frame::{snap_outward, Snap};
-use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::{cell, Bounds, Projection};
-use tessera_store::coordinates::{axis_names, other_axis_names};
-use tessera_store::declaration::{
+use mosaica_spatial::frame::{snap_outward, Snap};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_spatial::{cell, Bounds, Projection};
+use mosaica_store::coordinates::{axis_names, other_axis_names};
+use mosaica_store::declaration::{
     check_attribute, check_value_keys, check_vocabulary, AttributeSpec, DECLARABLE_TYPES,
 };
-pub use tessera_store::manifest::VocabularyKind;
-pub use tessera_store::vocabulary::VocabularyMinter;
-use tessera_types::layer::{
+pub use mosaica_store::manifest::VocabularyKind;
+pub use mosaica_store::vocabulary::VocabularyMinter;
+use mosaica_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
     LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource, ServingLayout,
     ShapeDeclaration, ShapeKind, SuppliedContent, SuppliedRequirement,
@@ -176,7 +176,7 @@ pub fn declaration_error(detail: impl Into<String>) -> BuildError {
 /// first value.
 pub const ABSENT_CODE: u32 = 0;
 
-use tessera_access::{is_inherited, INHERITED};
+use mosaica_access::{is_inherited, INHERITED};
 
 // ---------------------------------------------------------------------------------------------
 // The file, as written
@@ -187,8 +187,8 @@ use tessera_access::{is_inherited, INHERITED};
 
 /// `corpus.toml` declares a corpus: the files a build reads, the views that place each item on a
 /// map, the vocabularies and attributes each item carries, and the annotation layers drawn over
-/// the items. `tessera build` and `tessera check` read the file that `[build] schema` in
-/// `tessera.toml` names, `schema.toml` by default, or the one `--config` names. `tessera check
+/// the items. `mosaica build` and `mosaica check` read the file that `[build] schema` in
+/// `mosaica.toml` names, `schema.toml` by default, or the one `--config` names. `mosaica check
 /// --payloads` prints the same declaration as the request bodies that declare it on a running
 /// service.
 ///
@@ -272,7 +272,7 @@ struct ViewBlock {
     #[serde(default)]
     projection: Option<String>,
     /// A name in `[sources]`: the file holding the view's points, one row per item. A build
-    /// refuses a view with no source; `tessera check` accepts one.
+    /// refuses a view with no source; `mosaica check` accepts one.
     ///
     /// Default: the value of `[defaults].source`.
     #[serde(default)]
@@ -312,7 +312,7 @@ struct ViewBlock {
     ///
     /// Default: `"public"`.
     #[serde(default)]
-    visibility: Option<tessera_types::view::DeclaredGate>,
+    visibility: Option<mosaica_types::view::DeclaredGate>,
 }
 
 /// A set of views that share every setting and differ by a key, and by the metadata each view
@@ -375,7 +375,7 @@ struct ViewGroupBlock {
     ///
     /// Default: `"public"`.
     #[serde(default)]
-    visibility: Option<tessera_types::view::DeclaredGate>,
+    visibility: Option<mosaica_types::view::DeclaredGate>,
     /// Another group's name: this group's views are that group's, and its own `source` holds
     /// their points. The group named may not itself name `members`, and a roster or `metadata`
     /// beside `members` is refused.
@@ -1322,7 +1322,7 @@ pub enum ArtifactSource {
     File {
         path: PathBuf,
         fields: Fields,
-        default_space: tessera_store::derived::ShapeSpace,
+        default_space: mosaica_store::derived::ShapeSpace,
     },
     /// `[[layer]].artifacts` — the rows themselves, on the canonical names.
     Inline(Vec<InlineArtifact>),
@@ -1431,8 +1431,8 @@ impl ViewMetadata {
     /// the manifest's group registry and the control-plane emitter answer the same declaration the
     /// same way, so a build and a runtime declaration of one block cannot disagree about a name's
     /// type — which is what the create operation's type check measures a supplied value against.
-    pub fn declared_type(&self) -> tessera_store::manifest::ViewMetadataType {
-        use tessera_store::manifest::ViewMetadataType;
+    pub fn declared_type(&self) -> mosaica_store::manifest::ViewMetadataType {
+        use mosaica_store::manifest::ViewMetadataType;
         match (self.vocabulary.is_some(), self.ty) {
             (true, _) => ViewMetadataType::Category,
             (false, ScalarType::Bool) => ViewMetadataType::Bool,
@@ -1856,7 +1856,7 @@ impl Frame {
     /// snap is resolution the corpus does not get, and a caller who can see the box beside the
     /// frame is the one who can judge that; rounding the frame's own corners would print two
     /// different frames identically at the offsets where a cell is centimetres. The square's
-    /// address is the frame's exact identity either way, and it is the address `tessera check`
+    /// address is the frame's exact identity either way, and it is the address `mosaica check`
     /// prints from the declaration alone (`crate::check::FramePreview`).
     fn snap_line(&self, snap: &Snap) -> String {
         let asked = match &self.asked {
@@ -1981,7 +1981,7 @@ pub fn frame_of(
         }
         // **A stated longitude/latitude box needs no data to become a frame** — it is projected
         // and snapped here, and the pass that follows is the clamp survey every frame gets. That
-        // is what lets `tessera check` answer the same question against no file at all
+        // is what lets `mosaica check` answer the same question against no file at all
         // (`crate::check`).
         Extent::LonLat(asked) => {
             let snap = snap_lon_lat(projection, asked);
@@ -2127,7 +2127,7 @@ fn empty_auto_source(subject: &str) -> BuildError {
 /// aligned square containing it (`projections.md` §4.2).
 ///
 /// **No data is read**, which is what makes the frame a property of the declaration alone and lets
-/// `tessera check` print it in seconds.
+/// `mosaica check` print it in seconds.
 pub fn snap_lon_lat(projection: Projection, asked: &LonLatBox) -> Snap {
     snap_outward(&asked.project(projection))
 }
@@ -2420,7 +2420,7 @@ impl AccessInput {
         AccessInput {
             source: AccessSource::Relation(path.into()),
             default: Some(
-                String::from_utf8(tessera_authz::PUBLIC_LABEL.to_vec())
+                String::from_utf8(mosaica_authz::PUBLIC_LABEL.to_vec())
                     .expect("the reserved label is ASCII"),
             ),
         }
@@ -2502,16 +2502,16 @@ pub struct Attribute {
     pub unique: bool,
 }
 
-/// Whether an unknown key is refused or minted — [`tessera_types::layer::ValueSet`], one type for
+/// Whether an unknown key is refused or minted — [`mosaica_types::layer::ValueSet`], one type for
 /// a vocabulary and for a layer, re-exported so a compiled declaration reads under one name here.
 ///
 /// On a **vocabulary** open means an unknown key is minted a fresh code, drawn at random from the
-/// declared width's unused space by [`tessera_store::vocabulary::VocabularyMinter`] — the same
+/// declared width's unused space by [`mosaica_store::vocabulary::VocabularyMinter`] — the same
 /// routine ingest uses, so exhaustion is one predicate. Declared values still pin or draw codes
 /// exactly as a closed vocabulary's do; the build mints only for keys the declaration does not
 /// carry, and an open vocabulary given no values at all is legal and starts empty. On a **layer**
 /// it means an unknown member key mints an artifact (`artifacts-from-points.md` §3).
-pub use tessera_types::layer::ValueSet;
+pub use mosaica_types::layer::ValueSet;
 
 /// A named value set: keys, their codes, and per-value presentation.
 #[derive(Debug, Clone)]
@@ -2554,7 +2554,7 @@ pub struct DeclaredValues {
 /// `MANIFEST.vocabularies`, and a second spelling of a two-variant disclosure control is a second
 /// place for `derived` to become `public` in translation. Declaration, discriminant and wire now
 /// carry the same two words, so there is no translation left to get wrong.
-pub use tessera_store::manifest::Visibility;
+pub use mosaica_store::manifest::Visibility;
 
 impl Attribute {
     /// The column in this attribute's source it is read from: the declared
@@ -2587,14 +2587,14 @@ impl Vocabulary {
 /// Which of the two readers a parse is answering for.
 ///
 /// A declaration that names no files is legal (`configuration.md` §2), and the two readers part
-/// company over it. `tessera check` reads the document and the schemas of the files it names, so a
-/// block with nothing to read is a block it has nothing to say about; `tessera build` has to open a
+/// company over it. `mosaica check` reads the document and the schemas of the files it names, so a
+/// block with nothing to read is a block it has nothing to say about; `mosaica build` has to open a
 /// file for every block that carries data, so the same block is a refusal there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strictness {
-    /// Every block that carries data names a file. `tessera build`.
+    /// Every block that carries data names a file. `mosaica build`.
     Build,
-    /// A block that names no file is declared and empty. `tessera check`.
+    /// A block that names no file is declared and empty. `mosaica check`.
     Declared,
 }
 
@@ -2610,7 +2610,7 @@ impl Config {
         Config::parse_with(path, overrides, Strictness::Build)
     }
 
-    /// Parse `path` for `tessera check`: a block that names no file compiles as declared and
+    /// Parse `path` for `mosaica check`: a block that names no file compiles as declared and
     /// empty rather than being refused (`configuration.md` §2). Every other rule is [`parse`]'s.
     ///
     /// [`parse`]: Config::parse
@@ -3552,7 +3552,7 @@ fn compile_views(
         let declared = block
             .visibility
             .clone()
-            .map(tessera_types::view::DeclaredGate::into_labels);
+            .map(mosaica_types::view::DeclaredGate::into_labels);
         let visibility = compile_view_gate(&object, declared.as_deref())?;
 
         let point_visibility =
@@ -3729,16 +3729,16 @@ fn compile_projected_fields(
 ///
 /// **The same charset a column name takes**, and for the same reason: a view id addresses a
 /// directory in the bundle (`views/<group>/<key>/`), the `view` in a request body, the
-/// `x-tessera-view` header and the manifest's `files` map, so it has to survive being a path
+/// `x-mosaica-view` header and the manifest's `files` map, so it has to survive being a path
 /// segment. Two characters are refused ahead of the charset because they are *reserved* rather
 /// than merely outside it: `:` joins a group to its key, and `@` pins a group-scoped attribute to
 /// a view (`views.md` §5). Each
 /// is refused here and again at manifest load, which are the two halves decision 0108 asks for.
 fn check_view_name(object: &str, name: &str) -> Result<()> {
-    // **The charset lives with the roster records** (`tessera_types::view::check_view_key`), so
+    // **The charset lives with the roster records** (`mosaica_types::view::check_view_key`), so
     // the declaration and the create operation coin keys under one rule rather than two copies of
     // it — decision 0091's reading applied to a name.
-    tessera_types::view::check_view_key(name)
+    mosaica_types::view::check_view_key(name)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
@@ -3754,11 +3754,11 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 ///
 /// **Any other list is read label by label as access expressions** and stored as their canonical
 /// text, by the rule a running service applies to a view it creates
-/// ([`tessera_access::declared_visibility`]). A label that does not parse is refused here,
+/// ([`mosaica_access::declared_visibility`]). A label that does not parse is refused here,
 /// where an author fixes it, rather than stored as a gate nobody satisfies. An empty list, and an
 /// empty element, are refused for the same reason.
 fn compile_view_gate(object: &str, declared: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    tessera_access::declared_visibility(declared)
+    mosaica_access::declared_visibility(declared)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
@@ -3970,7 +3970,7 @@ fn compile_view_group(
     let declared = block
         .visibility
         .clone()
-        .map(tessera_types::view::DeclaredGate::into_labels);
+        .map(mosaica_types::view::DeclaredGate::into_labels);
     let visibility = compile_view_gate(&object, declared.as_deref())?;
     let point_visibility =
         compile_point_visibility(&object, block.point_visibility.as_ref(), sources)?;
@@ -4097,7 +4097,7 @@ fn compile_point_visibility(
             default: None,
         });
     };
-    let default = tessera_access::point_default(default)
+    let default = mosaica_access::point_default(default)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
     Ok(PointVisibility {
         field: point.field.clone(),
@@ -4107,7 +4107,7 @@ fn compile_point_visibility(
 }
 
 /// The roster's own key set, which no metadata name may take (`views.md` §3.2).
-use tessera_types::view::ROSTER_KEYS;
+use mosaica_types::view::ROSTER_KEYS;
 
 /// The keys a group declares and a view of it may not (`views.md` §3.1).
 const GROUP_LEVEL_KEYS: [&str; 8] = [
@@ -4139,7 +4139,7 @@ fn compile_metadata_types(
     };
     let mut metadata = Vec::with_capacity(declared.len());
     for (name, value) in declared {
-        tessera_types::view::check_metadata_name(name)
+        mosaica_types::view::check_metadata_name(name)
             .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
         if discriminator == Some(name.as_str()) {
             return Err(declaration_error(format!(
@@ -4316,7 +4316,7 @@ fn compile_roster_view(
     let visibility = match table.get("visibility") {
         None => None,
         Some(value) => {
-            let declared: tessera_types::view::DeclaredGate =
+            let declared: mosaica_types::view::DeclaredGate =
                 value.clone().try_into().map_err(|_| {
                     declaration_error(format!(
                         "{object}: `visibility` is {}, and it is an access label, a list of \
@@ -4658,8 +4658,8 @@ fn compile_vocabularies(
             .map_err(declaration_error)?;
         check_codes(&declared.codes, &reserved, width, name)?;
         let kind = match value_set {
-            ValueSet::Closed => tessera_store::manifest::VocabularyKind::Declared,
-            ValueSet::Open => tessera_store::manifest::VocabularyKind::Discovered,
+            ValueSet::Closed => mosaica_store::manifest::VocabularyKind::Declared,
+            ValueSet::Open => mosaica_store::manifest::VocabularyKind::Discovered,
         };
         let mut values = VocabularyMinter::declared(
             name.clone(),
@@ -4877,7 +4877,7 @@ fn compile_attributes(
             }
         }
     }
-    tessera_store::declaration::check_unique_fields(
+    mosaica_store::declaration::check_unique_fields(
         attributes.iter().filter(|a| a.unique).count(),
     )
     .map_err(declaration_error)?;
@@ -4977,7 +4977,7 @@ fn compile_layers(
         // **A name in `views` is a plain view or a whole group** (`views.md` §2): naming a group
         // draws the layer on every view of it, present and future, which is what lets a layer
         // follow a group that grows at ingest rather than being redeclared per quarter.
-        if let Err(view) = tessera_types::layer::expand_views(
+        if let Err(view) = mosaica_types::layer::expand_views(
             declared_views,
             |name| groups.iter().any(|g| g.name == name).then(Vec::new),
             |name| views.iter().any(|v| v.name == name),
@@ -5001,7 +5001,7 @@ fn compile_layers(
         // that key set's views alone. A build names a group's views by the group's name only.
         let scope = compile_scope(&object, block.scope.as_ref(), groups)?;
         if let Scope::Group(group) = &scope {
-            tessera_types::layer::check_scoped_views(
+            mosaica_types::layer::check_scoped_views(
                 declared_views,
                 group,
                 groups.iter().map(|g| (g.name.as_str(), g.members.as_deref())),
@@ -5252,7 +5252,7 @@ fn compile_layers(
         // `projection = "none"` has one space and nothing to convert a degree from. Refused here,
         // where the declaration can be pointed at, rather than at the first row read.
         let honourable =
-            |space: tessera_store::derived::ShapeSpace| -> std::result::Result<(), String> {
+            |space: mosaica_store::derived::ShapeSpace| -> std::result::Result<(), String> {
                 for name in declared_views {
                     let Some(view) = views.iter().find(|v| &v.name == name) else {
                         continue;
@@ -5267,7 +5267,7 @@ fn compile_layers(
                 Ok(())
             };
         let default_space = match block.default_space.as_deref() {
-            None => tessera_store::derived::ShapeSpace::View,
+            None => mosaica_store::derived::ShapeSpace::View,
             Some(word) => {
                 if !carries_geometry {
                     return Err(declaration_error(format!(
@@ -5276,7 +5276,7 @@ fn compile_layers(
                          for it to be the space of"
                     )));
                 }
-                let space = tessera_store::derived::ShapeSpace::parse(word)
+                let space = mosaica_store::derived::ShapeSpace::parse(word)
                     .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?;
                 honourable(space)
                     .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?;
@@ -5285,7 +5285,7 @@ fn compile_layers(
         };
         for artifact in block.artifacts.iter().flatten() {
             if let Some(word) = artifact.space.as_deref() {
-                let space = tessera_store::derived::ShapeSpace::parse(word).map_err(|e| {
+                let space = mosaica_store::derived::ShapeSpace::parse(word).map_err(|e| {
                     declaration_error(format!(
                         "{object}: artifact '{}': `space`: {e}",
                         artifact.key
@@ -5509,8 +5509,8 @@ fn compile_layers(
             // compiled into `Scopes` alone, which is a build-time structure, so a bundle carried
             // no record of which of its layers were per-view (`views.md` §11).
             scope: match &scope {
-                Scope::Entity => tessera_types::layer::LayerScope::Entity,
-                Scope::Group(group) => tessera_types::layer::LayerScope::Group(group.clone()),
+                Scope::Entity => mosaica_types::layer::LayerScope::Entity,
+                Scope::Group(group) => mosaica_types::layer::LayerScope::Group(group.clone()),
             },
             name: block.name.clone(),
             title: block.title.clone(),
@@ -6094,7 +6094,7 @@ fn mint_roster(
     }
     keys.iter()
         .map(|key| {
-            tessera_types::view::check_view_key(key).map_err(|detail| {
+            mosaica_types::view::check_view_key(key).map_err(|detail| {
                 declaration_error(format!(
                     "{object}: the discriminator column '{column}' carries the value '{key}', and \
                      this group declares no roster, so every distinct value of that column is a \
@@ -6172,8 +6172,8 @@ impl Config {
                     Some(_) => mint_roster(owner, &mut scanned)?,
                     // A group that names no points file and no roster is declared and empty
                     // (`configuration.md` §2): there is no discriminator column to mint keys
-                    // from, so the group has no views. `tessera build` refuses that declaration
-                    // at parse; `tessera check` compiles it and reads it back.
+                    // from, so the group has no views. `mosaica build` refuses that declaration
+                    // at parse; `mosaica check` compiles it and reads it back.
                     None => Vec::new(),
                 },
             };
@@ -6247,7 +6247,7 @@ impl Config {
     /// ⊘ *Present and future* is the ingest half: a view created later gets the layer's artifacts
     /// at the fold that writes them (spec §3.5).
     pub fn expand_layer_views(registry: &[BuildView], declared: &[String]) -> Vec<String> {
-        tessera_types::layer::expand_views(
+        mosaica_types::layer::expand_views(
             declared,
             |name| {
                 let of_group: Vec<String> = registry
@@ -6271,8 +6271,8 @@ impl Config {
         &self,
         registry: &[BuildView],
         resolved: &[crate::ViewArgs],
-    ) -> Vec<tessera_store::manifest::GroupDescriptor> {
-        use tessera_store::manifest::{
+    ) -> Vec<mosaica_store::manifest::GroupDescriptor> {
+        use mosaica_store::manifest::{
             GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewMetadataValue,
         };
         let mut groups: Vec<GroupDescriptor> = Vec::new();
@@ -6318,7 +6318,7 @@ impl Config {
                     // manifest must say numbers. Every view of a group shares one frame by
                     // construction (`views.md` §3.1), so any of them answers — and this view is
                     // one of them.
-                    quantisation: tessera_store::manifest::Quantisation {
+                    quantisation: mosaica_store::manifest::Quantisation {
                         x_min: frame.x_min,
                         x_max: frame.x_max,
                         y_min: frame.y_min,
@@ -6351,7 +6351,7 @@ impl Config {
                     },
                     views: Vec::new(),
                     // Filled at the manifest write from the declaration's scoped attributes
-                    // (`tessera_build::build`), so the family list has one origin.
+                    // (`mosaica_build::build`), so the family list has one origin.
                     scoped_scalars: Vec::new(),
                 });
             }
@@ -6476,7 +6476,7 @@ fn attribute_payloads(config: &Config) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(config.attribute_order.len());
     for name in &config.attribute_order {
         let (attribute, scope) = match config.schema.attributes.iter().find(|a| &a.name == name) {
-            Some(attribute) => (attribute, tessera_types::layer::LayerScope::Entity),
+            Some(attribute) => (attribute, mosaica_types::layer::LayerScope::Entity),
             None => match config
                 .scoped_attributes
                 .iter()
@@ -6484,7 +6484,7 @@ fn attribute_payloads(config: &Config) -> Vec<serde_json::Value> {
             {
                 Some(scoped) => (
                     &scoped.attribute,
-                    tessera_types::layer::LayerScope::Group(scoped.group.clone()),
+                    mosaica_types::layer::LayerScope::Group(scoped.group.clone()),
                 ),
                 // A name in the order list that compiled to no column is not reachable: both
                 // halves are pushed from the same block list. Skipped rather than asserted,
@@ -6499,7 +6499,7 @@ fn attribute_payloads(config: &Config) -> Vec<serde_json::Value> {
 
 fn attribute_payload(
     attribute: &Attribute,
-    scope: tessera_types::layer::LayerScope,
+    scope: mosaica_types::layer::LayerScope,
 ) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     body.insert("name".to_string(), attribute.name.clone().into());
@@ -6526,7 +6526,7 @@ fn attribute_payload(
         attribute
             .analyser
             .as_deref()
-            .map(|identity| tessera_analyse::declared_name(identity).to_string()),
+            .map(|identity| mosaica_analyse::declared_name(identity).to_string()),
     );
     body.insert("index".to_string(), attribute.index.into());
     body.insert("render".to_string(), attribute.render.into());
@@ -6736,7 +6736,7 @@ fn extent_payload(projection: Projection, extent: &Extent) -> serde_json::Value 
 ///
 /// **One test a block kind**, each asking the same two questions: is every acquisition key gone,
 /// and is everything else there in the shape the route takes? The round trip — that a running
-/// service accepts what comes out — is `tessera-server`'s `tests/payload_emitter.rs`, because only
+/// service accepts what comes out — is `mosaica-server`'s `tests/payload_emitter.rs`, because only
 /// a server can answer it.
 #[cfg(test)]
 mod payload_tests {
@@ -6918,7 +6918,7 @@ fields = { id = "entity" }
     #[test]
     fn layer_payloads_are_the_registration_bodies() {
         let (_dir, payloads) = every_key();
-        let layers: Vec<tessera_types::layer::LayerDeclaration> =
+        let layers: Vec<mosaica_types::layer::LayerDeclaration> =
             serde_json::from_value(payloads["layers"].clone()).expect("layer bodies");
         assert_eq!(layers.len(), 1);
         assert_eq!(layers[0].name, "clusters/a");

@@ -2,7 +2,7 @@
 //!
 //! Discharges "Experiment 2" from docs/evidence/memos/2026-07-30-tail-attribution.md: that memo
 //! narrowed the residual k-scaling stall to "gather/serialise/scheduling, not the count loop" by
-//! *inference* (correlating externally-observable work against `x-tessera-server-us`), and said
+//! *inference* (correlating externally-observable work against `x-mosaica-server-us`), and said
 //! outright that attributing it to a phase needs instrumentation that did not exist. This is that
 //! instrumentation.
 //!
@@ -11,7 +11,7 @@
 //! `viewport.rs` carries no `#[cfg]` at any measurement point and cannot drift into a state where
 //! the instrumented and uninstrumented builds take different paths. [`StageTimings`] has the same
 //! shape in both builds, so no downstream type or match needs conditional compilation either.
-//! The claim is discharged by measurement, not assertion — `cargo bench -p tessera-engine` with
+//! The claim is discharged by measurement, not assertion — `cargo bench -p mosaica-engine` with
 //! and without the feature, recorded as `bench_timing_overhead_pct` in the baseline JSON.
 //!
 //! **I10 / SA §9.** Nothing here holds an entity id, a descriptor, a token, or any per-principal
@@ -218,7 +218,7 @@ pub struct StageTimings {
     pub tiles_bands_widened: u64,
     /// Tiles read from the identity column after the bands were read and held too few.
     pub tiles_sparse_after_read: u64,
-    /// Number of clock reads taken. Multiply by the per-lap cost from `tessera-bench calibrate`
+    /// Number of clock reads taken. Multiply by the per-lap cost from `mosaica-bench calibrate`
     /// to get the perturbation this instrumentation itself introduced, and subtract it honestly
     /// rather than pretending it is zero.
     pub clock_laps: u64,

@@ -440,7 +440,7 @@ pub struct ViewportHead {
     pub stamp: GenerationStamp,
     /// See [`ViewportOut::stale`].
     pub stale: bool,
-    /// The region leaves' verdict — `x-tessera-region` — or `None` where the request carried no
+    /// The region leaves' verdict — `x-mosaica-region` — or `None` where the request carried no
     /// region leaf. A function of the shapes and the grid alone, settled before any row is read.
     pub region: Option<crate::region::RegionVerdict>,
     /// The render-column schema, in declaration order, from the same generation the response is

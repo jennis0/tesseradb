@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {RegionProjection} from '@tesseradb/client';
+import type {RegionProjection} from '@mosaica/client';
 import '../src/map.js';
 import {deep, fakeStore, meta, mount, settle, status} from './fake-store.js';
 
@@ -21,20 +21,20 @@ const region = (outside: boolean): RegionProjection => ({
 });
 
 async function mapWith(r: RegionProjection | null) {
-  const host = await mount('<tessera-map></tessera-map>');
-  const map = host.querySelector('tessera-map') as HTMLElement & {store: unknown};
+  const host = await mount('<mosaica-map></mosaica-map>');
+  const map = host.querySelector('mosaica-map') as HTMLElement & {store: unknown};
   const store = fakeStore({meta: meta(), status: status({}), region: r});
   map.store = store;
   await settle(host);
   return {host, store};
 }
 
-describe('<tessera-map> region tag', () => {
+describe('<mosaica-map> region tag', () => {
   it('shows the count matched inside a drawn region, and clears the selection from its ×', async () => {
     const {host, store} = await mapWith(region(false));
     const tag = deep(host, '[part="region-tag"]')!;
     expect(tag).not.toBeNull();
-    expect(tag.querySelector('tessera-count')).not.toBeNull();
+    expect(tag.querySelector('mosaica-count')).not.toBeNull();
     (tag.querySelector('button') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'select').map((c) => c.args[0])).toEqual([null]);
   });

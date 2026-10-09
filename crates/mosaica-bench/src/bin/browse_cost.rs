@@ -27,9 +27,9 @@
 //! ladder-corpus scan figure as measured.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin browse_cost -- \
+//! cargo run --release -p mosaica-bench --bin browse_cost -- \
 //!     --bundle data/ladder/arxiv/bundle --view knn --layer clusters/kmeans
-//! cargo run --release -p tessera-bench --bin browse_cost -- --scan-rows 2422486
+//! cargo run --release -p mosaica-bench --bin browse_cost -- --scan-rows 2422486
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -41,9 +41,9 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_engine::browse::{BrowseForm, BrowseRequest};
-use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
-use tessera_engine::{Engine, EngineConfig};
+use mosaica_engine::browse::{BrowseForm, BrowseRequest};
+use mosaica_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
+use mosaica_engine::{Engine, EngineConfig};
 
 fn main() {
     let mut bundle: Option<PathBuf> = None;
@@ -95,7 +95,7 @@ fn engine_at(root: &Path, cache: &Path, wal: &Path, publishing: bool) -> Engine 
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )
     .expect("the bundle opens");
@@ -241,13 +241,13 @@ fn measure_scan(rows: u64, repeat: usize) {
     engine
         .register_layer(scan_layer())
         .expect("the layer registers");
-    let members: Vec<tessera_types::EntityId> =
-        (0..rows).map(tessera_types::EntityId::new).collect();
+    let members: Vec<mosaica_types::EntityId> =
+        (0..rows).map(mosaica_types::EntityId::new).collect();
     engine
         .publish_artifacts(
             "bench/all".into(),
             0,
-            vec![tessera_lifecycle::IncomingArtifact::from_entities(
+            vec![mosaica_lifecycle::IncomingArtifact::from_entities(
                 Some("all".into()),
                 members,
             )],
@@ -299,8 +299,8 @@ fn measure_scan(rows: u64, repeat: usize) {
     ask("render-only leaf (scan)", Some(scan));
 }
 
-fn scan_layer() -> tessera_types::layer::LayerDeclaration {
-    use tessera_types::layer::*;
+fn scan_layer() -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::*;
     LayerDeclaration {
         scope: Default::default(),
         name: "bench/all".into(),
@@ -341,16 +341,16 @@ fn build_scan_fixture(dir: &Path, rows: u64) -> PathBuf {
     write_pairs(&pairs, rows);
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, SCAN_SCHEMA).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+    let schema = mosaica_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the schema parses")
         .schema;
     let bundle = dir.join("bundle");
-    tessera_build::build(&tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+    mosaica_build::build(&mosaica_build::BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: tessera_spatial::Bounds {
+            projection: mosaica_spatial::Projection::None,
+            extent: mosaica_spatial::Bounds {
                 x_min: 0.0,
                 x_max: 1000.0,
                 y_min: 0.0,
@@ -359,16 +359,16 @@ fn build_scan_fixture(dir: &Path, rows: u64) -> PathBuf {
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
         out: bundle.clone(),
         limit: None,
         strict: false,
-        identity_key: tessera_types::IdentityKey::from_hex(
+        identity_key: mosaica_types::IdentityKey::from_hex(
             "07070707070707070707070707070707",
         )
         .expect("a well-formed key"),

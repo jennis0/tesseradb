@@ -22,10 +22,10 @@
 //! acceptable", and SA §9 asks for it measured from day one split by mask sparsity. That is the
 //! same sweep as the performance measurement, so it is built once and read twice.
 
-use tessera_authz::PostingsReader;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_store::read::open_bundle;
+use mosaica_authz::PostingsReader;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_store::read::open_bundle;
 
 use crate::arms::{Context, Result};
 use crate::corpus::{build_grant_to_coverage, gen_viewports, Dictionary, GrantShape, TermStats};
@@ -70,7 +70,7 @@ impl Mode {
 }
 
 /// The server's own defaults. A bench cell that does not sweep these must measure them, or it
-/// measures a deployment nobody runs. Keep in step with `tessera-server`'s `DEFAULT_*` constants.
+/// measures a deployment nobody runs. Keep in step with `mosaica-server`'s `DEFAULT_*` constants.
 pub const DEFAULT_K_MAX_MARKS: usize = 500;
 pub const DEFAULT_THETA_TARGET: u64 = 16;
 
@@ -163,7 +163,7 @@ pub fn run(
                 // One engine per (fixture, coverage). `Engine::open` digest-verifies every byte, so
                 // this is the expensive setup — never inside a timed loop.
                 let tmp = std::env::temp_dir().join(format!(
-                    "tessera-bench-engine-{}-{}",
+                    "mosaica-bench-engine-{}-{}",
                     std::process::id(),
                     coverage_target
                 ));
@@ -182,7 +182,7 @@ pub fn run(
                         max_underlay_offset: 4,
                         max_underlay_cells: 8192,
                         max_tiles_per_request: 262_144,
-                        compute_threads: tessera_engine::default_compute_threads(),
+                        compute_threads: mosaica_engine::default_compute_threads(),
                         flush_max_age_secs: 90,
                         // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
                         // what bounds the window close's O(buffered) copy. Nothing here reaches it.
@@ -192,7 +192,7 @@ pub fn run(
                         segment_floor_bytes: None,
                         coalesce_width: None,
                         // Compaction §9's trigger is off unless a deployment configures one.
-                        compaction: tessera_engine::CompactionSchedule::off(),
+                        compaction: mosaica_engine::CompactionSchedule::off(),
                     },
                 )?;
                 let session = engine.authorise(grant.auth_json(&dictionary).as_bytes())?;
@@ -378,7 +378,7 @@ fn build_plan(mode: Mode, extent: f64, zoom: u8, seed: u64) -> Vec<(u8, [f64; 4]
 /// over a candidate pool, paid once per (fixture, coverage, mode).
 fn density_deciles(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     view: &str,
     extent: f64,
     zoom: u8,

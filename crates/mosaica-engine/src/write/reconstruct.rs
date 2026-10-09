@@ -15,36 +15,36 @@ pub(crate) struct ManifestSeed<'a> {
     /// positions; empty where no manifest can be trusted to be the newest.
     pub free: croaring::Bitmap,
     pub held: Vec<(u64, croaring::Bitmap)>,
-    pub layers: &'a [tessera_types::layer::RegisteredLayer],
+    pub layers: &'a [mosaica_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
     /// The highest layer registry version counter any partition's manifest saved.
     pub registry_version: u64,
     /// Every view created since the build, across every partition's manifest, and every
     /// incarnation that has died. The build's own roster is not here: it is in `MANIFEST.json`
     /// and is seeded separately.
-    pub created_views: &'a [tessera_types::view::CreatedView],
-    pub dead_view_incarnations: &'a [tessera_types::view::DeadIncarnation],
+    pub created_views: &'a [mosaica_types::view::CreatedView],
+    pub dead_view_incarnations: &'a [mosaica_types::view::DeadIncarnation],
     /// The views a build declared, as `(group, key)`: the keys a create must not reissue.
     pub declared_views: Vec<(String, String)>,
     /// `Manifest::view_ids_for_key`: every view id a dropped key resolves to, the owner's and
     /// every sharing group's. Replay's `ViewDrop` arm prunes the buffer with it, and it is passed
-    /// rather than derived because `tessera-lifecycle` holds no manifest.
+    /// rather than derived because `mosaica-lifecycle` holds no manifest.
     pub view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
     /// Every published membership extent, across every partition's manifest, with the prefix
     /// directory their paths are relative to.
-    pub membership_extents: &'a [tessera_store::manifest::MembershipExtent],
+    pub membership_extents: &'a [mosaica_store::manifest::MembershipExtent],
     /// Every `(layer, level)`'s artifact-write counter as of the publication, across every
     /// partition's manifest.
     ///
     /// Seeded after the records and before the replay, or a level comes back at its record count
     /// rather than the number the publication recorded. See `ArtifactStore::seed_level_version`.
-    pub level_versions: &'a [tessera_store::manifest::LevelVersion],
+    pub level_versions: &'a [mosaica_store::manifest::LevelVersion],
     pub prefix_dir: std::path::PathBuf,
     /// The served schema as the manifests make it: the build's columns with every side manifest's
     /// runtime declarations appended (`Manifest::with_attributes`). Replay compares each
     /// `AttributeDeclare` record against it, so a record restating a folded column is applied as
     /// nothing and one contradicting the manifests refuses the open.
-    pub manifest: &'a tessera_store::manifest::Manifest,
+    pub manifest: &'a mosaica_store::manifest::Manifest,
     /// The side manifests' `attributes` and `scoped_attributes`, the runtime declarations no fold
     /// has written into a `MANIFEST.json`; replay appends to these.
     pub attributes: crate::attributes::RuntimeAttributes,
@@ -89,7 +89,7 @@ impl WritePath {
         registry.seed(seed.layers, seed.tombstones, seed.registry_version);
         // Same ordering rule as the registry above. The build's declared views are seeded first
         // because their keys are taken; forgetting them would let a create reissue one.
-        let mut roster = tessera_lifecycle::ViewRoster::new();
+        let mut roster = mosaica_lifecycle::ViewRoster::new();
         roster.seed_declared(seed.declared_views.iter().cloned());
         roster.seed(seed.created_views, seed.dead_view_incarnations);
         // View groups and plain views declared while the service ran; one the served manifest
@@ -115,7 +115,7 @@ impl WritePath {
             // A record whose meaning is not built refuses the open: a log carrying one was written
             // by a binary this one is not, and replaying past it would serve state that omits what
             // the record said. Naming the track tells the operator which binary.
-            if let Some((kind, track)) = tessera_lifecycle::wal::unbuilt_track(&record) {
+            if let Some((kind, track)) = mosaica_lifecycle::wal::unbuilt_track(&record) {
                 return Err(EngineError::Malformed(format!(
                     "the WAL carries a {kind} record, which this build cannot apply (track {track})"
                 )));
@@ -161,7 +161,7 @@ impl WritePath {
                             }
                         }
                         None => {
-                            let mut minter = tessera_store::vocabulary::VocabularyMinter::new(
+                            let mut minter = mosaica_store::vocabulary::VocabularyMinter::new(
                                 compiled.name.clone(),
                                 compiled.kind,
                                 compiled.visibility,
@@ -294,7 +294,7 @@ impl WritePath {
             // The pack is held for as long as the memberships read through it: one `Arc` per
             // extent is cloned into each `Members`.
             let pack = Arc::new(
-                tessera_store::membership::MembershipPack::open(&path)
+                mosaica_store::membership::MembershipPack::open(&path)
                     .map_err(|e| EngineError::Malformed(e.to_string()))?,
             );
             let owner: Arc<dyn std::any::Any + Send + Sync> = pack.clone();
@@ -329,7 +329,7 @@ impl WritePath {
                     undecodable += 1;
                     continue;
                 };
-                match tessera_lifecycle::membership::decode_record(entity, blob) {
+                match mosaica_lifecycle::membership::decode_record(entity, blob) {
                     Some((mut record, shape)) => {
                         // The membership is read through the pack's mapping and the decoded
                         // bitmap is dropped, to avoid holding a heap bitmap per artifact.
@@ -339,7 +339,7 @@ impl WritePath {
                         // written twice (names come from a counter that only rises, one executor
                         // per bundle root), so a mapped file is never truncated under a reader.
                         let mapped = unsafe {
-                            tessera_lifecycle::membership::mapped_members(blob, owner.clone())
+                            mosaica_lifecycle::membership::mapped_members(blob, owner.clone())
                         };
                         // The same cardinality check `ArtifactStore::rehouse_members` makes: a
                         // disagreement means the two readers drifted apart or the bytes are
@@ -380,14 +380,14 @@ impl WritePath {
         // point mark takes the maximum: the two regions grow towards each other, so "furthest
         // along" is downward there.
         let mut wal_high_water = 0u64;
-        let mut wal_low_water = tessera_lifecycle::alloc::ROWLESS_CEILING;
+        let mut wal_low_water = mosaica_lifecycle::alloc::ROWLESS_CEILING;
         // Every point entity a kept record names.
         let mut named = croaring::Bitmap::new();
         // Each edit's `(number, new entity)` whose first row no flush has written, and so whose
         // pair no run holds; kept where the entity ends buffered or deleted.
         let mut edits: Vec<(EntityId, EntityId)> = Vec::new();
         // Every batch-carrying record, by the rule both accept sites use
-        // ([`tessera_lifecycle::batch_identity`]).
+        // ([`mosaica_lifecycle::batch_identity`]).
         let mut accepted_batches: AcceptedBatches = FxHashMap::default();
 
         for item in wal.records() {
@@ -421,7 +421,7 @@ impl WritePath {
             });
             wal_high_water = wal_high_water.max(high_water_from([&record]));
             wal_low_water = wal_low_water.min(low_water_from([&record]));
-            named.or_inplace(&tessera_lifecycle::alloc::entities_named([&record]));
+            named.or_inplace(&mosaica_lifecycle::alloc::entities_named([&record]));
             if let WalRecord::IngestBatch { edits: batch, .. } = &record {
                 edits.extend(batch.iter().filter_map(|edit| {
                     let first = edit.rows.first()?;
@@ -429,7 +429,7 @@ impl WritePath {
                         .then_some((edit.number, first.entity_id))
                 }));
             }
-            if let Some(identity) = tessera_lifecycle::batch_identity(&record) {
+            if let Some(identity) = mosaica_lifecycle::batch_identity(&record) {
                 accepted_batches.insert(
                     identity.batch_id.to_string(),
                     AcceptedBatch {

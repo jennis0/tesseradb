@@ -28,7 +28,7 @@ mod reduce;
 mod test_support;
 
 use croaring::Bitmap;
-pub use tessera_types::layer::ComputedProperty;
+pub use mosaica_types::layer::ComputedProperty;
 
 use dig::concave_rings;
 pub use dig::dig_rings;

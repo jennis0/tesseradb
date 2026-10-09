@@ -20,12 +20,12 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::Config;
-use tessera_build::{build, build_in_memory, BuildArgs};
-use tessera_filter::{Access, RecordBlob, RecordValue};
-use tessera_spatial::Bounds;
-use tessera_store::open_bundle;
-use tessera_types::IdentityKey;
+use mosaica_build::config::Config;
+use mosaica_build::{build, build_in_memory, BuildArgs};
+use mosaica_filter::{Access, RecordBlob, RecordValue};
+use mosaica_spatial::Bounds;
+use mosaica_store::open_bundle;
+use mosaica_types::IdentityKey;
 
 mod common;
 
@@ -180,12 +180,12 @@ fn args(config: &Config, out: PathBuf) -> BuildArgs {
     let acquired = config.acquire().expect("the declaration acquires");
     let registry = config.build_views().expect("the registry compiles");
     let acquired_view =
-        tessera_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
+        mosaica_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: Bounds {
                 x_min: 0.0,
                 x_max: 1000.0,

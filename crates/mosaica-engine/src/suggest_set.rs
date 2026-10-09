@@ -409,7 +409,7 @@ impl SuggestSets {
 /// since the index was built has none, is therefore not in the set, and is answered by the probe
 /// route at the walk's side-map arm.
 pub fn sweep<'a>(
-    columns: impl Iterator<Item = &'a tessera_filter::ValueColumn>,
+    columns: impl Iterator<Item = &'a mosaica_filter::ValueColumn>,
     candidate: &Bitmap,
     index: &crate::suggest::SuggestIndex,
 ) -> Option<SuggestSet> {
@@ -556,13 +556,13 @@ mod tests {
         let codes: Vec<u32> = (0..8u32)
             .map(|e| {
                 if e == 4 {
-                    tessera_store::vocabulary::ABSENT_CODE
+                    mosaica_store::vocabulary::ABSENT_CODE
                 } else {
                     in_key_order[(e % 4) as usize].code
                 }
             })
             .collect();
-        let column = tessera_filter::ValueColumn::universal(tessera_filter::Codes::U32(
+        let column = mosaica_filter::ValueColumn::universal(mosaica_filter::Codes::U32(
             codes.into(),
         ));
 
@@ -598,7 +598,7 @@ mod tests {
 
         assert!(sweep(std::iter::empty(), &candidate, &index).is_none());
 
-        let numbers = tessera_filter::ValueColumn::universal(tessera_filter::Codes::F64(
+        let numbers = mosaica_filter::ValueColumn::universal(mosaica_filter::Codes::F64(
             vec![1.0f64, 2.0, 3.0, 4.0].into(),
         ));
         assert!(sweep(std::iter::once(&numbers), &candidate, &index).is_none());

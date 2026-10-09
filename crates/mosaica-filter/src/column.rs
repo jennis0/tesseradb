@@ -12,8 +12,8 @@ use std::io;
 use std::path::Path;
 
 use croaring::{Bitmap, BitmapView};
-use tessera_authz::{DeltaTier, PostingRef, PostingsReader};
-use tessera_types::AttrLocalId;
+use mosaica_authz::{DeltaTier, PostingRef, PostingsReader};
+use mosaica_types::AttrLocalId;
 
 /// A column's postings file, in whichever record format its identifier domain wants.
 ///
@@ -288,7 +288,7 @@ pub fn resolve_union(column: &ColumnPostings, values: &[AttrLocalId]) -> io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_authz::{write_delta_tier_at, write_postings};
+    use mosaica_authz::{write_delta_tier_at, write_postings};
 
     const SMALL: u32 = 32;
 

@@ -25,13 +25,13 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::Engine;
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_store::read::open_bundle;
-use tessera_types::{AttrLocalId, EntityId};
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::Engine;
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{AttrLocalId, EntityId};
 
 /// Built items. Small: every assertion here is exhaustive over the corpus and the fold is the
 /// expensive step.
@@ -116,20 +116,20 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         .expect("the text schema parses")
         .schema;
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -200,7 +200,7 @@ fn partition_dir(root: &Path) -> PathBuf {
     root.join(current_prefix(root)).join("partitions/default")
 }
 
-fn text_extents(root: &Path) -> Vec<tessera_store::manifest::TextExtent> {
+fn text_extents(root: &Path) -> Vec<mosaica_store::manifest::TextExtent> {
     open_bundle(root).expect("the bundle opens").partitions["default"]
         .manifest
         .text_extents
@@ -214,9 +214,9 @@ fn text_extents(root: &Path) -> Vec<tessera_store::manifest::TextExtent> {
 /// answer these questions correctly.
 fn base_index(root: &Path) -> BTreeMap<String, croaring::Bitmap> {
     let dir = partition_dir(root).join("attrs/prose");
-    let dict = tessera_filter::SortedDict::open_dir(&dir, tessera_filter::Access::Read)
+    let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("the merged token dictionary opens");
-    let postings = tessera_filter::ColumnPostings::open(&dir.join("postings.arrow"), false)
+    let postings = mosaica_filter::ColumnPostings::open(&dir.join("postings.arrow"), false)
         .expect("the merged token postings open");
     assert_eq!(
         dict.len(),

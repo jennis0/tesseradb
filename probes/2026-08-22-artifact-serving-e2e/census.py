@@ -3,8 +3,8 @@
 **This is the campaign's correctness spine.** Everything else here is a number that could be
 slower or faster; this is the one that can be wrong. For each of a spread of principals and each of
 the layer shapes, the server's answer at the whole map is compared to
-`tessera corpus artifact-census` — the same relation stated by a generator that has never read a
-Tessera artefact — as sets of `(artifact, masked count)` pairs, with **exact** equality required
+`mosaica corpus artifact-census` — the same relation stated by a generator that has never read a
+Mosaica artefact — as sets of `(artifact, masked count)` pairs, with **exact** equality required
 in both directions: an artifact the server serves and the census does not is as much a failure as
 one the census holds and the server drops.
 

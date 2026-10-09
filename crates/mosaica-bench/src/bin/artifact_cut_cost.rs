@@ -160,11 +160,11 @@
 //! side tables, a frontier pass that stops climbing at the first node an earlier walk covered, and
 //! a memoised depth table are the whole difference.
 //!
-//! Run: `cargo run --release -p tessera-bench --bin artifact_cut_cost`
+//! Run: `cargo run --release -p mosaica-bench --bin artifact_cut_cost`
 
 use std::time::Instant;
 
-use tessera_engine::cut::{cut, Lineage};
+use mosaica_engine::cut::{cut, Lineage};
 
 /// Children per internal node in the treed arm — three, so the arithmetic never agrees with a bit
 /// shift by accident and the tree gets genuinely deep at scale.

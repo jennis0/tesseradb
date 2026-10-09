@@ -39,7 +39,7 @@ import traitlets
 from ._auth import Token, TokenSource, minted
 
 _HERE = pathlib.Path(__file__).parent
-_BUNDLE = "tessera-components.js"
+_BUNDLE = "mosaica-components.js"
 
 
 def bundle_path() -> Optional[pathlib.Path]:
@@ -86,7 +86,7 @@ def _by_name(value: Any, trait: str, outer: str, inner: str) -> dict:
 
 
 class Map(anywidget.AnyWidget):
-    """The interactive map in a notebook cell, reading a Tessera database with a token.
+    """The interactive map in a notebook cell, reading a Mosaica database with a token.
 
     The page in the browser fetches its data from the database itself, as the token allows. The
     token reaches the page as a message and is never widget state, so saving the notebook does
@@ -184,10 +184,10 @@ class Map(anywidget.AnyWidget):
     `any_of`, `none_of` or two tests on one column, is refused by the page: nothing is applied,
     and `last_error` and a warning say why.
 
-    The map needs the components' bundle, which `pip install 'tesseradb[widget]'` installs; a
+    The map needs the components' bundle, which `pip install 'mosaica[widget]'` installs; a
     `Map` made without it raises `RuntimeError` naming what to install.
 
-        m = tesseradb.Map(viewer_url, token=token, colour_by="venue")
+        m = mosaica.Map(viewer_url, token=token, colour_by="venue")
         m
     """
 
@@ -265,15 +265,15 @@ class Map(anywidget.AnyWidget):
         if token is None:
             raise TypeError(
                 "Map needs a token: the viewer token your deployment issued you, one from "
-                "tesseradb.login(url, ...), or one an operator running locally mints with "
+                "mosaica.login(url, ...), or one an operator running locally mints with "
                 "db.token(terms)."
             )
         bundle = bundle_path()
         if bundle is None:
             raise RuntimeError(
-                "tesseradb's bundle is missing. From PyPI: pip install 'tesseradb[widget]' installs "
+                "mosaica's bundle is missing. From PyPI: pip install 'mosaica[widget]' installs "
                 "it. From the checkout: pip install -e 'clients/py[widget]' builds it with Node, or "
-                "run `npm run bundle -w @tesseradb/components` in clients/ts."
+                "run `npm run bundle -w @mosaica/components` in clients/ts."
             )
         self._token_source: TokenSource = token
         self._token: Optional[Token] = None
@@ -333,7 +333,7 @@ class Map(anywidget.AnyWidget):
         elif kind == "error":
             detail = f"{content.get('what')}: {content.get('detail')}"
             self.last_error = detail
-            warnings.warn(f"tesseradb widget refused {detail}", stacklevel=2)
+            warnings.warn(f"mosaica widget refused {detail}", stacklevel=2)
 
     # ---- validation --------------------------------------------------------------------------
 

@@ -17,12 +17,12 @@
 //!
 //! `render` is not supported on this route yet.
 
-use tessera_lifecycle::wal::{AttributeDeclaration, WalScalar};
-use tessera_lifecycle::{AttributeRequest, ExecError};
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::declaration::{check_attribute, AttributeSpec};
-use tessera_store::manifest::{DeclaredScalar, Manifest, ScopedScalar};
-use tessera_types::layer::LayerScope;
+use mosaica_lifecycle::wal::{AttributeDeclaration, WalScalar};
+use mosaica_lifecycle::{AttributeRequest, ExecError};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::declaration::{check_attribute, AttributeSpec};
+use mosaica_store::manifest::{DeclaredScalar, Manifest, ScopedScalar};
+use mosaica_types::layer::LayerScope;
 
 /// A declaration compiled to the manifest entry it becomes: one of the flat bundle-wide columns,
 /// or one group's column family (`views.md` §5).
@@ -268,7 +268,7 @@ fn compile(request: &AttributeRequest, manifest: &Manifest) -> Result<CompiledAt
             .iter()
             .filter(|d| d.unique && d.name != name)
             .count();
-        tessera_store::declaration::check_unique_fields(others + 1)?;
+        mosaica_store::declaration::check_unique_fields(others + 1)?;
     }
     let Some(group) = group else {
         return Ok(CompiledAttribute::Entity(DeclaredScalar {

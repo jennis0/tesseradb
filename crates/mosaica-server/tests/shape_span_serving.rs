@@ -23,9 +23,9 @@ use std::path::Path;
 use common::*;
 use serde_json::json;
 use tempfile::TempDir;
-use tessera_build::config::Fields;
-use tessera_build::{build, ViewArgs};
-use tessera_spatial::{Bounds, Projection};
+use mosaica_build::config::Fields;
+use mosaica_build::{build, ViewArgs};
+use mosaica_spatial::{Bounds, Projection};
 
 /// Points in longitude and latitude, inside the boundary published below.
 const PLACES: &[(f64, f64)] = &[

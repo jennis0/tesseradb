@@ -1,6 +1,6 @@
 import {LitElement, css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {formatCount, formatMasked, type Count, type Masked} from '@tesseradb/client';
+import {formatCount, formatMasked, type Count, type Masked} from '@mosaica/client';
 import {attachContextRoot, defineOnce} from './define.js';
 import {tokens} from './tokens.js';
 
@@ -13,14 +13,14 @@ import {tokens} from './tokens.js';
  * This element takes no store; the host or another element sets its properties.
  *
  * @summary A sample count or a masked count, formatted.
- * @tagname tessera-count
+ * @tagname mosaica-count
  * @category Elements
  * @csspart count - The figure. Carries `data-kind` (`sample`, `scalar` or `none`), `data-exact`
  *   (`true` or `false`), `data-empty` (`true` when nothing was rendered) and, under
  *   `figure="shown"`, `data-total` with the total.
  * @csspart label - The `label` text after the figure, rendered only when the figure is.
  */
-export class TesseraCount extends LitElement {
+export class MosaicaCount extends LitElement {
   static override styles = [
     tokens,
     css`
@@ -28,12 +28,12 @@ export class TesseraCount extends LitElement {
         display: inline;
       }
       [part='count'] {
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
         font-variant-numeric: tabular-nums;
         font-weight: 500;
       }
       [part='label'] {
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         margin-left: 0.4em;
       }
     `
@@ -74,10 +74,10 @@ export class TesseraCount extends LitElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-count', TesseraCount);
+defineOnce('mosaica-count', MosaicaCount);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-count': TesseraCount;
+    'mosaica-count': MosaicaCount;
   }
 }

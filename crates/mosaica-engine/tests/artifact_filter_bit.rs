@@ -27,18 +27,18 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
-use tessera_corpus::materialise::PARTITION_LAYER;
-use tessera_corpus::{Corpus, Grant, BAY_VALUES};
-use tessera_engine::filter::{FilterExpr, FilterOperand};
-use tessera_engine::Engine;
-use tessera_types::TesseraId;
-use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
-use tessera_lifecycle::IncomingArtifact;
-use tessera_types::layer::{
+use mosaica_corpus::materialise::PARTITION_LAYER;
+use mosaica_corpus::{Corpus, Grant, BAY_VALUES};
+use mosaica_engine::filter::{FilterExpr, FilterOperand};
+use mosaica_engine::Engine;
+use mosaica_types::TesseraId;
+use mosaica_lifecycle::membership::{IncomingAttachment, IncomingContent};
+use mosaica_lifecycle::IncomingArtifact;
+use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent,
 };
-use tessera_types::{AttrLocalId, EntityId};
+use mosaica_types::{AttrLocalId, EntityId};
 
 const N: u64 = 3_000;
 const SEED: u64 = 0x5EED;
@@ -130,8 +130,8 @@ fn lit(
 ) -> BTreeMap<String, (u64, Option<bool>, Option<bool>)> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
-    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
-    request.layers = tessera_engine::LayerSelection::Named(&names);
+    let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", zoom, bbox, usize::MAX);
+    request.layers = mosaica_engine::LayerSelection::Named(&names);
     request.filter = filter;
     request.highlight = highlight;
     let out = engine
@@ -347,7 +347,7 @@ fn clusters() -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -372,7 +372,7 @@ fn labels() -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -385,7 +385,7 @@ fn labels() -> LayerDeclaration {
                 ty: "text".into(),
                 // `inherited`: the label's text serves on the container's own gate, so this case
                 // is about the bit rather than about containment — which has its own file.
-                require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited,
+                require_member_visibility: mosaica_types::layer::SuppliedRequirement::Inherited,
             }],
         },
         depends_on: vec![CLUSTERS.into()],
@@ -469,8 +469,8 @@ fn a_label_carries_its_targets_bits() {
      -> BTreeMap<(String, String), Row> {
         let session = fx.engine.authorise(&grant_credential(grant)).unwrap();
         let names = [CLUSTERS, LABELS];
-        let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
-        request.layers = tessera_engine::LayerSelection::Named(&names);
+        let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
+        request.layers = mosaica_engine::LayerSelection::Named(&names);
         request.filter = filter;
         request.highlight = highlight;
         let out = fx.engine
@@ -569,7 +569,7 @@ fn described() -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: mosaica_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -580,7 +580,7 @@ fn described() -> LayerDeclaration {
             supplied: vec![SuppliedContent {
                 name: "topic".into(),
                 ty: "text".into(),
-                require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+                require_member_visibility: mosaica_types::layer::SuppliedRequirement::All,
             }],
         },
         depends_on: Vec::new(),
@@ -599,8 +599,8 @@ fn described_served(
 ) -> BTreeMap<String, (u64, Vec<String>)> {
     let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [DESCRIBED];
-    let mut request = tessera_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
-    request.layers = tessera_engine::LayerSelection::Named(&names);
+    let mut request = mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX);
+    request.layers = mosaica_engine::LayerSelection::Named(&names);
     request.filter = filter;
     let out = engine
         .viewport_artifacts(&session, request)

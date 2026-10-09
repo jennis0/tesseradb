@@ -19,7 +19,7 @@
 # machine, and the campaign's timing-sensitive arms are the ones that would notice:
 #
 #   cargo build --release --workspace --bins
-#   cargo build --release -p tessera-bench
+#   cargo build --release -p mosaica-bench
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -27,7 +27,7 @@ LABEL="${1:?usage: run-tier.sh <label> <n> [step ...]}"
 N="${2:?usage: run-tier.sh <label> <n> [step ...]}"
 shift 2
 
-WORK="${CAMPAIGN_WORK:-/home/user/.cache/tessera-campaign}/t$LABEL"
+WORK="${CAMPAIGN_WORK:-/home/user/.cache/mosaica-campaign}/t$LABEL"
 LOGS="$WORK/logs"
 ITERATIONS="${ITERATIONS:-9}"
 LOAD_SECONDS="${LOAD_SECONDS:-45}"
@@ -50,7 +50,7 @@ step () {
   tail -6 "$LOGS/$name.log"
 }
 
-# **Above about 10^8 points, pass a budget.** `tessera build`'s automatic derivation takes 80% of
+# **Above about 10^8 points, pass a budget.** `mosaica build`'s automatic derivation takes 80% of
 # MemAvailable and models the batch loop's own structures; at 2.5x10^8 over this declaration the
 # real peak ran past it and the build was OOM-killed at 47.3 GB after 24 minutes.
 BUDGET_ARG=""

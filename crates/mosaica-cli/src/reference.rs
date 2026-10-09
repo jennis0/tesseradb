@@ -5,23 +5,23 @@
 //! command or its help text, run:
 //!
 //! ```text
-//! TESSERA_WRITE_CLI_REFERENCE=1 cargo test -p tessera-cli cli_reference
+//! MOSAICA_WRITE_CLI_REFERENCE=1 cargo test -p mosaica-cli cli_reference
 //! ```
 
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use clap::{Arg, ArgAction, Command, CommandFactory};
-use tessera_docgen::{cell, escape_angles, outside_code};
+use mosaica_docgen::{cell, escape_angles, outside_code};
 
-const REGENERATE: &str = "TESSERA_WRITE_CLI_REFERENCE=1 cargo test -p tessera-cli cli_reference";
+const REGENERATE: &str = "MOSAICA_WRITE_CLI_REFERENCE=1 cargo test -p mosaica-cli cli_reference";
 
 const INTRO: &str = "\
-`tessera <subcommand> --help` prints the text on this page. `tessera --version` prints the commit \
-the binary was built from. It prints `unknown` when `TESSERA_BUILD_COMMIT` was unset at build \
+`mosaica <subcommand> --help` prints the text on this page. `mosaica --version` prints the commit \
+the binary was built from. It prints `unknown` when `MOSAICA_BUILD_COMMIT` was unset at build \
 time and git could not name the commit, as in a build outside a git checkout.
 
-`build`, `check`, `health` and `serve` read the deployment file `tessera.toml` from the working \
+`build`, `check`, `health` and `serve` read the deployment file `mosaica.toml` from the working \
 directory, or from the nearest directory above it that has one. `--deployment` names a different \
 file.
 ";
@@ -37,7 +37,7 @@ pub(crate) fn render() -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "<!-- Generated from crates/tessera-cli/src/main.rs. Edit the help text there, then run: \
+        "<!-- Generated from crates/mosaica-cli/src/main.rs. Edit the help text there, then run: \
          {REGENERATE} -->\n"
     );
     out.push_str("# CLI\n\n");
@@ -51,7 +51,7 @@ pub(crate) fn render() -> String {
         let sub = cli
             .find_subcommand_mut(&name)
             .expect("a name read from this command's own subcommands");
-        section(&mut out, sub, "tessera");
+        section(&mut out, sub, "mosaica");
     }
     out
 }
@@ -156,10 +156,10 @@ fn sentence(text: &str) -> String {
 
 #[test]
 fn cli_reference_matches_the_commands() {
-    tessera_docgen::check_page(
+    mosaica_docgen::check_page(
         &page_path(),
         &render(),
-        "TESSERA_WRITE_CLI_REFERENCE",
+        "MOSAICA_WRITE_CLI_REFERENCE",
         REGENERATE,
     );
 }

@@ -1,8 +1,8 @@
 import {describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
-import {SessionArtifactTable, attachedTextOf, servedLineage} from '@tesseradb/client/internal';
+import {type Artifact, type ArtifactsProjection, type Meta} from '@mosaica/client';
+import {SessionArtifactTable, attachedTextOf, servedLineage} from '@mosaica/client/internal';
 import {LayerManager, OrthographicView, type Layer} from '@deck.gl/core';
-import {LABEL_CANDIDATE_CEILING, TesseraLayer, frontier, labelBudget, labelCandidates, type TesseraLayerInternalProps} from '../src/layer.js';
+import {LABEL_CANDIDATE_CEILING, MosaicaLayer, frontier, labelBudget, labelCandidates, type MosaicaLayerInternalProps} from '../src/layer.js';
 import {fakeDevice} from './fake-device.js';
 import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, placeLabels} from '../src/labels.js';
 import medcpt from './fixtures/medcpt-kmeans-labels.json' with {type: 'json'};
@@ -301,10 +301,10 @@ describe('labels at rest and under the pointer', () => {
     const manager = new LayerManager(fakeDevice(), {});
     manager.activateViewport(new OrthographicView({flipY: true}).makeViewport({width: 800, height: 600, viewState: {target: [256, 256, 0], zoom: 0}})!);
     const p = projection([artifact(1n, 100n), artifact(2n, 90n, ['graph neural networks']), topic(9n, 1n, 'decoders, thresholds')]);
-    manager.setLayers([new TesseraLayer({id: 'tessera', depth: 2, status: 'shown', artifacts: p, meta: META, hoveredArtifact: hovered} as TesseraLayerInternalProps)]);
-    const layer = manager.getLayers().find((l) => l.id === 'tessera') as TesseraLayer;
+    manager.setLayers([new MosaicaLayer({id: 'mosaica', depth: 2, status: 'shown', artifacts: p, meta: META, hoveredArtifact: hovered} as MosaicaLayerInternalProps)]);
+    const layer = manager.getLayers().find((l) => l.id === 'mosaica') as MosaicaLayer;
     const rows = (id: string) => {
-      const sub = (layer.getSubLayers() as Layer[]).find((l) => l.id === `tessera-${id}`);
+      const sub = (layer.getSubLayers() as Layer[]).find((l) => l.id === `mosaica-${id}`);
       return ((sub?.props.data as {text: string; id: bigint}[] | undefined) ?? []).map((d) => [String(d.id), d.text]);
     };
     return {names: rows('labels'), counts: rows('label-counts')};

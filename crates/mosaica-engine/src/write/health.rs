@@ -47,7 +47,7 @@ impl ExecutorPosture {
 
 /// The executor's liveness and its counters, shared between the thread and every reader.
 ///
-/// Lives in `tessera-engine` rather than in `tessera-lifecycle` because it describes **the
+/// Lives in `mosaica-engine` rather than in `mosaica-lifecycle` because it describes **the
 /// thread**, and the thread is this crate's by the plan's Decision 1 — a crate that deliberately
 /// owns no executor should not own the executor's liveness vocabulary.
 #[derive(Debug)]
@@ -171,7 +171,7 @@ pub struct ExecutorHealth {
     /// The last fold's staircase, pass by pass.
     pub(crate) last_fold_passes: Mutex<Vec<crate::compact::PassCost>>,
     /// The last fold's degradation report. The durable copy is the file in `reports/`.
-    pub(crate) last_fold_report: Mutex<Vec<tessera_lifecycle::membership::Degradation>>,
+    pub(crate) last_fold_report: Mutex<Vec<mosaica_lifecycle::membership::Degradation>>,
     /// A flush has finished on the pool and is holding at the test hook. Always `false` outside
     /// tests.
     pub(crate) flush_holding: AtomicBool,
@@ -784,7 +784,7 @@ impl ExecutorHealth {
     }
 
     /// The last fold's degradation report — see [`Self::last_fold_report`].
-    pub fn last_fold_report(&self) -> Vec<tessera_lifecycle::membership::Degradation> {
+    pub fn last_fold_report(&self) -> Vec<mosaica_lifecycle::membership::Degradation> {
         lock_recover(&self.last_fold_report).clone()
     }
 
@@ -1188,7 +1188,7 @@ pub fn estimate_buffer_retry_after_s(stats: &ExecutorStats, buffered: u64) -> u6
 
 /// The commit window's row bound for an engine whose embedder sets none.
 ///
-/// The same figure `tessera-server`'s `ingest.commit_window_max_items` defaults to, restated here
+/// The same figure `mosaica-server`'s `ingest.commit_window_max_items` defaults to, restated here
 /// because this crate cannot see that crate's config and **must not** default to "unbounded". The
 /// drain that fills a window frees a bounded-queue slot per entry, and a concurrent submitter
 /// refills it immediately, so under sustained load `work.try_recv()` never returns `Err` and a

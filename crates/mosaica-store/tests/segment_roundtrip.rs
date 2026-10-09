@@ -14,17 +14,17 @@ use arrow::record_batch::RecordBatch;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_spatial::split32;
-use tessera_spatial::tiler::{sort_batch, ScalarType, TilerItem};
-use tessera_store::manifest::Manifest;
-use tessera_store::read::ScalarSlice;
-use tessera_store::write::{write_permutation, write_segment};
-use tessera_store::{ColumnsRef, StoreError};
-use tessera_types::{EntityId, TesseraId};
+use mosaica_spatial::split32;
+use mosaica_spatial::tiler::{sort_batch, ScalarType, TilerItem};
+use mosaica_store::manifest::Manifest;
+use mosaica_store::read::ScalarSlice;
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{ColumnsRef, StoreError};
+use mosaica_types::{EntityId, TesseraId};
 
 /// A synthetic `tessera_id`-shaped value for test fixtures: full splitmix64 output over a
 /// seed, so its top 16 bits are a `priority` prefix like any real `tessera_id` (contracts
-/// §2.6), without claiming this is the actual Feistel construction — `tessera-types`'s identity
+/// §2.6), without claiming this is the actual Feistel construction — `mosaica-types`'s identity
 /// tests cover that separately.
 fn synthetic_tessera_id(seed: u64) -> TesseraId {
     let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
@@ -37,7 +37,7 @@ fn synthetic_tessera_id(seed: u64) -> TesseraId {
 /// Quantise a coordinate against the unit extent the way the importer does — the tiler takes
 /// fixed point, never a coordinate.
 fn q(v: f64) -> u32 {
-    tessera_spatial::fixed32(v, 0.0, 1.0)
+    mosaica_spatial::fixed32(v, 0.0, 1.0)
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn tiler_and_segment_writers_round_trip() {
         .read_to_end(&mut perm_bytes)
         .expect("read permutation.bin");
 
-    assert_eq!(&perm_bytes[0..4], b"TSPM");
+    assert_eq!(&perm_bytes[0..4], b"MSPM");
     let version = u16::from_le_bytes(perm_bytes[4..6].try_into().unwrap());
     let page_shift = u16::from_le_bytes(perm_bytes[6..8].try_into().unwrap());
     let file_bound = u64::from_le_bytes(perm_bytes[8..16].try_into().unwrap());
@@ -162,7 +162,7 @@ fn tiler_and_segment_writers_round_trip() {
 }
 
 /// Reading `permutation.bin`'s bytes without going through `Permutation`, for the tests whose
-/// subject is the layout itself (contracts §2.6; `tessera_store::permutation` for the diagram).
+/// subject is the layout itself (contracts §2.6; `mosaica_store::permutation` for the diagram).
 ///
 /// Only the single-page case, which is every fixture here: a bound under 2¹⁶ gives one page, so
 /// its slot is 0 whenever the page is present at all.
@@ -310,7 +310,7 @@ fn write_permutation_rejects_duplicate_entity_id() {
 
 #[test]
 fn write_segment_scalars_round_trip() {
-    use tessera_spatial::tiler::ScalarValue;
+    use mosaica_spatial::tiler::ScalarValue;
 
     let mut items = vec![
         TilerItem {
@@ -517,7 +517,7 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
 /// or move the header's field order, and these bytes stop matching.
 #[test]
 fn a_scattered_permutation_is_byte_identical_to_a_sequential_one() {
-    use tessera_store::write::PermutationWriter;
+    use mosaica_store::write::PermutationWriter;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let bound = 64u64;
@@ -560,8 +560,8 @@ fn a_scattered_permutation_is_byte_identical_to_a_sequential_one() {
 /// below resolves to row 0.
 #[test]
 fn an_entity_with_no_row_is_absent_rather_than_row_zero() {
-    use tessera_store::write::PermutationWriter;
-    use tessera_store::Permutation;
+    use mosaica_store::write::PermutationWriter;
+    use mosaica_store::Permutation;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("permutation.bin");
@@ -588,7 +588,7 @@ fn an_entity_with_no_row_is_absent_rather_than_row_zero() {
 /// silently overwriting a slot it already filled.
 #[test]
 fn a_scattered_duplicate_entity_is_refused() {
-    use tessera_store::write::PermutationWriter;
+    use mosaica_store::write::PermutationWriter;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("permutation.bin");
@@ -618,7 +618,7 @@ fn a_scattered_duplicate_entity_is_refused() {
 /// byte would lose up to seven rows' values while `row_count` still matched.
 #[test]
 fn every_declared_width_round_trips_including_a_packed_bool() {
-    use tessera_spatial::tiler::ScalarValue;
+    use mosaica_spatial::tiler::ScalarValue;
 
     let schema: Vec<(String, ScalarType)> = vec![
         ("flag".into(), ScalarType::Bool),
@@ -724,7 +724,7 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
 }
 
 /// **The in-place route writes the bytes the segment writer writes.** This is the assertion
-/// `tessera_store::columns` exists under: the build lays `columns.arrow` out before its first row
+/// `mosaica_store::columns` exists under: the build lays `columns.arrow` out before its first row
 /// and fills it from Morton buckets, and a file that differed from the one [`SegmentWriter`]
 /// produces for the same rows would be a format two writers disagree about.
 ///
@@ -732,9 +732,9 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
 /// array of itself; over the two-column case a schema-less build writes; and over no rows at all.
 #[test]
 fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
-    use tessera_spatial::tiler::{ScalarType, ScalarValue};
-    use tessera_store::columns::{ColumnsFile, ColumnsPlan};
-    use tessera_store::write::{SegmentRow, SegmentWriter};
+    use mosaica_spatial::tiler::{ScalarType, ScalarValue};
+    use mosaica_store::columns::{ColumnsFile, ColumnsPlan};
+    use mosaica_store::write::{SegmentRow, SegmentWriter};
 
     let widths = [
         ("flag", ScalarType::Bool),
@@ -798,10 +798,10 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
         for rows in [0usize, 1, 7, 1000, 600_000] {
             // Ascending, so the rows arrive in the `(morton, tessera_id)` order the writer takes
             // with every row in one cell.
-            let mut tessera: Vec<u64> = (0..rows as u64)
+            let mut mosaica: Vec<u64> = (0..rows as u64)
                 .map(|i| synthetic_tessera_id(i).raw())
                 .collect();
-            tessera.sort_unstable();
+            mosaica.sort_unstable();
             let residual: Vec<u32> = (0..rows)
                 .map(|i| (i as u32).wrapping_mul(2_654_435_761))
                 .collect();
@@ -823,11 +823,11 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
                     columns.iter().map(|column| column[row].clone()).collect();
                 writer
                     .append(SegmentRow {
-                        tessera_id: TesseraId::new(tessera[row]),
+                        tessera_id: TesseraId::new(mosaica[row]),
                         morton: 0,
                         residual: residual[row],
                         scalars: &values,
-                        indexed: &tessera_store::write::no_indexed,
+                        indexed: &mosaica_store::write::no_indexed,
                     })
                     .expect("append");
             }
@@ -841,7 +841,7 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
             // Filled in pieces and out of column order, which is what the build does: the two
             // fixed columns arrive a Morton bucket at a time and each render column arrives
             // later, a row bucket at a time.
-            for (row, id) in tessera.iter().enumerate() {
+            for (row, id) in mosaica.iter().enumerate() {
                 file.put(0, row as u64 * 8, &id.to_le_bytes()).expect("put");
             }
             for (row, value) in residual.iter().enumerate() {

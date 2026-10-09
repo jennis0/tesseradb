@@ -7,7 +7,7 @@
 //! attributing the flush's cost at scale would be told the residue is nothing.
 //!
 //! Runs only under `bench-timing`: without it every lap is zero by construction, and the
-//! `tessera-engine` self dev-dependency turns the feature on for `cargo test -p tessera-engine`.
+//! `mosaica-engine` self dev-dependency turns the feature on for `cargo test -p mosaica-engine`.
 
 #![cfg(feature = "bench-timing")]
 
@@ -16,13 +16,13 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, FlushStage};
+use mosaica_engine::{Engine, EngineConfig, FlushStage};
 
 const WAIT: Duration = Duration::from_secs(30);
 
 fn ingest_rows(engine: &Engine, batch: &str, n: usize) {
-    let rows: Vec<tessera_lifecycle::UnallocatedRow> = (0..n)
-        .map(|i| tessera_lifecycle::UnallocatedRow {
+    let rows: Vec<mosaica_lifecycle::UnallocatedRow> = (0..n)
+        .map(|i| mosaica_lifecycle::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],

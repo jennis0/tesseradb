@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_filter::{RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
+use mosaica_filter::{RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
 
 use super::open::{open_scoped_column, runtime_layers};
 use super::{check_dictionary_pairing, record_open_error, FilterColumns, Layer, TextLayer};
@@ -28,7 +28,7 @@ pub struct TextExtentPaths {
 impl TextExtentPaths {
     /// `extent`'s files resolved against the prefix directory that holds them, under the column
     /// name a leaf resolves to.
-    pub fn of(prefix_dir: &Path, extent: &tessera_store::manifest::TextExtent) -> TextExtentPaths {
+    pub fn of(prefix_dir: &Path, extent: &mosaica_store::manifest::TextExtent) -> TextExtentPaths {
         TextExtentPaths {
             column: crate::filter::extent_column_name(&extent.column, extent.view.as_deref()),
             dict_rel: extent.dict.clone(),
@@ -75,7 +75,7 @@ pub struct CoalescedTextWindow {
 /// IO after the manifest edit.
 #[derive(Debug, Clone)]
 pub struct OpenedExtent {
-    pub extent: tessera_store::manifest::AttrExtent,
+    pub extent: mosaica_store::manifest::AttrExtent,
     pub values: Arc<ValueColumn>,
     pub dict: Option<Arc<SortedDict>>,
 }
@@ -107,8 +107,8 @@ impl FilterColumns {
     /// taken again from the declaration, and its index route added or removed.
     pub(crate) fn with_unique(
         &self,
-        scalar: &tessera_store::manifest::DeclaredScalar,
-        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+        scalar: &mosaica_store::manifest::DeclaredScalar,
+        vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     ) -> FilterColumns {
         let mut next = self.successor();
         match Placement::of(scalar, vocabularies) {
@@ -158,9 +158,9 @@ impl FilterColumns {
     /// empty stack the next flush's extent composes onto, and the placement its flags afford.
     pub(crate) fn with_runtime_column(
         &self,
-        scalar: &tessera_store::manifest::DeclaredScalar,
+        scalar: &mosaica_store::manifest::DeclaredScalar,
         declared_index: usize,
-        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+        vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
     ) -> Result<FilterColumns, ComposeError> {
         let mut next = self.successor();
         if let Some(placement) = Placement::of(scalar, vocabularies) {
@@ -182,9 +182,9 @@ impl FilterColumns {
     pub fn with_scoped_columns(
         &self,
         partition_dir: &Path,
-        columns: &[(String, String, tessera_types::view::ViewIncarnation)],
-        scoped: &[tessera_store::manifest::ScopedScalar],
-        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+        columns: &[(String, String, mosaica_types::view::ViewIncarnation)],
+        scoped: &[mosaica_store::manifest::ScopedScalar],
+        vocabularies: &[mosaica_store::manifest::ManifestVocabulary],
         mmap: bool,
     ) -> Result<FilterColumns, ComposeError> {
         let mut next = self.successor();
@@ -239,7 +239,7 @@ impl FilterColumns {
         &self,
         extents: &[OpenedExtent],
         records: &[RecordExtentPaths],
-        entity_terms: &[tessera_store::EntityTermsExtentPaths],
+        entity_terms: &[mosaica_store::EntityTermsExtentPaths],
         texts: &[TextExtentPaths],
     ) -> Result<FilterColumns, ComposeError> {
         // Composes here so this process serves from the stack it holds; uncomposed, the entities
@@ -311,7 +311,7 @@ impl FilterColumns {
         &self,
         windows: &[CoalescedWindow],
         texts: &[CoalescedTextWindow],
-        entity_terms: Option<Arc<tessera_store::EntityTermsStack>>,
+        entity_terms: Option<Arc<mosaica_store::EntityTermsStack>>,
         records: Option<Arc<RecordStack>>,
     ) -> Result<FilterColumns, ComposeError> {
         let entity_terms = match entity_terms {
@@ -449,7 +449,7 @@ mod tests {
     use super::*;
     use crate::filter::test_support::*;
     use crate::filter::{Family, FilterOperand};
-    use tessera_filter::RecordValue;
+    use mosaica_filter::RecordValue;
 
     // -------------------------------------------------------------------------------------
     // The layer pairing, and what crosses the boundary

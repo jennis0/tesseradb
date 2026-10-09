@@ -31,9 +31,9 @@
  },
  "binary": {
   "sha256": "f5ac32f380d1ee395614a7f10fec84445dc3beaa1534ba008c2d8f4d33acdef9",
-  "version": "tessera be547754033ae5122045b1dcaa8c072e3b0ff2a8"
+  "version": "mosaica be547754033ae5122045b1dcaa8c072e3b0ff2a8"
  },
- "bundle": "/home/joe/code/tessera/data/ladder/gbif/bundle",
+ "bundle": "/home/joe/code/mosaica/data/ladder/gbif/bundle",
  "manifest_digest_on_disk": "6ea575bd9077f818361003a90f3f959dba57e24d191237d1913055cb16c83dad",
  "box": {
   "cpu": "AMD Ryzen 9 5900X 12-Core Processor",

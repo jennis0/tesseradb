@@ -7,8 +7,8 @@ use std::path::Path;
 use arrow::array::{Array, ArrayRef};
 use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use tessera_spatial::tiler::ScalarType;
-use tessera_store::unique::{key_of_integer, UniqueKey};
+use mosaica_spatial::tiler::ScalarType;
+use mosaica_store::unique::{key_of_integer, UniqueKey};
 
 use super::{CarriedField, LimitRead, TESSERA_ID_COLUMN};
 use crate::config::ViewSelector;

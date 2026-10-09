@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {TesseraClient, TesseraError} from '../src/client.js';
+import {MosaicaClient, MosaicaError} from '../src/client.js';
 import type {TileSink} from '../src/client.js';
 import {FRAME_TRAILER, FrameReader} from '../src/frame.js';
 import {inlineDecoder, type Decoder} from '../src/decoder.js';
@@ -33,7 +33,7 @@ function stubFetch(answer: (url: string) => Response) {
 }
 
 const client = () =>
-  new TesseraClient({
+  new MosaicaClient({
     viewerUrl: 'http://viewer',
     sessionUrl: 'http://session',
     decoder: empty
@@ -122,7 +122,7 @@ describe('the artifacts viewport request', () => {
 describe('the bulk read by identifier', () => {
   it('sends the ids as decimal strings, so an id past 2^53 survives', async () => {
     const seen = stubFetch(() => new Response(JSON.stringify({error: 'contract', detail: 'stop here'}), {status: 422}));
-    await expect(client().artifacts('tok', {view: 's0', layer: 'l', fields: ['level'], ids: [2n ** 60n + 1n, 5n]})).rejects.toThrow(TesseraError);
+    await expect(client().artifacts('tok', {view: 's0', layer: 'l', fields: ['level'], ids: [2n ** 60n + 1n, 5n]})).rejects.toThrow(MosaicaError);
     expect(seen[0]!.url).toBe('http://viewer/v1/artifacts');
     expect(seen[0]!.body).toMatchObject({view: 's0', layer: 'l', fields: ['level'], ids: [String(2n ** 60n + 1n), '5']});
   });
@@ -272,8 +272,8 @@ describe('/v1/meta', () => {
  */
 describe('the artifacts viewport, read from a captured response', () => {
   const read = async (name: string, onTile?: TileSink) => {
-    stubFetch(() => new Response(fixture(name), {status: 200, headers: {'x-tessera-identity-key': 'ik', etag: '"ck"'}}));
-    return new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()}).viewportArtifacts('tok', {view: 's0', zoom: 2, bbox: [0, 0, 1, 1], perTile: 50}, {onTile});
+    stubFetch(() => new Response(fixture(name), {status: 200, headers: {'x-mosaica-identity-key': 'ik', etag: '"ck"'}}));
+    return new MosaicaClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()}).viewportArtifacts('tok', {view: 's0', zoom: 2, bbox: [0, 0, 1, 1], perTile: 50}, {onTile});
   };
 
   it('hands over one frame per tile in wire order, with the response’s keys, and returns the same frames', async () => {
@@ -348,7 +348,7 @@ describe('the artifacts viewport, read from a captured response', () => {
     stubFetch(() => new Response(cut, {status: 200}));
     const handed: unknown[] = [];
     await rejectsAsRefused(
-      new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()}).viewportArtifacts(
+      new MosaicaClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()}).viewportArtifacts(
         'tok',
         {view: 's0', zoom: 2, bbox: [0, 0, 1, 1], perTile: 50},
         {onTile: (f) => void handed.push(f)}
@@ -413,6 +413,6 @@ describe('the drill-down', () => {
 
     // Every withheld case arrives alike: an id naming nothing, one naming a point, one gated, one
     // suppressed, one below its layer's criterion.
-    await expect(client().artifact('tok', 1n, {view: 's0'})).rejects.toThrow(TesseraError);
+    await expect(client().artifact('tok', 1n, {view: 's0'})).rejects.toThrow(MosaicaError);
   });
 });

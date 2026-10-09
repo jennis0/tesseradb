@@ -1,6 +1,6 @@
 """The supervisor: the deployment file, the announce line, and stopping the child by its pid (§7).
 
-The announce line is read from a fake child here, a Python script printing what `tessera serve`
+The announce line is read from a fake child here, a Python script printing what `mosaica serve`
 prints, so the parser is covered without a bundle and without the binary.
 """
 
@@ -12,7 +12,7 @@ import textwrap
 
 import pytest
 
-from tesseradb import _instance
+from mosaica import _instance
 
 ANNOUNCE = (
     '{"event": "listening", "viewer": "127.0.0.1:38001", "session": "127.0.0.1:38002", '
@@ -53,7 +53,7 @@ def test_the_announce_line_is_read_past_the_childs_own_logging():
 def test_a_unix_control_plane_is_carried_through_as_written():
     line = (
         '{"event":"listening","viewer":"127.0.0.1:1","session":"127.0.0.1:2",'
-        '"control":"unix:/run/tessera/control.sock"}'
+        '"control":"unix:/run/mosaica/control.sock"}'
     )
     process = child(f"""
         import sys
@@ -61,7 +61,7 @@ def test_a_unix_control_plane_is_carried_through_as_written():
         """)
     try:
         assert _instance.read_announce(process.stdout, 10, lambda: "").control == (
-            "unix:/run/tessera/control.sock"
+            "unix:/run/mosaica/control.sock"
         )
     finally:
         _instance.stop(process)
@@ -125,30 +125,30 @@ def test_the_deployment_file_names_three_loopback_planes_at_port_zero(tmp_path):
     # The widget's page is served from a loopback address, and its origin cannot be enumerated.
     assert "cors_loopback = true" in text
     assert "cors_origins" not in text
-    assert (tmp_path / ".tessera" / "cache").is_dir()
+    assert (tmp_path / ".mosaica" / "cache").is_dir()
 
 
 def test_the_secrets_are_generated_once_and_owner_only(tmp_path):
     _instance.secrets_for(tmp_path)
     written = {
-        name: (tmp_path / ".tessera" / name).read_text() for name in ("operator.cred",)
+        name: (tmp_path / ".mosaica" / name).read_text() for name in ("operator.cred",)
     }
     for name in written:
-        assert oct((tmp_path / ".tessera" / name).stat().st_mode)[-3:] == "600"
+        assert oct((tmp_path / ".mosaica" / name).stat().st_mode)[-3:] == "600"
     # The directory too, and each file is created owner-only rather than narrowed afterwards.
-    assert oct((tmp_path / ".tessera").stat().st_mode)[-3:] == "700"
+    assert oct((tmp_path / ".mosaica").stat().st_mode)[-3:] == "700"
     _instance.secrets_for(tmp_path)
     assert written == {
-        name: (tmp_path / ".tessera" / name).read_text() for name in written
+        name: (tmp_path / ".mosaica" / name).read_text() for name in written
     }
 
 
-def test_the_binary_is_found_at_tessera_bin(tmp_path, monkeypatch):
-    binary = tmp_path / "tessera"
+def test_the_binary_is_found_at_mosaica_bin(tmp_path, monkeypatch):
+    binary = tmp_path / "mosaica"
     binary.write_text("")
-    monkeypatch.setenv("TESSERA_BIN", str(binary))
-    assert _instance.find_binary() == (str(binary), "TESSERA_BIN")
-    monkeypatch.setenv("TESSERA_BIN", str(tmp_path / "absent"))
+    monkeypatch.setenv("MOSAICA_BIN", str(binary))
+    assert _instance.find_binary() == (str(binary), "MOSAICA_BIN")
+    monkeypatch.setenv("MOSAICA_BIN", str(tmp_path / "absent"))
     with pytest.raises(Exception):
         _instance.find_binary()
 
@@ -157,7 +157,7 @@ def test_the_binary_is_found_at_tessera_bin(tmp_path, monkeypatch):
 LEFT_OPEN = """
     import json, sys
     import pyarrow as pa
-    import tesseradb as td
+    import mosaica as td
 
     where = json.loads(sys.argv[1])
     db = td.create(where)
@@ -195,10 +195,10 @@ def test_a_temporary_database_is_removed_at_interpreter_exit(tmp_path):
     left = left_open(None, str(saved))
     assert not os.path.exists(left["path"])
     # The copy it was saved to, which a second database opened and served, is the user's.
-    assert (saved / "tessera.toml").exists()
+    assert (saved / "mosaica.toml").exists()
 
 
 def test_a_database_at_a_path_the_user_named_is_kept_at_interpreter_exit(tmp_path):
     left = left_open(str(tmp_path / "db"))
-    assert (tmp_path / "db" / "tessera.toml").exists()
+    assert (tmp_path / "db" / "mosaica.toml").exists()
     assert left["path"] == str(tmp_path / "db")

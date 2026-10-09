@@ -68,7 +68,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_types::TesseraId;
+use mosaica_types::TesseraId;
 
 use crate::artifacts::ArtifactRows;
 use crate::cut::Lineage;
@@ -208,7 +208,7 @@ fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Opti
 mod tests {
     use super::*;
     use crate::row_column::RowColumn;
-    use tessera_types::layer::ServingLayout;
+    use mosaica_types::layer::ServingLayout;
 
     /// Served artifacts with their response-local rung: the longest chain to each through the
     /// served set alone, which is what the serving path computes over the response's links.

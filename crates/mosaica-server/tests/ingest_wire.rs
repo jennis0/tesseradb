@@ -23,8 +23,8 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{Engine, EngineConfig};
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{Engine, EngineConfig};
 
 /// Whether a refusal's detail names the row index and the column the caller sent.
 fn names_cell(detail: &str, row: usize, column: &str) -> bool {
@@ -106,16 +106,16 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
 fn build_over(
     dir: &Path,
     points: std::path::PathBuf,
-) -> Result<std::path::PathBuf, tessera_build::BuildError> {
+) -> Result<std::path::PathBuf, mosaica_build::BuildError> {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, N);
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, format!("{SCHEMA}{ID_ATTRIBUTE}")).unwrap();
-    let config = tessera_build::config::Config::parse(&schema_path, &Default::default())
+    let config = mosaica_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(
+        attribute_sources: mosaica_build::config::AttributeSource::over(
             points.clone(),
             &config.schema,
         ),
@@ -310,7 +310,7 @@ async fn ingest(
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id);
+        .header("x-mosaica-batch-id", batch_id);
     if let Some(content_type) = content_type {
         request = request.header("content-type", content_type);
     }
@@ -1235,7 +1235,7 @@ async fn post_rows(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, 
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
+        .header("x-mosaica-batch-id", batch_id)
         .header("content-type", ARROW)
         .body(body)
         .send()

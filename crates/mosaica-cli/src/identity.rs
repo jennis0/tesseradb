@@ -4,8 +4,8 @@
 //!
 //! Secrets are never arguments, which other users of the machine can read: a password, an API key
 //! or an access token to log in with is read from stdin, the session token to log out with from
-//! `TESSERA_TOKEN`, the session plane's credential from `TESSERA_API_KEY`, and the control plane's
-//! credential from `TESSERA_CREDENTIAL`.
+//! `MOSAICA_TOKEN`, the session plane's credential from `MOSAICA_API_KEY`, and the control plane's
+//! credential from `MOSAICA_CREDENTIAL`.
 
 use std::io::{BufRead, Read, Write};
 use std::process::ExitCode;
@@ -158,13 +158,13 @@ fn finish(verb: &str, answer: Result<(u16, Vec<u8>), String>) -> ExitCode {
         }
         Ok((status, body)) => {
             eprintln!(
-                "tessera {verb}: the server answered {status}: {}",
+                "mosaica {verb}: the server answered {status}: {}",
                 String::from_utf8_lossy(&body).trim_end()
             );
             ExitCode::FAILURE
         }
         Err(e) => {
-            eprintln!("tessera {verb}: {e}");
+            eprintln!("mosaica {verb}: {e}");
             ExitCode::FAILURE
         }
     }
@@ -235,7 +235,7 @@ pub(crate) fn login(args: LoginArgs) -> ExitCode {
 #[derive(Args)]
 pub(crate) struct LogoutArgs {
     /// The viewer plane's address, such as `http://127.0.0.1:8080`. The session token to end is
-    /// read from `TESSERA_TOKEN`.
+    /// read from `MOSAICA_TOKEN`.
     #[arg(long, value_name = "URL")]
     server: String,
 }
@@ -243,7 +243,7 @@ pub(crate) struct LogoutArgs {
 pub(crate) fn logout(args: LogoutArgs) -> ExitCode {
     let answer = (|| {
         let target = Target::parse(&args.server)?;
-        let token = env_secret("TESSERA_TOKEN", "session token")?;
+        let token = env_secret("MOSAICA_TOKEN", "session token")?;
         send(&target, "POST", "/v1/logout", Some(&token), None)
     })();
     finish("logout", answer)
@@ -251,7 +251,7 @@ pub(crate) fn logout(args: LogoutArgs) -> ExitCode {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCommand {
-    /// Mint a session on the session plane, with the credential in `TESSERA_API_KEY`: an API key
+    /// Mint a session on the session plane, with the credential in `MOSAICA_API_KEY`: an API key
     /// whose principal holds `authorise-as`, or the operator credential.
     ///
     /// A session for a principal carries the target's terms and its `read` and `write`, and never
@@ -266,13 +266,13 @@ pub(crate) enum SessionCommand {
         target: AuthoriseTarget,
     },
     /// End a session by its `token_id` on the session plane, with the credential in
-    /// `TESSERA_API_KEY`: an API key ends a session minted with a key of the same principal, and
+    /// `MOSAICA_API_KEY`: an API key ends a session minted with a key of the same principal, and
     /// the operator credential ends any session.
     Revoke {
         /// The session plane's address, such as `http://127.0.0.1:8081`.
         #[arg(long, value_name = "URL")]
         session: String,
-        /// The `token_id` `tessera session authorise` printed.
+        /// The `token_id` `mosaica session authorise` printed.
         #[arg(long, value_name = "N")]
         token_id: u64,
     },
@@ -329,7 +329,7 @@ pub(crate) struct EndWhich {
     provider: Option<String>,
 }
 
-/// The control plane's address. The credential is read from `TESSERA_CREDENTIAL`: the operator
+/// The control plane's address. The credential is read from `MOSAICA_CREDENTIAL`: the operator
 /// credential, an API key or an OIDC access token.
 #[derive(Args)]
 pub(crate) struct Control {
@@ -341,7 +341,7 @@ pub(crate) struct Control {
 impl Control {
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Vec<u8>), String> {
         let target = Target::parse(&self.control)?;
-        let credential = env_secret("TESSERA_CREDENTIAL", "control-plane credential")?;
+        let credential = env_secret("MOSAICA_CREDENTIAL", "control-plane credential")?;
         send(&target, method, path, Some(&credential), body.as_ref())
     }
 }
@@ -350,7 +350,7 @@ pub(crate) fn session(command: SessionCommand) -> ExitCode {
     let answer = match command {
         SessionCommand::Authorise { session, target } => (|| {
             let at = Target::parse(&session)?;
-            let key = env_secret("TESSERA_API_KEY", "session-plane credential")?;
+            let key = env_secret("MOSAICA_API_KEY", "session-plane credential")?;
             let body = match target {
                 AuthoriseTarget {
                     principal: Some(principal),
@@ -366,7 +366,7 @@ pub(crate) fn session(command: SessionCommand) -> ExitCode {
         })(),
         SessionCommand::Revoke { session, token_id } => (|| {
             let target = Target::parse(&session)?;
-            let key = env_secret("TESSERA_API_KEY", "session-plane credential")?;
+            let key = env_secret("MOSAICA_API_KEY", "session-plane credential")?;
             let body = json!({ "token_id": token_id });
             send(&target, "POST", "/session/revoke", Some(&key), Some(&body))
         })(),
@@ -518,7 +518,7 @@ pub(crate) enum KeyCommand {
     Revoke {
         #[command(flatten)]
         control: Control,
-        /// The key's prefix, as `tessera key list` prints it.
+        /// The key's prefix, as `mosaica key list` prints it.
         prefix: String,
     },
 }
@@ -683,7 +683,7 @@ pub(crate) fn grant(args: GrantArgs, revoke: bool) -> ExitCode {
 
 #[derive(Subcommand)]
 pub(crate) enum ProviderCommand {
-    /// List every OIDC provider, declared through the API or in `tessera.toml`.
+    /// List every OIDC provider, declared through the API or in `mosaica.toml`.
     List {
         #[command(flatten)]
         control: Control,
@@ -715,7 +715,7 @@ pub(crate) enum ProviderCommand {
         #[arg(long = "claim-rule", num_args = 2, value_names = ["CLAIM", "TEMPLATE"])]
         claim_rules: Vec<String>,
         /// A role mapping: a claim path, the exact value, and the local group it gives, such as
-        /// `groups[*] tessera-admins admins`. Repeatable.
+        /// `groups[*] mosaica-admins admins`. Repeatable.
         #[arg(long = "role-mapping", num_args = 3, value_names = ["CLAIM", "VALUE", "GROUP"])]
         role_mappings: Vec<String>,
     },

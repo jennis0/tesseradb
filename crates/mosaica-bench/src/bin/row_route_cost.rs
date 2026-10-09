@@ -44,18 +44,18 @@
 //! Nothing here reports one as measured.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin row_route_cost -- \
-//!     --fixture /tmp/tessera-bench/fixtures/2422486/attrs-subclass \
-//!     [--both /tmp/tessera-bench/fixtures/2422486/attrs-both] [--repeat 5]
+//! cargo run --release -p mosaica-bench --bin row_route_cost -- \
+//!     --fixture /tmp/mosaica-bench/fixtures/2422486/attrs-subclass \
+//!     [--both /tmp/mosaica-bench/fixtures/2422486/attrs-both] [--repeat 5]
 //! ```
 
 use std::path::{Path, PathBuf};
 
-use tessera_engine::filter::{FilterExpr, FilterOperand};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_store::read::open_bundle;
-use tessera_types::AttrLocalId;
+use mosaica_engine::filter::{FilterExpr, FilterOperand};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_store::read::open_bundle;
+use mosaica_types::AttrLocalId;
 
 /// The server's own defaults, so a cell measures a deployment somebody would run.
 const K_MAX_MARKS: usize = 500;
@@ -121,7 +121,7 @@ fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
 
 fn open_engine(root: &Path, threads: usize, tag: &str) -> Result<Engine, Box<dyn std::error::Error>> {
     let tmp = std::env::temp_dir().join(format!(
-        "tessera-row-route-{}-{tag}-{threads}",
+        "mosaica-row-route-{}-{tag}-{threads}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -148,7 +148,7 @@ fn open_engine(root: &Path, threads: usize, tag: &str) -> Result<Engine, Box<dyn
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?)
 }
@@ -211,7 +211,7 @@ struct Cell {
 
 fn measure(
     engine: &Engine,
-    session: &tessera_engine::Session,
+    session: &mosaica_engine::Session,
     view: &str,
     zoom: u8,
     bbox: [f64; 4],

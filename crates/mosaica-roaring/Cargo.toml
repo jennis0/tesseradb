@@ -1,5 +1,5 @@
 [package]
-name = "tessera-roaring"
+name = "mosaica-roaring"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true

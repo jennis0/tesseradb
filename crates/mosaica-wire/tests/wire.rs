@@ -1,4 +1,4 @@
-//! The frames `tessera-wire` writes, read back the way a client reads them.
+//! The frames `mosaica-wire` writes, read back the way a client reads them.
 
 use arrow::array::{
     Array, BooleanArray, DictionaryArray, StringArray, UInt32Array, UInt64Array,
@@ -6,7 +6,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, TimeUnit, UInt16Type};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
-use tessera_wire::{
+use mosaica_wire::{
     artifacts_frame, page_end_frame, points_frame,
     points_highlight_frame, read_frame, records_frame, records_head_frame, split_frames,
     sub_cells_frame, table_head_frame, tiles_frame, trailer_frame, ArtifactRow, FrameError,
@@ -590,7 +590,7 @@ fn records_page(rows: u64) -> RecordBatch {
         Field::new("tessera_id", DataType::UInt64, false),
         Field::new("score", DataType::Float64, true),
         Field::new("archive", archive.data_type().clone(), true),
-        Field::new("tessera:labels", labels.data_type().clone(), false),
+        Field::new("mosaica:labels", labels.data_type().clone(), false),
     ]));
     RecordBatch::try_new(schema, vec![ids, score, archive, labels]).unwrap()
 }

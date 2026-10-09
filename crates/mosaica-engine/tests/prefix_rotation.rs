@@ -30,10 +30,10 @@ use std::path::Path;
 
 use common::*;
 use sha2::{Digest, Sha256};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::Engine;
-use tessera_lifecycle::wal::ChangeOp;
-use tessera_types::EntityId;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::Engine;
+use mosaica_lifecycle::wal::ChangeOp;
+use mosaica_types::EntityId;
 
 /// Copy `root/from` to `root/to`, give the copy a `MANIFEST.json` that differs, and flip `CURRENT`
 /// onto it — the state a fold leaves behind at compaction §4 step 4.
@@ -123,7 +123,7 @@ fn side_manifests(root: &Path, prefix: &str) -> Vec<String> {
     names
 }
 
-fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
+fn visible(engine: &Engine, session: &mosaica_engine::Session) -> u64 {
     engine
         .viewport(
             session,
@@ -607,7 +607,7 @@ fn publishing_a_prefix_current_does_not_name_is_refused() {
     assert!(
         matches!(
             refused,
-            tessera_engine::PublishGeometryError::PrefixNotCommitted { .. }
+            mosaica_engine::PublishGeometryError::PrefixNotCommitted { .. }
         ),
         "{refused:?}"
     );
@@ -618,7 +618,7 @@ fn publishing_a_prefix_current_does_not_name_is_refused() {
     );
 }
 
-/// The entity id `tessera-build` assigned to fixture source row `source_id`.
+/// The entity id `mosaica-build` assigned to fixture source row `source_id`.
 ///
 /// Resolved **before** any flip in every case here: `source_to_new_map` opens the bundle through
 /// `CURRENT`, so calling it afterwards would be answering from the new prefix — correct, but it

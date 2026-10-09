@@ -12,11 +12,11 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
-use tessera_authz::{FragmentCacheError, FrozenFragment, Grant};
-use tessera_types::TermId;
+use mosaica_authz::{FragmentCacheError, FrozenFragment, Grant};
+use mosaica_types::TermId;
 
 #[cfg(doc)]
-use tessera_authz::FragmentCache;
+use mosaica_authz::FragmentCache;
 
 use crate::engine::{hex_encode, Engine};
 use crate::error::{EngineError, Result};
@@ -71,8 +71,8 @@ struct HeldTerms {
 /// to, computed once here and brought forward by the background refresh rather than recomputed
 /// per viewport.
 ///
-/// Holds no entity-id → wire-handle table: that state lives in `tessera-server`, alongside this
-/// struct rather than inside it, so this crate never depends on `tessera-wire`'s handle type.
+/// Holds no entity-id → wire-handle table: that state lives in `mosaica-server`, alongside this
+/// struct rather than inside it, so this crate never depends on `mosaica-wire`'s handle type.
 pub struct Session {
     /// Bearer token: 32 random bytes, hex-encoded.
     token: String,
@@ -85,7 +85,7 @@ pub struct Session {
     /// does not carry is absent, never an error. Resolved once, at authorise, and never
     /// re-resolved in place: see [`Session::is_stale`]. For a `read-all` session, every key.
     satisfied: Satisfied,
-    /// What the fragment is the union of, and the [`tessera_authz::FragmentCache`] key component:
+    /// What the fragment is the union of, and the [`mosaica_authz::FragmentCache`] key component:
     /// `satisfied`'s keys sorted, or every key. A `read-all` session's fragment is keyed by the
     /// watermark alone, so every such session at one watermark shares it.
     grant: Grant,
@@ -157,7 +157,7 @@ impl Session {
     pub(crate) fn term_of<'a>(
         &'a self,
         key: TermId,
-        dict: &'a tessera_authz::Dict,
+        dict: &'a mosaica_authz::Dict,
     ) -> Option<&'a [u8]> {
         match &self.held {
             Some(held) => held.descriptors.get(&key).map(Vec::as_slice),
@@ -175,7 +175,7 @@ impl Session {
 
     /// Whether the session satisfies any of the stored `labels`.
     pub(crate) fn admits<S: AsRef<str>>(&self, labels: &[S]) -> bool {
-        tessera_access::admits(labels, &|term| self.holds(term))
+        mosaica_access::admits(labels, &|term| self.holds(term))
     }
 
     /// `sha256(auth_data)`.
@@ -230,7 +230,7 @@ impl Engine {
 
         let mut credentials: FxHashSet<Vec<u8>> =
             auth_terms.iter().map(|t| t.as_bytes().to_vec()).collect();
-        credentials.insert(tessera_authz::PUBLIC_LABEL.to_vec());
+        credentials.insert(mosaica_authz::PUBLIC_LABEL.to_vec());
         let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
         let mut descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
         let labels = generation.dict.labels();
@@ -253,14 +253,14 @@ impl Engine {
         // credential and not by a grant. Looked up by descriptor, because in a bundle whose
         // dictionary lacks it term 0 is some other label, and a hardcoded 0 would grant that to
         // everyone.
-        if let Some(term) = generation.dict.lookup(tessera_authz::PUBLIC_LABEL) {
+        if let Some(term) = generation.dict.lookup(mosaica_authz::PUBLIC_LABEL) {
             debug_assert_eq!(
                 term,
-                tessera_authz::PUBLIC_TERM,
+                mosaica_authz::PUBLIC_TERM,
                 "`public` is reserved at term 0 by every build"
             );
             satisfied.insert(term);
-            descriptors.insert(term, tessera_authz::PUBLIC_LABEL.to_vec());
+            descriptors.insert(term, mosaica_authz::PUBLIC_LABEL.to_vec());
         }
 
         let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
@@ -334,7 +334,7 @@ impl Engine {
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,
-                &tessera_cache::NeverCancelled,
+                &mosaica_cache::NeverCancelled,
             )
             .map_err(fragment_error)?;
 
@@ -436,7 +436,7 @@ impl Engine {
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,
-                &tessera_cache::NeverCancelled,
+                &mosaica_cache::NeverCancelled,
             )
             .map_err(fragment_error)
     }
@@ -445,7 +445,7 @@ impl Engine {
     /// credential's terms, the test an artifact's own label takes. A gate-failed name and a
     /// never-registered one answer identically, so a name outside this set reveals nothing about
     /// why.
-    pub(crate) fn reachable_layers(&self, session: &Session) -> tessera_lifecycle::ResolvedLayers {
+    pub(crate) fn reachable_layers(&self, session: &Session) -> mosaica_lifecycle::ResolvedLayers {
         self.write
             .live()
             .resolve_layers(|label| session.admits(&[label]))
@@ -457,9 +457,9 @@ impl Engine {
     pub(crate) fn label_gate<'s>(
         &self,
         session: &'s Session,
-        declaration: &tessera_types::layer::LayerDeclaration,
+        declaration: &mosaica_types::layer::LayerDeclaration,
     ) -> crate::artifacts::LabelGate<'s> {
-        use tessera_types::layer::MemberDefault;
+        use mosaica_types::layer::MemberDefault;
         // A layer naming no field has no artifact labels, and its default says nothing.
         let unlabelled = !declaration.artifact_visibility.carries_own_labels()
             || match &declaration.artifact_visibility.default {
@@ -479,7 +479,7 @@ impl Engine {
     /// layer is currently served is asked live, per call, against the overlay, since a suppression
     /// takes effect at the ack: a cache may bake in reachability but must never bake in whether a
     /// layer is served.
-    pub fn visible_layers(&self, session: &Session) -> Vec<tessera_types::layer::RegisteredLayer> {
+    pub fn visible_layers(&self, session: &Session) -> Vec<mosaica_types::layer::RegisteredLayer> {
         let generation = self.generation();
         self.reachable_layers(session)
             .names()
@@ -504,7 +504,7 @@ fn fragment_error(e: FragmentCacheError) -> EngineError {
 }
 
 /// The terms a credential presents. `auth_data` is the JSON `{"terms": ["<term>", ...]}`; each
-/// term is held as [`tessera_access::held_term`] says, and one it refuses is dropped. A
+/// term is held as [`mosaica_access::held_term`] says, and one it refuses is dropped. A
 /// credential that parses to no terms is valid, and its session sees what `public` admits.
 fn credential_terms(auth_data: &[u8]) -> Result<Vec<String>> {
     let refused = || {
@@ -520,7 +520,7 @@ fn credential_terms(auth_data: &[u8]) -> Result<Vec<String>> {
     let mut held = Vec::with_capacity(terms.len());
     for term in terms {
         let term = term.as_str().ok_or_else(refused)?;
-        held.extend(tessera_access::held_term(term).map(str::to_owned));
+        held.extend(mosaica_access::held_term(term).map(str::to_owned));
     }
     held.sort_unstable();
     held.dedup();

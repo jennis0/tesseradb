@@ -2,7 +2,7 @@
 //! are shaped, and the compression figure the window exists to buy.
 //!
 //! The engine-level cases (one fsync per window, each waiter's own ids, the partially-acked window)
-//! live in `tessera-engine/tests/write.rs`, because they are statements about the executor. These
+//! live in `mosaica-engine/tests/write.rs`, because they are statements about the executor. These
 //! are statements about the allocation, which is entity-space and needs no `Engine`, no `Bundle` and
 //! no `TempDir` — that separation is why `CommitWindow` lives in this crate at all.
 
@@ -10,11 +10,11 @@ use std::collections::HashSet;
 
 use proptest::prelude::*;
 
-use tessera_lifecycle::alloc::Allocator;
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::WalRecord;
-use tessera_lifecycle::window::{CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry};
-use tessera_types::TermId;
+use mosaica_lifecycle::alloc::Allocator;
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::WalRecord;
+use mosaica_lifecycle::window::{CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry};
+use mosaica_types::TermId;
 
 fn row(terms: &[u32]) -> UnallocatedRow {
     UnallocatedRow {
@@ -162,7 +162,7 @@ proptest! {
     }
 }
 
-fn framed_ids_of<W>(entry: &tessera_lifecycle::window::ClosedEntry<W>) -> Vec<u64> {
+fn framed_ids_of<W>(entry: &mosaica_lifecycle::window::ClosedEntry<W>) -> Vec<u64> {
     framed_ids(&entry.record)
 }
 
@@ -181,7 +181,7 @@ fn framed_ids_of<W>(entry: &tessera_lifecycle::window::ClosedEntry<W>) -> Vec<u6
 /// item's signature **is** its term and `run = chunk × density` holds by construction. That makes
 /// the ordering property below robust and the *magnitudes* meaningless as a forecast: on a real
 /// corpus `assign_sorted` sorts on the whole term signature, so a term's postings split across every
-/// signature carrying it and the runs are far shorter (module docs of `tessera_lifecycle::window`
+/// signature carrying it and the runs are far shorter (module docs of `mosaica_lifecycle::window`
 /// have the measured distribution). For the same reason the "window achieves X% of the ceiling"
 /// printed below is `chunk / corpus` — 2 000/4 000 — and carries no information about a deployment.
 #[test]

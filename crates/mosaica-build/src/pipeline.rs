@@ -108,7 +108,7 @@
 //! **An item's index keys are those of its row's labels read together.** [`build_dictionary`]
 //! relies on a source term being one dictionary key, derived from the source term alone, so the
 //! whole item never has to be assembled. [`crate::plan_access`] makes it one: each distinct label is
-//! read once into the keys it is indexed under ([`tessera_authz::index_keys`]), and the scan visits
+//! read once into the keys it is indexed under ([`mosaica_authz::index_keys`]), and the scan visits
 //! a row's keys in place of its labels. A row whose labels are several and name a conjunction is
 //! read again as one disjunction, because a conjunction one label names may be absorbed by another.
 //! Each key is a term or a conjunction, and a principal satisfies the item exactly when it holds or
@@ -146,14 +146,14 @@ use croaring::Bitmap;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use tessera_authz::encode_posting;
-use tessera_filter::{
+use mosaica_authz::encode_posting;
+use mosaica_filter::{
     Codes, ColumnKind, RecordFieldRef, RecordValueRef, ValueColumnWriter, RECORD_BLOCKS_FILE,
     RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
-use tessera_spatial::split32;
-use tessera_spatial::tiler::{ScalarType, ScalarValue};
-use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
+use mosaica_spatial::split32;
+use mosaica_spatial::tiler::{ScalarType, ScalarValue};
+use mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 use crate::column::EntityColumn;
 use crate::error::{BuildError, Result};
@@ -406,7 +406,7 @@ impl BucketSink {
                 writers
                     .into_iter()
                     .map(|w| w.finish().map(Some))
-                    .collect::<tessera_store::Result<_>>()?,
+                    .collect::<mosaica_store::Result<_>>()?,
             )),
         }
     }
@@ -864,7 +864,7 @@ fn report_column_routes(
 /// 93 GB of bundle written. Nothing published it: `CURRENT` is written last and
 /// [`crate::validate_args`] refuses to start where one already exists, so a prefix here is a
 /// prefix no reader can resolve, which is the proof
-/// [`tessera_store::reclaim_unpublished_prefix`] makes for itself before deleting anything.
+/// [`mosaica_store::reclaim_unpublished_prefix`] makes for itself before deleting anything.
 ///
 /// That refusal is why the argument check runs here rather than inside [`build_bundle`]. It is
 /// the one error that fires while `<out>/CURRENT` exists, which is the one state the sweep
@@ -883,13 +883,13 @@ pub(crate) fn build(
     // **First, before any validation**, so a run whose log is all that survives says which source
     // produced it. A campaign of 2026-09-12 lost two and three-quarter hours to a binary seven
     // commits behind the tree its figures were read against.
-    eprintln!("tessera build: commit {}", crate::BUILD_COMMIT);
+    eprintln!("mosaica build: commit {}", crate::BUILD_COMMIT);
     validate_args(args)?;
     let outcome = build_bundle(args, frames, observer, route);
     if outcome.is_err() {
         let prefix = args.out.join(PREFIX);
         if prefix.is_dir() {
-            match tessera_store::reclaim_unpublished_prefix(&prefix) {
+            match mosaica_store::reclaim_unpublished_prefix(&prefix) {
                 Ok(()) => eprintln!(
                     "swept the partial bundle at {}: this build wrote no CURRENT, so nothing \
                      names it and a retry has the disk back",
@@ -1308,8 +1308,8 @@ fn build_bundle(
         .join(PREFIX)
         .join("partitions")
         .join(PHASH)
-        .join(tessera_store::ENTITY_TERMS_DIR);
-    let mut entity_terms = tessera_store::EntityTermsWriter::create(&entity_terms_dir)
+        .join(mosaica_store::ENTITY_TERMS_DIR);
+    let mut entity_terms = mosaica_store::EntityTermsWriter::create(&entity_terms_dir)
         .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
     let mut sig_terms: Vec<u32> = Vec::new();
     for k in 0..plan.batches {
@@ -1340,7 +1340,7 @@ fn build_bundle(
                 cursor += 1;
             }
             let sig = &packed[start..cursor];
-            if sig.len() > tessera_authz::MAX_KEYS_PER_ITEM {
+            if sig.len() > mosaica_authz::MAX_KEYS_PER_ITEM {
                 // A declared bound is a *declaration*: record it and carry on. Dropping
                 // terms here would silently widen the item's visibility (I2/I3).
                 over_bound_items += 1;
@@ -1502,7 +1502,7 @@ fn build_bundle(
         eprintln!(
             "warning: {over_bound_items} item(s) are indexed under more than {} keys; no key \
              was dropped",
-            tessera_authz::MAX_KEYS_PER_ITEM
+            mosaica_authz::MAX_KEYS_PER_ITEM
         );
     }
 
@@ -1537,7 +1537,7 @@ fn build_bundle(
         .as_deref()
         .map(PairsParquetWriter::create)
         .transpose()?;
-    let mut spool = tessera_authz::PostingsSpool::create(&tmp.path().join("postings.spool"))
+    let mut spool = mosaica_authz::PostingsSpool::create(&tmp.path().join("postings.spool"))
         .map_err(|e| BuildError::io(&postings_path, e))?;
     let mut written = 0u64;
     for (j, &(band_lo, band_hi)) in plan.band_bounds.iter().enumerate() {
@@ -1698,10 +1698,10 @@ fn build_bundle(
     // inside the attribute tail until the campaign's kills made the distinction worth having
     // (`residency.rs`).
     let view_ids: Vec<String> = args.views.iter().map(|v| v.view_id.clone()).collect();
-    let view_frames: Vec<tessera_store::derived::ViewFrame> = args
+    let view_frames: Vec<mosaica_store::derived::ViewFrame> = args
         .views
         .iter()
-        .map(|v| tessera_store::derived::ViewFrame::new(&v.view_id, v.projection, v.extent))
+        .map(|v| mosaica_store::derived::ViewFrame::new(&v.view_id, v.projection, v.extent))
         .collect();
     let mut published_layers = if args.layers.is_empty() {
         drop(numbering);
@@ -1718,7 +1718,7 @@ fn build_bundle(
             // own projection and extent, so a layer spanning frames stores a different
             // canonical form under each view's name.
             &view_frames,
-            tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+            mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
             // The build's own `.build-tmp/`, which the member spill writes its runs into —
             // still open here, and swept by the `close` below whether this stage succeeds or
             // not.
@@ -1880,7 +1880,7 @@ fn build_bundle(
     // A view holds a **subset** of entity space — its `present` bits — so its permutation is
     // sentinel wherever it does not, and `row_count` is the view's population rather than `n`.
     let mut view_files: Vec<PathBuf> = Vec::new();
-    let mut segments: Vec<tessera_store::manifest::SegmentDescriptor> = Vec::new();
+    let mut segments: Vec<mosaica_store::manifest::SegmentDescriptor> = Vec::new();
     let mut occupancies: Vec<crate::Occupancy> = Vec::with_capacity(args.views.len());
     let mut artifact_paths: Vec<PathBuf> = Vec::new();
     // Accumulated across the views, like the extents beside them: what a scoped layer's artifacts
@@ -1888,16 +1888,16 @@ fn build_bundle(
     let mut artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport> = Vec::new();
     // **One counter for the whole prefix.** The artifact pass runs per view and each of its calls
     // names files from this, so the second view's files cannot be named after the first's — see
-    // `tessera_store::derived::DerivedIndex`.
-    let mut derived_index = tessera_store::derived::DerivedIndex::default();
+    // `mosaica_store::derived::DerivedIndex`.
+    let mut derived_index = mosaica_store::derived::DerivedIndex::default();
     // **Opened once for the build, not once per view.** The postings are entity space and every
     // view projects the same ones through its own permutation (`crate::term_images_pass`).
-    let postings = tessera_authz::postings::PostingsReader::open(&postings_path, true)
+    let postings = mosaica_authz::postings::PostingsReader::open(&postings_path, true)
         .map_err(|e| BuildError::io(&postings_path, e))?;
     let mut term_images: Vec<Option<crate::term_images_pass::ViewTermImages>> =
         Vec::with_capacity(args.views.len());
     for (index, view) in args.views.iter().enumerate() {
-        let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
+        let view_dir = mosaica_store::view_path(&partition_dir, &view.view_id);
         let segment_dir = view_dir.join("segments").join(SEG_ID);
         std::fs::create_dir_all(&segment_dir).map_err(|e| BuildError::io(&segment_dir, e))?;
 
@@ -1998,7 +1998,7 @@ fn build_bundle(
         let presence_paths = assembled.presence_paths;
         let row_entity_path = assembled.row_entity_path;
         let permutation_path = assembled.permutation_path;
-        let segment_paths: Vec<std::path::PathBuf> = tessera_store::SEGMENT_FILES
+        let segment_paths: Vec<std::path::PathBuf> = mosaica_store::SEGMENT_FILES
             .iter()
             .map(|name| segment_dir.join(name))
             .collect();
@@ -2059,28 +2059,28 @@ fn build_bundle(
         term_images.push(images);
         timer.end(BuildStage::TermImages, u64::from(kept));
 
-        // ---- 10d. this view's field tallies (`tessera_store::field_tallies`) ---------------
+        // ---- 10d. this view's field tallies (`mosaica_store::field_tallies`) ---------------
         //
         // After every file they read: the segment, the row-to-entity table, the entity terms and
         // the value columns. The in-memory build calls the same function at the same point.
         let partition_dir = args.out.join(crate::PREFIX).join("partitions").join(crate::PHASH);
-        view_files.push(tessera_store::field_tallies::derive_view(
+        view_files.push(mosaica_store::field_tallies::derive_view(
             &partition_dir,
             &view.view_id,
             SEG_ID,
             rows_in_view,
             &crate::declared_scalars_of(&args.schema),
-            &|name| tessera_filter::base_numbers(&partition_dir, name),
+            &|name| mosaica_filter::base_numbers(&partition_dir, name),
         )?);
 
         view_files.push(permutation_path);
         view_files.push(row_entity_path);
         view_files.extend(segment_paths);
         view_files.extend(presence_paths);
-        segments.push(tessera_store::manifest::SegmentDescriptor {
+        segments.push(mosaica_store::manifest::SegmentDescriptor {
             view: view.view_id.clone(),
             // **The declared incarnation** (decision 0115): a build coins each key once.
-            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+            incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
             seg_id: SEG_ID.to_string(),
             row_count: rows_in_view,
             entity_lo: 0,
@@ -2183,7 +2183,7 @@ fn read_attributes_by_entity(
     routes: &ColumnRoutes,
     numbering: &crate::ids::Numbering,
     entity_of_ordinal: &[u32],
-    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    minters: &mut std::collections::HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
     tmp: &Path,
 ) -> Result<(
@@ -2455,7 +2455,7 @@ fn read_one_attribute_scan(
     scan: &crate::AttributeScan<'_>,
     n: u64,
     entity_of_ordinal: &[u32],
-    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    minters: &mut std::collections::HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
     by_entity: &mut [EntityColumn],
     spilled: &mut [crate::extents::ExtentColumn],
@@ -2761,7 +2761,7 @@ fn write_scoped_columns(
     n: u64,
     numbering: &crate::ids::Numbering,
     entity_of_ordinal: &[u32],
-    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    minters: &mut std::collections::HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
 ) -> Result<(Vec<PathBuf>, Vec<ScopedRenderColumn>)> {
     let mut paths = Vec::new();
@@ -2818,9 +2818,9 @@ fn write_scoped_columns(
                 scratch,
             )?;
             // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the
-            // one place a view id becomes a path (`tessera_store::view_path`).
+            // one place a view id becomes a path (`mosaica_store::view_path`).
             let mut column_dir = partition_dir.join("attrs").join(&attribute.name);
-            for component in tessera_store::view_path_components(&view.view_id) {
+            for component in mosaica_store::view_path_components(&view.view_id) {
                 column_dir.push(component);
             }
             std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
@@ -2923,23 +2923,23 @@ fn write_scoped_columns(
 }
 
 /// One view's column of a group-scoped `text` family, its prose as a record blob under
-/// [`tessera_store::manifest::SCOPED_PROSE_DIR`]. Returns the files written.
+/// [`mosaica_store::manifest::SCOPED_PROSE_DIR`]. Returns the files written.
 fn write_scoped_prose(
     column_dir: &Path,
     values: &crate::column::EntityColumn,
 ) -> Result<Vec<PathBuf>> {
-    let dir = column_dir.join(tessera_store::manifest::SCOPED_PROSE_DIR);
+    let dir = column_dir.join(mosaica_store::manifest::SCOPED_PROSE_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
     let files = [
-        tessera_filter::RECORD_BLOCKS_FILE,
-        tessera_filter::RECORD_HASROW_FILE,
-        tessera_filter::RECORD_DIRECTORY_FILE,
+        mosaica_filter::RECORD_BLOCKS_FILE,
+        mosaica_filter::RECORD_HASROW_FILE,
+        mosaica_filter::RECORD_DIRECTORY_FILE,
     ]
     .map(|name| dir.join(name));
     let rows = values
         .present_entities()
         .filter_map(|entity| Some((u32::try_from(entity).ok()?, values.str_at(entity)?)));
-    tessera_filter_write::write_prose(&files[0], &files[1], &files[2], rows)
+    mosaica_filter_write::write_prose(&files[0], &files[1], &files[2], rows)
         .map_err(|e| BuildError::io(&dir, e))?;
     for file in &files {
         fsync_file(file)?;
@@ -2981,7 +2981,7 @@ fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Ve
     args.views
         .iter()
         .map(|view| {
-            let Some((group, key)) = view.view_id.split_once(tessera_store::GROUP_SEPARATOR) else {
+            let Some((group, key)) = view.view_id.split_once(mosaica_store::GROUP_SEPARATOR) else {
                 // A plain view is in no group, so no scope reaches it.
                 return Vec::new();
             };
@@ -3023,7 +3023,7 @@ fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Ve
 /// `text` arm the declaration refuses anyway, and either could have been edited alone.
 fn scoped_postings_are_owed(attribute: &crate::config::Attribute) -> bool {
     attribute.vocabulary.is_some()
-        && tessera_store::manifest::ScopedScalar::licence_of(
+        && mosaica_store::manifest::ScopedScalar::licence_of(
             attribute.ty,
             attribute.vocabulary.is_some(),
             attribute.index,
@@ -3056,7 +3056,7 @@ fn report_scoped_coverage(
 /// and is therefore selected by no row.
 fn key_of(view_id: &str) -> &str {
     view_id
-        .split_once(tessera_store::GROUP_SEPARATOR)
+        .split_once(mosaica_store::GROUP_SEPARATOR)
         .map_or(view_id, |(_, key)| key)
 }
 
@@ -3087,7 +3087,7 @@ fn read_scoped_column(
     rows: &crate::ids::ReadRows,
     n: u64,
     entity_of_ordinal: &[u32],
-    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    minters: &mut std::collections::HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
 ) -> Result<ScopedColumn> {
     let attribute = &family.attribute;
@@ -3159,7 +3159,7 @@ fn read_scoped_column(
 ///
 /// **The keyed record format** (filter-index §2.5), not the positional one the authorisation index
 /// uses. A category's identifier is its vocabulary code, and codes are a sparse subset of a
-/// 32-bit space by construction — [`tessera_store::vocabulary`] mints them scattered so that the
+/// 32-bit space by construction — [`mosaica_store::vocabulary`] mints them scattered so that the
 /// code itself carries no ordering information. A positional file would need a record per code up
 /// to the largest one drawn; the keyed file stores `(code, posting)` ascending and binary-searches.
 ///
@@ -3218,7 +3218,7 @@ pub(crate) struct TextIndexCost {
 
 /// Entity ids the postings emit holds in flight — the shared emit's own constant, so the build and
 /// the fold band identically (filter-index §6.2).
-use tessera_filter_write::POSTINGS_BAND_ROWS;
+use mosaica_filter_write::POSTINGS_BAND_ROWS;
 
 fn write_filter_postings_banded(
     partition_dir: &Path,
@@ -3413,7 +3413,7 @@ pub(crate) fn write_record_blob(
         .filter(|column| blob_columns.contains(&column.column))
         .map(crate::extents::ExtentRows::over)
         .collect();
-    let mut sources: Vec<&mut dyn tessera_filter_write::RecordRows> = Vec::new();
+    let mut sources: Vec<&mut dyn mosaica_filter_write::RecordRows> = Vec::new();
     if !column_tags.is_empty() {
         sources.push(&mut columns);
     }
@@ -3422,7 +3422,7 @@ pub(crate) fn write_record_blob(
             sources.push(extent);
         }
     }
-    tessera_filter_write::merge_record_rows(
+    mosaica_filter_write::merge_record_rows(
         &mut sources,
         &croaring::Bitmap::new(),
         &blocks_path,
@@ -3620,7 +3620,7 @@ struct ColumnRows<'a> {
     at: u32,
 }
 
-impl<'a> tessera_filter_write::RecordRows for ColumnRows<'a> {
+impl<'a> mosaica_filter_write::RecordRows for ColumnRows<'a> {
     fn advance(&mut self) -> std::io::Result<bool> {
         while self.entity < self.n {
             let entity = self.entity;
@@ -3680,7 +3680,7 @@ fn record_value_of<'a>(
 ) -> Result<Option<RecordValueRef<'a>>> {
     if attribute.vocabulary.is_some() {
         let code = category_code(&values.value_at(entity), &attribute.name)?;
-        if code == tessera_store::vocabulary::ABSENT_CODE {
+        if code == mosaica_store::vocabulary::ABSENT_CODE {
             return Ok(None);
         }
         // The code at the declared width — the value the entity-space column would have stored,
@@ -3727,7 +3727,7 @@ fn record_value_of<'a>(
 
 /// The staged attribute values of one category column, as the shared postings emit reads them.
 ///
-/// **The emit itself lives in `tessera-filter`** (`fold::write_category_postings`), because the
+/// **The emit itself lives in `mosaica-filter`** (`fold::write_category_postings`), because the
 /// fold rebuilds these postings from the folded column and filter-index §6.2 makes one writer
 /// rather than two producers that agree the byte-identity argument. What is here is the adaptation:
 /// the build's source is a `ScalarValue` per entity, where the fold's is a value column.
@@ -3736,7 +3736,7 @@ struct StagedCategory<'a> {
     column: &'a str,
 }
 
-impl tessera_filter_write::CategorySource for StagedCategory<'_> {
+impl mosaica_filter_write::CategorySource for StagedCategory<'_> {
     fn for_each(&self, f: &mut dyn FnMut(u32, u32) -> std::io::Result<()>) -> std::io::Result<()> {
         for (entity, value) in self.values.iter().enumerate() {
             let code = category_code(&value, self.column).map_err(std::io::Error::other)?;
@@ -3744,7 +3744,7 @@ impl tessera_filter_write::CategorySource for StagedCategory<'_> {
             // is the same zero the entity-major buffer is initialised to, which is safe only
             // because the reader's count check upstream proves every entity was visited — an
             // unvisited entity would otherwise be indistinguishable from one with no value.
-            if code == tessera_store::vocabulary::ABSENT_CODE {
+            if code == mosaica_store::vocabulary::ABSENT_CODE {
                 continue;
             }
             f(entity as u32, code)?;
@@ -3759,7 +3759,7 @@ fn write_category_postings(
     values: &EntityColumn,
     band_rows: usize,
 ) -> Result<()> {
-    tessera_filter_write::write_category_postings(
+    mosaica_filter_write::write_category_postings(
         path,
         column,
         &StagedCategory { values, column },
@@ -3847,7 +3847,7 @@ fn write_column_values(
         let mut held: Vec<u32> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
             let code = category_code(&value, &attribute.name)?;
-            if code == tessera_store::vocabulary::ABSENT_CODE {
+            if code == mosaica_store::vocabulary::ABSENT_CODE {
                 continue;
             }
             presence.present(entity as u32);
@@ -4302,7 +4302,7 @@ const KEYWORD_ORDINAL_RECORD: usize = 8;
 /// 3. **Cascade**, where a corpus produced more runs than one merge may hold file descriptors for
 ///    ([`RUN_MERGE_FAN_IN`]).
 /// 4. **Merge.** The runs are merged k-way on the key. Each distinct key is pushed once to
-///    [`tessera_filter::SortedDictWriter`], which streams the dictionary and holds only its
+///    [`mosaica_filter::SortedDictWriter`], which streams the dictionary and holds only its
 ///    restart table, and the ordinal it returns is written to every row the merge then drains for
 ///    that key.
 /// 5. **Partition.** The ordinals leave the merge in key order and the values file needs them in
@@ -4330,7 +4330,7 @@ const KEYWORD_ORDINAL_RECORD: usize = 8;
 /// distinct key once, ascending, and pushes it to the dictionary writer, so the ordinal the writer
 /// returns *is* that position — and it is asserted against the count of keys pushed rather than
 /// assumed from the two staying in step. An ordinal naming another key's value has no symptom: it
-/// recolours a map, and every count it feeds stays plausible (`tessera_filter::dict`).
+/// recolours a map, and every count it feeds stays plausible (`mosaica_filter::dict`).
 ///
 /// **Every row that went in came back out.** Each run verifies its own count and anchor as it is
 /// read; what no single run can see is that the *set* of runs is whole, so the run counts are
@@ -4365,7 +4365,7 @@ fn write_keyword_column(
     let receipts = cascade_sorted_runs(column_dir, "keyword", receipts)?;
 
     // ---- 4. the merge: the dictionary, and each row's ordinal ---------------------------------
-    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+    let dict_path = column_dir.join(mosaica_filter::DICT_FILE);
     let partition = spill::Partition::create(
         column_dir,
         KEYWORD_ORDINAL_PARTITION,
@@ -4436,7 +4436,7 @@ fn merge_keyword_runs(
     }
 
     let dict_file = std::fs::File::create(dict_path).map_err(|e| BuildError::io(dict_path, e))?;
-    let mut dict = tessera_filter::SortedDictWriter::new(std::io::BufWriter::new(dict_file))
+    let mut dict = mosaica_filter::SortedDictWriter::new(std::io::BufWriter::new(dict_file))
         .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
     let mut merge = TextRunMerge::open(receipts)?;
     let mut keys = 0u64;
@@ -4689,7 +4689,7 @@ const TEXT_POSTING_BYTES: usize = 8;
 ///
 /// **This is the merge's only unbounded term, and this is what bounds it.** A term carried by a
 /// quarter of the corpus is 10⁸ entities at 10⁹ items, which as a `Vec<u32>` is 400 MB for one
-/// record — the residency `tessera_authz::postings::encode_posting_bitmap` was added to remove
+/// record — the residency `mosaica_authz::postings::encode_posting_bitmap` was added to remove
 /// from compaction's fold, for exactly this reason. Above the cap the merge accumulates into a
 /// `Bitmap` instead and encodes from that; the two encoders are byte-identical over the same set
 /// (pinned by `postings::the_bitmap_and_slice_encoders_agree_byte_for_byte`), so the cap is a
@@ -4749,7 +4749,7 @@ impl TextIndexPlan {
 /// keyword's are in its key set, and the postings are written in that same order — so posting *i*
 /// belongs to the *i*-th key the dictionary holds. Both files are produced by one pass over one
 /// sorted term stream, so an ordinal cannot drift between them: the ordinal a term gets is the one
-/// [`tessera_filter::SortedDictWriter::push`] returns, and the record encoded against it is
+/// [`mosaica_filter::SortedDictWriter::push`] returns, and the record encoded against it is
 /// appended to the postings spool before the next term is read.
 ///
 /// # The shape: chunk, spill, merge
@@ -4798,11 +4798,11 @@ impl TextIndexPlan {
 /// # The pieces that did not change
 ///
 /// **A term's first sighting is the only one that allocates.** The analyser hands back borrowed
-/// tokens ([`tessera_analyse::Analyser::for_each_token`]) and the lookup is by `&[u8]`, so a term
+/// tokens ([`mosaica_analyse::Analyser::for_each_token`]) and the lookup is by `&[u8]`, so a term
 /// already in the map costs no allocation.
 ///
-/// **The postings stream through [`tessera_authz::postings::PostingsSpool`]** rather than being
-/// collected, and the dictionary through [`tessera_filter::SortedDictWriter`]: neither file is
+/// **The postings stream through [`mosaica_authz::postings::PostingsSpool`]** rather than being
+/// collected, and the dictionary through [`mosaica_filter::SortedDictWriter`]: neither file is
 /// ever held whole in memory.
 ///
 /// **A term repeated within one document contributes one posting entry.** The analyser keeps
@@ -4811,7 +4811,7 @@ impl TextIndexPlan {
 /// ascending, so the duplicate is always the accumulator's last entry — the same `last()` test as
 /// before, and it stays correct because a chunk is an ascending range and never a scattered set.
 ///
-/// The singleton encoding is `tessera-authz`'s, unchanged: a term carried by few enough entities is
+/// The singleton encoding is `mosaica-authz`'s, unchanged: a term carried by few enough entities is
 /// a bare `u32` array rather than a serialised bitmap, which is what the string-storage campaign
 /// measured at 4.4× smaller on the singleton-heavy vocabularies real prose produces. Reusing that
 /// format rather than minting a second one is the whole reason this crate already depends on it.
@@ -4891,7 +4891,7 @@ fn write_text_index(
     // The whole identity is compared. `Schema::parse` resolves it from this binary's analyser, but
     // a `Schema` built in code can carry a stale version, and a bundle recording one opens for no
     // reader.
-    let analyser = tessera_analyse::analyser_with_identity(identity)
+    let analyser = mosaica_analyse::analyser_with_identity(identity)
         .ok_or_else(|| {
             BuildError::Invalid(format!(
                 "attribute '{}' declares analyser '{identity}', which this build does not carry.                  Its terms cannot be reproduced, so an index written now would answer every                  `match` from a segmentation the manifest does not describe",
@@ -4943,7 +4943,7 @@ fn write_text_index(
     let receipts = cascade_sorted_runs(column_dir, "text", receipts)?;
 
     // ---- 3. the merge: one sorted term stream into both files -------------------------------
-    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+    let dict_path = column_dir.join(mosaica_filter::DICT_FILE);
     let postings_path = column_dir.join("postings.arrow");
     // Beside the file it assembles, and removed by `finish` — the spool-then-assemble discipline
     // this repo applies to every file whose records are sized as they are written. A build that
@@ -4987,7 +4987,7 @@ fn index_text_chunk(
     window: TextWindow,
     values: &TextValues<'_>,
     _attribute: &crate::config::Attribute,
-    analyser: &tessera_analyse::Analyser,
+    analyser: &mosaica_analyse::Analyser,
     worker_bytes: usize,
 ) -> Result<Vec<spill::SpillReceipt>> {
     let mut receipts = Vec::new();
@@ -4996,7 +4996,7 @@ fn index_text_chunk(
     let mut bytes = 0usize;
     let mut seq = 0usize;
     // The analyser's normalisation buffer, held across the whole chunk rather than per document.
-    let mut scratch = tessera_analyse::TokenScratch::default();
+    let mut scratch = mosaica_analyse::TokenScratch::default();
     values.for_each_record_in(window, &mut |entity, prose| {
         let entity = entity as u32;
         analyser.for_each_token(prose, &mut scratch, &mut |token| {
@@ -5268,9 +5268,9 @@ fn merge_text_runs(
     let mut merge = TextRunMerge::open(receipts)?;
 
     let dict_file = std::fs::File::create(dict_path).map_err(|e| BuildError::io(dict_path, e))?;
-    let mut dict = tessera_filter::SortedDictWriter::new(std::io::BufWriter::new(dict_file))
+    let mut dict = mosaica_filter::SortedDictWriter::new(std::io::BufWriter::new(dict_file))
         .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
-    let mut spool = tessera_authz::postings::PostingsSpool::create(spool_path)
+    let mut spool = mosaica_authz::postings::PostingsSpool::create(spool_path)
         .map_err(|e| BuildError::io(spool_path, e))?;
 
     let mut entities: Vec<u32> = Vec::new();
@@ -5294,7 +5294,7 @@ fn merge_text_runs(
                 entities.push(entity);
                 Ok(())
             })?;
-            tessera_authz::postings::encode_posting(
+            mosaica_authz::postings::encode_posting(
                 ordinal as usize,
                 &entities,
                 SMALL_TERM_THRESHOLD_DEFAULT,
@@ -5317,7 +5317,7 @@ fn merge_text_runs(
                 bitmap.add_many(&staged);
                 staged.clear();
             }
-            tessera_authz::postings::encode_posting_bitmap(&bitmap, SMALL_TERM_THRESHOLD_DEFAULT)
+            mosaica_authz::postings::encode_posting_bitmap(&bitmap, SMALL_TERM_THRESHOLD_DEFAULT)
                 .map_err(|e| BuildError::io(postings_path, e))?
         };
         spool
@@ -5335,7 +5335,7 @@ fn merge_text_runs(
 }
 
 /// Entities staged before each hand-off to croaring in the merge's bitmap arm — the same batching
-/// `tessera_roaring` uses, and for the same reason: `add_many` amortises over a run of values.
+/// `mosaica_roaring` uses, and for the same reason: `add_many` amortises over a run of values.
 const TEXT_MERGE_STAGE_ENTITIES: usize = 1 << 16;
 
 /// Order two runs by their head term, ties broken by run index so that equal terms leave the heap
@@ -5448,7 +5448,7 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
         // posting and no value*. Reached by every column of a group-scoped family, where covering
         // fewer than every entity is the ordinary state rather than a symptom: a view holds its own
         // rows (`views.md` §5).
-        ScalarValue::Null => Ok(tessera_store::vocabulary::ABSENT_CODE),
+        ScalarValue::Null => Ok(mosaica_store::vocabulary::ABSENT_CODE),
         other => Err(BuildError::Invalid(format!(
             "attribute '{column}' is declared for filtering but carries {other:?}, which is not a \
              category code"
@@ -5602,21 +5602,21 @@ fn build_dictionary(
     // Streamed, not interned: the descriptors here are distinct by construction (one per
     // distinct source term) and arrive in term-id order, which is `DictStreamWriter`'s exact
     // contract — at T = 117M an interner is gigabytes of pointless ownership.
-    let mut dict = tessera_authz::DictStreamWriter::new(dict_dir);
+    let mut dict = mosaica_authz::DictStreamWriter::new(dict_dir);
     // **`public` is appended first, so it is term 0 in every bundle** and is minted for no other
     // descriptor — the streaming half of what `build_in_memory` does by interning it first. A
     // source term spelling `public` therefore maps to 0 rather than appending a second record,
     // which would put one descriptor in the dictionary twice.
     let public = dict
-        .append(tessera_authz::PUBLIC_LABEL)
+        .append(mosaica_authz::PUBLIC_LABEL)
         .map_err(|e| BuildError::io(dict_dir, e))?;
-    debug_assert_eq!(public, tessera_authz::PUBLIC_TERM);
+    debug_assert_eq!(public, mosaica_authz::PUBLIC_TERM);
     let mut pairs_of_term: Vec<(u64, u32)> = Vec::with_capacity(order.len());
     let mut row_counts: Vec<u64> = vec![0; 1];
     for &(_, source_term) in &order {
         let descriptor = access.descriptors.descriptor(source_term);
         let rows = first_ordinal[&source_term].1;
-        if descriptor.as_bytes() == tessera_authz::PUBLIC_LABEL {
+        if descriptor.as_bytes() == mosaica_authz::PUBLIC_LABEL {
             pairs_of_term.push((source_term, public.raw()));
             row_counts[public.raw() as usize] = rows;
             continue;
@@ -5992,9 +5992,9 @@ mod tests {
         )
         .expect("blob stage writes");
         assert!(!written.is_empty());
-        let blob = tessera_filter::RecordBlob::open_dir(
+        let blob = mosaica_filter::RecordBlob::open_dir(
             &dir.path().join("attrs/record"),
-            tessera_filter::Access::Mapped,
+            mosaica_filter::Access::Mapped,
         )
         .expect("open");
         let fields = blob
@@ -6066,18 +6066,18 @@ mod tests {
             "a public category with neither flag has no entity-space home; without a blob row \
              its values are stored nowhere at all"
         );
-        let blob = tessera_filter::RecordBlob::open_dir(
+        let blob = mosaica_filter::RecordBlob::open_dir(
             &dir.path().join("attrs/record"),
-            tessera_filter::Access::Mapped,
+            mosaica_filter::Access::Mapped,
         )
         .expect("open");
         assert_eq!(
             blob.fields_of(0)
                 .expect("read")
                 .expect("entity 0 has a row"),
-            vec![tessera_filter::RecordField {
+            vec![mosaica_filter::RecordField {
                 tag: 0,
-                value: tessera_filter::RecordValue::U16(7),
+                value: mosaica_filter::RecordValue::U16(7),
             }],
             "the public category's value is the blob row"
         );
@@ -6277,9 +6277,9 @@ mod tests {
         // And the merged blob says what the corpus says.
         let dir = tempfile::tempdir().expect("tempdir");
         blob_of(dir.path(), 3);
-        let blob = tessera_filter::RecordBlob::open_dir(
+        let blob = mosaica_filter::RecordBlob::open_dir(
             &dir.path().join("attrs/record"),
-            tessera_filter::Access::Read,
+            mosaica_filter::Access::Read,
         )
         .expect("open");
         // The last value written for an entity is the one the blob holds.
@@ -6300,7 +6300,7 @@ mod tests {
                         .iter()
                         .find(|field| field.tag == tag)
                         .map(|field| match &field.value {
-                            tessera_filter::RecordValue::Utf8(value) => value.clone(),
+                            mosaica_filter::RecordValue::Utf8(value) => value.clone(),
                             other => panic!("entity {entity} carries {other:?} at tag {tag}"),
                         })
                 })
@@ -6322,7 +6322,7 @@ mod tests {
                     .map(|field| field.value.clone())
             });
             let expected = match entity % 3 {
-                0 => Some(tessera_filter::RecordValue::U32(entity * 10)),
+                0 => Some(mosaica_filter::RecordValue::U32(entity * 10)),
                 _ => None,
             };
             assert_eq!(count, expected, "entity {entity}'s count");
@@ -6446,7 +6446,7 @@ mod tests {
                     .collect();
                 assert!(left.is_empty(), "plan {k} source {source} left {left:?}");
                 files.push((
-                    std::fs::read(column_dir.join(tessera_filter::DICT_FILE)).expect("dict"),
+                    std::fs::read(column_dir.join(mosaica_filter::DICT_FILE)).expect("dict"),
                     std::fs::read(column_dir.join("postings.arrow")).expect("postings"),
                 ));
             }
@@ -6468,7 +6468,7 @@ mod tests {
                 .collect();
             assert!(left.is_empty(), "plan {k} left {left:?} behind");
             files.push((
-                std::fs::read(column_dir.join(tessera_filter::DICT_FILE)).expect("dict"),
+                std::fs::read(column_dir.join(mosaica_filter::DICT_FILE)).expect("dict"),
                 std::fs::read(column_dir.join("postings.arrow")).expect("postings"),
             ));
         }
@@ -6503,12 +6503,12 @@ mod tests {
         )
         .expect("text index");
 
-        let dict = tessera_filter::SortedDict::open(
-            &dir.path().join(tessera_filter::DICT_FILE),
-            tessera_filter::Access::Read,
+        let dict = mosaica_filter::SortedDict::open(
+            &dir.path().join(mosaica_filter::DICT_FILE),
+            mosaica_filter::Access::Read,
         )
         .expect("the token dictionary opens");
-        let postings = tessera_authz::postings::PostingsReader::open(
+        let postings = mosaica_authz::postings::PostingsReader::open(
             &dir.path().join("postings.arrow"),
             false,
         )
@@ -6528,13 +6528,13 @@ mod tests {
                 .expect("a readable posting")
                 .expect("every term in the dictionary has a posting");
             let got: Vec<u32> = match posting {
-                tessera_authz::postings::PostingRef::Array(bytes) => bytes
+                mosaica_authz::postings::PostingRef::Array(bytes) => bytes
                     .as_chunks::<4>()
                     .0
                     .iter()
                     .map(|c| u32::from_le_bytes(*c))
                     .collect(),
-                tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
+                mosaica_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
             };
             assert_eq!(&got, entities, "term {term:?} carries the wrong entities");
         }
@@ -6653,7 +6653,7 @@ mod tests {
                         extents: Option<&crate::extents::OpenExtents>| {
             std::fs::create_dir_all(column_dir).expect("column dir");
             let values_path = column_dir.join("values.arrow");
-            let presence_path = column_dir.join(tessera_filter::PRESENCE_FILE);
+            let presence_path = column_dir.join(mosaica_filter::PRESENCE_FILE);
             let written = write_column_values(
                 column_dir,
                 &values_path,
@@ -6712,7 +6712,7 @@ mod tests {
             let column_dir = dir.path().join(format!("plan-{k}"));
             std::fs::create_dir_all(&column_dir).expect("column dir");
             let values_path = column_dir.join("values.arrow");
-            let presence_path = column_dir.join(tessera_filter::PRESENCE_FILE);
+            let presence_path = column_dir.join(mosaica_filter::PRESENCE_FILE);
             let written = write_column_values(
                 &column_dir,
                 &values_path,
@@ -6732,8 +6732,8 @@ mod tests {
                 .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
                 .filter(|name| {
                     name != "values.arrow"
-                        && name != tessera_filter::PRESENCE_FILE
-                        && name != tessera_filter::DICT_FILE
+                        && name != mosaica_filter::PRESENCE_FILE
+                        && name != mosaica_filter::DICT_FILE
                 })
                 .collect();
             left.sort();
@@ -6769,7 +6769,7 @@ mod tests {
             let column_dir = dir.path().join(format!("chunk-{chunk_rows}"));
             std::fs::create_dir_all(&column_dir).expect("column dir");
             let values_path = column_dir.join("values.arrow");
-            let presence_path = column_dir.join(tessera_filter::PRESENCE_FILE);
+            let presence_path = column_dir.join(mosaica_filter::PRESENCE_FILE);
             write_column_values(
                 &column_dir,
                 &values_path,
@@ -6781,9 +6781,9 @@ mod tests {
             )
             .expect("keyword column");
 
-            let dict = tessera_filter::SortedDict::open(
-                &column_dir.join(tessera_filter::DICT_FILE),
-                tessera_filter::Access::Read,
+            let dict = mosaica_filter::SortedDict::open(
+                &column_dir.join(mosaica_filter::DICT_FILE),
+                mosaica_filter::Access::Read,
             )
             .expect("the dictionary opens");
             assert_eq!(dict.len() as usize, expected.len(), "chunk {chunk_rows}");
@@ -6797,10 +6797,10 @@ mod tests {
                 );
             }
 
-            let column = tessera_filter::ValueColumn::open(
+            let column = mosaica_filter::ValueColumn::open(
                 &values_path,
                 Some(&presence_path),
-                tessera_filter::Access::Read,
+                mosaica_filter::Access::Read,
             )
             .expect("the value column opens");
             for entity in 0..N_KEYWORD {
@@ -6835,7 +6835,7 @@ mod tests {
             title: None,
             ty: ScalarType::Text,
             analyser: Some(
-                tessera_analyse::analyser(tessera_analyse::UNICODE)
+                mosaica_analyse::analyser(mosaica_analyse::UNICODE)
                     .expect("the unicode analyser ships")
                     .identity(),
             ),
@@ -6888,10 +6888,10 @@ mod tests {
     }
 
     /// The expected `(term, entities)` set, derived from the fixture through the analyser itself —
-    /// the same route `tessera tokenise` gives the conformance oracle, so this asserts the index
+    /// the same route `mosaica tokenise` gives the conformance oracle, so this asserts the index
     /// against the analyser rather than against a second tokeniser that could drift.
     fn expected_text_postings() -> Vec<(String, Vec<u32>)> {
-        let analyser = tessera_analyse::analyser(tessera_analyse::UNICODE).expect("the analyser");
+        let analyser = mosaica_analyse::analyser(mosaica_analyse::UNICODE).expect("the analyser");
         let mut terms: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
         for entity in 0..N_TEXT {
             let ScalarValue::Utf8(prose) = text_fixture_prose(entity) else {
@@ -6923,7 +6923,7 @@ mod tests {
             ScalarType::U32,
             (0..5_000u32).map(|e| {
                 ScalarValue::U32(match e % 7 {
-                    0 => tessera_store::vocabulary::ABSENT_CODE,
+                    0 => mosaica_store::vocabulary::ABSENT_CODE,
                     1 => 3_999_999_999,
                     2 => 17,
                     _ => 1_000 + (e % 53),
@@ -6946,7 +6946,7 @@ mod tests {
         // And the postings say what the column says: each code's posting is exactly the entities
         // carrying it, which is what makes one a derivative of the other.
         let tier =
-            tessera_authz::DeltaTier::open(&dir.path().join("postings-1.arrow")).expect("open");
+            mosaica_authz::DeltaTier::open(&dir.path().join("postings-1.arrow")).expect("open");
         let mut codes: Vec<u32> = values
             .iter()
             .map(|v| category_code(&v, "colour").expect("code"))
@@ -6961,13 +6961,13 @@ mod tests {
                 .filter(|(_, v)| category_code(v, "colour").expect("code") == code)
                 .map(|(e, _)| e as u32)
                 .collect();
-            if code == tessera_store::vocabulary::ABSENT_CODE {
+            if code == mosaica_store::vocabulary::ABSENT_CODE {
                 assert!(posting.is_none(), "the absent code earns no posting");
                 continue;
             }
             let got = match posting.expect("carried") {
-                tessera_authz::PostingRef::Roaring(view) => view.iter().collect::<Vec<_>>(),
-                tessera_authz::PostingRef::Array(bytes) => bytes
+                mosaica_authz::PostingRef::Roaring(view) => view.iter().collect::<Vec<_>>(),
+                mosaica_authz::PostingRef::Array(bytes) => bytes
                     .as_chunks::<4>()
                     .0
                     .iter()

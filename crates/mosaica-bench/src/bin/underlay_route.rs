@@ -24,7 +24,7 @@
 //!   * `us_per_cell_evaluated` — the figure that says whether the cost is per-cell or per-item.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin underlay_route -- \
+//! cargo run --release -p mosaica-bench --bin underlay_route -- \
 //!     --fixture data/bench-fixtures/1e8 --terms 0..200
 //! ```
 
@@ -33,9 +33,9 @@ use std::time::Instant;
 
 use clap::Parser;
 
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_store::read::open_bundle;
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{Engine, EngineConfig};
+use mosaica_store::read::open_bundle;
 
 const K_MAX_MARKS: usize = 500;
 const THETA_TARGET: u64 = 16;
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "s0".to_string());
     drop(bundle);
 
-    let tmp = std::env::temp_dir().join(format!("tessera-underlay-route-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("mosaica-underlay-route-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
 
@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_underlay_offset: 16,
             max_underlay_cells: usize::MAX,
             max_tiles_per_request: 262_144,
-            compute_threads: tessera_engine::default_compute_threads(),
+            compute_threads: mosaica_engine::default_compute_threads(),
             flush_max_age_secs: 90,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
             // what bounds the window close's O(buffered) copy. Nothing here reaches it.
@@ -128,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             segment_floor_bytes: None,
             coalesce_width: None,
             // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
 
@@ -284,6 +284,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Summed masked visible over a response's tiles.
-fn visible_for(out: &tessera_engine::viewport::ViewportOut) -> u64 {
+fn visible_for(out: &mosaica_engine::viewport::ViewportOut) -> u64 {
     out.tiles.iter().map(|t| t.visible).sum()
 }

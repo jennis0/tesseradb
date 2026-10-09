@@ -14,7 +14,7 @@
 //!
 //! # The extent format knows nothing about bitmaps
 //!
-//! A membership is an opaque byte blob in the extent format, and deliberately: `tessera-lifecycle`
+//! A membership is an opaque byte blob in the extent format, and deliberately: `mosaica-lifecycle`
 //! owns the Roaring form and does not depend on this crate, so a layout that understood the payload
 //! would put the bitmap library on both sides of a boundary that currently has it on one. What the
 //! format owns is **addressing** — which bytes belong to which ordinal — and nothing else.
@@ -23,14 +23,14 @@
 //! machinery that *does* read bitmaps — the pass producing the inputs to the formats below — is
 //! [`crate::derived`], a file of its own for exactly this reason: a module whose doc claims it
 //! knows nothing about the payload should not hold nine hundred lines that do. The two stay in one
-//! crate on `tessera-build`'s own rule for the filter artefact — the format's owner owns both
+//! crate on `mosaica-build`'s own rule for the filter artefact — the format's owner owns both
 //! halves, so the writer and the reader cannot drift — and the boundary [`crate::derived`] keeps
 //! is the other one: it never sees an `ArtifactRecord`.
 //!
 //! # The format
 //!
 //! ```text
-//! header  := magic "TSMB" | u16 version | u16 reserved | u32 count | u32 ordinal_lo
+//! header  := magic "MSMB" | u16 version | u16 reserved | u32 count | u32 ordinal_lo
 //! offsets := u64 LE × (count + 1)   -- into the payload region; offsets[0] == 0, ascending
 //! payload := count blobs, concatenated in ordinal order
 //! ```
@@ -69,13 +69,13 @@ use memmap2::Mmap;
 
 use crate::error::{Result, StoreError};
 
-const MAGIC: &[u8; 4] = b"TSMB";
+const MAGIC: &[u8; 4] = b"MSMB";
 /// Bumped whenever a blob's *content* changes shape, even though this module holds a blob opaquely:
 /// the refusal has to happen at the file, because the decoder on the other side of the boundary
-/// sees only bytes. Version 2 is the artifact record carrying its attachment — an extent written
+/// sees only bytes. From version 2 the artifact record carries its attachment — an extent written
 /// under version 1 restores every label as unattached, which serves the labels of suppressed
 /// clusters.
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4;
 
 fn malformed(path: &Path, detail: impl std::fmt::Display) -> StoreError {
@@ -275,7 +275,7 @@ impl MembershipPack {
             ));
         }
         if &map[0..4] != MAGIC {
-            return Err(malformed(path, "magic is not TSMB"));
+            return Err(malformed(path, "magic is not MSMB"));
         }
         let version = u16::from_le_bytes([map[4], map[5]]);
         if version != VERSION {
@@ -392,7 +392,7 @@ impl MembershipPack {
 // accessors infallible.
 //
 // ```text
-// header  := magic "TSCP" | u16 version | u16 id_width | u32 ordinals | u32 pairs
+// header  := magic "MSCP" | u16 version | u16 id_width | u32 ordinals | u32 pairs
 //                         | u32 expressions | u32 words
 // at      := u32 LE x (ordinals + 1)   -- into `ids`; at[0] == 0, ascending, at[ordinals] == pairs
 // ids     := id_width bytes x pairs, padded to a 4-byte boundary
@@ -405,11 +405,11 @@ impl MembershipPack {
 // narrow id column has an odd length, and the alternative — padding the reader into an assumption
 // — is how a file written on one machine comes to be read wrongly on another.
 
-const CONTAINMENT_MAGIC: &[u8; 4] = b"TSCP";
+const CONTAINMENT_MAGIC: &[u8; 4] = b"MSCP";
 /// Bumped whenever the array layout or the word encoding changes. There is no compatibility to
 /// keep (decision 0048); the number exists so a stale local file is a loud refusal rather than a
 /// silent misread of a containment answer.
-const CONTAINMENT_VERSION: u16 = 1;
+const CONTAINMENT_VERSION: u16 = 2;
 const CONTAINMENT_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4 + 4 + 4;
 
 fn containment_malformed(what: &str, detail: impl std::fmt::Display) -> StoreError {
@@ -542,7 +542,7 @@ impl ContainmentPack {
             ));
         }
         if &raw[0..4] != CONTAINMENT_MAGIC {
-            return Err(containment_malformed(what, "magic is not TSCP"));
+            return Err(containment_malformed(what, "magic is not MSCP"));
         }
         let version = u16::from_le_bytes([raw[4], raw[5]]);
         if version != CONTAINMENT_VERSION {
@@ -755,7 +755,7 @@ impl ContainmentPack {
 // the three where another belongs refuses instead of finding a plausible header.
 //
 // ```text
-// header := magic "TSTI" | u16 version | u16 reserved | u32 ordinals | u32 row_count
+// header := magic "MSTI" | u16 version | u16 reserved | u32 ordinals | u32 row_count
 // spans  := u32 LE min, u32 LE max, per ordinal
 // ```
 //
@@ -764,7 +764,7 @@ impl ContainmentPack {
 // artifacts against 4.2 MB of index. The extents are the half that scales with the population and
 // the half worth mapping; the tree is a pure function of them — an artifact's node is the finest
 // whose block holds both ends of its span — so writing it would be writing a derivation of the
-// bytes beside it, and a second thing that could disagree with them. `tessera_engine::tile_index`
+// bytes beside it, and a second thing that could disagree with them. `mosaica_engine::tile_index`
 // folds it up in one pass over this column, which is the same pass that validates the column.
 //
 // # The two sentinels, and why they are not one
@@ -783,11 +783,11 @@ impl ContainmentPack {
 // them apart would have no way to answer "is this ordinal an artifact" from the column, and the
 // first caller that needed to would get the permissive answer for a hole.
 
-const TILE_INDEX_MAGIC: &[u8; 4] = b"TSTI";
+const TILE_INDEX_MAGIC: &[u8; 4] = b"MSTI";
 /// Bumped whenever the header or the span encoding changes. There is no compatibility to keep
 /// (decision 0048); the number exists so a stale local file is a loud refusal rather than a silent
 /// misread of which artifacts a viewport reaches.
-const TILE_INDEX_VERSION: u16 = 1;
+const TILE_INDEX_VERSION: u16 = 2;
 const TILE_INDEX_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4;
 
 /// The span of an ordinal that holds no artifact at all. See the module's note on the two
@@ -893,7 +893,7 @@ impl TileIndexPack {
             ));
         }
         if &raw[0..4] != TILE_INDEX_MAGIC {
-            return Err(tile_index_malformed(what, "magic is not TSTI"));
+            return Err(tile_index_malformed(what, "magic is not MSTI"));
         }
         let version = u16::from_le_bytes([raw[4], raw[5]]);
         if version != TILE_INDEX_VERSION {
@@ -993,10 +993,10 @@ impl TileIndexPack {
 // header.
 //
 // ```text
-// label := magic "TSLB" | u16 version | u8 width | u8 reserved | u32 rows | u32 ordinals
+// label := magic "MSLB" | u16 version | u8 width | u8 reserved | u32 rows | u32 ordinals
 //          labels: width bytes x rows
 //
-// list  := magic "TSLL" | u16 version | u8 width | u8 reserved | u32 rows | u32 ordinals
+// list  := magic "MSLL" | u16 version | u8 width | u8 reserved | u32 rows | u32 ordinals
 //                       | u32 entries
 //          at:     u32 LE x (rows + 1)   -- into `values`; at[0] == 0, ascending, at[rows] == entries
 //          values: width bytes x entries
@@ -1029,12 +1029,12 @@ impl TileIndexPack {
 /// compares against one constant rather than against three.
 pub const ROW_COLUMN_HOLE: u32 = u32::MAX;
 
-const LABEL_MAGIC: &[u8; 4] = b"TSLB";
-const LIST_MAGIC: &[u8; 4] = b"TSLL";
+const LABEL_MAGIC: &[u8; 4] = b"MSLB";
+const LIST_MAGIC: &[u8; 4] = b"MSLL";
 /// Bumped whenever the header or the label encoding changes. There is no compatibility to keep
 /// (decision 0048); the number exists so a stale local file is a loud refusal rather than a silent
 /// misread of which artifact a row belongs to.
-const ROW_COLUMN_VERSION: u16 = 1;
+const ROW_COLUMN_VERSION: u16 = 2;
 const LABEL_HEADER_LEN: usize = 4 + 2 + 1 + 1 + 4 + 4;
 const LIST_HEADER_LEN: usize = 4 + 2 + 1 + 1 + 4 + 4 + 4;
 
@@ -1443,7 +1443,7 @@ impl LabelColumnPack {
             ));
         }
         if &raw[0..4] != LABEL_MAGIC {
-            return Err(row_column_malformed(what, "magic is not TSLB"));
+            return Err(row_column_malformed(what, "magic is not MSLB"));
         }
         let version = u16::from_le_bytes([raw[4], raw[5]]);
         if version != ROW_COLUMN_VERSION {
@@ -1637,7 +1637,7 @@ impl ListColumnPack {
             ));
         }
         if &raw[0..4] != LIST_MAGIC {
-            return Err(row_column_malformed(what, "magic is not TSLL"));
+            return Err(row_column_malformed(what, "magic is not MSLL"));
         }
         let version = u16::from_le_bytes([raw[4], raw[5]]);
         if version != ROW_COLUMN_VERSION {
@@ -1835,8 +1835,8 @@ impl ListColumnPack {
 // (`polygon-membership.md` §6.3), persisted so an open claims it rather than resolving again.
 // ---------------------------------------------------------------------------------------------
 
-const SHAPE_ROWS_MAGIC: &[u8; 4] = b"TSSR";
-const SHAPE_ROWS_VERSION: u16 = 1;
+const SHAPE_ROWS_MAGIC: &[u8; 4] = b"MSSR";
+const SHAPE_ROWS_VERSION: u16 = 2;
 /// Magic, version, reserved, ordinals, row count, level version, segment-id length.
 const SHAPE_ROWS_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4 + 8 + 2;
 /// The per-ordinal length that marks a hole — no artifact at that ordinal, as distinct from an
@@ -1852,7 +1852,7 @@ fn shape_rows_malformed(what: &str, detail: impl std::fmt::Display) -> StoreErro
 /// Serialise one `(view, layer, level)`'s membership of **one segment**, one entry per ordinal.
 ///
 /// ```text
-/// TSSR | u16 version | u16 reserved (0) | u32 ordinals | u32 row_count | u64 level_version
+/// MSSR | u16 version | u16 reserved (0) | u32 ordinals | u32 row_count | u64 level_version
 ///      | u16 seg_id_len | seg_id bytes
 ///      | per ordinal: u32 len — u32::MAX a hole, 0 an empty membership — then `len` bytes,
 ///        a portable Roaring bitmap of segment-local rows
@@ -1946,7 +1946,7 @@ impl ShapeRowsPack {
             ));
         }
         if &raw[0..4] != SHAPE_ROWS_MAGIC {
-            return Err(shape_rows_malformed(what, "magic is not TSSR"));
+            return Err(shape_rows_malformed(what, "magic is not MSSR"));
         }
         let version = u16::from_le_bytes([raw[4], raw[5]]);
         if version != SHAPE_ROWS_VERSION {

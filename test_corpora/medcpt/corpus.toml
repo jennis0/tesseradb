@@ -2,7 +2,7 @@
 #
 # Produced by `prepare.py`, which writes an edited copy of this file next to the parquets;
 # `[sources]` is relative to the declaring document (configuration.md §3), so the copy beside the
-# data is what `tessera build` reads and this one is what gets reviewed.
+# data is what `mosaica build` reads and this one is what gets reviewed.
 #
 # **Two markers are filled by the run rather than committed conditional.** `# <abstract-attribute>`
 # becomes the `abstract` column's declaration when `prepare.py` ran with `--abstracts`, which is

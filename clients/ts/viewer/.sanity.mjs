@@ -6,7 +6,7 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 await page.goto('http://localhost:5173/?trace=1', {waitUntil: 'load'});
-await page.waitForFunction(() => (window.__tesseraProbe?.marks ?? 0) > 0, null, {timeout: 90000});
+await page.waitForFunction(() => (window.__mosaicaProbe?.marks ?? 0) > 0, null, {timeout: 90000});
 await page.waitForTimeout(4000);
 for (let i = 0; i < 3; i++) { await page.mouse.move(500,350); await page.mouse.wheel(0,-300); await page.waitForTimeout(900); }
 await page.waitForTimeout(2000);
@@ -16,7 +16,7 @@ for (const dx of [-320, 320, -320]) {
   await page.mouse.up(); await page.waitForTimeout(1400);
 }
 await page.mouse.wheel(0, 300); await page.waitForTimeout(1500);   // zoom out — the stale-stand-in case
-const dump = await page.evaluate(() => window.__tesseraTrace.toJSON());
+const dump = await page.evaluate(() => window.__mosaicaTrace.toJSON());
 const kinds = {};
 for (const e of dump.events) kinds[e.kind] = (kinds[e.kind] ?? 0) + 1;
 console.log('events:', kinds);
@@ -26,6 +26,6 @@ console.log(`refresh: ${refresh.length} (mean ${refresh.length ? (refresh.reduce
 const split = dump.events.filter((e) => e.kind === 'split');
 console.log(`split: ${split.length}, max single ${Math.max(0,...split.map(e=>e.ms)).toFixed(1)} ms (summed per response, sliced within)`);
 console.log('bar:', await page.evaluate(() => document.querySelector('div[style*="fixed"] span')?.textContent ?? 'missing'));
-console.log('marks:', await page.evaluate(() => window.__tesseraProbe));
+console.log('marks:', await page.evaluate(() => window.__mosaicaProbe));
 console.log('errors:', errors.length ? errors.slice(0,4) : 'none');
 await browser.close();

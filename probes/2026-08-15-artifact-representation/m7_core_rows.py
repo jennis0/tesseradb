@@ -10,7 +10,7 @@ import pyarrow.parquet as pq, pyarrow as pa, pyarrow.ipc as ipc
 from pyroaring import BitMap
 import zlib
 
-FIX='/tmp/tessera-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
+FIX='/tmp/mosaica-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
 OUT='probes/2026-08-15-artifact-representation'
 
 row_entity=np.fromfile(f'{FIX}/views/s0/row-entity.u32',dtype=np.uint32)

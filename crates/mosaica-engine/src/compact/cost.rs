@@ -1,7 +1,7 @@
 /// Resident bytes: total, anonymous, file-backed. Files written through a mapping are
 /// file-backed and can be reclaimed once written back; anonymous memory cannot.
 fn resident_set() -> (u64, u64, u64) {
-    let r = tessera_types::process::resident_bytes();
+    let r = mosaica_types::process::resident_bytes();
     (r.total, r.anon, r.file)
 }
 

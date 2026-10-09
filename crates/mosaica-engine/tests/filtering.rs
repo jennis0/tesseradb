@@ -13,7 +13,7 @@
 
 mod common;
 
-use tessera_engine::SuggestRequest;
+use mosaica_engine::SuggestRequest;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -27,17 +27,17 @@ use parquet::arrow::ArrowWriter;
 
 use common::*;
 use croaring::Bitmap;
-use tessera_build::config::Config;
-use tessera_build::{build, BuildArgs};
-use tessera_engine::filter::{
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::filter::{
     candidate, ComposeError, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand,
     OpenedExtent, Scalar, MAX_FILTER_DEPTH,
 };
-use tessera_engine::ViewportRequest;
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::WalScalar;
-use tessera_store::read::open_bundle;
-use tessera_types::AttrLocalId;
+use mosaica_engine::ViewportRequest;
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_store::read::open_bundle;
+use mosaica_types::AttrLocalId;
 
 const N: u64 = 60;
 /// The whole declared extent, so a depth-0 request covers every item.
@@ -244,8 +244,8 @@ struct Fixture {
     /// deliberately corrupted a *file* can still reopen the columns: `open_bundle` verifies every
     /// digest, so it refuses first and the reader under test is never reached.
     phash: String,
-    manifest: tessera_store::manifest::Manifest,
-    extents: Vec<tessera_store::manifest::AttrExtent>,
+    manifest: mosaica_store::manifest::Manifest,
+    extents: Vec<mosaica_store::manifest::AttrExtent>,
 }
 
 fn fixture() -> Fixture {
@@ -261,20 +261,20 @@ fn fixture() -> Fixture {
     let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
 
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: bundle.clone(),
         limit: None,
         strict: false,
@@ -303,7 +303,7 @@ fn fixture() -> Fixture {
         &phash,
         &opened.manifest,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
-        tessera_engine::filter::PartitionExtents::of(Some(&opened.partitions[&phash].manifest)),
+        mosaica_engine::filter::PartitionExtents::of(Some(&opened.partitions[&phash].manifest)),
         &[],
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -363,7 +363,7 @@ fn as_vec(b: &Bitmap) -> Vec<u32> {
 }
 
 /// Open an engine, authorise, and take the composed entity-space candidate the design requires.
-fn candidate_for(fx: &Fixture, credential: &[u8]) -> (tessera_engine::Engine, Bitmap) {
+fn candidate_for(fx: &Fixture, credential: &[u8]) -> (mosaica_engine::Engine, Bitmap) {
     let cache = fx._dir.path().join(format!("cache-{}", credential.len()));
     let wal = fx._dir.path().join(format!("wal-{}", credential.len()));
     let engine = open_engine(&fx.bundle, &cache, &wal);
@@ -592,7 +592,7 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 /// the reserved code 0, which is what the ingest boundary turns a null category into — beside the
 /// ordinary key case a declared vocabulary resolves at the commit window.
 fn ingest_and_flush(
-    engine: &tessera_engine::Engine,
+    engine: &mosaica_engine::Engine,
     external: &str,
     department: WalScalar,
     title: &str,
@@ -613,7 +613,7 @@ fn ingest_and_flush(
 /// and `/v1/categories`' extent sweep both have to see.
 #[allow(clippy::too_many_arguments)]
 fn ingest_and_flush_with(
-    engine: &tessera_engine::Engine,
+    engine: &mosaica_engine::Engine,
     external: &str,
     department: WalScalar,
     archive: WalScalar,
@@ -662,7 +662,7 @@ fn ingest_and_flush_with(
 }
 
 /// The candidate a full-coverage session sees against the engine's live generation.
-fn live_candidate(engine: &tessera_engine::Engine) -> (Arc<tessera_engine::Generation>, Bitmap) {
+fn live_candidate(engine: &mosaica_engine::Engine) -> (Arc<mosaica_engine::Generation>, Bitmap) {
     let session = engine
         .authorise(&full_coverage_credential())
         .expect("credential resolves");
@@ -1099,12 +1099,12 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
         !extents.is_empty(),
         "the flush recorded its extents in the side-manifest"
     );
-    let open = |extents: &[tessera_store::manifest::AttrExtent]| {
+    let open = |extents: &[mosaica_store::manifest::AttrExtent]| {
         FilterColumns::open(
             &prefix,
             &phash,
             &opened.manifest,
-            tessera_engine::filter::PartitionExtents {
+            mosaica_engine::filter::PartitionExtents {
                 attrs: extents,
                 ..Default::default()
             },
@@ -1133,11 +1133,11 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
 fn opened(
     column: &str,
     values_rel: &str,
-    values: Arc<tessera_filter::ValueColumn>,
-    dict: Option<Arc<tessera_filter::SortedDict>>,
+    values: Arc<mosaica_filter::ValueColumn>,
+    dict: Option<Arc<mosaica_filter::SortedDict>>,
 ) -> OpenedExtent {
     OpenedExtent {
-        extent: tessera_store::manifest::AttrExtent {
+        extent: mosaica_store::manifest::AttrExtent {
             column: column.to_string(),
             view: None,
             incarnation: None,
@@ -1162,14 +1162,14 @@ fn keyword_extent(
     entities: &[u32],
     values: &[String],
 ) -> (
-    Arc<tessera_filter::ValueColumn>,
-    Arc<tessera_filter::SortedDict>,
+    Arc<mosaica_filter::ValueColumn>,
+    Arc<mosaica_filter::SortedDict>,
 ) {
     let mut keys: Vec<&str> = values.iter().map(String::as_str).collect();
     keys.sort_unstable();
     keys.dedup();
     let mut bytes = Vec::new();
-    let mut writer = tessera_filter::SortedDictWriter::new(&mut bytes).expect("a writer opens");
+    let mut writer = mosaica_filter::SortedDictWriter::new(&mut bytes).expect("a writer opens");
     for key in &keys {
         writer.push(key).expect("keys ascend strictly");
     }
@@ -1184,13 +1184,13 @@ fn keyword_extent(
     }
     (
         Arc::new(
-            tessera_filter::ValueColumn::partial(
-                tessera_filter::Codes::U32(ordinals.into()),
+            mosaica_filter::ValueColumn::partial(
+                mosaica_filter::Codes::U32(ordinals.into()),
                 presence,
             )
             .unwrap(),
         ),
-        Arc::new(tessera_filter::SortedDict::from_vec(bytes).expect("the dictionary reads back")),
+        Arc::new(mosaica_filter::SortedDict::from_vec(bytes).expect("the dictionary reads back")),
     )
 }
 
@@ -1283,7 +1283,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     assert!(
         matches!(
             err,
-            tessera_engine::AcceptError::ScalarArity {
+            mosaica_engine::AcceptError::ScalarArity {
                 expected: 7,
                 got: 8,
                 ..
@@ -1373,7 +1373,7 @@ fn a_filtered_viewport_sees_entities_flushed_since_the_session_authorised() {
     let after = engine.authorise(&full_coverage_credential()).unwrap();
 
     let eng = FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"]));
-    let filtered = |session: &tessera_engine::Session| {
+    let filtered = |session: &mosaica_engine::Session| {
         engine
             .viewport(
                 session,
@@ -1466,11 +1466,11 @@ fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
     let cache = fx._dir.path().join("cache-vp-theta");
     let wal = fx._dir.path().join("wal-vp-theta");
     // θ live and small, unlike every other engine these tests open.
-    let live_theta = tessera_engine::EngineConfig {
+    let live_theta = mosaica_engine::EngineConfig {
         theta_target_marks: 4,
         ..config()
     };
-    let engine = tessera_engine::Engine::open(
+    let engine = mosaica_engine::Engine::open(
         &fx.bundle,
         &cache,
         &wal,
@@ -1616,7 +1616,7 @@ fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
         "the control request was supposed to project"
     );
 
-    let ids = |out: &tessera_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+    let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
         out.points.tessera_ids.iter().copied().collect()
     };
     let (narrow_all, narrow_matched, full_matched) = (
@@ -1682,7 +1682,7 @@ fn a_filter_does_not_move_the_threshold_anchor() {
         )
         .unwrap();
 
-    let sum = |v: &[tessera_engine::TileCount], f: fn(&tessera_engine::TileCount) -> u64| -> u64 {
+    let sum = |v: &[mosaica_engine::TileCount], f: fn(&mosaica_engine::TileCount) -> u64| -> u64 {
         v.iter().map(f).sum()
     };
     // `visible` is the composed count and must not move with the filter — that is what keeps θ's
@@ -1927,7 +1927,7 @@ fn a_values_count_is_what_a_filter_on_that_value_returns() {
         .category_counts(
             "department",
             &cand,
-            tessera_engine::filter::CountCodes::All(&|visit| codes.iter().for_each(|&c| visit(c))),
+            mosaica_engine::filter::CountCodes::All(&|visit| codes.iter().for_each(|&c| visit(c))),
             &|_| {},
         )
         .expect("a declared category counts");
@@ -1937,7 +1937,7 @@ fn a_values_count_is_what_a_filter_on_that_value_returns() {
             .filter_columns
             .resolve(
                 "department",
-                &tessera_engine::filter::FilterOperand::Equals(AttrLocalId::new(*code)),
+                &mosaica_engine::filter::FilterOperand::Equals(AttrLocalId::new(*code)),
                 &cand,
             )
             .expect("a declared category resolves");
@@ -2343,14 +2343,14 @@ fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
 
 /// Reopen the fixture's columns from disk — used after a test has rewritten a postings file, since
 /// the route is decided and the file mapped at open.
-fn reopen(fx: &Fixture) -> Result<FilterColumns, tessera_engine::filter::ComposeError> {
+fn reopen(fx: &Fixture) -> Result<FilterColumns, mosaica_engine::filter::ComposeError> {
     FilterColumns::open(
         &fx.bundle.join(&fx.prefix),
         &fx.phash,
         // The manifest as it stood at the build: this fixture declares no view group
         // (`views.md` §5), so no incarnation is ever asked for.
         &fx.manifest,
-        tessera_engine::filter::PartitionExtents {
+        mosaica_engine::filter::PartitionExtents {
             attrs: &fx.extents,
             ..Default::default()
         },
@@ -2432,7 +2432,7 @@ fn a_public_column_reads_its_postings_and_a_derived_one_does_not() {
         let mut entries: Vec<(u32, Vec<u32>)> =
             codes.values().map(|&code| (code, vec![0u32])).collect();
         entries.sort_by_key(|(code, _)| *code);
-        tessera_authz::write_delta_tier_at(&postings_path(&fx, column), &entries, 32).unwrap();
+        mosaica_authz::write_delta_tier_at(&postings_path(&fx, column), &entries, 32).unwrap();
     }
     let columns = reopen(&fx).expect("the rewritten files are well-formed and open");
 
@@ -2594,8 +2594,8 @@ fn a_column_the_schema_did_not_declare_filterable_is_still_refused() {
 /// Every value `column` offers this principal, in key order, paged at `limit` so the cursor is
 /// exercised on the ordinary path rather than only on a contrived one.
 fn offered(
-    engine: &tessera_engine::Engine,
-    session: &tessera_engine::Session,
+    engine: &mosaica_engine::Engine,
+    session: &mosaica_engine::Session,
     column: &str,
     limit: usize,
 ) -> Vec<String> {
@@ -2606,7 +2606,7 @@ fn offered(
             .categories(
                 session,
                 column,
-                tessera_engine::CategoryQuery::Page {
+                mosaica_engine::CategoryQuery::Page {
                     after: after.as_deref(),
                     limit,
                 },
@@ -2676,7 +2676,7 @@ fn both_category_request_forms_apply_the_membership_gate() {
         .categories(
             &narrow,
             "department",
-            tessera_engine::CategoryQuery::Codes(&asked),
+            mosaica_engine::CategoryQuery::Codes(&asked),
         )
         .unwrap()
         .unwrap();
@@ -2704,7 +2704,7 @@ fn a_derived_page_is_filtered_before_it_is_cut() {
         .categories(
             &wide,
             "department",
-            tessera_engine::CategoryQuery::Page {
+            mosaica_engine::CategoryQuery::Page {
                 after: None,
                 limit: 2,
             },
@@ -2724,7 +2724,7 @@ fn a_derived_page_is_filtered_before_it_is_cut() {
         .categories(
             &wide,
             "department",
-            tessera_engine::CategoryQuery::Page {
+            mosaica_engine::CategoryQuery::Page {
                 after: Some("legal"),
                 limit: 2,
             },
@@ -2997,10 +2997,10 @@ fn a_node_restarts_onto_a_folded_bundle_and_answers_from_it() {
 }
 
 /// The folded prefix's value column for one attribute, opened directly off disc.
-fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> tessera_filter::ValueColumn {
-    tessera_filter::ValueColumn::open_dir(
+fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> mosaica_filter::ValueColumn {
+    mosaica_filter::ValueColumn::open_dir(
         &attr_dir(fx, prefix, column),
-        tessera_filter::Access::Read,
+        mosaica_filter::Access::Read,
     )
     .expect("the folded column opens")
 }
@@ -3024,7 +3024,7 @@ fn folded_key(fx: &Fixture, prefix: &str, column: &str, entity: u32) -> Option<S
     let dir = attr_dir(fx, prefix, column);
     let values = folded_column(fx, prefix, column);
     let ordinal = values.value_of(entity)?.raw();
-    let dict = tessera_filter::SortedDict::open_dir(&dir, tessera_filter::Access::Read)
+    let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
         .expect("a keyword column's dictionary is beside its values");
     let mut scratch = Vec::new();
     Some(
@@ -3065,8 +3065,8 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
     let arch = AttrLocalId::new(fx.archive_codes[archive_of(2).expect("source 2 carries one")]);
     engine
         .accept_change(
-            tessera_types::EntityId::new(deleted),
-            tessera_lifecycle::wal::ChangeOp::Delete,
+            mosaica_types::EntityId::new(deleted),
+            mosaica_lifecycle::wal::ChangeOp::Delete,
         )
         .expect("a delete is accepted");
     fold(&engine);
@@ -3107,9 +3107,9 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
     // Walked rather than searched for as bytes: the dictionary is front-coded, so a key's bytes
     // are not contiguous in the file and a byte-window search would report absence for keys that
     // are present — passing vacuously, which is the direction that hides the failure.
-    let dict = tessera_filter::SortedDict::open_dir(
+    let dict = mosaica_filter::SortedDict::open_dir(
         &attr_dir(&fx, "v00001", "title"),
-        tessera_filter::Access::Read,
+        mosaica_filter::Access::Read,
     )
     .expect("the folded dictionary is on disc");
     let mut keys = Vec::new();
@@ -3127,7 +3127,7 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
          dictionary"
     );
 
-    let postings = tessera_filter::ColumnPostings::open_keyed(
+    let postings = mosaica_filter::ColumnPostings::open_keyed(
         &fx.bundle
             .join("v00001")
             .join("partitions")
@@ -3221,8 +3221,8 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
 
     engine
         .accept_change(
-            tessera_types::EntityId::new(doomed),
-            tessera_lifecycle::wal::ChangeOp::Delete,
+            mosaica_types::EntityId::new(doomed),
+            mosaica_lifecycle::wal::ChangeOp::Delete,
         )
         .expect("a delete is accepted");
     assert!(
@@ -3288,8 +3288,8 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
     let arch = AttrLocalId::new(fx.archive_codes[archive_of(2).expect("source 2 carries one")]);
     engine
         .accept_change(
-            tessera_types::EntityId::new(suppressed),
-            tessera_lifecycle::wal::ChangeOp::Suppress,
+            mosaica_types::EntityId::new(suppressed),
+            mosaica_lifecycle::wal::ChangeOp::Suppress,
         )
         .expect("a suppression is accepted");
     fold(&engine);
@@ -3305,7 +3305,7 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
         "the suppressed entity keeps its slot and its key: no attribute artefact changes for a \
          suppression"
     );
-    let postings = tessera_filter::ColumnPostings::open_keyed(
+    let postings = mosaica_filter::ColumnPostings::open_keyed(
         &fx.bundle
             .join("v00001")
             .join("partitions")
@@ -3325,8 +3325,8 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
     drop(generation);
     engine
         .accept_change(
-            tessera_types::EntityId::new(suppressed),
-            tessera_lifecycle::wal::ChangeOp::Unsuppress,
+            mosaica_types::EntityId::new(suppressed),
+            mosaica_lifecycle::wal::ChangeOp::Unsuppress,
         )
         .expect("an unsuppress is accepted");
     let (generation, cand) = live_candidate(&engine);
@@ -3508,7 +3508,7 @@ const COALESCE_WIDTH: usize = 8;
 ///
 /// The row-space merge is independent and safe beside a coalesce — each discards a plan that no
 /// longer rebases — but not deterministic enough to assert list lengths against.
-fn engine_for_coalesce(fx: &Fixture, tag: &str) -> tessera_engine::Engine {
+fn engine_for_coalesce(fx: &Fixture, tag: &str) -> mosaica_engine::Engine {
     let engine = open_engine_publishing(
         &fx.bundle,
         &fx._dir.path().join(format!("cache-{tag}")),
@@ -3520,7 +3520,7 @@ fn engine_for_coalesce(fx: &Fixture, tag: &str) -> tessera_engine::Engine {
 
 /// Ingest and flush `COALESCE_WIDTH` rows, then drive the tick the coalesce is selected on and wait
 /// for it to publish. Returns the entities, in ingest order.
-fn flush_a_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
+fn flush_a_window(engine: &mosaica_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
     let entities: Vec<u64> = (from..from + COALESCE_WIDTH)
         .map(|i| {
             ingest_and_flush_with(
@@ -3540,7 +3540,7 @@ fn flush_a_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Ve
 
 /// Drive ticks until every column's live attribute extents are fewer than a window: the pass that
 /// takes them has published.
-fn attrs_coalesced(engine: &tessera_engine::Engine) {
+fn attrs_coalesced(engine: &mosaica_engine::Engine) {
     tick_until(engine, "the attribute extents to coalesce", std::time::Duration::from_secs(30), || {
         let generation = engine.generation();
         let (_, partition) = generation.bundle.partitions.iter().next().unwrap();
@@ -3565,7 +3565,7 @@ fn extents_per_column(fx: &Fixture) -> BTreeMap<String, usize> {
 
 /// Every filter answer this fixture can express, over the live candidate — the whole surface a
 /// content-preserving re-encode has to leave alone.
-fn every_answer(engine: &tessera_engine::Engine, fx: &Fixture) -> Vec<(String, Vec<u32>)> {
+fn every_answer(engine: &mosaica_engine::Engine, fx: &Fixture) -> Vec<(String, Vec<u32>)> {
     let (generation, cand) = live_candidate(engine);
     let mut out = Vec::new();
     for key in ["eng", "sales", "legal"] {
@@ -3766,7 +3766,7 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
 /// declared column the layer counts and the placement, one representative operand per family, and
 /// the record stack's depth.
 fn composition_reading(
-    engine: &tessera_engine::Engine,
+    engine: &mosaica_engine::Engine,
     fx: &Fixture,
 ) -> BTreeMap<String, String> {
     let (generation, cand) = live_candidate(engine);
@@ -3905,7 +3905,7 @@ const KEYS: [&str; COALESCE_WIDTH] = [
 ];
 
 /// Ingest and flush one window's worth of rows whose `title` is `{tag}-{KEYS[i]}`, one flush each.
-fn flush_keyed_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
+fn flush_keyed_window(engine: &mosaica_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
     (0..COALESCE_WIDTH)
         .map(|i| {
             ingest_and_flush_with(
@@ -3925,7 +3925,7 @@ fn flush_keyed_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -
 /// read by: the column reader, the filter expression evaluator, and a viewport request. Each
 /// answer is a sorted id list, so two captures compare as one value.
 fn keyword_answers(
-    engine: &tessera_engine::Engine,
+    engine: &mosaica_engine::Engine,
     fx: &Fixture,
     tag: &str,
 ) -> Vec<(String, Vec<u64>)> {
@@ -3984,7 +3984,7 @@ fn keyword_answers(
 }
 
 /// Drive the tick a coalesce is selected on, with the pass enabled, and wait for it to publish.
-fn coalesce_now(engine: &tessera_engine::Engine) {
+fn coalesce_now(engine: &mosaica_engine::Engine) {
     engine.set_coalesce_for_test(true);
     attrs_coalesced(engine);
 }
@@ -4135,8 +4135,8 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
     let deleted = entities[3];
     engine
         .accept_change(
-            tessera_types::EntityId::new(deleted),
-            tessera_lifecycle::wal::ChangeOp::Delete,
+            mosaica_types::EntityId::new(deleted),
+            mosaica_lifecycle::wal::ChangeOp::Delete,
         )
         .expect("a delete is accepted");
     assert!(
@@ -4156,10 +4156,10 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
         if extent.column != "title" {
             continue;
         }
-        let column = tessera_filter::open_extent(
+        let column = mosaica_filter::open_extent(
             &prefix.join(&extent.values),
             &prefix.join(&extent.presence),
-            tessera_filter::Access::Read,
+            mosaica_filter::Access::Read,
         )
         .expect("a listed extent opens");
         // The ordinal alone would not settle it: a key is what the entity carried, and only this
@@ -4172,7 +4172,7 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
             .as_ref()
             .expect("a keyword extent lists its dictionary beside its values");
         let dict =
-            tessera_filter::SortedDict::open(&prefix.join(dict_rel), tessera_filter::Access::Read)
+            mosaica_filter::SortedDict::open(&prefix.join(dict_rel), mosaica_filter::Access::Read)
                 .expect("the listed dictionary opens");
         let mut scratch = Vec::new();
         held = Some(
@@ -4209,8 +4209,8 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
             presence.add(*e);
         }
         Arc::new(
-            tessera_filter::ValueColumn::partial(
-                tessera_filter::Codes::I32(
+            mosaica_filter::ValueColumn::partial(
+                mosaica_filter::Codes::I32(
                     entities
                         .iter()
                         .map(|e| *e as i32)
@@ -4238,7 +4238,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
         .expect("two extents above the build's high-water compose");
 
     let window =
-        |values: Arc<tessera_filter::ValueColumn>| tessera_engine::filter::CoalescedWindow {
+        |values: Arc<mosaica_filter::ValueColumn>| mosaica_engine::filter::CoalescedWindow {
             consumed: vec![first.clone(), second.clone()],
             replacement: opened("bonus", "coalesced/c-1/attrs/bonus/values.arrow", values, None),
         };
@@ -4275,7 +4275,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let answer = next
         .resolve(
             "bonus",
-            &FilterOperand::NumEquals(tessera_filter::Scalar::Int(201)),
+            &FilterOperand::NumEquals(mosaica_filter::Scalar::Int(201)),
             &cand,
         )
         .expect("answers");
@@ -4341,11 +4341,11 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
     let source = 1u64;
     let entity = fx.entity_of[&source];
     let id = engine
-        .tessera_id_of(tessera_types::EntityId::new(entity))
+        .tessera_id_of(mosaica_types::EntityId::new(entity))
         .expect("identity is computable");
     let raw = id.raw();
 
-    let filtered = |engine: &tessera_engine::Engine, session: &tessera_engine::Session| {
+    let filtered = |engine: &mosaica_engine::Engine, session: &mosaica_engine::Session| {
         engine
             .viewport(
                 session,
@@ -4369,13 +4369,13 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
              suppressed"
     );
     let matched =
-        |out: &tessera_engine::ViewportOut| -> u64 { out.tiles.iter().map(|t| t.matched).sum() };
+        |out: &mosaica_engine::ViewportOut| -> u64 { out.tiles.iter().map(|t| t.matched).sum() };
     let matched_before = matched(&before);
 
     engine
         .accept_change(
-            tessera_types::EntityId::new(entity),
-            tessera_lifecycle::wal::ChangeOp::Suppress,
+            mosaica_types::EntityId::new(entity),
+            mosaica_lifecycle::wal::ChangeOp::Suppress,
         )
         .expect("a suppression is accepted");
 
@@ -4402,8 +4402,8 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
 
     engine
         .accept_change(
-            tessera_types::EntityId::new(entity),
-            tessera_lifecycle::wal::ChangeOp::Unsuppress,
+            mosaica_types::EntityId::new(entity),
+            mosaica_lifecycle::wal::ChangeOp::Unsuppress,
         )
         .expect("an unsuppress is accepted");
     let restored = filtered(&engine, &session);
@@ -4449,7 +4449,7 @@ fn the_row_route_and_the_entity_route_agree_over_the_domain() {
             })
             .collect(),
     );
-    let ids = |out: &tessera_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+    let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
         out.points.tessera_ids.iter().copied().collect()
     };
 
@@ -4533,7 +4533,7 @@ fn the_row_route_and_the_entity_route_agree_over_a_numeric_range() {
             }),
         },
     );
-    let ids = |out: &tessera_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+    let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
         out.points.tessera_ids.iter().copied().collect()
     };
 
@@ -4590,7 +4590,7 @@ fn the_row_route_and_the_entity_route_agree_over_a_numeric_range() {
         .filter_map(|e| fx.entity_of.get(&e).copied())
         .filter_map(|entity| {
             engine
-                .tessera_id_of(tessera_types::EntityId::new(entity))
+                .tessera_id_of(mosaica_types::EntityId::new(entity))
                 .ok()
         })
         .map(|id| id.raw())
@@ -4659,7 +4659,7 @@ fn a_render_column_filter_narrows_the_selection_without_moving_the_anchor() {
         // `TileCount::visible` is the anchor's own input — the composed mask's count for the tile,
         // computed above the filter — while `matched` is what the filter narrowed to. The first
         // must be identical across the pair; the second must not be.
-        let anchor = |out: &tessera_engine::ViewportOut| -> Vec<(u64, u64)> {
+        let anchor = |out: &mosaica_engine::ViewportOut| -> Vec<(u64, u64)> {
             out.tiles.iter().map(|t| (t.tile, t.visible)).collect()
         };
         let (visible, visible_unfiltered) = (anchor(&filtered), anchor(&unfiltered));

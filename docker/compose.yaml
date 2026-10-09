@@ -1,21 +1,21 @@
-# Tessera from the image built by the repository's Dockerfile. docker/README.md walks through it.
+# Mosaica from the image built by the repository's Dockerfile. docker/README.md walks through it.
 #
-#   docker compose run --rm tessera build    # once, to create the database
+#   docker compose run --rm mosaica build    # once, to create the database
 #   docker compose up -d                     # serve it
 
 services:
-  tessera:
-    image: tessera
+  mosaica:
+    image: mosaica
     build:
       context: ..
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     volumes:
-      - ./config:/etc/tessera:ro
-      - tessera-data:/var/lib/tessera
+      - ./config:/etc/mosaica:ro
+      - mosaica-data:/var/lib/mosaica
     secrets:
-      - tessera_operator
+      - mosaica_operator
     ports:
       - "8080:8080"
       - "8081:8081"
@@ -23,8 +23,8 @@ services:
     restart: unless-stopped
 
 volumes:
-  tessera-data:
+  mosaica-data:
 
 secrets:
-  tessera_operator:
-    file: ./secrets/tessera_operator
+  mosaica_operator:
+    file: ./secrets/mosaica_operator

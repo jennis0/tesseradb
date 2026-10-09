@@ -14,7 +14,7 @@
 //! pages' batches.
 //!
 //! ```text
-//! cargo build --release -p tessera-bench --bin aggregate_cost
+//! cargo build --release -p mosaica-bench --bin aggregate_cost
 //! systemd-run --user --scope --collect -p MemoryMax=16G -p MemorySwapMax=2G -- \
 //!     target/release/aggregate_cost \
 //!     --bundle data/ladder/geonames/bundle-final --view world --threads 12 \
@@ -36,10 +36,10 @@ use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use serde_json::{json, Value};
 
-use tessera_engine::filter::{FilterExpr, RegionLeaf, Scalar};
-use tessera_engine::shapes::{Bounds, ShapeF64, Space};
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{
+use mosaica_engine::filter::{FilterExpr, RegionLeaf, Scalar};
+use mosaica_engine::shapes::{Bounds, ShapeF64, Space};
+use mosaica_engine::viewport::ViewportRequest;
+use mosaica_engine::{
     AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, By, Engine, EngineConfig,
     Grouping, PageEnd, Pick, RecordsLimits, Session, SinkResult, TableHead,
 };
@@ -241,7 +241,7 @@ fn main() -> Result<(), BoxError> {
             "WARNING: debug build, so every figure below is meaningless. Build with --release."
         );
     }
-    let tmp = std::env::temp_dir().join(format!("tessera-aggregate-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("mosaica-aggregate-{}", std::process::id()));
     std::fs::create_dir_all(&tmp)?;
     let engine = Engine::open(
         &args.bundle,
@@ -263,7 +263,7 @@ fn main() -> Result<(), BoxError> {
             tier_width: None,
             segment_floor_bytes: None,
             coalesce_width: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
+            compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
     let meta = engine.meta();

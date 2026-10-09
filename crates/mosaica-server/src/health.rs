@@ -16,7 +16,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 
-use tessera_engine::ExecutorPosture;
+use mosaica_engine::ExecutorPosture;
 
 use crate::state::AppState;
 
@@ -57,7 +57,7 @@ mod tests {
     }
 
     /// Every posture, including `Dead`, which no HTTP test reaches. That a panicked executor
-    /// becomes `Dead` is tested in `tessera-engine` (`an_executor_panic_is_reported_dead`).
+    /// becomes `Dead` is tested in `mosaica-engine` (`an_executor_panic_is_reported_dead`).
     #[test]
     fn only_a_running_executor_is_ready() {
         assert!(is_ready(ExecutorPosture::Running));

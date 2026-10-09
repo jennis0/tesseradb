@@ -8,7 +8,7 @@
 //! (`self_check`).
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin record_walk_scale -- --dir <scratch> [--rows N]
+//! cargo run --release -p mosaica-bench --bin record_walk_scale -- --dir <scratch> [--rows N]
 //! ```
 //!
 //! The blob is kept under `--dir` and reused by a later run with the same `--rows`, so two builds
@@ -19,8 +19,8 @@ use std::time::Instant;
 
 use clap::Parser;
 use croaring::Bitmap;
-use tessera_filter::{Access, RecordBlob, RecordFieldRef, RecordValue, RecordValueRef};
-use tessera_filter_write::RecordBlobWriter;
+use mosaica_filter::{Access, RecordBlob, RecordFieldRef, RecordValue, RecordValueRef};
+use mosaica_filter_write::RecordBlobWriter;
 
 #[derive(Parser)]
 struct Args {
@@ -77,7 +77,7 @@ fn main() {
             &blocks,
             &hasrow,
             &directory,
-            tessera_filter::RECORD_BLOCK_TARGET,
+            mosaica_filter::RECORD_BLOCK_TARGET,
         )
         .expect("create the writer");
         let mut lcg = Lcg(7);
@@ -115,7 +115,7 @@ fn main() {
     );
 
     let mut sum = 0u64;
-    let mut visit = |_: u32, fields: Vec<tessera_filter::RecordField>| {
+    let mut visit = |_: u32, fields: Vec<mosaica_filter::RecordField>| {
         if let Some(RecordValue::U64(v)) = fields.first().map(|f| f.value.clone()) {
             sum = sum.wrapping_add(v);
         }

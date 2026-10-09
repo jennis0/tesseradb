@@ -39,12 +39,12 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::config::{Config, Schema};
-use tessera_build::{build, BuildArgs};
-use tessera_engine::{ColumnBuf, Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::command::UnallocatedRow;
-use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
+use mosaica_build::config::{Config, Schema};
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{ColumnBuf, Engine, EngineConfig, ViewportRequest};
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
+use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
 
 /// The fixture's schema: a `u8` category, a plain `i64` and a plain `f32`.
 ///
@@ -169,20 +169,20 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
     write_pairs_n(&pairs, n);
     let schema = parse_schema(tmp);
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -210,7 +210,7 @@ fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
     // The prefix is read from `CURRENT` rather than assumed, because a fold publishes into a new
     // one — a hard-coded `v00000` would silently read the *pre-fold* segments and let the fold
     // case pass without the fold's output ever being looked at.
-    let current: tessera_store::manifest::CurrentPointer =
+    let current: mosaica_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
             .expect("CURRENT parses");
     let prefix = &current.prefix;
@@ -313,7 +313,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
         .expect("the declared vocabulary reaches the manifest");
     assert_eq!(
         vocabulary.visibility,
-        tessera_store::manifest::Visibility::Public
+        mosaica_store::manifest::Visibility::Public
     );
     let codes: BTreeMap<&str, u32> = vocabulary
         .values
@@ -338,7 +338,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     for source in 0..N_ITEMS {
         let entity = entity_of_source[&source];
         let id = key
-            .forward(0, tessera_types::EntityId::new(entity))
+            .forward(0, mosaica_types::EntityId::new(entity))
             .unwrap();
         let (band, stamp, score) = tail[&id.raw()];
         assert_eq!(band, band_code(source), "source {source}'s band code");
@@ -363,20 +363,20 @@ fn both_build_implementations_write_the_same_tail() {
     write_pairs_n(&pairs, 2_000);
     let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -395,7 +395,7 @@ fn both_build_implementations_write_the_same_tail() {
     let streamed = tmp.path().join("streamed");
     let linear = tmp.path().join("linear");
     build(&args_for(&streamed)).expect("the streaming build succeeds");
-    tessera_build::build_in_memory(&args_for(&linear)).expect("the in-memory build succeeds");
+    mosaica_build::build_in_memory(&args_for(&linear)).expect("the in-memory build succeeds");
 
     let a = std::fs::read(
         streamed.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
@@ -544,7 +544,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
     for source in [0u64, 1, 2, N_ITEMS - 1] {
         let entity = entity_of_source[&source];
         let id = key
-            .forward(0, tessera_types::EntityId::new(entity))
+            .forward(0, mosaica_types::EntityId::new(entity))
             .unwrap();
         assert_eq!(
             tail[&id.raw()],
@@ -852,7 +852,7 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
         .values()
         .find_map(|p| p.views.get("s0"))
         .expect("the bundle holds view s0");
-    let segments = tessera_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
+    let segments = mosaica_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
     assert_eq!(segments.len(), 3, "the build and two flushes, unmerged");
     let mut stored = BTreeMap::new();
     for (at, (segment, _)) in segments.iter().enumerate() {
@@ -951,7 +951,7 @@ fn a_segment_holding_a_render_column_at_another_type_is_refused() {
     build_fixture_with_attributes(&root, tmp.path(), N_ITEMS);
 
     let current_path = root.join("CURRENT");
-    let mut current: tessera_store::manifest::CurrentPointer =
+    let mut current: mosaica_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(&current_path).unwrap()).unwrap();
     let manifest_path = root.join(&current.prefix).join("MANIFEST.json");
     let mut manifest: serde_json::Value =
@@ -979,7 +979,7 @@ fn a_segment_holding_a_render_column_at_another_type_is_refused() {
         ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], u32::MAX as usize),
     );
     assert!(
-        matches!(answer, Err(tessera_engine::EngineError::Malformed(_))),
+        matches!(answer, Err(mosaica_engine::EngineError::Malformed(_))),
         "a segment storing score as f32 under an f64 declaration is refused: {:?}",
         answer.map(|out| out.points.len())
     );
@@ -1079,20 +1079,20 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the non-prefix fixture schema parses");
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -1133,7 +1133,7 @@ fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> Una
 /// same truth-by-identity join `tail_by_identity` performs for the all-rendered fixture.
 fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
     let bundle = open_bundle(root).expect("the bundle opens");
-    let current: tessera_store::manifest::CurrentPointer =
+    let current: mosaica_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
             .expect("CURRENT parses");
     let prefix = &current.prefix;
@@ -1312,17 +1312,17 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
         let value = |name: &str| &served.fields.iter().find(|f| f.name == name).unwrap().value;
         assert_eq!(
             value("audit"),
-            &tessera_engine::ScalarOut::I64(audit),
+            &mosaica_engine::ScalarOut::I64(audit),
             "{label}: the entity-space value under its own name"
         );
         assert_eq!(
             value("band"),
-            &tessera_engine::ScalarOut::Utf8(band_key.to_string()),
+            &mosaica_engine::ScalarOut::Utf8(band_key.to_string()),
             "{label}: the category resolves to its own key"
         );
         assert_eq!(
             value("score"),
-            &tessera_engine::ScalarOut::F32(score),
+            &mosaica_engine::ScalarOut::F32(score),
             "{label}: the row value under its own name"
         );
     };
@@ -1330,7 +1330,7 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
     let entity_of_source = source_to_new_map(&root, "v00000");
     for source in [0u64, 1, 5, 63] {
         let id = engine
-            .tessera_id_of(tessera_types::EntityId::new(entity_of_source[&source]))
+            .tessera_id_of(mosaica_types::EntityId::new(entity_of_source[&source]))
             .expect("identity is computable");
         expect_item(
             id,
@@ -1420,23 +1420,23 @@ fn tier_code_of(entity: u64) -> u8 {
 /// The blob row the fixture's generation functions predict for `source`: `note` is declared at
 /// position 1 and `revision` at position 2, and the field tag **is** the declared position
 /// (records §3) — the same identity the build's blob stage and the flush's extent writer share.
-fn record_fields_of(source: u64) -> Vec<tessera_filter::RecordField> {
+fn record_fields_of(source: u64) -> Vec<mosaica_filter::RecordField> {
     vec![
-        tessera_filter::RecordField {
+        mosaica_filter::RecordField {
             tag: 1,
-            value: tessera_filter::RecordValue::Utf8(note_of(source)),
+            value: mosaica_filter::RecordValue::Utf8(note_of(source)),
         },
-        tessera_filter::RecordField {
+        mosaica_filter::RecordField {
             tag: 2,
-            value: tessera_filter::RecordValue::I64(revision_of(source)),
+            value: mosaica_filter::RecordValue::I64(revision_of(source)),
         },
-        tessera_filter::RecordField {
+        mosaica_filter::RecordField {
             tag: 3,
-            value: tessera_filter::RecordValue::U8(tier_code_of(source)),
+            value: mosaica_filter::RecordValue::U8(tier_code_of(source)),
         },
-        tessera_filter::RecordField {
+        mosaica_filter::RecordField {
             tag: 4,
-            value: tessera_filter::RecordValue::U64(source),
+            value: mosaica_filter::RecordValue::U64(source),
         },
     ]
 }
@@ -1497,20 +1497,20 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the record fixture schema parses");
     let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: vec![mosaica_build::ViewArgs {
             visibility: None,
             view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
+            projection: mosaica_spatial::Projection::None,
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
             select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
+            access: mosaica_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -1529,27 +1529,27 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
 }
 
 /// The partition's side-manifest, as the serving path holds it.
-fn side_manifest(root: &Path) -> tessera_store::manifest::SegmentsManifest {
+fn side_manifest(root: &Path) -> mosaica_store::manifest::SegmentsManifest {
     let bundle = open_bundle(root).expect("the bundle opens");
     bundle.partitions["default"].manifest.clone()
 }
 
 /// The record stack exactly as drill-down will open it: the base blob under `attrs/record` plus
 /// every extent the manifest's `record_extents` names, oldest first.
-fn record_stack(root: &Path) -> tessera_filter::RecordStack {
+fn record_stack(root: &Path) -> mosaica_filter::RecordStack {
     let prefix_dir = root.join(current_prefix(root));
     let manifest = side_manifest(root);
     let base = prefix_dir.join("partitions/default/attrs/record");
-    let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
+    let extents: Vec<mosaica_filter::RecordExtentPaths> = manifest
         .record_extents
         .iter()
-        .map(|e| tessera_filter::RecordExtentPaths {
+        .map(|e| mosaica_filter::RecordExtentPaths {
             blocks: prefix_dir.join(&e.blocks),
             hasrow: prefix_dir.join(&e.hasrow),
             directory: prefix_dir.join(&e.directory),
         })
         .collect();
-    tessera_filter::RecordStack::open(Some(&base), &extents, tessera_filter::Access::Read)
+    mosaica_filter::RecordStack::open(Some(&base), &extents, mosaica_filter::Access::Read)
         .expect("the stack opens fail-closed over every layer the manifest names")
 }
 
@@ -1628,7 +1628,7 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
         });
     assert_eq!(
         note.value,
-        tessera_engine::ScalarOut::Utf8("the-flushed-note".to_string()),
+        mosaica_engine::ScalarOut::Utf8("the-flushed-note".to_string()),
         "the live generation serves the flushed blob row"
     );
 
@@ -1649,19 +1649,19 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
     assert_eq!(
         stack.fields_of(entity).expect("a clean read"),
         Some(vec![
-            tessera_filter::RecordField {
+            mosaica_filter::RecordField {
                 tag: 1,
-                value: tessera_filter::RecordValue::Utf8("the-flushed-note".to_string()),
+                value: mosaica_filter::RecordValue::Utf8("the-flushed-note".to_string()),
             },
-            tessera_filter::RecordField {
+            mosaica_filter::RecordField {
                 tag: 2,
-                value: tessera_filter::RecordValue::I64(77),
+                value: mosaica_filter::RecordValue::I64(77),
             },
             // The `public` category with neither flag: no hot column, no entity-space structure,
             // so the blob is its only home and the flush owes it exactly as the build does.
-            tessera_filter::RecordField {
+            mosaica_filter::RecordField {
                 tag: 3,
-                value: tessera_filter::RecordValue::U8(3),
+                value: mosaica_filter::RecordValue::U8(3),
             },
         ]),
         "the flushed row's blob values are what was ingested"
@@ -1683,7 +1683,7 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
 /// Byte-absence is asserted by exhaustive walk rather than by decompression in this test: rows
 /// tile their blocks exactly (`for_each_row` refuses anything else), so once every decoded row is
 /// a surviving entity's expected fields, every block byte is accounted for and none of them is
-/// the deleted row's. The unit half (`tessera-filter-write`'s
+/// the deleted row's. The unit half (`mosaica-filter-write`'s
 /// `a_blanked_rows_bytes_are_not_in_the_folded_blob`) additionally greps the decompressed frames.
 #[test]
 fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
@@ -1764,17 +1764,17 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     assert_eq!(
         stack.fields_of(suppressed).expect("read"),
         Some(vec![
-            tessera_filter::RecordField {
+            mosaica_filter::RecordField {
                 tag: 1,
-                value: tessera_filter::RecordValue::Utf8("the-suppressed-prose".to_string()),
+                value: mosaica_filter::RecordValue::Utf8("the-suppressed-prose".to_string()),
             },
-            tessera_filter::RecordField {
+            mosaica_filter::RecordField {
                 tag: 2,
-                value: tessera_filter::RecordValue::I64(1),
+                value: mosaica_filter::RecordValue::I64(1),
             },
-            tessera_filter::RecordField {
+            mosaica_filter::RecordField {
                 tag: 3,
-                value: tessera_filter::RecordValue::U8(3),
+                value: mosaica_filter::RecordValue::U8(3),
             },
         ]),
         "the suppressed row folds through intact — a later unsuppress reveals exactly this"
@@ -1790,11 +1790,11 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
 
     // The exhaustive walk over the folded base: every row is a surviving entity's, so the deleted
     // row's bytes are in no block (see this test's doc for why the walk is the byte argument).
-    let base = tessera_filter::RecordBlob::open_dir(
+    let base = mosaica_filter::RecordBlob::open_dir(
         &root
             .join(current_prefix(&root))
             .join("partitions/default/attrs/record"),
-        tessera_filter::Access::Read,
+        mosaica_filter::Access::Read,
     )
     .expect("the folded base opens");
     let mut saw_deleted = false;
@@ -1805,7 +1805,7 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
         );
         if fields
             .iter()
-            .any(|f| f.value == tessera_filter::RecordValue::Utf8("the-deleted-prose".to_string()))
+            .any(|f| f.value == mosaica_filter::RecordValue::Utf8("the-deleted-prose".to_string()))
         {
             saw_deleted = true;
         }
@@ -1904,7 +1904,7 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
             .expect("every ingested entity has a blob row");
         assert!(
             fields.iter().any(|f| f.value
-                == tessera_filter::RecordValue::Utf8(note.clone())),
+                == mosaica_filter::RecordValue::Utf8(note.clone())),
             "entity {entity} lost its note to the coalesce's live publication"
         );
     }
@@ -1923,17 +1923,17 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         assert_eq!(
             stack.fields_of(entity).expect("read"),
             Some(vec![
-                tessera_filter::RecordField {
+                mosaica_filter::RecordField {
                     tag: 1,
-                    value: tessera_filter::RecordValue::Utf8(note.clone()),
+                    value: mosaica_filter::RecordValue::Utf8(note.clone()),
                 },
-                tessera_filter::RecordField {
+                mosaica_filter::RecordField {
                     tag: 2,
-                    value: tessera_filter::RecordValue::I64(*revision),
+                    value: mosaica_filter::RecordValue::I64(*revision),
                 },
-                tessera_filter::RecordField {
+                mosaica_filter::RecordField {
                     tag: 3,
-                    value: tessera_filter::RecordValue::U8(3),
+                    value: mosaica_filter::RecordValue::U8(3),
                 },
             ]),
             "entity {entity} answers differently through the coalesced extent"

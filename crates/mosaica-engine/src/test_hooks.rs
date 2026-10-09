@@ -6,9 +6,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 #[cfg(feature = "fault-injection")]
-use tessera_authz::{DeltaTier, Dict};
+use mosaica_authz::{DeltaTier, Dict};
 #[cfg(feature = "fault-injection")]
-use tessera_types::EntityId;
+use mosaica_types::EntityId;
 
 #[cfg(feature = "fault-injection")]
 use crate::engine::open_rotation;
@@ -298,7 +298,7 @@ impl Engine {
     ///
     /// Scoped to the `Engine` instance rather than global or thread-local state, since tests run
     /// in parallel each with their own `Engine`, and the engine is driven from a different OS
-    /// thread than the one that set this in `tessera-server`'s own tests.
+    /// thread than the one that set this in `mosaica-server`'s own tests.
     ///
     /// The `serial_fallback_max_rows` field itself is present in every build and always read;
     /// only this setter is gated, so nothing outside `bench-timing` can ever write a value other

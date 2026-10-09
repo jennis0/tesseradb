@@ -3,7 +3,7 @@
 //
 //   node probes/2026-08-08-lookahead-contention/load.mjs [--clients N] [--depth D] [--steps S]
 //
-// Needs a running `tessera serve` (run_demo.sh --no-viewer) and TESSERA_SESSION_CRED.
+// Needs a running `mosaica serve` (run_demo.sh --no-viewer) and MOSAICA_SESSION_CRED.
 //
 // **No browser, deliberately.** Driving N headless pages measures software rasterisation of N
 // deck.gl canvases long before it measures the engine: at three clients the box saturated and the
@@ -25,9 +25,9 @@ const STEPS = arg('steps', 12);
 // This is the parameter the whole trade turns on: look-ahead moves work earlier when it guesses
 // right, and adds work when it guesses wrong.
 const TURN = arg('turn', 0) / 100;
-const VIEWER = process.env.TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585';
-const SESSION = process.env.TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303';
-const CRED = process.env.TESSERA_SESSION_CRED ?? 'dev-session-credential';
+const VIEWER = process.env.MOSAICA_VIEWER_URL ?? 'http://127.0.0.1:37585';
+const SESSION = process.env.MOSAICA_SESSION_URL ?? 'http://127.0.0.1:49303';
+const CRED = process.env.MOSAICA_SESSION_CRED ?? 'dev-session-credential';
 
 // The viewer's own constants, so the shapes match what a real client sends.
 const MARGIN = 1.3;
@@ -78,7 +78,7 @@ async function viewport(token, tiles, k = 500) {
   const body = await r.arrayBuffer();
   return {
     wallMs: performance.now() - t0,
-    serverUs: Number(r.headers.get('x-tessera-server-us') ?? 0),
+    serverUs: Number(r.headers.get('x-mosaica-server-us') ?? 0),
     status: r.status,
     bytes: body.byteLength
   };

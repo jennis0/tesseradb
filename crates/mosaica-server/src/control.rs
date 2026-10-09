@@ -19,11 +19,11 @@ use axum::{Json, Router};
 
 use sha2::{Digest, Sha256};
 
-use tessera_engine::{MetaView, ScopedScalar};
-use tessera_lifecycle::ChangeOp;
+use mosaica_engine::{MetaView, ScopedScalar};
+use mosaica_lifecycle::ChangeOp;
 
-use tessera_types::view::ViewMetadataValue;
-use tessera_types::EntityId;
+use mosaica_types::view::ViewMetadataValue;
+use mosaica_types::EntityId;
 
 use crate::address::{Named, Table};
 use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
@@ -56,7 +56,7 @@ pub fn init_deny_runtime() -> std::io::Result<()> {
         // All work here is `spawn_blocking`, which runs on the blocking pool; the one worker
         // only has to exist.
         .worker_threads(1)
-        .thread_name("tessera-deny")
+        .thread_name("mosaica-deny")
         .max_blocking_threads(DENY_MAX_BLOCKING_THREADS)
         .build()?;
     if let Err(loser) = DENY_RUNTIME.set(rt) {
@@ -212,7 +212,7 @@ async fn require_admin(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    caller(&request).require(tessera_catalogue::Permission::Admin)?;
+    caller(&request).require(mosaica_catalogue::Permission::Admin)?;
     Ok(next.run(request).await)
 }
 
@@ -223,16 +223,16 @@ async fn require_write(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    caller(&request).require(tessera_catalogue::Permission::Write)?;
+    caller(&request).require(mosaica_catalogue::Permission::Write)?;
     Ok(next.run(request).await)
 }
 
 /// views need not share one, and a shape goes through each view's own transform. The layer's
 /// views, not the bundle's, because a layer need not be drawn on every view.
 fn layer_frames(
-    meta: &tessera_engine::EngineMeta,
+    meta: &mosaica_engine::EngineMeta,
     views: &[&str],
-) -> Result<Vec<tessera_engine::shapes::ViewFrame>, ApiError> {
+) -> Result<Vec<mosaica_engine::shapes::ViewFrame>, ApiError> {
     if views.is_empty() {
         return Err(ApiError::Contract(
             "this layer declares no view to publish a shape into".into(),
@@ -246,7 +246,7 @@ fn layer_frames(
                 .iter()
                 .find(|v| v.id == *name)
                 .ok_or_else(|| ApiError::Unknown(format!("unknown view '{name}'")))?;
-            Ok(tessera_engine::shapes::ViewFrame::new(
+            Ok(mosaica_engine::shapes::ViewFrame::new(
                 &view.id,
                 view.projection,
                 crate::filter_dto::view_extent(view),
@@ -314,41 +314,41 @@ fn body_refusal(status: StatusCode, body: &str, cap: usize, remedy: &str) -> Api
     }
 }
 
-/// The `x-tessera-batch-id` header; a value that is not UTF-8 is refused as a missing one is.
+/// The `x-mosaica-batch-id` header; a value that is not UTF-8 is refused as a missing one is.
 fn batch_id_header(headers: &HeaderMap) -> Result<String, ApiError> {
     headers
-        .get("x-tessera-batch-id")
+        .get("x-mosaica-batch-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
-        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))
+        .ok_or_else(|| ApiError::Contract("missing x-mosaica-batch-id header".to_string()))
 }
 
-/// The `x-tessera-view` header, if given; a value that is not UTF-8 is refused.
+/// The `x-mosaica-view` header, if given; a value that is not UTF-8 is refused.
 fn view_header(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
     headers
-        .get("x-tessera-view")
+        .get("x-mosaica-view")
         .map(|value| {
             value.to_str().map(str::to_string).map_err(|_| {
                 ApiError::Contract(
-                    "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
+                    "x-mosaica-view is not valid UTF-8, so it names no view".to_string(),
                 )
             })
         })
         .transpose()
 }
 
-/// The view a write batch names in `x-tessera-view`. With no header the deployment must have
+/// The view a write batch names in `x-mosaica-view`. With no header the deployment must have
 /// exactly one view (422 otherwise, naming them); an unknown view is 404, not 422, as on the
-/// viewer plane. Resolved by [`tessera_engine::EngineMeta::resolve_view`], the one resolution
+/// viewer plane. Resolved by [`mosaica_engine::EngineMeta::resolve_view`], the one resolution
 /// both planes use.
 fn resolve_view<'a>(
     view: Option<&str>,
-    meta: &'a tessera_engine::EngineMeta,
+    meta: &'a mosaica_engine::EngineMeta,
 ) -> Result<&'a MetaView, ApiError> {
     let views = &meta.views;
     match view {
         None if views.len() > 1 => Err(ApiError::Contract(format!(
-            "this bundle has {} views, so name one of them in x-tessera-view: {}",
+            "this bundle has {} views, so name one of them in x-mosaica-view: {}",
             views.len(),
             views
                 .iter()
@@ -495,7 +495,7 @@ fn run_ingest(
     let buffered = state.engine.buffered_items();
     if buffered >= state.limits.ingest_buffer_max_items {
         return Err(ApiError::Backpressure {
-            retry_after_s: tessera_engine::estimate_buffer_retry_after_s(
+            retry_after_s: mosaica_engine::estimate_buffer_retry_after_s(
                 &state.engine.write_executor_stats(),
                 buffered as u64,
             ),
@@ -529,9 +529,9 @@ fn run_ingest(
     }
 
     let rows = items.len() as u64;
-    let rows_in: Vec<tessera_engine::IngestRow> = items
+    let rows_in: Vec<mosaica_engine::IngestRow> = items
         .into_iter()
-        .map(|item| tessera_engine::IngestRow {
+        .map(|item| mosaica_engine::IngestRow {
             tessera_id: item.tessera_id,
             labels: item.labels,
             position: item.position,
@@ -542,7 +542,7 @@ fn run_ingest(
         .collect();
     let receipt = state
         .engine
-        .ingest(tessera_engine::IngestRequest {
+        .ingest(mosaica_engine::IngestRequest {
             batch_id,
             body_hash,
             view: view_id,
@@ -722,7 +722,7 @@ fn run_changes(
         }
         let applied: Vec<ChangeOp> = changes.iter().map(|(_, op)| *op).collect();
         match state.engine.accept_changes(changes) {
-            Err(tessera_engine::AcceptError::Exec(tessera_lifecycle::ExecError::Stale))
+            Err(mosaica_engine::AcceptError::Exec(mosaica_lifecycle::ExecError::Stale))
                 if attempts < 3 =>
             {
                 continue
@@ -941,14 +941,14 @@ async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
 async fn register_layer(
     State(state): State<Arc<AppState>>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    body: ApiJson<tessera_types::layer::LayerDeclaration>,
+    body: ApiJson<mosaica_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let mut declaration = body.0;
     let name = declaration.name.clone();
     // A group's name is every view the group holds now, as it is at a build.
     let meta = state.engine.meta();
     let declared_views = std::mem::take(&mut declaration.views);
-    declaration.views = tessera_types::layer::expand_views(
+    declaration.views = mosaica_types::layer::expand_views(
         &declared_views,
         |view| {
             meta.groups
@@ -971,7 +971,7 @@ async fn register_layer(
         ))
     })?;
     if let Some(group) = declaration.scope.group() {
-        tessera_types::layer::check_scoped_views(
+        mosaica_types::layer::check_scoped_views(
             &declared_views,
             group,
             meta.groups
@@ -999,12 +999,12 @@ async fn register_layer(
     }
     // A shape layer over both projected and unprojected views is refused at the declaration
     // rather than at its first artifact.
-    if declaration.membership == tessera_types::layer::MembershipSource::Spatial {
+    if declaration.membership == mosaica_types::layer::MembershipSource::Spatial {
         let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
         let frames = layer_frames(&meta, &views)?;
-        tessera_engine::shapes::check_shape_span(
+        mosaica_engine::shapes::check_shape_span(
             &frames,
-            tessera_engine::shapes::ShapeSpace::Wgs84,
+            mosaica_engine::shapes::ShapeSpace::Wgs84,
         )
         .map_err(|e| ApiError::Contract(format!("layer '{name}': {e}")))?;
     }
@@ -1051,7 +1051,7 @@ struct AttributeBody {
     render: bool,
     /// `"entity"`, or `{"group": "<view_group>"}`, spelled as the block spells it.
     #[serde(default)]
-    scope: tessera_types::layer::LayerScope,
+    scope: mosaica_types::layer::LayerScope,
     /// No two items may hold one value. On a column that exists, the one change accepted: the
     /// answer waits while the column's index is built, and a column already holding a value twice
     /// is refused, naming the values.
@@ -1070,7 +1070,7 @@ async fn declare_attribute(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
     let name = body.name.clone();
-    let request = tessera_engine::AttributeRequest {
+    let request = mosaica_engine::AttributeRequest {
         name: body.name,
         title: body.title,
         ty: body.ty,
@@ -1099,7 +1099,7 @@ struct VocabularyBody {
     /// `closed` refuses an unknown key at ingest; `open` mints it.
     value_set: ValueSet,
     /// `public` or `derived`: whether the existence of a value is sensitive. Takes no access label.
-    visibility: tessera_types::vocabulary::Visibility,
+    visibility: mosaica_types::vocabulary::Visibility,
     /// The code space's width: `u8`, `u16` or `u32`.
     width: String,
     #[serde(default)]
@@ -1118,10 +1118,10 @@ enum ValueSet {
 }
 
 impl ValueSet {
-    fn kind(self) -> tessera_types::vocabulary::VocabularyKind {
+    fn kind(self) -> mosaica_types::vocabulary::VocabularyKind {
         match self {
-            ValueSet::Closed => tessera_types::vocabulary::VocabularyKind::Declared,
-            ValueSet::Open => tessera_types::vocabulary::VocabularyKind::Discovered,
+            ValueSet::Closed => mosaica_types::vocabulary::VocabularyKind::Declared,
+            ValueSet::Open => mosaica_types::vocabulary::VocabularyKind::Discovered,
         }
     }
 }
@@ -1152,7 +1152,7 @@ async fn declare_vocabulary(
     body: ApiJson<VocabularyBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
-    let request = tessera_engine::VocabularyRequest {
+    let request = mosaica_engine::VocabularyRequest {
         name: name.clone(),
         title: body.title,
         kind: body.value_set.kind(),
@@ -1161,7 +1161,7 @@ async fn declare_vocabulary(
         values: body
             .values
             .into_iter()
-            .map(|v| tessera_engine::DeclaredValue {
+            .map(|v| mosaica_engine::DeclaredValue {
                 key: v.key,
                 title: v.title,
             })
@@ -1189,11 +1189,11 @@ async fn mint_vocabulary_values(
     ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<VocabularyValuesBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let values: Vec<tessera_engine::DeclaredValue> = body
+    let values: Vec<mosaica_engine::DeclaredValue> = body
         .0
         .values
         .into_iter()
-        .map(|v| tessera_engine::DeclaredValue {
+        .map(|v| mosaica_engine::DeclaredValue {
             key: v.key,
             title: v.title,
         })
@@ -1221,8 +1221,8 @@ struct ExtentBody {
 }
 
 impl ExtentBody {
-    fn frame(&self) -> tessera_engine::DeclaredFrame {
-        tessera_engine::DeclaredFrame {
+    fn frame(&self) -> mosaica_engine::DeclaredFrame {
+        mosaica_engine::DeclaredFrame {
             x_min: self.x[0],
             x_max: self.x[1],
             y_min: self.y[0],
@@ -1247,7 +1247,7 @@ struct PointVisibilityBody {
 struct MetadataFieldBody {
     name: String,
     #[serde(rename = "type")]
-    ty: tessera_types::view::ViewMetadataType,
+    ty: mosaica_types::view::ViewMetadataType,
     #[serde(default)]
     vocabulary: Option<String>,
 }
@@ -1264,7 +1264,7 @@ struct ViewGroupBody {
     extent: ExtentBody,
     /// One label or a list, each element one term. Absent is `public`.
     #[serde(default)]
-    visibility: Option<tessera_types::view::DeclaredGate>,
+    visibility: Option<mosaica_types::view::DeclaredGate>,
     #[serde(default)]
     point_visibility: Option<PointVisibilityBody>,
     /// Another group's name, whose views this group shares.
@@ -1284,7 +1284,7 @@ struct PlainViewBody {
     projection: String,
     extent: ExtentBody,
     #[serde(default)]
-    visibility: Option<tessera_types::view::DeclaredGate>,
+    visibility: Option<mosaica_types::view::DeclaredGate>,
     #[serde(default)]
     point_visibility: Option<PointVisibilityBody>,
 }
@@ -1304,20 +1304,20 @@ async fn create_view_group(
     body: ApiJson<ViewGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
-    let declaration = tessera_engine::ViewGroupDeclaration {
+    let declaration = mosaica_engine::ViewGroupDeclaration {
         name: name.clone(),
         title: body.title,
         projection: body.projection,
         frame: body.extent.frame(),
         visibility: body
             .visibility
-            .map(tessera_types::view::DeclaredGate::into_labels),
+            .map(mosaica_types::view::DeclaredGate::into_labels),
         point_default: body.point_visibility.and_then(|p| p.default),
         members: body.members,
         metadata: body
             .metadata
             .into_iter()
-            .map(|f| tessera_types::view::GroupMetadataField {
+            .map(|f| mosaica_types::view::GroupMetadataField {
                 name: f.name,
                 ty: f.ty,
                 vocabulary: f.vocabulary,
@@ -1340,14 +1340,14 @@ async fn create_plain_view(
     body: ApiJson<PlainViewBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
-    let declaration = tessera_engine::PlainViewDeclaration {
+    let declaration = mosaica_engine::PlainViewDeclaration {
         name: name.clone(),
         title: body.title,
         projection: body.projection,
         frame: body.extent.frame(),
         visibility: body
             .visibility
-            .map(tessera_types::view::DeclaredGate::into_labels),
+            .map(mosaica_types::view::DeclaredGate::into_labels),
         point_default: body.point_visibility.and_then(|p| p.default),
     };
     let existing = state
@@ -1365,7 +1365,7 @@ struct ViewRecord {
     /// This view's own gate; absent takes the group's. One label or a list, each element one
     /// term.
     #[serde(default)]
-    visibility: Option<tessera_types::view::DeclaredGate>,
+    visibility: Option<mosaica_types::view::DeclaredGate>,
     /// One entry per name the group declared. A `timestamp_us` is microseconds since the epoch,
     /// as a JSON integer.
     #[serde(default)]
@@ -1418,7 +1418,7 @@ async fn create_view(
     }
     let visibility = record
         .visibility
-        .map(tessera_types::view::DeclaredGate::into_labels);
+        .map(mosaica_types::view::DeclaredGate::into_labels);
     let (group_name, view_key) = (group.clone(), key.clone());
     state
         .write(move |state| {
@@ -1455,7 +1455,7 @@ async fn drop_view(
 /// An artifact record's `access` labels as they are stored, by the rule the build reads
 /// an artifact's labels with. Absent and empty are no label.
 fn access_descriptors(labels: Option<Vec<String>>) -> Result<Vec<Vec<u8>>, ApiError> {
-    tessera_access::artifact_access(&labels.unwrap_or_default())
+    mosaica_access::artifact_access(&labels.unwrap_or_default())
         .map(|labels| labels.into_iter().map(String::into_bytes).collect())
         .map_err(ApiError::Contract)
 }
@@ -1734,9 +1734,9 @@ impl MemberColumn {
         }
     }
 
-    fn cell(&self, at: usize) -> Option<tessera_engine::AddressValue> {
+    fn cell(&self, at: usize) -> Option<mosaica_engine::AddressValue> {
         use arrow::array::Array;
-        use tessera_engine::AddressValue;
+        use mosaica_engine::AddressValue;
         match self {
             MemberColumn::Text(c) => {
                 (!c.is_null(at)).then(|| AddressValue::Text(c.value(at).to_string()))
@@ -1997,20 +1997,20 @@ impl ShapedRow for GrowingArtifactBody {
 /// space, so a drawing lands where the membership shape beside it does.
 fn canonical_authored_content(
     state: &AppState,
-    declaration: &tessera_types::layer::LayerDeclaration,
+    declaration: &mosaica_types::layer::LayerDeclaration,
     index: usize,
     rank: usize,
-    kind: tessera_types::layer::ShapeKind,
-    space: tessera_engine::shapes::ShapeSpace,
+    kind: mosaica_types::layer::ShapeKind,
+    space: mosaica_engine::shapes::ShapeSpace,
     text: &str,
 ) -> Result<
     (
-        tessera_lifecycle::membership::ArtifactShapes,
+        mosaica_lifecycle::membership::ArtifactShapes,
         serde_json::Value,
     ),
     ApiError,
 > {
-    use tessera_engine::shapes::{authored_shape_input, shape_input};
+    use mosaica_engine::shapes::{authored_shape_input, shape_input};
     let refuse = |detail: String| {
         ApiError::Contract(format!(
             "artifact {index}: content {rank}: the authored {} content: {detail}",
@@ -2026,18 +2026,18 @@ fn canonical_authored_content(
 /// build's report returned in the response. A refusal names the row and the batch has no effect.
 fn canonical_row_shape(
     state: &AppState,
-    declaration: &tessera_types::layer::LayerDeclaration,
+    declaration: &mosaica_types::layer::LayerDeclaration,
     index: usize,
     artifact: &RowShape<'_>,
-    default_space: tessera_engine::shapes::ShapeSpace,
+    default_space: mosaica_engine::shapes::ShapeSpace,
 ) -> Result<
     Option<(
-        tessera_lifecycle::membership::ArtifactShapes,
+        mosaica_lifecycle::membership::ArtifactShapes,
         serde_json::Value,
     )>,
     ApiError,
 > {
-    use tessera_engine::shapes::{shape_input, ShapeInput, ShapeSpace};
+    use mosaica_engine::shapes::{shape_input, ShapeInput, ShapeSpace};
     let refuse = |detail: String| ApiError::Contract(format!("artifact {index}: {detail}"));
     let mut carried: Vec<(&str, ShapeInput)> = Vec::new();
     let count = |field: &str, n: usize, want: usize| {
@@ -2103,13 +2103,13 @@ fn canonical_row_shape(
 /// One shape canonicalised for every view of its layer, and the per-view report of what that did.
 fn canonical_for_layer(
     state: &AppState,
-    declaration: &tessera_types::layer::LayerDeclaration,
-    shape: &tessera_engine::shapes::ShapeF64,
-    space: tessera_engine::shapes::ShapeSpace,
+    declaration: &mosaica_types::layer::LayerDeclaration,
+    shape: &mosaica_engine::shapes::ShapeF64,
+    space: mosaica_engine::shapes::ShapeSpace,
     refuse: impl Fn(String) -> ApiError,
 ) -> Result<
     (
-        tessera_lifecycle::membership::ArtifactShapes,
+        mosaica_lifecycle::membership::ArtifactShapes,
         serde_json::Value,
     ),
     ApiError,
@@ -2117,7 +2117,7 @@ fn canonical_for_layer(
     let meta = state.engine.meta();
     let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
     let frames = layer_frames(&meta, &views)?;
-    let canonical = tessera_engine::shapes::canonical_shapes(
+    let canonical = mosaica_engine::shapes::canonical_shapes(
         shape,
         &frames,
         space,
@@ -2143,7 +2143,7 @@ fn canonical_for_layer(
             })
         })
         .collect();
-    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
+    let shapes = mosaica_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
         .ok_or_else(|| refuse("the layer is drawn in no view".to_string()))?;
     Ok((shapes, serde_json::Value::Array(report)))
 }
@@ -2153,17 +2153,17 @@ fn canonical_for_layer(
 /// An unknown layer canonicalises nothing here; the engine refuses it.
 fn canonical_batch_shapes(
     state: &AppState,
-    declaration: Option<&tessera_types::layer::LayerDeclaration>,
+    declaration: Option<&mosaica_types::layer::LayerDeclaration>,
     default_space: Option<&str>,
     rows: &mut [impl ShapedRow],
 ) -> Result<
     (
-        Vec<Option<tessera_lifecycle::membership::ArtifactShapes>>,
+        Vec<Option<mosaica_lifecycle::membership::ArtifactShapes>>,
         Vec<serde_json::Value>,
     ),
     ApiError,
 > {
-    use tessera_engine::shapes::ShapeSpace;
+    use mosaica_engine::shapes::ShapeSpace;
     let default_space = match default_space {
         None => ShapeSpace::View,
         Some(word) => ShapeSpace::parse(word)
@@ -2432,7 +2432,7 @@ async fn publish_artifacts(
                 .map(|l| (l.artifact, l.list.as_str()))
                 .zip(resolved)
                 .peekable();
-            let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
+            let incoming: Vec<mosaica_lifecycle::IncomingArtifact> = artifacts
                 .into_iter()
                 .zip(shapes)
                 .zip(accesses)
@@ -2450,26 +2450,26 @@ async fn publish_artifacts(
                             _ => sets.push(entities),
                         }
                     }
-                    let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
+                    let contents: Vec<mosaica_lifecycle::membership::IncomingContent> = artifact
                         .content
                         .into_iter()
                         .zip(sets)
-                        .map(|(v, set)| tessera_lifecycle::membership::IncomingContent::new(v.values, set))
+                        .map(|(v, set)| mosaica_lifecycle::membership::IncomingContent::new(v.values, set))
                         .collect();
                     let attached_to = artifact.attached_to.map(|a| {
-                        tessera_lifecycle::membership::IncomingAttachment {
+                        mosaica_lifecycle::membership::IncomingAttachment {
                             layer: a.layer,
                             level: a.level,
                             key: a.key,
                         }
                     });
                     let mut incoming = match attached_to {
-                        None => tessera_lifecycle::IncomingArtifact::with_content(
+                        None => mosaica_lifecycle::IncomingArtifact::with_content(
                             artifact.key,
                             members,
                             contents,
                         ),
-                        Some(attached_to) => tessera_lifecycle::IncomingArtifact::attached(
+                        Some(attached_to) => mosaica_lifecycle::IncomingArtifact::attached(
                             artifact.key,
                             members,
                             contents,
@@ -2690,7 +2690,7 @@ async fn grow_memberships(
             } = resolve_member_lists(state, &mut lists, strict)?;
             let mut entities = entities.into_iter();
 
-            let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
+            let joins: Vec<mosaica_lifecycle::IncomingGrowth> = artifacts
                 .into_iter()
                 .zip(shapes)
                 .zip(accesses)
@@ -2699,16 +2699,16 @@ async fn grow_memberships(
                     let leaving = entities.next().expect("a leaving list per artifact");
                     // Every row carries all its fields; the executor refuses combinations it does
                     // not take, rather than this dropping them and answering 200.
-                    let mut join = tessera_lifecycle::IncomingGrowth::page_of_entities(
+                    let mut join = mosaica_lifecycle::IncomingGrowth::page_of_entities(
                         artifact.key,
                         artifact.rank,
                         members,
                         leaving,
                     );
-                    join.parts = tessera_lifecycle::FixedParts {
+                    join.parts = mosaica_lifecycle::FixedParts {
                         parent_keys: artifact.parent,
                         attached_to: artifact.attached_to.map(|a| {
-                            tessera_lifecycle::membership::IncomingAttachment {
+                            mosaica_lifecycle::membership::IncomingAttachment {
                                 layer: a.layer,
                                 level: a.level,
                                 key: a.key,
@@ -2775,7 +2775,7 @@ async fn faults_arm(
     let site = parse_pause_site(&req.site)?;
     state
         .faults
-        .arm_pause(site, tessera_lifecycle::faults::PauseAction::Stall);
+        .arm_pause(site, mosaica_lifecycle::faults::PauseAction::Stall);
     Ok(StatusCode::OK)
 }
 
@@ -2810,8 +2810,8 @@ struct FaultSiteRequest {
 }
 
 #[cfg(feature = "fault-injection")]
-fn parse_pause_site(name: &str) -> Result<tessera_lifecycle::faults::PauseSite, ApiError> {
-    tessera_lifecycle::faults::PauseSite::from_name(name).ok_or_else(|| {
+fn parse_pause_site(name: &str) -> Result<mosaica_lifecycle::faults::PauseSite, ApiError> {
+    mosaica_lifecycle::faults::PauseSite::from_name(name).ok_or_else(|| {
         ApiError::Contract(format!(
             "unknown pause site {name:?}; the sites are after_fsync, before_ack, \
              before_manifest_publish, before_current_flip, before_merge_publish"
@@ -2838,18 +2838,18 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let ready = is_ready(executor.posture);
     let live = state.engine.generation_status();
     let partitions = live.partitions;
-    let projection_cache: tessera_engine::CacheStats = state.engine.row_projection_cache_stats();
+    let projection_cache: mosaica_engine::CacheStats = state.engine.row_projection_cache_stats();
     let projection_routes = state.engine.projection_builds_by_route();
-    let fragment_cache: tessera_engine::FragmentCacheStats = live.fragment_cache;
+    let fragment_cache: mosaica_engine::FragmentCacheStats = live.fragment_cache;
     let masked_counts = state.engine.figures_stats();
-    let region_cache: tessera_engine::CacheStats = state.engine.region_cache_stats();
+    let region_cache: mosaica_engine::CacheStats = state.engine.region_cache_stats();
     let derived_cache = state.engine.derived_cache_stats();
     let suggest_sets = state.engine.suggest_set_stats();
-    let occupancy: tessera_engine::CacheStats = state.engine.occupancy_cache_stats();
+    let occupancy: mosaica_engine::CacheStats = state.engine.occupancy_cache_stats();
     let heap = state.heap.stats();
     let ingest = state.ingest_admission.status();
     let sessions = state.sessions.lock().stats();
-    let segments: Vec<tessera_engine::ViewSegments> = live.segments;
+    let segments: Vec<mosaica_engine::ViewSegments> = live.segments;
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         // Cycles completed since the executor started, one per cycle whatever it published: the
@@ -2959,7 +2959,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // Stage laps in nanoseconds, recorded only under `bench-timing`; the flag says whether
             // zeros mean idle or unmeasured.
             "bench_timing": cfg!(feature = "bench-timing"),
-            "stage_nanos": tessera_engine::WriteStage::ALL
+            "stage_nanos": mosaica_engine::WriteStage::ALL
                 .iter()
                 .map(|stage| {
                     (
@@ -2976,7 +2976,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "rows_executed": executor.flush_rows_executed,
                 "flushes": executor.flushes,
                 "rows_published": executor.flush_rows_published,
-                "executor_nanos": tessera_engine::FlushStage::EXECUTOR
+                "executor_nanos": mosaica_engine::FlushStage::EXECUTOR
                     .iter()
                     .map(|stage| {
                         (
@@ -2985,7 +2985,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                         )
                     })
                     .collect::<serde_json::Map<String, serde_json::Value>>(),
-                "pool_nanos": tessera_engine::FlushStage::POOL
+                "pool_nanos": mosaica_engine::FlushStage::POOL
                     .iter()
                     .map(|stage| {
                         (
@@ -3064,7 +3064,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "fold_failures": executor.fold_failures,
             "fold_requested": executor.fold_requested,
             "fold_refusals": executor.fold_refusals,
-            "fold_refusals_by_gate": tessera_engine::FOLD_GATES
+            "fold_refusals_by_gate": mosaica_engine::FOLD_GATES
                 .iter()
                 .zip(executor.fold_refusals_by_gate)
                 .map(|(gate, count)| (gate.to_string(), serde_json::json!(count)))
@@ -3302,7 +3302,7 @@ mod tests {
         discard_losing_runtime(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
-                .thread_name("tessera-deny-loser")
+                .thread_name("mosaica-deny-loser")
                 .build()
                 .unwrap(),
         );
@@ -3313,7 +3313,7 @@ mod tests {
         discard_losing_runtime(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
-                .thread_name("tessera-deny-loser")
+                .thread_name("mosaica-deny-loser")
                 .build()
                 .unwrap(),
         );

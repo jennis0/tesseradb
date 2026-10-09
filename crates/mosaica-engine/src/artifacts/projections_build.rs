@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 
-use tessera_lifecycle::membership::ArtifactStore;
-use tessera_types::layer::{LayerDeclaration, ServingLayout};
+use mosaica_lifecycle::membership::ArtifactStore;
+use mosaica_types::layer::{LayerDeclaration, ServingLayout};
 
-use tessera_store::permutation::RowSpace;
+use mosaica_store::permutation::RowSpace;
 
 use crate::containment::{ContainmentPartition, PartitionSource};
 use crate::row_column::RowColumn;
@@ -514,11 +514,11 @@ impl ArtifactProjections {
             Some(base) => base,
             None => {
                 let mut labels =
-                    vec![tessera_store::membership::ROW_COLUMN_HOLE; base_rows as usize];
+                    vec![mosaica_store::membership::ROW_COLUMN_HOLE; base_rows as usize];
                 if let Some(values) = source.values.base() {
                     values.for_each_code_in(&values.present(), |entity, code| {
                         let Some(row) =
-                            space.row_of(tessera_types::EntityId::new(u64::from(entity)))
+                            space.row_of(mosaica_types::EntityId::new(u64::from(entity)))
                         else {
                             return;
                         };
@@ -546,10 +546,10 @@ impl ArtifactProjections {
         if tail_rows == 0 {
             return Some(base);
         }
-        let mut tail = vec![tessera_store::membership::ROW_COLUMN_HOLE; tail_rows as usize];
+        let mut tail = vec![mosaica_store::membership::ROW_COLUMN_HOLE; tail_rows as usize];
         for values in source.values.extents() {
             values.for_each_code_in(&values.present(), |entity, code| {
-                let Some(row) = space.row_of(tessera_types::EntityId::new(u64::from(entity)))
+                let Some(row) = space.row_of(mosaica_types::EntityId::new(u64::from(entity)))
                 else {
                     return;
                 };

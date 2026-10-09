@@ -668,10 +668,10 @@ fn build_with_labels(dir: &std::path::Path) {
     write_roster(&dir.join("roster.parquet"));
     write_labels(&dir.join("topics.parquet"));
     std::fs::write(&config, BUILT_TOML).unwrap();
-    let parsed = tessera_build::config::Config::parse(&config, &Default::default())
+    let parsed = mosaica_build::config::Config::parse(&config, &Default::default())
         .expect("the declaration parses");
-    let args = tessera_build::BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(&points, &parsed.schema),
+    let args = mosaica_build::BuildArgs {
+        attribute_sources: mosaica_build::config::AttributeSource::over(&points, &parsed.schema),
         layers: parsed.layers,
         layer_inputs: parsed.layer_sources,
         schema: parsed.schema,
@@ -682,7 +682,7 @@ fn build_with_labels(dir: &std::path::Path) {
             vec![view_args("s0", &points, AccessInput::relation(pairs))],
         )
     };
-    tessera_build::build(&args).expect("the bundle builds");
+    mosaica_build::build(&args).expect("the bundle builds");
 }
 
 /// The built bundle serves it too (decision 0091). The label of the small cluster is drawn with its

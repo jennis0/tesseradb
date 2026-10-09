@@ -6,7 +6,7 @@
 //! ## The file
 //!
 //! ```text
-//!   0   "TSPM"                        magic
+//!   0   "MSPM"                        magic
 //!   4   u16 version = 2
 //!   6   u16 page_shift = 16           recorded, not assumed — any other value is refused
 //!   8   u64 bound                     the entity ids this file covers, [0, bound)
@@ -36,7 +36,7 @@
 //! ([`crate::write::PermutationWriter`]) — be held to byte-for-byte agreement.
 //!
 //! **The flat array is gone, and the version number refuses it by construction.** Version 1 was
-//! `bound` slots with no directory and no page count; this is version 2, so a file from the older
+//! `bound` slots with no directory and no page count; this is version 3, so a file from the older
 //! producer fails [`Permutation::load`] with an unsupported-version error rather than having its
 //! first slots read as a directory. The artifacts are recreated rather than carried
 //! ([decision 0048](../../../docs/decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)),
@@ -65,8 +65,8 @@ use std::sync::Arc;
 
 use memmap2::Mmap;
 
-use tessera_roaring::{Sink, BLOCK, WORDS};
-use tessera_types::{EntityId, RowId, ROW_ABSENT};
+use mosaica_roaring::{Sink, BLOCK, WORDS};
+use mosaica_types::{EntityId, RowId, ROW_ABSENT};
 
 use crate::error::{Result, StoreError};
 
@@ -74,7 +74,7 @@ use crate::error::{Result, StoreError};
 ///
 /// The two bijectivity checks in this module sweep a row space that reaches 10⁹. A byte a row
 /// is 1 GB of transient memory there, paid by every view at bundle open and twice again by
-/// `tessera verify`; a bit a row is 125 MB. The check is unchanged: a row whose bit is already
+/// `mosaica verify`; a bit a row is 125 MB. The check is unchanged: a row whose bit is already
 /// set is claimed by a second entity.
 struct RowsSeen(Vec<u64>);
 
@@ -93,8 +93,8 @@ impl RowsSeen {
     }
 }
 
-const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
-const PERMUTATION_VERSION: u16 = 2;
+const PERMUTATION_MAGIC: &[u8; 4] = b"MSPM";
+const PERMUTATION_VERSION: u16 = 3;
 
 /// A page covers `2^PAGE_SHIFT` consecutive entity ids.
 ///
@@ -664,7 +664,7 @@ impl Permutation {
         // SAFETY: the mapped file is treated as read-only for the lifetime of this struct;
         // nothing in this process writes to it concurrently. A backing file that another
         // process truncates while mapped is an operational hazard shared with every other
-        // mmap-based reader in this codebase (`tessera-authz`'s postings reader), not one
+        // mmap-based reader in this codebase (`mosaica-authz`'s postings reader), not one
         // introduced here.
         let mmap = unsafe { Mmap::map(&file) }.map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -683,7 +683,7 @@ impl Permutation {
             )));
         }
         if &mmap[0..4] != PERMUTATION_MAGIC {
-            return Err(invalid("bad magic (expected 'TSPM')".to_string()));
+            return Err(invalid("bad magic (expected 'MSPM')".to_string()));
         }
         let version = u16::from_le_bytes(mmap[4..6].try_into().expect("2-byte view"));
         if version != PERMUTATION_VERSION {
@@ -980,7 +980,7 @@ impl Permutation {
     /// entity. A sweep by `row_of` repeats the directory lookup at every slot and visits each
     /// entity of an absent page one at a time; this reads the directory once a page and each
     /// present page end to end, so a sparse view costs its own slots and not its entity span.
-    /// `tessera verify` crosses entity space this way.
+    /// `mosaica verify` crosses entity space this way.
     pub fn try_for_each_slot<E>(
         &self,
         mut f: impl FnMut(u64, RowId) -> std::result::Result<(), E>,
@@ -1054,7 +1054,7 @@ impl Permutation {
     /// cursors stay in L1, wide enough that the bit array each one stamps stays in L2.
     ///
     /// **Containers are emitted, not inserted.** The bit array a bucket stamps *is* 64 Roaring
-    /// container payloads laid end to end, so [`tessera_roaring::Sink`] takes them as they are —
+    /// container payloads laid end to end, so [`mosaica_roaring::Sink`] takes them as they are —
     /// a popcount and a memcpy each. Expanding them back to `u32` for `add_many` instead costs
     /// 1 077 ms more at 10⁹ (2 306 ms against 1 229 ms), which is the larger half of the primitive.
     ///
@@ -1091,7 +1091,7 @@ impl Permutation {
     /// corpus enters the branch: the mapping is not read on this path, and `bound` is the view's
     /// entity-space width rather than anything a grant selects. So the residual sits inside C19's
     /// accepted shape — work correlating with the principal's own coverage — and adds no quantity
-    /// to C4's open row, the same reading `tessera_engine`'s `DecodeSource` records for the
+    /// to C4's open row, the same reading `mosaica_engine`'s `DecodeSource` records for the
     /// decode-source choice. Appendix C's **C19** names this branch as one of its accepted
     /// widenings rather than giving it a row of its own (owner ruling, 2026-09-14).
     ///
@@ -1470,7 +1470,7 @@ impl SegmentExtent {
     /// The alternative was to write `rows` beside `morton.u32` (4 bytes × entities in the segment,
     /// one more file, one more manifest field, a contracts §2.1 change). This construction stores
     /// only the rows an edit moved: `columns.arrow` already carries `tessera_id` at the row, the
-    /// identity is a bijection over 2⁶⁴ ([`tessera_types::IdentityKey`]) from an item's number,
+    /// identity is a bijection over 2⁶⁴ ([`mosaica_types::IdentityKey`]) from an item's number,
     /// and `MANIFEST.json` already carries the key, so a row's entity is its number's unless the
     /// segment's edited rows list another ([`crate::edited`]). An entity under `entity_lo` goes to
     /// [`Self::below`], as the flush that wrote the segment put it.
@@ -1490,7 +1490,7 @@ impl SegmentExtent {
         entity_lo: u64,
         entity_hi: u64,
         row_base: u32,
-        key: &tessera_types::IdentityKey,
+        key: &mosaica_types::IdentityKey,
         shard_id: u32,
     ) -> Result<Self> {
         let (seg_id, tessera_ids) = (segment.seg_id.as_str(), segment.columns.tessera_id());
@@ -1721,7 +1721,7 @@ impl Buckets16 {
         keys_below: usize,
     ) -> Self {
         let mut at = vec![0u32; keys_below.min(1 << 16)];
-        tessera_roaring::for_each_run_in(rows, piece.clone(), &mut |run| {
+        mosaica_roaring::for_each_run_in(rows, piece.clone(), &mut |run| {
             tables.for_each_slice(run, |slice| {
                 for &e in slice {
                     at[(e >> 16) as usize] += 1;
@@ -1739,7 +1739,7 @@ impl Buckets16 {
             }
         }
         let mut lows = vec![0u16; total as usize];
-        tessera_roaring::for_each_run_in(rows, piece, &mut |run| {
+        mosaica_roaring::for_each_run_in(rows, piece, &mut |run| {
             tables.for_each_slice(run, |slice| {
                 for &e in slice {
                     let slot = &mut at[(e >> 16) as usize];
@@ -2105,7 +2105,7 @@ impl RowSpace {
         let tables = self.row_entities()?;
         // Every entity with a row here is below the floor, so its key is below this.
         let keys_below = (self.entity_floor().min(1 << 32) >> 16) as usize + 1;
-        let pieces = tessera_roaring::split_by_cardinality(
+        let pieces = mosaica_roaring::split_by_cardinality(
             rows,
             0..tables.len(),
             rayon::current_num_threads() * 4,
@@ -2129,7 +2129,7 @@ impl RowSpace {
     ///
     /// Built from [`Self::entity_buckets`] on the current rayon pool, one container per key: a
     /// bitset stamped directly from the key's buckets, or a sorted array where it holds
-    /// [`tessera_roaring::ARRAY_MAX`] members or fewer.
+    /// [`mosaica_roaring::ARRAY_MAX`] members or fewer.
     pub fn entities_of_rows(&self, rows: &croaring::Bitmap) -> Option<croaring::Bitmap> {
         use rayon::prelude::*;
         let buckets = self.entity_buckets(rows)?;
@@ -2138,12 +2138,12 @@ impl RowSpace {
         let parts: Vec<croaring::Bitmap> = keys
             .par_chunks(keys.len().div_ceil(groups).max(1))
             .map(|keys| {
-                let mut sink = tessera_roaring::Sink::new();
-                let mut words = [0u64; tessera_roaring::WORDS];
+                let mut sink = mosaica_roaring::Sink::new();
+                let mut words = [0u64; mosaica_roaring::WORDS];
                 let mut members: Vec<u32> = Vec::new();
                 for &key in keys {
                     let card = buckets.count(key);
-                    if card > tessera_roaring::ARRAY_MAX {
+                    if card > mosaica_roaring::ARRAY_MAX {
                         words.fill(0);
                         buckets.for_each_bucket(key, |lows| {
                             for &low in lows {
@@ -2178,7 +2178,7 @@ impl RowSpace {
 
     /// How many rows the base permutation covers — the boundary below which no flush and no merge
     /// moves a row, which is what makes an extents-only re-projection exact
-    /// (`tessera_engine::projection::RowProjection::rebase_extents`).
+    /// (`mosaica_engine::projection::RowProjection::rebase_extents`).
     pub fn base_rows(&self) -> u32 {
         self.base_rows
     }
@@ -2228,7 +2228,7 @@ impl RowSpace {
     /// against.
     ///
     /// **Not the artifact row forms' projection any more.** A form covers the whole row space and
-    /// is extended by each flush in place (`tessera_engine::artifacts`); what base-only bought was
+    /// is extended by each flush in place (`mosaica_engine::artifacts`); what base-only bought was
     /// that a form survived a flush and a merge untouched, and what it cost was that a member
     /// ingested since the last fold contributed nothing to its artifact's masked count — fail-closed
     /// and hours wide under the nightly compaction gate. A generating set is projected through the whole
@@ -2280,7 +2280,7 @@ impl RowSpace {
     }
 
     /// The rows contributed by the one extent at `index` — what a merge's publication re-projects
-    /// into a held row form for the span it renumbered (`tessera_engine::artifacts`). Empty where
+    /// into a held row form for the span it renumbered (`mosaica_engine::artifacts`). Empty where
     /// `index` names no extent.
     pub fn project_extent(&self, mask: &croaring::Bitmap, index: usize) -> croaring::Bitmap {
         match self.extents.get(index) {
@@ -2303,7 +2303,7 @@ impl RowSpace {
     }
 
     /// The base permutation, for the callers that legitimately need the built segment alone —
-    /// `tessera build`'s own verification, and the sharing assertion incremental generation
+    /// `mosaica build`'s own verification, and the sharing assertion incremental generation
     /// construction rests on.
     pub fn base(&self) -> &Arc<Permutation> {
         &self.base
@@ -2316,7 +2316,7 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::seq::SliceRandom;
     use rand::{Rng, SeedableRng};
-    use tessera_types::EntityId;
+    use mosaica_types::EntityId;
 
     /// A permutation over `bound` entity slots in which each entity holds a row with probability
     /// `density`, in an order the seed decides — written through the real writer and read back

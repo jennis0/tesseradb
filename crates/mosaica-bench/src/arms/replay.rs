@@ -1,4 +1,4 @@
-//! `tessera-bench replay`: sends a log written by `[serve] request_log` back at a server, as one
+//! `mosaica-bench replay`: sends a log written by `[serve] request_log` back at a server, as one
 //! viewer or as many, and reports each route's latency beside the latency the log recorded.
 //!
 //! A recorded session is a `token_id` within a run: each server process numbers its sessions from
@@ -106,7 +106,7 @@ pub(crate) struct Plan {
 }
 
 /// The route a path is reported under: the method and the path with its parameters named. The
-/// patterns follow the routes `tessera_server::viewer::router` declares, and change with them.
+/// patterns follow the routes `mosaica_server::viewer::router` declares, and change with them.
 fn route_template(method: &str, path: &str) -> String {
     let path = path.split('?').next().unwrap_or(path);
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
@@ -305,7 +305,7 @@ async fn send(
         sent.headers_us = Some(started.elapsed().as_micros() as u64);
         sent.pin = resp
             .headers()
-            .get("x-tessera-pin")
+            .get("x-mosaica-pin")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         while let Some(chunk) = resp.chunk().await? {
@@ -868,16 +868,16 @@ mod tests {
             "[[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n",
         )
         .unwrap();
-        let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+        let schema = mosaica_build::config::Config::parse(&schema_path, &Default::default())
             .unwrap()
             .schema;
         let bundle = dir.join("bundle");
-        tessera_build::build(&tessera_build::BuildArgs {
-            views: vec![tessera_build::ViewArgs {
+        mosaica_build::build(&mosaica_build::BuildArgs {
+            views: vec![mosaica_build::ViewArgs {
                 visibility: None,
                 view_id: "s0".to_string(),
-                projection: tessera_spatial::Projection::None,
-                extent: tessera_spatial::Bounds {
+                projection: mosaica_spatial::Projection::None,
+                extent: mosaica_spatial::Bounds {
                     x_min: 0.0,
                     x_max: 1000.0,
                     y_min: 0.0,
@@ -886,16 +886,16 @@ mod tests {
                 points: points.clone(),
                 point_fields: Default::default(),
                 select: None,
-                access: tessera_build::config::AccessInput::relation(pairs),
+                access: mosaica_build::config::AccessInput::relation(pairs),
             }],
             anchor: 0,
             groups: Vec::new(),
             scoped_attributes: Vec::new(),
-            attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+            attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
             out: bundle.clone(),
             limit: None,
             strict: false,
-            identity_key: tessera_types::IdentityKey::from_hex("07070707070707070707070707070707")
+            identity_key: mosaica_types::IdentityKey::from_hex("07070707070707070707070707070707")
                 .unwrap(),
             shard_id: 0,
             layers: Vec::new(),
@@ -909,7 +909,7 @@ mod tests {
         })
         .unwrap();
         std::fs::write(dir.join("operator.cred"), CREDENTIAL).unwrap();
-        let toml = dir.join("tessera.toml");
+        let toml = dir.join("mosaica.toml");
         std::fs::write(
             &toml,
             r#"
@@ -971,22 +971,22 @@ mod tests {
         })
     }
 
-    /// A server prepared from `deployment` as `tessera serve` prepares one, its viewer and session
+    /// A server prepared from `deployment` as `mosaica serve` prepares one, its viewer and session
     /// routers served on tasks the test can stop.
     struct Running {
-        state: Arc<tessera_server::state::AppState>,
+        state: Arc<mosaica_server::state::AppState>,
         tasks: Vec<tokio::task::JoinHandle<()>>,
         viewer: String,
         session: String,
     }
 
     async fn start(deployment: &Path) -> Running {
-        let state = tessera_server::prepare(deployment).unwrap().state;
+        let state = mosaica_server::prepare(deployment).unwrap().state;
         let mut urls = Vec::new();
         let mut tasks = Vec::new();
         for router in [
-            tessera_server::viewer::router(Arc::clone(&state)),
-            tessera_server::session::router(Arc::clone(&state)),
+            mosaica_server::viewer::router(Arc::clone(&state)),
+            mosaica_server::session::router(Arc::clone(&state)),
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             urls.push(format!("http://{}", listener.local_addr().unwrap()));
