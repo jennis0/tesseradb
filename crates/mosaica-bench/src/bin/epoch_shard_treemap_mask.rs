@@ -18,6 +18,26 @@
 //! A fourth column, **rows_in_range**, is `EffectiveMask::rows_in_range`'s materialised
 //! `leaf ∩ range`, which is what the decode pays instead when the overlay diffs are non-empty.
 //!
+//! Two more columns price the count another way. croaring's range count takes two ranks, each a
+//! popcount from the start of the range's container, so a short range costs what a long one does.
+//!
+//! - **count_ranges** is one `roaring_bitmap_rank_many` call per leaf over the request's endpoints
+//!   in ascending order, which walks the leaf's containers once with a running rank. The endpoints
+//!   are sorted outside the timer: a request's tiles at one depth are disjoint and come out of
+//!   `tile_ranges_all` in row order, so in the engine they are sorted already, and only this
+//!   bench's per-tile jitter can reorder them.
+//! - **count_local** is `leaf ∩ range` counted without materialising it, against a one-run bitmap
+//!   built per part, which popcounts only the words inside the range.
+//!
+//! `--layout viewport` places a request's tiles as a screen asks for them, a contiguous block of
+//! the map, in place of distinct tiles anywhere. Batching gains only where ranges share containers,
+//! which a contiguous block makes likely and a scattered one does not.
+//!
+//! `--figures-artifacts` adds a level's figures walk: each visible row's label read from a column
+//! and counted against its artifact, one count vector per leaf, then the vectors summed. The walk
+//! and the sum are timed apart, since the engine keeps each shard's counts and pays the sum per
+//! request.
+//!
 //! Synthetic and in memory: a universe of 2³⁰ rows, one bitmap over it at N = 1 or N leaves over
 //! 2³⁰/N each at the same density, rows chosen independently at random (realistic masks measure
 //! as essentially scattered under Morton order, run ratio 1.03–1.15 — `probes/results.md` §5),
@@ -109,6 +129,13 @@ struct Args {
     /// log₂ of the synthetic identity column's length. 26 is 512 MB.
     #[arg(long, default_value_t = 26)]
     id_rows_log2: u32,
+    /// Where a request's tiles are: `random`, distinct tiles anywhere, or `viewport`, a contiguous
+    /// block.
+    #[arg(long, value_enum, default_value_t = Layout::Random)]
+    layout: Layout,
+    /// Artifacts in the level the figures walk counts into; 0 skips the walk.
+    #[arg(long, default_value_t = 0)]
+    figures_artifacts: u32,
     #[arg(long, default_value_t = 0x5EED)]
     seed: u64,
     /// Where the synthetic segment's files go; removed at exit.
@@ -117,6 +144,13 @@ struct Args {
     /// JSON record of every cell.
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Layout {
+    Random,
+    Viewport,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -160,8 +194,72 @@ impl Treemap {
         self.leaf(shard)
     }
 
+    /// The rank of each of `ends`, ascending, in the leaf: one `roaring_bitmap_rank_many` call.
+    fn rank_many(&self, shard: u32, ends: &[u32], ranks: &mut [u64]) {
+        assert!(ranks.len() >= ends.len());
+        let leaf: *const Bitmap = self.leaf(shard);
+        // SAFETY: `Bitmap` is `repr(transparent)` over `roaring_bitmap_t`. The call reads
+        // `ends.len()` values from `ends` and writes as many ranks into `ranks`, which the assert
+        // above sizes.
+        unsafe {
+            croaring_sys::roaring_bitmap_rank_many(
+                leaf.cast::<croaring_sys::roaring_bitmap_t>(),
+                ends.as_ptr(),
+                ends.as_ptr().add(ends.len()),
+                ranks.as_mut_ptr(),
+            );
+        }
+    }
+
+    /// `leaf ∩ r`, counted against a one-run bitmap.
+    fn count_local(&self, shard: u32, r: Range<u32>) -> u64 {
+        self.leaf(shard).and_cardinality(&Bitmap::from_range(r))
+    }
+
     fn cardinality(&self) -> u64 {
         self.leaves.iter().map(|(_, b)| b.cardinality()).sum()
+    }
+}
+
+/// One leaf's share of a request for `count_ranges`: the endpoints of its parts in ascending
+/// order, and for each part, in tile order, where its `start − 1` (none for a start of 0) and its
+/// `end − 1` sit in that order.
+struct LeafEnds {
+    ends: Vec<u32>,
+    at: Vec<(Option<usize>, usize)>,
+}
+
+impl LeafEnds {
+    fn of(ranges: &[Range<u32>]) -> LeafEnds {
+        let mut keyed: Vec<(u32, usize, bool)> = Vec::with_capacity(2 * ranges.len());
+        for (i, r) in ranges.iter().enumerate() {
+            if r.start > 0 {
+                keyed.push((r.start - 1, i, false));
+            }
+            keyed.push((r.end - 1, i, true));
+        }
+        keyed.sort_unstable();
+        let mut at = vec![(None, 0usize); ranges.len()];
+        let mut ends = Vec::with_capacity(keyed.len());
+        for (pos, (value, i, hi)) in keyed.into_iter().enumerate() {
+            ends.push(value);
+            if hi {
+                at[i].1 = pos;
+            } else {
+                at[i].0 = Some(pos);
+            }
+        }
+        LeafEnds { ends, at }
+    }
+
+    /// Each part's count from the ranks of `ends`, summed, and written into `counts`.
+    fn counts(&self, ranks: &[u64], counts: &mut [u64]) -> u64 {
+        let mut sum = 0;
+        for (c, (lo, hi)) in counts.iter_mut().zip(&self.at) {
+            *c = ranks[*hi] - lo.map_or(0, |l| ranks[l]);
+            sum += *c;
+        }
+        sum
     }
 }
 
@@ -424,6 +522,21 @@ struct LeafStats {
     run_containers: u32,
 }
 
+/// One figures walk: every leaf's visible rows counted against their artifacts, then the leaves'
+/// counts summed.
+#[derive(Serialize)]
+struct FiguresCell {
+    variant: String,
+    coverage_pct: f64,
+    shards: u32,
+    artifacts: u32,
+    visible: u64,
+    walk_us: Vec<f64>,
+    walk_us_median: f64,
+    sum_us: Vec<f64>,
+    sum_us_median: f64,
+}
+
 #[derive(Serialize)]
 struct Report {
     cpu: String,
@@ -438,11 +551,20 @@ struct Report {
     k_min: usize,
     m_target: u64,
     seed: u64,
+    layout: Layout,
     leaves: Vec<LeafStats>,
     cells: Vec<Cell>,
+    figures: Vec<FiguresCell>,
 }
 
-const OPS: [&str; 4] = ["count", "decode", "rows_in_range", "select"];
+const OPS: [&str; 6] = [
+    "count",
+    "count_ranges",
+    "count_local",
+    "decode",
+    "rows_in_range",
+    "select",
+];
 
 fn median(xs: &[f64]) -> f64 {
     let mut v = xs.to_vec();
@@ -464,17 +586,43 @@ fn measure(warmup: usize, samples: usize, mut f: impl FnMut()) -> Vec<f64> {
 }
 
 /// The tile positions of one depth: every tile where there are at most `tiles` of them,
-/// otherwise `tiles` distinct positions at random. The same positions serve every N.
-fn positions(depth: u8, tiles: usize, seed: u64) -> Vec<u64> {
+/// otherwise `tiles` distinct positions, at random or as a contiguous block in Morton order. The
+/// same positions serve every N.
+fn positions(depth: u8, tiles: usize, seed: u64, layout: Layout) -> Vec<u64> {
     let count = 1usize << (2 * u32::from(depth));
     if count <= tiles {
         return (0..count as u64).collect();
     }
     let mut rng = StdRng::seed_from_u64(seed ^ (u64::from(depth) << 48));
-    rand::seq::index::sample(&mut rng, count, tiles)
-        .into_iter()
-        .map(|p| p as u64)
-        .collect()
+    match layout {
+        Layout::Random => rand::seq::index::sample(&mut rng, count, tiles)
+            .into_iter()
+            .map(|p| p as u64)
+            .collect(),
+        Layout::Viewport => {
+            let side = 1u64 << depth;
+            let w = (tiles as f64).sqrt().ceil() as u64;
+            let h = (tiles as u64).div_ceil(w);
+            let x0 = rng.gen_range(0..=side - w);
+            let y0 = rng.gen_range(0..=side - h);
+            let mut block: Vec<u64> = (0..h)
+                .flat_map(|dy| (0..w).map(move |dx| morton(x0 + dx, y0 + dy)))
+                .take(tiles)
+                .collect();
+            block.sort_unstable();
+            block
+        }
+    }
+}
+
+/// A tile's position in Morton order from its column and row.
+fn morton(x: u64, y: u64) -> u64 {
+    let mut p = 0u64;
+    for bit in 0..32 {
+        p |= ((x >> bit) & 1) << (2 * bit);
+        p |= ((y >> bit) & 1) << (2 * bit + 1);
+    }
+    p
 }
 
 struct Case<'a> {
@@ -496,7 +644,7 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
         eprintln!("  depth {depth}: per-leaf range under one row at N={shards}, skipped");
         return;
     }
-    let positions = positions(depth, args.tiles, args.seed);
+    let positions = positions(depth, args.tiles, args.seed, args.layout);
     let tiles = positions.len();
 
     // The request's parts: for each tile, `(shard, local range)` per leaf. Each part's start is
@@ -505,7 +653,8 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     // an arbitrary row, whereas `2³⁰/4ᵈ` is a multiple of the container width up to depth 7, and
     // a range that starts and ends on container boundaries is counted from the header alone —
     // an unrealistic advantage that a split into N parts would then appear to lose.
-    let mut jitter = StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 40) ^ (u64::from(shards) << 8));
+    let mut jitter =
+        StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 40) ^ (u64::from(shards) << 8));
     let parts: Vec<Vec<(u32, Range<u32>)>> = positions
         .iter()
         .map(|&p| {
@@ -559,6 +708,49 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
         black_box(sum);
     });
     record("count", us);
+
+    // Each leaf's ranges in tile order, and their endpoints sorted, both outside the timer.
+    let by_leaf: Vec<Vec<Range<u32>>> = (0..shards as usize)
+        .map(|s| parts.iter().map(|tile| tile[s].1.clone()).collect())
+        .collect();
+    let leaf_ends: Vec<LeafEnds> = by_leaf.iter().map(|r| LeafEnds::of(r)).collect();
+    let mut ranks = vec![0u64; 2 * tiles];
+    let mut counts = vec![0u64; tiles];
+    for (s, le) in leaf_ends.iter().enumerate() {
+        map.rank_many(s as u32, &le.ends, &mut ranks);
+        le.counts(&ranks, &mut counts);
+        for (t, c) in counts.iter().enumerate() {
+            assert_eq!(
+                *c, visible[t][s],
+                "count_ranges disagrees at leaf {s}, tile {t}"
+            );
+            let local = map.count_local(s as u32, by_leaf[s][t].clone());
+            assert_eq!(
+                local, visible[t][s],
+                "count_local disagrees at leaf {s}, tile {t}"
+            );
+        }
+    }
+    let us = measure(args.warmup, args.samples, || {
+        let mut sum = 0u64;
+        for (s, le) in leaf_ends.iter().enumerate() {
+            map.rank_many(s as u32, &le.ends, &mut ranks);
+            sum += le.counts(&ranks, &mut counts);
+        }
+        black_box(sum);
+    });
+    record("count_ranges", us);
+
+    let us = measure(args.warmup, args.samples, || {
+        let mut sum = 0u64;
+        for tile in &parts {
+            for (s, r) in tile {
+                sum += map.count_local(*s, r.clone());
+            }
+        }
+        black_box(sum);
+    });
+    record("count_local", us);
 
     let us = measure(args.warmup, args.samples, || {
         let mut visited = 0u64;
@@ -656,12 +848,107 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
                 })
                 .collect();
             let tile_visible: u64 = vis.iter().sum();
-            let selected = Selection::of(mask, &SelectionParts::new(&sel_parts), &params, tile_visible);
+            let selected = Selection::of(
+                mask,
+                &SelectionParts::new(&sel_parts),
+                &params,
+                tile_visible,
+            );
             served += selected.rows.len();
         }
         black_box(served);
     });
     record("select", us);
+}
+
+/// A label per row of the universe, each an artifact drawn at random: the level's column.
+fn label_column(artifacts: u32, seed: u64) -> Vec<u32> {
+    let mut rng = SplitMix(seed);
+    (0..UNIVERSE)
+        .map(|_| (((rng.next() >> 32) * u64::from(artifacts)) >> 32) as u32)
+        .collect()
+}
+
+/// The figures walk over every leaf, each into a count vector of its own, and the sum of those
+/// vectors, timed apart. Leaf s reads the column from row s·(2³⁰/N).
+fn figures(
+    args: &Args,
+    variant: &str,
+    coverage_pct: f64,
+    map: &Treemap,
+    labels: &[u32],
+) -> FiguresCell {
+    let shards = map.leaves.len();
+    let shard_rows = (UNIVERSE / shards as u64) as usize;
+    let artifacts = args.figures_artifacts as usize;
+    let mut per: Vec<Vec<u32>> = vec![vec![0u32; artifacts]; shards];
+    let mut total = vec![0u64; artifacts];
+
+    let walk_us = measure(args.warmup, args.samples, || {
+        for ((s, leaf), counts) in map.leaves.iter().zip(per.iter_mut()) {
+            counts.fill(0);
+            let column = &labels[*s as usize * shard_rows..][..shard_rows];
+            let mut iter = leaf.iter();
+            let mut buf = [0u32; VALUE_BUF_LEN];
+            loop {
+                let n = iter.next_many(&mut buf);
+                if n == 0 {
+                    break;
+                }
+                for &row in &buf[..n] {
+                    counts[column[row as usize] as usize] += 1;
+                }
+            }
+        }
+        black_box(&per);
+    });
+    let sum_us = measure(args.warmup, args.samples, || {
+        total.fill(0);
+        for counts in &per {
+            for (t, c) in total.iter_mut().zip(counts) {
+                *t += u64::from(*c);
+            }
+        }
+        black_box(&total);
+    });
+    assert_eq!(total.iter().sum::<u64>(), map.cardinality());
+    FiguresCell {
+        variant: variant.to_string(),
+        coverage_pct,
+        shards: shards as u32,
+        artifacts: args.figures_artifacts,
+        visible: map.cardinality(),
+        walk_us_median: median(&walk_us),
+        walk_us,
+        sum_us_median: median(&sum_us),
+        sum_us,
+    }
+}
+
+fn print_figures(figures: &[FiguresCell]) {
+    if figures.is_empty() {
+        return;
+    }
+    println!("\n### figures walk (ms per walk, median of samples)\n");
+    println!("| variant | N | visible | walk | sum | walk + sum | ÷ N=1 |");
+    println!("|---|---|---|---|---|---|---|");
+    for f in figures {
+        let base = figures
+            .iter()
+            .find(|b| b.variant == f.variant && b.shards == 1)
+            .map(|b| b.walk_us_median + b.sum_us_median);
+        let both = f.walk_us_median + f.sum_us_median;
+        println!(
+            "| {} | {} | {} | {:.1} | {:.2} | {:.1} | {} |",
+            f.variant,
+            f.shards,
+            f.visible,
+            f.walk_us_median / 1e3,
+            f.sum_us_median / 1e3,
+            both / 1e3,
+            base.map_or("—".to_string(), |b| format!("{:.2}", both / b)),
+        );
+    }
 }
 
 fn fmt_us(us: f64) -> String {
@@ -674,7 +961,13 @@ fn fmt_us(us: f64) -> String {
     }
 }
 
-fn find<'a>(cells: &'a [Cell], variant: &str, op: &str, shards: u32, depth: u8) -> Option<&'a Cell> {
+fn find<'a>(
+    cells: &'a [Cell],
+    variant: &str,
+    op: &str,
+    shards: u32,
+    depth: u8,
+) -> Option<&'a Cell> {
     cells
         .iter()
         .find(|c| c.variant == variant && c.op == op && c.shards == shards && c.depth == depth)
@@ -790,8 +1083,17 @@ fn main() {
     let segment = synthetic_segment(id_rows, args.seed ^ 0x1D, &scratch);
     eprintln!("  written and mapped in {:.1} s", t.elapsed().as_secs_f64());
 
+    let labels = (args.figures_artifacts > 0).then(|| {
+        eprintln!(
+            "label column: {UNIVERSE} rows over {} artifacts",
+            args.figures_artifacts
+        );
+        label_column(args.figures_artifacts, args.seed ^ 0x1AB)
+    });
+
     let mut cells: Vec<Cell> = Vec::new();
     let mut leaves: Vec<LeafStats> = Vec::new();
+    let mut figures_cells: Vec<FiguresCell> = Vec::new();
     for (variant, coverage_pct, run_heavy) in &variants {
         for &shards in &args.shards {
             eprintln!("{variant}, N={shards}: building");
@@ -833,6 +1135,11 @@ fn main() {
                 segment: &segment,
                 id_rows: id_rows as u64,
             };
+            if let Some(labels) = &labels {
+                let t = Instant::now();
+                figures_cells.push(figures(&args, variant, *coverage_pct, &map, labels));
+                eprintln!("  figures done in {:.1} s", t.elapsed().as_secs_f64());
+            }
             for depth in 0..=args.max_depth {
                 let t = Instant::now();
                 run_depth(&args, &case, depth, &mut cells);
@@ -842,6 +1149,7 @@ fn main() {
     }
 
     print_tables(&cells, &args.shards, args.max_depth);
+    print_figures(&figures_cells);
 
     if let Some(out) = &args.out {
         let report = Report {
@@ -857,11 +1165,16 @@ fn main() {
             k_min: args.k_min,
             m_target: M_TARGET,
             seed: args.seed,
+            layout: args.layout,
             leaves,
             cells,
+            figures: figures_cells,
         };
-        std::fs::write(out, serde_json::to_string_pretty(&report).expect("serialise"))
-            .expect("write result json");
+        std::fs::write(
+            out,
+            serde_json::to_string_pretty(&report).expect("serialise"),
+        )
+        .expect("write result json");
         eprintln!("wrote {}", out.display());
     }
 

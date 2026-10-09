@@ -53,6 +53,9 @@ mosaica-filter-write = { path = "../mosaica-filter-write" }
 mosaica-analyse = { path = "../mosaica-analyse" }
 
 croaring = { workspace = true }
+# `epoch_shard_treemap_mask` calls `roaring_bitmap_rank_many`, which `croaring` does not wrap. The
+# version is the one `croaring` itself depends on, so both name the same `roaring_bitmap_t`.
+croaring-sys = "5.2.2"
 # Calibration task: the load arm decodes just enough of a 200 response's tiles frame to sum the
 # `served` column, for the points-served-per-second/per-user/per-request metrics. `mosaica-wire`
 # supplies the frame walk (`split_frames` — the streamed framing, contracts §3.2 r26); `arrow`
