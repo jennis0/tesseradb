@@ -1,9 +1,9 @@
-import type {Meta, Quantisation, Store} from '@tesseradb/client';
+import type {Meta, Quantisation, Store} from '@mosaicajs/client';
 import {emit} from './base.js';
 
 /**
  * What the view and key pickers share: the frame comparison and the switch. The picker rules are
- * in `@tesseradb/client`, so a host drawing its own picker gets the same answers.
+ * in `@mosaicajs/client`, so a host drawing its own picker gets the same answers.
  */
 
 /**
@@ -16,7 +16,7 @@ export function sameFrame(a: Quantisation | null, b: Quantisation | null): boole
 }
 
 /**
- * Make `id` the current view and emit `tessera-viewswitch` `{from, to, sameFrame}`, for a host that
+ * Make `id` the current view and emit `mosaica-viewswitch` `{from, to, sameFrame}`, for a host that
  * owns the URL or a basemap. The map follows the `view` projection, so a host calling
  * `setCurrentView` itself gets the same refit.
  */
@@ -26,5 +26,5 @@ export function switchView(from: HTMLElement, store: Store, meta: Meta, id: stri
   const before = meta.views.find((v) => v.id === current)?.quantisation ?? null;
   const after = meta.views.find((v) => v.id === id)?.quantisation ?? null;
   store.setCurrentView(id);
-  emit(from, 'tessera-viewswitch', {from: current, to: id, sameFrame: sameFrame(before, after)});
+  emit(from, 'mosaica-viewswitch', {from: current, to: id, sameFrame: sameFrame(before, after)});
 }

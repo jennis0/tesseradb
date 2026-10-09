@@ -1,0 +1,456 @@
+//! The flush tick: the one cadence on which geometry is published (write-path §4.1).
+//!
+//! What is asserted here is the cadence and its two triggers — the tick fires on an idle node,
+//! an operator request pulls the deadline forward without bypassing the tick path, and an
+//! accepted deny moves no geometry. The flush unit's own behaviour is covered by the flush and
+//! promotion suites; these are the properties that must hold around it, because each is
+//! fail-open if it lands the other way round.
+
+mod common;
+
+use std::time::Duration;
+
+use common::*;
+use mosaica_lifecycle::ChangeOp;
+use mosaica_types::EntityId;
+
+/// [`engine_with_tick`] with the row trigger set too — `flush_max_items`, §4.1's second trigger.
+fn engine_with_triggers(
+    tmp: &tempfile::TempDir,
+    root: &std::path::Path,
+    flush_max_age_secs: u64,
+    flush_max_items: usize,
+) -> Engine {
+    let mut engine = Engine::open(
+        root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        EngineConfig {
+            flush_max_age_secs,
+            flush_max_items,
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
+}
+
+fn engine_with_tick(
+    tmp: &tempfile::TempDir,
+    root: &std::path::Path,
+    flush_max_age_secs: u64,
+) -> Engine {
+    let mut engine = Engine::open(
+        root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        EngineConfig {
+            flush_max_age_secs,
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
+}
+
+use mosaica_engine::{Engine, EngineConfig};
+
+const WAIT: Duration = Duration::from_secs(10);
+
+/// The tick fires on its own, with no traffic at all. A cadence that only advanced when something
+/// else woke the executor would make visibility latency a function of load rather than of
+/// `flush_max_age_secs`.
+#[test]
+fn the_tick_fires_on_an_idle_node() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 1);
+    wait_until("two ticks on an idle node", WAIT, || {
+        engine.write_executor_stats().ticks >= 2
+    });
+}
+
+/// **`POST /control/flush` is accepted at any time and executed promptly** (contracts §3.4): the
+/// flag pulls the tick's deadline forward and the doorbell wakes an idle executor, so the flush
+/// runs at the next loop iteration — through the one tick path, never around it. With nothing
+/// buffered the triggered tick plans nothing and the request is consumed; with a buffered row it
+/// publishes long before the 3600 s deadline this test sets. The second half needs the other ring
+/// too: nothing else wakes the executor before the deadline, so the row is served only because the
+/// finished flush rang the doorbell itself.
+#[test]
+fn a_requested_flush_executes_promptly_through_the_tick_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    // A deadline far enough out that any publication observed below is the request's doing.
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    let ticks_at_start = engine.write_executor_stats().ticks;
+
+    // Empty buffer: the triggered tick fires, plans nothing, and consumes the request.
+    engine.request_flush();
+    wait_until("the requested tick fires on an empty buffer", WAIT, || {
+        engine.write_executor_stats().ticks > ticks_at_start
+    });
+    wait_until(
+        "the request is consumed by the tick it triggered",
+        WAIT,
+        || !engine.write_executor_stats().flush_requested,
+    );
+    assert_eq!(
+        engine.generation().segments_version,
+        0,
+        "nothing buffered, so the triggered tick published nothing"
+    );
+
+    // Buffered row: a second request publishes it without waiting out the deadline.
+    let row = mosaica_lifecycle::UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 0.5,
+        y: 0.5,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    engine
+        .ingest_rows(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
+        .expect("the row is accepted");
+    engine.request_flush();
+    wait_until(
+        "the buffered row is published by the requested flush",
+        WAIT,
+        || engine.generation().segments_version > 0,
+    );
+}
+
+/// **An accepted deny leaves `segments_version` unmoved** (§1.3's geometry/overlay split).
+///
+/// The overlay publication writes a side-manifest at the deny drain's close (Task 27), and the
+/// guard here is what keeps that publication from ever being implemented through
+/// `publish_geometry`: an overlay publication supersedes no geometry, so it must not move
+/// `segments_version` — every deny would otherwise rotate the row-projection cache key and cost
+/// a full projection rebuild.
+#[test]
+fn an_accepted_deny_moves_no_geometry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+
+    let before = engine.generation();
+    let entity = source_to_new_map(&root, &before.prefix)[&7];
+    engine
+        .accept_change(EntityId::new(entity), ChangeOp::Suppress)
+        .expect("a suppression is accepted");
+
+    let after = engine.generation();
+    assert!(
+        after.overlay_version > before.overlay_version,
+        "the deny is in force"
+    );
+    assert_eq!(
+        after.segments_version, before.segments_version,
+        "an overlay publication supersedes no geometry, so it must not rotate the row-projection \
+         cache key"
+    );
+}
+
+/// **The deny-only regime rotates** (owner-ruled 2026-08-04; write-path §4.5). A node that takes
+/// denies but never flushes — a loaded bundle with no live ingest — used to seal nothing and
+/// reclaim nothing: an unbounded log on the one lane that cannot be shed. The tick now rotates
+/// whenever the log has grown and no flush publication is coming to do it, and the rotation's
+/// snapshot is what carries the suppression across the reclaim — asserted by restarting onto the
+/// rotated log and finding it still in force.
+#[test]
+fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 1);
+
+    let wal_members = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("wal") && !n.ends_with(".sync"))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = wal_members();
+    assert!(!before.is_empty(), "the WAL has at least its first member");
+
+    let entity = source_to_new_map(&root, &engine.generation().prefix)[&3];
+    engine
+        .accept_change(EntityId::new(entity), ChangeOp::Suppress)
+        .expect("a suppression is accepted");
+
+    // The tick fires within a second; growth (the ChangeBatch record) triggers a rotation,
+    // whose reclaim deletes the original member — the buffer is empty, so the whole durable
+    // prefix below the snapshot is reclaimable.
+    wait_until(
+        "the original WAL member is reclaimed by a tick rotation",
+        WAIT,
+        || {
+            let now = wal_members();
+            now != before && !now.is_empty()
+        },
+    );
+
+    // The suppression's only durable home is now the rotation snapshot. A restart must carry it.
+    drop(engine);
+    let reopened = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
+            max_merged_segment_bytes: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: mosaica_engine::CompactionSchedule::off(),
+            ..config()
+        },
+    )
+    .expect("the rotated log opens");
+    assert!(
+        reopened
+            .generation()
+            .overlay
+            .is_suppressed(EntityId::new(entity)),
+        "the suppression must survive the rotation it was reclaimed under"
+    );
+}
+
+/// **The row trigger publishes ahead of the period** (§4.1's `flush_max_items`).
+///
+/// The deadline here is an hour, so a publication observed below is the buffered-row count's
+/// doing and nothing else's. This is the property decision 0045's deleted key never had: the mark
+/// it set was read by nothing, and the tick that would have consulted it fired on age alone — so
+/// a loader's `B`, and with it the `O(B)` copy every commit-window close pays, was the arrival
+/// rate times ninety seconds and not a number anybody chose.
+#[test]
+fn the_row_trigger_publishes_ahead_of_the_period() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_triggers(&tmp, &root, 3600, 4);
+
+    for i in 0..4u8 {
+        let row = mosaica_lifecycle::UnallocatedRow {
+            view: "s0".to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        };
+        engine
+            .ingest_rows(vec![row], format!("rows-trigger-batch-{i}"), [i; 32])
+            .expect("the row is accepted");
+    }
+
+    wait_until(
+        "the buffered rows are published by the row trigger, with no request and no elapsed tick",
+        WAIT,
+        || engine.generation().segments_version > 0,
+    );
+}
+
+/// **A request made while a cycle's second view waits is honoured by a prompt cycle.** A cycle
+/// holding rows in two views plans both, dispatches one and defers the other, and stays open
+/// until the deferred view publishes. A request made meanwhile is answered with the cycle after
+/// it; the tick that takes the deferred view consumes the request's flag, so that later cycle
+/// comes only because closing the open one arms it again. The period here is an hour, so the
+/// number arriving at all is the re-armed request's doing.
+#[test]
+fn a_request_made_while_a_view_is_deferred_is_honoured_without_the_period() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    engine
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: mosaica_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    let mut ingested = Vec::new();
+    for (i, view) in ["s0", "s1"].into_iter().enumerate() {
+        let row = mosaica_lifecycle::UnallocatedRow {
+            view: view.to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        };
+        let entity = engine
+            .ingest_rows(vec![row], format!("open-cycle-{view}"), [i as u8 + 1; 32])
+            .expect("the row is accepted")[0];
+        ingested.push((view, entity));
+    }
+
+    // The first view's flush is held, so the cycle is open and the second view deferred.
+    engine.set_flush_paused_for_test(true);
+    let first = engine.request_flush_publication();
+    wait_until("the first view's flush is held", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+    let second = engine.request_flush_publication();
+    assert_eq!(
+        second,
+        first + 1,
+        "a request during an open cycle names the cycle after it"
+    );
+
+    engine.set_flush_paused_for_test(false);
+    wait_until("the open cycle publishes both views", WAIT, || {
+        engine.publication() >= first
+    });
+    for (view, entity) in &ingested {
+        assert!(
+            serves(&engine, view, *entity),
+            "the row in {view} is served at the number the first request was answered with"
+        );
+    }
+    wait_until(
+        "the cycle the second request was answered with publishes, well inside the period",
+        WAIT,
+        || engine.publication() >= second,
+    );
+}
+
+/// **A retry that finds nothing to flush still reaches the number a request was promised.** A
+/// flush that fails holds its cycle open and retries. A request made meanwhile is answered with the
+/// cycle after it. The row is deleted before the retry, so the retry plans nothing and closes the
+/// open cycle inside the tick, with no publication to wake the executor again: only the re-armed
+/// request brings the promised cycle before the hour-long period.
+///
+/// The flush is made to fail by a read-only segments directory. No fault switch fails a flush and
+/// lets it recover: a WAL fault leaves the overlay diverged and a step-down stays, and both refuse
+/// every later flush until a restart.
+#[test]
+fn a_retry_that_finds_nothing_to_flush_still_reaches_the_promised_number() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    let entity = ingest(&engine, "failed-cycle");
+
+    let segments = segments_dir(&root, "s0");
+    let writable = std::fs::metadata(&segments).unwrap().permissions();
+    std::fs::set_permissions(&segments, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let first = engine.request_flush_publication();
+    wait_until("the flush fails", WAIT, || {
+        engine.write_executor_stats().flush_failures >= 1
+    });
+    let second = engine.request_flush_publication();
+    assert_eq!(
+        second,
+        first + 1,
+        "a request during an open cycle names the cycle after it"
+    );
+
+    engine
+        .accept_change(entity, ChangeOp::Delete)
+        .expect("the deletion is accepted");
+    std::fs::set_permissions(&segments, writable).unwrap();
+
+    wait_until("the retry closes the failed cycle", WAIT, || {
+        engine.publication() >= first
+    });
+    wait_until(
+        "the cycle the second request was answered with publishes, well inside the period",
+        WAIT,
+        || engine.publication() >= second,
+    );
+    assert_eq!(
+        engine.write_executor_stats().flushes,
+        0,
+        "the deleted row was never flushed, so no cycle published a segment"
+    );
+}
+
+/// The directory `view`'s flushed segments are written into.
+fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
+    let current: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
+    let partitions = root
+        .join(current["prefix"].as_str().unwrap())
+        .join("partitions");
+    let partition = std::fs::read_dir(&partitions)
+        .unwrap()
+        .next()
+        .expect("the bundle has a partition")
+        .unwrap()
+        .path();
+    mosaica_store::view_path(&partition, view).join("segments")
+}
+
+/// Whether a full-coverage viewer is served `entity`, ingested at (0.5, 0.5), in `view`.
+fn serves(engine: &Engine, view: &str, entity: EntityId) -> bool {
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let wanted = engine.tessera_id_of(entity).unwrap();
+    engine
+        .viewport(
+            &session,
+            mosaica_engine::ViewportRequest::new(view, 10, [0.4, 0.4, 0.6, 0.6], 200),
+        )
+        .unwrap()
+        .points
+        .iter()
+        .any(|(id, _)| id == wanted)
+}

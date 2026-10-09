@@ -7,7 +7,7 @@ corpus and the right place to shake out an ingest pipeline.
 
 ```bash
 ~/venvs/ingest/bin/python -m test_corpora.geonames.prepare
-cd "$TESSERA_LADDER/geonames" && tessera check && tessera build
+cd "$MOSAICA_LADDER/geonames" && mosaica check && mosaica build
 ```
 
 ## What it built
@@ -18,10 +18,10 @@ the build derived its own.
 | | |
 |---|---|
 | `prepare.py` wall | 2:54 (15 s to read `allCountries.txt`, 37 s to assign ids) |
-| `tessera build` wall | **2:59** |
+| `mosaica build` wall | **2:59** |
 | build peak RSS | **3.55 GB** |
 | bundle | **1,341,841,220 bytes** — 99.7 B/point |
-| `tessera verify` | OK in 1.03 s |
+| `mosaica verify` | OK in 1.03 s |
 | artifacts | 688 feature minted; 464,655 admin declared by `artifacts-admin.parquet` |
 | points with a cell of their own | **85.7%** of 13,463,857, in 11,544,034 distinct cells |
 | rows in no artifact | 5,003 feature (blank class), 398 admin (no country and no admin code) |

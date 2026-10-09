@@ -48,7 +48,7 @@ REPLICA = 2_422_486
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--limit", type=int, required=True, help="entity_id < LIMIT")
-ap.add_argument("--data", default="/home/user/code/tessera/data")
+ap.add_argument("--data", default="/home/user/code/mosaica/data")
 ap.add_argument("--out", default=None)
 ap.add_argument("--chunk", type=int, default=5_000_000, help="rows per output row group")
 args = ap.parse_args()
@@ -86,7 +86,7 @@ schema = pa.schema([
 
 # `geometry.parquet` is sorted by (morton, entity_id), NOT by entity id, so the rows this scale
 # wants are spread across every one of its 1,000 row groups and the whole file must be walked.
-# Walked in row-group order and buffered: nothing here needs the output sorted, since `tessera
+# Walked in row-group order and buffered: nothing here needs the output sorted, since `mosaica
 # build` sorts by morton itself.
 geom = pq.ParquetFile(GEOM)
 writer = pq.ParquetWriter(OUT, schema, compression="zstd")

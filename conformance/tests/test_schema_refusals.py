@@ -66,7 +66,7 @@ def _build(corpus_dir: Path, schema_text: str, out: Path):
     schema_path = corpus_dir / f"{out.name}.config.toml"
     schema_path.write_text(SCHEMA_HEAD + schema_text)
     deployment = write_deployment(
-        corpus_dir / f"{out.name}.tessera.toml", bundle=out, schema=schema_path
+        corpus_dir / f"{out.name}.mosaica.toml", bundle=out, schema=schema_path
     )
     return run_build(["--deployment", str(deployment)])
 

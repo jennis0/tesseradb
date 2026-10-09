@@ -5,7 +5,7 @@ minutes and **there must be exactly one**. Everything after this script — the 
 layout, the clusterings, `prepare.py` — reads the local ladder directory this writes and never the
 share again.
 
-Per chunk `N`, under `$TESSERA_LADDER/medcpt/staging/`:
+Per chunk `N`, under `$MOSAICA_LADDER/medcpt/staging/`:
 
 - **`chunk_NN.parquet`** — `row` (the global row index, which is `entity_id`), `pmid`, `published`,
   `title`, `abstract` and `mesh` (the raw `m` field, left for the MeSH track to resolve). One row
@@ -163,7 +163,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--chunks", type=str, default=None,
                     help="comma-separated chunk numbers; default all 38, in order")
-    ap.add_argument("--out", type=Path, default=None, help="default $TESSERA_LADDER/medcpt")
+    ap.add_argument("--out", type=Path, default=None, help="default $MOSAICA_LADDER/medcpt")
     ap.add_argument("--force", action="store_true", help="restage chunks already recorded")
     args = ap.parse_args()
 

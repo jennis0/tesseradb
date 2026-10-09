@@ -8,7 +8,7 @@ holds the prose the fixture planted and walks it, with no dictionary, no posting
 anywhere in it.
 
 **Both sides tokenise through one analyser, and that is the design decision this module rests on.**
-The oracle reaches `tessera tokenise` — the verb decision 0070 put there for exactly this — rather
+The oracle reaches `mosaica tokenise` — the verb decision 0070 put there for exactly this — rather
 than reimplementing UAX #29 segmentation in Python, which would compare PyICU's ICU4C against the
 engine's icu4x and turn every marginal disagreement into a research question. What is differential
 here is the *set and sequence arithmetic over one token stream*: the engine's through a
@@ -285,7 +285,7 @@ def test_the_manifest_records_the_analyser_the_oracle_tokenises_with(catalogue_b
     """**The differential is only a differential if both sides used one pipeline** (decision 0070).
 
     The column records a full `<name>/<version>` identity; the oracle reaches the analyser through
-    `tessera tokenise`, whose default is the same name. If the manifest ever records an identity
+    `mosaica tokenise`, whose default is the same name. If the manifest ever records an identity
     the CLI's default does not resolve to, every comparison in this module becomes a comparison
     between two segmentations and its agreements stop meaning anything — silently, because both
     sides would still be internally consistent.
@@ -307,7 +307,7 @@ def test_meta_publishes_the_analyser_identity_a_client_would_need(
     A client sends query text raw and the server segments it, so an empty `match` is ambiguous
     between *no document says this* and *your query segmented differently from the index* — and for
     CJK or Thai the second is the likely one. The identity is what separates them, and a client that
-    has it can reproduce the segmentation through `tessera tokenise`.
+    has it can reproduce the segmentation through `mosaica tokenise`.
 
     Asserted against the **manifest's** own field rather than a literal, since the two being the
     same string is the whole point; and against a non-text column, whose `null` is what makes the
@@ -605,7 +605,7 @@ def test_the_golden_tokeniser_vectors_run_here_too():
 
     The vectors pin the token stream across fourteen script families, and the whole text family
     rests on them: an analyser change that altered a segmentation would silently change what every
-    index in every bundle means. They live in `crates/tessera-analyse/tests/vectors/golden.json`
+    index in every bundle means. They live in `crates/mosaica-analyse/tests/vectors/golden.json`
     and run in Rust; running them here as well is what makes them a *conformance* obligation rather
     than one crate's unit test, and it checks them through the CLI — the surface the oracle uses —
     rather than through the library.
@@ -615,7 +615,7 @@ def test_the_golden_tokeniser_vectors_run_here_too():
 
     from oracle.harness import REPO_ROOT  # noqa: PLC0415
 
-    path = Path(REPO_ROOT) / "crates/tessera-analyse/tests/vectors/golden.json"
+    path = Path(REPO_ROOT) / "crates/mosaica-analyse/tests/vectors/golden.json"
     doc = json.loads(path.read_text(encoding="utf-8"))
 
     for entry in doc["analysers"]:

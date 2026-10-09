@@ -1,0 +1,806 @@
+//! I1 composition tests over a 10k(+5)-entity in-memory-ish fixture.
+//!
+//! Fixture: an identity permutation over `[0, 10_005)` (rows == entity ids, so row-space
+//! assertions can be read directly against entity ids), two granted terms (0, 1) whose postings
+//! cover entities `[0, 510)` — the base fragment — and entity ids `[10_000, 10_005)` reserved,
+//! unpermutted-in-the-bundle-sense but *do* have rows in this synthetic permutation, standing in
+//! for buffered entities. A real buffered entity has a row wherever a flush of another view has
+//! published one for it — an entity joined to a second view, whose join row flushes before its
+//! own (`tests/deny_mask.rs`) — and the synthetic permutation puts every case here on that
+//! branch rather than only the cases a two-view fixture could reach.
+
+use std::collections::HashSet;
+use std::ops::Range;
+use std::sync::Arc;
+
+use rand::rngs::StdRng;
+use rand::Rng;
+use rand::SeedableRng;
+use rustc_hash::FxHashSet;
+use tempfile::TempDir;
+
+use mosaica_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReader};
+use mosaica_engine::compose::{compose, visible_to, EffectiveMask};
+use mosaica_engine::projection::RowProjection;
+use mosaica_lifecycle::{ChangeOp, IngestBuffer, Overlay};
+use mosaica_store::write::write_permutation;
+use mosaica_store::{Permutation, RowSpace};
+use mosaica_types::{EntityId, TermId};
+
+const UNIVERSE: u32 = 10_000;
+const BUFFER_EXT: u32 = 5;
+const BOUND: u64 = (UNIVERSE + BUFFER_EXT) as u64;
+const WATERMARK: u64 = UNIVERSE as u64;
+const SMALL_TERM_THRESHOLD: u32 = 32;
+
+// Fixture entity ids (documented at point of use below in each test).
+const SUPPRESS_IN: u64 = 5;
+const DELETED_IN: u64 = 8;
+const CROSS1_DSU: u64 = 10; // delete -> suppress -> unsuppress
+const CROSS2_SDU: u64 = 11; // suppress -> delete -> unsuppress
+const SUPPRESS_OUT: u64 = 9000; // outside the fragment
+const OUT_OF_FRAGMENT: u64 = 9001; // outside the fragment
+const BUFFERED_PASS: u64 = 10_000;
+const BUFFERED_FAIL: u64 = 10_001;
+
+const SATISFIED_TERM_A: u32 = 0; // a real granted/postings term
+const UNSATISFIED_TERM: u32 = 77;
+
+struct Fixture {
+    _temp: TempDir,
+    perm: RowSpace,
+    postings: PostingsReader,
+    satisfied: FxHashSet<TermId>,
+    base: Arc<RowProjection>,
+    /// Every entity id genuinely inside the base fragment (brute-force, for cross-checks).
+    fragment_entities: HashSet<u32>,
+}
+
+fn build_fixture() -> Fixture {
+    let temp = TempDir::new().unwrap();
+
+    // Term 0: entities [0, 500). Term 1: entities [500, 510). Both granted.
+    let per_term: Vec<Vec<u32>> = vec![(0..500).collect(), (500..510).collect()];
+
+    let postings_path = temp.path().join("postings.arrow");
+    write_postings(&postings_path, &per_term, SMALL_TERM_THRESHOLD).unwrap();
+    let postings = PostingsReader::open(&postings_path, false).unwrap();
+
+    let granted: Vec<TermId> = vec![TermId::new(0), TermId::new(1)];
+    let cache_dir = temp.path().join("cache");
+    let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
+    let fragment = cache
+        .get_or_build(&granted, &postings, &[], WATERMARK)
+        .unwrap();
+
+    let perm_path = temp.path().join("permutation.bin");
+    let identity: Vec<EntityId> = (0..BOUND).map(EntityId::new).collect();
+    write_permutation(&perm_path, &identity, BOUND).unwrap();
+    let perm = RowSpace::new(
+        Arc::new(Permutation::load(&perm_path).unwrap()),
+        BOUND as u32,
+    );
+
+    let base = Arc::new(RowProjection::walk(&fragment, &perm));
+
+    let mut fragment_entities: HashSet<u32> = HashSet::new();
+    for t in per_term {
+        fragment_entities.extend(t);
+    }
+
+    let satisfied: FxHashSet<TermId> = [TermId::new(SATISFIED_TERM_A), TermId::new(1)]
+        .into_iter()
+        .collect();
+
+    Fixture {
+        _temp: temp,
+        perm,
+        postings,
+        satisfied,
+        base,
+        fragment_entities,
+    }
+}
+
+fn e(id: u64) -> EntityId {
+    EntityId::new(id)
+}
+
+/// Rebuild the same fragment via the cache (cache hit, not a rebuild) — the exact `&FrozenFragment`
+/// every test composes against, exposed separately so `visible_to` tests can also get one without
+/// threading it through the fixture's lifetime.
+fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
+    let cache_dir = fx._temp.path().join("cache");
+    let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
+    let granted: Vec<TermId> = vec![TermId::new(0), TermId::new(1)];
+    cache
+        .get_or_build(&granted, &fx.postings, &[], WATERMARK)
+        .unwrap()
+}
+
+/// Compose against `overlay`/`buffer`. Kept as a free function so every test composes through the
+/// exact same call.
+///
+/// No `FrozenFragment` is built: `fx.base` is already its row-space projection, which is all
+/// `compose` reads. `visible_to` still takes one, and `fragment_for` still exists for it.
+fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> EffectiveMask {
+    let mask = compose_through_the_list(fx, overlay, buffer);
+    let fallback = compose_with_the_fallback_walk(fx, overlay, buffer);
+    let (_, minus, plus, _) = mask.parts();
+    let (_, fallback_minus, fallback_plus, _) = fallback.parts();
+    assert_eq!(
+        (minus, plus),
+        (fallback_minus, fallback_plus),
+        "the list walk and the whole-buffer walk compose different diffs"
+    );
+    mask
+}
+
+fn compose_through_the_list(
+    fx: &Fixture,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+) -> EffectiveMask {
+    compose(
+        &fx.satisfied,
+        overlay,
+        buffer,
+        Arc::clone(&fx.base),
+        &fx.perm,
+        // Derived here exactly as a publication derives it, so every case in this file exercises
+        // the deny mask rather than the walk that used to answer for deletions and suppressions.
+        &mosaica_engine::denied_rows_of(overlay, &fx.perm),
+        // The derived list, on the same rule. Every case here is composed twice, once through it
+        // and once through the whole-buffer fallback, and the two are required to agree: the
+        // fallback is what a view with no list falls back to.
+        Some(&mosaica_engine::buffered_rows_of(buffer, &fx.perm)),
+    )
+}
+
+/// [`compose_with`] with no list, so the walk goes over the whole buffer.
+fn compose_with_the_fallback_walk(
+    fx: &Fixture,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+) -> EffectiveMask {
+    compose(
+        &fx.satisfied,
+        overlay,
+        buffer,
+        Arc::clone(&fx.base),
+        &fx.perm,
+        &mosaica_engine::denied_rows_of(overlay, &fx.perm),
+        None,
+    )
+}
+
+fn full_range() -> Range<u32> {
+    0..(BOUND as u32)
+}
+
+/// **One rule at a time, over one fixture.** Each case names an overlay scenario and the composed
+/// answer it must produce: how far the count over the whole row space falls below the
+/// projection's, which rows `contains_row` must admit and which it must refuse, and whether every
+/// row is compared against the projection one by one — which is what makes "a deny the fragment
+/// never contained changes nothing" a byte-for-byte claim rather than a count.
+struct Case {
+    name: &'static str,
+    ops: &'static [(u64, ChangeOp)],
+    /// Entities the case relies on being inside the base fragment, and outside it.
+    in_fragment: &'static [u64],
+    out_of_fragment: &'static [u64],
+    delta: u64,
+    visible: &'static [u64],
+    hidden: &'static [u64],
+    sweeps: bool,
+}
+
+#[test]
+fn each_overlay_rule_composes_to_the_answer_it_names() {
+    const CASES: &[Case] = &[
+        Case {
+            name: "no overlay and no buffer",
+            ops: &[],
+            in_fragment: &[],
+            out_of_fragment: &[],
+            delta: 0,
+            visible: &[],
+            hidden: &[],
+            sweeps: true,
+        },
+        Case {
+            name: "a suppression inside the fragment",
+            ops: &[(SUPPRESS_IN, ChangeOp::Suppress)],
+            in_fragment: &[SUPPRESS_IN],
+            out_of_fragment: &[],
+            delta: 1,
+            visible: &[],
+            hidden: &[SUPPRESS_IN],
+            sweeps: false,
+        },
+        Case {
+            name: "that suppression lifted",
+            ops: &[
+                (SUPPRESS_IN, ChangeOp::Suppress),
+                (SUPPRESS_IN, ChangeOp::Unsuppress),
+            ],
+            in_fragment: &[SUPPRESS_IN],
+            out_of_fragment: &[],
+            delta: 0,
+            visible: &[SUPPRESS_IN],
+            hidden: &[],
+            sweeps: false,
+        },
+        Case {
+            name: "a deny outside the fragment",
+            ops: &[(SUPPRESS_OUT, ChangeOp::Suppress)],
+            in_fragment: &[],
+            out_of_fragment: &[SUPPRESS_OUT],
+            delta: 0,
+            visible: &[],
+            hidden: &[],
+            sweeps: true,
+        },
+        Case {
+            name: "delete then suppress then unsuppress",
+            ops: &[
+                (CROSS1_DSU, ChangeOp::Delete),
+                (CROSS1_DSU, ChangeOp::Suppress),
+                (CROSS1_DSU, ChangeOp::Unsuppress),
+            ],
+            in_fragment: &[CROSS1_DSU],
+            out_of_fragment: &[],
+            delta: 1,
+            visible: &[],
+            hidden: &[CROSS1_DSU],
+            sweeps: false,
+        },
+        Case {
+            name: "suppress then delete then unsuppress",
+            ops: &[
+                (CROSS2_SDU, ChangeOp::Suppress),
+                (CROSS2_SDU, ChangeOp::Delete),
+                (CROSS2_SDU, ChangeOp::Unsuppress),
+            ],
+            in_fragment: &[CROSS2_SDU],
+            out_of_fragment: &[],
+            delta: 1,
+            visible: &[],
+            hidden: &[CROSS2_SDU],
+            sweeps: false,
+        },
+    ];
+
+    let fx = build_fixture();
+    for case in CASES {
+        let name = case.name;
+        for entity in case.in_fragment {
+            assert!(
+                fx.fragment_entities.contains(&(*entity as u32)),
+                "{name}: entity {entity} is meant to be inside the base fragment"
+            );
+        }
+        for entity in case.out_of_fragment {
+            assert!(
+                !fx.fragment_entities.contains(&(*entity as u32)),
+                "{name}: entity {entity} is meant to be outside the base fragment"
+            );
+            assert!(
+                !fx.base.bitmap().contains(*entity as u32),
+                "{name}: entity {entity} is meant to be outside the projection"
+            );
+        }
+
+        let mut overlay = Overlay::new();
+        for (entity, op) in case.ops {
+            overlay.apply(e(*entity), *op);
+        }
+        let mask = compose_with(&fx, &overlay, &IngestBuffer::new());
+
+        assert_eq!(
+            mask.count_range(full_range()),
+            fx.base.bitmap().cardinality() - case.delta,
+            "{name}: the composed count over the whole row space"
+        );
+        for entity in case.visible {
+            assert!(mask.contains_row(*entity as u32), "{name}: row {entity}");
+        }
+        for entity in case.hidden {
+            assert!(!mask.contains_row(*entity as u32), "{name}: row {entity}");
+        }
+        if case.sweeps {
+            for entity in 0..BOUND as u32 {
+                assert_eq!(
+                    mask.contains_row(entity),
+                    fx.base.bitmap().contains(entity),
+                    "{name}: row {entity}"
+                );
+            }
+        }
+        assert!(
+            mask.check_structural_invariants(),
+            "{name}: the structural invariants"
+        );
+    }
+}
+
+/// **An unsuppress restores the ordinary path, and does not publish anything.**
+///
+/// Suppression is a set, and composition subtracts it. Removing an entity from that set stops it
+/// being subtracted — nothing more. What made this worth a test is that the old representation did
+/// something *else* at the same time: `suppress → unsuppress` left an entry with no active fact,
+/// and `verdict` treated the mere presence of an entry as "the fragment decides". A buffered item
+/// is in no fragment, so it read as invisible — hidden by a leftover data structure, after the
+/// suppression that justified hiding it had been lifted.
+///
+/// So the item is not revealed by the unsuppress; it stops being hidden by the husk. Lifecycle
+/// §3.1 always said "unsuppress removes the entry", and the old code kept one.
+///
+/// **Observable only through `visible_to`** — `/v1/items`' one-bit test. A buffered item has no row
+/// in any segment, so it contributes to no tile and no count either way, and a viewport cannot tell
+/// the difference.
+#[test]
+fn an_unsuppress_restores_the_buffered_items_own_verdict_rather_than_leaving_a_husk() {
+    let fx = build_fixture();
+    let entity = e(OUT_OF_FRAGMENT);
+    assert!(!fx.fragment_entities.contains(&(OUT_OF_FRAGMENT as u32)));
+
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        OUT_OF_FRAGMENT,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+
+    let mut overlay = Overlay::new();
+    overlay.apply(entity, ChangeOp::Suppress);
+    assert!(
+        !visible_to(&fragment_for(&fx), &fx.satisfied, &overlay, &buffer, entity),
+        "suppressed, so hidden whatever the buffer says"
+    );
+
+    overlay.apply(entity, ChangeOp::Unsuppress);
+    assert!(
+        !overlay.touches(entity),
+        "the unsuppress leaves no trace at all — there is no husk to outrank the buffer"
+    );
+    assert!(
+        visible_to(&fragment_for(&fx), &fx.satisfied, &overlay, &buffer, entity),
+        "the buffered item's own terms decide once nothing denies it"
+    );
+}
+
+#[test]
+fn e_buffered_entity_included_iff_terms_intersect() {
+    let fx = build_fixture();
+
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_PASS,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_FAIL,
+        vec![TermId::new(UNSATISFIED_TERM)],
+    );
+    let overlay = Overlay::new();
+
+    let mask = compose_with(&fx, &overlay, &buffer);
+
+    assert!(mask.contains_row(BUFFERED_PASS as u32));
+    assert!(!mask.contains_row(BUFFERED_FAIL as u32));
+    assert!(mask.check_structural_invariants());
+}
+
+#[test]
+fn g_count_range_matches_brute_force_rows_in_range() {
+    let fx = build_fixture();
+
+    // A composite scenario exercising every rule at once.
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress);
+    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
+
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_PASS,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_FAIL,
+        vec![TermId::new(UNSATISFIED_TERM)],
+    );
+
+    let mask = compose_with(&fx, &overlay, &buffer);
+    assert!(mask.check_structural_invariants());
+
+    let mut rng = StdRng::seed_from_u64(42);
+    for _ in 0..200 {
+        let a = rng.gen_range(0..BOUND as u32);
+        let b = rng.gen_range(0..BOUND as u32);
+        let r = a.min(b)..a.max(b) + 1;
+
+        let expected = mask.rows_in_range(r.clone()).iter().count() as u64;
+        assert_eq!(mask.count_range(r.clone()), expected, "range {r:?}");
+    }
+}
+
+/// The run decode (`for_each_visible_run`) flattens to exactly `rows_in_range`, on **both**
+/// routes: the diffs-empty cursor walk of `base`, and the diffs-present fallback through the
+/// materialised bitmap. `diffs_are_empty` is the route predicate, so asserting it per mask pins
+/// which route each half of this test actually exercised.
+#[test]
+fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
+    let fx = build_fixture();
+
+    // Route 1: no overlay, no buffer — diffs empty, the cursor walks `base` directly.
+    let empty_mask = compose_with(&fx, &Overlay::new(), &IngestBuffer::new());
+    assert!(empty_mask.diffs_are_empty(), "route predicate: base walk");
+
+    // Route 2: the same composite scenario as `g_...` — non-empty minus AND plus, so the
+    // fallback must include `plus` rows the base cursor could never see. The suppression supplies
+    // `minus`; the buffered pass supplies `plus`, which is the only source of one now that the
+    // evaluate store is gone (decision 0048) — this fixture's synthetic permutation gives a
+    // buffered entity a row, which a real one does not have.
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_PASS,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    let diff_mask = compose_with(&fx, &overlay, &buffer);
+    assert!(!diff_mask.diffs_are_empty(), "route predicate: fallback");
+
+    let mut rng = StdRng::seed_from_u64(0xB9);
+    for mask in [&empty_mask, &diff_mask] {
+        for _ in 0..200 {
+            let a = rng.gen_range(0..BOUND as u32);
+            let b = rng.gen_range(0..BOUND as u32);
+            let r = a.min(b)..a.max(b) + 1;
+
+            let mut flat: Vec<u32> = Vec::new();
+            let mut prev_end: u32 = 0;
+            mask.for_each_visible_run(r.clone(), |run| {
+                assert!(run.start < run.end, "empty run emitted for {r:?}");
+                assert!(
+                    flat.is_empty() || run.start > prev_end,
+                    "runs not ascending/disjoint for {r:?}"
+                );
+                prev_end = run.end;
+                flat.extend(run);
+            });
+            let expected = mask.rows_in_range(r.clone()).to_vec();
+            assert_eq!(flat, expected, "range {r:?}");
+        }
+    }
+
+    // The plus row is genuinely reachable only through the fallback: prove the scenario keeps
+    // exercising the property the fallback exists for.
+    let plus_row = BUFFERED_PASS as u32;
+    let mut saw_plus = false;
+    diff_mask.for_each_visible_run(plus_row..plus_row + 1, |run| {
+        saw_plus = saw_plus || (run.start..run.end).contains(&plus_row);
+    });
+    assert!(
+        saw_plus,
+        "the buffered (plus) row must be yielded by the fallback route"
+    );
+}
+
+/// Insert a buffered item directly with already-resolved `terms`, bypassing descriptor
+/// resolution (irrelevant to these tests — see [`mosaica_lifecycle::IngestBuffer::insert_row_with_terms`]).
+fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
+    use mosaica_lifecycle::WalRow;
+
+    let row = WalRow {
+        entity_id: e(entity),
+        view: "s0".to_string(),
+        join: false,
+        descriptors: Vec::new(),
+        x: 0.0,
+        y: 0.0,
+        scalars: Vec::new(),
+        scoped: Vec::new(),
+    };
+    buffer.insert_row_with_terms(&row, terms);
+}
+
+/// Restart-replay. Two entities are established purely through the WAL (ids
+/// `10_002`/`10_003`, inside the synthetic permutation's buffered-with-a-row range), then driven
+/// through the two cross-cause sequences that matter — `delete → suppress →
+/// unsuppress` and `suppress → delete` — all *through the
+/// WAL*, not by calling `Overlay::apply` directly. The WAL handle is dropped and reopened (the
+/// "restart"), so the `Overlay`/`IngestBuffer` this test composes against are rebuilt from a
+/// fresh replay of on-disk bytes, exactly as a real process restart would rebuild them.
+#[test]
+fn step3_restart_replay_survives_cross_cause_sequences() {
+    use mosaica_lifecycle::wal::{Wal, WalRecord, WalRow};
+    use mosaica_lifecycle::{ChangeOp, Replay};
+
+    const ENTITY_X: u64 = 10_002;
+    const ENTITY_Y: u64 = 10_003;
+
+    let wal_dir = TempDir::new().unwrap();
+    let wal_path = wal_dir.path().join("wal.log");
+
+    {
+        let mut wal = Wal::open(&wal_path).unwrap();
+        wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
+            batch_id: "b0".to_string(),
+            body_hash: [0u8; 32],
+            rows: vec![
+                WalRow {
+                    entity_id: e(ENTITY_X),
+                    view: "s0".to_string(),
+                    join: false,
+                    descriptors: vec![b"term-x".to_vec()],
+                    x: 0.0,
+                    y: 0.0,
+                    scalars: Vec::new(),
+                    scoped: Vec::new(),
+                },
+                WalRow {
+                    entity_id: e(ENTITY_Y),
+                    view: "s0".to_string(),
+                    join: false,
+                    descriptors: vec![b"term-y".to_vec()],
+                    x: 0.0,
+                    y: 0.0,
+                    scalars: Vec::new(),
+                    scoped: Vec::new(),
+                },
+            ],
+        })
+        .unwrap();
+
+        // delete X -> suppress X -> unsuppress X (must stay excluded: delete is terminal).
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Delete)],
+        })
+        .unwrap();
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Suppress)],
+        })
+        .unwrap();
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Unsuppress)],
+        })
+        .unwrap();
+
+        // suppress Y -> delete Y: the other order, and the deletion must outlive an unsuppress
+        // that never comes.
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_Y), ChangeOp::Suppress)],
+        })
+        .unwrap();
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_Y), ChangeOp::Delete)],
+        })
+        .unwrap();
+
+        wal.fsync().unwrap();
+        // `wal` (and its file handle) drops here — the simulated crash/restart boundary.
+    }
+
+    // A one-descriptor dictionary: `b"satisfied-term"` resolves to `TermId(0)`, which is exactly
+    // `SATISFIED_TERM_A` in the fixture's `satisfied` set below.
+    let dict_dir = TempDir::new().unwrap();
+    let mut dict_writer = mosaica_authz::DictWriter::new(dict_dir.path());
+    dict_writer.intern(b"satisfied-term");
+    let dict_paths = dict_writer.finish().unwrap();
+    let dict = mosaica_authz::Dict::load(&dict_paths).unwrap();
+
+    // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
+    let wal = Wal::open(&wal_path).unwrap();
+    let mut replay = Replay::new(&dict, Overlay::new(), &mosaica_lifecycle::owner_id_only);
+    for record in wal.records() {
+        let (position, record) = record.unwrap();
+        replay.apply(&record, position, |_, _| false);
+    }
+    let (overlay, buffer, _resolver) = replay.finish();
+
+    assert!(
+        overlay.is_deleted(e(ENTITY_X)),
+        "delete must survive replay"
+    );
+    assert!(
+        !overlay.is_suppressed(e(ENTITY_X)),
+        "unsuppress clears the suppression only, and does so across replay too"
+    );
+
+    assert!(
+        overlay.is_deleted(e(ENTITY_Y)),
+        "delete must survive replay in either order"
+    );
+    assert!(
+        overlay.is_suppressed(e(ENTITY_Y)),
+        "and the suppression that preceded it is a separate fact, still in force"
+    );
+    // **Neither is buffered any more, and the exclusions above are what makes that safe.** A
+    // deleted row acquires no geometry, so no flush would ever consume it and it would pin the
+    // WAL's reclaim bound for ever (`overlay::drop_deleted`). What answers for it is the overlay,
+    // which `verdict` consults before the buffer and which nothing retires.
+    assert!(!buffer.contains(e(ENTITY_X)));
+    assert!(!buffer.contains(e(ENTITY_Y)));
+
+    // Compose against the Step 1 fixture (its `satisfied` set already contains `TermId(0)`) and
+    // confirm both entities are excluded from the effective mask: X because delete is terminal
+    // under a later unsuppress, Y because its delete outranks the suppression that preceded it.
+    let fx = build_fixture();
+    let mask = compose_with(&fx, &overlay, &buffer);
+    assert!(!mask.contains_row(ENTITY_X as u32));
+    assert!(!mask.contains_row(ENTITY_Y as u32));
+    assert!(mask.check_structural_invariants());
+}
+
+/// The equivalence `visible_to` rests on, asserted rather than argued. For a
+/// fixture exercising every precedence branch — deleted, suppressed, a delete → suppress →
+/// unsuppress sequence, a deny outside the fragment (no-op), buffered pass/fail, and plain
+/// fragment membership — `visible_to` must agree with `compose(...).contains_row(row_of(entity))`
+/// for every entity that has a row. If `verdict` was correctly factored out of `compose` (rather
+/// than transcribed a second time), this is what proves the factoring did not change `compose`'s
+/// behaviour — two independent transcriptions of the precedence rule is exactly how a suppression
+/// stops suppressing (lifecycle §3, caught twice in review).
+#[test]
+fn visible_to_agrees_with_compose_over_every_precedence_case() {
+    let fx = build_fixture();
+
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    overlay.apply(e(DELETED_IN), ChangeOp::Delete);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress);
+    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress);
+    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
+
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_PASS,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_FAIL,
+        vec![TermId::new(UNSATISFIED_TERM)],
+    );
+
+    let fragment = fragment_for(&fx);
+    let mask = compose(
+        &fx.satisfied,
+        &overlay,
+        &buffer,
+        Arc::clone(&fx.base),
+        &fx.perm,
+        &mosaica_engine::denied_rows_of(&overlay, &fx.perm),
+        Some(&mosaica_engine::buffered_rows_of(&buffer, &fx.perm)),
+    );
+    assert!(mask.check_structural_invariants());
+
+    for entity in 0..BOUND as u32 {
+        let Some(row) = fx.perm.row_of(EntityId::new(entity as u64)) else {
+            continue;
+        };
+        let expected = mask.contains_row(row.raw());
+        let got = visible_to(
+            &fragment,
+            &fx.satisfied,
+            &overlay,
+            &buffer,
+            EntityId::new(entity as u64),
+        );
+        assert_eq!(got, expected, "entity {entity}");
+    }
+}
+
+/// **The count and the geometry must be taken over the same set**, and this is where that is
+/// asserted rather than assumed. `count_intersection` composes term by term and never materialises;
+/// `visible_rows` materialises, and derived content is computed from what it returns. A viewer
+/// served a count of forty beside a hull drawn from thirty-nine members would have two answers to
+/// one question and no way to tell which was wrong.
+///
+/// Driven with a suppression *and* a buffered arrival, because those are the two terms that make
+/// the composed mask differ from the projection at all.
+#[test]
+fn the_materialised_visible_rows_agree_with_the_composed_count() {
+    use mosaica_engine::compose::MaskedSet;
+
+    let fx = build_fixture();
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        OUT_OF_FRAGMENT,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    let mask = compose_with(&fx, &overlay, &buffer);
+
+    // Over the whole row space, and over a scatter, rather than one range that might miss the two
+    // rows the diffs touch.
+    let whole = croaring::Bitmap::from_range(0..(BOUND as u32));
+    assert_eq!(
+        mask.visible_rows(&whole).cardinality(),
+        mask.count_intersection(&whole),
+        "the whole row space"
+    );
+    let scatter: croaring::Bitmap = (0..BOUND as u32).filter(|r| r % 3 == 0).collect();
+    assert_eq!(
+        mask.visible_rows(&scatter).cardinality(),
+        mask.count_intersection(&scatter),
+        "a scattered membership"
+    );
+    // And every row it returns really is visible, one by one — a cardinality that agreed while the
+    // members differed would pass both assertions above.
+    for row in mask.visible_rows(&scatter).iter() {
+        assert!(mask.contains_row(row), "row {row} is not in the mask");
+    }
+}
+
+/// **A filter moves neither `viewport ∩ M_auth` nor whether that set is the whole mask.**
+///
+/// A row-major level reads candidacy off its masked-count histogram where the viewport covers the
+/// mask, and takes it off a count a filter narrows nowhere. That is sound only while both inputs
+/// are functions of the composed mask alone. If a filter narrowed `here`, a whole-map request under
+/// a filter would look like a whole-map request without one and the histogram would admit artifacts
+/// the filter had removed from view; narrowing the histogram instead would withhold artifacts a
+/// viewer is entitled to. I3 and I12: a filter may hide, never reveal, and may move the frontier
+/// up, never down.
+///
+/// Driven with a suppression and a buffered arrival, the two terms that make the composed mask
+/// differ from the projection at all.
+#[test]
+fn a_filter_moves_neither_the_composed_set_nor_the_whole_map_test() {
+    use mosaica_engine::compose::{FilterRows, WholeMask};
+    use mosaica_engine::tile_index::Viewport;
+
+    let fx = build_fixture();
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_PASS,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    let unfiltered = compose_with(&fx, &overlay, &buffer);
+    // One row in ten, which removes most of what the viewer may see without emptying anything.
+    let admitted: croaring::Bitmap = (0..BOUND as u32).filter(|r| r % 10 == 0).collect();
+    let filtered =
+        compose_with(&fx, &overlay, &buffer).with_filter(FilterRows::Complete(admitted.clone()));
+
+    assert_eq!(unfiltered.visible_all(), filtered.visible_all());
+    assert_eq!(unfiltered.visible_count(), filtered.visible_count());
+    assert!(
+        unfiltered.visible_count() > unfiltered.visible_all().and_cardinality(&admitted),
+        "the filter must actually narrow something, or this test asserts nothing"
+    );
+
+    let whole = croaring::Bitmap::from_range(0..(BOUND as u32));
+    let narrow = croaring::Bitmap::from_range(0..100);
+    for rows in [&whole, &narrow] {
+        let without = Viewport::compose(rows, &unfiltered);
+        let with = Viewport::compose(rows, &filtered);
+        assert_eq!(without.here(), with.here());
+        assert_eq!(without.covers_mask(), with.covers_mask());
+    }
+    // And the two viewports are genuinely the two cases, not one case twice.
+    assert!(Viewport::compose(&whole, &unfiltered).covers_mask());
+    assert!(!Viewport::compose(&narrow, &unfiltered).covers_mask());
+    assert_eq!(
+        Viewport::compose(&whole, &unfiltered).here(),
+        unfiltered.visible_all(),
+        "a viewport over the whole row space composes to the mask itself"
+    );
+}

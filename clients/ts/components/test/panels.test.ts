@@ -1,12 +1,12 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {activeCount, type FilterDraft, type FiltersProjection, type Meta} from '@tesseradb/client';
+import {activeCount, type FilterDraft, type FiltersProjection, type Meta} from '@mosaicajs/client';
 import '../src/item-card.js';
 import '../src/filter.js';
 import '../src/filter-panel.js';
-import type {TesseraItemCard} from '../src/item-card.js';
-import type {TesseraFilter} from '../src/filter.js';
-import type {TesseraFilterPanel} from '../src/filter-panel.js';
-import type {TesseraFieldCard} from '../src/field-card.js';
+import type {MosaicaItemCard} from '../src/item-card.js';
+import type {MosaicaFilter} from '../src/filter.js';
+import type {MosaicaFilterPanel} from '../src/filter-panel.js';
+import type {MosaicaFieldCard} from '../src/field-card.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar} from './fake-store.js';
 import {UNNAMED, dateRangeText, parseDateText} from '../src/base.js';
 
@@ -28,10 +28,10 @@ const META = meta({
   ]
 });
 
-describe('<tessera-item-card>', () => {
+describe('<mosaica-item-card>', () => {
   it('renders fields by name in declaration order, presented by type, with a slot per field', async () => {
-    const host = await mount('<tessera-item-card title-field="title"><a slot="field-title" href="#">my link</a></tessera-item-card>');
-    const el = host.querySelector('tessera-item-card') as TesseraItemCard;
+    const host = await mount('<mosaica-item-card title-field="title"><a slot="field-title" href="#">my link</a></mosaica-item-card>');
+    const el = host.querySelector('mosaica-item-card') as MosaicaItemCard;
     el.meta = META;
     // `archive` absent from the record, the extra `note` undeclared: order is declared-then-extra,
     // and the gap is named rather than shifting the fields after it.
@@ -49,8 +49,8 @@ describe('<tessera-item-card>', () => {
   });
 
   it('with no title field, heads the card with the id, once, and shows every other field in the grid', async () => {
-    const host = await mount('<tessera-item-card></tessera-item-card>');
-    const el = host.querySelector('tessera-item-card') as TesseraItemCard;
+    const host = await mount('<mosaica-item-card></mosaica-item-card>');
+    const el = host.querySelector('mosaica-item-card') as MosaicaItemCard;
     el.meta = META;
     el.item = {id: 42n, detail: {fields: {note: 'x', title: 'A title'}, labels: [], views: [], scoped: {}}};
     await settle(host);
@@ -58,26 +58,26 @@ describe('<tessera-item-card>', () => {
     expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['title', 'note']);
   });
 
-  it('fires tessera-open with the id as a decimal string, bubbling and composed', async () => {
-    const host = await mount('<tessera-item-card></tessera-item-card>');
-    const el = host.querySelector('tessera-item-card') as TesseraItemCard;
+  it('fires mosaica-open with the id as a decimal string, bubbling and composed', async () => {
+    const host = await mount('<mosaica-item-card></mosaica-item-card>');
+    const el = host.querySelector('mosaica-item-card') as MosaicaItemCard;
     el.item = {id: 2n ** 63n + 1n, detail: {fields: {}, labels: [], views: [], scoped: {}}};
     await settle(host);
     let detail: {id?: string} | null = null;
-    document.body.addEventListener('tessera-open', (e) => (detail = (e as CustomEvent).detail));
+    document.body.addEventListener('mosaica-open', (e) => (detail = (e as CustomEvent).detail));
     (deep(host, '[part="open"]') as HTMLButtonElement).click();
     expect(detail!.id).toBe('9223372036854775809');
     expect(typeof detail!.id).toBe('string');
   });
 
   it('distinguishes a miss from a broken pick from a refusal', async () => {
-    const host = await mount('<tessera-item-card></tessera-item-card>');
-    const el = host.querySelector('tessera-item-card') as TesseraItemCard;
+    const host = await mount('<mosaica-item-card></mosaica-item-card>');
+    const el = host.querySelector('mosaica-item-card') as MosaicaItemCard;
     el.pick = {kind: 'miss'};
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('empty');
 
-    el.pick = {kind: 'broken', index: 7, layer: 'tessera-marks-p1', hasIds: false, idCount: 0};
+    el.pick = {kind: 'broken', index: 7, layer: 'mosaica-marks-p1', hasIds: false, idCount: 0};
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('refused');
     expect(deep(host, '[part="refusal"]')).not.toBeNull();
@@ -90,8 +90,8 @@ describe('<tessera-item-card>', () => {
   });
 
   it('reads the store’s selection when nothing is given by property', async () => {
-    const host = await mount('<tessera-item-card></tessera-item-card>');
-    const el = host.querySelector('tessera-item-card') as TesseraItemCard;
+    const host = await mount('<mosaica-item-card></mosaica-item-card>');
+    const el = host.querySelector('mosaica-item-card') as MosaicaItemCard;
     const store = fakeStore({meta: META, status: status({})});
     el.store = store;
     await settle(host);
@@ -116,8 +116,8 @@ const filtersOf = (draft: FilterDraft, over: Partial<FiltersProjection> = {}): F
 const value = (code: number, key: string, title: string | null, count?: number) => ({code, key, title, match: {field: 'key' as const, start: 0, len: 0}, ...(count === undefined ? {} : {count})});
 
 async function mountFilter(column: string, filters: FiltersProjection, attrs = '') {
-  const host = await mount(`<tessera-filter column="${column}" ${attrs}></tessera-filter>`);
-  const el = host.querySelector('tessera-filter') as TesseraFilter;
+  const host = await mount(`<mosaica-filter column="${column}" ${attrs}></mosaica-filter>`);
+  const el = host.querySelector('mosaica-filter') as MosaicaFilter;
   const store = fakeStore({meta: META, status: status({}), filters});
   el.store = store;
   await settle(host);
@@ -135,7 +135,7 @@ async function type(host: HTMLElement, text: string) {
 
 const drafts = (store: ReturnType<typeof fakeStore>) => store.calls.filter((c) => c.name === 'setFilters').map((c) => c.args[0] as FilterDraft);
 
-describe('<tessera-filter> on a category', () => {
+describe('<mosaica-filter> on a category', () => {
   const empty = () => filtersOf({filter: {archive: {family: 'category', keys: []}}, highlight: {}});
 
   it('asks for nothing and lists nothing until something is typed', async () => {
@@ -220,7 +220,7 @@ describe('<tessera-filter> on a category', () => {
     await type(host, '');
     expect(forgot()).toEqual([['archive']]);
     await type(host, 'ma');
-    host.querySelector('tessera-filter')!.remove();
+    host.querySelector('mosaica-filter')!.remove();
     expect(forgot()).toEqual([['archive'], ['archive']]);
   });
 
@@ -243,7 +243,7 @@ describe('<tessera-filter> on a category', () => {
   });
 });
 
-describe('<tessera-filter> on a category, its suggestions', () => {
+describe('<mosaica-filter> on a category, its suggestions', () => {
   it('show while the box has focus and close as focus leaves it', async () => {
     const {host, store} = await mountFilter('archive', filtersOf({filter: {archive: {family: 'category', keys: []}}, highlight: {}}));
     const entry = await type(host, 'c');
@@ -259,12 +259,12 @@ describe('<tessera-filter> on a category, its suggestions', () => {
   });
 });
 
-describe('<tessera-filter> on text', () => {
+describe('<mosaica-filter> on text', () => {
   it('sends one box’s words, phrases and alternatives after the typing pause', async () => {
     vi.useFakeTimers();
     const {host, store} = await mountFilter('title', filtersOf({filter: {title: {family: 'text', query: '', phrase: true}}, highlight: {}}));
     const changes: unknown[] = [];
-    host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-filterchange', (e) => changes.push((e as CustomEvent).detail));
     await type(host, '"graph neural" OR lattice');
     expect(drafts(store)).toHaveLength(0);
     await vi.runAllTimersAsync();
@@ -282,13 +282,13 @@ describe('<tessera-filter> on text', () => {
 
 });
 
-describe('<tessera-filter> on a keyword column', () => {
+describe('<mosaica-filter> on a keyword column', () => {
   const meta: Meta = {...META, filterOperands: [{column: 'author', family: 'keyword', operands: ['eq', 'prefix']}]};
 
   it('offers only the operators the column publishes, and sends the draft’s operator', async () => {
     vi.useFakeTimers();
-    const host = await mount('<tessera-filter column="author"></tessera-filter>');
-    const el = host.querySelector('tessera-filter') as TesseraFilter;
+    const host = await mount('<mosaica-filter column="author"></mosaica-filter>');
+    const el = host.querySelector('mosaica-filter') as MosaicaFilter;
     const store = fakeStore({meta, status: status({})});
     store.set('filters', filtersOf({filter: {author: {family: 'keyword', needle: '', op: 'eq'}}, highlight: {}}));
     el.store = store;
@@ -319,15 +319,15 @@ describe('<tessera-filter> on a keyword column', () => {
   });
 });
 
-describe('<tessera-filter-panel>', () => {
+describe('<mosaica-filter-panel>', () => {
   async function mountPanel(draft: FilterDraft, attrs = '', over: Partial<FiltersProjection> = {}) {
-    const host = await mount(`<tessera-filter-panel ${attrs}></tessera-filter-panel>`);
-    const panel = host.querySelector('tessera-filter-panel') as TesseraFilterPanel;
+    const host = await mount(`<mosaica-filter-panel ${attrs}></mosaica-filter-panel>`);
+    const panel = host.querySelector('mosaica-filter-panel') as MosaicaFilterPanel;
     const store = fakeStore({meta: META, status: status({}), filters: filtersOf(draft, over)});
     panel.store = store;
     await settle(host);
     const sent = () => store.calls.filter((c) => c.name === 'setFilters').at(-1)!.args[0] as FilterDraft;
-    const cards = () => deepAll(host, 'tessera-field-card') as TesseraFieldCard[];
+    const cards = () => deepAll(host, 'mosaica-field-card') as MosaicaFieldCard[];
     const fields = () => cards().map((c) => [c.field, !c.folded]);
     return {host, panel, store, sent, cards, fields};
   }
@@ -375,7 +375,7 @@ describe('<tessera-filter-panel>', () => {
     const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {archive: {family: 'category', keys: ['math']}}};
     const {host, store, sent, fields} = await mountPanel(draft);
     const changes: unknown[] = [];
-    host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-filterchange', (e) => changes.push((e as CustomEvent).detail));
     const open = async () => {
       (deep(host, '[part="add"]') as HTMLButtonElement).click();
       await settle(host);
@@ -512,7 +512,7 @@ describe('<tessera-filter-panel>', () => {
       ['archive', true],
       ['title', true]
     ]);
-    (deep(host, 'tessera-field-card[data-field="archive"]')!.shadowRoot!.querySelector('[part="fold"]') as HTMLButtonElement).click();
+    (deep(host, 'mosaica-field-card[data-field="archive"]')!.shadowRoot!.querySelector('[part="fold"]') as HTMLButtonElement).click();
     await settle(host);
     expect(fields()).toEqual([
       ['archive', false],
@@ -540,7 +540,7 @@ describe('<tessera-filter-panel>', () => {
       ['title', false],
       ['submitted_at', false]
     ]);
-    const fold = (field: string) => deep(host, `tessera-field-card[data-field="${field}"]`)!.shadowRoot!.querySelector('[part="fold"]') as HTMLButtonElement;
+    const fold = (field: string) => deep(host, `mosaica-field-card[data-field="${field}"]`)!.shadowRoot!.querySelector('[part="fold"]') as HTMLButtonElement;
     expect(fold('archive').getAttribute('aria-expanded')).toBe('false');
     fold('title').click();
     await settle(host);
@@ -582,7 +582,7 @@ describe('<tessera-filter-panel>', () => {
       expect(deep(host, '[part="subject-name"]')!.textContent).toBe('Highlighted');
       expect(deep(host, '[part="subject-count"]')!.textContent).toBe('43');
       const changes: unknown[] = [];
-      host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
+      host.addEventListener('mosaica-filterchange', (e) => changes.push((e as CustomEvent).detail));
       (deep(host, '[part="clear-highlight"]') as HTMLButtonElement).click();
       expect(activeCount(sent(), 'highlight')).toBe(0);
       expect(activeCount(sent(), 'filter')).toBe(1);
@@ -620,15 +620,15 @@ describe('<tessera-filter-panel>', () => {
 
     it('asks for the cards under chips-only, and show() lists the chip’s card', async () => {
       const {host, panel} = await mountPanel(both, 'chips-only');
-      expect(deepAll(host, 'tessera-field-card')).toHaveLength(0);
+      expect(deepAll(host, 'mosaica-field-card')).toHaveLength(0);
       const asked: unknown[] = [];
-      host.addEventListener('tessera-chipopen', (e) => asked.push((e as CustomEvent).detail));
+      host.addEventListener('mosaica-chipopen', (e) => asked.push((e as CustomEvent).detail));
       (chip(host, 'highlight').querySelector('[part="edit"]') as HTMLButtonElement).click();
       expect(asked).toEqual([{column: 'archive', verb: 'highlight'}]);
       panel.chipsOnly = false;
       panel.show('archive');
       await settle(host);
-      expect(deepAll(host, 'tessera-field-card').map((c) => (c as TesseraFieldCard).field)).toContain('archive');
+      expect(deepAll(host, 'mosaica-field-card').map((c) => (c as MosaicaFieldCard).field)).toContain('archive');
     });
 
     it('empties both positions on Clear all', async () => {
@@ -644,11 +644,11 @@ describe('<tessera-filter-panel>', () => {
     const controls = await mountPanel(draft, 'controls-only');
     expect(deepAll(controls.host, '[part="chip"]')).toHaveLength(0);
     expect(deep(controls.host, '[part="subject"]')).toBeNull();
-    expect(deepAll(controls.host, 'tessera-field-card')).toHaveLength(1);
+    expect(deepAll(controls.host, 'mosaica-field-card')).toHaveLength(1);
     document.body.innerHTML = '';
     const chips = await mountPanel(draft, 'chips-only');
     expect(deepAll(chips.host, '[part="chip"]')).toHaveLength(1);
-    expect(deepAll(chips.host, 'tessera-field-card')).toHaveLength(0);
+    expect(deepAll(chips.host, 'mosaica-field-card')).toHaveLength(0);
   });
 
   it('does not rebuild a card under the user on a store tick', async () => {
@@ -681,15 +681,15 @@ describe('<tessera-filter-panel>', () => {
   });
 });
 
-describe('<tessera-filter-panel> cluster fields', () => {
+describe('<mosaica-filter-panel> cluster fields', () => {
   const layer = (name: string, over: Partial<Meta['layers'][number]> = {}) =>
     ({name, title: `${name} title`, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'nested', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1, ...over}) as Meta['layers'][number];
   const LAYERED = {...META, layers: [layer('topics'), layer('labels', {depsOn: ['topics']}), layer('elsewhere', {views: ['s9']})]};
   const topic = (id: bigint, verb: 'filter' | 'highlight', label?: string) => ({layer: 'topics', artifact: id, outside: false, verb, ...(label ? {label} : {})});
 
   async function mountLayered(members: ReturnType<typeof topic>[] = []) {
-    const host = await mount('<tessera-filter-panel></tessera-filter-panel>');
-    const panel = host.querySelector('tessera-filter-panel') as TesseraFilterPanel;
+    const host = await mount('<mosaica-filter-panel></mosaica-filter-panel>');
+    const panel = host.querySelector('mosaica-filter-panel') as MosaicaFilterPanel;
     const store = fakeStore({meta: LAYERED, status: status({}), filters: filtersOf({filter: {}, highlight: {}}, {members})});
     store.set('view', {...store.get('view'), id: 's0'});
     panel.store = store;
@@ -706,12 +706,12 @@ describe('<tessera-filter-panel> cluster fields', () => {
     expect(options.at(-1)!.textContent).toContain('topics title');
     (options.at(-1) as HTMLButtonElement).click();
     await settle(host);
-    expect(deep(host, 'tessera-field-card[data-field="cluster:topics"]')).not.toBeNull();
+    expect(deep(host, 'mosaica-field-card[data-field="cluster:topics"]')).not.toBeNull();
   });
 
   it('lists a layer holding a clause, and shows its clauses as chips, the filter’s first', async () => {
     const {host} = await mountLayered([topic(8n, 'highlight', 'Optics'), topic(7n, 'filter', 'Neural networks'), topic(9n, 'filter')]);
-    expect(deep(host, 'tessera-field-card[data-field="cluster:topics"]')).not.toBeNull();
+    expect(deep(host, 'mosaica-field-card[data-field="cluster:topics"]')).not.toBeNull();
     const chips = deepAll(host, '[part="chip"]').map((c) => [c.getAttribute('data-verb'), c.textContent!.trim()]);
     expect(chips).toEqual([
       ['filter', 'Neural networks'],
@@ -743,11 +743,11 @@ describe('<tessera-filter-panel> cluster fields', () => {
   });
 });
 
-describe('<tessera-filter-panel chips-only>', () => {
+describe('<mosaica-filter-panel chips-only>', () => {
   it('renders nothing while no clause is applied, and the chips once one is', async () => {
-    const host = await mount('<tessera-filter-panel chips-only></tessera-filter-panel>');
+    const host = await mount('<mosaica-filter-panel chips-only></mosaica-filter-panel>');
     const store = fakeStore({meta: META, status: status({})});
-    (host.querySelector('tessera-filter-panel') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-filter-panel') as unknown as {store: unknown}).store = store;
     await settle(host);
     expect(deepAll(host, '[part]')).toHaveLength(0);
     store.set('filters', filtersOf({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}));

@@ -19,7 +19,7 @@
 # limits are the ladder's rungs; `LIMITS="2000000"` is a short run that exercises the scripts.
 #
 # The build runs in its own session under `setsid`, and this script kills only the pid it
-# started. Nothing here matches a process by name: another session's `tessera` is not ours.
+# started. Nothing here matches a process by name: another session's `mosaica` is not ours.
 set -uo pipefail
 before="${BEFORE:?BEFORE is the binary to measure against}"
 after="${AFTER:?AFTER is the binary to measure}"
@@ -51,7 +51,7 @@ one_build() {
     echo "$?" > "$rcfile"
   ' _ "$pidfile" "$rcfile" \
     "$binary" build \
-      --deployment "$corpus/tessera.toml" --config "$corpus/corpus.toml" \
+      --deployment "$corpus/mosaica.toml" --config "$corpus/corpus.toml" \
       --out "$out/bundle" --limit "$limit" --file "taxonomy=$members" \
       --stage-timings --stage-timings-json "$out/stages.json" \
       --no-oracle-pairs --memory-budget "$budget" \
@@ -67,7 +67,7 @@ one_build() {
   # The sampler reads /proc for this pid alone, so a pid that is not the build would report
   # another process's memory as the build's.
   case "$(ps -o comm= -p "$pid" 2>/dev/null)" in
-    *tessera*) ;;
+    *mosaica*) ;;
     *) echo "pid $pid is not the build; refusing to sample it" >&2; return 1 ;;
   esac
 

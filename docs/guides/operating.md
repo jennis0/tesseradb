@@ -1,19 +1,19 @@
 # Operate a deployment
 
-This guide covers running Tessera once it is installed, [under systemd](systemd.md) or [with
+This guide covers running Mosaica once it is installed, [under systemd](systemd.md) or [with
 Docker](docker.md). Before anyone else uses the server, decide who may reach each of its three
 addresses and how much memory it gets. After that you'll mostly need the sections on health, the
 write-ahead log and compaction. Putting the viewer address behind TLS has [a page of its
 own](tls.md), and so does [rebuilding the bundle](rebuild.md).
 
-The examples use the systemd install, run as the `tessera` user in `/srv/tessera`. Under Docker,
-run them from `~/tessera-docker`, use ports 9161 to 9163 in place of 9151 to 9153, and write
+The examples use the systemd install, run as the `mosaica` user in `/srv/mosaica`. Under Docker,
+run them from `~/mosaica-docker`, use ports 9161 to 9163 in place of 9151 to 9153, and write
 `http://127.0.0.1:9163` where the examples reach the control socket with
-`--unix-socket /run/tessera/control.sock http://localhost`.
+`--unix-socket /run/mosaica/control.sock http://localhost`.
 
 ## What the server keeps on disc
 
-`[bundle]` in `tessera.toml` names three places.
+`[bundle]` in `mosaica.toml` names three places.
 
 | Key | What it holds | What makes it grow | If it is lost |
 |---|---|---|---|
@@ -37,7 +37,7 @@ identity key too. Access control applies to what the server sends, not to the fi
 | Address | Routes | Who should reach it |
 |---|---|---|
 | Viewer | `/v1/*`, `/healthz`, `/readyz` | Browsers, each with its own token, through a TLS proxy. People who log in with a password or an API key do it here, at `/v1/login`. |
-| Session | `/session/authorise`, `/session/revoke`, `/healthz`, `/readyz` | Your application's backend, which signs people in and asks Tessera for their tokens with an API key whose principal holds `authorise-as` |
+| Session | `/session/authorise`, `/session/revoke`, `/healthz`, `/readyz` | Your application's backend, which signs people in and asks Mosaica for their tokens with an API key whose principal holds `authorise-as` |
 | Control | `/control/*` | You, and whatever loads data into the corpus |
 
 An API key whose principal holds `authorise-as` can mint a token for any principal in the
@@ -45,11 +45,11 @@ catalogue, and so read whatever any principal may. The operator credential holds
 it can mint a token for any set of access labels, read every item, change the catalogue, and
 delete your data or add to it. Keep the session and control addresses off the internet. The viewer
 address serves only what each token allows, and it is the one browsers need. It serves plain
-HTTP and accepts a password over it, so put it behind TLS, as [Put Tessera behind TLS](tls.md)
+HTTP and accepts a password over it, so put it behind TLS, as [Put Mosaica behind TLS](tls.md)
 describes.
 
 Both installs keep the operator credential in a file called `operator.secret`. Under systemd it is
-in `/srv/tessera/secrets`, and under Docker in `~/tessera-docker/secrets`, which Compose mounts into
+in `/srv/mosaica/secrets`, and under Docker in `~/mosaica-docker/secrets`, which Compose mounts into
 the container as `/run/secrets`. The server reads the file once, when it starts, and trims the
 whitespace around it. To change the credential, replace the file and restart the server. The users,
 groups, API keys and grants are kept in the catalogue, the directory `[catalogue] dir` names, and
@@ -61,7 +61,7 @@ from `/proc`, so a file is the better choice. Whichever you use, the server want
 even if nothing ever calls the control address, and refuses one that is empty:
 
 ```text
-tessera serve: refused to start: there is no operator credential; set `operator_credential_file` or `operator_credential_env` under [serve] and put the secret in that file or variable
+mosaica serve: refused to start: there is no operator credential; set `operator_credential_file` or `operator_credential_env` under [serve] and put the secret in that file or variable
 ```
 
 A browser's token lasts `token_max_lifetime` seconds, set under `[disclosure]`, and keeps the
@@ -104,7 +104,7 @@ more of the bundle in memory. A cap that is too low makes the server slower befo
 memory, and `file_bytes` is how much of the bundle is in memory:
 
 ```console
-tessera$ curl -sS --unix-socket /run/tessera/control.sock \
+mosaica$ curl -sS --unix-socket /run/mosaica/control.sock \
   -H "authorization: Bearer $(cat secrets/operator.secret)" \
   http://localhost/control/status | jq '{posture: .write_executor.posture, heap}'
 {
@@ -125,7 +125,7 @@ tessera$ curl -sS --unix-socket /run/tessera/control.sock \
 `compute_threads` defaults to the number of CPUs the process may use. Lower it to leave some for
 other work on the same machine.
 
-A build sizes itself separately. `tessera build --memory-budget 24g` keeps the build's own
+A build sizes itself separately. `mosaica build --memory-budget 24g` keeps the build's own
 structures within 24 GiB. Without it the build works out a budget from the memory the machine has
 free, which is too much if the server is running beside it.
 
@@ -180,7 +180,7 @@ the three levels' counts and centroids as drawing does. Any route that names a `
 browse and the bulk reads included, fills those same counts and centroids where nothing has yet;
 without a `palette_size` no route fills them for colours. On 1,000,000 Tree of Life images with
 69,872 taxa in seven `tiered` levels it took 0.06 s, and 0.21 s with the fill. The process's peak
-resident memory, mapped files included, was 1.5 GB. *One run each, with `tessera-bench`'s
+resident memory, mapped files included, was 1.5 GB. *One run each, with `mosaica-bench`'s
 `slot_cost`.*
 
 On the full GBIF bundle, under the conditions of the table above, a viewer asked for the taxonomy
@@ -244,18 +244,18 @@ newest one on disc failed its checks. The control address has neither.
 
 The [TLS proxy](tls.md) does not pass the probes through. Run your load balancer's or monitor's
 check on the server's machine, or against the session address from inside your network.
-`tessera health` makes the same check from the command line. It reads `tessera.toml`, asks the
+`mosaica health` makes the same check from the command line. It reads `mosaica.toml`, asks the
 viewer address for `/readyz`, and exits 0 on a 200. The Docker image uses it as its health check.
 
 ```console
-tessera$ tessera health && echo ready
+mosaica$ mosaica health && echo ready
 ready
 ```
 
 When nothing is listening it says so and exits 1:
 
 ```text
-tessera health: no server answering at 127.0.0.1:9151: Connection refused (os error 111)
+mosaica health: no server answering at 127.0.0.1:9151: Connection refused (os error 111)
 ```
 
 `/control/status` names the state of the write side in `write_executor.posture`: `not-started`,
@@ -340,7 +340,7 @@ refused, and `/control/status` records the reason under `compaction.last_refusal
 To start one yourself, whatever the schedule says:
 
 ```console
-tessera$ curl -sS -X POST --unix-socket /run/tessera/control.sock \
+mosaica$ curl -sS -X POST --unix-socket /run/mosaica/control.sock \
   -H "authorization: Bearer $(cat secrets/operator.secret)" \
   -w '%{http_code}\n' http://localhost/control/compact
 202
@@ -350,7 +350,7 @@ The server picks the request up at its next tick. A request made while a compact
 dropped, with a warning in the log. Read the outcome a few seconds later:
 
 ```console
-tessera$ curl -sS --unix-socket /run/tessera/control.sock \
+mosaica$ curl -sS --unix-socket /run/mosaica/control.sock \
   -H "authorization: Bearer $(cat secrets/operator.secret)" \
   http://localhost/control/status | jq '.compaction | {folds, fold_refusals, last_refusal}'
 {
@@ -375,7 +375,7 @@ list and writes both files again.
 ## Stopping and restarting
 
 SIGTERM or SIGINT stops the server at once, without waiting for requests in progress, and it
-writes `tessera serve: stopped on SIGTERM` as it goes. A browser partway through a response gets it
+writes `mosaica serve: stopped on SIGTERM` as it goes. A browser partway through a response gets it
 cut short, missing the final frame that marks a response complete.
 
 Sessions are held only in memory. After a restart none of them exists, and each browser has to ask

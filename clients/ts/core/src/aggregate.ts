@@ -32,8 +32,8 @@ export async function readAggregate(
   let recomposed = false;
   for (;;) {
     const response = await request(cursor);
-    region ??= parseRegionVerdict(response.headers.get('x-tessera-region'));
-    identityKey = response.headers.get('x-tessera-identity-key') ?? identityKey;
+    region ??= parseRegionVerdict(response.headers.get('x-mosaica-region'));
+    identityKey = response.headers.get('x-mosaica-identity-key') ?? identityKey;
     const frames = new Frames(response.body?.getReader(), signal, 'aggregate');
     let table: Reading | null = null;
     let pending: Uint8Array | null = null;

@@ -1,5 +1,5 @@
 {
-  "name": "@tesseradb/example-plain-html",
+  "name": "@mosaicajs/example-plain-html",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",

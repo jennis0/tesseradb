@@ -1,6 +1,6 @@
 import {retryDelayMs, type Clock, type RetryOptions} from './driver.js';
 import {PartialAggregate} from './aggregate.js';
-import {TesseraError} from './client.js';
+import {MosaicaError} from './client.js';
 import {refusalOf, type Refusal} from './presented.js';
 import {paletteOfSize, type PaletteName} from './palette.js';
 import type {AggregateBy, AggregateCut, AggregateRequest, AggregateResult, AggregateTable, FilterExpr, Grouping} from './types.js';
@@ -429,7 +429,7 @@ export function joinedAggregate(
         }
       },
       (error: unknown) => {
-        const separately = error instanceof PartialAggregate || (error instanceof TesseraError && error.status === 422);
+        const separately = error instanceof PartialAggregate || (error instanceof MosaicaError && error.status === 422);
         for (const part of live) {
           if (separately) alone(batch.token, batch.req, part);
           else part.reject(error);

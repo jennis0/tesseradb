@@ -1,7 +1,7 @@
-"""Boot a `tessera serve` for a measurement, on ports and scratch state of its own, for
+"""Boot a `mosaica serve` for a measurement, on ports and scratch state of its own, for
 `serve_battery.py` and `ingest_cycle.py`.
 
-Never the rung's own `tessera.toml`, since another session usually serves the same bundle from
+Never the rung's own `mosaica.toml`, since another session usually serves the same bundle from
 it: a measurement writes a copy with its own ports, cache and WAL under a scratch directory.
 
 Always inside a `systemd-run --user --scope` transient scope, capped or not: it needs no root,
@@ -65,7 +65,7 @@ def minted_credentials(source_dir: Path) -> dict[str, str]:
     """A value for the operator credential variable this deployment names, where the environment
     and the deployment's own `.env` do not carry one, minted for this run only.
     """
-    deployment = tomllib.loads((source_dir / "tessera.toml").read_text())
+    deployment = tomllib.loads((source_dir / "mosaica.toml").read_text())
     name = deployment["serve"]["operator_credential_env"]
     env = dict(os.environ) | read_env_file(source_dir / ".env")
     return {} if env.get(name) else {name: secrets.token_urlsafe(32)}
@@ -108,7 +108,7 @@ class Deployment:
         self.pid: int | None = None
         self.cgroup: Path | None = None
         self.scratch.mkdir(parents=True, exist_ok=True)
-        self.toml = self.scratch / "tessera.toml"
+        self.toml = self.scratch / "mosaica.toml"
         self._write_toml()
 
     @classmethod
@@ -121,10 +121,10 @@ class Deployment:
         swap_bytes: int = 0,
         bundle: Path | None = None,
     ) -> Deployment:
-        """A server over the bundle a deployment directory's `tessera.toml` names, or over
+        """A server over the bundle a deployment directory's `mosaica.toml` names, or over
         `bundle`, on the ports it names."""
         directory = Path(directory)
-        settings = tomllib.loads((directory / "tessera.toml").read_text())
+        settings = tomllib.loads((directory / "mosaica.toml").read_text())
         ports = tuple(
             int(settings["serve"][k].rsplit(":", 1)[1]) for k in ("viewer", "session", "control")
         )
@@ -180,11 +180,11 @@ class Deployment:
         """The operator credential's value, from the environment, never from the copy this class
         writes, which carries only the variable's name.
         """
-        source = tomllib.loads((self.source_dir / "tessera.toml").read_text())["serve"]
+        source = tomllib.loads((self.source_dir / "mosaica.toml").read_text())["serve"]
         return self.env[source["operator_credential_env"]]
 
     def _write_toml(self) -> None:
-        source = tomllib.loads((self.source_dir / "tessera.toml").read_text())
+        source = tomllib.loads((self.source_dir / "mosaica.toml").read_text())
         serve = {
             key: value
             for key, value in source["serve"].items()
@@ -252,7 +252,7 @@ dir = "{(self.scratch / 'catalogue').resolve()}"
         while time.time() < deadline:
             if self.proc.poll() is not None:
                 raise RuntimeError(
-                    f"tessera serve exited {self.proc.returncode} before answering /readyz; "
+                    f"mosaica serve exited {self.proc.returncode} before answering /readyz; "
                     f"see {self.log_path}"
                 )
             try:
@@ -261,10 +261,10 @@ dir = "{(self.scratch / 'catalogue').resolve()}"
             except requests.exceptions.RequestException:
                 pass
             time.sleep(0.5)
-        raise TimeoutError(f"tessera serve never answered /readyz; see {self.log_path}")
+        raise TimeoutError(f"mosaica serve never answered /readyz; see {self.log_path}")
 
     def _served_pid(self) -> int:
-        """The served `tessera` pid, which is never `self.proc.pid` — that is systemd-run's."""
+        """The served `mosaica` pid, which is never `self.proc.pid` — that is systemd-run's."""
         out = subprocess.run(
             ["pgrep", "-f", f"serve --deployment {self.toml}"],
             capture_output=True,
@@ -294,7 +294,7 @@ dir = "{(self.scratch / 'catalogue').resolve()}"
         return path if path.is_dir() else None
 
     def stop(self) -> None:
-        """Stop this process by pid. Never `pkill -f tessera`: other sessions serve too."""
+        """Stop this process by pid. Never `pkill -f mosaica`: other sessions serve too."""
         for pid in filter(None, [self.pid, self.proc.pid if self.proc else None]):
             try:
                 os.kill(pid, signal.SIGTERM)

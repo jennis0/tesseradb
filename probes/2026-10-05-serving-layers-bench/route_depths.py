@@ -3,7 +3,7 @@ bench's principals: what the route costs when a client asks for about a screen's
 256-pixel tiles, beside what the TypeScript store asks for in the bench.
 
     python3 probes/2026-10-05-serving-layers-bench/route_depths.py --deployment <dir> \
-        --binary <tessera> --run <bench run.json> --out <out.json> [--cap 24G] [--swap 2G]
+        --binary <mosaica> --run <bench run.json> --out <out.json> [--cap 24G] [--swap 2G]
 
 It starts the binary on a fresh cache over the deployment's bundle, with the bundle's pages
 evicted first, under the cap. The bench run gives the principals and their densest regions.

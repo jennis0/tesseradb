@@ -1,5 +1,5 @@
 /**
- * The mapping between deck.gl's non-geospatial tile indices and Tessera's Morton cell grid.
+ * The mapping between deck.gl's non-geospatial tile indices and Mosaica's Morton cell grid.
  *
  * The engine's world is a 2^16 x 2^16 cell grid, quantised per axis, so a tile is square in cell
  * space and rectangular in data space. The deck.gl world is cell space scaled down by

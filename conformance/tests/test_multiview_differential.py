@@ -69,12 +69,12 @@ built for it.
 
 - **A second gate semantics.** The gate here is one group's, over two views, with a label that is
   a single compartment term. A view's *own* label narrowing its group's — the conjunction §6
-  specifies — is asserted at server level (`crates/tessera-server/tests/views_gate.rs`) and is not
+  specifies — is asserted at server level (`crates/mosaica-server/tests/views_gate.rs`) and is not
   re-derived against an oracle here: the oracle's contribution is the served set behind a passed
   gate, which one label answers as well as two.
 - **Ingest into a second view** (§4's join rule). The fixture is build-only, and a server that
   accepted writes would mutate the bundle under every other module in this suite;
-  `crates/tessera-server/tests/views_write.rs` drives that path against a real flush.
+  `crates/mosaica-server/tests/views_write.rs` drives that path against a real flush.
 - **A group's view created or dropped while the service runs** (§3.2, §3.4), for the same reason.
 - **A scoped `text` family** (§5's remaining marker): the build writes no serving artefact a
   request can reach for it here, so there is nothing for an oracle to disagree with. The scoped

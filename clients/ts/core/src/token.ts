@@ -1,12 +1,12 @@
-import {TesseraError} from './client.js';
+import {MosaicaError} from './client.js';
 import type {Clock} from './driver.js';
 import type {Refusal} from './presented.js';
 import type {Store} from './store.js';
 
 /**
  * A function the store calls for a viewer token, and calls again to renew it. It resolves to the
- * token and `expiresAt`, in seconds since the Unix epoch, as {@link TesseraClient.login} and
- * {@link TesseraClient.authorise} report it; `Infinity` is a token that does not expire.
+ * token and `expiresAt`, in seconds since the Unix epoch, as {@link MosaicaClient.login} and
+ * {@link MosaicaClient.authorise} report it; `Infinity` is a token that does not expire.
  *
  * The store renews 30 seconds before expiry, or halfway through a lifetime shorter than a minute,
  * and calls again before a request where the token has 5 seconds or less left. Concurrent requests
@@ -57,7 +57,7 @@ export class TokenSupply {
     if (this.disposed) throw disposedError();
     if (this.token && Date.now() < this.expiresAtMs - 5_000) return this.token;
     if (!this.supplier) {
-      if (!this.token) throw new TesseraError(401, 'bad-credential', 'no token');
+      if (!this.token) throw new MosaicaError(401, 'bad-credential', 'no token');
       return this.token;
     }
     return this.renew(this.supplier);

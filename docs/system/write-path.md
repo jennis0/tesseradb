@@ -1,6 +1,6 @@
 # The write path
 
-The write path is how data enters a running Tessera and becomes part of the map. Rows arrive at
+The write path is how data enters a running Mosaica and becomes part of the map. Rows arrive at
 the control plane, are written to a log, and are published to viewers in stages. A viewer's
 request reads from a published snapshot and never sees a write in progress.
 
@@ -45,7 +45,7 @@ to time a **merge** combines small segments into larger ones. A deleted row cann
 a sorted file in place either, so a deletion is recorded in the overlay and the row stays on disc,
 hidden, until a **compaction** rewrites the whole partition into one segment without it. This is
 the same arrangement as a log-structured merge tree, the storage layout behind most write-heavy
-databases; what Tessera adds is that the sort order is the map itself.
+databases; what Mosaica adds is that the sort order is the map itself.
 
 ```mermaid
 flowchart TB
@@ -64,13 +64,13 @@ flowchart TB
     end
   end
   wal["write-ahead log<br/>ingests and denies since the last flush"]
-  build["tessera build"] --> bundle
-  serve["tessera serve"] -- "maps and reads" --> bundle
+  build["mosaica build"] --> bundle
+  serve["mosaica serve"] -- "maps and reads" --> bundle
   serve <--> wal
   wal -- "flush: new segment;<br/>compaction: new prefix" --> bundle
 ```
 
-*What tessera build writes and tessera serve reads, and what the write path adds while serving.*
+*What mosaica build writes and mosaica serve reads, and what the write path adds while serving.*
 
 A deny is in force for every request that starts after it is acknowledged. It is recorded in the
 **overlay**, the in-memory record of what is hidden. A deletion leaves the overlay at the compaction
@@ -145,7 +145,7 @@ while the service holds it (a row, a buffered row, or the label a flush wrote), 
 removes a deleted item also drops its deletion. The same rule answers a change and a membership's
 member, each naming its item by a `tessera_id` and unique values ([accepting a
 deny](#accepting-a-deny)). It is the rule a build applies to its files, written once in
-`tessera-lifecycle` (`resolve.rs`).
+`mosaica-lifecycle` (`resolve.rs`).
 
 | What the row's values name | What the handler decides |
 |---|---|
@@ -175,7 +175,7 @@ row in `refused`, by its position in the batch and its reason (`names_two_items`
 for its `tessera_id`; it names no entity and no value the caller did not send. A caller that asks
 for `strict=true` has the whole batch refused with `409` at its first refused row instead, naming
 rows by position, values as sent and items by `tessera_id`, and nothing is written. A build refuses
-the rows of its files by the same rule, and `tessera build --strict` refuses the build at the first
+the rows of its files by the same rule, and `mosaica build --strict` refuses the build at the first
 file with a refused row.
 
 To decide a row naming an item, the handler reads what the item stores, in ascending entity order
@@ -247,7 +247,7 @@ for the edited items whose new rows it writes, a merge combines runs, and a comp
 them without the entities it removes. Until a flush writes an edit's pair, the pair is held in the
 generation. Every translation between an entity and a `tessera_id` reads both. A segment whose rows
 belong to an edited item lists those rows' entities beside its columns, so opening, merging and
-compacting a segment reads a row's entity without the map. `tessera verify --deep` checks that the
+compacting a segment reads a row's entity without the map. `mosaica verify --deep` checks that the
 two directions hold the same pairs and that every such row is a pair of the map.
 
 ### The commit window
@@ -493,7 +493,7 @@ about the map becomes wrong at a flush. A session picks up the new rows once the
 refresh has reached it, usually by its next request. Until then its visible set is the previous
 generation's projection, so the flush's new rows are not yet visible to it. Deletions,
 suppressions, segments and the overlay are always the current generation's. The response's
-`x-tessera-pin` header names the generation of the visible set, and `x-tessera-stale` for a pin
+`x-mosaica-pin` header names the generation of the visible set, and `x-mosaica-stale` for a pin
 held from before the flush changes when the refresh reaches the session, not at the flush. Every
 response also carries a content key, travelling as an ETag. Presenting an old pin or content key
 back is never an error.
@@ -683,7 +683,7 @@ crates:
   and `unique` declared on and off, checked after every step against a model of the items:
   every view's points for two principals, `in` over every unique value, every item's card, and
   that no two items name one entity; long sequences that edit the same items again and again, so
-  compactions free ids and later edits take them (`tessera-engine`'s `identity_model`);
+  compactions free ids and later edits take them (`mosaica-engine`'s `identity_model`);
 - an item on a freed id carrying nothing of the item that held it, in any home, across a flush, a
   merge, a restart and a compaction, and freed ids restored at a restart less those issued since
   (`freed_ids_carry_nothing`);
@@ -702,9 +702,9 @@ fail-closed handling of corruption.
 
 The write path lives in:
 
-- `tessera-lifecycle`: the WAL, the overlay, allocation, the commit window, and the rule that
+- `mosaica-lifecycle`: the WAL, the overlay, allocation, the commit window, and the rule that
   resolves a row to the item it names;
-- `tessera-engine`: resolving a batch against a generation, flush, merge, and the compaction
+- `mosaica-engine`: resolving a batch against a generation, flush, merge, and the compaction
   passes and their publication;
-- `tessera-store`: the on-disc fold, merge, and reclamation routines the engine drives;
-- `tessera-server`'s control plane, which exposes the ingest, changes, flush and compact routes.
+- `mosaica-store`: the on-disc fold, merge, and reclamation routines the engine drives;
+- `mosaica-server`'s control plane, which exposes the ingest, changes, flush and compact routes.

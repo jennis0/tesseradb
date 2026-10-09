@@ -1,7 +1,7 @@
 """Build a corpus whose one unique id is sparse and out of file order, and measure the build.
 
     python3 probe.py make --items 100000000 --order shuffled --out DIR
-    python3 probe.py run --binary tessera --data DIR --cap 600M --budget 500m --out run.json
+    python3 probe.py run --binary mosaica --data DIR --cap 600M --budget 500m --out run.json
     python3 probe.py run ... --main      # the declaration as main reads it, with a join field
 
 `make` writes `points.parquet` (`id` u64, `x`, `y`, and with `--names` a keyword `name` the record
@@ -118,11 +118,11 @@ def make(args: argparse.Namespace) -> None:
     points.close()
     members.close()
     print(file=sys.stderr)
-    (out / "tessera.toml").write_text(
+    (out / "mosaica.toml").write_text(
         """[bundle]
 path  = "bundle"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [build]
 schema = "corpus.toml"
@@ -205,12 +205,12 @@ def read_majflt(pid: int) -> int | None:
 
 
 def build_pid(scope_pid: int) -> int | None:
-    """The tessera process: systemd-run execs it in place, so it is the scope's own pid."""
+    """The mosaica process: systemd-run execs it in place, so it is the scope's own pid."""
     try:
         comm = Path(f"/proc/{scope_pid}/comm").read_text().strip()
     except OSError:
         return None
-    return scope_pid if comm.startswith("tessera") else None
+    return scope_pid if comm.startswith("mosaica") else None
 
 
 def cgroup_of(pid: int) -> Path | None:
@@ -238,7 +238,7 @@ def run(args: argparse.Namespace) -> int:
             stale.unlink()
     cmd = [
         str(args.binary.resolve()), "build",
-        "--deployment", str(data / "tessera.toml"),
+        "--deployment", str(data / "mosaica.toml"),
         "--config", str(data / ("corpus-main.toml" if args.main else "corpus.toml")),
         "--out", str(bundle),
         "--no-oracle-pairs",

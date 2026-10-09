@@ -16,7 +16,7 @@ import {hollowRadius, sizingRadius, type Sizing} from './size.js';
 
 /** The uniform block the vertex and fragment stages share. */
 const LUT_BLOCK = /* glsl */ `\
-layout(std140) uniform tesseraLutUniforms {
+layout(std140) uniform mosaicaLutUniforms {
   float useLut;
   highp int lutMask;
   highp int lutShift;
@@ -31,11 +31,11 @@ layout(std140) uniform tesseraLutUniforms {
   float sizeRadius;
   float sizeHollow;
   vec3 dullColour;
-} tesseraLut;
+} mosaicaLut;
 `;
 
 const lutUniforms = {
-  name: 'tesseraLut',
+  name: 'mosaicaLut',
   vs: `${LUT_BLOCK}uniform sampler2D lutTexture;
 `,
   fs: LUT_BLOCK,
@@ -140,7 +140,7 @@ export type MarksLayerProps = ScatterplotLayerProps & {
 };
 
 export class MarksLayer extends ScatterplotLayer<unknown, MarksLayerProps> {
-  static override layerName = 'TesseraMarksLayer';
+  static override layerName = 'MosaicaMarksLayer';
   static override defaultProps: DefaultProps<MarksLayerProps> = {
     ...(ScatterplotLayer.defaultProps as DefaultProps<MarksLayerProps>),
     useLut: false,
@@ -163,68 +163,68 @@ export class MarksLayer extends ScatterplotLayer<unknown, MarksLayerProps> {
         'vs:#decl': /* glsl */ `in float instanceOrdinals;
 in float instanceHighlights;
 in float instanceSizes;
-out float vTesseraHollow;
+out float vMosaicaHollow;
 // 1.0 where this mark is drawn by the pass in force, 0.0 where another pass draws it. The dull pass
 // draws the unlit marks; the lit and glow passes draw the lit ones.
-float tesseraInPass(float lit) {
-  if (tesseraLut.pass < 0.5) return 1.0;
-  return tesseraLut.pass < 1.5 ? 1.0 - lit : lit;
+float mosaicaInPass(float lit) {
+  if (mosaicaLut.pass < 0.5) return 1.0;
+  return mosaicaLut.pass < 1.5 ? 1.0 - lit : lit;
 }
 // The multiple of the layer's radius this mark draws at. A lit mark is drawn larger than a dulled
 // one, and its glow larger still; the passes not drawing this mark collapse it to zero size. Under
 // sizing the layer's radius is sizeRadius, and the mark's own radius, or the ring's for a mark
 // with no value, is a fraction of it.
-float tesseraSizeFactor() {
+float mosaicaSizeFactor() {
   float lit = step(0.5, instanceHighlights);
-  float glow = step(2.5, tesseraLut.pass);
-  float drawn = instanceSizes < 0.0 ? tesseraLut.sizeHollow : mix(tesseraLut.sizeMin, tesseraLut.sizeMax, instanceSizes);
-  float own = tesseraLut.sizing > 0.5 ? drawn / tesseraLut.sizeRadius : 1.0;
-  return own * mix(tesseraLut.dullRadius, tesseraLut.litRadius, lit) * mix(1.0, ${GLOW_RADIUS_SCALE.toFixed(3)}, glow) * tesseraInPass(lit);
+  float glow = step(2.5, mosaicaLut.pass);
+  float drawn = instanceSizes < 0.0 ? mosaicaLut.sizeHollow : mix(mosaicaLut.sizeMin, mosaicaLut.sizeMax, instanceSizes);
+  float own = mosaicaLut.sizing > 0.5 ? drawn / mosaicaLut.sizeRadius : 1.0;
+  return own * mix(mosaicaLut.dullRadius, mosaicaLut.litRadius, lit) * mix(1.0, ${GLOW_RADIUS_SCALE.toFixed(3)}, glow) * mosaicaInPass(lit);
 }`,
         'vs:DECKGL_FILTER_SIZE': /* glsl */ `\
-size *= tesseraSizeFactor();
+size *= mosaicaSizeFactor();
 `,
         // The fragment stage measures the disc against the radius drawn, and draws a mark with no
         // value under sizing as a ring.
         'vs:#main-end': /* glsl */ `\
-outerRadiusPixels *= tesseraSizeFactor();
-vTesseraHollow = tesseraLut.sizing > 0.5 && instanceSizes < 0.0 ? 1.0 : 0.0;
+outerRadiusPixels *= mosaicaSizeFactor();
+vMosaicaHollow = mosaicaLut.sizing > 0.5 && instanceSizes < 0.0 ? 1.0 : 0.0;
 `,
-        'fs:#decl': /* glsl */ `in float vTesseraHollow;
+        'fs:#decl': /* glsl */ `in float vMosaicaHollow;
 `,
         // Under sizing deck feathers every edge, and a mark drawn below the feathering threshold
         // takes its hard edge back, as an unsized mark that small is drawn. A ring's inside is
         // clear except to picking, so a mark with no value is found where it is drawn.
         'fs:#main-end': /* glsl */ `\
-if (tesseraLut.sizing > 0.5 && picking.isActive < 0.5) {
-  float tesseraDistance = length(unitPosition) * outerRadiusPixels;
+if (mosaicaLut.sizing > 0.5 && picking.isActive < 0.5) {
+  float mosaicaDistance = length(unitPosition) * outerRadiusPixels;
   if (outerRadiusPixels < ${ANTIALIAS_ABOVE_PX.toFixed(3)}) {
-    if (tesseraDistance > outerRadiusPixels) discard;
-    float feather = smoothedge(tesseraDistance, outerRadiusPixels);
+    if (mosaicaDistance > outerRadiusPixels) discard;
+    float feather = smoothedge(mosaicaDistance, outerRadiusPixels);
     if (feather > 0.0) fragColor.a /= feather;
   }
-  if (vTesseraHollow > 0.5) {
+  if (vMosaicaHollow > 0.5) {
     float inner = outerRadiusPixels - ${HOLLOW_RING_PX.toFixed(3)};
-    fragColor.a *= smoothstep(inner - 0.5, inner + 0.5, tesseraDistance);
+    fragColor.a *= smoothstep(inner - 0.5, inner + 0.5, mosaicaDistance);
   }
 }
 `,
         // The colour from whichever source is on, then the highlight over it. With no highlight
         // `dull` is 1.0 and `dullGrey` 0.0, so the colour passes through.
         'vs:DECKGL_FILTER_COLOR': /* glsl */ `\
-if (tesseraLut.useLut > 0.5) {
+if (mosaicaLut.useLut > 0.5) {
   int o = int(instanceOrdinals + 0.5);
-  ivec2 at = ivec2(o & tesseraLut.lutMask, o >> tesseraLut.lutShift);
+  ivec2 at = ivec2(o & mosaicaLut.lutMask, o >> mosaicaLut.lutShift);
   vec4 lutColour = texelFetch(lutTexture, at, 0);
   color = vec4(lutColour.rgb, lutColour.a * layer.opacity);
 }
 float lit = step(0.5, instanceHighlights);
-color.rgb = mix(mix(color.rgb, tesseraLut.dullColour, tesseraLut.dullGrey), color.rgb, lit);
-color.a *= mix(tesseraLut.dull, 1.0, lit) * tesseraInPass(lit) * mix(1.0, ${GLOW_ALPHA.toFixed(3)}, step(2.5, tesseraLut.pass));
+color.rgb = mix(mix(color.rgb, mosaicaLut.dullColour, mosaicaLut.dullGrey), color.rgb, lit);
+color.a *= mix(mosaicaLut.dull, 1.0, lit) * mosaicaInPass(lit) * mix(1.0, ${GLOW_ALPHA.toFixed(3)}, step(2.5, mosaicaLut.pass));
 `,
         // The glow fades from its centre to nothing at its edge.
         'fs:DECKGL_FILTER_COLOR': /* glsl */ `\
-if (tesseraLut.pass > 2.5) {
+if (mosaicaLut.pass > 2.5) {
   color.a *= 1.0 - min(1.0, length(geometry.uv));
 }
 `
@@ -248,7 +248,7 @@ if (tesseraLut.pass > 2.5) {
     const sizing = this.props.sizing ?? null;
     if (model) {
       model.shaderInputs.setProps({
-        tesseraLut: {
+        mosaicaLut: {
           useLut: this.props.useLut && texture ? 1 : 0,
           lutMask: LUT_WIDTH - 1,
           lutShift: LUT_SHIFT,

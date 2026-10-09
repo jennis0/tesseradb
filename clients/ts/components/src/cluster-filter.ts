@@ -1,10 +1,10 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {artifactName, withMember, withoutMember, type BrowseRow, type Layer, type MemberClause, type Refusal} from '@tesseradb/client';
-import {refusalOf} from '@tesseradb/client/internal';
+import {artifactName, withMember, withoutMember, type BrowseRow, type Layer, type MemberClause, type Refusal} from '@mosaicajs/client';
+import {refusalOf} from '@mosaicajs/client/internal';
 import {HeldAggregate, artifactGroupings, countsByKey} from './aggregate.js';
-import {TesseraElement, UNNAMED, emit, idString} from './base.js';
+import {MosaicaElement, UNNAMED, emit, idString} from './base.js';
 import {FloatingList} from './float.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -47,9 +47,9 @@ type Offer = {row: BrowseRow; path: string[] | null; beyond: boolean};
  * first by default, and Escape closes the list.
  *
  * @summary A layer's field card's search box.
- * @tagname tessera-cluster-filter
+ * @tagname mosaica-cluster-filter
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A row put
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clausechange']>} mosaica-clausechange - A row put
  *   a `member_of` clause on or took it off.
  * @csspart entry - The search box.
  * @csspart values - The list, while it is open.
@@ -61,7 +61,7 @@ type Offer = {row: BrowseRow; path: string[] | null; beyond: boolean};
  * @csspart more - The note under the box: no match, or that more match than the list holds.
  * @csspart refusal - The words "Clusters unavailable", with `data-code`, where the list was refused.
  */
-export class TesseraClusterFilter extends TesseraElement {
+export class MosaicaClusterFilter extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -91,9 +91,9 @@ export class TesseraClusterFilter extends TesseraElement {
         display: flex;
         flex-direction: column;
         padding: 4px;
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius-control);
-        background: var(--_tessera-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius-control);
+        background: var(--_mosaica-surface);
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
       }
       [part~='option'] {
@@ -107,10 +107,10 @@ export class TesseraClusterFilter extends TesseraElement {
       }
       [part~='option']:hover,
       [part~='option'][data-active] {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part~='option'][aria-selected='true'] {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
         font-weight: 600;
       }
       .opt {
@@ -128,20 +128,20 @@ export class TesseraClusterFilter extends TesseraElement {
       [part='path'] {
         font-size: 12px;
         font-weight: 400;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       [part='value-count'] {
         font-size: 12px;
         font-weight: 400;
         font-variant-numeric: tabular-nums;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='more'],
       [part='refusal'] {
         display: block;
         margin-top: 6px;
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
     `
   ];
@@ -329,7 +329,7 @@ export class TesseraClusterFilter extends TesseraElement {
         ? withoutMember(members, this.layer, row.tesseraId, 'filter')
         : withMember(members, {layer: this.layer, artifact: row.tesseraId, outside: false, verb: 'filter', ...(name === null ? {} : {label: name})})
     );
-    emit(this, 'tessera-clausechange', {id: idString(row.tesseraId), layer: this.layer, outside: false, verb: 'filter', on: !on});
+    emit(this, 'mosaica-clausechange', {id: idString(row.tesseraId), layer: this.layer, outside: false, verb: 'filter', on: !on});
     this.search = '';
     this.found = null;
     this.listOpen = false;
@@ -483,10 +483,10 @@ export class TesseraClusterFilter extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-cluster-filter', TesseraClusterFilter);
+defineOnce('mosaica-cluster-filter', MosaicaClusterFilter);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-cluster-filter': TesseraClusterFilter;
+    'mosaica-cluster-filter': MosaicaClusterFilter;
   }
 }

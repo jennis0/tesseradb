@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest';
-import {TesseraClient} from '../src/client.js';
+import {MosaicaClient} from '../src/client.js';
 import {GRID32, gridToWorld, WORLD_SIZE} from '../src/coords.js';
 import {outlineOf} from '../../deck/src/layer.js';
 import {createStore} from '../src/store.js';
@@ -39,7 +39,7 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
       artifact: async () => ({layer: 'clusters/a', key: 'far', maskedCount: 10n}),
       categories: async () => [],
       close: () => {}
-    } as unknown as TesseraClient;
+    } as unknown as MosaicaClient;
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, artifacts: {perTile: 12}});
     store.setLayers(['clusters/a']);
     await clock.advance(1);

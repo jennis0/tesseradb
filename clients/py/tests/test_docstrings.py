@@ -21,23 +21,23 @@ from pathlib import Path
 
 import pytest
 
-import tesseradb
+import mosaica
 
 #: The reference pages, which a checkout carries and an sdist does not.
 REFERENCE = Path(__file__).resolve().parents[3] / "docs" / "reference" / "python"
 
 #: Attributes left out on purpose. `Database.blocks` is public today, and whether it stays public
 #: is awaiting a decision, so it is neither required nor refused a place in the docs.
-UNDECIDED = {"tesseradb._database.Database.blocks"}
+UNDECIDED = {"mosaica._database.Database.blocks"}
 
 
 def type_checking_names() -> dict:
     """The names the package imports for annotations only, which a return type may use."""
-    return {"Map": tesseradb.Map}
+    return {"Map": mosaica.Map}
 
 
 def in_package(cls: type) -> bool:
-    return cls.__module__.startswith("tesseradb")
+    return cls.__module__.startswith("mosaica")
 
 
 def members(cls: type) -> dict:
@@ -120,7 +120,7 @@ def walk() -> tuple[dict, dict]:
     """What the reference documents. The exported names, the public methods and properties of
     each class among them, and every class those return or a returned dataclass holds, by path;
     and each public attribute of those classes, by path, with the class that defines it."""
-    queue = [getattr(tesseradb, name) for name in tesseradb.__all__ if name != "__version__"]
+    queue = [getattr(mosaica, name) for name in mosaica.__all__ if name != "__version__"]
     found: dict = {}
     fields: dict = {}
     while queue:

@@ -21,7 +21,7 @@ row — walkable with exactly these framing functions), and the coalesced-extent
 (an extent blob has the same three files and the same addressing). Both land with the blob
 lifecycle; neither changes the licence above.
 
-Format, transcribed from `tessera-filter`'s `record` module (the byte format's single home): a
+Format, transcribed from `mosaica-filter`'s `record` module (the byte format's single home): a
 block is `row_count u32 LE | first_rank u32 LE | first_entity u32 LE`, then one LEB128 varint per
 row past the first holding that row's entity less its predecessor's less one, then the rows; a row
 is a LEB128 varint stating how many bytes of fields follow, then those fields; a field is

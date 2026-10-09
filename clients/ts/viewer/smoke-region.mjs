@@ -6,7 +6,7 @@
 //     [--headed] [--executable /path/to/chrome] [--principals i,j]
 //
 // A lasso is a filter leaf on the ordinary viewport request, with no counting request of its own,
-// and its count is exact for the shape: the server says so on `x-tessera-region` and the panel
+// and its count is exact for the shape: the server says so on `x-mosaica-region` and the panel
 // renders the count exact. Under a second principal the same lasso counts that principal's items,
 // with the same verdict. Filtering to a division narrows the map and every count to its members.
 //
@@ -16,7 +16,7 @@
 // the count inexact, or if filtering to the division does not narrow the map.
 //
 // Everything is read through the components' parts and the store. Requires a running
-// `tessera serve` over a bundle with a `spatial` layer (such as the Overture one-part ladder) and
+// `mosaica serve` over a bundle with a `spatial` layer (such as the Overture one-part ladder) and
 // a running `vite dev`.
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -24,7 +24,7 @@ import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-brows
 
 const args = flags();
 const url = args.url ?? 'http://localhost:5173';
-const shots = args.shots ?? '/tmp/tessera-region';
+const shots = args.shots ?? '/tmp/mosaica-region';
 await mkdir(shots, {recursive: true});
 
 const browser = await launchBrowser(args);
@@ -75,7 +75,7 @@ const settled = async (limitMs = 60_000) => {
   let stable = 0;
   while (Date.now() - started < limitMs) {
     await page.waitForTimeout(500);
-    const marks = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    const marks = await page.evaluate(() => window.__mosaicaProbe?.marks ?? -1);
     if (marks === last) {
       if (++stable >= 4) return;
     } else {
@@ -88,11 +88,11 @@ const settled = async (limitMs = 60_000) => {
 /** The region as the store and the probe hold it, and the panel's rendered count. */
 const region = async () =>
   page.evaluate(() => {
-    const p = window.__tesseraProbe;
-    const explorer = /** @type {{store: {get(name: 'region'): {status: string; matched: {value: number; exact: boolean}; visible: {value: number; exact: boolean} | null; verdict: {exact: boolean; depth: number | null} | null; shape: {kind: string}} | null} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const p = window.__mosaicaProbe;
+    const explorer = /** @type {{store: {get(name: 'region'): {status: string; matched: {value: number; exact: boolean}; visible: {value: number; exact: boolean} | null; verdict: {exact: boolean; depth: number | null} | null; shape: {kind: string}} | null} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     const r = explorer?.store?.get('region') ?? null;
     // The panel lives in the explorer's shadow tree, and its count in the panel's.
-    const panel = document.querySelector('tessera-explorer')?.shadowRoot?.querySelector('tessera-selection') ?? null;
+    const panel = document.querySelector('mosaica-explorer')?.shadowRoot?.querySelector('mosaica-selection') ?? null;
     const count = panel?.shadowRoot?.querySelector('[part="count-matched"]')?.shadowRoot?.querySelector('[part="count"]') ?? null;
     return {
       status: r?.status ?? null,
@@ -108,20 +108,20 @@ const region = async () =>
 
 const roster = async () =>
   page.evaluate(() => {
-    const explorer = /** @type {{store: {get(name: 'meta'): {layers: {name: string; shape: string | null}[]} | null} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{store: {get(name: 'meta'): {layers: {name: string; shape: string | null}[]} | null} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     return (explorer?.store?.get('meta')?.layers ?? []).map((l) => ({name: l.name, shape: l.shape}));
   });
 
 const served = async () =>
   page.evaluate(() => {
-    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {tesseraId: bigint; layer: string; box: number[] | null; parentIds: bigint[]; maskedCount: bigint}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {tesseraId: bigint; layer: string; box: number[] | null; parentIds: bigint[]; maskedCount: bigint}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     return (explorer?.store?.get('artifacts')?.served ?? []).map((x) => ({id: String(x.tesseraId), layer: x.layer, box: x.box, parents: x.parentIds.map((p) => String(p)), count: Number(x.maskedCount)}));
   });
 
 /** Tick exactly one layer in the picker, or none. */
 const only = async (layerName) => {
   await openLayers();
-  const entries = page.locator('tessera-layer-picker [part="entry"]');
+  const entries = page.locator('mosaica-layer-picker [part="entry"]');
   const n = await entries.count();
   for (let o = 0; o < n; o++) {
     const entry = entries.nth(o);
@@ -134,12 +134,12 @@ const only = async (layerName) => {
 const principal = async (index) => {
   await page.selectOption('#principal', String(index));
   await openLayers();
-  await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+  await page.locator('mosaica-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 };
 
 const fitBbox = async (bbox) => {
   await page.evaluate((bbox) => {
-    const explorer = /** @type {{map: {fitBbox(extent: [number, number, number, number]): boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{map: {fitBbox(extent: [number, number, number, number]): boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     explorer?.map?.fitBbox(/** @type {[number, number, number, number]} */ (bbox));
   }, bbox);
   await settled();
@@ -147,7 +147,7 @@ const fitBbox = async (bbox) => {
 
 const select = async (shape) => {
   await page.evaluate((shape) => {
-    const explorer = /** @type {{map: {select(shape: unknown): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{map: {select(shape: unknown): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     explorer?.map?.select(shape);
   }, shape);
 };
@@ -163,7 +163,7 @@ const answered = async () => {
 };
 
 await openLayers();
-await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+await page.locator('mosaica-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 await settled();
 
 const layers = await roster();
@@ -237,14 +237,14 @@ for (const p of pair) {
       const card = all.find((a) => a.id === pick);
       const unfiltered = (await region()).view?.matched ?? -1;
       await page.evaluate((id) => {
-        const explorer = /** @type {{store: {needShape(id: bigint): void; openArtifact(id: bigint): Promise<void>} | null; map: {fitTo(id: bigint): boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+        const explorer = /** @type {{store: {needShape(id: bigint): void; openArtifact(id: bigint): Promise<void>} | null; map: {fitTo(id: bigint): boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
         explorer?.map?.fitTo(BigInt(id));
         explorer?.store?.needShape(BigInt(id));
         void explorer?.store?.openArtifact(BigInt(id));
       }, pick);
       await settled();
       const wide = (await region()).view?.matched ?? -1;
-      await page.locator('tessera-artifact-card [part="filter"]').first().click({timeout: 30_000});
+      await page.locator('mosaica-artifact-card [part="filter"]').first().click({timeout: 30_000});
       await answered();
       await settled();
       await page.waitForTimeout(1000);
@@ -257,7 +257,7 @@ for (const p of pair) {
       if (card && f.matched !== null && f.matched > card.count) failures.push(`${label}: the region's count ${f.matched} exceeds the card's ${card.count}`);
       await select(null);
       await page.evaluate(() => {
-        const explorer = /** @type {{store: {clearSelection(): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+        const explorer = /** @type {{store: {clearSelection(): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
         explorer?.store?.clearSelection();
       });
       await settled();

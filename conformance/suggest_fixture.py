@@ -2,7 +2,7 @@
 
 `docs/design/value-suggestion.md` §4 declares the fold (NFKC, then full case folding, then
 whitespace collapse) and the entry construction (key, title, word starts after the first) as a
-fixed rule, factored in Rust as `tessera_analyse::{Fold, SuggestionFold}` and applied identically
+fixed rule, factored in Rust as `mosaica_analyse::{Fold, SuggestionFold}` and applied identically
 to a typed query and to every indexed string. This module is the independent second
 implementation §4 calls for: it re-derives the same rule from the design text, in Python, over a
 small dedicated corpus built backwards from the rule's own edge cases — mixed-case, extra
@@ -26,7 +26,7 @@ works entirely in source-id space and never opens the built bundle.
 **The fold: Python versus Rust, and where they may legitimately diverge.** `unicodedata.normalize
 ("NFKC", …)` and `str.casefold()` are CPython's own tables (Unicode Character Database /
 `CaseFolding.txt`, full mappings), where the Rust side is `icu4x`'s pinned data
-(`tessera_analyse::UNICODE_VERSION`). Full case folding is locale-independent by construction, so
+(`mosaica_analyse::UNICODE_VERSION`). Full case folding is locale-independent by construction, so
 the two are expected to agree on every code point both Unicode Character Database revisions assign
 — the one legitimate divergence is a code point one Unicode version knows and the other does not
 (a very recent script), which this fixture does not touch. `str.casefold()` is Python's own
@@ -70,7 +70,7 @@ def fold_entry(text: str) -> str:
 
 
 def _wordish(c: str) -> bool:
-    """`SuggestionFold::wordish` (`crates/tessera-analyse/src/lib.rs`): `Alphabetic ∪ Number ∪
+    """`SuggestionFold::wordish` (`crates/mosaica-analyse/src/lib.rs`): `Alphabetic ∪ Number ∪
     Mark`, approximated by the Unicode general-category groups `L*` (letter), `N*` (number) and
     `M*` (mark), read off `unicodedata.category` rather than icu4x's property tables.
 
@@ -113,7 +113,7 @@ def _served_start(text: str) -> int:
 
 
 def match_len(served: str, start: int, q_folded: str) -> int:
-    """`match_len` (`crates/tessera-engine/src/suggest.rs`): re-fold `served` forward from `start`,
+    """`match_len` (`crates/mosaica-engine/src/suggest.rs`): re-fold `served` forward from `start`,
     one character at a time, until the fold has `q_folded` as a prefix — the number of characters
     consumed is `match.len`. An empty query consumes nothing. Mirrors the Rust function exactly;
     Python indexes strings by code point throughout, so there is no byte/character split to carry
@@ -525,6 +525,6 @@ def build_suggest_bundle(work_dir: Path) -> Path:
     config.write_text(CONFIG_TOML)
 
     bundle = work_dir / "bundle"
-    deployment = write_deployment(work_dir / "tessera.toml", bundle=bundle, schema=config)
+    deployment = write_deployment(work_dir / "mosaica.toml", bundle=bundle, schema=config)
     cli_build(deployment, bundle)
     return bundle

@@ -26,7 +26,7 @@ baseline.
 
 Usage:
   reference/.venv/bin/python scripts/bench_work_correlation.py \
-      --bundle /tmp/tessera-1e9 --out probes/work-correlation.json
+      --bundle /tmp/mosaica-1e9 --out probes/work-correlation.json
 """
 
 from __future__ import annotations
@@ -65,8 +65,8 @@ def pearson(xs: list[float], ys: list[float]) -> float:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bundle", default="/tmp/tessera-1e9")
-    ap.add_argument("--tmp", default="/tmp/tessera-1e9-serve-workcorr")
+    ap.add_argument("--bundle", default="/tmp/mosaica-1e9")
+    ap.add_argument("--tmp", default="/tmp/mosaica-1e9-serve-workcorr")
     ap.add_argument("-n", "--n-viewports", type=int, default=1000)
     ap.add_argument("--width", type=int, default=10_000)
     ap.add_argument("--seed", type=int, default=0)
@@ -114,7 +114,7 @@ def main() -> int:
         print(f"authorise() [w={w}]: {results['authorise_seconds'] * 1000:.1f} ms")
 
         warm_resp = srv.viewport_response(token, "s0", 6, [0.0, 0.0, EXTENT, EXTENT], k=30)
-        results["warmup_server_us"] = int(warm_resp.headers.get("x-tessera-server-us", "0"))
+        results["warmup_server_us"] = int(warm_resp.headers.get("x-mosaica-server-us", "0"))
         print(f"Warm-up server-side: {results['warmup_server_us'] / 1000:.3f} ms")
 
         viewports = bks.gen_viewports(args.seed + 1, args.n_viewports)
@@ -124,7 +124,7 @@ def main() -> int:
             per_request = []
             for i, (zoom, bbox) in enumerate(viewports):
                 resp = srv.viewport_response(token, "s0", zoom, bbox, k=k)
-                server_us = float(resp.headers.get("x-tessera-server-us", "nan"))
+                server_us = float(resp.headers.get("x-mosaica-server-us", "nan"))
                 body = resp.content
                 tiles, points = decode_viewport(body)
                 n_tiles = len(tiles)

@@ -37,8 +37,8 @@ use croaring::Bitmap;
 use placement::{
     mask, median, permutation, project, range_bitmap, rows_in, viewport, MaskShape,
 };
-use tessera_filter::{Codes, ValueColumn};
-use tessera_types::AttrLocalId;
+use mosaica_filter::{Codes, ValueColumn};
+use mosaica_types::AttrLocalId;
 
 /// A viewport resolves to ~300 tiles (`filter-surface.md` §7.2, and the two prior campaigns).
 const TILES: usize = 300;

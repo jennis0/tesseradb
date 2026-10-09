@@ -1,5 +1,5 @@
 import {html, nothing, type TemplateResult} from 'lit';
-import type {StatusProjection} from '@tesseradb/client';
+import type {StatusProjection} from '@mosaicajs/client';
 
 /**
  * The eight panel states. Every panel shows its state in one `part="state"` region, with

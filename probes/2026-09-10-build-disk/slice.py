@@ -7,7 +7,7 @@ publisher's export order changes which values a slice holds rather than how many
 
 A whole-corpus `--limit` will not do instead. It is a prefix of the *points* file alone, and a
 member row past the limit names an entity the build did not assign, which the layer publication
-refuses (`tessera build --help`).
+refuses (`mosaica build --help`).
 
 Re-encoded rather than byte-copied, pyarrow having no row-group copy.
 
@@ -33,7 +33,7 @@ for name in ["points.parquet", "members-taxonomy.parquet"]:
     writer.close()
     print(f"{name}: {rows:,} rows in {groups} row groups")
 
-for name in ["corpus.toml", "tessera.toml", ".env", "vocab-kingdom.parquet",
+for name in ["corpus.toml", "mosaica.toml", ".env", "vocab-kingdom.parquet",
              "country-terms.txt", "country-ranks.json"]:
     shutil.copy(src / name, out / name)
 print(f"wrote {out}")

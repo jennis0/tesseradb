@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {FilterDraft, FiltersProjection, Meta, Rgba} from '@tesseradb/client';
+import type {FilterDraft, FiltersProjection, Meta, Rgba} from '@mosaicajs/client';
 import '../src/field-card.js';
-import type {TesseraFieldCard} from '../src/field-card.js';
+import type {MosaicaFieldCard} from '../src/field-card.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, meta, mount, registered, scalar, settle, status, type FakeStore} from './fake-store.js';
 
 afterEach(() => {
@@ -42,8 +42,8 @@ const META = meta({
 const filtersOf = (draft: FilterDraft, over: Partial<FiltersProjection> = {}): FiltersProjection => ({draft, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0, ...over});
 
 async function mountCard(field: string, draft: FilterDraft = {filter: {}, highlight: {}}, over: Partial<FiltersProjection> = {}, attrs = '') {
-  const host = await mount(`<tessera-field-card field="${field}" ${attrs}></tessera-field-card>`);
-  const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+  const host = await mount(`<mosaica-field-card field="${field}" ${attrs}></mosaica-field-card>`);
+  const card = host.querySelector('mosaica-field-card') as MosaicaFieldCard;
   const store = fakeStore({meta: META, status: status({}), filters: filtersOf(draft, over)});
   store.set('view', {...store.get('view'), id: 's0'});
   card.store = store;
@@ -63,7 +63,7 @@ async function answer(host: HTMLElement, store: FakeStore, subject: Parameters<t
   await settle(host);
 }
 
-describe('<tessera-field-card> on a category', () => {
+describe('<mosaica-field-card> on a category', () => {
   it('registers its counts in view with the highlight and over everything matching, each leaving out its own clause', async () => {
     const {store} = await mountCard('archive');
     expect(spec(store, 'field-subject')).toEqual({groupings: [{by: {field: 'archive', top: 5}}], subject: 'view', highlighted: true, without: 'archive'});
@@ -78,8 +78,8 @@ describe('<tessera-field-card> on a category', () => {
   });
 
   it('names no more values than the server counts by name', async () => {
-    const host = await mount('<tessera-field-card field="archive"></tessera-field-card>');
-    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const host = await mount('<mosaica-field-card field="archive"></mosaica-field-card>');
+    const card = host.querySelector('mosaica-field-card') as MosaicaFieldCard;
     const store = fakeStore({meta: {...META, selection: {...META.selection, maxAggregateNamed: 2}}, status: status({}), filters: filtersOf({filter: {archive: {family: 'category', keys: ['a', 'b', 'c']}}, highlight: {}})});
     card.store = store;
     await settle(host);
@@ -144,7 +144,7 @@ describe('<tessera-field-card> on a category', () => {
     const {host, store} = await mountCard('archive');
     await answer(host, store, [{rows: [{key: 'cs', count: 10}], total: 10}], [{rows: [{key: 'cs', count: 20}], total: 20}]);
     const changes: unknown[] = [];
-    host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-filterchange', (e) => changes.push((e as CustomEvent).detail));
     const row = rows(host)[0]!;
     (row.querySelector('[part="filter"]') as HTMLButtonElement).click();
     expect(lastFilters(store)).toEqual({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
@@ -183,7 +183,7 @@ describe('<tessera-field-card> on a category', () => {
   it('colours the map by the field from its paint button, pressed while it does, and by nothing when pressed again', async () => {
     const {host, store} = await mountCard('archive');
     const colours: unknown[] = [];
-    host.addEventListener('tessera-colourchange', (e) => colours.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-colourchange', (e) => colours.push((e as CustomEvent).detail));
     const paint = () => deep(host, '[part="paint"]') as HTMLButtonElement;
     expect(paint().getAttribute('aria-pressed')).toBe('false');
     paint().click();
@@ -208,7 +208,7 @@ describe('<tessera-field-card> on a category', () => {
   it('gives a value the colour chosen in its picker, drawn at once and reported as one change', async () => {
     const {host, store} = await mountCard('archive');
     const chosen: unknown[] = [];
-    host.addEventListener('tessera-valuecolour', (e) => chosen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-valuecolour', (e) => chosen.push((e as CustomEvent).detail));
     store.set('legend', {...store.get('legend'), colourBy: 'archive', categories: {archive: [{key: 'cs', code: 1, title: null}]}, ranks: {archive: {1: 0}}});
     await answer(host, store, [{rows: [{key: 'cs', count: 10}], total: 10}], [{rows: [{key: 'cs', count: 10}], total: 10}]);
     (rows(host)[0]!.querySelector('button[part="swatch"]') as HTMLButtonElement).click();
@@ -230,7 +230,7 @@ describe('<tessera-field-card> on a category', () => {
   it('shows a custom colour as it is dragged, and puts back the colour from before when the picker closes before the drag ends', async () => {
     const {host, store} = await mountCard('archive');
     const chosen: unknown[] = [];
-    host.addEventListener('tessera-valuecolour', (e) => chosen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-valuecolour', (e) => chosen.push((e as CustomEvent).detail));
     store.set('legend', {...store.get('legend'), colourBy: 'archive', categories: {archive: [{key: 'cs', code: 1, title: null}]}, ranks: {archive: {1: 0}}});
     await answer(host, store, [{rows: [{key: 'cs', count: 10}], total: 10}], [{rows: [{key: 'cs', count: 10}], total: 10}]);
     const swatchStyle = () => rows(host)[0]!.querySelector('[part="swatch"]')!.getAttribute('style');
@@ -264,7 +264,7 @@ describe('<tessera-field-card> on a category', () => {
     expect(rows(host)).toHaveLength(0);
     expect(deepAll(host, '[part="spark"] span').map((b) => (b as HTMLElement).style.height)).toEqual(['14px', '5px']);
     const toggled: unknown[] = [];
-    card.addEventListener('tessera-fold', (e) => toggled.push((e as CustomEvent).detail));
+    card.addEventListener('mosaica-fold', (e) => toggled.push((e as CustomEvent).detail));
     (deep(host, '[part="fold"]') as HTMLButtonElement).click();
     await settle(host);
     expect(toggled).toEqual([{field: 'archive', folded: false}]);
@@ -272,7 +272,7 @@ describe('<tessera-field-card> on a category', () => {
   });
 });
 
-describe('<tessera-field-card> on a date', () => {
+describe('<mosaica-field-card> on a date', () => {
   const YEAR = (y: number) => Date.UTC(y, 0, 1);
   const bins = (counts: number[]) => counts.map((count, i) => ({lower: YEAR(2019 + i), upper: YEAR(2020 + i), count}));
 
@@ -365,12 +365,12 @@ describe('<tessera-field-card> on a date', () => {
   });
 });
 
-describe('<tessera-field-card> on a layer', () => {
+describe('<mosaica-field-card> on a layer', () => {
   const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 1, parentIds, childCount: 0, slot: null});
 
   it('ranks the clusters the map draws by their counts in view, leaving out its own clauses, and names each as its table does, with its path from browse pages', async () => {
-    const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
-    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const host = await mount('<mosaica-field-card field="cluster:topics"></mosaica-field-card>');
+    const card = host.querySelector('mosaica-field-card') as MosaicaFieldCard;
     const store = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
     store.set('view', {...store.get('view'), id: 's0'});
     store.setBrowse('p:7', {artifacts: [], parents: [row(1n, 'physics', [0n])], next: null});
@@ -391,7 +391,7 @@ describe('<tessera-field-card> on a layer', () => {
     expect(spec(store, 'field-match')).toEqual({groupings: [{by: {layer: 'topics', artifacts: [7n, 8n], paletteSize: 'drawn'}}, ranked(1)], withoutMembersOf: 'topics'});
     answerAggregate(store, 'field-match', aggregateEntry([{rows: [{key: 8n, count: 50}, {key: 7n, count: 90}], total: 140}, {rows: [{key: 7n, count: 90}], groups: 12}]));
     await settle(host);
-    expect(deep(host, 'tessera-cluster-filter')!.getAttribute('placeholder')).toBe('Search 12 clusters');
+    expect(deep(host, 'mosaica-cluster-filter')!.getAttribute('placeholder')).toBe('Search 12 clusters');
     // A share of a few per cent still reads as a bar; plain percentages otherwise.
     const optics = rows(host)[0]!;
     expect((optics.querySelector('[part="bar-match"]') as HTMLElement).getAttribute('style')).toContain('max(3px, 64.3%)');
@@ -406,15 +406,15 @@ describe('<tessera-field-card> on a layer', () => {
     // Each cluster's parents, and its first parent's, and nothing else.
     expect(store.calls.filter((c) => c.name === 'browse').map((c) => (c.args[0] as {parent?: bigint}).parent ?? 'roots')).toEqual([7n, 8n, 1n]);
     const clauses: unknown[] = [];
-    host.addEventListener('tessera-clausechange', (e) => clauses.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-clausechange', (e) => clauses.push((e as CustomEvent).detail));
     (rows(host)[1]!.querySelector('[part="highlight"]') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([{layer: 'topics', artifact: 8n, outside: false, verb: 'highlight', label: 'lasers'}]);
     expect(clauses).toEqual([{id: '8', layer: 'topics', outside: false, verb: 'highlight', on: true}]);
   });
 
   it('colours each cluster’s swatch from the slot its row carries, a chosen colour over it, in the store’s palette', async () => {
-    const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
-    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const host = await mount('<mosaica-field-card field="cluster:topics"></mosaica-field-card>');
+    const card = host.querySelector('mosaica-field-card') as MosaicaFieldCard;
     const store = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
     store.set('view', {...store.get('view'), id: 's0'});
     store.set('legend', {...store.get('legend'), colourBy: 'cluster:topics'});
@@ -450,8 +450,8 @@ describe('<tessera-field-card> on a layer', () => {
   });
 
   it('opens the colour picker from a cluster’s swatch, sets the colour chosen on the store over its slot’s, and reports it', async () => {
-    const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
-    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const host = await mount('<mosaica-field-card field="cluster:topics"></mosaica-field-card>');
+    const card = host.querySelector('mosaica-field-card') as MosaicaFieldCard;
     const store = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
     store.set('view', {...store.get('view'), id: 's0'});
     store.set('legend', {...store.get('legend'), colourBy: 'cluster:topics'});
@@ -462,7 +462,7 @@ describe('<tessera-field-card> on a layer', () => {
     answerAggregate(store, 'field-subject', aggregateEntry([{rows: [{key: 7n, count: 9, title: 'optics', slot: 2}], total: 9}], 's0', undefined, 'tableau10'));
     await settle(host);
     const chosen: unknown[] = [];
-    host.addEventListener('tessera-clustercolour', (e) => chosen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-clustercolour', (e) => chosen.push((e as CustomEvent).detail));
     const swatch = () => rows(host)[0]!.querySelector('[part="swatch"]') as HTMLButtonElement;
     expect(swatch().tagName).toBe('BUTTON');
     swatch().click();
@@ -491,8 +491,8 @@ describe('<tessera-field-card> on a layer', () => {
 
   it('ranks a flat layer’s clusters with no cut', async () => {
     const flat = {...topicsLayer, name: 'groups', hierarchy: {kind: 'flat', pruneChildren: false}} as Meta['layers'][number];
-    const host = await mount('<tessera-field-card field="cluster:groups"></tessera-field-card>');
-    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const host = await mount('<mosaica-field-card field="cluster:groups"></mosaica-field-card>');
+    const card = host.querySelector('mosaica-field-card') as MosaicaFieldCard;
     const store = fakeStore({meta: {...META, layers: [flat]}, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
     store.set('view', {...store.get('view'), id: 's0'});
     card.store = store;
@@ -501,11 +501,11 @@ describe('<tessera-field-card> on a layer', () => {
   });
 });
 
-describe('<tessera-field-card> across a change of viewer', () => {
+describe('<mosaica-field-card> across a change of viewer', () => {
   it('drops a browse page still loading for the viewer before, so nothing it met names a cluster to the next', async () => {
     const row = (id: bigint, name: string, parentIds: bigint[] = []) => ({tesseraId: id, key: null, name, maskedCount: 10n, matchedCount: null, rung: 0, parentIds, childCount: 0, slot: null});
-    const host = await mount('<tessera-field-card field="cluster:topics"></tessera-field-card>');
-    const card = host.querySelector('tessera-field-card') as TesseraFieldCard;
+    const host = await mount('<mosaica-field-card field="cluster:topics"></mosaica-field-card>');
+    const card = host.querySelector('mosaica-field-card') as MosaicaFieldCard;
     const before = fakeStore({meta: META, status: status({}), filters: filtersOf({filter: {}, highlight: {}})});
     before.set('view', {...before.get('view'), id: 's0'});
     // The page of the cluster's parents waits until the viewer has changed.
@@ -540,10 +540,10 @@ describe('<tessera-field-card> across a change of viewer', () => {
   });
 });
 
-describe('<tessera-field-card> on text', () => {
+describe('<mosaica-field-card> on text', () => {
   it('is the field’s search box, and counts nothing', async () => {
     const {host, store} = await mountCard('title');
-    expect(deep(host, 'tessera-filter')).not.toBeNull();
+    expect(deep(host, 'mosaica-filter')).not.toBeNull();
     expect(deep(host, '[part="paint"]')).toBeNull();
     expect(registered(store).size).toBe(0);
   });

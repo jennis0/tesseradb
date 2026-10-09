@@ -24,7 +24,7 @@ suite once pinned θ and the mark caps "above any fixture total", which is true 
 false at ten million items, where the whole-extent tile holds ten million visible rows against a
 million-mark budget. But every tile's own row in the tiles batch already says whether truncation
 happened: ``served == matched`` means it did not — `matched` is the selection's pool, and on an
-unfiltered viewport it equals `visible` (`tessera-engine`'s viewport module states the pair) — and
+unfiltered viewport it equals `visible` (`mosaica-engine`'s viewport module states the pair) — and
 ``served < matched`` means it did. The diff therefore:
 
 - takes **membership evidence** only from untruncated tiles (and from drill-down flips, which no

@@ -4,8 +4,8 @@
 //   node clients/ts/viewer/smoke-suggest.mjs [--url http://localhost:5187] [--shot-dir DIR]
 //     [--headed] [--executable /path/to/chrome]
 //
-// Requires a running `tessera serve` over the GeoNames bundle and a running `vite dev`, with a
-// dataset document (`?datasets=` or `VITE_TESSERA_DATASETS`). `country` is `derived` with 254
+// Requires a running `mosaica serve` over the GeoNames bundle and a running `vite dev`, with a
+// dataset document (`?datasets=` or `VITE_MOSAICA_DATASETS`). `country` is `derived` with 254
 // values (`test_corpora/geonames/corpus.toml`).
 //
 // It checks against a real server what the component tests with a fake store cannot: that
@@ -16,7 +16,7 @@ import {flags, isSupersededAbort, launchBrowser} from './smoke-browser.mjs';
 
 const args = flags();
 const url = args.url ?? 'http://localhost:5187';
-const shotDir = args['shot-dir'] ?? '/tmp/tessera-smoke-suggest';
+const shotDir = args['shot-dir'] ?? '/tmp/mosaica-smoke-suggest';
 const settleMs = Number(args.settle ?? 4000);
 
 const browser = await launchBrowser(args);
@@ -58,7 +58,7 @@ const settled = async (limitMs = 20_000) => {
   let stable = 0;
   while (Date.now() - started < limitMs) {
     await page.waitForTimeout(400);
-    const marks = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    const marks = await page.evaluate(() => window.__mosaicaProbe?.marks ?? -1);
     if (marks === last) {
       if (++stable >= 3) return true;
     } else {
@@ -100,7 +100,7 @@ await settled();
 await shot('01-broad-opened');
 
 // Open the field column: at a narrow width it is behind the `Fields` tab.
-const filterPanel = page.locator('tessera-filter-panel').first();
+const filterPanel = page.locator('mosaica-filter-panel').first();
 if ((await filterPanel.count()) === 0 || !(await filterPanel.isVisible().catch(() => false))) {
   const tab = page.locator('[part="tabs"] button', {hasText: 'Fields'}).first();
   if (await tab.count()) {
@@ -112,10 +112,10 @@ check('the filter panel is reachable', (await filterPanel.count()) > 0);
 
 // The country card, listed for this run.
 await page.evaluate(() => {
-  const explorer = /** @type {HTMLElement & {pinnedFilters: string} | null} */ (document.querySelector('tessera-explorer'));
+  const explorer = /** @type {HTMLElement & {pinnedFilters: string} | null} */ (document.querySelector('mosaica-explorer'));
   if (explorer) explorer.pinnedFilters = 'country';
 });
-const country = page.locator('tessera-filter[column="country"]').first();
+const country = page.locator('mosaica-filter[column="country"]').first();
 await country.waitFor({state: 'attached', timeout: 10_000}).catch(() => {});
 await page.waitForTimeout(500);
 await shot('03-country-card');

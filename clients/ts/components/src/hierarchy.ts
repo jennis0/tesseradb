@@ -1,8 +1,8 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {artifactName, browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
-import {refusalOf} from '@tesseradb/client/internal';
-import {TesseraElement, UNNAMED, emit, idString} from './base.js';
+import {artifactName, browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@mosaicajs/client';
+import {refusalOf} from '@mosaicajs/client/internal';
+import {MosaicaElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {renderState, stateOf} from './states.js';
@@ -44,11 +44,11 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * paged.
  *
  * @summary A layer's hierarchy, browsed apart from the viewport.
- * @tagname tessera-hierarchy
+ * @tagname mosaica-hierarchy
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A row's
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clausechange']>} mosaica-clausechange - A row's
  *   name, highlight or filter button put a `member_of` clause on or took it off.
- * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - A row's Fit
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-artifactfit']>} mosaica-artifactfit - A row's Fit
  *   button was pressed.
  * @csspart title - The heading.
  * @csspart state - The state line, with `data-state`.
@@ -63,8 +63,8 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * @csspart name - A row's name, with `data-unnamed` where it has none, which highlights the artifact
  *   when pressed.
  * @csspart counts - A row's counts.
- * @csspart count-matched - A row's matched `<tessera-count>`, while a filter is set.
- * @csspart count-masked - A row's masked `<tessera-count>`.
+ * @csspart count-matched - A row's matched `<mosaica-count>`, while a filter is set.
+ * @csspart count-masked - A row's masked `<mosaica-count>`.
  * @csspart actions - A row's buttons.
  * @csspart highlight - A row's highlight button, with `aria-pressed`.
  * @csspart filter - A row's filter button, with `aria-pressed`.
@@ -76,7 +76,7 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * @csspart children - An expanded row's children.
  * @csspart more - The More button that fetches the next page.
  */
-export class TesseraHierarchy extends TesseraElement {
+export class MosaicaHierarchy extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -105,23 +105,23 @@ export class TesseraHierarchy extends TesseraElement {
         gap: 6px;
         min-height: 28px;
         padding: 0 4px 0 calc(2px + var(--depth, 0) * 14px);
-        border-radius: var(--_tessera-radius-control);
+        border-radius: var(--_mosaica-radius-control);
       }
       [part='row']:hover {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part='row'][data-clause~='filter'] {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
         font-weight: 500;
       }
       [part='row'][data-clause~='highlight'] {
-        background: var(--_tessera-highlight-soft);
-        color: var(--_tessera-highlight);
+        background: var(--_mosaica-highlight-soft);
+        color: var(--_mosaica-highlight);
       }
       [part='expander'] {
         display: inline-flex;
         width: 14px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       [part='expander'][data-leaf] {
         visibility: hidden;
@@ -138,7 +138,7 @@ export class TesseraHierarchy extends TesseraElement {
         gap: 6px;
         align-items: baseline;
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       /* Over the counts, so hidden buttons take no width from the name; still reachable by Tab. */
       [part='actions'] {
@@ -149,8 +149,8 @@ export class TesseraHierarchy extends TesseraElement {
         display: inline-flex;
         gap: 2px;
         padding-left: 6px;
-        background: var(--_tessera-surface-2);
-        border-radius: var(--_tessera-radius-control);
+        background: var(--_mosaica-surface-2);
+        border-radius: var(--_mosaica-radius-control);
         opacity: 0;
         pointer-events: none;
       }
@@ -162,12 +162,12 @@ export class TesseraHierarchy extends TesseraElement {
       [part='actions'] button {
         display: inline-flex;
         padding: 3px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         border-radius: 4px;
       }
       [part='actions'] button:hover {
-        color: var(--_tessera-ink);
-        background: var(--_tessera-surface-3);
+        color: var(--_mosaica-ink);
+        background: var(--_mosaica-surface-3);
       }
       [part='dismiss'] {
         display: inline-grid;
@@ -176,18 +176,18 @@ export class TesseraHierarchy extends TesseraElement {
         height: 20px;
         flex: none;
         border-radius: 4px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='dismiss'][data-verb='highlight'] {
-        color: var(--_tessera-highlight);
+        color: var(--_mosaica-highlight);
       }
       [part='dismiss']:hover {
-        background: var(--_tessera-surface-3);
+        background: var(--_mosaica-surface-3);
       }
       [part='also'] {
         padding-left: calc(18px + var(--depth, 0) * 14px);
         font-size: 11px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       [part='more'] {
         margin: 4px 0 4px calc(18px + var(--depth, 0) * 14px);
@@ -443,7 +443,7 @@ export class TesseraHierarchy extends TesseraElement {
         ? withoutMember(held, layer.name, id, verb)
         : withMember(held, {layer: layer.name, artifact: id, outside: false, verb, ...(label === undefined ? {} : {label})})
     );
-    emit(this, 'tessera-clausechange', {id: idString(id), layer: layer.name, outside: false, verb, on: !on});
+    emit(this, 'mosaica-clausechange', {id: idString(id), layer: layer.name, outside: false, verb, on: !on});
   }
 
   override render(): TemplateResult | typeof nothing {
@@ -506,8 +506,8 @@ export class TesseraHierarchy extends TesseraElement {
           @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${name ?? UNNAMED}</button>
         <span part="counts">
           ${filtered && node.row.matchedCount !== null
-            ? html`<tessera-count part="count-matched" .masked=${masked(node.row.matchedCount)}></tessera-count>/`
-            : nothing}<tessera-count part="count-masked" .masked=${masked(node.row.maskedCount)}></tessera-count>
+            ? html`<mosaica-count part="count-matched" .masked=${masked(node.row.matchedCount)}></mosaica-count>/`
+            : nothing}<mosaica-count part="count-masked" .masked=${masked(node.row.maskedCount)}></mosaica-count>
         </span>
         ${clauses.map(
           (verb) => html`<button part="dismiss" type="button" data-verb=${verb} aria-label=${verb === 'highlight' ? `Stop highlighting ${name ?? UNNAMED}` : `Stop filtering to ${name ?? UNNAMED}`}
@@ -522,7 +522,7 @@ export class TesseraHierarchy extends TesseraElement {
             // A filter layer draws nothing, so there is nothing to fit to.
             drawn
               ? html`<button part="fit" type="button" title="Fit the map to it"
-                  @click=${() => emit(this, 'tessera-artifactfit', {id: idString(node.row.tesseraId)})}>${icon('fit', 13)}</button>`
+                  @click=${() => emit(this, 'mosaica-artifactfit', {id: idString(node.row.tesseraId)})}>${icon('fit', 13)}</button>`
               : nothing
           }
         </span>
@@ -542,10 +542,10 @@ export class TesseraHierarchy extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-hierarchy', TesseraHierarchy);
+defineOnce('mosaica-hierarchy', MosaicaHierarchy);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-hierarchy': TesseraHierarchy;
+    'mosaica-hierarchy': MosaicaHierarchy;
   }
 }

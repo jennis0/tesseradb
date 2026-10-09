@@ -20,11 +20,11 @@ import {
   type Meta,
   type PaletteName,
   type Store
-} from '@tesseradb/client';
-import {CATEGORY_PALETTES, RAMPS} from '@tesseradb/deck';
-import {colourOfFraction, css as rgb, fractionOf, hexOf} from '@tesseradb/deck/internal';
+} from '@mosaicajs/client';
+import {CATEGORY_PALETTES, RAMPS} from '@mosaicajs/deck';
+import {colourOfFraction, css as rgb, fractionOf, hexOf} from '@mosaicajs/deck/internal';
 import {HeldAggregate, artifactGroupings, countsByKey, levelOf, listedGroups, rankedGrouping} from './aggregate.js';
-import {TesseraElement, UNNAMED, columnCaption, countText, dateRangeText, emit, idString, keyTitle, shortDateText} from './base.js';
+import {MosaicaElement, UNNAMED, columnCaption, countText, dateRangeText, emit, idString, keyTitle, shortDateText} from './base.js';
 import {ColourPicker, pickerStyles} from './colour-picker.js';
 import {clusterColour, colouringOf, holdColours, paletteValueColour, setClusterColours, setValueColours, valueColour, valueMet, watchChoices} from './colouring.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -121,9 +121,9 @@ function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
  * field, the values it leaves out are greyed and show only how many items they would add, and the
  * shares are of what the filter keeps. Hovering or focusing a row shows Highlight and Filter, which
  * put the value in or out of the field's clause in that position. Over the rows is the field's
- * search box, the typeahead of `<tessera-filter>` or `<tessera-cluster-filter>`, whose choice joins
+ * search box, the typeahead of `<mosaica-filter>` or `<mosaica-cluster-filter>`, whose choice joins
  * the filter. A levelled layer's card has a Level choice in its heading, the deepest level by
- * default, which fires `tessera-levelchange`. A cluster card ranks a `nested` or `dag` layer's
+ * default, which fires `mosaica-levelchange`. A cluster card ranks a `nested` or `dag` layer's
  * clusters at the cut the map draws (`cut: 'drawn'`), and a flat or levelled layer's at its level.
  * A cluster is named as the aggregate's table names it, which is the name the layer's browse pages
  * give the same viewer. On a `nested` or `dag` layer its path is named from a browse page of its
@@ -138,35 +138,35 @@ function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
  * on the field is outlined on the plot. The heading gives the field's figures: how many items hold
  * a value and their mean, or their range while folded.
  *
- * A text or keyword field is its `<tessera-filter>` search box.
+ * A text or keyword field is its `<mosaica-filter>` search box.
  *
  * The paint button colours the map by the field, or by nothing where it already does
  * (`Store.setColourBy`), and is pressed while it does. Then a category or cluster card shows each
  * value's colour beside it, and a number or date card the ramp under its plot. Each colour is a
  * button that opens a colour picker: the palette's colours and a lighter row, a custom area with a
  * hue bar and a hex field, and Reset, which gives the value or the cluster its palette colour back.
- * A choice applies at once and fires `tessera-valuecolour` for a category value, written to the
- * colour choices every element over the store shares, or `tessera-clustercolour` for a cluster,
+ * A choice applies at once and fires `mosaica-valuecolour` for a category value, written to the
+ * colour choices every element over the store shares, or `mosaica-clustercolour` for a cluster,
  * set on the store with its other chosen colours (`Store.setArtifactColours`).
  *
  * `folded` draws the heading alone, with a small chart of the subject's counts.
  *
  * @summary One field's counts in view and overall, with its filter and highlight.
- * @tagname tessera-field-card
+ * @tagname mosaica-field-card
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A row's
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-filterchange']>} mosaica-filterchange - A row's
  *   Highlight or Filter, or the range box, changed the field's clause.
- * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A cluster
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clausechange']>} mosaica-clausechange - A cluster
  *   row's Highlight or Filter put a `member_of` clause on or took it off.
- * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The paint
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-colourchange']>} mosaica-colourchange - The paint
  *   button changed what the map is coloured by.
- * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-levelchange']>} mosaica-levelchange - The Level
  *   choice of a levelled layer's card changed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A category
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-valuecolour']>} mosaica-valuecolour - A category
  *   value's colour was chosen or reset in the colour picker.
- * @fires {CustomEvent<TesseraEventDetails['tessera-clustercolour']>} tessera-clustercolour - A
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-clustercolour']>} mosaica-clustercolour - A
  *   cluster's colour was chosen or reset in the colour picker.
- * @fires {CustomEvent<TesseraEventDetails['tessera-fold']>} tessera-fold - The fold button folded or
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-fold']>} mosaica-fold - The fold button folded or
  *   opened the card.
  * @csspart head - The heading: the name, what it notes, and the buttons.
  * @csspart title - The field's name.
@@ -205,10 +205,10 @@ function binsOf(table: AggregateTable | undefined, timestamp: boolean): Bin[] {
  * @csspart hue - The picker's hue bar, a slider.
  * @csspart hex - The picker's hex field.
  * @csspart reset - The picker's Reset button.
- * @csspart filter-<part> - A part of the inner `<tessera-filter>`.
- * @csspart cluster-filter-<part> - A part of the inner `<tessera-cluster-filter>`.
+ * @csspart filter-<part> - A part of the inner `<mosaica-filter>`.
+ * @csspart cluster-filter-<part> - A part of the inner `<mosaica-cluster-filter>`.
  */
-export class TesseraFieldCard extends TesseraElement {
+export class MosaicaFieldCard extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -216,8 +216,8 @@ export class TesseraFieldCard extends TesseraElement {
     css`
       :host {
         display: block;
-        padding: 10px var(--_tessera-panel-inline, 14px) 12px;
-        border-bottom: 1px solid var(--_tessera-line-2);
+        padding: 10px var(--_mosaica-panel-inline, 14px) 12px;
+        border-bottom: 1px solid var(--_mosaica-line-2);
       }
       :host([folded]) {
         padding-top: 6px;
@@ -238,14 +238,14 @@ export class TesseraFieldCard extends TesseraElement {
         font-weight: 600;
         letter-spacing: 0;
         text-transform: none;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
         white-space: nowrap;
       }
       [part='sub'] {
         flex: 1 1 auto;
         min-width: 0;
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -256,7 +256,7 @@ export class TesseraFieldCard extends TesseraElement {
       }
       [part='sub'] select {
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       [part='spark'] {
         flex: none;
@@ -271,7 +271,7 @@ export class TesseraFieldCard extends TesseraElement {
         flex: 1 1 0;
         min-height: 1px;
         border-radius: 1px 1px 0 0;
-        background: var(--_tessera-bar-match);
+        background: var(--_mosaica-bar-match);
       }
       :host([compact]) [part='spark'] {
         width: 72px;
@@ -303,7 +303,7 @@ export class TesseraFieldCard extends TesseraElement {
         fill: currentColor;
       }
       :host([compact]) [part='spark'] span {
-        background: var(--_tessera-bar);
+        background: var(--_mosaica-bar);
       }
       [part='paint'],
       [part='fold'] {
@@ -313,21 +313,21 @@ export class TesseraFieldCard extends TesseraElement {
         display: grid;
         place-items: center;
         border-radius: 5px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='paint'] {
-        border: 1px solid var(--_tessera-line);
-        background: var(--_tessera-surface);
-        color: color-mix(in srgb, var(--_tessera-ink) 82%, var(--_tessera-surface));
+        border: 1px solid var(--_mosaica-line);
+        background: var(--_mosaica-surface);
+        color: color-mix(in srgb, var(--_mosaica-ink) 82%, var(--_mosaica-surface));
       }
       [part='paint'][aria-pressed='true'] {
-        border-color: var(--_tessera-accent);
-        background: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
+        border-color: var(--_mosaica-accent);
+        background: var(--_mosaica-accent);
+        color: var(--_mosaica-accent-ink);
       }
       [part='fold']:hover,
       [part='paint'][aria-pressed='false']:hover {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       .body {
         margin-top: 6px;
@@ -338,7 +338,7 @@ export class TesseraFieldCard extends TesseraElement {
       .search {
         display: block;
         margin-bottom: 4px;
-        --_tessera-input-height: 28px;
+        --_mosaica-input-height: 28px;
       }
       [part~='row'] {
         position: relative;
@@ -353,7 +353,7 @@ export class TesseraFieldCard extends TesseraElement {
       [part~='row']:hover,
       [part~='row']:focus-within,
       [part~='row'][data-shown] {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part~='row'][data-state='out'] {
         opacity: 0.55;
@@ -363,7 +363,7 @@ export class TesseraFieldCard extends TesseraElement {
       }
       [part~='row'][data-state='lit'] [part='name'] {
         font-weight: 600;
-        color: var(--_tessera-highlight);
+        color: var(--_mosaica-highlight);
       }
       .mark {
         width: 12px;
@@ -379,7 +379,7 @@ export class TesseraFieldCard extends TesseraElement {
       /* A value the map has given no colour yet: an outline, not a grey that reads as a colour. */
       [part='swatch'][data-unmet] {
         background: none;
-        box-shadow: inset 0 0 0 1px var(--_tessera-line-control);
+        box-shadow: inset 0 0 0 1px var(--_mosaica-line-control);
       }
       button[part='swatch'] {
         cursor: pointer;
@@ -408,7 +408,7 @@ export class TesseraFieldCard extends TesseraElement {
         overflow: hidden;
         text-overflow: ellipsis;
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       .bars {
         position: relative;
@@ -422,27 +422,27 @@ export class TesseraFieldCard extends TesseraElement {
         border-radius: 2px;
       }
       [part='bar-match'] {
-        background: var(--_tessera-bar-match);
+        background: var(--_mosaica-bar-match);
       }
       [part='bar-subject'] {
-        background: var(--_bar, var(--_tessera-bar));
+        background: var(--_bar, var(--_mosaica-bar));
       }
       :host([highlighting]) {
-        --_bar: var(--_tessera-bar-highlight);
+        --_bar: var(--_mosaica-bar-highlight);
       }
       [part='count'] {
         text-align: right;
         font-size: 12px;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       [part='count'] .sub {
         font-weight: 500;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
       }
       :host([highlighting]) [part='count'] .sub {
-        color: var(--_tessera-highlight);
+        color: var(--_mosaica-highlight);
       }
       /* The verbs share the counts' cell and take their place while the row is hovered or holds
          focus. Hidden, they stay in the tab order, so Tab reaches them and shows them. */
@@ -474,19 +474,19 @@ export class TesseraFieldCard extends TesseraElement {
         height: 22px;
         display: grid;
         place-items: center;
-        border: 1px solid var(--_tessera-line);
+        border: 1px solid var(--_mosaica-line);
         border-radius: 5px;
-        background: var(--_tessera-surface);
-        color: color-mix(in srgb, var(--_tessera-ink) 82%, var(--_tessera-surface));
+        background: var(--_mosaica-surface);
+        color: color-mix(in srgb, var(--_mosaica-ink) 82%, var(--_mosaica-surface));
       }
       [part='verbs'] button[aria-pressed='true'] {
-        border-color: var(--_tessera-accent);
-        background: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
+        border-color: var(--_mosaica-accent);
+        background: var(--_mosaica-accent);
+        color: var(--_mosaica-accent-ink);
       }
       [part='verbs'] [part='highlight'][aria-pressed='true'] {
-        border-color: var(--_tessera-highlight);
-        background: var(--_tessera-highlight);
+        border-color: var(--_mosaica-highlight);
+        background: var(--_mosaica-highlight);
       }
       [part='more'] {
         align-self: flex-start;
@@ -495,7 +495,7 @@ export class TesseraFieldCard extends TesseraElement {
       .none {
         padding: 4px 0 0 20px;
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       /* The histogram. */
       .hist {
@@ -536,16 +536,16 @@ export class TesseraFieldCard extends TesseraElement {
         top: -4px;
         bottom: -2px;
         border-radius: 4px;
-        border: 1.5px solid var(--_tessera-ink);
-        background: color-mix(in srgb, var(--_tessera-ink) 6%, transparent);
+        border: 1.5px solid var(--_mosaica-ink);
+        background: color-mix(in srgb, var(--_mosaica-ink) 6%, transparent);
         pointer-events: none;
       }
       [part~='band'][data-verb='brush'] {
         border-style: dashed;
       }
       [part~='band'][data-verb='highlight'] {
-        border-color: var(--_tessera-highlight);
-        background: color-mix(in srgb, var(--_tessera-highlight) 8%, transparent);
+        border-color: var(--_mosaica-highlight);
+        background: color-mix(in srgb, var(--_mosaica-highlight) 8%, transparent);
       }
       [part='ramp'] {
         height: 6px;
@@ -557,7 +557,7 @@ export class TesseraFieldCard extends TesseraElement {
         justify-content: space-between;
         margin-top: 4px;
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         font-variant-numeric: tabular-nums;
       }
       [part='brush'] {
@@ -568,16 +568,16 @@ export class TesseraFieldCard extends TesseraElement {
         flex-direction: column;
         gap: 8px;
         padding: 10px;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
         font-size: 12px;
         white-space: nowrap;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='brush'] b {
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
         font-weight: 600;
       }
       [part='brush'] .acts {
@@ -594,13 +594,13 @@ export class TesseraFieldCard extends TesseraElement {
         font-weight: 500;
       }
       [part='brush-filter'] {
-        background: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
+        background: var(--_mosaica-accent);
+        color: var(--_mosaica-accent-ink);
       }
       [part='brush-highlight'] {
-        border: 1px solid color-mix(in srgb, var(--_tessera-highlight) 18%, var(--_tessera-highlight-soft)) !important;
-        background: var(--_tessera-highlight-soft);
-        color: var(--_tessera-highlight);
+        border: 1px solid color-mix(in srgb, var(--_mosaica-highlight) 18%, var(--_mosaica-highlight-soft)) !important;
+        background: var(--_mosaica-highlight-soft);
+        color: var(--_mosaica-highlight);
       }
       .text {
         margin-top: 6px;
@@ -848,7 +848,7 @@ export class TesseraFieldCard extends TesseraElement {
     const draft = s.get('filters').draft;
     const next: FilterDraft = {...draft, [verb]: {...draft[verb], [this.field]: clause}};
     s.setFilters(next);
-    emit(this, 'tessera-filterchange', {column: this.field, verb, expr: composeFilters(next, verb)});
+    emit(this, 'mosaica-filterchange', {column: this.field, verb, expr: composeFilters(next, verb)});
   }
 
   /** Put a cluster's `member_of` clause in `verb` on or off. */
@@ -860,7 +860,7 @@ export class TesseraFieldCard extends TesseraElement {
     const members = s.get('filters').members;
     const on = members.some((m) => m.layer === layer && m.artifact === artifact && m.verb === verb && !m.outside);
     s.setMembers(on ? withoutMember(members, layer, artifact, verb) : withMember(members, {layer, artifact, outside: false, verb, ...(name === null ? {} : {label: name})}));
-    emit(this, 'tessera-clausechange', {id, layer, outside: false, verb, on: !on});
+    emit(this, 'mosaica-clausechange', {id, layer, outside: false, verb, on: !on});
   }
 
   /** Colour the map by this field, or by nothing where it already is. */
@@ -869,19 +869,19 @@ export class TesseraFieldCard extends TesseraElement {
     if (!s) return;
     const colourBy = s.get('legend').colourBy === this.field ? null : this.field;
     s.setColourBy(colourBy);
-    emit(this, 'tessera-colourchange', {colourBy});
+    emit(this, 'mosaica-colourchange', {colourBy});
   }
 
   private chooseLevel(value: string): void {
     const level = value === '' ? null : Number(value);
     this.level = level;
-    emit(this, 'tessera-levelchange', {level});
+    emit(this, 'mosaica-levelchange', {level});
   }
 
   private fold(): void {
     this.folded = !this.folded;
     this.brush = null;
-    emit(this, 'tessera-fold', {field: this.field, folded: this.folded});
+    emit(this, 'mosaica-fold', {field: this.field, folded: this.folded});
   }
 
   // ---- render ----------------------------------------------------------------------------------
@@ -902,7 +902,7 @@ export class TesseraFieldCard extends TesseraElement {
       html`<div part="head"><span part="title">${title}</span>${this.folded && this.compact && colouring ? html`<span class="painted" role="img" aria-label="Colouring the map">${icon('drop', 11, 2)}</span>` : nothing}${sub}${this.folded ? this.spark(s, kind, colouring) : nothing}${paint}${fold}</div>`;
     if (kind === 'histogram') return this.histogram(s, meta, head, colouring);
     if (kind === 'search') {
-      const body = this.folded ? nothing : html`<tessera-filter class="text" exportparts=${exportparts('filter')} column=${this.field} placeholder=${`Search ${title.toLowerCase()}`} .store=${s}></tessera-filter>`;
+      const body = this.folded ? nothing : html`<mosaica-filter class="text" exportparts=${exportparts('filter')} column=${this.field} placeholder=${`Search ${title.toLowerCase()}`} .store=${s}></mosaica-filter>`;
       return html`${head(html`<span part="sub"></span>`)}${body}`;
     }
     return this.valueCard(s, kind, layer, head, colouring);
@@ -1046,8 +1046,8 @@ export class TesseraFieldCard extends TesseraElement {
     const values = (kind === 'category' ? match?.result?.tables[0] : match?.result?.tables.at(-1))?.groups ?? null;
     const search =
       kind === 'category'
-        ? html`<tessera-filter class="search" exportparts=${exportparts('filter')} column=${this.field} placeholder=${values === null ? 'Search values' : `Search ${values.toLocaleString('en-GB')} values`} .store=${s}></tessera-filter>`
-        : html`<tessera-cluster-filter class="search" exportparts=${exportparts('cluster-filter')} layer=${layer!.name} placeholder=${values === null ? 'Search clusters' : `Search ${values.toLocaleString('en-GB')} clusters`} .store=${s}></tessera-cluster-filter>`;
+        ? html`<mosaica-filter class="search" exportparts=${exportparts('filter')} column=${this.field} placeholder=${values === null ? 'Search values' : `Search ${values.toLocaleString('en-GB')} values`} .store=${s}></mosaica-filter>`
+        : html`<mosaica-cluster-filter class="search" exportparts=${exportparts('cluster-filter')} layer=${layer!.name} placeholder=${values === null ? 'Search clusters' : `Search ${values.toLocaleString('en-GB')} clusters`} .store=${s}></mosaica-cluster-filter>`;
     const moreButton =
       more > 0 || this.expanded
         ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = !this.expanded)}>${this.expanded ? 'Show fewer' : `${more.toLocaleString('en-GB')} more${this.highlighting(s) ? '' : ' in view'}`}</button>`
@@ -1262,7 +1262,7 @@ export class TesseraFieldCard extends TesseraElement {
         current: () => valueColour(s, this.field, r.key),
         apply: (hex, final) => {
           setValueColours(s, this.field, [{value: r.key, colour: hex}]);
-          if (final) emit(this, 'tessera-valuecolour', {column: this.field, changes: [{value: r.key, colour: hex}]});
+          if (final) emit(this, 'mosaica-valuecolour', {column: this.field, changes: [{value: r.key, colour: hex}]});
         },
         hold: () => holdColours(s)
       });
@@ -1278,7 +1278,7 @@ export class TesseraFieldCard extends TesseraElement {
       current: () => clusterColour(s, layer, id, own),
       apply: (hex, final) => {
         setClusterColours(s, layer, [{tesseraId: id, colour: hex}]);
-        if (final) emit(this, 'tessera-clustercolour', {layer, changes: [{tesseraId: r.key, colour: hex}]});
+        if (final) emit(this, 'mosaica-clustercolour', {layer, changes: [{tesseraId: r.key, colour: hex}]});
       },
       hold: () => holdColours(s)
     });
@@ -1286,10 +1286,10 @@ export class TesseraFieldCard extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-field-card', TesseraFieldCard);
+defineOnce('mosaica-field-card', MosaicaFieldCard);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-field-card': TesseraFieldCard;
+    'mosaica-field-card': MosaicaFieldCard;
   }
 }

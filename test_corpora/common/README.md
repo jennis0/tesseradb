@@ -6,7 +6,7 @@ compaction.
 
 | | |
 |---|---|
-| [`deployment.py`](deployment.py) | boots a `tessera serve` over an existing bundle, on its own ports and scratch state, inside a transient cgroup scope |
+| [`deployment.py`](deployment.py) | boots a `mosaica serve` over an existing bundle, on its own ports and scratch state, inside a transient cgroup scope |
 | [`serve_battery.py`](serve_battery.py) | the view-latency battery — a principal ladder, density-decile locations, three conditions |
 | [`ingest_cycle/`](ingest_cycle/) | split, build the complement's points and declarations, ingest the hold-out, publish every layer's artifacts, flush, fold, and an equivalence census |
 | [`workload.py`](workload.py) | one rung through all of it — build, verify, battery, cycle — and a report of what held and what it cost |
@@ -22,12 +22,12 @@ files. The table is generated and the marked block is not hand-edited.
 ## Running one rung
 
 ```bash
-export TESSERA_LADDER="$PWD/data/ladder"
+export MOSAICA_LADDER="$PWD/data/ladder"
 python3 -m test_corpora.common.workload --rung arxiv --work /tmp/wl [--quick]
 ```
 
-This builds `tessera` from the checkout unless `--binary` names one, runs `tessera check`, builds
-the all-in bundle into `<work>/<rung>/bundle`, runs `tessera verify --deep` over it, then drives
+This builds `mosaica` from the checkout unless `--binary` names one, runs `mosaica check`, builds
+the all-in bundle into `<work>/<rung>/bundle`, runs `mosaica verify --deep` over it, then drives
 the battery and the cycle against it under a 16 GiB cap. It prints a correctness line per check,
 any failure making the exit code non-zero, and a cost table beside the most recent earlier run of
 the same rung and shape. `--quick` is three zooms, three deciles, ten samples a cell and a 2%
@@ -39,7 +39,7 @@ derived into `<work>/<rung>/derived-ranks.json`: one pair per (entity, label) of
 `point_visibility` field across every view's points, a missing label counted under the view's
 default. The result's `ranks` says which it was.
 
-Each run writes `$TESSERA_LADDER/<rung>/workload-results/<timestamp>-<commit>.json`, holding both
+Each run writes `$MOSAICA_LADDER/<rung>/workload-results/<timestamp>-<commit>.json`, holding both
 driver results whole. These are not committed: `data/` is git-ignored and they are one box's
 figures.
 
@@ -51,12 +51,12 @@ The drivers also run on their own, for a sweep of one knob:
 ```bash
 # the battery against a server it boots itself
 python3 -m test_corpora.common.serve_battery --boot-rung <rung> --boot-bundle <bundle> \
-    --boot-scratch <scratch> --boot-binary <tessera> --boot-port0 8151 \
+    --boot-scratch <scratch> --boot-binary <mosaica> --boot-port0 8151 \
     --cap-bytes 17179869184 --out serve-6g.json
 
 # the cycle, one cell per (fraction, concurrency)
 python3 -m test_corpora.common.ingest_cycle --rung-dir <rung> --work <scratch> \
-    --binary <tessera> --fraction 0.10 --concurrency 8 --write-cycle --state-extent \
+    --binary <mosaica> --fraction 0.10 --concurrency 8 --write-cycle --state-extent \
     --all-in-bundle <bundle> --cap-bytes 17179869184 --out ingest-10.json
 
 # collate and render
@@ -82,7 +82,7 @@ Holds both driver results whole, under `serve` and `ingest`, beside:
 | `rung`, `quick` | the run's arguments |
 | `started_at`, `host` | when and where |
 | `commit`, `dirty` | the checkout's git commit, and whether it had uncommitted changes |
-| `binary` | the path to the `tessera` binary measured |
+| `binary` | the path to the `mosaica` binary measured |
 | `minted_credentials` | credential environment variables minted for this run, sorted |
 | `ranks` | the ranks file the ladder was built from; `derived` true, with the `fields` and the number of `terms`, where the rung had none |
 | `steps` | wall time per top-level step: `binary`, `check`, `build`, `verify`, `serve`, `ingest` |
@@ -101,7 +101,7 @@ reading its fields under a schema they were not written to.
   "schema_version": 3,
   "rung": "medcpt",              // the directory under test_corpora/
   "rows": 35920666,              // the corpus's row count, as the rung's own README states it
-  "binary_commit": "…",          // the tessera binary's git commit; a cell may override it
+  "binary_commit": "…",          // the mosaica binary's git commit; a cell may override it
   "built_at": "…",               // when the figures were taken
   "host": "…",                   // free text: cores, RAM, disk
   "build":  { … },               // §1
@@ -117,8 +117,8 @@ reading its fields under a schema they were not written to.
 
 | field | unit | how it was measured |
 |---|---|---|
-| `stages[]` | — | `tessera build --stage-timings-json`, one object per pipeline stage in report order |
-| `stages[].stage` | — | the stage's name, from `tessera_build::observer::BuildStage` |
+| `stages[]` | — | `mosaica build --stage-timings-json`, one object per pipeline stage in report order |
+| `stages[].stage` | — | the stage's name, from `mosaica_build::observer::BuildStage` |
 | `stages[].wall_s` | seconds | the stage timer's own elapsed |
 | `stages[].rows` | count | whatever the stage counted — items, pairs or terms, stage-specific |
 | `stages[].peak_rss_kib` | KiB | the process's `VmHWM` when the stage ended, not the stage's own; it only rises |
@@ -203,7 +203,7 @@ view's, under `ingest_by_view` (below, under "Beyond the schema").
 | `seed` | — | the split's seed |
 | `base_rows`, `holdout_rows` | count | entities in the base and in the hold-out: the cycle's own `base_entities` and `holdout_entities` |
 | `blocked` | object/absent | the cell did not run: where, and the refusal, verbatim |
-| `base_build`, `base_build_stages` | — | `tessera build` over the complement alone, on §1's fields |
+| `base_build`, `base_build_stages` | — | `mosaica build` over the complement alone, on §1's fields |
 | `publish` | — | the publication, per layer — below |
 | `items_per_s` | rows/s | rows acked ÷ the hold-out's wall |
 | `accepted` | count | rows the route answered 200 for |
@@ -278,7 +278,7 @@ commonest values, and a text column's two commonest words of four letters or mor
 `/v1/categories` for each category column, followed through every page. Each value is drawn from
 up to 200,000 rows of the file the view's batches take the column from, kept to the entities the
 view holds wherever that file is not the view's own points file, and a text column's words are
-the tokens `tessera tokenise` produces under the column's declared analyser. A matched count or
+the tokens `mosaica tokenise` produces under the column's declared analyser. A matched count or
 value list that differs counts under `filters`, and a probe answer that did not arrive whole is a
 sentence under `incomplete`.
 

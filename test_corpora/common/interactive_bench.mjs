@@ -1,7 +1,7 @@
 // The session and map sections of `interactive_bench.py`: the TypeScript core's own store, driver
 // and replica, driven by a fixed camera script, with every request timed on the wire.
 //
-//   TESSERA_BENCH_SESSION_CRED=… node test_corpora/common/interactive_bench.mjs <plan.json> <out.json>
+//   MOSAICA_BENCH_SESSION_CRED=… node test_corpora/common/interactive_bench.mjs <plan.json> <out.json>
 //
 // The plan names the core's dist, the server, the screen, the principals and the script; the
 // Python side writes it. The core may be any build of `clients/ts/core`, so one script measures a
@@ -15,10 +15,10 @@ import {Worker} from 'node:worker_threads';
 
 const [planPath, outPath] = process.argv.slice(2);
 const plan = JSON.parse(readFileSync(planPath, 'utf8'));
-const {createStore, TesseraClient, inlineDecoder} = await import(plan.core);
+const {createStore, MosaicaClient, inlineDecoder} = await import(plan.core);
 const {tableFromIPC} = await import(plan.arrow);
-const cred = process.env.TESSERA_BENCH_SESSION_CRED;
-if (!cred) throw new Error('set TESSERA_BENCH_SESSION_CRED to the deployment operator credential');
+const cred = process.env.MOSAICA_BENCH_SESSION_CRED;
+if (!cred) throw new Error('set MOSAICA_BENCH_SESSION_CRED to the deployment operator credential');
 
 const now = () => performance.timeOrigin + performance.now();
 
@@ -117,7 +117,7 @@ wire.on('message', (m) => {
       }
     });
     p.record.status = m.head.status;
-    p.record.pin = Object.fromEntries(m.head.headers)['x-tessera-pin'] ?? null;
+    p.record.pin = Object.fromEntries(m.head.headers)['x-mosaica-pin'] ?? null;
     p.resolve(new Response(body, {status: m.head.status, headers: m.head.headers}));
   } else if (m.chunk) {
     p.stream?.enqueue(new Uint8Array(m.chunk));
@@ -291,7 +291,7 @@ async function show(store, q, s) {
 // A principal
 // ---------------------------------------------------------------------------------------------
 
-const client = new TesseraClient({viewerUrl: plan.viewer, sessionUrl: plan.session, sessionCredential: cred, decoder: inlineDecoder(), fetch: wireFetch});
+const client = new MosaicaClient({viewerUrl: plan.viewer, sessionUrl: plan.session, sessionCredential: cred, decoder: inlineDecoder(), fetch: wireFetch});
 
 /** Authorise, read meta, build the viewer's store and show the whole extent. */
 async function open(principal, label, keepIds) {
@@ -303,7 +303,7 @@ async function open(principal, label, keepIds) {
   const view = meta.views[0];
   const q = view.quantisation;
   const ids = new Set();
-  const storeClient = new TesseraClient({viewerUrl: plan.viewer, sessionUrl: '', decoder: inlineDecoder(), fetch: wireFetch});
+  const storeClient = new MosaicaClient({viewerUrl: plan.viewer, sessionUrl: '', decoder: inlineDecoder(), fetch: wireFetch});
   if (keepIds) {
     const viewport = storeClient.viewport.bind(storeClient);
     storeClient.viewport = (token, req, opts = {}) =>

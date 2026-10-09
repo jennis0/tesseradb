@@ -1,0 +1,856 @@
+//! Shared fixtures for `mosaica-engine`'s viewport-side integration tests.
+//!
+//! The viewport cases and the pin cases live in separate binaries (`tests/viewport.rs` and
+//! `tests/pins.rs`). This module holds the fixture corpus, the `EngineConfig`s and the credentials
+//! both of them use.
+//!
+//! Every item carries `ALL_TERM` ("0"); every third item (`source_id % 3 == 0`) additionally
+//! carries `SUBSET_TERM` ("1").
+
+// Each integration-test binary compiles this module separately, so a fixture used by only one of
+// them is genuinely dead code in the other. Allowing it here is what keeps the binaries from each
+// carrying their own copy — which is the drift this module exists to prevent.
+#![allow(dead_code)]
+
+mod lifecycle;
+mod wait;
+
+#[allow(unused_imports)]
+pub use lifecycle::*;
+#[allow(unused_imports)]
+pub use wait::*;
+pub use ingest_rows::IngestRows;
+
+mod ingest_rows {
+    use mosaica_engine::{AcceptError, Engine, IngestRequest};
+    use mosaica_lifecycle::{BatchArtifacts, IngestRow, UnallocatedRow};
+    use mosaica_types::EntityId;
+
+    /// Ingest through [`Engine::ingest`] from rows shaped as the executor writes them: each row
+    /// names the item its `join` holds by `tessera_id`, or none, carries its label and position,
+    /// and carries every value it holds, a null clearing one. Every row names the same view.
+    pub trait IngestRows {
+        /// Send `rows` as one batch, and answer the entity each row created or named.
+        fn ingest_rows(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+        ) -> Result<Vec<EntityId>, AcceptError> {
+            self.ingest_rows_joining(rows, batch_id, body_hash, BatchArtifacts::default())
+                .map(|(entities, _)| entities)
+        }
+
+        /// [`Self::ingest_rows`], with the artifacts the rows name in a layer's column, answering
+        /// how many artifacts the batch minted beside the entities.
+        fn ingest_rows_joining(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+            artifacts: BatchArtifacts,
+        ) -> Result<(Vec<EntityId>, u64), AcceptError>;
+    }
+
+    impl IngestRows for Engine {
+        fn ingest_rows_joining(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+            artifacts: BatchArtifacts,
+        ) -> Result<(Vec<EntityId>, u64), AcceptError> {
+            let view = rows.first().map(|row| row.view.clone());
+            assert!(
+                rows.iter().all(|row| Some(&row.view) == view.as_ref()),
+                "a batch names one view"
+            );
+            let rows = rows
+                .into_iter()
+                .map(|row| IngestRow {
+                    tessera_id: row
+                        .join
+                        .map(|entity| self.tessera_id_of(entity).expect("a joined item has an id")),
+                    labels: Some(row.descriptors),
+                    position: Some((row.x, row.y)),
+                    scalars: row.scalars,
+                    scoped: row.scoped,
+                    omitted: Vec::new(),
+                })
+                .collect();
+            let receipt = self.ingest(IngestRequest {
+                batch_id,
+                body_hash,
+                view,
+                rows,
+                artifacts,
+                strict: true,
+                tessera_id_column: false,
+            })?;
+            let entities = self
+                .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())
+                .unwrap()
+                .into_iter()
+                .map(|entity| entity.expect("an accepted row names an item"))
+                .collect();
+            Ok((entities, receipt.minted))
+        }
+    }
+}
+
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use arrow::array::{Float64Array, UInt32Array, UInt64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig};
+use mosaica_lifecycle::UnallocatedRow;
+use mosaica_spatial::Bounds;
+use mosaica_store::read::open_bundle;
+use mosaica_types::{EntityId, IdentityKey, TesseraId};
+
+pub const N_ITEMS: u64 = 10_000;
+pub const ALL_TERM: u64 = 0;
+pub const SUBSET_TERM: u64 = 1;
+
+/// A fixed, non-degenerate test key — the same canonical vector used across the identity
+/// construction's own tests (`mosaica_types::identity`'s `CANONICAL_KEY`) and
+/// `mosaica-build`'s fixture tests, so a mismatch between crates would show up as a vector
+/// disagreement rather than an independently-chosen value.
+pub const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+
+pub fn test_key() -> IdentityKey {
+    IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
+}
+
+pub fn extent() -> Bounds {
+    Bounds {
+        x_min: 0.0,
+        x_max: 1000.0,
+        y_min: 0.0,
+        y_max: 1000.0,
+    }
+}
+
+/// The base config for these tests.
+///
+/// **`theta_target_marks` is raised above `N_ITEMS` on purpose.** These tests assert *masking* —
+/// which items a principal may see — not density. Leaving θ live would make every assertion about a
+/// point set depend on the density rule's threshold clause as well, so a masking bug and a θ
+/// arithmetic bug would be indistinguishable. Raising the target above the fixture's total visible
+/// count saturates θ at every depth, which reduces selection to "serve every visible row up to the
+/// cap" and isolates what these tests are for. Density itself is tested in `selection.rs`, against
+/// fixtures built for it.
+pub fn config() -> EngineConfig {
+    EngineConfig {
+        token_max_lifetime_secs: 3600,
+        max_k: 200,
+        k_min: 2,
+        k_max_marks: 200,
+        theta_target_marks: N_ITEMS * 2,
+        max_underlay_offset: 4,
+        max_underlay_cells: 8192,
+        max_tiles_per_request: 262_144,
+        compute_threads: default_compute_threads(),
+        // The server's own defaults for lifecycle §2.2's two pin bounds, deliberately rather than
+        // test-specific values: a case that means to exercise the TTL or the cap overrides the one
+        // it is testing (`tests/pins.rs` does), so these must never be the reason a test passes.
+        // A 300 s TTL means no case here reaches it by elapsing.
+        flush_max_age_secs: 90,
+        // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
+        // what bounds the window close's O(buffered) copy. Nothing here reaches it.
+        flush_max_items: 40_000,
+        // The built-in default; `tests/scale.rs` is where this knob is exercised.
+        max_merged_segment_bytes: None,
+        // The built-in merge and coalesce policies (width 4 / floor 16 MiB / width 8);
+        // `tests/merge.rs` and `tests/coalesce.rs` are where the configured values are exercised.
+        tier_width: None,
+        segment_floor_bytes: None,
+        coalesce_width: None,
+        // Compaction §9's trigger is off unless a deployment configures one.
+        compaction: mosaica_engine::CompactionSchedule::off(),
+    }
+}
+
+/// A config whose caps are large enough to never truncate a sample — used by tests asserting
+/// membership (counts, exact point sets) rather than a cap itself. θ is saturated here too, for the
+/// reason given on [`config`].
+pub fn config_uncapped() -> EngineConfig {
+    EngineConfig {
+        max_k: N_ITEMS as usize,
+        k_max_marks: N_ITEMS as usize,
+        ..config()
+    }
+}
+
+/// Every item carries `ALL_TERM`; every third carries `SUBSET_TERM` too.
+pub fn terms_of(source_id: u64) -> Vec<u64> {
+    if source_id.is_multiple_of(3) {
+        vec![ALL_TERM, SUBSET_TERM]
+    } else {
+        vec![ALL_TERM]
+    }
+}
+
+/// Parameterised over item count so the D-G concurrency tests near the end of this file (which
+/// need `RowProjection::new` to take long enough to give a race a real window) can ask for a
+/// larger synthetic corpus without duplicating the whole writer. [`build_fixture`] is the
+/// `N_ITEMS`-sized default every other test in this file uses.
+pub fn write_points_n(path: &Path, n: u64) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let ids: Vec<u64> = (0..n).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// See [`write_points_n`]'s doc.
+pub fn write_pairs_n(path: &Path, n: u64) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("term_id", DataType::UInt32, false),
+    ]));
+    let mut entities = Vec::new();
+    let mut terms = Vec::new();
+    for e in 0..n {
+        for t in terms_of(e) {
+            entities.push(e);
+            terms.push(t as u32);
+        }
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(entities)),
+            Arc::new(UInt32Array::from(terms)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// Build the fixture bundle at `out` through `mosaica_build::build`, over an
+/// `n`-item synthetic corpus. See [`write_points_n`]'s doc for why this is parameterised.
+pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
+    write_points_n(points_path, n);
+    write_pairs_n(pairs_path, n);
+    let schema = id_schema();
+    let args = BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: mosaica_spatial::Projection::None,
+            extent: extent(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &schema,
+        ),
+        out: out.to_path_buf(),
+        limit: None,
+        strict: false,
+        identity_key: test_key(),
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema,
+    };
+    build(&args).expect("fixture build should succeed");
+}
+
+/// Build the fixture bundle at `out` through `mosaica_build::build`.
+pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
+    build_fixture_n(out, points_path, pairs_path, N_ITEMS)
+}
+
+/// A built fixture bundle and the paths an engine opens it with, holding the temporary directory
+/// that owns all three.
+pub struct Fixture {
+    pub _tmp: tempfile::TempDir,
+    pub root: PathBuf,
+    pub cache: PathBuf,
+    pub wal: PathBuf,
+}
+
+/// The `N_ITEMS` fixture, built into a temporary directory of its own.
+pub fn fixture() -> Fixture {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    Fixture {
+        root,
+        cache: tmp.path().join("cache"),
+        wal: tmp.path().join("wal.log"),
+        _tmp: tmp,
+    }
+}
+
+/// The same bundle, built into a caller's directory — for a case that opens the bundle more than
+/// once, or beside paths of its own.
+pub fn fixture_in(tmp: &Path) -> PathBuf {
+    let root = tmp.join("bundle");
+    build_fixture(
+        &root,
+        &tmp.join("points.parquet"),
+        &tmp.join("pairs.parquet"),
+    );
+    root
+}
+
+/// Build a bundle over inputs the **corpus generator** wrote, with the generator's own schema.
+///
+/// Separate from [`build_fixture_n`] rather than a parameter on it: that one owns its inputs and
+/// its (empty) schema, and the census owns neither — its points carry the generator's five column
+/// families and its extent is the generator's. What the two share is `BuildArgs`, which is the
+/// point.
+pub fn build_corpus_fixture(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    corpus: &mosaica_corpus::Corpus,
+) {
+    // **Beside the sources, not beside the bundle.** A `source` is a path relative to the
+    // document that declares it (`configuration.md` §3), and the generator's declaration names
+    // `points.parquet` and `pairs.parquet` — so the document has to sit where they do.
+    let config_path = points_path.with_file_name("corpus-config.toml");
+    std::fs::create_dir_all(config_path.parent().expect("the sources have a parent")).ok();
+    std::fs::write(&config_path, corpus.config_toml()).expect("the generator's config is writable");
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the generator's config parses");
+    let args = BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: mosaica_spatial::Projection::None,
+            extent: corpus.extent(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &config.schema,
+        ),
+        out: out.to_path_buf(),
+        limit: None,
+        strict: false,
+        identity_key: test_key(),
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    };
+    build(&args).expect("the census fixture builds");
+}
+
+/// The generator's corpus built **with its layers** — the five artifact arms its declaration
+/// carries, materialised beside the points and published into the bundle.
+///
+/// Separate from [`build_corpus_fixture`] rather than a flag on it: that one exists so a census can
+/// register and publish its *own* layer against the generator's memberships, and reads none of the
+/// artifact fixtures. This one is for the cases that are about the declaration — a layer built by
+/// rule beside the same layer built by list — where what is under test is precisely what
+/// `mosaica build` does with the generator's own `[[layer]]` blocks.
+pub fn build_corpus_fixture_with_layers(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    corpus: &mosaica_corpus::Corpus,
+) {
+    let dir = points_path.parent().expect("the sources have a parent");
+    corpus
+        .write_artifact_fixtures(dir)
+        .expect("the generator's artifact fixtures are writable");
+    let config_path = points_path.with_file_name("corpus-config.toml");
+    std::fs::write(&config_path, corpus.config_toml()).expect("the generator's config is writable");
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the generator's config parses");
+    let args = BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: mosaica_spatial::Projection::None,
+            extent: corpus.extent(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &config.schema,
+        ),
+        out: out.to_path_buf(),
+        limit: None,
+        strict: false,
+        identity_key: test_key(),
+        shard_id: 0,
+        layers: config.layers,
+        layer_inputs: config.layer_sources,
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    };
+    build(&args).expect("the generator's own layers build");
+}
+
+/// The generator's points and access relation, under a **caller-supplied** declaration.
+///
+/// For the cases whose subject is a layer the generator does not declare — a spatial layer with
+/// boxes, say, which its boundary arm has a roster for and no geometry. The points, the pairs and
+/// the extent are the generator's, so its closed forms are still the oracle; the layers are the
+/// case's own.
+pub fn build_with_layers(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    corpus: &mosaica_corpus::Corpus,
+    config: mosaica_build::config::Config,
+) {
+    let schema = with_id(config.schema);
+    let args = BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: mosaica_spatial::Projection::None,
+            extent: corpus.extent(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            select: None,
+            access: mosaica_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &schema,
+        ),
+        out: out.to_path_buf(),
+        limit: None,
+        strict: false,
+        identity_key: test_key(),
+        shard_id: 0,
+        layers: config.layers,
+        layer_inputs: config.layer_sources,
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema,
+    };
+    build(&args).expect("the fixture's own declaration builds");
+}
+
+/// The fixture's one declared column: `id`, the points file's `entity_id` declared unique, which
+/// is how a test finds, or names in a row, the item a source row became.
+pub fn id_schema() -> mosaica_build::config::Schema {
+    mosaica_build::config::Schema {
+        attributes: vec![mosaica_build::config::Attribute {
+            field: Some("entity_id".to_string()),
+            name: "id".to_string(),
+            title: None,
+            ty: mosaica_spatial::tiler::ScalarType::U64,
+            analyser: None,
+            vocabulary: None,
+            value_set: None,
+            index: false,
+            render: false,
+            unique: true,
+        }],
+        vocabularies: Default::default(),
+    }
+}
+
+/// `schema` with [`id_schema`]'s `id` declared after its own columns, unless it declares one.
+pub fn with_id(mut schema: mosaica_build::config::Schema) -> mosaica_build::config::Schema {
+    if !schema.attributes.iter().any(|a| a.name == "id") {
+        schema.attributes.extend(id_schema().attributes);
+    }
+    schema
+}
+
+/// Every `source_id -> entity_id` pair the bundle's unique `id` column holds in its runs.
+pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {
+    let bundle = open_bundle(bundle_root).unwrap();
+    let part = &bundle.partitions["default"];
+    let runs = part
+        .manifest
+        .unique_indexes
+        .iter()
+        .find(|runs| runs.attribute == "id")
+        .expect("the fixture declares a unique `id`");
+    let mut map = BTreeMap::new();
+    let paths = runs.base.iter().map(|run| run.path.as_str()).chain(runs.live.iter().map(String::as_str));
+    for rel in paths {
+        mosaica_store::unique::for_each_entry(
+            mosaica_store::unique::KeyKind::Unsigned,
+            &bundle_root.join(prefix).join(rel),
+            |key, entity| {
+                if let mosaica_store::unique::UniqueKey::Int(source) = key {
+                    map.insert(source, u64::from(entity));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+    map
+}
+
+/// The item the unique `id` value `source` names, deleted items left out.
+pub fn item_of_id(
+    engine: &Engine,
+    source: u64,
+) -> Result<Option<EntityId>, mosaica_engine::EngineError> {
+    Ok(unique_holders(engine, "id", &[source.to_string()])?[0])
+}
+
+/// The `id` a test gives the item it calls `key`: a stable hash with the top bit set, so it names
+/// none of the fixture's built items.
+pub fn key_id(key: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    hash | 1 << 63
+}
+
+/// The row values that give an item the `id` of `key`.
+pub fn keyed(key: &str) -> Vec<mosaica_lifecycle::wal::WalScalar> {
+    vec![mosaica_lifecycle::wal::WalScalar::U64(key_id(key))]
+}
+
+/// The live item holding the `id` of `key`, if any.
+pub fn item_of_key(engine: &Engine, key: &str) -> Option<EntityId> {
+    unique_holders(engine, "id", &[key_id(key).to_string()]).unwrap()[0]
+}
+
+/// An engine with its write executor running.
+///
+/// **Publication is a submission now** (lifecycle §1.3): `Engine::publish_geometry` hands the
+/// swap to the executor thread, so an engine that never started one answers `NoExecutor` rather
+/// than publishing. That is the correct posture — there is no honest "published" when there is no
+/// publisher — so a test that publishes starts the thread, exactly as one that submits a
+/// `/control/changes` entry already had to.
+pub fn open_engine_publishing(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
+    let mut engine = open_engine(bundle_root, cache_dir, wal_path);
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
+}
+
+/// The same, with the tick period cut to `secs`.
+///
+/// For a test whose subject is a cadence rather than a publication: the WAL gauge is sampled at
+/// most once per `flush_max_age_secs` (`Executor::sample_wal_gauge`), so a test that reads it twice
+/// either waits out the shipped 90 s or runs against a shorter period. Everything else keeps
+/// [`config`]'s values.
+pub fn open_engine_publishing_with_tick_period(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    secs: u64,
+) -> Engine {
+    let mut engine = Engine::open(
+        bundle_root,
+        cache_dir,
+        wal_path,
+        EngineConfig {
+            flush_max_age_secs: secs,
+            ..config()
+        },
+    )
+    .expect("engine should open against a freshly built bundle");
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
+}
+
+pub fn open_engine(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
+    Engine::open(
+        bundle_root,
+        cache_dir,
+        wal_path,
+        config(),
+    )
+    .expect("engine should open against a freshly built bundle")
+}
+
+pub fn open_engine_uncapped(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
+    Engine::open(
+        bundle_root,
+        cache_dir,
+        wal_path,
+        config_uncapped(),
+    )
+    .expect("engine should open against a freshly built bundle")
+}
+
+/// The fixture's whole extent, as a viewport request carries it.
+pub const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
+/// The artifacts a principal is served over the whole map at depth 0.
+pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .viewport_artifacts(
+            &session,
+            mosaica_engine::ViewportArtifactsRequest::new("s0", 0, WHOLE_MAP, usize::MAX),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts()
+}
+
+/// Each artifact a tile-by-tile answer served, once, with its filter and highlight bits taken over
+/// every tile it was served in: what one answer over the whole of the request's tiles says.
+pub fn over_every_tile(out: &mosaica_engine::ViewportArtifactsOut) -> Vec<ArtifactOut> {
+    let mut merged: Vec<ArtifactOut> = Vec::new();
+    for artifact in out.frames.iter().flat_map(|frame| &frame.artifacts) {
+        match merged.iter_mut().find(|held| held.tessera_id == artifact.tessera_id) {
+            Some(held) => {
+                held.matched = held.matched.zip(artifact.matched).map(|(a, b)| a || b);
+                held.highlighted = held
+                    .highlighted
+                    .zip(artifact.highlighted)
+                    .map(|(a, b)| a || b);
+            }
+            None => merged.push(artifact.clone()),
+        }
+    }
+    merged
+}
+
+/// The drawn shape a principal is served for an artifact, read by its identifier: the one route a
+/// shape is served on.
+pub fn shape_of(
+    engine: &Engine,
+    credential: &[u8],
+    id: TesseraId,
+) -> Option<Vec<Vec<Vec<[u32; 2]>>>> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .artifact(&session, id, "s0", None)
+        .unwrap()
+        .expect("the artifact is served")
+        .derived
+        .shape
+}
+
+/// The entity an artifact's served identifier names.
+pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
+    engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
+}
+
+/// A one-row ingest at the fixture's centre, carrying `ALL_TERM`, under the caller's batch id.
+pub fn ingest(engine: &Engine, batch: &str) -> EntityId {
+    let row = UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    engine
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
+        .expect("ingest is accepted")[0]
+}
+
+/// An engine over `root`, with its cache and log beside it under `tmp`, ticking every
+/// `tick_secs` and its write executor running.
+pub fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
+    let mut engine = Engine::open(
+        root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        EngineConfig {
+            flush_max_age_secs: tick_secs,
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(64)
+        .expect("the executor starts once");
+    engine
+}
+
+/// Whether the subset principal can see the item behind a source id.
+pub fn subset_sees(e: u64) -> bool {
+    terms_of(e).contains(&SUBSET_TERM)
+}
+
+/// A credential over the terms a generator grant names.
+pub fn grant_credential(grant: &str) -> Vec<u8> {
+    let terms: Vec<String> = mosaica_corpus::Grant::parse(grant)
+        .expect("the grant is inside the generator's term space")
+        .terms()
+        .iter()
+        .map(|t| format!("\"{}\"", t.raw()))
+        .collect();
+    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
+}
+
+pub fn full_coverage_credential() -> Vec<u8> {
+    br#"{"terms": ["0"]}"#.to_vec()
+}
+
+pub fn subset_credential() -> Vec<u8> {
+    br#"{"terms": ["1"]}"#.to_vec()
+}
+
+pub fn zero_credential() -> Vec<u8> {
+    br#"{"terms": []}"#.to_vec()
+}
+
+/// The item each of `values` names in the unique field `field`, `None` for a value naming none,
+/// asked of [`mosaica_engine::Engine::name_items`].
+pub fn unique_holders(
+    engine: &mosaica_engine::Engine,
+    field: &str,
+    values: &[String],
+) -> Result<Vec<Option<mosaica_types::EntityId>>, mosaica_engine::EngineError> {
+    let table = mosaica_engine::AddressTable {
+        rows: values.len(),
+        tessera_id: None,
+        columns: vec![(
+            field.to_string(),
+            values
+                .iter()
+                .map(|v| Some(mosaica_engine::AddressValue::Text(v.clone())))
+                .collect(),
+        )],
+    };
+    Ok(engine
+        .name_items(&table)?
+        .verdicts
+        .into_iter()
+        .map(|verdict| match verdict {
+            mosaica_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Every WAL member file in `dir`, by name and bytes.
+///
+/// The log is a **sequence** — `wal-000001.log` and its `.sync` sidecar, beside the stem the engine
+/// was opened with — not one file, so copying the stem copies nothing. Rotation seals a member,
+/// opens the next and reclaims the ones behind it, which is exactly the state
+/// a test of a restart before the rotation takes a copy of before the fold rotates.
+pub fn snapshot_wal(dir: &Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+    let mut members: Vec<(std::ffi::OsString, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("wal-"))
+        .map(|e| (e.file_name(), std::fs::read(e.path()).unwrap()))
+        .collect();
+    assert!(
+        !members.is_empty(),
+        "the engine writes a WAL sequence, not one file"
+    );
+    members.sort_by(|a, b| a.0.cmp(&b.0));
+    members
+}
+
+/// Put `snapshot` back, removing whatever members are there now — the on-disc state a crash between
+/// the `CURRENT` flip and the WAL rotation leaves.
+pub fn restore_wal(dir: &Path, snapshot: &[(std::ffi::OsString, Vec<u8>)]) {
+    for entry in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
+        if entry.file_name().to_string_lossy().starts_with("wal-") {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    for (name, bytes) in snapshot {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+}
+
+/// A flat layer that derives a hull, so its levels hold their rows: the declaration a test building
+/// forms directly through `ArtifactProjections::get_or_build` builds them for.
+pub fn held_rows_declaration(name: &str) -> mosaica_types::layer::LayerDeclaration {
+    use mosaica_types::layer::*;
+    LayerDeclaration {
+        scope: Default::default(),
+        name: name.into(),
+        title: None,
+        views: vec!["s0".into()],
+        membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: ArtifactVisibility::inherited(),
+        require_member_visibility: None,
+        hierarchy: Hierarchy {
+            kind: HierarchyKind::Flat,
+            prune_children: false,
+        },
+        content: ContentDeclaration {
+            computed: vec!["hull".into()],
+            supplied: Vec::new(),
+        },
+        depends_on: Vec::new(),
+        levels: Vec::new(),
+        layout: None,
+        shape: None,
+    }
+}

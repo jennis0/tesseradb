@@ -1,12 +1,12 @@
-# Run Tessera under systemd
+# Run Mosaica under systemd
 
 This guide turns the map you served from a terminal in [the first tutorial](../start/first-map.md)
 into a service on a Linux server, which starts at boot and comes back by itself if it crashes.
-You'll need sudo on the server and the `tessera` binary you built with cargo. From the tutorial's
+You'll need sudo on the server and the `mosaica` binary you built with cargo. From the tutorial's
 `~/ireland` directory you need `corpus.toml` and `points.parquet`.
 
 Once the service is running, [Operate a deployment](operating.md) covers what you do with it, from
-who may reach each address to compaction. [Run Tessera with Docker](docker.md) does the same job as
+who may reach each address to compaction. [Run Mosaica with Docker](docker.md) does the same job as
 this page in a container.
 
 !!! note ""
@@ -19,21 +19,21 @@ The service gets a user of its own. The bundle holds every item in the corpus, w
 label, so no other account on the machine should be able to read it.
 
 ```bash
-sudo useradd --system --home-dir /srv/tessera --shell /usr/sbin/nologin tessera
-sudo install -m 0755 ~/.cargo/bin/tessera /usr/local/bin/tessera
+sudo useradd --system --home-dir /srv/mosaica --shell /usr/sbin/nologin mosaica
+sudo install -m 0755 ~/.cargo/bin/mosaica /usr/local/bin/mosaica
 ```
 
-## Lay out /srv/tessera
+## Lay out /srv/mosaica
 
 The service needs to write to two places only, the bundle and a `state` directory holding the
 write-ahead log and the cache. Keeping them apart from the declaration in `corpus` and the
-credentials in `secrets` lets systemd make everything else read-only to it. Only the `tessera`
+credentials in `secrets` lets systemd make everything else read-only to it. Only the `mosaica`
 user can open `secrets`.
 
 ```bash
-sudo install -d -o tessera -g tessera -m 0750 /srv/tessera /srv/tessera/corpus /srv/tessera/state /srv/tessera/state/wal
-sudo install -d -o tessera -g tessera -m 0700 /srv/tessera/secrets
-sudo install -o tessera -g tessera -m 0640 ~/ireland/corpus.toml ~/ireland/points.parquet /srv/tessera/corpus/
+sudo install -d -o mosaica -g mosaica -m 0750 /srv/mosaica /srv/mosaica/corpus /srv/mosaica/state /srv/mosaica/state/wal
+sudo install -d -o mosaica -g mosaica -m 0700 /srv/mosaica/secrets
+sudo install -o mosaica -g mosaica -m 0640 ~/ireland/corpus.toml ~/ireland/points.parquet /srv/mosaica/corpus/
 ```
 
 The server creates its cache directory when it first starts. It does not create the directory the
@@ -41,21 +41,21 @@ log goes in, which is why `state/wal` is made here. Without it the server stops 
 error that doesn't say which directory it wanted:
 
 ```text
-tessera serve: refused to start: wal error: wal io error: No such file or directory (os error 2)
+mosaica serve: refused to start: wal error: wal io error: No such file or directory (os error 2)
 ```
 
 From here on the page uses two shells. A command after `$` runs in your own shell and uses `sudo`. A
-command after `tessera$` runs as the `tessera` user in `/srv/tessera`, which is the only account
+command after `mosaica$` runs as the `mosaica` user in `/srv/mosaica`, which is the only account
 that can read the credentials. Open that shell like this:
 
 ```console
-$ sudo -u tessera bash
-tessera$ cd /srv/tessera
+$ sudo -u mosaica bash
+mosaica$ cd /srv/mosaica
 ```
 
-## Write tessera.toml
+## Write mosaica.toml
 
-Save this as `/srv/tessera/tessera.toml`, as the `tessera` user:
+Save this as `/srv/mosaica/mosaica.toml`, as the `mosaica` user:
 
 ```toml
 [bundle]
@@ -72,7 +72,7 @@ token_max_lifetime = 3600
 [serve]
 viewer  = "127.0.0.1:9151"
 session = "127.0.0.1:9152"
-control = "unix:/run/tessera/control.sock"
+control = "unix:/run/mosaica/control.sock"
 operator_credential_file = "secrets/operator.secret"
 
 [catalogue]
@@ -80,49 +80,49 @@ dir = "state/catalogue"
 ```
 
 The paths under `[bundle]`, `schema`, the credential file and the catalogue's directory are read
-relative to the directory `tessera.toml` is in, wherever the server is started from. The catalogue
+relative to the directory `mosaica.toml` is in, wherever the server is started from. The catalogue
 holds the deployment's users, groups, API keys and grants. The server creates it on its first
-start, readable by the `tessera` user alone.
+start, readable by the `mosaica` user alone.
 
 In the tutorial the control address, which takes writes to the corpus, was a TCP port on
 `127.0.0.1`. Any program on the machine can connect to that, and only the operator credential keeps
-it out. Here it is a unix socket, a file only the `tessera` user can open, so the operating system
+it out. Here it is a unix socket, a file only the `mosaica` user can open, so the operating system
 turns every other account away before the credential is even read. Write a socket's path in full,
-since it is not read relative to `tessera.toml`.
+since it is not read relative to `mosaica.toml`.
 
 The viewer and session addresses stay on `127.0.0.1`. [Addresses and
 credentials](operating.md#addresses-and-credentials) says who should reach each one, and what
 `token_max_lifetime` is for.
 
-Every section of `tessera.toml` refuses a key it does not know and names the ones it takes. The keys
+Every section of `mosaica.toml` refuses a key it does not know and names the ones it takes. The keys
 this guide leaves out keep their defaults.
 
 !!! note ""
-    Not built yet: a reference page for `tessera.toml`. Until there is one, each key is a field of
+    Not built yet: a reference page for `mosaica.toml`. Until there is one, each key is a field of
     `RawServe` or `RawIngest` in
-    [`crates/tessera-config/src/lib.rs`](https://github.com/jennis0/tesseradb/blob/main/crates/tessera-config/src/lib.rs),
+    [`crates/mosaica-config/src/lib.rs`](https://github.com/jennis0/mosaica/blob/main/crates/mosaica-config/src/lib.rs),
     with its default in
-    [`defaults.rs`](https://github.com/jennis0/tesseradb/blob/main/crates/tessera-config/src/defaults.rs).
+    [`defaults.rs`](https://github.com/jennis0/mosaica/blob/main/crates/mosaica-config/src/defaults.rs).
 
 ## Create the credential
 
-The server will not start without the operator credential `tessera.toml` names. It uses the
+The server will not start without the operator credential `mosaica.toml` names. It uses the
 tutorial's file name:
 
 ```console
-tessera$ umask 077
-tessera$ openssl rand -hex 32 > secrets/operator.secret
+mosaica$ umask 077
+mosaica$ openssl rand -hex 32 > secrets/operator.secret
 ```
 
 ## Build the bundle
 
-Run `tessera build` as the `tessera` user, so the service owns the bundle and can write to it
+Run `mosaica build` as the `mosaica` user, so the service owns the bundle and can write to it
 later.
 
 ```console
-tessera$ tessera build
+mosaica$ mosaica build
 ...
-built /srv/tessera/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
+built /srv/mosaica/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
   view ireland: 29935 row(s)
 ```
 
@@ -131,82 +131,82 @@ A later build is different, because the running server changes the bundle and a 
 
 ## Start it by hand
 
-Run the server once in the `tessera` shell before handing it to systemd. A mistake in `tessera.toml`
+Run the server once in the `mosaica` shell before handing it to systemd. A mistake in `mosaica.toml`
 then shows up in front of you, not in the journal. systemd will make the socket's directory under
 `/run` for you; for now, make it yourself.
 
 ```console
-$ sudo install -d -o tessera -g tessera -m 0700 /run/tessera
+$ sudo install -d -o mosaica -g mosaica -m 0700 /run/mosaica
 ```
 
 ```console
-tessera$ tessera serve
-2026-09-24T09:26:04.709794Z  INFO tessera_server::memory: the allocator's arena count is capped arenas=12
-2026-09-24T09:26:04.727664Z  INFO tessera_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
-2026-09-24T09:26:04.727934Z  INFO tessera_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
-{"event":"listening","viewer":"127.0.0.1:9151","session":"127.0.0.1:9152","control":"unix:/run/tessera/control.sock"}
+mosaica$ mosaica serve
+2026-09-24T09:26:04.709794Z  INFO mosaica_server::memory: the allocator's arena count is capped arenas=12
+2026-09-24T09:26:04.727664Z  INFO mosaica_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
+2026-09-24T09:26:04.727934Z  INFO mosaica_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
+{"event":"listening","viewer":"127.0.0.1:9151","session":"127.0.0.1:9152","control":"unix:/run/mosaica/control.sock"}
 ```
 
-If `/run/tessera` is missing, the server stops with an error that does not say which path it wanted:
+If `/run/mosaica` is missing, the server stops with an error that does not say which path it wanted:
 
 ```text
-tessera serve: No such file or directory (os error 2)
+mosaica serve: No such file or directory (os error 2)
 ```
 
-In a second `tessera` shell, ask the viewer address whether the server is ready, and ask the session
+In a second `mosaica` shell, ask the viewer address whether the server is ready, and ask the session
 address for a token. Your backend will ask with an API key whose principal holds `authorise-as`,
 naming the principal to read as. The operator credential can instead name the access terms the
 token holds, which needs no principal in the catalogue:
 
 ```console
-tessera$ curl -sSi http://127.0.0.1:9151/readyz
+mosaica$ curl -sSi http://127.0.0.1:9151/readyz
 HTTP/1.1 200 OK
 content-length: 0
 date: Thu, 24 Sep 2026 09:26:04 GMT
 
-tessera$ curl -sS http://127.0.0.1:9152/session/authorise \
+mosaica$ curl -sS http://127.0.0.1:9152/session/authorise \
   -H "authorization: Bearer $(cat secrets/operator.secret)" \
   -H 'content-type: application/json' \
   -d '{"terms": ["public"]}'
 {"token":"2546b15027f3b33d8639941a5406597e1ee2bf60715d46dbfb5e4268ac0547d1","token_id":0,"expires_at":1790245564}
 ```
 
-Press Ctrl-C in the first shell. The server prints `tessera serve: stopped on SIGINT` and exits.
+Press Ctrl-C in the first shell. The server prints `mosaica serve: stopped on SIGINT` and exits.
 
 ## Hand it to systemd
 
-Save this as `/etc/systemd/system/tessera.service`:
+Save this as `/etc/systemd/system/mosaica.service`:
 
 ```ini
 [Unit]
-Description=Tessera
+Description=Mosaica
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=exec
-User=tessera
-Group=tessera
-WorkingDirectory=/srv/tessera
-ExecStart=/usr/local/bin/tessera serve --deployment /srv/tessera/tessera.toml
+User=mosaica
+Group=mosaica
+WorkingDirectory=/srv/mosaica
+ExecStart=/usr/local/bin/mosaica serve --deployment /srv/mosaica/mosaica.toml
 Restart=on-failure
 RestartSec=5
 MemoryMax=24G
 MemorySwapMax=0
 UMask=0077
-RuntimeDirectory=tessera
+RuntimeDirectory=mosaica
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/srv/tessera/bundle /srv/tessera/state
+ReadWritePaths=/srv/mosaica/bundle /srv/mosaica/state
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`RuntimeDirectory` makes `/run/tessera` each time the service starts and removes it when it stops.
-`UMask=0077` means the socket, and every file the server writes, can be opened by the `tessera` user
+`RuntimeDirectory` makes `/run/mosaica` each time the service starts and removes it when it stops.
+`UMask=0077` means the socket, and every file the server writes, can be opened by the `mosaica` user
 alone.
 
 `MemoryMax` caps the service's memory, and 24G is a placeholder; [Memory](operating.md#memory)
@@ -229,11 +229,11 @@ Start the service, and have it start at boot:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now tessera
-journalctl -u tessera -f
+sudo systemctl enable --now mosaica
+journalctl -u mosaica -f
 ```
 
 The journal shows the same lines you saw when you started it by hand. The server logs at `INFO` and
-above, and `RUST_LOG` does not change that. `systemctl stop tessera` sends SIGTERM, which stops the
+above, and `RUST_LOG` does not change that. `systemctl stop mosaica` sends SIGTERM, which stops the
 server at once; [Stopping and restarting](operating.md#stopping-and-restarting) says what that
 means for requests in progress.

@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {WORLD_SIZE, type Quantisation} from '@tesseradb/client';
-import {viewInputOf} from '@tesseradb/deck';
+import {WORLD_SIZE, type Quantisation} from '@mosaicajs/client';
+import {viewInputOf} from '@mosaicajs/deck';
 import {fitWorld} from '../src/view.js';
 
 const EXTENT: Quantisation = {xMin: 0, xMax: 1000, yMin: -50, yMax: 50};

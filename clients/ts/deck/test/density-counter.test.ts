@@ -1,11 +1,11 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, OrthographicView, type Layer} from '@deck.gl/core';
 import {tableFromArrays} from 'apache-arrow';
-import {TesseraError, createStore, type AggregateRequest, type AggregateResult, type TesseraClient} from '@tesseradb/client';
-import {mortonOfTile} from '@tesseradb/client/internal';
+import {MosaicaError, createStore, type AggregateRequest, type AggregateResult, type MosaicaClient} from '@mosaicajs/client';
+import {mortonOfTile} from '@mosaicajs/client/internal';
 import {SELECTION, fakeClock, fakeScheduler, camera as cameraOver, meta, response, result as viewportResult, view} from '../../core/test/support.js';
 import {DENSITY_CELL_SIZES, DENSITY_SETTLE_MS, DensityCounter, cellDepth, resolutionStops, type DensityCamera} from '../src/density-counter.js';
-import {TesseraLayer} from '../src/layer.js';
+import {MosaicaLayer} from '../src/layer.js';
 import {fakeDevice} from './fake-device.js';
 
 /**
@@ -19,7 +19,7 @@ const HEIGHT = 800;
 const camera = (target: [number, number], zoom: number): DensityCamera => ({target, zoom, width: WIDTH, height: HEIGHT});
 
 /** A store whose `aggregate` answers each request with one cell at the asked depth, unless told to refuse. */
-async function setUp(maxAggregateCells = SELECTION.maxAggregateCells, viewport: TesseraClient['viewport'] = async () => response(viewportResult())) {
+async function setUp(maxAggregateCells = SELECTION.maxAggregateCells, viewport: MosaicaClient['viewport'] = async () => response(viewportResult())) {
   const asked: AggregateRequest[] = [];
   const refusals: Error[] = [];
   const aggregate = vi.fn(async (_token: string, req: AggregateRequest): Promise<AggregateResult> => {
@@ -45,7 +45,7 @@ async function setUp(maxAggregateCells = SELECTION.maxAggregateCells, viewport: 
     viewport,
     aggregate,
     close: () => {}
-  } as unknown as TesseraClient;
+  } as unknown as MosaicaClient;
   const clock = fakeClock();
   const scheduler = fakeScheduler();
   const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false});
@@ -144,7 +144,7 @@ describe('DensityCounter', () => {
       onCounts({tiles, subCells: null, identityKey: 'ik', contentKey: 'ck'});
       await new Promise<void>((resolve) => (land = resolve));
       return answer;
-    }) as unknown as TesseraClient['viewport'];
+    }) as unknown as MosaicaClient['viewport'];
     const {store, counter, settle, clock, scheduler} = await setUp(SELECTION.maxAggregateCells, viewport);
     counter.set(ON);
     store.setView(cameraOver(store.frame(), [0, 0, 512, 512], WIDTH, HEIGHT));
@@ -268,14 +268,14 @@ describe('DensityCounter', () => {
 
   it('asks one depth coarser after a 422, whatever its wording, and gives up after three', async () => {
     const {counter, refusals, settle, depths} = await setUp();
-    refusals.push(new TesseraError(422, 'contract', 'no'));
+    refusals.push(new MosaicaError(422, 'contract', 'no'));
     counter.set({on: true, cellPx: 4});
     counter.look(camera([256, 256], 2));
     await settle();
     const fine = cellDepth(2, 4);
     expect(depths()).toEqual([fine, fine - 1]);
     expect(counter.counts()!.depth).toBe(fine - 1);
-    for (let i = 0; i < 4; i++) refusals.push(new TesseraError(422, 'contract', 'no'));
+    for (let i = 0; i < 4; i++) refusals.push(new MosaicaError(422, 'contract', 'no'));
     counter.look(camera([256, 256], 4));
     await settle();
     const deeper = cellDepth(4, 4);
@@ -289,7 +289,7 @@ describe('DensityCounter', () => {
     counter.look(camera([256, 256], 2));
     await settle();
     expect(counter.counts()).not.toBeNull();
-    refusals.push(new TesseraError(403, 'bad-credential', 'the token is not valid'));
+    refusals.push(new MosaicaError(403, 'bad-credential', 'the token is not valid'));
     counter.look(camera([256, 256], 4));
     await settle();
     expect(counter.counts()).toBeNull();
@@ -338,7 +338,7 @@ describe('DensityCounter', () => {
   });
 });
 
-describe('TesseraLayer over a store alone', () => {
+describe('MosaicaLayer over a store alone', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
@@ -349,14 +349,14 @@ describe('TesseraLayer over a store alone', () => {
     const {store, asked} = await setUp();
     const manager = new LayerManager(fakeDevice(), {});
     manager.activateViewport(new OrthographicView({flipY: true}).makeViewport({width: 800, height: 600, viewState: {target: [256, 256, 0], zoom: 1}})!);
-    const draw = () => manager.setLayers([new TesseraLayer({id: 'tessera', store, density: 'grid', densityResolution: 16})]);
+    const draw = () => manager.setLayers([new MosaicaLayer({id: 'mosaica', store, density: 'grid', densityResolution: 16})]);
     draw();
     await vi.advanceTimersByTimeAsync(DENSITY_SETTLE_MS);
     expect(asked.map((r) => r.groupings[0]!.cells!.depth)).toEqual([cellDepth(1, 16)]);
     draw();
     await vi.advanceTimersByTimeAsync(0);
     draw();
-    const grid = ((manager.getLayers().find((l) => l.id === 'tessera') as unknown as TesseraLayer).getSubLayers() as Layer[]).find((l) => l.id === 'tessera-density-grid');
+    const grid = ((manager.getLayers().find((l) => l.id === 'mosaica') as unknown as MosaicaLayer).getSubLayers() as Layer[]).find((l) => l.id === 'mosaica-density-grid');
     expect((grid?.props as {visible: boolean} | undefined)?.visible).toBe(true);
     manager.finalize();
     vi.unstubAllGlobals();

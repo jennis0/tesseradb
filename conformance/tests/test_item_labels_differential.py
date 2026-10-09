@@ -20,7 +20,7 @@ intersection" and "the full set" are the same answer, so no fixture here can tel
 What the cases below therefore prove is that the served array is *exactly* the intersection where
 the intersection is the whole set — which catches an engine serving nothing, serving the wrong
 descriptor, or serving them unsorted, and does not catch the disclosure. The **withholding** case is
-covered at the server level instead, in `crates/tessera-server/tests/item_labels.rs`, whose fixture
+covered at the server level instead, in `crates/mosaica-server/tests/item_labels.rs`, whose fixture
 gives every third item a second label: there a principal holding one of the two is served one, and
 a principal holding the other is served the other. Closing it here needs a conformance fixture with
 multi-compartment items, which is a fixture regeneration rather than a test to write.

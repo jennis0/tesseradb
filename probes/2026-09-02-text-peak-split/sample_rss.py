@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Split a process's resident set into anonymous and file-backed halves, per build stage.
 
-`tessera build --stage-timings` reports one number a stage — `VmHWM`, the kernel's
+`mosaica build --stage-timings` reports one number a stage — `VmHWM`, the kernel's
 high-water mark over *all* resident pages. Since 2026-08-30 the entity-order columns,
 the render tail and the text index's runs are mapped files, so most of what a large
 build has resident is page cache the kernel may evict rather than memory it must have.
@@ -9,7 +9,7 @@ build has resident is page cache the kernel may evict rather than memory it must
 
 Run mode:
 
-    sample_rss.py --out PREFIX -- tessera build ...
+    sample_rss.py --out PREFIX -- mosaica build ...
 
 polls `/proc/<pid>/status` every 100 ms — or every `--interval` seconds — for `RssAnon`,
 `RssFile`, `RssShmem`, `VmRSS` and `VmHWM`, writing `PREFIX.rss.csv`; every line the child writes to stderr is

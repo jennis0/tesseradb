@@ -1,6 +1,6 @@
 # Data model
 
-Tessera serves one shared collection of items through several different maps at once. An item
+Mosaica serves one shared collection of items through several different maps at once. An item
 exists once, with one identity, one access label and one set of declared field values. It can have
 a position in more than one map, because switching which map a viewer looks at changes only where
 an item is drawn and how it is queried, never what the item is or who may see it.
@@ -120,7 +120,7 @@ freed, because its `tessera_id` is derived from it, and neither is one a suppres
 against ([freed entity ids](write-path.md#freed-entity-ids) has the rules).
 
 The `tessera_id` is what a client receives and holds instead of the entity id. The key of the
-permutation is drawn at random by `tessera build` each time it creates a bundle and is stored in
+permutation is drawn at random by `mosaica build` each time it creates a bundle and is stored in
 the bundle's manifest. Nobody configures it, and no response carries it. A `tessera_id` is stable
 for the item's life in that bundle, across edits, sessions, restarts, flushes, merges and
 compactions, and a copy of the bundle keeps it. A rebuild issues a new `tessera_id` for every item, and one from
@@ -286,7 +286,7 @@ A build leaves out a row that names two items, names an item or sets a value an 
 file names or sets, or names no item in a file that cannot create one. Of two rows naming one item,
 the first is kept. The build goes on without the refused rows and prints a count for each file and
 reason with the values of up to ten of the rows. Where it refused any, it writes the same list to
-`reports/refused.json` in the bundle. `tessera build --strict` refuses the build at the first file
+`reports/refused.json` in the bundle. `mosaica build --strict` refuses the build at the first file
 with a refused row instead ([CLI reference](../reference/cli.md)).
 
 `unique` is the one part of a field's declaration that can change once the field exists, at a
@@ -334,10 +334,10 @@ arrived first.
 Integration tests cover a view group's build and its live creation, an item joined into a second
 view, and a field's build pass.
 
-The data model lives in `tessera-types` (the declared shapes: a view, a vocabulary, a field),
-`tessera-build` (compiling a declaration into a bundle), `tessera-spatial` (the projection and
-frame transforms), `tessera-store` (vocabularies and each view's own files on disc), and
-`tessera-engine` (viewport reads and category serving).
+The data model lives in `mosaica-types` (the declared shapes: a view, a vocabulary, a field),
+`mosaica-build` (compiling a declaration into a bundle), `mosaica-spatial` (the projection and
+frame transforms), `mosaica-store` (vocabularies and each view's own files on disc), and
+`mosaica-engine` (viewport reads and category serving).
 
 ## Sources
 

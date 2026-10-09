@@ -13,7 +13,7 @@ The interface between the two tracks is fixed in
 README at merge.
 
 ```bash
-export TESSERA_LADDER="$PWD/data/ladder"
+export MOSAICA_LADDER="$PWD/data/ladder"
 P=~/venvs/projection/bin/python
 
 $P -m test_corpora.paperseek.extract           # the id set, the one scan, the extract
@@ -195,10 +195,10 @@ x and y from a **SplitMix64 of the work's own id**. The vectors track owns the l
 and it proves **nothing** about whether a topic is compact.
 
 ```
-tessera check --payloads   OK — 4 sources, 1 view, 1 vocabulary, 3 attributes, 1 layer
-tessera build              OK — 200,000 items, 10 terms, 200,000 pairs, 12,872,196 bytes,
+mosaica check --payloads   OK — 4 sources, 1 view, 1 vocabulary, 3 attributes, 1 layer
+mosaica build              OK — 200,000 items, 10 terms, 200,000 pairs, 12,872,196 bytes,
                                 50 MB peak RSS, 0 unclustered member rows
-tessera verify --deep      OK — 1 partition, 1 view, 1 segment, 200,000 rows
+mosaica verify --deep      OK — 1 partition, 1 view, 1 segment, 200,000 rows
 ```
 
 | | |

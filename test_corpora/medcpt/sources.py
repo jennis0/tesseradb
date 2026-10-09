@@ -48,7 +48,7 @@ def mesh_tree() -> Path:
 
 
 def staging() -> Path:
-    """`$TESSERA_LADDER/medcpt/staging/`, the local copy everything after `stage.py` reads.
+    """`$MOSAICA_LADDER/medcpt/staging/`, the local copy everything after `stage.py` reads.
 
     **It belongs to the rung, not to a run.** `prepare.py --out` moves where a run writes its
     corpus — a 1M sample beside a whole-corpus one — and every run reads the same staged bytes,

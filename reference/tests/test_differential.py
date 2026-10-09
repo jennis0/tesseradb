@@ -45,8 +45,8 @@ SEED = 20260728
 # 5 viewports" -- the independent Python oracle is slow by design, and re-deriving a mask from
 # 1.72B pairs per grant set is not something to do 20x at that scale). Overridable via env so the
 # default 250k invocation (CI, everyday `pytest`) is unaffected.
-N_GRANT_SETS = int(os.environ.get("TESSERA_DIFFERENTIAL_N_GRANTS", "20"))
-N_VIEWPORTS_PER_GRANT = int(os.environ.get("TESSERA_DIFFERENTIAL_N_VIEWPORTS", "10"))
+N_GRANT_SETS = int(os.environ.get("MOSAICA_DIFFERENTIAL_N_GRANTS", "20"))
+N_VIEWPORTS_PER_GRANT = int(os.environ.get("MOSAICA_DIFFERENTIAL_N_VIEWPORTS", "10"))
 ZOOM_RANGE = (3, 8)
 GRID_MAX = 65536.0
 REPO_ROOT = Path(__file__).resolve().parents[2]

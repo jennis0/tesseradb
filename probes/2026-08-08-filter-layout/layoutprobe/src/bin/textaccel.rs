@@ -55,7 +55,7 @@ use std::time::Instant;
 
 use croaring::Bitmap;
 use memchr::memmem;
-use tessera_filter::{Codes, ValueColumn};
+use mosaica_filter::{Codes, ValueColumn};
 
 #[inline]
 fn splitmix(x: u64) -> u64 {

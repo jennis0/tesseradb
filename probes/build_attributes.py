@@ -1,6 +1,6 @@
 """Build the 2.4M points file carrying a declared attribute tail — `data/scaled/attrs/`.
 
-The benchmark fixtures have never carried a per-item column: `tessera-build` wrote
+The benchmark fixtures have never carried a per-item column: `mosaica-build` wrote
 `declared_scalars` empty unconditionally, so per-point-attributes §8's arms ("the fixtures carry
 no attribute tail today, so no arm can see any of this") had nothing to measure. This produces
 the first points file that does.
@@ -253,14 +253,14 @@ SCHEMA_TOML = """\
 # pinned in those files and compiled into `MANIFEST.vocabularies`; nothing re-derives them.
 #
 # Build with:
-#   tessera build --points data/scaled/attrs/points.parquet \\
+#   mosaica build --points data/scaled/attrs/points.parquet \\
 #                 --pairs  data/scaled/pairs/<set>.pairs.parquet \\
 #                 --schema data/scaled/attrs/schema.toml \\
 #                 --values archive=data/scaled/attrs/archive.parquet \\
 #                 --values primary_category=data/scaled/attrs/primary_category.parquet \\
 #                 --view s0 --limit 2422486 ...   (the extent is the view's own now)
 #
-# Residency, which `tessera build` also reports: 16 B/row over the 12 B fixed row (+133%).
+# Residency, which `mosaica build` also reports: 16 B/row over the 12 B fixed row (+133%).
 
 [[attribute]]
 name       = "archive"
@@ -306,7 +306,7 @@ SCHEMA_WIDE_TOML = """\
 # five-column `schema.toml` cannot; see that script's docstring for the table. Codes are pinned in
 # the vocabulary files and compiled into `MANIFEST.vocabularies`; nothing re-derives them.
 #
-# Residency, which `tessera build` also reports: 59.25 B/row over the 12 B fixed row (+494%).
+# Residency, which `mosaica build` also reports: 59.25 B/row over the 12 B fixed row (+494%).
 
 # ---- categories ------------------------------------------------------------------------------
 

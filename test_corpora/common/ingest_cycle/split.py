@@ -542,7 +542,7 @@ def build_bundle(
     extra: Sequence[str] = (),
     env: dict[str, str] | None = None,
 ) -> dict:
-    """`tessera build` into `out`, and what it cost. `peak_rss_kib` is the largest stage's own
+    """`mosaica build` into `out`, and what it cost. `peak_rss_kib` is the largest stage's own
     high-water, as the build reports it, rather than the driver's `getrusage`, a high-water over
     every child it has reaped."""
     t0 = time.perf_counter()
@@ -599,7 +599,7 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     )
     (out / "corpus.toml").write_text(declaration)
     kept["declaration_only"] = removed
-    (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
+    (out / "mosaica.toml").write_text((rung / "mosaica.toml").read_text())
     (out / "base-inputs.json").write_text(json.dumps(kept))
     return kept
 

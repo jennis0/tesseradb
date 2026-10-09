@@ -26,11 +26,11 @@ budget=(); [ -n "${BUDGET:-}" ] && budget=(--memory-budget "$BUDGET")
 shapes=("${@:-distinct many few}")
 
 mkdir -p "$work"
-cat > "$work/tessera.toml" <<'EOF'
+cat > "$work/mosaica.toml" <<'EOF'
 [bundle]
 path  = "bundle"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [build]
 schema = "corpus.toml"
@@ -55,7 +55,7 @@ for shape in ${shapes[@]}; do
     binary="$([ "$which" = before ] && echo "$BEFORE" || echo "$AFTER")"
     out="$work/bundle-$shape-$which"
     rm -rf "$out"
-    /usr/bin/time -v "$binary" build --deployment "$work/tessera.toml" \
+    /usr/bin/time -v "$binary" build --deployment "$work/mosaica.toml" \
         --config "$corpus/corpus.toml" --out "$out" --no-oracle-pairs "${budget[@]}" \
         --stage-timings --stage-timings-json "$work/stages-$shape-$which.json" \
         > "$work/build-$shape-$which.log" 2> "$work/time-$shape-$which.log"

@@ -1976,6 +1976,389 @@ dependencies = [
 ]
 
 [[package]]
+name = "mosaica-access"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.7",
+ "rustc-hash 1.1.0",
+]
+
+[[package]]
+name = "mosaica-analyse"
+version = "0.1.0"
+dependencies = [
+ "icu_casemap",
+ "icu_normalizer",
+ "icu_properties",
+ "icu_segmenter",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "mosaica-authz"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "croaring",
+ "memmap2",
+ "mosaica-access",
+ "mosaica-cache",
+ "mosaica-types",
+ "proptest",
+ "rand 0.8.7",
+ "rustc-hash 1.1.0",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "mosaica-bench"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "axum",
+ "clap",
+ "croaring",
+ "libc",
+ "memchr",
+ "memmap2",
+ "mosaica-analyse",
+ "mosaica-authz",
+ "mosaica-build",
+ "mosaica-corpus",
+ "mosaica-engine",
+ "mosaica-filter",
+ "mosaica-filter-write",
+ "mosaica-lifecycle",
+ "mosaica-roaring",
+ "mosaica-server",
+ "mosaica-spatial",
+ "mosaica-store",
+ "mosaica-types",
+ "mosaica-wire",
+ "parquet",
+ "rand 0.8.7",
+ "rayon",
+ "reqwest",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "zstd",
+]
+
+[[package]]
+name = "mosaica-build"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "chrono",
+ "croaring",
+ "libc",
+ "memmap2",
+ "mosaica-access",
+ "mosaica-analyse",
+ "mosaica-authz",
+ "mosaica-docgen",
+ "mosaica-engine",
+ "mosaica-filter",
+ "mosaica-filter-write",
+ "mosaica-lifecycle",
+ "mosaica-spatial",
+ "mosaica-store",
+ "mosaica-types",
+ "parquet",
+ "proptest",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "mosaica-cache"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash 1.1.0",
+]
+
+[[package]]
+name = "mosaica-catalogue"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "getrandom 0.2.17",
+ "mosaica-access",
+ "parking_lot",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "url",
+]
+
+[[package]]
+name = "mosaica-cli"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "clap",
+ "mosaica-analyse",
+ "mosaica-build",
+ "mosaica-config",
+ "mosaica-corpus",
+ "mosaica-docgen",
+ "mosaica-server",
+ "mosaica-spatial",
+ "mosaica-store",
+ "mosaica-types",
+ "mosaica-wire",
+ "parquet",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "mosaica-config"
+version = "0.1.0"
+dependencies = [
+ "mosaica-docgen",
+ "mosaica-engine",
+ "mosaica-types",
+ "serde",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "mosaica-corpus"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "mosaica-spatial",
+ "mosaica-types",
+ "parquet",
+ "proptest",
+ "tempfile",
+]
+
+[[package]]
+name = "mosaica-docgen"
+version = "0.1.0"
+dependencies = [
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "mosaica-engine"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "arrow",
+ "base64",
+ "chacha20poly1305",
+ "criterion",
+ "croaring",
+ "delaunator",
+ "libc",
+ "memmap2",
+ "mosaica-access",
+ "mosaica-analyse",
+ "mosaica-authz",
+ "mosaica-build",
+ "mosaica-cache",
+ "mosaica-corpus",
+ "mosaica-engine",
+ "mosaica-filter",
+ "mosaica-filter-write",
+ "mosaica-lifecycle",
+ "mosaica-roaring",
+ "mosaica-spatial",
+ "mosaica-store",
+ "mosaica-types",
+ "parquet",
+ "proptest",
+ "rand 0.8.7",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "mosaica-filter"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "croaring",
+ "memchr",
+ "memmap2",
+ "mosaica-authz",
+ "mosaica-roaring",
+ "mosaica-types",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
+name = "mosaica-filter-write"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "croaring",
+ "mosaica-authz",
+ "mosaica-filter",
+ "mosaica-roaring",
+ "mosaica-types",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
+name = "mosaica-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "criterion",
+ "croaring",
+ "mosaica-authz",
+ "mosaica-lifecycle",
+ "mosaica-types",
+ "postcard",
+ "proptest",
+ "rustc-hash 1.1.0",
+ "serde",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "mosaica-python"
+version = "0.1.0"
+dependencies = [
+ "mosaica-build",
+ "mosaica-config",
+ "pyo3",
+ "serde_json",
+]
+
+[[package]]
+name = "mosaica-roaring"
+version = "0.1.0"
+dependencies = [
+ "croaring",
+ "rand 0.8.7",
+]
+
+[[package]]
+name = "mosaica-server"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "axum",
+ "base64",
+ "bytes",
+ "futures-core",
+ "http-body",
+ "jsonschema",
+ "jsonwebtoken",
+ "mosaica-access",
+ "mosaica-build",
+ "mosaica-catalogue",
+ "mosaica-config",
+ "mosaica-engine",
+ "mosaica-lifecycle",
+ "mosaica-server",
+ "mosaica-spatial",
+ "mosaica-types",
+ "mosaica-wire",
+ "parking_lot",
+ "parquet",
+ "reqwest",
+ "ring",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "mosaica-spatial"
+version = "0.1.0"
+dependencies = [
+ "mosaica-types",
+ "proptest",
+ "serde_json",
+]
+
+[[package]]
+name = "mosaica-store"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "base64",
+ "crc32fast",
+ "croaring",
+ "libc",
+ "memmap2",
+ "mosaica-access",
+ "mosaica-analyse",
+ "mosaica-roaring",
+ "mosaica-spatial",
+ "mosaica-types",
+ "parquet",
+ "proptest",
+ "rand 0.8.7",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
+ "twox-hash",
+]
+
+[[package]]
+name = "mosaica-types"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "libc",
+ "mosaica-access",
+ "mosaica-types",
+ "serde",
+ "serde_json",
+ "trybuild",
+]
+
+[[package]]
+name = "mosaica-wire"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "arrow-ipc",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3227,389 +3610,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "tessera-access"
-version = "0.1.0"
-dependencies = [
- "rand 0.8.7",
- "rustc-hash 1.1.0",
-]
-
-[[package]]
-name = "tessera-analyse"
-version = "0.1.0"
-dependencies = [
- "icu_casemap",
- "icu_normalizer",
- "icu_properties",
- "icu_segmenter",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "tessera-authz"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "croaring",
- "memmap2",
- "proptest",
- "rand 0.8.7",
- "rustc-hash 1.1.0",
- "sha2",
- "tempfile",
- "tessera-access",
- "tessera-cache",
- "tessera-types",
-]
-
-[[package]]
-name = "tessera-bench"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "axum",
- "clap",
- "croaring",
- "libc",
- "memchr",
- "memmap2",
- "parquet",
- "rand 0.8.7",
- "rayon",
- "reqwest",
- "rustc-hash 1.1.0",
- "serde",
- "serde_json",
- "tempfile",
- "tessera-analyse",
- "tessera-authz",
- "tessera-build",
- "tessera-corpus",
- "tessera-engine",
- "tessera-filter",
- "tessera-filter-write",
- "tessera-lifecycle",
- "tessera-roaring",
- "tessera-server",
- "tessera-spatial",
- "tessera-store",
- "tessera-types",
- "tessera-wire",
- "tokio",
- "toml 0.8.23",
- "zstd",
-]
-
-[[package]]
-name = "tessera-build"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "chrono",
- "croaring",
- "libc",
- "memmap2",
- "parquet",
- "proptest",
- "rayon",
- "rustc-hash 1.1.0",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tessera-access",
- "tessera-analyse",
- "tessera-authz",
- "tessera-docgen",
- "tessera-engine",
- "tessera-filter",
- "tessera-filter-write",
- "tessera-lifecycle",
- "tessera-spatial",
- "tessera-store",
- "tessera-types",
- "toml 0.8.23",
-]
-
-[[package]]
-name = "tessera-cache"
-version = "0.1.0"
-dependencies = [
- "rustc-hash 1.1.0",
-]
-
-[[package]]
-name = "tessera-catalogue"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "getrandom 0.2.17",
- "parking_lot",
- "rusqlite",
- "serde_json",
- "sha2",
- "subtle",
- "tempfile",
- "tessera-access",
- "url",
-]
-
-[[package]]
-name = "tessera-cli"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "clap",
- "parquet",
- "reqwest",
- "serde_json",
- "tempfile",
- "tessera-analyse",
- "tessera-build",
- "tessera-config",
- "tessera-corpus",
- "tessera-docgen",
- "tessera-server",
- "tessera-spatial",
- "tessera-store",
- "tessera-types",
- "tessera-wire",
- "tokio",
- "toml 0.8.23",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tessera-config"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tempfile",
- "tessera-docgen",
- "tessera-engine",
- "tessera-types",
- "tokio",
- "toml 0.8.23",
-]
-
-[[package]]
-name = "tessera-corpus"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "parquet",
- "proptest",
- "tempfile",
- "tessera-spatial",
- "tessera-types",
-]
-
-[[package]]
-name = "tessera-docgen"
-version = "0.1.0"
-dependencies = [
- "syn 2.0.119",
-]
-
-[[package]]
-name = "tessera-engine"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "arrow",
- "base64",
- "chacha20poly1305",
- "criterion",
- "croaring",
- "delaunator",
- "libc",
- "memmap2",
- "parquet",
- "proptest",
- "rand 0.8.7",
- "rayon",
- "rustc-hash 1.1.0",
- "serde_json",
- "sha2",
- "tempfile",
- "tessera-access",
- "tessera-analyse",
- "tessera-authz",
- "tessera-build",
- "tessera-cache",
- "tessera-corpus",
- "tessera-engine",
- "tessera-filter",
- "tessera-filter-write",
- "tessera-lifecycle",
- "tessera-roaring",
- "tessera-spatial",
- "tessera-store",
- "tessera-types",
- "tracing",
-]
-
-[[package]]
-name = "tessera-filter"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "croaring",
- "memchr",
- "memmap2",
- "tempfile",
- "tessera-authz",
- "tessera-roaring",
- "tessera-types",
- "zstd",
-]
-
-[[package]]
-name = "tessera-filter-write"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "croaring",
- "tempfile",
- "tessera-authz",
- "tessera-filter",
- "tessera-roaring",
- "tessera-types",
- "zstd",
-]
-
-[[package]]
-name = "tessera-lifecycle"
-version = "0.1.0"
-dependencies = [
- "crc32fast",
- "criterion",
- "croaring",
- "postcard",
- "proptest",
- "rustc-hash 1.1.0",
- "serde",
- "sha2",
- "tempfile",
- "tessera-authz",
- "tessera-lifecycle",
- "tessera-types",
-]
-
-[[package]]
-name = "tessera-python"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "serde_json",
- "tessera-build",
- "tessera-config",
-]
-
-[[package]]
-name = "tessera-roaring"
-version = "0.1.0"
-dependencies = [
- "croaring",
- "rand 0.8.7",
-]
-
-[[package]]
-name = "tessera-server"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "axum",
- "base64",
- "bytes",
- "futures-core",
- "http-body",
- "jsonschema",
- "jsonwebtoken",
- "parking_lot",
- "parquet",
- "reqwest",
- "ring",
- "rustc-hash 1.1.0",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "tempfile",
- "tessera-access",
- "tessera-build",
- "tessera-catalogue",
- "tessera-config",
- "tessera-engine",
- "tessera-lifecycle",
- "tessera-server",
- "tessera-spatial",
- "tessera-types",
- "tessera-wire",
- "tokio",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "tessera-spatial"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "serde_json",
- "tessera-types",
-]
-
-[[package]]
-name = "tessera-store"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "base64",
- "crc32fast",
- "croaring",
- "libc",
- "memmap2",
- "parquet",
- "proptest",
- "rand 0.8.7",
- "rayon",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tessera-access",
- "tessera-analyse",
- "tessera-roaring",
- "tessera-spatial",
- "tessera-types",
- "tracing",
- "twox-hash",
-]
-
-[[package]]
-name = "tessera-types"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.2.17",
- "libc",
- "serde",
- "serde_json",
- "tessera-access",
- "tessera-types",
- "trybuild",
-]
-
-[[package]]
-name = "tessera-wire"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "arrow-ipc",
 ]
 
 [[package]]

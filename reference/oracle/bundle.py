@@ -1,6 +1,6 @@
-"""Read a Tessera bundle directly off disk (Reference Sheet R4, contracts §2.1-§2.3).
+"""Read a Mosaica bundle directly off disk (Reference Sheet R4, contracts §2.1-§2.3).
 
-Independent of `tessera-store`: this module re-parses `CURRENT`/`MANIFEST.json`/
+Independent of `mosaica-store`: this module re-parses `CURRENT`/`MANIFEST.json`/
 `SEGMENTS-<n>.json`, `permutation.bin`, `morton.u32`, `cuts.u32`, `postings.arrow` and
 `columns.arrow` from
 their byte-level definitions, verifying every file digest the manifests name along the way. Tag-1
@@ -31,10 +31,10 @@ from . import morton as morton_mod
 #: everything else here; `Bundle.view_dir` is the one place it is split on.
 GROUP_SEPARATOR = ":"
 
-PERMUTATION_MAGIC = b"TSPM"
-# Version 2 is the two-level paged form (contracts 2.6); version 1 was the flat array it
-# replaced, and this reader refuses that on the version field alone.
-PERMUTATION_VERSION = 2
+PERMUTATION_MAGIC = b"MSPM"
+# The two-level paged form (contracts 2.6). Version 1 was the flat array it replaced, and this
+# reader refuses that on the version field alone.
+PERMUTATION_VERSION = 3
 PERMUTATION_ABSENT = 0xFFFF_FFFF
 PERMUTATION_PAGE_SHIFT = 16
 PERMUTATION_PAGE_ENTRIES = 1 << PERMUTATION_PAGE_SHIFT
@@ -46,13 +46,13 @@ PERMUTATION_PAGE_ALIGN = 4096
 # typed reader error, not a default... it does not acquire a minted key, a zero key or a
 # legacy path" (docs/evidence/memos/2026-07-30-tessera-id-construction.md §2). The fallback
 # below violates that rule on purpose, as a temporary scaffold: no bundle in this checkout
-# carries an `identity` object yet, because tessera-build/tessera-store have not been
-# repointed at the tessera_id column (only tessera-types/identity.rs has landed as of
+# carries an `identity` object yet, because mosaica-build/mosaica-store have not been
+# repointed at the tessera_id column (only mosaica-types/identity.rs has landed as of
 # Task 5/12). REMOVE THIS FALLBACK the moment Task 6/7 land build-side `identity` emission
 # -- at that point every bundle this oracle reads is post-r6 and an absent `identity`
 # object must raise, full stop.
 PRE_R6_IDENTITY_FALLBACK_REMOVE_AT = (
-    "Task 6/7: tessera-build/tessera-store emitting MANIFEST `identity` and the "
+    "Task 6/7: mosaica-build/mosaica-store emitting MANIFEST `identity` and the "
     "`tessera_id` column"
 )
 
@@ -150,7 +150,7 @@ class SourceGeometry:
 def _row_groups_worth_reading(reader, column: str, limit: int | None) -> list[int]:
     """Row groups that may hold a row whose `column` is below `limit`, by their own statistics.
 
-    Mirrors the importer's own row-group filter (`tessera_build::input`), and for the same
+    Mirrors the importer's own row-group filter (`mosaica_build::input`), and for the same
     reason: the fixture corpus is 10⁹ rows and the fixture bundle a 250,000-row prefix, so a
     reader that visits every group to find a prefix is not slow, it is unusable. Returns **all**
     groups when there is no limit or no usable statistic — the filter may never drop a group it
@@ -195,7 +195,7 @@ def read_source_geometry(
     other extent the cell indices would be re-quantised as though they were coordinates in that
     extent's units. The importer errors there and so does this.
 
-    `limit` mirrors `tessera build --limit`: keep source rows whose value of `field` is below it.
+    `limit` mirrors `mosaica build --limit`: keep source rows whose value of `field` is below it.
     **Passing it is not an optimisation** — see [`_row_groups_worth_reading`].
 
     The per-row arithmetic is vectorised in numpy rather than written as the loop the rest of this
@@ -368,7 +368,7 @@ class Bundle:
     """A verified, opened bundle: `CURRENT` -> `MANIFEST.json` -> `SEGMENTS-0.json` -> segments.
 
     Phase 1 has exactly one partition (`default`) and, per view, exactly one segment — matching
-    the build's own scope (tessera-build's module doc).
+    the build's own scope (mosaica-build's module doc).
     """
 
     def __init__(self, root: Path | str):
@@ -502,7 +502,7 @@ class Bundle:
 
         **Nested rather than joined**, because `:` is not a path character everywhere: the id a
         request names and the manifest carries is `group:key`, and the directory is two components
-        (`views.md` §3.2; `tessera_store::view_path`). A single joined component was what this
+        (`views.md` §3.2; `mosaica_store::view_path`). A single joined component was what this
         oracle laid down while every bundle had one plain view, and it named a directory no
         multi-view build writes — so the failure would have been a missing file rather than a
         wrong answer, which is the safe direction and still the wrong path.
@@ -748,8 +748,8 @@ class Bundle:
         raise ValueError(f"postings.arrow: term {term_id} has unknown tag {tag}")
 
 
-KEY_RUN_MAGIC = b"TSKEYRUN"
-KEY_RUN_VERSION = 2
+KEY_RUN_MAGIC = b"MSKEYRUN"
+KEY_RUN_VERSION = 3
 KEY_RUN_PAGE = 4096
 
 
@@ -760,7 +760,7 @@ def _page_checksum_holds(page: bytes) -> bool:
 def read_key_run(path: Path) -> list[tuple[int, int]]:
     """One key run file's `(key, entity)` entries, in file order, every checksum checked.
 
-    The layout (`tessera_store::key_index`): a 4096-byte header page — magic, format version,
+    The layout (`mosaica_store::key_index`): a 4096-byte header page — magic, format version,
     key width, entry count, page count, smallest and largest key, then a CRC-32 of those 64
     bytes — and one 4096-byte page per group of entries. A page holds its entry count (u16), the
     bit width of its gaps (u8), its first key, the gap from each key to the next packed least

@@ -1,28 +1,28 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tessera-access",
-    "crates/tessera-types",
-    "crates/tessera-roaring",
-    "crates/tessera-cache",
-    "crates/tessera-analyse",
-    "crates/tessera-catalogue",
-    "crates/tessera-authz",
-    "crates/tessera-filter",
-    "crates/tessera-store",
-    "crates/tessera-spatial",
-    "crates/tessera-lifecycle",
-    "crates/tessera-engine",
-    "crates/tessera-wire",
-    "crates/tessera-config",
-    "crates/tessera-server",
-    "crates/tessera-filter-write",
-    "crates/tessera-build",
-    "crates/tessera-corpus",
-    "crates/tessera-cli",
-    "crates/tessera-bench",
-    "crates/tessera-python",
-    "crates/tessera-docgen",
+    "crates/mosaica-access",
+    "crates/mosaica-types",
+    "crates/mosaica-roaring",
+    "crates/mosaica-cache",
+    "crates/mosaica-analyse",
+    "crates/mosaica-catalogue",
+    "crates/mosaica-authz",
+    "crates/mosaica-filter",
+    "crates/mosaica-store",
+    "crates/mosaica-spatial",
+    "crates/mosaica-lifecycle",
+    "crates/mosaica-engine",
+    "crates/mosaica-wire",
+    "crates/mosaica-config",
+    "crates/mosaica-server",
+    "crates/mosaica-filter-write",
+    "crates/mosaica-build",
+    "crates/mosaica-corpus",
+    "crates/mosaica-cli",
+    "crates/mosaica-bench",
+    "crates/mosaica-python",
+    "crates/mosaica-docgen",
 ]
 
 [workspace.package]
@@ -32,7 +32,7 @@ license = "Apache-2.0"
 croaring = "2.8.0"
 rayon = "1"
 proptest = "1"
-# **Pinned exactly.** `tessera_store::columns` writes `columns.arrow` in place by learning the
+# **Pinned exactly.** `mosaica_store::columns` writes `columns.arrow` in place by learning the
 # file's layout from arrow's own `FileWriter` run into a recording sink, which depends on that
 # writer handing each buffer to the sink separately. A 59.x that encoded a batch contiguously
 # before writing it would materialise the whole body — ~70 GB at rung 6 — inside the layout pass.
@@ -41,7 +41,7 @@ proptest = "1"
 arrow = { version = "=59.1.0", default-features = false, features = ["ipc"] }
 tempfile = "3"
 # Test-only, and dev-only everywhere it is used: compile-fail harness for the invariants that
-# are upheld by the type system (I4). See crates/tessera-types/tests/compile_fail.rs.
+# are upheld by the type system (I4). See crates/mosaica-types/tests/compile_fail.rs.
 trybuild = "1"
 rand = "0.8"
 memmap2 = "0.9"
@@ -57,12 +57,12 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 postcard = { version = "1", features = ["use-std"] }
 crc32fast = "1"
-# Keyword keys in the key index are the XXH3-128 hash of the string (`tessera_store::key_index`).
+# Keyword keys in the key index are the XXH3-128 hash of the string (`mosaica_store::key_index`).
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }
 arc-swap = "1"
 parking_lot = "0.12"
 # Facade only, no subscriber: a no-op wherever nothing attaches one. Promoted here on its
-# second consumer (tessera-store's step-down warn, tessera-server's request logging) per the
+# second consumer (mosaica-store's step-down warn, mosaica-server's request logging) per the
 # workspace convention that a dependency taken by two crates is versioned in one place.
 tracing = "0.1"
 # The paged-records cursor's seal: XChaCha20-Poly1305, whose 24-byte nonce is drawn at random per

@@ -1,11 +1,11 @@
 """Decode TSMB membership extents: count artifacts, membership entries, and bytes.
 
-Format (crates/tessera-store/src/membership.rs module doc):
+Format (crates/mosaica-store/src/membership.rs module doc):
   header  := "TSMB" | u16 version | u16 reserved | u32 count | u32 ordinal_lo
   offsets := u64 LE x (count+1)
   payload := count blobs
 
-Blob (tessera-lifecycle::membership::encode_record):
+Blob (mosaica-lifecycle::membership::encode_record):
   u16 key_len | key | u16 view_len | view | u16 content_count | u32 members_len | members ...
 
 members := CRoaring portable serialisation.

@@ -1,13 +1,13 @@
 import {Dictionary, Int8, Int32, Table, tableToIPC, TimestampMicrosecond, Uint64, Uint8, Utf8, vectorFromArray} from 'apache-arrow';
 import {describe, expect, it} from 'vitest';
 import {PartialAggregate} from '../src/aggregate.js';
-import {TesseraClient, TesseraError} from '../src/client.js';
+import {MosaicaClient, MosaicaError} from '../src/client.js';
 import type {Frame} from '../src/frame.js';
 import type {AggregateRequest} from '../src/types.js';
 import {chunked, framed, manual, u64} from './support.js';
 
 /**
- * `TesseraClient.aggregate` over bodies built here from the wire layout: per table a head (kind 9)
+ * `MosaicaClient.aggregate` over bodies built here from the wire layout: per table a head (kind 9)
  * and records frames (7) each followed by a page end (8), then a trailer (4).
  */
 
@@ -54,7 +54,7 @@ function responseOf(parts: Part[], next: string | null, trailer: Record<string, 
 function clientFor(answers: Record<string, () => Response>) {
   const sent: {url: string; body: Record<string, unknown>}[] = [];
   const asked = new Set<string>();
-  const client = new TesseraClient({
+  const client = new MosaicaClient({
     viewerUrl: 'http://viewer',
     sessionUrl: 'http://session',
     fetch: (async (url: string, init?: RequestInit) => {
@@ -101,15 +101,15 @@ const TWO = {
         'c1'
       ),
       11,
-      {headers: {'x-tessera-identity-key': 'ik1', 'x-tessera-region': 'cover; depth=9'}}
+      {headers: {'x-mosaica-identity-key': 'ik1', 'x-mosaica-region': 'cover; depth=9'}}
     ),
   c1: () =>
     chunked(responseOf([{head: {grouping: 1, total: 11, groups: 6, resumed: true}, pages: [{table: fieldPage([['rest', null, 2n], ['none', null, 1n]]), next: null}]}], null, {recomposed: true}), 64, {
-      headers: {'x-tessera-identity-key': 'ik2'}
+      headers: {'x-mosaica-identity-key': 'ik2'}
     })
 };
 
-describe('TesseraClient.aggregate', () => {
+describe('MosaicaClient.aggregate', () => {
   it('sends the request as given, each field that is set under its wire name, and each follow-up from the cursor', async () => {
     const {client, sent} = clientFor(TWO);
     await client.aggregate('tok', {
@@ -278,7 +278,7 @@ describe('TesseraClient.aggregate', () => {
   it('rejects with the refusal, first request or follow-up', async () => {
     const refusal = () => new Response(JSON.stringify({error: 'contract', detail: 'more cells than selection.max_aggregate_cells'}), {status: 422});
     const first = clientFor({'': refusal}).client.aggregate('tok', REQUEST);
-    await expect(first).rejects.toBeInstanceOf(TesseraError);
+    await expect(first).rejects.toBeInstanceOf(MosaicaError);
     await expect(first).rejects.toMatchObject({status: 422, code: 'contract'});
     const later = clientFor({'': TWO[''], c1: refusal}).client.aggregate('tok', REQUEST);
     await expect(later).rejects.toMatchObject({status: 422, retryAfterS: null});
@@ -289,7 +289,7 @@ describe('TesseraClient.aggregate', () => {
   it('stops at an abort of its signal, mid-body', async () => {
     const controller = new AbortController();
     const body = manual(controller.signal);
-    const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch: (async () => body.response) as typeof fetch});
+    const client = new MosaicaClient({viewerUrl: 'http://viewer', sessionUrl: '', fetch: (async () => body.response) as typeof fetch});
     const read = client.aggregate('tok', REQUEST, controller.signal);
     const whole = TWO['']();
     body.push(new Uint8Array(await whole.arrayBuffer()).slice(0, 30));

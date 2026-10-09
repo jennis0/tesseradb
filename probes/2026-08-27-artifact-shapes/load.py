@@ -3,7 +3,7 @@
 The corpus is read from `data/notebook-2m4-live/*.parquet` rather than through the engine: the
 question here is about shape families, and every family in this probe is a function of the member
 positions alone. Positions are quantised **exactly as the build quantises** — `fixed32(v) =
-clamp(floor((v - min) / (max - min) * 2^32), 0, 2^32 - 1)` (`tessera-spatial/src/morton.rs`)
+clamp(floor((v - min) / (max - min) * 2^32), 0, 2^32 - 1)` (`mosaica-spatial/src/morton.rs`)
 against the bounds the built bundle records — so a shape computed here is over the same integer
 lattice the engine's is, and the two are comparable vertex for vertex.
 
@@ -23,10 +23,10 @@ import pyarrow.parquet as pq
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-DATA = os.environ.get("SHAPES_DATA", "/home/user/code/tessera/data/notebook-2m4-live")
+DATA = os.environ.get("SHAPES_DATA", "/home/user/code/mosaica/data/notebook-2m4-live")
 BUNDLE = os.environ.get(
     "SHAPES_BUNDLE",
-    "/home/user/code/tessera/.claude/worktrees/client-corpus/clients/ts/.dev/"
+    "/home/user/code/mosaica/.claude/worktrees/client-corpus/clients/ts/.dev/"
     "bundle-notebook-2m4/v00000/MANIFEST.json",
 )
 CACHE = os.path.join(HERE, "cache")
@@ -40,7 +40,7 @@ def quantisation():
 
 
 def fixed32(v, lo, hi):
-    """`tessera_spatial::morton::fixed32`, vectorised. Computed in f64, floored, clamped."""
+    """`mosaica_spatial::morton::fixed32`, vectorised. Computed in f64, floored, clamped."""
     scaled = np.floor((v - lo) / (hi - lo) * 4294967296.0)
     return np.clip(scaled, 0.0, 4294967295.0).astype(np.uint32)
 

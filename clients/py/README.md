@@ -1,23 +1,23 @@
-# `tesseradb`
+# `mosaica`
 
-Tessera's Python package: one package whether you want the widget, the SDK or
+Mosaica's Python package: one package whether you want the widget, the SDK or
 both. The widget and the SDK are here; the in-process instance joins them later. It shares no
 code with `reference/`, the test-only oracle.
 
 ```
-pip install tesseradb            # read, create, declare, insert, commit; with pyarrow and the binary
-pip install 'tesseradb[widget]'  # + anywidget and the notebook widget, Map
+pip install mosaica            # read, create, declare, insert, commit; with pyarrow and the binary
+pip install 'mosaica[widget]'  # + anywidget and the notebook widget, Map
 ```
 
 Every table the package returns is a pyarrow table; `.to_pandas()` on it gives a DataFrame where
-pandas is installed. `pip install tesseradb --no-deps` installs neither pyarrow nor the
-`tesseradb-native` wheel that carries the `tessera` binary: install `pyarrow>=14` by hand, and
-put a `tessera` binary on `PATH` or name it with `TESSERA_BIN` to make or serve a database.
+pandas is installed. `pip install mosaica --no-deps` installs neither pyarrow nor the
+`mosaica-native` wheel that carries the `mosaica` binary: install `pyarrow>=14` by hand, and
+put a `mosaica` binary on `PATH` or name it with `MOSAICA_BIN` to make or serve a database.
 
 From this checkout, `pip install -e 'clients/py[widget]'` — the wheel's build hook
 (`hatch_build.py`) runs `npm ci` (when the install is stale) and `npm run bundle -w
-@tesseradb/components` in `clients/ts` and copies the single-file bundle into
-`tesseradb/static/`, which is why a checkout install needs Node and a PyPI install does not.
+@mosaicajs/components` in `clients/ts` and copies the single-file bundle into
+`mosaica/static/`, which is why a checkout install needs Node and a PyPI install does not.
 Nothing built is committed. `check.sh` is the package's half of the gate: the tests, and a wheel
 built and opened to prove the bundle is inside it.
 
@@ -36,9 +36,9 @@ narrower readers; filters and counts; one view per year with a clustering of eac
 new papers into the database while it serves, with a suppression; and the database saved and
 reopened.
 
-They need `pip install -e 'clients/py[widget]'`, a `tessera` binary on `PATH` or named by
-`TESSERA_BIN`, and the corpus at `data/notebook-2m4-live/`, or `data/notebook-sample/` with
-`SCALE = "sample"`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
+They need `pip install -e 'clients/py[widget]'`, a `mosaica` binary on `PATH` or named by
+`MOSAICA_BIN`, and the corpus at `data/notebook-2m4-live/`, or `data/notebook-sample/` with
+`SCALE = "sample"`, which `MOSAICA_NOTEBOOK_DATA` names elsewhere.
 Three things are in no extra, because the package needs none of them: `pandas`, which the first
 section's frame is built with, and the front end you are running, `marimo` or `jupyterlab`. So
 `pip install pandas marimo` for the first notebook, `pip install pandas jupyterlab` for the
@@ -53,14 +53,14 @@ that drifts from the package fails the gate.
 
 ## A database in a directory
 
-The SDK makes a Tessera database out of frames and files. Three verbs carry it,
+The SDK makes a Mosaica database out of frames and files. Three verbs carry it,
 and each does one thing. `declare_*` says what exists and takes no data. `insert(target, table,
 **columns)` hands a table to a declared thing and names every column it reads. `commit()` sends
 what was inserted since the last commit and forgets it: the first time through the build, after
 that through the control plane. `check()` is `commit()` with nothing sent.
 
 ```python
-import tesseradb as td
+import mosaica as td
 
 db = td.create()                                   # a temporary directory, on /dev/shm where there is one
 db.declare_view("map")
@@ -70,7 +70,7 @@ db.declare_layer("clusters", kind="flat")
 db.insert("map", df, x="x", y="y")                 # paper and title are read by name
 db.insert("clusters", df, key="cluster")
 db.check()                                         # what the declaration reads, and what refuses it
-db.commit()                                        # tessera check, tessera build, tessera serve
+db.commit()                                        # mosaica check, mosaica build, mosaica serve
 ```
 
 No call prints. Each returns a report that shows as a short summary of what happened, in numbers,
@@ -78,15 +78,15 @@ with every refusal and finding in full; a notebook cell that ends in one shows i
 on the report's attributes: an insert's `read` and `ignored` columns, a check's or a first
 commit's `findings` and `log` (the declaration check's and the build's text), a later commit's
 `plan`, `rows_accepted` and `refusals`. `db.path` is where the database is and `db.binary` the
-`tessera` program it runs.
+`mosaica` program it runs.
 
 `db.declaration` is the TOML the SDK wrote, and the declaration check reads that file: the
 mapping from verb to block is checked below the SDK rather than mirrored in Python. `check()` and
-`commit()` run that check in this process where the `_tessera` extension module is installed, and
-through `tessera check` where it is not; the two read one declaration with one parser, and what
+`commit()` run that check in this process where the `_mosaica` extension module is installed, and
+through `mosaica check` where it is not; the two read one declaration with one parser, and what
 the extension adds is a refusal naming the block it is about. Every block names the source
 and the column names its inserts gave it. The directory is everything the binary reads, so
-`db.save("~/somewhere")` and `tessera serve --deployment ~/somewhere/tessera.toml` on another
+`db.save("~/somewhere")` and `mosaica serve --deployment ~/somewhere/mosaica.toml` on another
 machine serve the same database.
 
 `declare_view_group` is the group surface: its views and their metadata come from
@@ -130,7 +130,7 @@ read in place it is copied, a block reading one file. A path is accepted whereve
 read where it lies, with two exceptions, whose record's `in_place` is false: a label set given a
 mapping or a `text=` column, where the SDK writes the table the publication takes, with the attachment its `of` names.
 
-A table in Tessera's own shape (an artifacts table, a members table, a roster, a value set) is no
+A table in Mosaica's own shape (an artifacts table, a members table, a roster, a value set) is no
 exception to the rule that every column a target reads is named on the call. A canonical column the
 call did not name is refused naming the column and the two remedies, name it or drop it, so nothing
 is read silently at one door and ignored at the other. `level` and `attached_level` are read by the
@@ -306,12 +306,12 @@ db.suppress({"entity_id": [17, 23]})
 db.unsuppress(frame[["entity_id"]])
 ```
 
-The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
+The binary is `MOSAICA_BIN` when set, else the first `mosaica` on `PATH`, else a checkout's target
 directory, release before debug; `create()` names the one it found. The database directory keeps
-its own operator credential under `.tessera/`, owner-only, and its catalogue of principals,
-credentials and grants under `.tessera/catalogue`. The operator credential authenticates the
+its own operator credential under `.mosaica/`, owner-only, and its catalogue of principals,
+credentials and grants under `.mosaica/catalogue`. The operator credential authenticates the
 server's superuser, and the database uses it for every write and to mint every token, so nobody
-has to set up principals to read their own data. `commit()` starts `tessera serve` as a child
+has to set up principals to read their own data. `commit()` starts `mosaica serve` as a child
 process on loopback at port 0 and reads the three bound addresses from the JSON line the child
 prints once all three planes are listening; `db.viewer_url`, `db.session_url` and
 `db.operator_credential` are what a token is minted against.
@@ -389,8 +389,8 @@ reads every row. The result reads as a pyarrow table of
 `tessera_id`, `code` (the point's position on the view's grid) and the columns declared with
 `render=True`, or only the rendered columns `point_rows` names, as in
 `point_rows=["venue"]`. A category column holds each value's key, as a dictionary column, and null for a
-value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `tessera.counts` (`visible`, `matched`, `highlighted`
-and `served`, over the tiles the request touched), `tessera.request` and `tessera.trailer`.
+value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `mosaica.counts` (`visible`, `matched`, `highlighted`
+and `served`, over the tiles the request touched), `mosaica.request` and `mosaica.trailer`.
 Each layer named in `layers` adds a `membership:<layer>` column: the `tessera_id` of the
 annotation of that layer holding the point, or null. Beside the points it has `sub_cells`, finer
 counts that `underlay_offset` asks for, or `None`. The other keywords are sent as given: `tiles`,
@@ -431,7 +431,7 @@ by the artifacts of one level of a layer, as the `top` groups by count or the gr
 `"cells"` divides the set, or each group, into the view's cells at a depth from 0 to 32, each row's
 `cell` being the cell's Morton prefix. `reference` is a second set to compare with, `{}` for
 everything the reader may see in the view; each row then adds `reference_count` and `lift`. The
-table's schema metadata `tessera.head` holds `total`, and `reference_total` and `groups` where they
+table's schema metadata `mosaica.head` holds `total`, and `reference_total` and `groups` where they
 apply. The call follows each response's cursor until every table is whole. On a selection,
 `aggregate(groupings, reference=None)` sends the selection's filters and box as `filters`.
 
@@ -452,10 +452,10 @@ for batch in db.items("s0", ["title"], page_rows=10_000, batches=True):
 named, as one pyarrow table. The server answers a page at a time, several pages to a response,
 and ends each response with a cursor for the next. `items` asks for responses until no row
 remains and joins their pages. The columns are `tessera_id`, the fields in the order named, then
-the `system_fields` asked for: `position` as `tessera:x` and `tessera:y`, in the view's
-coordinates, and `labels` as `tessera:labels`. A unique attribute is a field like any other. A category column holds each value's key as a
+the `system_fields` asked for: `position` as `mosaica:x` and `mosaica:y`, in the view's
+coordinates, and `labels` as `mosaica:labels`. A unique attribute is a field like any other. A category column holds each value's key as a
 dictionary column, and a missing value is null. `filters` narrows the rows as `Selection.filter` does, and `keep_unmatched=True`
-keeps every row and adds a `tessera:matched` column. The table's schema metadata `tessera.head`
+keeps every row and adds a `mosaica:matched` column. The table's schema metadata `mosaica.head`
 holds the page size and order the server used, and with `count=True` the numbers of items
 `visible` and `matched`. A read that returns no row is a table of no rows with the same columns.
 
@@ -489,8 +489,8 @@ same way. An artifact is one member of a layer, such as a cluster. `fields` are 
 `matched_count`. The rows are in order of
 level, then in the order they were published.
 
-`tessera items` and `tessera artifacts` make the same reads from a shell and write Arrow IPC or
-Parquet; `tessera items --help` lists their arguments. When a read stops part of the way, they
+`mosaica items` and `mosaica artifacts` make the same reads from a shell and write Arrow IPC or
+Parquet; `mosaica items --help` lists their arguments. When a read stops part of the way, they
 keep the whole pages before the stop in the output and print the cursor to read the rest with.
 
 `items(fields, ...)` on a selection reads the items it counts: its filters and its box are sent
@@ -518,7 +518,7 @@ column's values that the reader may see, one row each, with `key`, `code` and `t
 prefix it is every value. With one it is the values whose key or title, or a word in either, starts
 with it, ignoring case, and each row adds `count`, the number of items the reader may see that carry
 the value; the server returns at most its `max_suggestions` setting of these, and the table's schema
-metadata `tessera.more` says whether more matched and `tessera.total` how many items the counts are
+metadata `mosaica.more` says whether more matched and `mosaica.total` how many items the counts are
 taken over. With `codes`, such as the codes in a sample's category column, it is the values of those
 codes, and a code with no value the reader may see is left out; `codes` and `prefix` cannot be
 combined. A column declared for a view group holds different values in each view, so it takes
@@ -555,7 +555,7 @@ db.drop_view("slices", "a")                    # the inverse of create_view
 `delete_group`, `add_member`, `remove_member`), grants of terms and permissions (`grant`,
 `revoke_grant`), OIDC providers (`list_providers`, `show_provider`, `put_provider`,
 `drop_provider`) and sessions (`list_sessions`, `end_sessions`). A change answers how many live
-sessions it ended. A database you read alone needs none of it. `tesseradb.Control(url,
+sessions it ended. A database you read alone needs none of it. `mosaica.Control(url,
 credential)` is the same client for a database somebody else runs, with the operator credential,
 an API key or an OIDC access token.
 
@@ -568,13 +568,13 @@ it leaves in no view, as `remove()` deletes one, and the answer's `deleted` says
 ## A deployment somebody else runs
 
 ```python
-v = tesseradb.connect("https://tessera.example/viewer", token=my_token)
+v = mosaica.connect("https://mosaica.example/viewer", token=my_token)
 v.map(colour_by="cluster:clusters/kmeans", artifacts_per_tile=50)
 v.view("s0").count()
 
-token = tesseradb.login("https://tessera.example/viewer", principal="ann", password=password)
-token = tesseradb.login("https://tessera.example/viewer", api_key=my_key)
-tesseradb.logout("https://tessera.example/viewer", token)
+token = mosaica.login("https://mosaica.example/viewer", principal="ann", password=password)
+token = mosaica.login("https://mosaica.example/viewer", api_key=my_key)
+mosaica.logout("https://mosaica.example/viewer", token)
 ```
 
 `token` is a string, a `Token` or a function returning either, as `Map` takes one. `login` makes
@@ -584,12 +584,12 @@ other queries, and reads what its token's terms admit.
 
 ## The widget, and the entry point being a token
 
-`map()` above builds this; `tesseradb.Map(url, token=my_token)` is it directly, for a URL and a
+`map()` above builds this; `mosaica.Map(url, token=my_token)` is it directly, for a URL and a
 token you already hold:
 
 ```python
-import tesseradb
-m = tesseradb.Map("https://tessera.example/viewer", token=my_token)
+import mosaica
+m = mosaica.Map("https://mosaica.example/viewer", token=my_token)
 m
 ```
 
@@ -604,7 +604,7 @@ counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.c
 unless you give others, are the fewest and the most a control for it offers; neither changes
 `budget`. `db.map`, `viewer.map` and `selection.map` all take the three and pass them on.
 
-`tesseradb.authorise(session_url, credential, ...)` mints on the session plane: with an API key
+`mosaica.authorise(session_url, credential, ...)` mints on the session plane: with an API key
 holding `authorise-as`, for a `principal` or an OIDC `access_token`, as an integrator's backend
 does; with the operator credential, for those or for `terms`. Either credential mints a token that
 reads as anyone, and a notebook that holds it is the pooled-service-token anti-pattern in a cell.
@@ -628,10 +628,10 @@ today the development-only `serve.dev_cors_origins` (the demo lists `http://loca
 a production list is design D10, not yet ruled. This arm can only ever be enumerated for
 JupyterLab and Marimo on a known origin — a VS Code notebook renders in `vscode-webview://` and
 Colab in a sandboxed iframe, which no origin list can name — and it needs a browser that can
-reach Tessera, which a remote JupyterHub often cannot.
+reach Mosaica, which a remote JupyterHub often cannot.
 
 **⊘ The proxy arm — documented, not built.** The widget's `url` becomes a path on the notebook
-server (`/tessera/<name>/`), and a small Jupyter server extension answers it:
+server (`/mosaica/<name>/`), and a small Jupyter server extension answers it:
 
 - it holds an API key with `authorise-as` (or a per-principal token store) on the server, never
   in the kernel or the page;

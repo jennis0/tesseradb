@@ -1,0 +1,48 @@
+[package]
+name = "mosaica-lifecycle"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[features]
+default = []
+# Deliberate WAL/executor fault injection — see `src/faults.rs`, which argues why the hooks live
+# beside the executor rather than with the conformance suite's own pause points.
+#
+# Two enablement routes, both deliberate (decision 0071): the self dev-dependency below (tests),
+# and the declared, default-off `fault-injection` feature on mosaica-server/mosaica-cli (the
+# correctness suite's faults build, to its own target directory). `cargo build` does not build
+# dev-dependencies and the server/CLI feature is off by default, so no default-features build
+# carries this code. Note honestly what that does NOT buy: `cargo test --workspace` still unifies
+# the feature across the workspace, exactly as `bench-timing` does — measured, not assumed. So the
+# rule that actually matters is the one `scripts/check-layers.sh` enforces: no DEFAULT-FEATURES
+# release build may reach it, answered from the resolved feature graph.
+fault-injection = []
+
+[dependencies]
+croaring = { workspace = true }
+mosaica-types = { path = "../mosaica-types", features = ["serde"] }
+mosaica-authz = { path = "../mosaica-authz" }
+postcard = { workspace = true }
+crc32fast = { workspace = true }
+serde = { workspace = true }
+# The stored digest of a content's values and of a shape (`ingest.md` §1.5): computed where the
+# record is built, so the extent and the log carry one number for one part.
+sha2 = { workspace = true }
+rustc-hash = "1"
+
+[dev-dependencies]
+# Self dev-dependency: the only way this crate's own integration tests can turn on a feature of
+# the library they link. Not a cycle — cargo permits it for dev-dependencies precisely for this,
+# and `cargo tree -e normal` does not see the edge — which is what `scripts/check-layers.sh`'s
+# rule 2 relies on: it asks cargo for the resolved feature set on normal edges and fails on any
+# `fault-injection` there. (The earlier note here claimed the rule read `cargo tree`; it was a grep
+# over manifest text that exempted this file wholesale. Now it is one, and demonstrated red.)
+mosaica-lifecycle = { path = ".", features = ["fault-injection"] }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+criterion = "0.5"
+
+[[bench]]
+name = "wal_record"
+harness = false

@@ -7,13 +7,13 @@
 //   node clients/ts/viewer/smoke.mjs [--url http://localhost:5173] [--shot /tmp/viewer.png]
 //     [--headed] [--executable /path/to/chrome]
 //
-// Requires a running `tessera serve` and a running `vite dev`. `--headed` is what a corpus of a
+// Requires a running `mosaica serve` and a running `vite dev`. `--headed` is what a corpus of a
 // few million points needs: see `smoke-browser.mjs`.
 import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
 
 const args = flags();
 const url = args.url ?? 'http://localhost:5173';
-const shot = args.shot ?? '/tmp/tessera-viewer.png';
+const shot = args.shot ?? '/tmp/mosaica-viewer.png';
 const settleMs = Number(args.settle ?? 6000);
 
 const browser = await launchBrowser(args);
@@ -46,7 +46,7 @@ const settled = async (limitMs = 45_000) => {
   let stable = 0;
   while (Date.now() - started < limitMs) {
     await page.waitForTimeout(500);
-    const marks = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    const marks = await page.evaluate(() => window.__mosaicaProbe?.marks ?? -1);
     if (marks === last) {
       if (++stable >= 4) return true;
     } else {
@@ -82,11 +82,11 @@ const litPixels = () =>
  */
 const counts = async () => {
   const text = async (part) => {
-    const el = page.locator(`tessera-status [part="${part}"] [part="count"]`).first();
+    const el = page.locator(`mosaica-status [part="${part}"] [part="count"]`).first();
     if ((await el.count()) === 0) return '';
     return (await el.textContent()) ?? '';
   };
-  const shownEl = page.locator('tessera-status [part="count-shown"] [part="count"]').first();
+  const shownEl = page.locator('mosaica-status [part="count-shown"] [part="count"]').first();
   const served = (await text('count-shown')).trim();
   const visible = (await shownEl.count()) > 0 ? await shownEl.getAttribute('data-total') : null;
   const matched = (await text('count-matched')).trim();
@@ -159,8 +159,8 @@ if (categoryOption) {
 // The text of the instruments and the explorer's panels, read through shadow roots by the locator.
 const panelText = await Promise.all([
   page.locator('#instruments').innerText(),
-  page.locator('tessera-status').first().innerText(),
-  page.locator('tessera-filter-panel').first().innerText()
+  page.locator('mosaica-status').first().innerText(),
+  page.locator('mosaica-filter-panel').first().innerText()
 ])
   .then((parts) => parts.filter(Boolean).join('\n'))
   .catch(() => '(no panels)');
@@ -181,7 +181,7 @@ const canvasPixels = await page.locator('canvas').first().evaluate((canvas) => {
 });
 
 // The strip's final state, through its part.
-const stripState = await page.locator('tessera-status [part="state"]').first().getAttribute('data-state').catch((e) => `error: ${e.message.slice(0, 120)}`);
+const stripState = await page.locator('mosaica-status [part="state"]').first().getAttribute('data-state').catch((e) => `error: ${e.message.slice(0, 120)}`);
 
 // A minute: a screenshot waits for a frame, and a software rasteriser draws about 10^6 marks slowly.
 await page.screenshot({path: shot, timeout: 60_000});

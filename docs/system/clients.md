@@ -1,6 +1,6 @@
 # Clients
 
-A client asks Tessera for a view and displays what comes back. The server decides what a viewer
+A client asks Mosaica for a view and displays what comes back. The server decides what a viewer
 may see before any byte leaves it; nothing a client does can widen or narrow that. What a client
 can get wrong is different in kind: showing a sample as though it were the whole set, showing a
 stale view as current, showing a refusal as an empty corpus, showing a masked count as if it were
@@ -112,11 +112,11 @@ of the palette its slot was served under until the new slot arrives.
 over their slots. The explorer's display menu lists the four palettes with each one's swatches and size, and
 the field card's swatches take the slot each row of its table carries. The notebook widget takes
 the palette as `palette`, and the Python client passes `palette_size` to every route that reads
-clusters and gives back each cluster's `slot`. `tessera artifacts --palette-size` adds the `slot`
+clusters and gives back each cluster's `slot`. `mosaica artifacts --palette-size` adds the `slot`
 field at the command line.
 
 A user chooses single colours in the browser: from a swatch on a field card, which opens a colour
-picker, or in Edit colours (`<tessera-colour-editor>`), which the explorer's Colour section opens
+picker, or in Edit colours (`<mosaica-colour-editor>`), which the explorer's Colour section opens
 while the points are coloured by a category or a layer. Edit colours lists the category's values,
 or the layer's clusters (the level coloured on a levelled layer, and on a `nested` or `dag` layer
 the cut the map draws, whose clusters change as the camera moves), largest first by their counts
@@ -127,7 +127,7 @@ typeahead, over every name in a tree, and sets one colour on several rows, or th
 back for every value of the field or every cluster of the layer, in one action. A category value's
 colour is written to the colour choices the elements over a store share, and a cluster's to
 `Store.setArtifactColours` under its layer, with the others chosen. Each action fires one event,
-`tessera-valuecolour` or `tessera-clustercolour`, naming every value or cluster it changed, and the
+`mosaica-valuecolour` or `mosaica-clustercolour`, naming every value or cluster it changed, and the
 client keeps none of them: a host that wants them kept stores them and sets them back through the
 map's or the explorer's `valueColours` (by column) and `clusterColours` (by layer). The notebook
 widget does so as its `value_colours` and `cluster_colours`.
@@ -157,7 +157,7 @@ one extra request once a view has settled.
 ```mermaid
 flowchart LR
   gesture["pan, zoom, filter, select"] --> driver["driver<br/>decides what to ask,<br/>when, at what depth"]
-  driver -- "requests" --> srv["tessera serve"]
+  driver -- "requests" --> srv["mosaica serve"]
   srv -- "framed responses" --> replica["replica<br/>what has been served,<br/>keyed by content key"]
   replica --> frame["presented frame<br/>what is on screen now"]
   frame --> render["renderer<br/>deck.gl layer, or your own"]
@@ -259,7 +259,7 @@ as given, choosing no fields and no order on the caller's behalf.
 |---|---|---|
 | TypeScript | `client.items(token, request)` and `client.artifacts(token, request)` | an async iterator of Arrow tables, one per page, with the cursor after each; a caller who stops, or whose read is cut or refused part-way, resumes from that cursor |
 | Python | `db.items`, `db.artifacts` and `selection.items`, and the same reads on a `Viewer` | one `pyarrow` table of the whole read, or with `batches=True` the pages one at a time; a read that stops part-way raises `PartialRead`, which holds the rows read and the cursor to read on from |
-| CLI | `tessera items` and `tessera artifacts` | Arrow IPC or Parquet, to a file or to standard output, written page by page; a read cut short leaves whole pages and names the cursor to read on from |
+| CLI | `mosaica items` and `mosaica artifacts` | Arrow IPC or Parquet, to a file or to standard output, written page by page; a read cut short leaves whole pages and names the cursor to read on from |
 
 `selection.items` sends the selection's own filters and box as the read's filter, so its rows are
 the items the selection counts.
@@ -273,11 +273,11 @@ the items the selection counts.
 | TypeScript | `client.aggregate(token, request)` | every response read through the cursor, one Arrow table per grouping with its head's figures, whether a page counted a changed corpus, and the region verdict |
 | TypeScript store | `store.setAggregate(id, {groupings, subject, reference, without, withoutMembersOf, highlighted})` | the `aggregates` projection, each entry answered over the set its `subject` names and asked again when the request that set composes changes; a request the next one supersedes is aborted |
 | Python | `viewer.aggregate(view, groupings, filters, reference)`, `db.aggregate` and `selection.aggregate` | one `pyarrow` table per grouping, the head's figures in its schema metadata |
-| CLI | `tessera aggregate --view <view> --grouping <json>` | one grouping's table, read through the cursor and written as Arrow IPC or Parquet, its head on stderr |
+| CLI | `mosaica aggregate --view <view> --grouping <json>` | one grouping's table, read through the cursor and written as Arrow IPC or Parquet, its head on stderr |
 
 Every surface sends a grouping as the caller wrote it, a histogram's `bins`, `range` and `sample`
 and a field's `summary` included, and none adds a default. Each reads a sampled histogram's head as
-it reads the rest: the TypeScript client as the table's `sample`, Python in the `tessera.head`
+it reads the rest: the TypeScript client as the table's `sample`, Python in the `mosaica.head`
 metadata, and the CLI on stderr. A summary is a table of one row on every surface, with the
 columns `items`, `count`, `none`, `min`, `max` and `mean`, over the whole visible set in the view;
 the request's filters change its head's `total` and none of its figures. The store sends a
@@ -296,7 +296,7 @@ backoff or the server's `Retry-After` where that is longer, and a newer change c
 `selection.aggregate` sends the selection's filters and box as the request's `filters`, so every
 grouping's total is the selection's count.
 
-The map draws density from this route. `DensityCounter` in `@tesseradb/deck` registers one
+The map draws density from this route. `DensityCounter` in `@mosaicajs/deck` registers one
 grouping of cells with the store, at the depth whose cells come nearest a chosen size on screen at
 the camera's zoom, over the viewport and a margin of a quarter of its width and height on each
 side. The registration is `highlighted`, so the counts are the highlighted items' under a
@@ -312,7 +312,7 @@ A depth whose cells over the area could pass `selection.max_aggregate_cells` is 
 counting one column and one row more than the area spans, since the server quantises the area's
 corners itself; the finest size that fits is drawn instead. A `422` is asked again one depth
 coarser, up to three times. Any other refusal draws nothing until the camera next rests, when the
-counter asks again. A `TesseraLayer` given a store and neither counts nor a counter keeps a counter
+counter asks again. A `MosaicaLayer` given a store and neither counts nor a counter keeps a counter
 of its own over its viewport.
 
 Every density mode colours a cell by where its count sits between no items and the largest count
@@ -415,15 +415,15 @@ behind a proxy, so the page never holds it, is specified and not built.
 ## Where this is tested and where it lives
 
 The store, its driver, replica, presented frame, filter composition and artifact channel live in
-`@tesseradb/client`. A drop-in map and its panels live in `@tesseradb/components` as custom
-elements built on the store; a deck.gl binding lives in `@tesseradb/deck`; React hooks and element
-wrappers live in `@tesseradb/react`. The Python package `tesseradb` embeds the same components
+`@mosaicajs/client`. A drop-in map and its panels live in `@mosaicajs/components` as custom
+elements built on the store; a deck.gl binding lives in `@mosaicajs/deck`; React hooks and element
+wrappers live in `@mosaicajs/react`. The Python package `mosaica` embeds the same components
 inside a notebook widget rather than reimplementing any of this in Python. An acceptance harness
 drives the built components against a running deployment and checks nine claims against rules 1
 to 5 and 7 through what is actually on screen, not through a transcript of what was sent. Rule 6
 is covered by unit tests; rules 8 to 12 are not screen-checkable and are not covered there.
 
-The bulk reads live in `@tesseradb/client`'s `records` module, in the Python package's viewer
+The bulk reads live in `@mosaicajs/client`'s `records` module, in the Python package's viewer
 reader, and in the CLI's `records` module.
 
 ## Sources

@@ -1,5 +1,5 @@
-import {WORLD_SIZE, type AggregateResult, type AggregateSpec, type Meta, type Refusal, type Store} from '@tesseradb/client';
-import {worldBbox} from '@tesseradb/client/internal';
+import {WORLD_SIZE, type AggregateResult, type AggregateSpec, type Meta, type Refusal, type Store} from '@mosaicajs/client';
+import {worldBbox} from '@mosaicajs/client/internal';
 import {densityCellsOf, densityOfTiles, type DensityCounts} from './density.js';
 
 /**

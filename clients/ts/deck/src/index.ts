@@ -1,15 +1,15 @@
 /**
- * A deck.gl layer that draws a Tessera store, for a host that builds its own `Deck`.
- * {@link TesseraLayer} draws the marks, density, the artifacts' names and outlines and the
+ * A deck.gl layer that draws a Mosaica store, for a host that builds its own `Deck`.
+ * {@link MosaicaLayer} draws the marks, density, the artifacts' names and outlines and the
  * selection. {@link CATEGORY_PALETTES} and {@link RAMPS} are the named colour sets a
  * {@link Colouring} chooses from, and {@link Sizing} the sizes a number column sizes marks
  * between. {@link viewInputOf} turns the host's camera into a view for the store,
  * {@link DensityCounter} keeps the counts density is drawn from, and {@link resolvePick} reads a
  * pick.
  *
- * @module @tesseradb/deck
+ * @module @mosaicajs/deck
  */
-export {TesseraLayer, type TesseraLayerProps, type LayerTimings} from './layer.js';
+export {MosaicaLayer, type MosaicaLayerProps, type LayerTimings} from './layer.js';
 export {
   CATEGORY_PALETTES,
   DEFAULT_COLOURING,

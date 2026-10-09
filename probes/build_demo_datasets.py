@@ -170,7 +170,7 @@ SCHEMA_HEAD = '''# The demo bundle's declaration — {scale}, {rows:,} items. Ge
 # declared column, so the view and every attribute name one source; the exploded
 # `(entity_id, term_id)` relation is the shared one two directories over, and the two vocabularies
 # name their own. The relation covers the largest scale, so a build of a smaller one counts the
-# rows naming a paper its points file does not hold as refused; `tessera build --limit` with the
+# rows naming a paper its points file does not hold as refused; `mosaica build --limit` with the
 # scale's row count leaves them out instead.
 #
 # `extent`: the points file stores Morton codes rather than coordinates, and codes are exact only

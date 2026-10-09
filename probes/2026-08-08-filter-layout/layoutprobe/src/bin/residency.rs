@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use tessera_filter::{write_value_column, Codes, ValueColumn};
+use mosaica_filter::{write_value_column, Codes, ValueColumn};
 
 /// Resident set size in bytes, from `/proc/self/statm`'s second field (resident pages).
 fn rss_bytes() -> u64 {
@@ -40,7 +40,7 @@ fn main() {
     let n: u64 = args.get(1).map(|s| s.parse().expect("n")).unwrap_or(100_000_000);
     let columns: usize = args.get(2).map(|s| s.parse().expect("columns")).unwrap_or(8);
 
-    let dir = std::env::temp_dir().join("tessera-residency-probe");
+    let dir = std::env::temp_dir().join("mosaica-residency-probe");
     std::fs::create_dir_all(&dir).expect("temp dir");
 
     // Written once and reused across both arms, so the two open the identical bytes.
@@ -89,7 +89,7 @@ fn main() {
         candidate.add_range(0u32..(n / 100) as u32);
         candidate.run_optimize();
         let t = Instant::now();
-        let hits = held[0].scan_eq(&candidate, tessera_types::AttrLocalId::new(42));
+        let hits = held[0].scan_eq(&candidate, mosaica_types::AttrLocalId::new(42));
         std::hint::black_box(hits.cardinality());
         // Cold: the mapped arm pays its page faults here, the read arm paid them at open.
         let cold_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -97,7 +97,7 @@ fn main() {
         let t = Instant::now();
         std::hint::black_box(
             held[0]
-                .scan_eq(&candidate, tessera_types::AttrLocalId::new(42))
+                .scan_eq(&candidate, mosaica_types::AttrLocalId::new(42))
                 .cardinality(),
         );
         let warm_ms = t.elapsed().as_secs_f64() * 1000.0;

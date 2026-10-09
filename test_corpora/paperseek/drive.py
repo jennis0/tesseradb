@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive a running `tessera serve` with a fixed request sequence, and report p50/p99 per kind.
+"""Drive a running `mosaica serve` with a fixed request sequence, and report p50/p99 per kind.
 
 **The system `python3`, not `~/venvs/projection`** — it needs `requests` and `pyarrow` and nothing
 the rung's environment carries, and the probe this is a copy of ran the same way.
@@ -10,7 +10,7 @@ sequence runs uncapped and under a cgroup cap and the two are comparable request
 
     python3 test_corpora/paperseek/drive.py \\
         --viewer http://127.0.0.1:8131 --session http://127.0.0.1:8132 \\
-        --control http://127.0.0.1:8133 --operator-cred "$TESSERA_PAPERSEEK_OPERATOR_CRED" \\
+        --control http://127.0.0.1:8133 --operator-cred "$MOSAICA_PAPERSEEK_OPERATOR_CRED" \\
         --principals '{"none": [], "cc-by": ["cc-by"], "all": ["cc-by", "cc0", ...]}' \\
         --match-field abstract --out results-nocap.json
 
@@ -85,7 +85,7 @@ def viewport(viewer_base, token, view_id, zoom, bbox, k=30, filters=None, extra=
     )
     dt = time.perf_counter() - t0
     r.raise_for_status()
-    server_us = int(r.headers.get("x-tessera-server-us", "0"))
+    server_us = int(r.headers.get("x-mosaica-server-us", "0"))
     counts = tile_counts(r.content)
     return {
         "wall_ms": dt * 1000,
@@ -232,7 +232,7 @@ def main():
                 )
                 dt = time.perf_counter() - t0
                 r.raise_for_status() if r.status_code not in (200, 404) else None
-                server_us = int(r.headers.get("x-tessera-server-us", "0")) if "x-tessera-server-us" in r.headers else 0
+                server_us = int(r.headers.get("x-mosaica-server-us", "0")) if "x-mosaica-server-us" in r.headers else 0
                 yield {"wall_ms": dt * 1000, "server_ms": server_us / 1000}, {"status": r.status_code}
 
         record_kind("item_drilldown", gen)
@@ -251,7 +251,7 @@ def main():
                 )
                 dt = time.perf_counter() - t0
                 r.raise_for_status() if r.status_code not in (200, 404, 422) else None
-                server_us = int(r.headers.get("x-tessera-server-us", "0")) if "x-tessera-server-us" in r.headers else 0
+                server_us = int(r.headers.get("x-mosaica-server-us", "0")) if "x-mosaica-server-us" in r.headers else 0
                 yield {"wall_ms": dt * 1000, "server_ms": server_us / 1000}, {"status": r.status_code}
 
         record_kind("artifact_drilldown", gen)

@@ -1,15 +1,15 @@
 import {css} from 'lit';
-import type {DensityColours} from '@tesseradb/deck';
-import type {TesseraEventDetails} from './events.js';
-import {densityStops} from '@tesseradb/deck/internal';
+import type {DensityColours} from '@mosaicajs/deck';
+import type {MosaicaEventDetails} from './events.js';
+import {densityStops} from '@mosaicajs/deck/internal';
 
 /**
  * What the display sections of the explorer's Layers popover share with the elements that render
  * choices like them: the settings they hold, the arrow keys of a radio group, and their styles.
  */
 
-/** Every display setting, as the explorer holds it and `tessera-displaychange` reports it. */
-export type DisplaySettings = TesseraEventDetails['tessera-displaychange'];
+/** Every display setting, as the explorer holds it and `mosaica-displaychange` reports it. */
+export type DisplaySettings = MosaicaEventDetails['mosaica-displaychange'];
 
 /** A density ramp as a CSS gradient, sparse to dense, on `scheme`'s ground. */
 export function densityGradient(colours: DensityColours, scheme: 'light' | 'dark'): string {
@@ -40,7 +40,7 @@ export const displayStyles = css`
     padding: 12px 14px;
   }
   .sec + .sec {
-    border-top: 1px solid var(--_tessera-line-2);
+    border-top: 1px solid var(--_mosaica-line-2);
   }
   .sec .hd {
     margin: 0;
@@ -80,7 +80,7 @@ export const displayStyles = css`
     position: relative;
     height: 16px;
     font-size: 12px;
-    color: var(--_tessera-ink-3);
+    color: var(--_mosaica-ink-3);
     font-variant-numeric: tabular-nums;
   }
   .ticks span {
@@ -114,12 +114,12 @@ export const displayStyles = css`
   .slider::-webkit-slider-runnable-track {
     height: 4px;
     border-radius: 2px;
-    background: linear-gradient(to right, var(--_tessera-accent) var(--fill, 0%), var(--_tessera-line-control) var(--fill, 0%));
+    background: linear-gradient(to right, var(--_mosaica-accent) var(--fill, 0%), var(--_mosaica-line-control) var(--fill, 0%));
   }
   .slider::-moz-range-track {
     height: 4px;
     border-radius: 2px;
-    background: linear-gradient(to right, var(--_tessera-accent) var(--fill, 0%), var(--_tessera-line-control) var(--fill, 0%));
+    background: linear-gradient(to right, var(--_mosaica-accent) var(--fill, 0%), var(--_mosaica-line-control) var(--fill, 0%));
   }
   .slider::-webkit-slider-thumb {
     -webkit-appearance: none;
@@ -128,16 +128,16 @@ export const displayStyles = css`
     margin-top: -5px;
     box-sizing: border-box;
     border-radius: 50%;
-    border: 1.5px solid var(--_tessera-accent);
-    background: var(--_tessera-surface);
+    border: 1.5px solid var(--_mosaica-accent);
+    background: var(--_mosaica-surface);
   }
   .slider::-moz-range-thumb {
     width: 14px;
     height: 14px;
     box-sizing: border-box;
     border-radius: 50%;
-    border: 1.5px solid var(--_tessera-accent);
-    background: var(--_tessera-surface);
+    border: 1.5px solid var(--_mosaica-accent);
+    background: var(--_mosaica-surface);
   }
   .slider:disabled {
     opacity: 0.4;
@@ -148,7 +148,7 @@ export const displayStyles = css`
     gap: 2px;
     padding: 2px;
     border-radius: 7px;
-    background: var(--_tessera-surface-3);
+    background: var(--_mosaica-surface-3);
   }
   .modes button {
     flex: 1 1 0;
@@ -156,12 +156,12 @@ export const displayStyles = css`
     border-radius: 5px;
     font-size: 12px;
     font-weight: 500;
-    color: var(--_tessera-ink-2);
+    color: var(--_mosaica-ink-2);
   }
   .modes button[aria-checked='true'] {
-    background: var(--_tessera-surface);
+    background: var(--_mosaica-surface);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-    color: var(--_tessera-ink);
+    color: var(--_mosaica-ink);
     font-weight: 600;
   }
   /* The readout column the other sliders keep on their right is kept here too, so the tracks end
@@ -187,7 +187,7 @@ export const displayStyles = css`
     height: 6px;
     margin-top: -3px;
     border-radius: 3px;
-    background: repeating-linear-gradient(135deg, var(--_tessera-ink-3) 0 1.5px, transparent 1.5px 4px) var(--_tessera-surface);
+    background: repeating-linear-gradient(135deg, var(--_mosaica-ink-3) 0 1.5px, transparent 1.5px 4px) var(--_mosaica-surface);
     opacity: 0.8;
     pointer-events: none;
   }
@@ -196,10 +196,10 @@ export const displayStyles = css`
     justify-content: space-between;
     margin-top: -2px;
     font-size: 11px;
-    color: var(--_tessera-ink-3);
+    color: var(--_mosaica-ink-3);
   }
   .ends .readout {
-    color: var(--_tessera-ink);
+    color: var(--_mosaica-ink);
     font-weight: 500;
   }
   /* Edit colours sits under the choices, as wide as its words. */
@@ -214,12 +214,12 @@ export const displayStyles = css`
     min-width: 0;
     max-width: 100%;
     padding: 3px 8px;
-    border: 1px solid var(--_tessera-line);
-    border-radius: var(--_tessera-radius-control);
-    background: var(--_tessera-surface);
+    border: 1px solid var(--_mosaica-line);
+    border-radius: var(--_mosaica-radius-control);
+    background: var(--_mosaica-surface);
     font-size: 12px;
     font-weight: 500;
-    color: var(--_tessera-ink);
+    color: var(--_mosaica-ink);
   }
   .ramp-choice.stretch {
     justify-self: stretch;
@@ -254,16 +254,16 @@ export const displayStyles = css`
   }
   .toggle {
     padding: 3px 8px;
-    border: 1px solid var(--_tessera-line);
-    border-radius: var(--_tessera-radius-control);
-    background: var(--_tessera-surface);
+    border: 1px solid var(--_mosaica-line);
+    border-radius: var(--_mosaica-radius-control);
+    background: var(--_mosaica-surface);
     font-size: 12px;
     font-weight: 500;
   }
   .toggle[aria-pressed='true'] {
-    border-color: var(--_tessera-accent);
-    background: var(--_tessera-accent);
-    color: var(--_tessera-accent-ink);
+    border-color: var(--_mosaica-accent);
+    background: var(--_mosaica-accent);
+    color: var(--_mosaica-accent-ink);
   }
   .ramp-choice .t {
     overflow: hidden;
@@ -291,7 +291,7 @@ export const displayStyles = css`
   }
   .readout {
     flex: none;
-    color: var(--_tessera-ink);
+    color: var(--_mosaica-ink);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -307,7 +307,7 @@ export const displayStyles = css`
     padding: 2px;
     border: 0;
     border-radius: 7px;
-    background: var(--_tessera-surface-3);
+    background: var(--_mosaica-surface-3);
   }
   .seg button {
     height: 24px;
@@ -315,15 +315,15 @@ export const displayStyles = css`
     border-radius: 5px;
     font-size: 12px;
     font-weight: 500;
-    color: var(--_tessera-ink-2);
+    color: var(--_mosaica-ink-2);
   }
   .seg button + button {
     border-left: 0;
   }
   .seg button[aria-checked='true'] {
-    background: var(--_tessera-surface);
+    background: var(--_mosaica-surface);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-    color: var(--_tessera-ink);
+    color: var(--_mosaica-ink);
     font-weight: 600;
   }
   /* The Size by menu, in the top layer beside the popover. */
@@ -334,10 +334,10 @@ export const displayStyles = css`
     width: 220px;
     padding: 6px 0;
     box-sizing: border-box;
-    background: var(--_tessera-surface);
-    color: var(--_tessera-ink);
-    border: 1px solid var(--_tessera-line);
-    border-radius: var(--_tessera-radius);
+    background: var(--_mosaica-surface);
+    color: var(--_mosaica-ink);
+    border: 1px solid var(--_mosaica-line);
+    border-radius: var(--_mosaica-radius);
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
     font-size: 13px;
   }
@@ -356,7 +356,7 @@ export const displayStyles = css`
   }
   .size-menu [role='menuitemradio']:hover,
   .size-menu [role='menuitemradio'][aria-checked='true'] {
-    background: var(--_tessera-surface-2);
+    background: var(--_mosaica-surface-2);
   }
   .size-menu [role='menuitemradio'][aria-checked='true'] {
     font-weight: 500;
@@ -407,7 +407,7 @@ export const displayStyles = css`
   .size-menu .named .line {
     font-size: 12px;
     font-weight: 400;
-    color: var(--_tessera-ink-2);
+    color: var(--_mosaica-ink-2);
   }
   .size-menu .lead {
     display: flex;
@@ -417,7 +417,7 @@ export const displayStyles = css`
   .size-menu .kind {
     font-size: 12px;
     font-weight: 400;
-    color: var(--_tessera-ink-3);
+    color: var(--_mosaica-ink-3);
   }
   .bar {
     display: block;
@@ -431,8 +431,8 @@ export const displayStyles = css`
     display: flex;
     flex-direction: column;
     padding: 3px;
-    border: 1px solid var(--_tessera-line);
-    border-radius: var(--_tessera-radius-control);
+    border: 1px solid var(--_mosaica-line);
+    border-radius: var(--_mosaica-radius-control);
   }
   .ramp-list button {
     display: flex;
@@ -441,10 +441,10 @@ export const displayStyles = css`
     padding: 5px 6px;
     border-radius: 4px;
     font-size: 12px;
-    color: var(--_tessera-ink);
+    color: var(--_mosaica-ink);
   }
   .ramp-list button:hover,
   .ramp-list button[aria-checked='true'] {
-    background: var(--_tessera-surface-2);
+    background: var(--_mosaica-surface-2);
   }
 `;

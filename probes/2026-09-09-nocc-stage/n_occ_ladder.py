@@ -4,7 +4,7 @@
 **Independent of the engine's walk and of the sketch.** The column is stored in Morton order, so
 the depth-*d* tile index `code >> (32 - 2d)` is non-decreasing along it and the number of distinct
 values is one plus the number of positions where it steps. That is a `numpy` diff, not a hash set,
-and it shares no code with `crates/tessera-engine/src/occupancy.rs`.
+and it shares no code with `crates/mosaica-engine/src/occupancy.rs`.
 
 Whole-column only: it answers for the *unmasked* view, which is what a full-coverage principal
 sees, and it is the ladder shape the staging policy's depth cap is argued from — not a masked

@@ -11,8 +11,8 @@
 # nothing it touched — and it has only ever been noticed by an author reading `git status` before
 # staging.
 #
-#   fmt-file.sh crates/tessera-engine/src/select.rs [more files...]
-#   fmt-file.sh --check crates/tessera-engine/src/select.rs   # report, change nothing
+#   fmt-file.sh crates/mosaica-engine/src/select.rs [more files...]
+#   fmt-file.sh --check crates/mosaica-engine/src/select.rs   # report, change nothing
 #   fmt-file.sh --selftest
 #
 # ## How the promise is kept, and how it is proved

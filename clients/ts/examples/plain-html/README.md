@@ -1,13 +1,13 @@
 # The plain-HTML example
 
-One page with no build step. `index.html` loads the single-file bundle by relative path with its integrity hash, and mounts `<tessera-explorer>` with a `viewer-url` and a `token`. `server.mjs` is the app server beside it: it serves the page and the bundle, mints tokens, and proxies the viewer routes.
+One page with no build step. `index.html` loads the single-file bundle by relative path with its integrity hash, and mounts `<mosaica-explorer>` with a `viewer-url` and a `token`. `server.mjs` is the app server beside it: it serves the page and the bundle, mints tokens, and proxies the viewer routes.
 
 ```bash
-npm run bundle -w @tesseradb/components    # writes components/dist/tessera-components.js and its .sri
+npm run bundle -w @mosaicajs/components    # writes components/dist/mosaica-components.js and its .sri
 node server.mjs                            # http://localhost:5180
 ```
 
-The server expects the demo's `2m4` scale (`./run_demo.sh --scale 2m4` at the repository root): a viewer listener on `127.0.0.1:37585` and a session listener on `127.0.0.1:49303`. `TESSERA_API_KEY` is an API key whose principal holds `authorise-as`; `run_demo.sh` writes one to `tessera-demo/presets/2m4.key` at the repository root. `users.json` lists the signed-in users the page offers and the Tessera principal each reads as. Those principals are the ones `run_demo.sh` creates when it measures the 2m4 presets, named `holding-` and a digest of their terms; `tessera principal list` shows them. `TESSERA_VIEWER_URL` and `TESSERA_SESSION_URL` point the server at another deployment, whose principals `users.json` then has to name, and `PORT` moves it off 5180. Until the bundle is built the server answers the page with a 503 naming the command above.
+The server expects the demo's `2m4` scale (`./run_demo.sh --scale 2m4` at the repository root): a viewer listener on `127.0.0.1:37585` and a session listener on `127.0.0.1:49303`. `MOSAICA_API_KEY` is an API key whose principal holds `authorise-as`; `run_demo.sh` writes one to `mosaica-demo/presets/2m4.key` at the repository root. `users.json` lists the signed-in users the page offers and the Mosaica principal each reads as. Those principals are the ones `run_demo.sh` creates when it measures the 2m4 presets, named `holding-` and a digest of their terms; `mosaica principal list` shows them. `MOSAICA_VIEWER_URL` and `MOSAICA_SESSION_URL` point the server at another deployment, whose principals `users.json` then has to name, and `PORT` moves it off 5180. Until the bundle is built the server answers the page with a 503 naming the command above.
 
 ## Where the token comes from
 
@@ -17,7 +17,7 @@ The key can mint a session for any principal holding `read`. This app server the
 
 ## Reaching the viewer routes
 
-The page calls the viewer routes on its own origin. `server.mjs` proxies `/v1/*` to the viewer listener and forwards every response header. The client reads `etag`, `x-tessera-identity-key`, `x-tessera-pin`, `x-tessera-stale`, `x-tessera-region`, `x-tessera-server-us` and `x-tessera-admission-us`, so a proxy in front of the viewer listener has to pass them through.
+The page calls the viewer routes on its own origin. `server.mjs` proxies `/v1/*` to the viewer listener and forwards every response header. The client reads `etag`, `x-mosaica-identity-key`, `x-mosaica-pin`, `x-mosaica-stale`, `x-mosaica-region`, `x-mosaica-server-us` and `x-mosaica-admission-us`, so a proxy in front of the viewer listener has to pass them through.
 
 A deployment can instead list the page's origin in `serve.cors_origins`. That admits the page to the viewer listener only, and the session listener stays closed to browsers. `serve.dev_cors_origins`, which the demo uses, also opens the session listener and is for development only.
 

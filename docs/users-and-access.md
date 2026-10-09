@@ -1,6 +1,6 @@
 # Users, credentials and access expressions
 
-A design note, part built. It proposes principals stored by Tessera, standard ways to
+A design note, part built. It proposes principals stored by Mosaica, standard ways to
 authenticate them, permissions for what a principal may do, and Accumulo-style access expressions
 for what a principal may see. The catalogue, the three listeners' credentials, sessions and their
 ending, the catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients, access
@@ -36,14 +36,14 @@ A **principal** is who a request acts for. There are three kinds.
 
 - A **local principal** is stored in the catalogue: a person or a service, with a name and a
   disabled flag.
-- An **OIDC identity** is named by its issuer and subject, `(iss, sub)`. Tessera does not store it.
+- An **OIDC identity** is named by its issuer and subject, `(iss, sub)`. Mosaica does not store it.
   Each authorise derives its terms and groups from the token's claims.
 - The **superuser** is the holder of the operator credential. It is described under
   [Bootstrap](#bootstrap).
 
 A principal proves who it is with one of three credentials.
 
-| Credential | Held by | How Tessera checks it | What is stored |
+| Credential | Held by | How Mosaica checks it | What is stored |
 |---|---|---|---|
 | Password | Local person | argon2id against the stored hash. A password shorter than the configured minimum is refused when it is set. Failed attempts are limited per name presented. The server accepts it over plain HTTP, so a deployment that takes passwords terminates TLS in front of the viewer listener. | The argon2id hash. |
 | API key | Local person or service | A random secret with a public id prefix. The prefix finds the record and the secret is compared by SHA-256 in constant time. A key can carry an expiry and a narrower set of permissions than its principal. | The prefix, the hash, the expiry and the permissions. The secret is shown once, at creation. |
@@ -70,14 +70,14 @@ client id accepts that client's ID tokens as access tokens.
 Two providers may not have the same issuer and audience. A token from either would verify against
 both, and which claim rules and role mappings applied would depend on the order the providers
 were tried in. One rule in the catalogue refuses such a provider, whether it is declared through
-the API or in `tessera.toml`. Providers with the same issuer and different audiences are allowed,
+the API or in `mosaica.toml`. Providers with the same issuer and different audiences are allowed,
 and a token whose `aud` names more than one of their audiences is refused, because nothing in it
 says which provider's rules apply.
 
 A provider's JWKS URL uses `https`, or `http` to a loopback address (`localhost`, `127.0.0.1` or
 `::1`). Any other `http` URL is refused when the provider is declared, because anyone on the network
 path could substitute the keys and then sign a token for any identity. Setting the environment
-variable `TESSERA_ALLOW_INSECURE_JWKS=1` accepts it, for a development provider on a private
+variable `MOSAICA_ALLOW_INSECURE_JWKS=1` accepts it, for a development provider on a private
 network.
 
 The service fetches a provider's keys when a token first needs them and keeps them for an hour. A
@@ -104,7 +104,7 @@ It holds:
 - the permissions granted to each principal and each group;
 - each OIDC provider declared through the API: issuer, audience, JWKS location, and the rules that
   turn claims into terms, and the role mappings from exact claim values to local groups. A
-  provider can also be declared in `tessera.toml` ([Surfaces](#surfaces)).
+  provider can also be declared in `mosaica.toml` ([Surfaces](#surfaces)).
 
 It does not hold sessions, which stay in memory, or the audit log, which is append-only and kept
 separately.
@@ -189,18 +189,18 @@ holds.
   authorise, a produced term is trimmed, and one that is `public` in any case or holds a control
   character is dropped.
 - An administrator declares **role mappings** for a provider: a claim path and an exact value
-  mapped to a local group, such as `groups[*]: tessera-admins -> admins`. An identity whose
-  `groups` claim holds `tessera-admins` receives the group's permissions and the terms granted to
+  mapped to a local group, such as `groups[*]: mosaica-admins -> admins`. An identity whose
+  `groups` claim holds `mosaica-admins` receives the group's permissions and the terms granted to
   it, `read-all` and `write-all` among them where the group holds them. The mapping reads the
   claim itself and ignores the terms the
   claim rules produce. The identity still holds those terms: with the standard rule it also holds
-  the term `tessera-admins`. A mapping matches a whole value exactly, and only in the claim it
-  names. A `department` claim that users can edit, set to `tessera-admins`, does not match.
+  the term `mosaica-admins`. A mapping matches a whole value exactly, and only in the claim it
+  names. A `department` claim that users can edit, set to `mosaica-admins`, does not match.
   Elasticsearch's role mappings, Vault's group aliases and Grafana's role mapping each match a
   named claim to an internal role in the same way.
 - A claim is trusted as the identity provider asserts it. Where users can create or name their
   own groups at the provider, anyone who creates a group called `secret` holds the term `secret`,
-  and anyone who creates `tessera-admins` matches a mapping on the `groups` claim. Such a
+  and anyone who creates `mosaica-admins` matches a mapping on the `groups` claim. Such a
   deployment maps stable group ids, as Entra ID can put in its tokens, or gives its template a
   prefix so that provider-made terms cannot collide with terms granted locally.
 
@@ -366,7 +366,7 @@ figures are paid at session start and never by a map request.
   not hold.
 - Containment for cluster labels reasons about sets of entities and their signatures, and applies
   unchanged with label ids as the signatures.
-- The plugin trait in `tessera-plugin` is removed (built). The two functions it held become the
+- The plugin trait in `mosaica-plugin` is removed (built). The two functions it held become the
   parser on the item side and the catalogue on the credential side. Both use one vocabulary, so the service
   can report terms that some label names and no grant or claim rule can produce, and the reverse.
 - The bundle's format changes and its version is bumped (built: 30, and the WAL's 32).
@@ -399,9 +399,9 @@ every principal it affects. This includes changes that widen access. The affecte
   through that provider.
 
 A session never outlives what authorised it. A session authorised with an API key that has an
-expiry ends when the key expires. An OIDC identity's grants come from its token, which Tessera
+expiry ends when the key expires. An OIDC identity's grants come from its token, which Mosaica
 cannot see change, so its session ends at the token's own expiry (`exp`), at the lifetime
-configured in `tessera.toml`'s `token_max_lifetime` if that is sooner, or when its provider's
+configured in `mosaica.toml`'s `token_max_lifetime` if that is sooner, or when its provider's
 configuration changes.
 
 Deletion and suppression apply to open sessions through the overlay, as they do in the current
@@ -436,7 +436,7 @@ root node upwards, so the writer's authorised set is never built.
 
 ## Bootstrap
 
-The operator credential, read from the file or environment variable named in `tessera.toml`,
+The operator credential, read from the file or environment variable named in `mosaica.toml`,
 authenticates a built-in superuser that has every permission, `read-all` and `write-all`
 included. The superuser is not in the catalogue. The API cannot disable it or change its
 credential. Changing the file and restarting rotates it. An empty catalogue therefore still has an
@@ -466,7 +466,7 @@ the CLI each reach all of them:
 - declare, change and remove an OIDC provider and its claim rules;
 - list a principal's sessions, and end them.
 
-An OIDC provider can also be declared in `tessera.toml`, so that a service starts with it in
+An OIDC provider can also be declared in `mosaica.toml`, so that a service starts with it in
 place. A provider declared there is read-only: the API lists it and refuses to change or remove
 it, and editing the file and restarting changes it. The service refuses to start when a provider's
 name is declared both in the file and in the catalogue.
@@ -514,11 +514,11 @@ change records who made it and what it changed.
 
 ## Where the code lives
 
-A new crate, `tessera-catalogue`, holds the SQLite catalogue, credential checks and the mapping
+A new crate, `mosaica-catalogue`, holds the SQLite catalogue, credential checks and the mapping
 from a principal to its terms and permissions. It depends on nothing that can see a row id or an
-entity id, and `scripts/check-layers.sh` denies it `tessera-store`, `tessera-authz` and
-`tessera-engine`. The server depends on it and hands the engine a set of terms. The expression
-parser, normalisation and the DAG are in `tessera-access`, which depends on no other crate of the
+entity id, and `scripts/check-layers.sh` denies it `mosaica-store`, `mosaica-authz` and
+`mosaica-engine`. The server depends on it and hands the engine a set of terms. The expression
+parser, normalisation and the DAG are in `mosaica-access`, which depends on no other crate of the
 workspace, and the catalogue reads a granted term by its rule for a held term (built). The index
-keys and the postings behind them are in `tessera-authz` (built). `tessera-plugin` is deleted
+keys and the postings behind them are in `mosaica-authz` (built). `mosaica-plugin` is deleted
 (built).

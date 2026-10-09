@@ -1113,7 +1113,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-analyse"
+name = "mosaica-analyse"
 version = "0.1.0"
 dependencies = [
  "icu_casemap",
@@ -1122,7 +1122,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-authz"
+name = "mosaica-authz"
 version = "0.1.0"
 dependencies = [
  "arrow",
@@ -1130,24 +1130,24 @@ dependencies = [
  "memmap2",
  "rustc-hash",
  "sha2",
- "tessera-types",
+ "mosaica-types",
 ]
 
 [[package]]
-name = "tessera-filter"
+name = "mosaica-filter"
 version = "0.1.0"
 dependencies = [
  "arrow",
  "croaring",
  "memchr",
  "memmap2",
- "tessera-authz",
- "tessera-types",
+ "mosaica-authz",
+ "mosaica-types",
  "zstd",
 ]
 
 [[package]]
-name = "tessera-types"
+name = "mosaica-types"
 version = "0.1.0"
 
 [[package]]
@@ -1156,10 +1156,10 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tempfile",
- "tessera-analyse",
- "tessera-authz",
- "tessera-filter",
- "tessera-types",
+ "mosaica-analyse",
+ "mosaica-authz",
+ "mosaica-filter",
+ "mosaica-types",
 ]
 
 [[package]]

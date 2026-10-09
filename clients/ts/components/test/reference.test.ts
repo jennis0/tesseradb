@@ -187,7 +187,7 @@ function emits(element: Element): Set<string> {
 function emitsWithin(element: Element, seen = new Set<string>()): Set<string> {
   const out = emits(element);
   seen.add(element.tag);
-  for (const match of element.text.matchAll(/<(tessera-[a-z-]+)[\s>]/g)) {
+  for (const match of element.text.matchAll(/<(mosaica-[a-z-]+)[\s>]/g)) {
     const child = ELEMENTS.find((e) => e.tag === match[1]);
     if (child && !seen.has(child.tag)) for (const e of emitsWithin(child, seen)) out.add(e);
   }
@@ -198,7 +198,7 @@ const EVENT_NAMES = new Set(quoted(readFileSync(join(SRC, 'events.ts'), 'utf8'),
 const STATE_PARTS = literals(/const STATE = \[([^\]]*)\]/.exec(readFileSync(join(SRC, 'parts.ts'), 'utf8'))![1]!);
 /** Templates shared between elements, each with what an element that renders it calls; its parts are the element's. */
 const SHARED = [{use: /\bnew ColourPicker\(/, text: readFileSync(join(SRC, 'colour-picker.ts'), 'utf8')}];
-const tokenNames = (text: string) => new Set([...text.matchAll(/var\(\s*(--tessera-[a-z0-9-]+)/g)].map((m) => m[1]!));
+const tokenNames = (text: string) => new Set([...text.matchAll(/var\(\s*(--mosaica-[a-z0-9-]+)/g)].map((m) => m[1]!));
 
 describe('each element documents what it renders', () => {
   it('finds every element the sources define', () => {
@@ -218,10 +218,10 @@ describe('each element documents what it renders', () => {
         const documented = new Set(fires.map((f) => f.name));
         for (const event of emits(element)) expect(documented, `@fires ${event}`).toContain(event);
         for (const event of documented) {
-          expect(EVENT_NAMES, `${event} is in TesseraEventDetails`).toContain(event);
+          expect(EVENT_NAMES, `${event} is in MosaicaEventDetails`).toContain(event);
           expect(emitsWithin(element), `${event} is emitted by the element or one it renders`).toContain(event);
         }
-        for (const f of fires) expect(f.type).toBe(`CustomEvent<TesseraEventDetails['${f.name}']>`);
+        for (const f of fires) expect(f.type).toBe(`CustomEvent<MosaicaEventDetails['${f.name}']>`);
       });
 
       it('documents its slots', () => {

@@ -16,7 +16,7 @@
 # complaint about a missing field from whichever tool next opens it, hours into a campaign and
 # nowhere near this script.
 #
-# So "already built" is decided by asking the reader, not by looking for `CURRENT`: `tessera
+# So "already built" is decided by asking the reader, not by looking for `CURRENT`: `mosaica
 # verify` opens the bundle exactly as the engine and the bench harness do. A bundle it refuses is
 # reported with the reader's own words and **rebuilt**, not skipped. The alternative — a list of
 # required fields kept here in shell — would be a second copy of the reader's contract, and would
@@ -30,7 +30,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TESSERA="$ROOT/target/release/tessera"
+MOSAICA="$ROOT/target/release/mosaica"
 GEOMETRY="$ROOT/data/scaled/geometry.parquet"
 PAIRS_DIR="$ROOT/data/scaled/pairs"
 
@@ -45,12 +45,12 @@ Usage: ${BASH_SOURCE[0]##*/} [options]
 
   --scales LIST       comma-separated item counts   (default: $DEFAULT_SCALES)
   --label-sets LIST   comma-separated pairs files   (default: all seven)
-  --fixtures DIR      output root                   (default: /tmp/tessera-bench/fixtures)
-  --log-dir DIR       per-build logs                (default: /tmp/tessera-bench/logs)
+  --fixtures DIR      output root                   (default: /tmp/mosaica-bench/fixtures)
+  --log-dir DIR       per-build logs                (default: /tmp/mosaica-bench/logs)
   --list              print the plan and exit, building nothing
   -h, --help          this
 
-Each existing bundle is opened with \`tessera verify\` before being skipped. One the current
+Each existing bundle is opened with \`mosaica verify\` before being skipped. One the current
 reader refuses — a fixture older than a change to the bundle format — is reported as STALE and
 rebuilt. \`--list\` names them without rebuilding, so this doubles as the answer to a loader
 error like "missing field" from any tool that reads a fixture.
@@ -68,8 +68,8 @@ EOF
 
 SCALES_ARG="$DEFAULT_SCALES"
 SETS_ARG="$DEFAULT_SETS"
-FIXTURES="/tmp/tessera-bench/fixtures"
-LOG_DIR="/tmp/tessera-bench/logs"
+FIXTURES="/tmp/mosaica-bench/fixtures"
+LOG_DIR="/tmp/mosaica-bench/logs"
 LIST_ONLY=0
 
 while [[ $# -gt 0 ]]; do
@@ -129,7 +129,7 @@ TOML
 
 # The deployment file each build is invoked against. `[bundle].path` is rewritten per fixture
 # below and `--out` names it too, which is the ordinary override.
-DEPLOYMENT="$LOG_DIR/fixtures.tessera.toml"
+DEPLOYMENT="$LOG_DIR/fixtures.mosaica.toml"
 cat > "$DEPLOYMENT" <<TOML
 [bundle]
 path  = "$FIXTURES/bundle"
@@ -148,7 +148,7 @@ session = "127.0.0.1:49303"
 control = "127.0.0.1:45721"
 TOML
 
-[[ -x "$TESSERA" ]] || { echo "missing $TESSERA — run: cargo build --release -p tessera-cli" >&2; exit 1; }
+[[ -x "$MOSAICA" ]] || { echo "missing $MOSAICA — run: cargo build --release -p mosaica-cli" >&2; exit 1; }
 [[ -f "$GEOMETRY" ]] || { echo "missing $GEOMETRY" >&2; exit 1; }
 
 built=0; skipped=0; failed=0; stale=0
@@ -158,7 +158,7 @@ started_all=$(date +%s)
 # so the line reads as a reason rather than a second path. Empty output means it opened cleanly.
 reader_refusal() { # reader_refusal <bundle root>
   local verdict
-  if verdict="$("$TESSERA" verify "$1" 2>&1)"; then
+  if verdict="$("$MOSAICA" verify "$1" 2>&1)"; then
     return 0
   fi
   echo "${verdict#FAILED*: }"
@@ -200,7 +200,7 @@ for scale in "${SCALES[@]}"; do
     echo "BUILD scale=$scale set=$set_name -> $out"
     rm -rf "$out"; mkdir -p "$out"
     started=$(date +%s)
-    if "$TESSERA" build \
+    if "$MOSAICA" build \
         --deployment "$DEPLOYMENT" \
         --file "labels=$pairs" --out "$out" \
         --limit "$scale" >"$log" 2>&1; then
@@ -216,11 +216,11 @@ for scale in "${SCALES[@]}"; do
 done
 
 # Alias the 2.4M categories-subclass bundle to the path `benches/viewport.rs` and
-# `tessera-bench`'s `viewport_latency` binary both default to, so existing tooling keeps working
+# `mosaica-bench`'s `viewport_latency` binary both default to, so existing tooling keeps working
 # against the same bytes rather than building a second copy.
 canonical="$FIXTURES/2422486/categories-subclass"
-if [[ -f "$canonical/CURRENT" && ! -e /tmp/tessera-2m4 ]]; then
-  ln -s "$canonical" /tmp/tessera-2m4 && echo "LINK  /tmp/tessera-2m4 -> $canonical"
+if [[ -f "$canonical/CURRENT" && ! -e /tmp/mosaica-2m4 ]]; then
+  ln -s "$canonical" /tmp/mosaica-2m4 && echo "LINK  /tmp/mosaica-2m4 -> $canonical"
 fi
 
 echo "----"

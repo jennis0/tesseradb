@@ -2,7 +2,7 @@
 
 ## What this is
 
-Tessera serves an interactive map over billions of documents or records from one machine, to many viewers, while the corpus changes underneath it. Each viewer sees the map computed over exactly the items they may see: every count, density, cluster, label and sample, not only which items they can retrieve.
+Mosaica serves an interactive map over billions of documents or records from one machine, to many viewers, while the corpus changes underneath it. Each viewer sees the map computed over exactly the items they may see: every count, density, cluster, label and sample, not only which items they can retrieve.
 
 A viewer's visible set is computed once per session as a Roaring bitmap. Geometry is stored in Morton order, so a tile is a contiguous range of row ids and a masked count is bitmap arithmetic.
 
@@ -20,11 +20,11 @@ The capabilities are listed in [overview.md](docs/system/overview.md): a map ove
 
 ## Layout
 
-One Rust workspace under [crates/](crates/), one binary (`tessera`).
+One Rust workspace under [crates/](crates/), one binary (`mosaica`).
 
-- `tessera-build` turns source files into a bundle. `tessera-engine` opens a bundle, answers requests and takes writes. `tessera-server` is the HTTP layer over the engine. `tessera-store` is the on-disk formats. `tessera-lifecycle` is the write-ahead log and the write commands.
+- `mosaica-build` turns source files into a bundle. `mosaica-engine` opens a bundle, answers requests and takes writes. `mosaica-server` is the HTTP layer over the engine. `mosaica-store` is the on-disk formats. `mosaica-lifecycle` is the write-ahead log and the write commands.
 - [clients/py/](clients/py/) is the Python SDK and [clients/ts/](clients/ts/) the browser client. Python is a consumer and is never in a request path. [conformance/](conformance/) is a Python suite that checks a running server against an independent oracle.
-- [probes/](probes/) and `tessera-bench` are measurements. Re-run a figure before relying on it.
+- [probes/](probes/) and `mosaica-bench` are measurements. Re-run a figure before relying on it.
 
 Nothing is deployed, so there is no backwards compatibility: change a format and rebuild the bundles. Bump the format version when you do, so a stale bundle is refused.
 

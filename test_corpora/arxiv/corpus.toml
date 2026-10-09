@@ -2,7 +2,7 @@
 #
 # Produced by `prepare.py`, which copies this file next to the parquets it writes; `[sources]` is
 # relative to the declaring document (configuration.md §3), so the copy beside the data is what
-# `tessera build` reads and this one is what gets reviewed.
+# `mosaica build` reads and this one is what gets reviewed.
 #
 # **The optional second stage edits the copy, never this file.** `toponymy.py` injects its four
 # sources at the marker in `[sources]` and appends the layer block from `toponymy.toml`. Both files

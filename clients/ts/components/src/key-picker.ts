@@ -1,7 +1,7 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
-import {type Meta, type ViewInfo} from '@tesseradb/client';
-import {stepView, viewLabel, viewsOfGroup} from '@tesseradb/client/internal';
-import {TesseraElement} from './base.js';
+import {type Meta, type ViewInfo} from '@mosaicajs/client';
+import {stepView, viewLabel, viewsOfGroup} from '@mosaicajs/client/internal';
+import {MosaicaElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {switchView} from './view-switch.js';
@@ -13,9 +13,9 @@ import {chrome, tokens} from './tokens.js';
  * Renders nothing when the current view is in no group.
  *
  * @summary Chooses the view within the current group.
- * @tagname tessera-key-picker
+ * @tagname mosaica-key-picker
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-viewswitch']>} mosaica-viewswitch - The view
  *   changed.
  * @csspart field - The caption and the row.
  * @csspart label - The caption, which is the group's name.
@@ -23,7 +23,7 @@ import {chrome, tokens} from './tokens.js';
  * @csspart select - The select.
  * @csspart step - A previous or next button, with `data-direction` set to `prev` or `next`.
  */
-export class TesseraKeyPicker extends TesseraElement {
+export class MosaicaKeyPicker extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -121,10 +121,10 @@ export class TesseraKeyPicker extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-key-picker', TesseraKeyPicker);
+defineOnce('mosaica-key-picker', MosaicaKeyPicker);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-key-picker': TesseraKeyPicker;
+    'mosaica-key-picker': MosaicaKeyPicker;
   }
 }

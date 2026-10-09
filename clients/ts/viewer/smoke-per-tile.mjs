@@ -16,7 +16,7 @@
 // skipped and says so. The colour is set through the explorer's store.
 //
 // The number in use is read off the `per_tile` of each `POST /v1/artifacts/viewport` the page
-// sends, and the token off its `authorization`. Requires a running `tessera serve` whose bundle
+// sends, and the token off its `authorization`. Requires a running `mosaica serve` whose bundle
 // declares a layer, and a running `vite dev`.
 import {mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -24,7 +24,7 @@ import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-brows
 
 const args = flags();
 const url = args.url ?? 'http://localhost:5173';
-const shots = args.shots ?? '/tmp/tessera-per-tile';
+const shots = args.shots ?? '/tmp/mosaica-per-tile';
 await mkdir(shots, {recursive: true});
 
 const browser = await launchBrowser(args);
@@ -91,7 +91,7 @@ async function settled(limitMs = 45_000) {
   let stable = 0;
   while (Date.now() - started < limitMs) {
     await page.waitForTimeout(500);
-    const marks = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    const marks = await page.evaluate(() => window.__mosaicaProbe?.marks ?? -1);
     if (marks === last) {
       if (++stable >= 4) return;
     } else {
@@ -109,7 +109,7 @@ const reading = async () => ({
   control: Number(await page.locator('#per-tile').inputValue()),
   address: Number(new URL(page.url()).searchParams.get('per-tile')),
   ...(await page.evaluate(() => {
-    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {layers: string[]}; get(name: 'legend'): {colourBy: string | null}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {layers: string[]}; get(name: 'legend'): {colourBy: string | null}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     const store = explorer?.activeStore;
     return {layers: store?.get('artifacts').layers ?? [], colourBy: store?.get('legend').colourBy ?? null};
   }))
@@ -122,7 +122,7 @@ const reading = async () => ({
 async function drawLastLayer() {
   const toggle = page.locator('[part="layers-toggle"]').first();
   if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
-  const entries = page.locator('tessera-layer-picker [part="entry"]');
+  const entries = page.locator('mosaica-layer-picker [part="entry"]');
   await entries.first().waitFor({timeout: 60_000});
   const count = await entries.count();
   for (let i = 0; i < count; i++) {
@@ -137,7 +137,7 @@ async function drawLastLayer() {
 /** Colour by a rendered column other than the current colour, through the explorer's store; returns it, or null. */
 const colourByAColumn = () =>
   page.evaluate(() => {
-    const explorer = /** @type {{activeStore: {get(name: 'meta'): {declaredScalars: {name: string; render: boolean}[]} | null; get(name: 'legend'): {colourBy: string | null}; setColourBy(column: string | null): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{activeStore: {get(name: 'meta'): {declaredScalars: {name: string; render: boolean}[]} | null; get(name: 'legend'): {colourBy: string | null}; setColourBy(column: string | null): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     const store = explorer?.activeStore;
     const current = store?.get('legend').colourBy;
     const column = store?.get('meta')?.declaredScalars.find((c) => c.render && c.name !== current)?.name ?? null;

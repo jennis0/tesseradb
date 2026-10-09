@@ -13,15 +13,15 @@ import traitlets
 
 anywidget = pytest.importorskip("anywidget")
 
-from tesseradb import Map, Token  # noqa: E402
+from mosaica import Map, Token  # noqa: E402
 
 
 @pytest.fixture
 def make(monkeypatch, tmp_path):
     """A Map whose bundle is a stub and whose `send` is captured."""
-    import tesseradb.widget as widget
+    import mosaica.widget as widget
 
-    stub = tmp_path / "tessera-components.js"
+    stub = tmp_path / "mosaica-components.js"
     stub.write_text("export function render() {}")
     monkeypatch.setattr(widget, "bundle_path", lambda: stub)
 
@@ -226,7 +226,7 @@ def test_title_field_is_synced_down_and_defaults_to_none(make):
 
 
 def test_map_without_a_bundle_says_how_to_get_one(monkeypatch):
-    import tesseradb.widget as widget
+    import mosaica.widget as widget
 
     monkeypatch.setattr(widget, "bundle_path", lambda: None)
     with pytest.raises(RuntimeError):

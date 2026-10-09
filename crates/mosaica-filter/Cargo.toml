@@ -1,0 +1,49 @@
+[package]
+name = "mosaica-filter"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[features]
+default = []
+# Per-stage bench accessors on `ColumnPostings` — the record search, the view construction and the
+# `hits` test that `intersects` runs as one call. OFF by default and enabled only by
+# `mosaica-bench`, mirroring `mosaica-engine/bench-timing`. It adds no behaviour to any path.
+bench-timing = ["mosaica-authz/bench-timing"]
+
+[dependencies]
+mosaica-types = { path = "../mosaica-types" }
+# The Roaring container assembler, shared with `mosaica-store`'s row projection. Below both,
+# because `check-layers.sh` denies filter -> store and store must not reach the filter index.
+mosaica-roaring = { path = "../mosaica-roaring" }
+# For the CSR postings format only — `PostingsReader`, `DeltaTier` and their ordinal-addressed
+# format core. This crate reads attribute postings; it never reads an authorisation posting, and
+# nothing here constructs a `TermId`. See lib.rs for why the dependency is on the format rather
+# than the other way round.
+mosaica-authz = { path = "../mosaica-authz" }
+croaring.workspace = true
+# The value column is an Arrow IPC file, as every other columnar artefact in the bundle is
+# (contracts §2.1). Reading it here rather than through `mosaica-store` is what keeps the layer
+# rule intact: `check-layers.sh` denies filter → store, so this crate stays entity-space and never
+# meets `RowId`.
+arrow.workspace = true
+# The value column is mapped rather than read: at 10⁹ it is 1 GB per byte of declared width per
+# column, and a generation opens every declared column at once. See `values::read_values`.
+memmap2 = { workspace = true }
+# **For `contains`' substring search only** (`dict::KeyMatcher`). The needle's searcher is built
+# once and reused across every dictionary key the walk decodes and every candidate slot the probe
+# reads; `str::contains(&str)` constructs a two-way searcher on every call, which the walk pays per
+# key against a haystack of a few tens of bytes — measured 1.14–2.03× of the whole per-key cost at
+# 2.4M, and the swing was in *both* directions with needle length, which is a searcher's setup and
+# not a property of the corpus (probes/2026-08-13-contains-recovery, arm 1). Already in the tree
+# transitively (arrow → arrow-string → regex → aho-corasick), so this declares a dependency the
+# build already carries rather than admitting a new one; writing the search by hand was measured
+# *slower* than the scalar loop it replaces (probes/2026-08-08-filter-layout, arm 12).
+memchr = "2"
+# The record blob's blocks are whole-row zstd frames (records-and-search §3): drill-down is one
+# block read and one decompress, and the fail-closed reader checks the decompressed length
+# against the directory's claim.
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -9,7 +9,7 @@ and the exact answer is the cheaper one. At **two or more** it estimates them wi
 exact accumulator would need a union, a sort or a bitset to say so — where adding a tile twice to a
 sketch is adding it once. The two properties §7.2 actually needs — θ monotone in depth, and both
 factors computed inside the viewer's own composed mask — an estimate has as readily as a count.
-[`ladder`] owns that predicate, exactly as `crates/tessera-engine/src/occupancy.rs` does.
+[`ladder`] owns that predicate, exactly as `crates/mosaica-engine/src/occupancy.rs` does.
 
 **Which route the differential exercises.** Every bundle this oracle opens has exactly one segment
 per view (`oracle/bundle.py` — phase 1), so `Selection.n_occ` takes the counted route and

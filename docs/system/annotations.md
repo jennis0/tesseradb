@@ -1,6 +1,6 @@
 # Annotations
 
-A map is not only points. Tessera also serves clusters, administrative or taxonomic hierarchies,
+A map is not only points. Mosaica also serves clusters, administrative or taxonomic hierarchies,
 regions bounded by a shape, and the labels that name them, each drawn from a set of points and
 each served or withheld for one viewer exactly as a point is.
 
@@ -380,7 +380,7 @@ of artifacts drawn beside each other at any depth, the share given one slot was:
 | arXiv, 2.4 million papers, HDBSCAN (`nested`) | 192 | sample | 0.13% | 0.26% | 0% | 0.13% |
 | arXiv, k-means (`flat`) | 64 | sample | 1.7% | 0.56% | 0% | 0% |
 
-*One run each, with `tessera-bench`'s `slot_cost`, over every artifact the broadest viewer is
+*One run each, with `mosaica-bench`'s `slot_cost`, over every artifact the broadest viewer is
 served. Every artifact had a centre of its own members. Centred by the sample instead, the GBIF
 sample's taxonomy has 172,885 taxa placed beside an ancestor and 21,868 with no centre, and clashes
 at 2.0%, 0.93%, 0.11% and 0.08%.*
@@ -435,7 +435,7 @@ rows, the rows the last build or compaction wrote, and a covering: at most 32 ro
 every member. The covering is the artifact's span of rows split at its 31 widest gaps, which is the
 covering of 32 ranges that holds the fewest rows that are not members. A build, a compaction and the
 server's own composition of a column all write both from the column's labels, so they are the column
-read the other way round. `tessera verify --deep` writes them again from the column and compares. On
+read the other way round. `mosaica verify --deep` writes them again from the column and compares. On
 a level's first use the server sorts the coverings into an index, which is never stored, and finds
 the artifacts whose coverings overlap a range of rows by binary search. A covering says only where
 an artifact's members could be: an artifact it proposes for a tile is still tested against the

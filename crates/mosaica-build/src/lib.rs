@@ -1,0 +1,3302 @@
+//! `mosaica build` — the batch build.
+//!
+//! Composes the tiler, the dictionary, the postings writer and the segment writers into one
+//! verifiable bundle whose layout is contracts §2.1. Two builds live here and must agree
+//! byte-for-byte: [`build`], the streaming one that ships (see [`mod@pipeline`]), and
+//! [`build_in_memory`], the linear one retained as its oracle.
+//!
+//! ## Entity-ID assignment is permanent
+//!
+//! Items are ordered by their **signature** — the sorted list of their term IDs — and the new
+//! entity ID is simply the position in that order (§11.1). Ties break on the item's Morton code and
+//! then on its number, which is the order the build created it in ([`ids`]), so the assignment is
+//! total and deterministic.
+//!
+//! This is not an optimisation that can be retrofitted. Entity IDs are append-only and never
+//! reused (I9), so the ordering chosen at the first build is the ordering the corpus keeps
+//! forever; a later build cannot re-sort entity space without invalidating every posting,
+//! permutation and handle ever issued. The measured posting compression from this ordering is
+//! 8.9–36.7x (`probes/results.md`) — the reason it must be in the first build rather than an
+//! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
+//! serving allocator applies exactly the same rule to appended items.
+
+pub mod artifact_pass;
+mod assembly;
+pub mod check;
+mod column;
+pub mod config;
+pub mod deep;
+pub mod disclosure;
+pub mod error;
+mod extents;
+pub mod ids;
+pub mod input;
+pub mod layers;
+pub mod observer;
+mod pipeline;
+mod residency;
+mod row_groups;
+pub mod shapes;
+pub(crate) mod spill;
+pub mod term_images_pass;
+mod unique_index;
+pub mod unique_key;
+pub use mosaica_store::utf8;
+
+/// The commit this binary was built from, or `"unknown"` where the source was not a git checkout.
+///
+/// `mosaica --version` prints it and a build logs it on its first line, so a measurement can be
+/// tied to the source it came from. `build.rs` stamps it.
+pub const BUILD_COMMIT: &str = env!("MOSAICA_BUILD_COMMIT");
+
+/// Return the allocator's free pages to the kernel — [`mosaica_types::process::trim_heap`], which
+/// carries the argument and the platform gate.
+///
+/// Called at each stage boundary ([`observer::StageTimer::end`]) and after the layer publication
+/// rehouses its memberships. The build holds 34 GB without it
+/// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5).
+pub(crate) fn trim_heap() {
+    mosaica_types::process::trim_heap();
+}
+
+use rayon::prelude::*;
+use std::collections::{BTreeMap, HashMap};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+
+use mosaica_authz::{write_postings, DictWriter};
+use mosaica_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
+use mosaica_spatial::{split32, Bounds};
+use mosaica_store::manifest::{
+    CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
+    IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
+    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+};
+use mosaica_store::write::{write_permutation, write_segment};
+use mosaica_store::{write_current, write_manifest_json, PairsParquetWriter};
+use mosaica_types::{
+    EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
+    SMALL_TERM_THRESHOLD_DEFAULT,
+};
+
+pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
+pub use ids::RefusedRows;
+pub use disclosure::write_disclosure_report;
+pub use error::{BuildError, Result};
+// [`BuildArgs::groups`]' own types. A caller assembling build arguments has to name them, and a
+// caller that cannot reach `mosaica-store` — every test above the store layer — could not
+// otherwise declare a group at all (`views.md` §3.2).
+pub use observer::{BuildObserver, BuildStage, NoopObserver};
+pub use mosaica_store::manifest::{
+    GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation, ViewMetadataType,
+    ViewMetadataValue,
+};
+pub use unique_key::{
+    footer_distinct_count, keyword_cardinalities, FooterCount, KeywordCardinality,
+    UNIQUE_KEY_FRACTION,
+};
+
+/// The single bundle prefix a batch build writes. Later publications get their own prefix; the
+/// batch build always starts a bundle from scratch.
+const PREFIX: &str = "v00000";
+/// This build writes exactly one partition: there are no compartments.
+const PHASH: &str = "default";
+/// One segment per (partition, view) at build (contracts §2.1).
+const SEG_ID: &str = "seg-0";
+/// The same, for the artifact pass, which reopens the segment the build wrote.
+pub(crate) const BUILD_SEG_ID: &str = SEG_ID;
+
+/// The shape layers' geometry report (`polygon-membership.md` §6.5), printed where the build's
+/// other reports are — on stderr, before the artifact pass adds the resolution's cost.
+pub(crate) fn report_shapes(reports: &[crate::shapes::ShapeLayerReport]) {
+    if reports.is_empty() {
+        return;
+    }
+    eprintln!("shape layers, from the geometry alone:");
+    for report in reports {
+        eprintln!("{report}");
+    }
+}
+
+/// The treed layers' edges as graphs, printed beside the artifact pass's per-level lines: what a
+/// cut climbs, and on a `dag` layer how many artifacts sit under more than one parent
+/// (`dag-hierarchies.md` §3, decision 0092).
+pub(crate) fn report_hierarchies(shapes: &[crate::layers::HierarchyShape]) {
+    for s in shapes {
+        eprintln!(
+            "  {} level {} [{}]: {} artifact(s), {} edge(s), {} root(s), {} under more than one \
+             parent (at most {})",
+            s.layer, s.level, s.kind, s.artifacts, s.edges, s.roots, s.multi_parent, s.max_parents
+        );
+    }
+}
+
+/// One coordinate system a build materialises, and where its points come from
+/// (`views.md` §7).
+///
+/// **A view owns everything downstream of the permutation and nothing upstream of it**
+/// (`views.md` §1): the projection, the frame, the geometry source and the labels its own rows
+/// carry are here; identity, the term index, the attributes and the layers are on
+/// [`BuildArgs`], shared by every view of the build.
+#[derive(Debug, Clone)]
+pub struct ViewArgs {
+    /// The view this row space belongs to: a plain view's name, or a group's view as the joined
+    /// `group:key` id (`views.md` §3.2). [`mosaica_store::view_path`] derives the on-disc path.
+    pub view_id: String,
+    /// What turns each row's coordinates into a position in this view's frame, before anything is
+    /// quantised (`projections.md` §3). [`mosaica_spatial::Projection::None`] — the default —
+    /// transforms nothing, and is the exact identity.
+    pub projection: mosaica_spatial::Projection,
+    /// The quantisation extent this view's Morton codes are computed against (contracts §2.5),
+    /// **per view and never per bundle** (decision 0040): an embedding and a map cannot share a
+    /// frame without one of them wasting most of the grid.
+    pub extent: Bounds,
+    /// Parquet file of this view's points: `entity_id` plus either `x`/`y` or `morton` (see
+    /// [`input`]). The view's own `source` (`configuration.md` §1), overridable by
+    /// `--file NAME=PATH`.
+    pub points: PathBuf,
+    /// Where the view's identity and geometry fields sit in that file — the view's `fields` map,
+    /// resolved. [`config::Fields::default`] is canonical names throughout.
+    pub point_fields: crate::config::Fields,
+    /// Which of that file's rows are this view's, where a group's views share one points file
+    /// (`views.md` §3.1's form B). `None` where the file *is* the view — every plain view, and
+    /// every view of a form A group.
+    ///
+    /// **Every pass over the file applies it**: the identity pass, the label vocabulary and its
+    /// scan, the geometry read, the frame survey and a group-scoped attribute's own column. A pass that
+    /// forgot it would read another view's rows into this view's row space.
+    pub select: Option<crate::config::ViewSelector>,
+    /// Where each of this view's points gets its access terms, and what a point carrying none
+    /// gets — the view's `point_visibility`, resolved.
+    ///
+    /// **The label is the entity's, not the row's** (`views.md` §7): pass one unions the label
+    /// sets a view's rows carry over every view an entity appears in, and a disagreement is a
+    /// refusal naming the entity and the files.
+    pub access: crate::config::AccessInput,
+    /// **This view's own gate** (`views.md` §6), compiled from the declaration
+    /// (`config::compile_view_gate`): a list of access labels, each one term (decision 0132), or
+    /// `None` for `public`. It reaches the manifest as
+    /// [`mosaica_store::manifest::ViewDescriptor::visibility`], which is the one input
+    /// `Engine::authorise` evaluates a view's own half of the gate from.
+    ///
+    /// For a view of a group this is the **roster record's** gate — the group's own half is on
+    /// [`BuildArgs::groups`], and the two are conjunctive.
+    pub visibility: Option<Vec<String>>,
+}
+
+/// One group-scoped attribute, and the views of its group whose values this build reads
+/// (`views.md` §5).
+///
+/// **The values are the views' own**, read one of two ways. Where the attribute declares no source
+/// of its own, each view's column is read from that view's points file — which for a form B group
+/// is the group's shared source under that view's own selection — so the family needs no file of
+/// its own: it names the views, and each view already says where its rows are. Where it declares
+/// one, that file carries one row per `(entity, view)` and its `fields.view` discriminator says
+/// which view each row's value is for.
+#[derive(Debug, Clone)]
+pub struct ScopedColumnFamily {
+    /// The column, exactly as an entity-scoped one is declared.
+    pub attribute: crate::config::Attribute,
+    /// The group that owns the views — the `<group>` component of the column's path.
+    pub group: String,
+    /// Indices into [`BuildArgs::views`], one per view of that group, in registry order.
+    pub views: Vec<usize>,
+    /// The attribute's **own** source (`views.md` §5), or `None` to read each view's column from
+    /// that view's points file. The keys a stray discriminator value is refused against are the
+    /// group's own and are derived from `views` rather than carried, so the two cannot disagree.
+    pub source: Option<crate::config::ScopedAttributeFile>,
+}
+
+/// One layer whose artifacts are a different set per view of a group (`views.md` §3.5).
+///
+/// **A scoped layer's artifact rows say which view each belongs to**, under the layer's own
+/// `fields.view`, and an artifact is drawn only in that view: its membership is projected into
+/// that view's row space and into no other. The keys are the group's, so a row naming one the
+/// roster does not carry is refused, exactly as a points row is.
+#[derive(Debug, Clone)]
+pub struct ScopedLayer {
+    /// The group whose views the artifact sets are per.
+    pub group: String,
+    /// The discriminator column on the artifacts source — the layer's `fields.view`, resolved.
+    pub column: String,
+    /// Every key of that group, sorted.
+    pub keys: Vec<String>,
+}
+
+/// Arguments to [`build`].
+#[derive(Clone)]
+pub struct BuildArgs {
+    /// Every coordinate system this build materialises, in **declaration order**
+    /// (`views.md` §7): one entry per plain `[[view]]` and one per view of every
+    /// `[[view_group]]`. Declaration order is what decides which view's Morton code an item
+    /// absent from the anchor is tie-broken on (decision 0112).
+    pub views: Vec<ViewArgs>,
+    /// Index into [`BuildArgs::views`] of the **anchor view**: the one whose Morton code orders
+    /// entity ids within a signature group (decision 0112, extending 0073).
+    ///
+    /// `[defaults].allocation_view` names it, and it is **required when the declaration carries
+    /// more than one view** — explicit rather than positional, so reordering declaration blocks
+    /// cannot silently re-key a rebuild, the ids being permanent (I9).
+    pub anchor: usize,
+    /// The view groups and their rosters (`views.md` §3.1), in declaration order — what the
+    /// manifest publishes so a client can order and name a group's views. Empty for a
+    /// declaration of plain views alone.
+    ///
+    /// **Recorded, never evaluated**: ⊘ no gate is evaluated anywhere (`views.md` §6), so a
+    /// roster entry's `visibility` is a record of the declaration rather than a means of
+    /// restricting reachability.
+    pub groups: Vec<mosaica_store::manifest::GroupDescriptor>,
+    /// The declared attributes **grouped by the file each is read from**, with where that file
+    /// keeps the unique fields its rows name items by.
+    ///
+    /// **A group is a pass.** Each one is a merge sweep over its own file against this build's
+    /// assigned ordinals, so a declaration whose columns sit in three files pays three passes and
+    /// no file has to carry a column it does not have. Empty for an empty schema, which is what
+    /// keeps a schema-less build's `columns.arrow` byte-identical to the one it wrote before this
+    /// existed.
+    ///
+    /// **Separate from the view's own source**, and usually the same file: identity and geometry
+    /// are per view, attributes are entity space, and a corpus whose geometry is recomputed does
+    /// not rewrite its attributes to say so.
+    pub attribute_sources: Vec<crate::config::AttributeSource>,
+    /// The **group-scoped attribute column families** this build writes (`views.md` §5): one
+    /// entity-space column per view of the group, each with its own presence bitmap, under
+    /// `attrs/<column>/<group>/<key>/`.
+    ///
+    /// **Not part of [`BuildArgs::schema`], and deliberately.** `MANIFEST.declared_scalars` is one
+    /// flat bundle-wide list and a family has no slot in it. The family's record is
+    /// `MANIFEST.groups[..].scoped_scalars` instead (contracts §2.2), derived from this field at
+    /// the manifest write, and it is what the engine opens the columns from and what
+    /// `/v1/meta`'s `filter_operands` publishes the scope from.
+    ///
+    /// **`render` on a family reaches each view's row tail** (`views.md` §5): the column is
+    /// permuted into the row space of every view of the group, and of any group sharing them, and
+    /// of no other.
+    ///
+    /// **What a build writes is no longer all there is** (r24). A batch into a view of the owning
+    /// group carries the family's values under their plain names, and a view created while the
+    /// service runs acquires its columns — and the empty bases beneath them — at the first flush
+    /// that covers it. ⊘ The one case that still needs a rebuild is a view of a group declaring
+    /// `members` of this one: it renders the family and may not be written through, the column
+    /// being the owner's and a second writer for one `(entity, view)` column being two layers
+    /// claiming one entity.
+    pub scoped_attributes: Vec<ScopedColumnFamily>,
+    /// Bundle root to create.
+    pub out: PathBuf,
+    /// Keep the items whose value of the declaration's one unique integer attribute is below this,
+    /// and the rows of every file that name them ([`ids::Limit`]).
+    pub limit: Option<u64>,
+    /// Refuse the build at the first file with a row the identity rule refuses, rather than
+    /// refusing those rows and reporting them ([`ids`]).
+    pub strict: bool,
+    /// The key of the `tessera_id` permutation, recorded in the manifest. The CLI generates one
+    /// for every bundle it creates; a caller that needs two builds to agree byte for byte passes
+    /// the same key to both.
+    pub identity_key: IdentityKey,
+    /// The §13.3 row-range shard this build produces. Always 0: there is no sharding.
+    pub shard_id: u32,
+    /// The config's `[[layer]]` blocks, compiled, in declaration order — which is registration
+    /// order, a layer having to follow every layer it names in `depends_on`. Empty for a bundle
+    /// with no layers, which is what every build wrote before this input existed.
+    ///
+    /// **A build input on the schema's terms** — it compiles into the manifest, and the engine
+    /// seeds its registry from there before replaying a WAL record. What it is *not* is a second
+    /// authority: the declarations run through the same registry and the same allocator the
+    /// control plane uses, so both routes refuse the same declarations and place the same ids.
+    pub layers: Vec<mosaica_types::layer::LayerDeclaration>,
+    /// Where each layer's artifacts come from — its own Parquet of one row per artifact, or the
+    /// rows written inline — and the `[layer.members]` source beside it, one row per
+    /// `(artifact, entity)`. Parallel to [`BuildArgs::layers`] and refused against it: an input
+    /// naming a layer this build does not declare is a name the manifest cannot carry.
+    ///
+    /// **One source per layer**, so no row carries the layer it belongs to.
+    pub layer_inputs: Vec<crate::config::LayerSources>,
+    /// Which of [`BuildArgs::layers`] are **scoped to a group** — a different artifact set per
+    /// view of it (`views.md` §3.5) — by layer name. Absent is the default `scope = "entity"`:
+    /// one artifact set, drawn on every view the layer names.
+    pub scoped_layers: BTreeMap<String, ScopedLayer>,
+    /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.
+    ///
+    /// The file is read by nothing on any request path — its consumers are the test-only
+    /// Python reference oracle and build-cadence tooling — so a deployment that runs no
+    /// conformance suite against the bundle can skip writing and hashing it (~5–7 GB at 10⁹).
+    /// A bundle without it is still verifiable: MANIFEST lists only what was written.
+    pub emit_oracle_pairs: bool,
+    /// Signature-sort batch size, in items (§11.1 r23: assignment is signature-sorted **within
+    /// each append-only batch and only within one**; the fragmentation is monotone in batch
+    /// count and permanent under I9).
+    ///
+    /// `None` = derive: the largest batch the memory budget supports, rounded down to a
+    /// multiple of 2²⁴ items so budget jitter between machines does not gratuitously fork
+    /// identities — usually the whole corpus in one batch, which reproduces the pre-batching
+    /// output byte for byte. Whatever is *used* (derived or explicit, when it batches at all)
+    /// is recorded in MANIFEST provenance, and an identity-preserving rebuild must replay it:
+    /// a different batch size is a different permanent assignment, i.e. a different corpus.
+    pub batch_items: Option<u64>,
+    /// Peak-RSS budget in bytes for the build's own structures. `None` = detect from the
+    /// machine (MemAvailable, damped). Drives batch and band sizing and the fail-closed
+    /// pre-flight; it cannot buy off the irreducible floors (the entity-of-ordinal map, the
+    /// per-term offsets), which the pre-flight states when refusing.
+    pub memory_budget: Option<u64>,
+    /// Override the derived postings band size, in pre-dedup rows. A tuning and **test** seam
+    /// (a corpus small enough for a test cannot force multiple bands through the budget
+    /// alone); band boundaries never affect output bytes, only transient memory. `None`
+    /// derives from the budget.
+    pub band_rows: Option<u64>,
+    /// The config's entity-space half: the per-item columns this build writes into
+    /// `columns.arrow`'s tail, in declared order, and the vocabularies they draw on (`--config`,
+    /// bound value files via `--file`).
+    ///
+    /// **Default-empty, and that case must stay byte-identical.** Every bundle built before a
+    /// config existed declared no scalar, and an empty schema must go on producing exactly the
+    /// bytes it did — `mosaica-cli`'s identity test asserts a byte-identical `columns.arrow`
+    /// across rebuilds carrying one key, and a schema that widened the fixed table by default
+    /// would break it for reasons unrelated to identity.
+    pub schema: crate::config::Schema,
+}
+
+impl std::fmt::Debug for BuildArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildArgs")
+            .field("views", &self.views)
+            .field("anchor", &self.anchor)
+            .field("groups", &self.groups)
+            .field("scoped_attributes", &self.scoped_attributes)
+            .field("attribute_sources", &self.attribute_sources)
+            .field("out", &self.out)
+            .field("limit", &self.limit)
+            .field("strict", &self.strict)
+            .field("identity_key", &self.identity_key)
+            .field("shard_id", &self.shard_id)
+            .field("emit_oracle_pairs", &self.emit_oracle_pairs)
+            .field("batch_items", &self.batch_items)
+            .field("memory_budget", &self.memory_budget)
+            .field("band_rows", &self.band_rows)
+            .finish()
+    }
+}
+
+/// What a completed build produced.
+#[derive(Debug, Clone)]
+pub struct ViewReport {
+    /// The view id: a plain view's name, or a group's view as `group:key` (`views.md` §3.2).
+    pub view_id: String,
+    /// Rows in this view's segment — the view's population, which is a **subset** of entity
+    /// space wherever the view does not hold every item (`views.md` §8).
+    pub rows: u64,
+    /// What this view's frame gave the corpus, counted off its own sorted Morton codes.
+    pub occupancy: Occupancy,
+    /// What deriving this view's term images came to, and `None` where the view has none
+    /// (`crate::term_images_pass`).
+    pub term_images: Option<crate::term_images_pass::TermImageReport>,
+}
+
+/// What a completed build produced, per view.
+#[derive(Debug, Clone)]
+pub struct BuildReport {
+    pub prefix: String,
+    /// One entry per view the build materialised, in registry order (`views.md` §7).
+    pub views: Vec<ViewReport>,
+    pub seg_id: String,
+    /// Number of items (= `entity_id_high_water`, since the bootstrap build allocates from 0).
+    pub items: u64,
+    /// Number of distinct terms in the dictionary.
+    pub terms: u64,
+    /// Number of `(entity, term)` pairs written.
+    pub pairs: u64,
+    /// Total size on disk of every file the manifests name.
+    pub bundle_bytes: u64,
+    /// Member rows whose key said *this point is in no artifact* — a null key, or exactly `-1`
+    /// (`artifacts-from-points.md` §2). Noise is a quarter of the points at each split of a
+    /// condensed tree, so this is an ordinary number rather than a fault; it is here because a
+    /// clustering that skipped *every* row named the wrong column, and only the count says so.
+    pub unclustered_member_rows: u64,
+    /// Artifacts **created by a member key no artifacts source declared**, under
+    /// `value_set = "open"` (`artifacts-from-points.md` §3). The ordinary number for a bare
+    /// clustering is *every* cluster, so this is not a fault either; it is here because minting
+    /// cannot be undone — a mistyped key becomes a permanent object — and the count is the whole of
+    /// what stands between an operator and noticing. An ingest batch reports the same number for
+    /// itself in its own 200.
+    pub minted_artifacts: u64,
+    /// Every `(view, layer, level)` the post-bundle artifact pass observed, in the order the
+    /// views were built (`crate::artifact_pass`).
+    ///
+    /// **Returned as well as printed, because a scoped layer's per-view separation is only
+    /// visible here** (`views.md` §3.5): an artifact belongs to one view, so the artifact count
+    /// with rows in a view is the layer's own set there and not the level's whole roster.
+    pub artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport>,
+    /// Per treed level, its edges as a graph (decision 0092's report, for the edges).
+    pub hierarchy_shapes: Vec<crate::layers::HierarchyShape>,
+    /// What each declared attribute source's join met — the figures
+    /// [`report_attribute_coverage`] prints, returned as well as printed.
+    ///
+    /// **Returned because the tallies are computed where nothing else can check them.** The
+    /// streaming pipeline counts a column's presence inside a scatter it splits across threads,
+    /// and a tally that lost or double-counted a lane would change this report without changing
+    /// one byte of the bundle — the one defect a bundle comparison cannot see. The linear build
+    /// counts the same thing serially, so the two are comparable (`tests/attribute_pass.rs`).
+    pub attribute_coverage: Vec<AttributeCoverage>,
+    /// Each indexed keyword column's distinct-key count against the rows carrying one, with the
+    /// bytes its index cost (`unique_key`). Printed at every build; a key unique per row earns a
+    /// warning and never a refusal.
+    pub keyword_cardinalities: Vec<KeywordCardinality>,
+    /// The rows each file's identity rule refused, by file and reason ([`ids`]). A build refuses
+    /// a row and carries on, as an ingest refusing rows one at a time would.
+    pub refused: Vec<RefusedRows>,
+    /// The declared columns whose characters the join spilled as record-blob extents rather than
+    /// filling an entity-ordered arena with them, by name, in declaration order
+    /// (`build-column-extents.md` §2).
+    ///
+    /// **Returned because the route is derived from the free space and changes no byte of the
+    /// bundle.** A `text` column is here at every build; a `keyword` or `utf8` column the record
+    /// blob alone reads is here when its arena would not fit beside the rest of the entity-order
+    /// stages, which is a property of the machine and not of the corpus. Two builds of one corpus
+    /// whose wall clocks differ have this list as the first thing to compare.
+    pub spilled_columns: Vec<String>,
+}
+
+/// **How many of the grid's cells the placed points actually landed in**, beside how many points
+/// there were.
+///
+/// A frame goes wrong in two ways and the clamp count (`config::Frame`) sees only one of them.
+/// Data *outside* the frame is pushed onto its edge, so those positions are actively wrong — that
+/// is the clamp, which the frame report counts. Data *tiny inside* the frame clamps
+/// nothing at all: every position is correct, and nearly all of the resolution is gone, because
+/// points a long way apart in the source land in one cell and can no longer be told apart.
+/// Coordinates spanning 100…118 against a 0…65536 frame do this with zero clamps.
+///
+/// **The frame report's bounding box cannot close that gap**, because it is derived from the
+/// data's extremes: two far-flung outliers make the box span most of the grid while 99% of the
+/// corpus still shares a handful of cells. The number that cannot be fooled that way is how many
+/// cells hold at least one point, counted exactly over every point the build placed.
+///
+/// **A warning, never a refusal**, as the clamp count is. A sparse corpus is stored *correctly but
+/// coarsely*, which is a legitimate thing to want — a small pilot corpus, a deliberately coarse
+/// frame, headroom left for data still to arrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Occupancy {
+    /// Points placed — one per row written.
+    pub points: u64,
+    /// Distinct cells those points landed in. Zero only for a build with no points, which is
+    /// refused before it reaches here.
+    pub cells: u64,
+}
+
+/// The average points per occupied cell at which the build says so emphatically.
+///
+/// **Ten, because nothing at this system's operating point reaches it on a frame that fits.**
+/// 4.3×10⁹ cells exist, so points spread over the whole grid collide rarely — about 1.0 per
+/// occupied cell at 10⁸ and 1.1 at 10⁹ — and a corpus concentrated into a tenth of the frame's
+/// area still only reaches 1.1 at 10⁸. The measure is a ratio rather than a count for a second
+/// reason: ten points in ten cells is a perfectly framed tiny corpus, not a sparse one, and only a
+/// count would scold it.
+///
+/// **The bound is not scale-free, and the limit is stated rather than left to be discovered.** A
+/// uniform corpus's ratio climbs with points per *available* cell, so it rises with both scale and
+/// concentration: at 10⁹ points in a hundredth of the frame's area it reaches about 23 and warns
+/// even under a frame `auto` fitted, a dense core with two distant outliers being exactly that
+/// corpus. Below 10⁹ no concentration reaches ten. This is a warning and not a refusal, so the
+/// cost of that case is a line of output.
+///
+/// The one corpus this warns about honestly and unhelpfully is a source whose positions genuinely
+/// coincide — a hundred documents recorded at one place really are one point. The raw numbers are
+/// printed either way, beside the data's own bounds in the frame report, which is what lets a
+/// caller tell the two apart.
+pub const COLLAPSE_WARNING_POINTS_PER_CELL: f64 = 10.0;
+
+impl Occupancy {
+    /// Count the distinct cells over a build's Morton codes **in tiler order**.
+    ///
+    /// **A run count over the sorted codes, not a bitmap.** Both builds reach this holding the
+    /// codes they are about to write to `morton.u32`, which is `(morton, tessera_id)` ascending
+    /// by contract (contracts §2.6 r6) — so equal codes are adjacent and the exact answer is one
+    /// comparison per point with nothing retained. A Roaring bitmap of the codes gives the same
+    /// exact answer for unsorted input, and is what this would need if the count moved anywhere
+    /// else; here it would allocate up to half a gigabyte (65,536 dense containers at 10⁹ points)
+    /// at the segment write, which is precisely the stage the pipeline holds as little as possible
+    /// beside. The order is asserted rather than assumed — out of order, a run count silently
+    /// over-reports, and an over-report is a warning that does not fire.
+    pub(crate) fn of_sorted_codes(codes: impl IntoIterator<Item = u32>) -> Occupancy {
+        let mut run = OccupancyRun::default();
+        for code in codes {
+            run.push(code);
+        }
+        run.finish()
+    }
+
+    /// Points per occupied cell — one where every point has a cell to itself, and the factor by
+    /// which the frame is coarser than this corpus needs where it is more. The reporting form is
+    /// [`Self::distinct_fraction`]; this is what the threshold is expressed in.
+    pub fn points_per_cell(&self) -> f64 {
+        if self.cells == 0 {
+            0.0
+        } else {
+            self.points as f64 / self.cells as f64
+        }
+    }
+
+    /// **What is reported: how many of this corpus's points have a position of their own.** One
+    /// hundred per cent is a point per cell; ten per cent means nine points in ten share a
+    /// position with another and cannot be told apart.
+    ///
+    /// The obvious reading of "how full is the grid" — occupied cells over the 4.3×10⁹ that exist
+    /// — is unreadable and nearly always wrong-looking: a corpus can never occupy more cells than
+    /// it has points, so a perfectly framed ten-thousand-point build fills 0.0002% of the grid and
+    /// a collapsed one fills 0.000003%. Both round to nothing, and the figure measures corpus size
+    /// far more than it measures the frame. Against the corpus's own points the same two builds
+    /// read 100% and 1.2%.
+    pub fn distinct_fraction(&self) -> f64 {
+        if self.points == 0 {
+            return 1.0;
+        }
+        self.cells as f64 / self.points as f64
+    }
+
+    /// **What the build says about resolution, every time, whether or not anything is wrong.**
+    /// The raw numbers, so a caller can judge a frame this does not warn about — and so silence
+    /// never means nobody looked.
+    pub fn report(&self, view: &str) -> String {
+        format!(
+            "view '{view}': {} point(s) landed in {} distinct cell(s) — {:.1}% of them have a \
+             position of their own",
+            self.points,
+            self.cells,
+            self.distinct_fraction() * 100.0
+        )
+    }
+
+    /// The emphatic line this occupancy earns, if any — past
+    /// [`COLLAPSE_WARNING_POINTS_PER_CELL`], and never a refusal.
+    pub fn warning(&self, view: &str) -> Option<String> {
+        if self.points_per_cell() < COLLAPSE_WARNING_POINTS_PER_CELL {
+            return None;
+        }
+        Some(format!(
+            "view '{view}': RESOLUTION LOST — only {:.1}% of these points have a position of \
+             their own, so points far apart in the source are stored at the same position and \
+             cannot be told apart. That is a frame far wider than the data it holds, unless the \
+             source's own positions genuinely coincide. Built anyway: every position written is \
+             correct, only coarse, and a pilot corpus, a deliberately wide frame or headroom for \
+             data still to arrive are all reasons to mean it. Write `extent = \"auto\"` to fit \
+             the frame to this data if it was not intended",
+            self.distinct_fraction() * 100.0
+        ))
+    }
+}
+
+/// The signature-sorted assignment key (§11.1): an item's **sorted term-ID list**.
+///
+/// Items are ordered by this key lexicographically, ties broken by Morton code and number, and each item's
+/// new entity ID is its position in that order. Items with identical term sets therefore occupy
+/// a contiguous entity-ID range, which is what turns their postings into runs — the measured
+/// 8.9–36.7x compression. **Permanent under I9:** entity IDs are never reused, so this ordering
+/// cannot be changed after the first build. The serving allocator calls this same function.
+pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
+    let mut key: Vec<u32> = terms.iter().map(|t| t.raw()).collect();
+    key.sort_unstable();
+    key.dedup();
+    key
+}
+
+/// What a build needs in hand before it can turn a row into a term id: the descriptor every source
+/// term names, and the source term a point carrying nothing is filled with.
+///
+/// **Established once, before either build's first pass**, because both passes of the streaming
+/// build and the single pass of the linear one must agree on it exactly — a source term is a
+/// position in a sorted vocabulary for a field-sourced view, and a disagreement about that list is
+/// a disagreement about every permanent entity id (I9).
+pub(crate) struct AccessPlan {
+    /// The dictionary key each source term names. For a field-sourced view a source term is a
+    /// position among the sorted keys its labels are indexed under ([`mosaica_authz::index_keys`]).
+    pub descriptors: input::TermDescriptors,
+    /// A field-sourced view's distinct labels, sorted, as its access column and its default carry
+    /// them. Empty for the relation route.
+    pub labels: Vec<String>,
+    /// Per position in [`Self::labels`], the source terms the label is indexed under.
+    pub keys_of_label: Vec<Vec<u64>>,
+    /// Per position in [`Self::labels`], whether one of its keys is a conjunction's. A row carrying
+    /// such a label among others is indexed by reading its labels together ([`Self::row_keys`]).
+    pub names_conjunction: Vec<bool>,
+    /// The label a point of view `v` carrying none is given, as a position in [`Self::labels`],
+    /// indexed by [`BuildArgs::views`]. Meaningless for the relation route, which fills nothing.
+    ///
+    /// **One vocabulary, one term per view's default** (`views.md` §7): term ids are entity
+    /// space and every view's labels are interned into the same dictionary, so the vocabulary is
+    /// the union over every view's source; what stays per view is which of its entries an
+    /// unlabelled point of that view takes.
+    /// Per view in [`BuildArgs::views`] order; `None` where the view declares no default, in
+    /// which case the vocabulary pass has already refused every row that would need one.
+    pub default_term: Vec<Option<u64>>,
+}
+
+/// How a build's views declare where their labels come from, checked once (`views.md` §7).
+///
+/// **A label is the entity's, not the row's.** The two routes cannot be mixed across the views of
+/// one build, and two relations cannot be: an entity's term set has to be one set, and there is
+/// nothing to check a second relation's disagreement against — the field route's per-view sets are
+/// compared entity by entity (the count identity in [`pipeline`]'s batch loop), which a relation
+/// carrying entity-space pairs is outside of.
+enum AccessRoute<'a> {
+    /// Every view reads its labels from a column of its own points file, or takes its default.
+    /// One vocabulary over every view's distinct values, and one set per (entity, view) to agree.
+    PerView,
+    /// Every view names the same exploded `(entity_id, term_id)` relation. Entity space already,
+    /// so it is scanned once and there is nothing to disagree.
+    SharedRelation(&'a std::path::Path),
+}
+
+/// Which route this build's views declare, refusing a mixture.
+fn access_route(args: &BuildArgs) -> Result<AccessRoute<'_>> {
+    use crate::config::AccessSource;
+    let mut relation: Option<&std::path::Path> = None;
+    let mut per_view: Option<&str> = None;
+    for view in &args.views {
+        match &view.access.source {
+            AccessSource::Relation(path) => match relation {
+                None => relation = Some(path.as_path()),
+                Some(first) if first == path.as_path() => {}
+                Some(first) => {
+                    return Err(BuildError::Invalid(format!(
+                        "view '{}' reads its labels from {} and another view reads them from {}. \
+                         A label is the entity's, not the row's (views §7), so two relations \
+                         would be two answers to one question with nothing to reconcile them",
+                        view.view_id,
+                        path.display(),
+                        first.display()
+                    )))
+                }
+            },
+            AccessSource::Field(_) | AccessSource::Default => per_view = Some(&view.view_id),
+        }
+    }
+    match (relation, per_view) {
+        (Some(path), None) => Ok(AccessRoute::SharedRelation(path)),
+        (None, _) => Ok(AccessRoute::PerView),
+        (Some(path), Some(view)) => Err(BuildError::Invalid(format!(
+            "view '{view}' reads its labels from its own points file and another view reads them \
+             from the relation {}. A build's views must declare one route (views §7): an \
+             entity's label is one set, and the two routes cannot be checked against each other",
+            path.display()
+        ))),
+    }
+}
+
+/// One view's points file, as a reader of it needs it (`input::Source`).
+pub(crate) fn view_source<'a>(
+    args: &'a BuildArgs,
+    view: usize,
+    numbering: &'a ids::Numbering,
+) -> input::Source<'a> {
+    let args_view = &args.views[view];
+    input::Source::new(
+        &args_view.points,
+        &args_view.point_fields,
+        numbering.points(view),
+    )
+}
+
+/// The access relation every view reads its labels from, where they read them from one.
+pub(crate) fn shared_relation(args: &BuildArgs) -> Result<Option<&Path>> {
+    Ok(match access_route(args)? {
+        AccessRoute::SharedRelation(path) => Some(path),
+        AccessRoute::PerView => None,
+    })
+}
+
+/// Which rows of a group-scoped attribute's own file are one view's: those whose discriminator is
+/// the view's key, refused against the group's keys (`views.md` §5).
+pub(crate) fn scoped_selector(
+    args: &BuildArgs,
+    family: &ScopedColumnFamily,
+    view: usize,
+) -> config::ViewSelector {
+    let key_of = |view_id: &str| {
+        view_id
+            .split_once(mosaica_store::GROUP_SEPARATOR)
+            .map_or(view_id, |(_, key)| key)
+            .to_string()
+    };
+    let mut keys: Vec<String> = family
+        .views
+        .iter()
+        .map(|&index| key_of(&args.views[index].view_id))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    config::ViewSelector {
+        column: family
+            .source
+            .as_ref()
+            .map_or_else(|| "view".to_string(), |source| source.view_field.clone()),
+        value: key_of(&args.views[view].view_id),
+        keys,
+        view_id: args.views[view].view_id.clone(),
+    }
+}
+
+/// Read whatever a build must know before assigning term ids (see [`AccessPlan`]).
+pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Result<AccessPlan> {
+    use crate::config::AccessSource;
+    if let AccessRoute::SharedRelation(_) = access_route(args)? {
+        // The relation supplies its own integer term ids and needs no vocabulary pass.
+        return Ok(AccessPlan {
+            descriptors: input::TermDescriptors::Ids,
+            labels: Vec::new(),
+            keys_of_label: Vec::new(),
+            names_conjunction: Vec::new(),
+            default_term: vec![None; args.views.len()],
+        });
+    }
+    // **The union, sorted** — one dictionary over every view's distinct values. With one view
+    // this is that view's own sorted vocabulary, unchanged, which is what keeps a single-view
+    // bundle byte-identical across this change.
+    let mut vocabulary: Vec<String> = Vec::new();
+    for (index, view) in args.views.iter().enumerate() {
+        let field = match &view.access.source {
+            AccessSource::Field(field) => Some(field.as_str()),
+            _ => None,
+        };
+        let (terms, unlabelled) = input::read_access_vocabulary(
+            view_source(args, index, numbering),
+            field,
+            view.access.default.as_deref(),
+        )?;
+        // **A null or empty label is refused where the view declares no default** (decision
+        // 0133), here, before a term id exists or a byte is written, naming the count and the
+        // view. The same corpus on `/control/ingest` is refused in the same terms. A corpus that
+        // relied on the fill declares the default it was getting.
+        if unlabelled > 0 && view.access.default.is_none() {
+            return Err(BuildError::Invalid(format!(
+                "view '{}': {unlabelled} point row(s) carry a null or empty access label and the \
+                 view declares no `point_visibility.default` to fill them with. Declare the label \
+                 such a point should carry, or label the rows (decision 0133)",
+                view.view_id
+            )));
+        }
+        vocabulary.extend(terms);
+    }
+    vocabulary.sort_unstable();
+    vocabulary.dedup();
+    let default_term = args
+        .views
+        .iter()
+        .map(|view| {
+            view.access.default.as_deref().map(|default| {
+                vocabulary
+                    .binary_search_by(|t| t.as_str().cmp(default))
+                    .expect("every declared default is read into the vocabulary unconditionally")
+                    as u64
+            })
+        })
+        .collect();
+    // Each distinct label read once, by the rule ingest applies to a row's `access`, into the keys
+    // it is indexed under. A source term is a key's position in their sorted union.
+    let label_keys = vocabulary
+        .iter()
+        .map(|label| mosaica_authz::index_keys([label.as_str()]).map_err(BuildError::Invalid))
+        .collect::<Result<Vec<Vec<Vec<u8>>>>>()?;
+    let mut keys: Vec<String> = label_keys
+        .iter()
+        .flatten()
+        .map(|key| String::from_utf8(key.clone()).expect("a key is a label's own text"))
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let names_conjunction = label_keys
+        .iter()
+        .map(|label| {
+            label
+                .iter()
+                .any(|key| mosaica_authz::label::label_of_key(key).is_some())
+        })
+        .collect();
+    let keys_of_label = label_keys
+        .iter()
+        .map(|label| {
+            label
+                .iter()
+                .map(|key| {
+                    keys.binary_search_by(|k| k.as_bytes().cmp(key))
+                        .expect("every key is in the union") as u64
+                })
+                .collect()
+        })
+        .collect();
+    Ok(AccessPlan {
+        descriptors: input::TermDescriptors::Vocabulary(keys),
+        labels: vocabulary,
+        keys_of_label,
+        names_conjunction,
+        default_term,
+    })
+}
+
+impl AccessPlan {
+    /// The source terms a row carrying the labels at `labels` (positions in [`Self::labels`]) is
+    /// indexed under, into `out`, sorted and distinct: [`mosaica_authz::index_keys`] over the row's
+    /// labels. Where no label names a conjunction, or there is one label, that is the union of each
+    /// label's own keys, and no label is read again.
+    fn row_keys(&self, labels: &[u64], out: &mut Vec<u64>) {
+        out.clear();
+        let together =
+            labels.len() > 1 && labels.iter().any(|&l| self.names_conjunction[l as usize]);
+        if together {
+            let texts = labels.iter().map(|&l| self.labels[l as usize].as_str());
+            let keys = mosaica_authz::index_keys(texts)
+                .expect("each label of the vocabulary was read at the plan");
+            out.extend(keys.iter().map(|key| {
+                let key = std::str::from_utf8(key).expect("a key is a label's own text");
+                self.descriptors
+                    .position_of(key)
+                    .expect("every key of a row is a key of one of its labels")
+            }));
+        } else {
+            for &label in labels {
+                out.extend_from_slice(&self.keys_of_label[label as usize]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
+/// Walk every view's access relation, whichever of the three shapes declared it, as
+/// `(view index, source entity id, source term)`.
+///
+/// **Every view, in [`BuildArgs::views`] order**, because entity space is unioned over them
+/// (`views.md` §7). The view index is what lets the caller count each view's contribution
+/// separately, which is how the label-agreement refusal is made exact.
+pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>>(
+    args: &BuildArgs,
+    plan: &AccessPlan,
+    numbering: &ids::Numbering,
+    mut visit: F,
+) -> Result<input::AccessFill> {
+    use crate::config::AccessSource;
+    if let AccessRoute::SharedRelation(path) = access_route(args)? {
+        // Scanned **once**, not once per view: its rows are entity space, and a second pass over
+        // them would double every posting.
+        let fields = config::Fields::canonical("point_visibility");
+        let rows = numbering
+            .of(ids::ReadKind::Access)
+            .expect("the access relation is numbered");
+        input::scan_pairs(input::Source::new(path, &fields, rows), |id, term| {
+            visit(0, id, term)
+        })?;
+        return Ok(input::AccessFill::default());
+    }
+    let mut fill = input::AccessFill::default();
+    let mut keys = Vec::new();
+    for (index, view) in args.views.iter().enumerate() {
+        // One visit per key a row's labels are indexed under.
+        let one = input::scan_access_field(
+            view_source(args, index, numbering),
+            match &view.access.source {
+                AccessSource::Field(field) => Some(field.as_str()),
+                _ => None,
+            },
+            &plan.labels,
+            plan.default_term[index],
+            |id, labels| {
+                plan.row_keys(labels, &mut keys);
+                for &key in &keys {
+                    visit(index, id, key)?;
+                }
+                std::ops::ControlFlow::Continue(())
+            },
+        )?;
+        fill.carried += one.carried;
+        fill.filled += one.filled;
+    }
+    Ok(fill)
+}
+
+/// Say how many points carried terms of their own and how many took the view's default.
+///
+/// **Printed rather than merely counted** (`configuration.md` §5): a fill is a visibility
+/// decision the build made on the caller's behalf, and a corpus that turned out to be almost
+/// entirely default is one whose author wants to know before it is served.
+pub(crate) fn report_access_fill(args: &BuildArgs, fill: input::AccessFill) {
+    if fill.filled == 0 {
+        return;
+    }
+    // Totalled over every view the build reads, which is what the number means: a point in two
+    // views carries its label in both, and the fill is a property of the corpus rather than of
+    // one row space.
+    eprintln!(
+        "{} view(s): {} point row(s) carried access terms of their own; {} took the declared \
+         default",
+        args.views.len(),
+        fill.carried,
+        fill.filled
+    );
+}
+
+/// What one attribute source met: how many of this build's entities came away with a value in each
+/// column. The rows of the source that named no item are the identity rule's to report
+/// ([`BuildReport::refused`]).
+#[derive(Debug, Clone)]
+pub struct AttributeCoverage {
+    /// The caller's own name for the source, from `[sources]`.
+    pub source: String,
+    /// Entities in this build — the denominator.
+    pub entities: u64,
+    /// Rows of this source that named one of them.
+    pub matched_rows: u64,
+    /// Each declared column this source carries, and how many entities came away with a value in
+    /// it. Fewer than [`AttributeCoverage::matched_rows`] where the source itself holds nulls.
+    pub columns: Vec<(String, u64)>,
+}
+
+/// A count with thousands separators, because these are the numbers an operator compares by eye.
+pub(crate) fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// **What each attribute source's join met, printed at every build** (`configuration.md` §1).
+///
+/// Reported and **never refused**, on the rule that separates a disclosure boundary from a build
+/// input: an unmatched row discloses nothing and costs a rerun, and refusing would block the
+/// legitimate case — a source covering a superset of this build's entities — as loudly as the
+/// broken one. Zero coverage says so emphatically and still builds, which is the owner's ruling
+/// twice over.
+pub(crate) fn report_attribute_coverage(coverage: &[AttributeCoverage]) {
+    for source in coverage {
+        for (name, present) in &source.columns {
+            if *present == 0 && source.entities > 0 {
+                eprintln!(
+                    "attribute '{name}': NO ENTITY HAS A VALUE — 0 of {} entities matched",
+                    thousands(source.entities)
+                );
+            } else {
+                eprintln!(
+                    "attribute '{name}': {} of {} entities have a value",
+                    thousands(*present),
+                    thousands(source.entities)
+                );
+            }
+        }
+    }
+}
+
+/// One sweep of the attribute join: a file's rows under the rule's numbers, the declared columns
+/// read from them, and the source their coverage counts toward.
+pub(crate) struct AttributeScan<'a> {
+    pub path: &'a Path,
+    pub fields: &'a config::Fields,
+    pub rows: &'a ids::ReadRows,
+    /// Indices into [`config::Schema::attributes`], ascending.
+    pub attributes: Vec<usize>,
+    /// The source these are its columns of, by index into [`BuildArgs::attribute_sources`], or
+    /// `None` for a sweep reading only the unique fields a file carries beside its own columns.
+    pub group: Option<usize>,
+}
+
+/// Every sweep of the attribute join, in the order the rule read the files: each view's points,
+/// each attribute file of its own, then each view's rows of a group-scoped attribute's file.
+///
+/// **A unique field is read from every file that carries it**, and not only from its own source:
+/// the rule took each such file's values as the item's, a later file's over an earlier's, so the
+/// column the index is written from holds what the rule decided. A source that is a view's points
+/// file is read once for each view reading it, with that view's rows.
+pub(crate) fn attribute_scans<'a>(
+    args: &'a BuildArgs,
+    numbering: &'a ids::Numbering,
+) -> Result<Vec<AttributeScan<'a>>> {
+    let carried = |path: &Path, fields: &config::Fields| -> Result<Vec<usize>> {
+        let groups = row_groups::FileGroups::open(path)?;
+        Ok(ids::carried_unique(groups.schema(), fields, &args.schema)
+            .map_err(|detail| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail,
+            })?
+            .into_iter()
+            .map(|field| usize::from(field.position))
+            .collect())
+    };
+    let mut scans = Vec::new();
+    let extra = |scans: &mut Vec<AttributeScan<'a>>,
+                     path: &'a Path,
+                     fields: &'a config::Fields,
+                     rows: &'a ids::ReadRows,
+                     own: &[usize]|
+     -> Result<()> {
+        let unique: Vec<usize> = carried(path, fields)?
+            .into_iter()
+            .filter(|index| !own.contains(index))
+            .collect();
+        if !unique.is_empty() {
+            scans.push(AttributeScan {
+                path,
+                fields,
+                rows,
+                attributes: unique,
+                group: None,
+            });
+        }
+        Ok(())
+    };
+    for (index, view) in args.views.iter().enumerate() {
+        let rows = numbering.points(index);
+        let mut own: Vec<usize> = Vec::new();
+        for (group_index, group) in args.attribute_sources.iter().enumerate() {
+            if group.path != view.points {
+                continue;
+            }
+            own.extend(&group.attributes);
+            scans.push(AttributeScan {
+                path: &group.path,
+                fields: &group.fields,
+                rows,
+                attributes: group.attributes.clone(),
+                group: Some(group_index),
+            });
+        }
+        extra(&mut scans, &view.points, &view.point_fields, rows, &own)?;
+    }
+    for (group_index, group) in args.attribute_sources.iter().enumerate() {
+        let Some(rows) = numbering.of(ids::ReadKind::Attributes(group_index)) else {
+            continue;
+        };
+        scans.push(AttributeScan {
+            path: &group.path,
+            fields: &group.fields,
+            rows,
+            attributes: group.attributes.clone(),
+            group: Some(group_index),
+        });
+        extra(&mut scans, &group.path, &group.fields, rows, &group.attributes)?;
+    }
+    for (family_index, family) in args.scoped_attributes.iter().enumerate() {
+        let Some(source) = &family.source else {
+            continue;
+        };
+        for &view in &family.views {
+            let kind = ids::ReadKind::Scoped {
+                family: family_index,
+                view,
+            };
+            if let Some(rows) = numbering.of(kind) {
+                extra(&mut scans, &source.path, &source.fields, rows, &[])?;
+            }
+        }
+    }
+    Ok(scans)
+}
+
+/// Write the rows the identity rule refused to `reports/refused.json` under the bundle, beside
+/// `disclosure.json`. A build that refused none removes the file an earlier build left there.
+pub fn write_refused_report(out: &Path, refused: &[RefusedRows]) -> Result<()> {
+    let path = out.join("reports").join("refused.json");
+    if refused.is_empty() {
+        return match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(BuildError::io(&path, e)),
+            _ => Ok(()),
+        };
+    }
+    let dir = out.join("reports");
+    fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+    write_json(&dir.join("refused.json"), &refused)
+}
+
+/// The refused rows as `mosaica build` prints them, one line per file and reason.
+pub fn describe_refused(refused: &[RefusedRows]) -> Vec<String> {
+    ids::describe_refused(refused)
+}
+
+/// Argument and destination checks shared by both build implementations.
+fn validate_args(args: &BuildArgs) -> Result<()> {
+    if args.views.is_empty() {
+        return Err(BuildError::Invalid(
+            "this build materialises no view, so it has no coordinate system to write a row \
+             space in (views §7)"
+                .into(),
+        ));
+    }
+    if args.anchor >= args.views.len() {
+        return Err(BuildError::Invalid(format!(
+            "the anchor view is index {} of {} declared (decision 0112)",
+            args.anchor,
+            args.views.len()
+        )));
+    }
+    let mut seen: Vec<&str> = Vec::with_capacity(args.views.len());
+    for view in &args.views {
+        view.extent.validate().map_err(|detail| {
+            BuildError::Invalid(format!("view '{}' extent: {detail}", view.view_id))
+        })?;
+        if seen.contains(&view.view_id.as_str()) {
+            return Err(BuildError::Invalid(format!(
+                "view '{}' is materialised twice; a view id names one row space (views §2)",
+                view.view_id
+            )));
+        }
+        seen.push(&view.view_id);
+    }
+    if args.batch_items == Some(0) {
+        return Err(BuildError::Invalid(
+            "--batch-items 0 is meaningless; omit it for a single batch".into(),
+        ));
+    }
+    // An artifact names the layer it belongs to, so a layer file is what makes those names
+    // resolvable. Refused rather than ignored: a build that quietly dropped the artifacts would
+    // produce a bundle whose clusters are absent, which no viewer can tell from clusters that
+    // failed their existence criterion.
+    if args.layers.is_empty() && !args.layer_inputs.is_empty() {
+        return Err(BuildError::Invalid(
+            "an artifact source names artifacts in layers, and the config declares no `[[layer]]` \
+             block for them to belong to"
+                .into(),
+        ));
+    }
+    // The declaration's rule, for the callers that build these arguments directly.
+    config::require_sources(&args.schema, &args.attribute_sources)?;
+    // **The path is derived from the id, never the id used as a path** (`views.md` §3.2): a
+    // group's view is `group:key` and lives at `views/<group>/<key>/`, so what has to be safe is
+    // each component [`mosaica_store::view_path`] derives, not the joined form.
+    for view in &args.views {
+        for component in mosaica_store::view_path_components(&view.view_id) {
+            if component.is_empty()
+                || component.contains('/')
+                || component.contains('\\')
+                || component == "."
+                || component == ".."
+            {
+                return Err(BuildError::Invalid(format!(
+                    "view id '{}' is not a safe path: '{component}'",
+                    view.view_id
+                )));
+            }
+        }
+    }
+
+    // A batch build always writes prefix `v00000`, so building into a directory that already
+    // holds a bundle would leave that bundle's files half-overwritten while its `CURRENT` still
+    // points at them — and a stale higher-numbered `SEGMENTS-<n>.json` left behind would be the
+    // one the reader picks. Refuse rather than produce that state (fail closed).
+    if args.out.join("CURRENT").exists() {
+        return Err(BuildError::Invalid(format!(
+            "{} already contains a bundle (CURRENT exists); remove it or choose another --out",
+            args.out.display()
+        )));
+    }
+    Ok(())
+}
+
+/// One item after labelling, before entity-ID assignment.
+///
+/// The item's term set is held only as its `signature` — [`signature_sort_key`]'s sorted,
+/// deduplicated term-ID list. That is both the ordering key and the postings input, so keeping a
+/// second, unsorted copy alongside it would only create a way for the two to disagree.
+struct StagedItem {
+    source_id: u64,
+    /// 32-bit fixed point per axis against the build extent, as `input::PointRow` carries it —
+    /// not coordinates. Same width as the `f32` pair it replaces.
+    qx: u32,
+    qy: u32,
+    /// The `split32` cell code of `(qx, qy)`, held rather than recomputed because it is a sort
+    /// key: entity-id ties within a signature group break on it (decision 0073).
+    morton: u32,
+    signature: Vec<u32>,
+}
+
+/// Run the batch build, producing a complete bundle at `args.out`.
+///
+/// This is [`pipeline::build`] — the streaming pipeline, which holds a bounded set of packed
+/// arrays rather than one struct per item. [`build_in_memory`] is the older, linear
+/// implementation, kept as the byte-equality oracle the two are tested against.
+pub fn build(args: &BuildArgs) -> Result<BuildReport> {
+    pipeline::build(args, &[], &observer::NoopObserver, ExtentRoute::Derived)
+}
+
+/// A frame the build fits once the identity pass has run, over the rows of each view's points it
+/// kept, and gives the views it covers in place of their [`ViewArgs::extent`].
+///
+/// This is how a `--limit` build is framed: a row naming an item the limit kept is kept whatever
+/// its own value, so which rows the frame covers is known only after the pass.
+#[derive(Debug, Clone)]
+pub struct Framing {
+    /// The view or group, as the frame's report names it.
+    pub subject: String,
+    pub projection: mosaica_spatial::Projection,
+    pub extent: config::Extent,
+    /// The views it covers, by index into [`BuildArgs::views`].
+    pub views: Vec<usize>,
+}
+
+/// [`build`] with the frames fitted after the identity pass ([`Framing`]), each stage reported
+/// to `observer` as it completes.
+pub fn build_framed(
+    args: &BuildArgs,
+    frames: &[Framing],
+    observer: &dyn observer::BuildObserver,
+) -> Result<BuildReport> {
+    pipeline::build(args, frames, observer, ExtentRoute::Derived)
+}
+
+/// `args` with each of `frames` fitted over the rows the identity pass kept, and given to the
+/// views it covers. Each frame's report is printed.
+pub(crate) fn fit_frames(
+    args: &BuildArgs,
+    frames: &[Framing],
+    numbering: &ids::Numbering,
+) -> Result<BuildArgs> {
+    let mut fitted = args.clone();
+    for framing in frames {
+        let sources: Vec<config::FrameSource> = framing
+            .views
+            .iter()
+            .map(|&index| {
+                let view = &args.views[index];
+                config::FrameSource {
+                    points: &view.points,
+                    fields: &view.point_fields,
+                    select: view.select.as_ref(),
+                    kept: Some(input::KeptRows(numbering.points(index))),
+                }
+            })
+            .collect();
+        let frame = config::frame_of(
+            &framing.subject,
+            framing.projection,
+            &framing.extent,
+            &sources,
+        )?;
+        eprintln!("{}", frame.report());
+        for &index in &framing.views {
+            fitted.views[index].extent = frame.extent;
+        }
+    }
+    Ok(fitted)
+}
+
+/// Which route [`build`] gives a string column that has two — an entity-ordered arena under
+/// `.build-tmp/`, or one record-blob extent per join chunk (`build-column-extents.md` §2).
+///
+/// **A seam for measurement and for tests**, beside [`BuildArgs::band_rows`] and for the same
+/// reason: the derived route is the modelled scratch against the space free on the output
+/// filesystem, and a corpus small enough to build in a test cannot reach either end of that. It is
+/// also what lets a probe time the two routes against each other with the rest of the plan held
+/// still, where varying the free space would vary the machine as well.
+///
+/// It changes no byte of the bundle. `tests/extent_route.rs` is what holds that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExtentRoute {
+    /// The modelled scratch against the free space, which is what [`build`] takes.
+    #[default]
+    Derived,
+    /// Every column that has an arena route fills one. A `text` column still spills, its second
+    /// decode being the source permutation rather than the arena's size.
+    Arena,
+    /// Every column that has an extent route takes it, which is the shape a build with no room
+    /// reaches on its own.
+    Extents,
+}
+
+/// [`build`] with the string columns' route named rather than derived ([`ExtentRoute`]).
+pub fn build_routed(args: &BuildArgs, route: ExtentRoute) -> Result<BuildReport> {
+    pipeline::build(args, &[], &observer::NoopObserver, route)
+}
+
+/// [`build`], reporting each pipeline stage's duration to `observer` as it completes.
+///
+/// Identical to `build` in every respect but the notifications — the same code path, not a
+/// parallel one, so a measurement taken here describes the build that actually ships. Exists for
+/// `mosaica-bench`'s ingest arm, which asks which of the eleven stages bends with scale.
+pub fn build_observed(
+    args: &BuildArgs,
+    observer: &dyn observer::BuildObserver,
+) -> Result<BuildReport> {
+    pipeline::build(args, &[], observer, ExtentRoute::Derived)
+}
+
+/// The linear, fully in-memory build.
+///
+/// Superseded by [`build`] for anything but small inputs — it materialises one [`StagedItem`]
+/// per point and the whole `per_term` posting relation before writing a byte, which at 10⁹
+/// items is tens of gigabytes. It is retained, and exercised by
+/// `tests/build_equivalence.rs`, as the **oracle** for the streaming pipeline: the two must
+/// produce byte-identical bundles for any input, because the entity-ID assignment they encode
+/// is permanent (I9) and every digest in the bundle depends on it.
+pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
+    validate_args(args)?;
+    // **The oracle materialises one view.** It exists to be the byte-equality reference for the
+    // streaming pipeline's entity-id assignment, and a second implementation of pass one's union
+    // would be a second thing to keep in step rather than a check on the first. A multi-view
+    // declaration goes through `build` (`views.md` §7).
+    let [view] = args.views.as_slice() else {
+        return Err(BuildError::Invalid(format!(
+            "the linear build materialises one view and this build declares {}: {}. It is the \
+             byte-equality oracle for the streaming pipeline, not a second multi-view build \
+             (views §7)",
+            args.views.len(),
+            args.views
+                .iter()
+                .map(|v| v.view_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    };
+
+    // **And one entity space, with no column family in it.** The oracle exists to be the
+    // byte-equality reference for the streaming build's entity-id assignment; a second
+    // implementation of the scoped families would be a second thing to keep in step rather than a
+    // check on the first, and they change no byte of what this build writes.
+    if let Some(family) = args.scoped_attributes.first() {
+        return Err(BuildError::Invalid(format!(
+            "the linear build writes no group-scoped column family, and this build declares one: \
+             '{}' over group '{}'. It is the byte-equality oracle for the streaming pipeline \
+             (views §5)",
+            family.attribute.name, family.group
+        )));
+    }
+
+    // ---- 1. read inputs --------------------------------------------------------------
+    // **Which item each row of each file names, by the rule an ingest applies** (`crate::ids`),
+    // decided here by the rule itself over maps, file by file.
+    let numbering = ids::number_linear(args)?;
+    let mut points = input::read_points(
+        view_source(args, 0, &numbering),
+        view.projection,
+        &view.extent,
+    )?;
+    // **No refusal for an empty points file** (decision 0091): the oracle writes the same
+    // zero-item bundle the streaming pipeline does, which is what keeps `build_equivalence`'s
+    // byte-identity claim true for `n = 0` as for any other n.
+    // Sort by number before anything else: term IDs are assigned in first-appearance order, so an
+    // iteration in number order is what makes the dictionary (and hence the signature ordering, and
+    // hence the permanent entity IDs) the streaming build's.
+    points.sort_unstable_by_key(|p| p.source_id);
+    // What every source term will be called, before any term id exists — a field-sourced view's
+    // sorted vocabulary, or the relation's own integers (`AccessPlan`).
+    let access = plan_access(args, &numbering)?;
+    let mut pairs_by_source: HashMap<u64, Vec<u64>> = HashMap::new();
+    let fill = scan_access(args, &access, &numbering, |_view, source_id, source_term| {
+        pairs_by_source
+            .entry(source_id)
+            .or_default()
+            .push(source_term);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    report_access_fill(args, fill);
+    // Sorted and deduplicated per item: the label set is a *set*, and the signature key and the
+    // postings writer both depend on it being one.
+    for terms in pairs_by_source.values_mut() {
+        terms.sort_unstable();
+        terms.dedup();
+    }
+
+    // ---- 2. intern each item's index keys ------------------------------------------
+    let dict_dir = args.out.join(PREFIX).join("dictionary");
+    fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
+    let mut dict = DictWriter::new(&dict_dir);
+
+    // **`public` is interned first, so it is term 0 in every bundle** and is minted for no other
+    // descriptor (`mosaica_authz::PUBLIC_TERM`). Reserved unconditionally, whether or not any point
+    // carries it: the label's identity has to be a property of the format rather than of the input,
+    // since `Engine::authorise` adds it to every principal's satisfied set and a term whose number
+    // moved with the data would make that addition mean something different per bundle.
+    dict.intern(mosaica_authz::PUBLIC_LABEL);
+
+    let mut staged: Vec<StagedItem> = Vec::with_capacity(points.len());
+    let mut over_bound_items = 0u64;
+    for point in &points {
+        let source_terms = pairs_by_source.remove(&point.source_id).unwrap_or_default();
+        let descriptors: Vec<Vec<u8>> = source_terms
+            .iter()
+            .map(|t| access.descriptors.descriptor(*t).into_owned().into_bytes())
+            .collect();
+        if descriptors.len() > mosaica_authz::MAX_KEYS_PER_ITEM {
+            // A declared bound is a *declaration*: record it and carry on. Dropping terms here
+            // would silently widen the item's visibility (I2/I3).
+            //
+            // This counts descriptors, and the streaming pipeline counts the item's signature
+            // length; the two always agree. `read_pairs` returns each item's source terms sorted
+            // and deduplicated, each source term is one key, and interning is injective, so the
+            // descriptor count *is* the distinct key count, which is what a signature holds.
+            over_bound_items += 1;
+        }
+        let terms: Vec<TermId> = descriptors.iter().map(|d| dict.intern(d)).collect();
+        staged.push(StagedItem {
+            source_id: point.source_id,
+            qx: point.qx,
+            qy: point.qy,
+            morton: split32(point.qx, point.qy).0.raw(),
+            signature: signature_sort_key(&terms),
+        });
+    }
+    if !pairs_by_source.is_empty() {
+        return Err(BuildError::Invalid(format!(
+            "pairs file references {} entity ids absent from the points file (first: {})",
+            pairs_by_source.len(),
+            pairs_by_source.keys().min().copied().unwrap_or_default()
+        )));
+    }
+    if over_bound_items > 0 {
+        eprintln!(
+            "warning: {over_bound_items} item(s) are indexed under more than {} keys; no key \
+             was dropped",
+            mosaica_authz::MAX_KEYS_PER_ITEM
+        );
+    }
+
+    // ---- 3. signature-sorted entity-ID assignment (I9, permanent — see module docs) ---
+    // §11.1 r23: the sort's scope is one batch. `staged` is in ascending source-id order
+    // (the sort above), i.e. ordinal order, so a batch is a contiguous chunk; each chunk is
+    // signature-sorted independently and the concatenation is the batch-major assignment.
+    // `None` (or one covering chunk) reproduces the historical global sort exactly.
+    let batch = args
+        .batch_items
+        .unwrap_or(u64::MAX)
+        .min(staged.len().max(1) as u64) as usize;
+    // `(signature, morton, source_id)` — decision 0073. The Morton code is the minor key, so a
+    // spatially coherent set lands in a contiguous run of entity ids; the source id survives
+    // beneath it to keep the order total, since two items may share a cell.
+    for chunk in staged.chunks_mut(batch) {
+        chunk.sort_by(|a, b| {
+            a.signature
+                .cmp(&b.signature)
+                .then(a.morton.cmp(&b.morton))
+                .then(a.source_id.cmp(&b.source_id))
+        });
+    }
+    let n = staged.len() as u64;
+    if n > u32::MAX as u64 {
+        return Err(BuildError::Invalid(format!(
+            "{n} items exceeds bundle_format 1's 2^32 entity-ID ceiling"
+        )));
+    }
+
+    // The dictionary is the authority on how many terms exist — `max(term_id) + 1` over the
+    // items would agree only as long as every interned term is still carried by some item, and
+    // a postings file shorter than the dictionary would silently make its tail terms unaskable.
+    let term_count = dict.len() as u64;
+
+    // ---- 4/5. postings and pairs -----------------------------------------------------
+    // Built by walking items in new-entity-ID order, so every per-term list comes out sorted
+    // strictly ascending without a further sort — which is exactly what `write_postings`
+    // requires (it rejects unsorted input rather than silently repairing it).
+    let mut per_term: Vec<Vec<u32>> = vec![Vec::new(); term_count as usize];
+    let mut pair_count = 0u64;
+    for (position, item) in staged.iter().enumerate() {
+        let new_id = position as u32;
+        // `signature` is already the sorted, deduplicated term-id list computed at staging.
+        for &term in &item.signature {
+            per_term[term as usize].push(new_id);
+            pair_count += 1;
+        }
+    }
+
+    let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
+    let terms_dir = partition_dir.join("terms");
+    let entities_dir = partition_dir.join("entities");
+    let view_dir = mosaica_store::view_path(&partition_dir, &view.view_id);
+    let segment_dir = view_dir.join("segments").join(SEG_ID);
+    for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
+        fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
+    }
+
+    let dict_paths = dict.finish().map_err(|e| BuildError::io(&dict_dir, e))?;
+    let dict_records = term_count;
+    for path in &dict_paths {
+        fsync_file(path)?;
+    }
+
+    let postings_path = terms_dir.join("postings.arrow");
+    write_postings(&postings_path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT)
+        .map_err(|e| BuildError::io(&postings_path, e))?;
+    fsync_file(&postings_path)?;
+
+    let mut other_paths: Vec<PathBuf> = vec![postings_path.clone()];
+    if args.emit_oracle_pairs {
+        let pairs_path = terms_dir.join("pairs.parquet");
+        write_pairs_parquet(&pairs_path, &per_term)?;
+        other_paths.push(pairs_path);
+    }
+
+    // ---- the entity->term transpose (contracts §2.4) --------------------------------------
+    //
+    // The postings answer *which entities carry term t*; this answers the other direction, which
+    // is what the drill-down's `labels` array intersects with the session's satisfied set
+    // (decision 0114) and what the join rule's label arm compares a second view's row against
+    // (`views.md` §4). Written from `staged` rather than by transposing `per_term`: `signature`
+    // *is* the item's sorted, deduplicated term list, and `position` is its entity id, so the base
+    // layer falls out of the same walk in the order the writer requires.
+    //
+    // **Unconditional, unlike `pairs.parquet`.** That file is an oracle input a deployment may
+    // legitimately omit; this one backs a request path and the write path's refusal, so a bundle
+    // without it would answer a drill-down short and accept a re-label through a second view.
+    let entity_terms_dir = partition_dir.join(mosaica_store::ENTITY_TERMS_DIR);
+    let mut entity_terms = mosaica_store::EntityTermsWriter::create(&entity_terms_dir)
+        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    for (position, item) in staged.iter().enumerate() {
+        entity_terms
+            .push(position as u32, &item.signature)
+            .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
+    }
+    for path in entity_terms
+        .finish()
+        .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?
+    {
+        fsync_file(&path)?;
+        other_paths.push(path);
+    }
+
+    // ---- 6. the identity, computed BEFORE the tiler (2026-07-30 fold, memo §6) --------
+    // `tessera_id` is now a sort key (`priority = high16(tessera_id)`, and the storage order is
+    // `(morton, tessera_id)`), so it must exist before `sort_batch` runs, not be written at the
+    // row after it.
+    let mut entity_ids: Vec<EntityId> = (0..n).map(EntityId::new).collect();
+    let mut tiler_items: Vec<TilerItem> = Vec::with_capacity(n as usize);
+    for (position, item) in staged.iter().enumerate() {
+        let entity_id = EntityId::new(position as u64);
+        let tessera_id = args.identity_key.forward(args.shard_id, entity_id)?;
+        tiler_items.push(TilerItem {
+            tessera_id,
+            qx: item.qx,
+            qy: item.qy,
+            scalars: Vec::new(),
+        });
+    }
+
+    // ---- 6b. the declared attribute tail ---------------------------------------------
+    // One pass **per attribute source**, joined to the staged items **by source id**, because
+    // `scan_attributes` visits rows in file order and staging is in entity order. Skipped
+    // entirely when the schema is empty, which is what keeps a schema-less build's `columns.arrow`
+    // byte-identical to the one it wrote before this existed.
+    //
+    // Every staged item must receive a *slot* for every declared column, which is what the absent
+    // pre-fill below is for: a row this pass never visits would otherwise keep an empty `scalars`
+    // vector, and the segment writer refuses that by name rather than padding it — padding would
+    // put every later row's value under the wrong identity in a column whose width says nothing is
+    // wrong. Every item must be matched by a row of each source, which a row of nulls satisfies.
+    //
+    // `minters` seeds one live `VocabularyMinter` per discovered vocabulary from whatever the
+    // schema already pins, and the scan mints into it for every novel key the corpus supplies.
+    // Its final state — carried past this block — is what `write_manifests` records into
+    // `MANIFEST.vocabularies` below, so a rebuild and the serving path see exactly what this
+    // build minted.
+    let mut minters = args.schema.open_minters();
+    // Hoisted out of the block below so the report can carry it: what the join met is a figure of
+    // the build, not of the pass.
+    let mut attribute_coverage: Vec<AttributeCoverage> = Vec::new();
+    if !args.schema.is_empty() {
+        let position_of_source: HashMap<u64, usize> = staged
+            .iter()
+            .enumerate()
+            .map(|(position, item)| (item.source_id, position))
+            .collect();
+        // **Absent, then overwritten.** Every item starts with one absent value per declared
+        // column, which a row carrying a null leaves in place.
+        for item in tiler_items.iter_mut() {
+            item.scalars = vec![ScalarValue::Null; args.schema.attributes.len()];
+        }
+        // Which items each source's rows met, and what they carried, per source.
+        let mut met: Vec<Vec<bool>> = vec![Vec::new(); args.attribute_sources.len()];
+        let mut matched: Vec<u64> = vec![0; args.attribute_sources.len()];
+        let mut present: Vec<Vec<u64>> = args
+            .attribute_sources
+            .iter()
+            .map(|group| vec![0; group.attributes.len()])
+            .collect();
+        for scan in attribute_scans(args, &numbering)? {
+            let columns: Vec<&crate::config::Attribute> = scan
+                .attributes
+                .iter()
+                .map(|&i| &args.schema.attributes[i])
+                .collect();
+            input::scan_attributes(
+                input::Source::new(scan.path, scan.fields, scan.rows),
+                &columns,
+                &mut minters,
+                |batch| {
+                    // **Serial, row by row, on purpose.** This is the reference build: the
+                    // streaming pipeline splits a batch across its columns for the speed
+                    // (`pipeline::read_one_attribute_scan`), and a second implementation that
+                    // did the same thing the same way would stop being an independent reading of
+                    // the same input.
+                    for &row in batch.rows {
+                        let number = batch.ids[row as usize];
+                        let Some(&position) = position_of_source.get(&number) else {
+                            return Err(BuildError::Invalid(format!(
+                                "{} changed while the build read it: a row names an item no \
+                                 view holds. Build again from files that do not change",
+                                scan.path.display()
+                            )));
+                        };
+                        if let Some(group) = scan.group {
+                            matched[group] += 1;
+                            let met = &mut met[group];
+                            if met.is_empty() {
+                                met.resize(staged.len(), false);
+                            }
+                            met[position] = true;
+                        }
+                        for (at, (&column, decoded)) in
+                            scan.attributes.iter().zip(batch.decoded).enumerate()
+                        {
+                            let value = decoded.value(
+                                row as usize,
+                                &args.schema.attributes[column],
+                                &args.schema,
+                            )?;
+                            if matches!(value, ScalarValue::Null) {
+                                continue;
+                            }
+                            if let Some(group) = scan.group {
+                                present[group][at] += 1;
+                            }
+                            tiler_items[position].scalars[column] = value;
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        attribute_coverage.reserve(args.attribute_sources.len());
+        for (index, group) in args.attribute_sources.iter().enumerate() {
+            let columns: Vec<&crate::config::Attribute> = group
+                .attributes
+                .iter()
+                .map(|&i| &args.schema.attributes[i])
+                .collect();
+            let unmet = match met[index].is_empty() {
+                true => staged.len(),
+                false => met[index].iter().filter(|met| !**met).count(),
+            };
+            if let Some(refusal) = input::items_without_a_row(&group.path, &columns, unmet as u64)
+            {
+                return Err(refusal);
+            }
+            attribute_coverage.push(AttributeCoverage {
+                source: group.name.clone(),
+                entities: staged.len() as u64,
+                matched_rows: matched[index],
+                columns: columns
+                    .iter()
+                    .zip(&present[index])
+                    .map(|(a, &n)| (a.name.clone(), n))
+                    .collect(),
+            });
+        }
+        report_attribute_coverage(&attribute_coverage);
+    }
+
+    // **The same route, derived the same way**: the streaming build's plan chooses a string
+    // column's home from the modelled arena and the free space (`residency::plan_routes`), and the
+    // oracle must reach the same answer over the same inputs. A column one build spilled and the
+    // other placed at an entity would put its values in the blob under two tags, which is a byte
+    // difference for a reason that is not the entity assignment this build exists to check.
+    //
+    // The model's sizes for the stages that take what their phase leaves are the streaming
+    // build's too, so both builds cut the same batches. This build holds its numbers in memory, so
+    // it charges them nothing; the route a string column's characters take is not recorded in the
+    // bundle (`tests/extent_route.rs`), so a different route is not a byte difference.
+    let (routes, model) = residency::routes_for(
+        args,
+        n,
+        numbering.disk_bytes(),
+        &residency::payloads_per_item(args),
+        pipeline::available_disk(&args.out),
+        ExtentRoute::Derived,
+    );
+
+    // ---- 6b′. the unique indexes ------------------------------------------------------
+    // Before `sort_batch`, while `tiler_items` is still in entity order.
+    let unique = {
+        let scratch = crate::spill::TmpDir::create(&args.out)?;
+        let written = crate::unique_index::write_unique_indexes(
+            &args.out.join(PREFIX),
+            PHASH,
+            &args.schema,
+            |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
+            scratch.path(),
+            model.sizing.unique_spill as usize,
+        )?;
+        scratch.close()?;
+        written
+    };
+
+    // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
+    // Before `sort_batch`, which permutes `tiler_items` into row order: entity id is a staged
+    // item's *position*, so the values are entity-major exactly here and nowhere after.
+    // Transposed into one vector per column because that is the shape the emit consumes — the
+    // streaming pipeline reads its attributes column-major already, and one of the two builds
+    // paying a transpose is better than two emit paths that could disagree about a record's
+    // contents (which `write_manifests` exists to prevent for the same reason).
+    let filter_paths = {
+        // The oracle's columns are mapped exactly as the streaming pipeline's are (`column.rs`),
+        // so this path holds its own `.build-tmp/` for the length of the emit.
+        let tmp = spill::TmpDir::create(&args.out)?;
+        let scratch = column::ColumnScratch::new(tmp.path());
+        let by_entity: Vec<column::EntityColumn> = args
+            .schema
+            .attributes
+            .iter()
+            .enumerate()
+            .map(|(index, attribute)| {
+                // A spilled column's values are its extents in both builds
+                // (`pipeline::ColumnRoutes`, `crate::extents`), so its slot here carries the
+                // length and nothing else. The two builds route through one function over one
+                // free-space figure: a column the streaming pipeline spills and this one placed at
+                // an entity would put the same value in the blob under two tags.
+                if routes.takes_extents(index) {
+                    return column::EntityColumn::spilled(
+                        &scratch,
+                        attribute.ty,
+                        tiler_items.len(),
+                    )
+                    .map_err(|e| {
+                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
+                    });
+                }
+                column::EntityColumn::from_values(
+                    &scratch,
+                    attribute.ty,
+                    tiler_items.iter().map(|i| i.scalars[index].clone()),
+                    &attribute.name,
+                )
+                .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))
+            })
+            .collect::<Result<_>>()?;
+        // One extent per spilled column, holding every value in entity order — which is the
+        // shape the streaming pipeline reaches after several chunks, and the same reader serves
+        // both.
+        let mut extent_columns: Vec<extents::ExtentColumn> = Vec::new();
+        for (index, attribute) in args.schema.attributes.iter().enumerate() {
+            if !routes.takes_extents(index) {
+                continue;
+            }
+            let mut column = extents::ExtentColumn::new(tmp.path(), index, &attribute.name);
+            let rows: Vec<(u32, &str)> = tiler_items
+                .iter()
+                .enumerate()
+                .filter_map(|(entity, item)| match &item.scalars[index] {
+                    mosaica_spatial::ScalarValue::Utf8(value) => {
+                        Some((entity as u32, value.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            column.push_extent(&rows)?;
+            extent_columns.push(column);
+        }
+        let open_extents: Vec<extents::OpenExtents> = extent_columns
+            .iter()
+            .map(extents::ExtentColumn::open)
+            .collect::<Result<_>>()?;
+        // The record blob beside the postings, from the same entity-major values — the two
+        // builds must stay byte-identical, so this path writes every artefact the streaming
+        // pipeline writes.
+        // The text columns' timing is the streaming pipeline's stage split (`observer.rs`); this
+        // path is the equivalence oracle and is not observed, so it drops it.
+        let (mut paths, _text) = pipeline::write_filter_postings(
+            &partition_dir,
+            &args.schema,
+            &by_entity,
+            &open_extents,
+            args.memory_budget
+                .unwrap_or_else(pipeline::detect_memory_budget),
+        )?;
+        paths.extend(pipeline::write_record_blob(
+            &partition_dir,
+            &args.schema,
+            tiler_items.len() as u64,
+            &routes,
+            &by_entity,
+            &open_extents,
+        )?);
+        drop(open_extents);
+        drop(extent_columns);
+        drop(by_entity);
+        tmp.close()?;
+        paths
+    };
+
+    // ---- 7. tiler and segment ---------------------------------------------------------
+    // Narrow each item's scalars to the render columns, in declaration order, so they align with
+    // `scalar_schema_of`'s filtered list, then the columns the bands copy, as `band_schema_of`
+    // lists them. Done after the filter emit above, which needs every declared column including
+    // the `index`-only ones.
+    //
+    // **Unconditional, where it used to be skipped when every column rendered.**
+    {
+        let attributes = &args.schema.attributes;
+        for item in &mut tiler_items {
+            let mut kept = Vec::with_capacity(item.scalars.len());
+            let drawn: fn(&crate::config::Attribute) -> bool = |a| a.render;
+            for keep in [drawn, band_copied] {
+                for (attribute, v) in attributes.iter().zip(&item.scalars) {
+                    if keep(attribute) {
+                        kept.push(v.clone());
+                    }
+                }
+            }
+            item.scalars = kept;
+        }
+    }
+    let scalar_schema = scalar_schema_of(&args.schema);
+    let band_schema = band_schema_of(&args.schema);
+    let codes = sort_batch(&mut tiler_items, &mut entity_ids);
+    // **The resolution this frame actually gave the corpus**, counted here because `codes` is the
+    // row order — `(morton, tessera_id)` ascending — and is the same vector `write_segment` puts
+    // into `morton.u32` below. The streaming pipeline counts the identical thing at its own
+    // segment write; a figure that appeared on one path and not the other would be worse than
+    // none, since which path ran is not something the caller chose.
+    let occupancy = Occupancy::of_sorted_codes(codes.iter().copied());
+
+    // The render columns' presence, after the sort because the bitmap is over **rows**, and before
+    // the substitution below because that is what erases the distinction: `columns.arrow` is
+    // non-nullable (contracts R4), so an absent value is written as the type's zero and this is
+    // what says that zero means nothing (decision 0064).
+    let mut presence_paths: Vec<PathBuf> = Vec::new();
+    for (column, (name, _)) in scalar_schema.iter().enumerate() {
+        let rows = pipeline::render_presence_of(
+            tiler_items
+                .iter()
+                .map(|i| !matches!(i.scalars[column], ScalarValue::Null)),
+        );
+        let Some(rows) = rows else { continue };
+        if let Some(path) =
+            mosaica_store::flush::write_render_presence(&segment_dir, name, rows, n as u32)
+                .map_err(|e| BuildError::Invalid(format!("attribute '{name}': {e}")))?
+        {
+            presence_paths.push(path);
+        }
+    }
+    // A `ScalarValue::Null` reaching the segment writer is a typed error rather than a drawn
+    // point, so the placeholder goes in last — see `ScalarValue::or_render_placeholder`.
+    for item in &mut tiler_items {
+        for (value, (_, ty)) in item.scalars.iter_mut().zip(&scalar_schema) {
+            if matches!(value, ScalarValue::Null) {
+                *value = value.or_render_placeholder(*ty);
+            }
+        }
+    }
+
+    write_segment(&segment_dir, &tiler_items, &codes, &scalar_schema, &band_schema)
+        .map_err(|e| BuildError::io(&segment_dir, e))?;
+    for name in mosaica_store::SEGMENT_FILES {
+        fsync_file(&segment_dir.join(name))?;
+    }
+
+    let permutation_path = view_dir.join("permutation.bin");
+    let row_order: Vec<EntityId> = entity_ids;
+    // `bound` is the partition view's max entity ID + 1. The bootstrap build allocates a dense
+    // 0..n, so that is exactly the item count.
+    write_permutation(&permutation_path, &row_order, n)
+        .map_err(|e| BuildError::io(&permutation_path, e))?;
+    fsync_file(&permutation_path)?;
+
+    // The other direction, for the filtered viewport's per-tile route
+    // (`mosaica_store::row_entity`). `row_order` is already the row→entity vector, so this writes
+    // what the permutation was just scattered from rather than deriving anything.
+    let row_entity_path = view_dir.join(mosaica_store::ROW_ENTITY_FILE);
+    let rows_by_index: Vec<u32> = row_order.iter().map(|e| e.raw() as u32).collect();
+    mosaica_store::write_row_entity(&row_entity_path, &rows_by_index)
+        .map_err(|e| BuildError::io(&row_entity_path, e))?;
+    fsync_file(&row_entity_path)?;
+
+    // ---- 8. layers, and the artifacts published into them ------------------------------
+    // Entity ids are assigned by now — an item's entity is its position in `staged` — so a member
+    // named by source id resolves, and the row-less region can be allocated against a settled
+    // point mark.
+    let mut published_layers = if args.layers.is_empty() {
+        crate::layers::PublishedLayers::default()
+    } else {
+        {
+            // The oracle build's `.build-tmp/`, for the member spill's runs — its own, because the
+            // filter-postings block above closed the one it opened. `TmpDir::create` deletes a
+            // stale directory rather than adopting it, so the two cannot overlap.
+            let tmp = spill::TmpDir::create(&args.out)?;
+            let mut plan = crate::layers::read(
+                &args.layers,
+                &args.layer_inputs,
+                &numbering,
+                &args.scoped_layers,
+                // The oracle build materialises exactly one view, so its one frame is the whole
+                // of decision 0111's per-view slice.
+                &[mosaica_store::derived::ViewFrame::new(
+                    &view.view_id,
+                    view.projection,
+                    view.extent,
+                )],
+                mosaica_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+                tmp.path(),
+                args.memory_budget
+                    .unwrap_or_else(pipeline::detect_memory_budget),
+            )?;
+            report_shapes(&plan.shape_reports);
+            let by_source: HashMap<u64, u64> = staged
+                .iter()
+                .enumerate()
+                .map(|(position, item)| (item.source_id, position as u64))
+                .collect();
+            let published = crate::layers::publish(
+                &mut plan,
+                &|source| by_source.get(&source).copied(),
+                n,
+                &args.out.join(PREFIX),
+                PHASH,
+                std::slice::from_ref(&view.view_id),
+                // The linear build holds its values on the items rather than in typed entity
+                // columns, which is the only thing about the two builds this rule sees.
+                &crate::layers::predicate_artifact_keys(
+                    &args.layers,
+                    &args.schema,
+                    &minters,
+                    &|index| {
+                        crate::pipeline::distinct_codes(
+                            tiler_items.iter().map(|item| item.scalars[index].clone()),
+                        )
+                    },
+                )?,
+                model.sizing.publication_batch,
+            )?;
+            // The runs and the merged table are dead the moment the publication has read them,
+            // and this is the success path — so the removal is reported rather than left to
+            // `Drop`, which cannot say a file was still busy.
+            drop(plan);
+            tmp.close()?;
+            published
+        }
+    };
+
+    write_containment_report(&args.out, &published_layers)?;
+
+    // ---- 8b. the post-bundle artifact pass ---------------------------------------------
+    //
+    // **Both builds run it, and that is not optional**: `tests/build_equivalence.rs` asserts the
+    // two produce byte-identical bundles, and the pass writes files and edits the layer records the
+    // manifest carries. The linear build writes its permutation at step 7, so row space already
+    // exists here — the batched build has to wait for its tiler sort, which is the only reason the
+    // two call sites sit at different step numbers. See `crate::artifact_pass`.
+    let artifact_store = std::mem::take(&mut published_layers.store);
+    let mut derived_index = mosaica_store::derived::DerivedIndex::default();
+    // **The pass's own `.build-tmp/`.** A row column is composed through a partition on disk, so
+    // the pass needs scratch of its own; the emit above closed the directory it used, and this is
+    // the last stage that wants one.
+    let artifact_tmp = spill::TmpDir::create(&args.out)?;
+    let artifact_pass = crate::artifact_pass::run(
+        &mut published_layers,
+        &artifact_store,
+        &args.out.join(PREFIX),
+        PHASH,
+        &view.view_id,
+        n as u32,
+        artifact_tmp.path(),
+        &mut derived_index,
+    );
+    // The containment partitions are not per view, so they are filed once for the prefix. The
+    // batched build does the same, and `tests/build_equivalence.rs` holds the two to one bundle.
+    let containment_extents = crate::artifact_pass::containment(
+        &artifact_store,
+        &args.out.join(PREFIX),
+        PHASH,
+        &mut derived_index,
+    );
+    drop(artifact_store);
+    artifact_tmp.close()?;
+    crate::artifact_pass::report(&artifact_pass);
+    eprintln!(
+        "  wrote {} containment partition(s)",
+        containment_extents.len()
+    );
+    report_hierarchies(&published_layers.hierarchy_shapes);
+    published_layers
+        .derived_extents
+        .clone_from(&artifact_pass.derived_extents);
+    published_layers
+        .derived_extents
+        .extend(containment_extents.iter().cloned());
+
+    // ---- 8c. the view's term images (`crate::term_images_pass`) ------------------------
+    //
+    // After the permutation they are projected through is durable, and before the digest pass
+    // that covers the file this writes. The streaming build calls the same pass at the same point
+    // in its own view loop.
+    let term_images = {
+        let postings = mosaica_authz::postings::PostingsReader::open(&postings_path, true)
+            .map_err(|e| BuildError::io(&postings_path, e))?;
+        vec![crate::term_images_pass::run(
+            &postings,
+            &args.out.join(PREFIX),
+            PHASH,
+            &view.view_id,
+            n as u32,
+            &mut derived_index,
+            model.sizing.term_image_workers as usize,
+        )?]
+    };
+
+    // ---- 8d. the view's field tallies (`mosaica_store::field_tallies`) -------------------
+    //
+    // After every file they read: the segment, the row-to-entity table, the entity terms and the
+    // value columns. The streaming build calls the same function at the same point.
+    other_paths.push(mosaica_store::field_tallies::derive_view(
+        &partition_dir,
+        &view.view_id,
+        SEG_ID,
+        n as u32,
+        &declared_scalars_of(&args.schema),
+        &|name| mosaica_filter::base_numbers(&partition_dir, name),
+    )?);
+
+    // ---- 9. manifests ------------------------------------------------------------------
+    other_paths.extend([permutation_path, row_entity_path]);
+    other_paths.extend(
+        mosaica_store::SEGMENT_FILES
+            .iter()
+            .map(|name| segment_dir.join(name)),
+    );
+    other_paths.extend(presence_paths);
+    other_paths.extend(filter_paths);
+    other_paths.extend(published_layers.paths.iter().cloned());
+    other_paths.extend(artifact_pass.paths.iter().cloned());
+    other_paths.extend(
+        term_images
+            .iter()
+            .flatten()
+            .map(|images| images.path.clone()),
+    );
+    other_paths.extend(
+        containment_extents
+            .iter()
+            .map(|entry| args.out.join(PREFIX).join(&entry.path)),
+    );
+    let mut report = write_manifests(
+        args,
+        &BundleFiles {
+            dict_paths,
+            dict_records,
+            other_paths,
+            unique,
+        },
+        n,
+        term_count,
+        pair_count,
+        args.batch_items.filter(|&b| b < n),
+        &minters,
+        &published_layers,
+        &[SegmentDescriptor {
+            view: view.view_id.clone(),
+            incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
+            seg_id: SEG_ID.to_string(),
+            row_count: n as u32,
+            entity_lo: 0,
+            entity_hi: n,
+        }],
+        std::slice::from_ref(&occupancy),
+        &term_images,
+    )?;
+    report.attribute_coverage = attribute_coverage;
+    report.refused = numbering.refused;
+    report.hierarchy_shapes = published_layers.hierarchy_shapes.clone();
+    report.spilled_columns = spilled_column_names(&args.schema, &routes);
+    Ok(report)
+}
+
+/// The spilled columns by name, in declaration order — [`BuildReport::spilled_columns`] for both
+/// build paths, so the oracle's report can be compared with the streaming build's.
+fn spilled_column_names(
+    schema: &crate::config::Schema,
+    routes: &pipeline::ColumnRoutes,
+) -> Vec<String> {
+    routes
+        .spilled()
+        .iter()
+        .map(|&index| schema.attributes[index].name.clone())
+        .collect()
+}
+
+/// The schema as the segment writer wants it: `(name, type)` in declared order.
+///
+/// One derivation, shared by both build implementations, so the two cannot come to disagree about
+/// a column's width — which would produce two bundles the byte-equality oracle calls different
+/// for a reason that is not the entity assignment it exists to check.
+fn scalar_schema_of(
+    schema: &crate::config::Schema,
+) -> Vec<(String, mosaica_spatial::tiler::ScalarType)> {
+    // Render columns only — the segment's tail and the assembly's render lanes must name the same
+    // columns in the same order, or every row's values land under the wrong headings.
+    schema
+        .attributes
+        .iter()
+        .filter(|a| a.render)
+        .map(|a| (a.name.clone(), a.ty))
+        .collect()
+}
+
+/// The schema's attributes as `MANIFEST.declared_scalars` records them, in declaration order.
+pub(crate) fn declared_scalars_of(schema: &crate::config::Schema) -> Vec<DeclaredScalar> {
+    schema
+        .attributes
+        .iter()
+        .map(|a| DeclaredScalar {
+            name: a.name.clone(),
+            arrow_type: a.ty,
+            vocabulary: a.vocabulary.clone(),
+            // Resolved at the schema parse, so what a bundle records is the identity the build
+            // actually indexed with rather than the name a schema asked for.
+            analyser: a.analyser.clone(),
+            index: a.index,
+            render: a.render,
+            unique: a.unique,
+        })
+        .collect()
+}
+
+/// Whether the identity bands copy `attribute` beside the render columns.
+pub(crate) fn band_copied(attribute: &crate::config::Attribute) -> bool {
+    mosaica_store::bands::copied_beside(
+        attribute.ty,
+        attribute.vocabulary.is_some(),
+        attribute.index,
+        attribute.render,
+    )
+}
+
+/// The columns the identity bands copy beside the render columns, in declared order, each with its
+/// position in the declaration.
+pub(crate) fn band_copied_columns(
+    schema: &crate::config::Schema,
+) -> impl Iterator<Item = (usize, &crate::config::Attribute)> {
+    schema
+        .attributes
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| band_copied(a))
+}
+
+/// The columns the identity bands copy beside the render columns, in declared order.
+fn band_schema_of(schema: &crate::config::Schema) -> Vec<(String, mosaica_spatial::tiler::ScalarType)> {
+    band_copied_columns(schema)
+        .map(|(_, a)| (a.name.clone(), a.ty))
+        .collect()
+}
+
+/// Every file a build wrote, split by the role it plays in the manifests.
+struct BundleFiles {
+    dict_paths: Vec<PathBuf>,
+    dict_records: u64,
+    other_paths: Vec<PathBuf>,
+    /// Each unique column's base runs, by attribute, in declaration order.
+    unique: Vec<(String, Vec<mosaica_store::unique::WrittenUniqueRun>)>,
+}
+
+/// Write `SEGMENTS-0.json`, `MANIFEST.json` and `CURRENT` over the files a build produced.
+/// Shared by both build implementations so the two cannot drift in the one place where a
+/// difference would be invisible until a digest failed.
+#[allow(clippy::too_many_arguments)]
+fn write_manifests(
+    args: &BuildArgs,
+    files: &BundleFiles,
+    n: u64,
+    term_count: u64,
+    pair_count: u64,
+    batch_items_recorded: Option<u64>,
+    minters: &HashMap<String, mosaica_store::vocabulary::VocabularyMinter>,
+    published_layers: &crate::layers::PublishedLayers,
+    segments_written: &[SegmentDescriptor],
+    occupancies: &[Occupancy],
+    term_images: &[Option<crate::term_images_pass::ViewTermImages>],
+) -> Result<BuildReport> {
+    let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
+    // Contracts §2.2 / §2.3 divide the two `files` maps by *when* a file appeared:
+    // `MANIFEST.files` covers every file present at build time, and `SEGMENTS-<n>.files` covers
+    // only what has been added *since* that manifest was written (streamed segments, later
+    // deltas). A batch build produces everything at build time, so every file it writes belongs
+    // in `MANIFEST.files` and `SEGMENTS-0.json`'s map is legitimately empty. (`open_bundle`
+    // accepts a file verified via either map, so both splits load — but the spec's wording is
+    // what the Python oracle and the conformance byte-scanner will be written against.)
+    let prefix_dir = args.out.join(PREFIX);
+    let mut dict_extents = Vec::new();
+    for path in &files.dict_paths {
+        dict_extents.push(DictExtent {
+            path: relative_to(&prefix_dir, path)?,
+            records: files.dict_records,
+        });
+    }
+    // Digest in parallel, one worker per file: SHA-256 is inherently sequential per file, but
+    // the files are independent, and at 10⁹ this stage re-reads ~47 GB. The map is assembled
+    // from (name, digest) pairs afterwards, so the manifest bytes cannot depend on scheduling.
+    let all_paths: Vec<&PathBuf> = files
+        .dict_paths
+        .iter()
+        .chain(&files.other_paths)
+        .chain(files.unique.iter().flat_map(|(_, runs)| runs.iter().map(|run| &run.path)))
+        .collect();
+    let unique_indexes = files
+        .unique
+        .iter()
+        .map(|(attribute, runs)| {
+            Ok(mosaica_store::manifest::UniqueIndexRuns {
+                attribute: attribute.clone(),
+                base: runs
+                    .iter()
+                    .map(|run| run.as_base(&prefix_dir))
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|e| BuildError::Invalid(e.to_string()))?,
+                live: Vec::new(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let manifest_files: BTreeMap<String, FileDigest> = all_paths
+        .into_par_iter()
+        .map(|path| Ok((relative_to(&prefix_dir, path)?, digest_file(path)?)))
+        .collect::<Result<_>>()?;
+
+    let bundle_bytes: u64 = manifest_files.values().map(|f| f.size).sum();
+
+    let segments = SegmentsManifest {
+        watermark: n,
+        entity_id_high_water: n,
+        // The row-less region's mark, and it must be the manifest's: the WAL carries the same one
+        // in its registration records and rotation reclaims those, so a mark that lived only there
+        // is lost at the first rotation and the next registration is handed ids a live layer
+        // already holds (decision 0074). `ROWLESS_CEILING` when the declaration carried no layer, which is
+        // the untouched region rather than a default standing in for a lost value.
+        entity_id_low_water: published_layers.low_water,
+        layers: published_layers.layers.clone(),
+        layer_registry_version: published_layers.registry_version,
+        membership_extents: published_layers.membership_extents.clone(),
+        level_versions: published_layers.level_versions.clone(),
+        // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only where
+        // the build published no artifacts, or where a derived structure would not compose — each
+        // of which leaves the level composing it on first use, exactly as before the pass existed.
+        derived_extents: published_layers.derived_extents.clone(),
+        // One entry per view that has images, in the order the views were built
+        // (`crate::term_images_pass`). A view with no rows, and a build over a dictionary with no
+        // terms, have none.
+        term_image_extents: term_images
+            .iter()
+            .flatten()
+            .map(|images| images.extent.clone())
+            .collect(),
+        artifact_record_extents: published_layers.artifact_record_extents.clone(),
+        // One per view the build materialised (`views.md` §7), in registry order. `entity_hi`
+        // is inclusive, and an empty build has no entity range at all — hence the saturating
+        // subtraction pass two hands over.
+        segments: segments_written
+            .iter()
+            .map(|descriptor| SegmentDescriptor {
+                entity_hi: descriptor.entity_hi.saturating_sub(1),
+                ..descriptor.clone()
+            })
+            .collect(),
+        dict_extents,
+        unique_indexes,
+        ..SegmentsManifest::empty()
+    };
+    let segments_path = partition_dir.join("SEGMENTS-0.json");
+    write_json(&segments_path, &segments)?;
+
+    let manifest = Manifest {
+        bundle_format: BUNDLE_FORMAT,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        // The schema, compiled. `MANIFEST.declared_scalars` is the *only* thing downstream reads:
+        // `columns.arrow`'s tail is written in this order, `/control/ingest` builds each row's
+        // scalar vector in this order, and flush, merge and the fold all take their writer schema
+        // from it. Reordering the schema file therefore reorders every segment built after it,
+        // which is why the compilation preserves declaration order rather than sorting by name.
+        declared_scalars: declared_scalars_of(&args.schema),
+        // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a
+        // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
+        // — which are under a digest.
+        //
+        // An open vocabulary's values come from its minter in `minters`, which holds the
+        // declaration's codes and every code this build drew during the scan; a closed one's are
+        // the declaration's own. Either way they are read back sorted by key.
+        vocabularies: {
+            let mut compiled: Vec<ManifestVocabulary> = args
+                .schema
+                .vocabularies
+                .values()
+                .map(|v| {
+                    let minter = minters.get(&v.name).unwrap_or(&v.values);
+                    let values = mosaica_store::vocabulary::values_of(minter)
+                        .into_iter()
+                        .map(|value| ManifestVocabularyValue {
+                            title: minter.title_of(&value.key).map(str::to_string),
+                            ..value
+                        })
+                        .collect();
+                    ManifestVocabulary {
+                        name: v.name.clone(),
+                        // The declaration's value set, carried verbatim: it is what ingest
+                        // consults to decide whether a key nothing has bound is a typo or a new
+                        // value. The manifest keeps its own two words for it.
+                        kind: v.values.kind(),
+                        visibility: v.visibility(),
+                        // The declared code space, carried so that a reader with no column over
+                        // this vocabulary still knows what bounds a code drawn into it.
+                        width: v.width,
+                        values,
+                        reserved: v.reserved.clone(),
+                    }
+                })
+                .collect();
+            compiled.sort_by(|a, b| a.name.cmp(&b.name));
+            compiled
+        },
+        small_term_threshold: SMALL_TERM_THRESHOLD_DEFAULT,
+        entity_id_high_water: n,
+        identity: IdentityDescriptor {
+            construction: IDENTITY_CONSTRUCTION.to_string(),
+            rounds: IDENTITY_ROUNDS,
+            key: args.identity_key.to_hex(),
+            shard_id: args.shard_id,
+        },
+        // **One entry per view, each carrying its own frame** (decision 0040): two views of one
+        // bundle may quantise differently, and an embedding and a map cannot share a frame
+        // without one of them wasting most of the grid (`views.md` §2).
+        // **The roster, and the column families scoped to it** (`views.md` §5). The families are
+        // derived here from [`BuildArgs::scoped_attributes`] rather than carried on the argument's
+        // own group descriptors: the declaration says which attributes are scoped and to what, and
+        // a second copy on the input would be a second thing to disagree with it.
+        groups: args
+            .groups
+            .iter()
+            .map(|group| mosaica_store::manifest::GroupDescriptor {
+                scoped_scalars: args
+                    .scoped_attributes
+                    .iter()
+                    .filter(|family| family.group == group.name)
+                    .map(|family| mosaica_store::manifest::ScopedScalar {
+                        name: family.attribute.name.clone(),
+                        group: family.group.clone(),
+                        arrow_type: family.attribute.ty,
+                        vocabulary: family.attribute.vocabulary.clone(),
+                        analyser: family.attribute.analyser.clone(),
+                        index: family.attribute.index,
+                        render: family.attribute.render,
+                        // The views whose columns this build **wrote**, in the order the family
+                        // names them, which is the roster's own order.
+                        views: family
+                            .views
+                            .iter()
+                            .map(|&index| args.views[index].view_id.clone())
+                            .collect(),
+                    })
+                    .collect(),
+                ..group.clone()
+            })
+            .collect(),
+        views: args
+            .views
+            .iter()
+            .map(|view| ViewDescriptor {
+                id: view.view_id.clone(),
+                display_name: view.view_id.clone(),
+                // **The declared incarnation** (decision 0115). A key a build declared and a
+                // running service later drops comes back at 1 or above, which is what keeps the
+                // build's own segments out of the view created under the reused name.
+                incarnation: mosaica_store::manifest::DECLARED_INCARNATION,
+                quantisation: Quantisation {
+                    x_min: view.extent.x_min,
+                    x_max: view.extent.x_max,
+                    y_min: view.extent.y_min,
+                    y_max: view.extent.y_max,
+                },
+                // What placed these positions before the frame did. A bundle that carries
+                // projected positions and cannot say so is one the write path and the
+                // differential oracle both have to be told about out of band
+                // (`projections.md` §3).
+                projection: view.projection,
+                // **The view's own gate** (`views.md` §6), the roster's copy of which is on the
+                // group descriptor above; `Manifest::validate_groups` refuses a bundle whose two
+                // copies disagree.
+                visibility: view.visibility.clone(),
+                // **What an unlabelled row is given on `/control/ingest`** (decision 0133): the
+                // declaration this build filled with, or `None` where it refused. The two entry
+                // points read one declaration.
+                point_default: view.access.default.clone(),
+            })
+            .collect(),
+        partitions: vec![PartitionDescriptor {
+            phash: PHASH.to_string(),
+            required_terms: Vec::new(),
+        }],
+        provenance: match batch_items_recorded {
+            // The batch size is identity-bearing (I9): a rebuild must replay it. Omitted
+            // entirely for a single-batch build, so pre-batching manifests stay well-defined
+            // (absent key == one batch).
+            Some(batch_items) => serde_json::json!({
+                "generating_set_choice": "prompt-sample",
+                "batch_items": batch_items,
+            }),
+            None => serde_json::json!({ "generating_set_choice": "prompt-sample" }),
+        },
+        files: manifest_files,
+    };
+    // Read back from the files just written, before the manifest is, so a keyword column whose
+    // dictionary does not open refuses here rather than after `CURRENT` has moved. The same pass
+    // runs at `mosaica verify`, so the two report one set of figures.
+    let keyword_cardinalities =
+        unique_key::keyword_cardinalities(&prefix_dir, &manifest, &[(PHASH, &segments)])?;
+    unique_key::report_keyword_cardinalities(&keyword_cardinalities, bundle_bytes);
+    // Both bundle artefacts, not written here: MANIFEST.json and CURRENT are pass 5's writers
+    // too (compaction §10's rule paragraph — a bundle artefact's writer lives in
+    // `mosaica-store`), so this build and a fold cannot serialise the same shape two different
+    // ways and disagree about what a manifest digests to.
+    let manifest_digest = write_manifest_json(&prefix_dir, &manifest)?;
+
+    // Everything the bundle names is now durable; `CURRENT` is written last and by rename, so
+    // a reader either sees the previous bundle or this complete one, never a half-built prefix.
+    write_current(&args.out, PREFIX, &manifest_digest)?;
+
+    Ok(BuildReport {
+        prefix: PREFIX.to_string(),
+        seg_id: SEG_ID.to_string(),
+        views: segments_written
+            .iter()
+            .zip(occupancies)
+            .zip(term_images)
+            .map(|((descriptor, occupancy), images)| ViewReport {
+                view_id: descriptor.view.clone(),
+                rows: descriptor.row_count as u64,
+                occupancy: *occupancy,
+                term_images: images.as_ref().map(|images| images.report),
+            })
+            .collect(),
+        items: n,
+        terms: term_count,
+        pairs: pair_count,
+        bundle_bytes,
+        unclustered_member_rows: published_layers.unclustered.iter().map(|u| u.rows).sum(),
+        minted_artifacts: published_layers.minted.values().sum(),
+        // Filled by the caller: the join happened stages ago and this function digests files.
+        artifact_levels: Vec::new(),
+        hierarchy_shapes: Vec::new(),
+        attribute_coverage: Vec::new(),
+        spilled_columns: Vec::new(),
+        refused: Vec::new(),
+        keyword_cardinalities,
+    })
+}
+
+/// What `mosaica verify` checked.
+#[derive(Debug, Clone)]
+pub struct VerifyReport {
+    pub prefix: String,
+    pub partitions: usize,
+    pub views: usize,
+    pub segments: usize,
+    pub rows: u64,
+    pub entity_id_high_water: u64,
+    /// Every file the manifests name, summed: the denominator an index's cost is stated against.
+    pub bundle_bytes: u64,
+    /// Each indexed keyword column's figures, read from the bundle exactly as the build reported
+    /// them (`unique_key`).
+    pub keyword_cardinalities: Vec<KeywordCardinality>,
+}
+
+/// Verify a bundle at `root`: run the read protocol (which checks every manifest digest, every
+/// file's size and SHA-256, and each permutation's bijectivity onto its segment's rows), then
+/// re-confirm the row space covers exactly the rows the segments claim, and re-derive every
+/// row's `tessera_id` from `(identity.key, identity.shard_id, entity_id)`, failing if a single
+/// row disagrees (contracts §2.6 r6: "`mosaica verify` checks the whole column against" the
+/// key).
+pub fn verify(root: &Path) -> Result<VerifyReport> {
+    verified_open(root, DIRECT_WINDOW_ROWS).map(|(_, report)| report)
+}
+
+/// [`verify`] with the identity check's window threshold given rather than taken from
+/// [`DIRECT_WINDOW_ROWS`].
+///
+/// **The only way to put a fixture through the partition route.** That route is what every bundle
+/// at corpus scale takes and what no bundle a test can afford to build does, so without a threshold
+/// a test can lower it would be reached by nothing that runs. Zero puts every view through it.
+pub fn verify_with_window_rows(root: &Path, direct_window_rows: u64) -> Result<VerifyReport> {
+    verified_open(root, direct_window_rows).map(|(_, report)| report)
+}
+
+/// The pass behind [`verify`] and [`deep::verify_deep`], returning the opened bundle so the deep
+/// mode does not pay a second full open (the open re-hashes every named file).
+fn verified_open(
+    root: &Path,
+    direct_window_rows: u64,
+) -> Result<(mosaica_store::read::Bundle, VerifyReport)> {
+    let bundle = mosaica_store::read::open_bundle(root)?;
+    // The key is parsed here, not by `open_bundle`: `IdentityDescriptor::validate` (run at
+    // open) checks `construction` and `rounds` but never parses `key`'s hex, since
+    // `mosaica-store` has no need to hold a live `IdentityKey` at all — only `mosaica verify`
+    // and the build do.
+    let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
+        .map_err(|e| BuildError::Invalid(format!("MANIFEST identity.key: {e}")))?;
+    let shard_id = bundle.manifest.identity.shard_id;
+
+    // Created on the first view that needs it, and by nothing else: a bundle small enough for the
+    // direct route verifies on a read-only root exactly as it did.
+    let mut scratch: Option<VerifyTmp> = None;
+    let mut views = 0usize;
+    let mut segments = 0usize;
+    let mut rows = 0u64;
+    let current: CurrentPointer = {
+        let bytes = fs::read(root.join("CURRENT")).map_err(|e| BuildError::io(root, e))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| BuildError::Invalid(format!("CURRENT is not valid JSON: {e}")))?
+    };
+    for partition in bundle.partitions.values() {
+        let prefix_dir = root.join(&current.prefix);
+        let edited = mosaica_store::edited::EditedIndex::open(
+            &partition.manifest.edited_items,
+            &prefix_dir,
+            None,
+        )?;
+        for (view_id, view) in &partition.views {
+            views += 1;
+            segments += view.segments.len();
+            let total_rows = view.row_space.total_rows();
+            rows += total_rows;
+            // `open_bundle` already ran `validate_rows` on the base and `is_well_formed` on
+            // every extent (no aliasing, no out-of-range row). The remaining half of
+            // bijectivity is surjectivity, and the identity column is checked against the key;
+            // both are `check_view_identity`'s.
+            view.row_space
+                .base()
+                .validate_rows(view.row_space.base_rows())?;
+            check_view_identity(
+                root,
+                &mut scratch,
+                direct_window_rows,
+                view_id,
+                view,
+                Identity {
+                    key: &identity_key,
+                    shard_id,
+                    edited: &edited,
+                },
+            )?;
+        }
+    }
+    // Sorted so two runs over one bundle report the columns in one order.
+    let mut partitions: Vec<(&str, &mosaica_store::manifest::SegmentsManifest)> = bundle
+        .partitions
+        .iter()
+        .map(|(phash, data)| (phash.as_str(), &data.manifest))
+        .collect();
+    partitions.sort_by(|a, b| a.0.cmp(b.0));
+    let bundle_bytes = bundle
+        .manifest
+        .files
+        .values()
+        .chain(
+            partitions
+                .iter()
+                .flat_map(|(_, segments)| segments.files.values()),
+        )
+        .map(|file| file.size)
+        .sum();
+    let keyword_cardinalities = unique_key::keyword_cardinalities(
+        &root.join(&current.prefix),
+        &bundle.manifest,
+        &partitions,
+    )?;
+    let report = VerifyReport {
+        prefix: current.prefix,
+        partitions: bundle.partitions.len(),
+        views,
+        segments,
+        rows,
+        entity_id_high_water: bundle.manifest.entity_id_high_water,
+        bundle_bytes,
+        keyword_cardinalities,
+    };
+    Ok((bundle, report))
+}
+
+/// One row-partition record: the row in the first four bytes, which is what the partition routes
+/// on, and the entity that claims it in the next eight.
+const ROW_ENTITY_RECORD: usize = 12;
+
+/// The most rows the identity check crosses in one window.
+///
+/// At or below it the window covers the view's whole row space and there is nothing to route, so
+/// the pass writes no scratch at all — which is every fixture and every small deployment. Above
+/// it the claims go through a [`Partition`] and the window covers one bucket. 2²² rows is 33 MB,
+/// under what a single bucket's window and loaded bytes come to at the `u32` row ceiling, so the
+/// direct route is never the more expensive of the two.
+const DIRECT_WINDOW_ROWS: u64 = 1 << 22;
+
+/// A window slot no entity claims. An entity id this large is not reachable: a permutation's
+/// `bound` is the entity span its directory covers, and a directory covering 2⁶⁴ − 1 entities is
+/// 2⁵⁰ bytes, which `Permutation::load` refuses against the file's length.
+const NO_ENTITY: u64 = u64::MAX;
+
+/// Scratch for the row partition, `<root>/.verify-tmp.<pid>.<serial>`.
+///
+/// **Beside the bundle first, the system temporary directory only if that fails.** The partition
+/// writes twelve bytes a row, and a system temporary directory is a tmpfs on many hosts — where
+/// those bytes would be the anonymous memory this pass exists to give up. A read-only bundle root
+/// is the case the fallback is for.
+///
+/// The pid and a serial are in the name, so two verifiers over one bundle — in one process or in
+/// two — do not sweep away each other's buckets, and neither touches a build's `.build-tmp`.
+///
+/// **A killed verify's scratch is swept by the next one**, not adopted: a directory named for a pid
+/// that no longer exists can only be the leavings of a verify that died between creation and drop,
+/// and it holds up to twelve bytes for every row of the bundle. A directory named for a live pid is
+/// left where it is, whether or not that process is a verify — the risk of taking a running pass's
+/// buckets is not worth the disk.
+pub(crate) struct VerifyTmp {
+    path: PathBuf,
+}
+
+impl VerifyTmp {
+    pub(crate) fn create(root: &Path) -> Result<VerifyTmp> {
+        static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!(".verify-tmp.{}.{serial}", std::process::id());
+        for base in [root.to_path_buf(), std::env::temp_dir()] {
+            sweep_dead_scratch(&base);
+            let path = base.join(&name);
+            let _ = fs::remove_dir_all(&path);
+            if fs::create_dir_all(&path).is_ok() {
+                return Ok(VerifyTmp { path });
+            }
+        }
+        Err(BuildError::Invalid(format!(
+            "the identity check has nowhere to put its row partition: neither {} nor the system \
+             temporary directory would take '{name}'",
+            root.display()
+        )))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for VerifyTmp {
+    fn drop(&mut self) {
+        // The tree, not its files. Best effort, as the build's own scratch sweep is — what this
+        // misses, the next verify's sweep takes.
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Remove every `.verify-tmp.<pid>.<serial>` under `base` whose pid is no longer a live process.
+///
+/// Best effort throughout: a directory whose name does not parse, a pid this process may not
+/// signal, and a removal the filesystem refuses are all left alone. `kill(pid, 0)` distinguishes
+/// the three answers that matter — alive, alive but another user's, and gone — and only the third
+/// is swept.
+fn sweep_dead_scratch(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(".verify-tmp.") else {
+            continue;
+        };
+        let Some((pid, _serial)) = rest.split_once('.') else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
+        if pid <= 0 || pid == std::process::id() as i32 {
+            continue;
+        }
+        // SAFETY: `kill` with signal 0 sends nothing; it reports whether the pid could be
+        // signalled. ESRCH is the one answer that says the process is gone.
+        let gone = unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// One segment's rows in view row space: where they begin, how many there are, and the segment.
+type SegmentRows<'a> = (u64, u32, &'a mosaica_store::read::SegmentData);
+
+/// A view id as a filename component: letters, digits, `-` and `_` kept, everything else one
+/// underscore.
+///
+/// The name is for whoever reads a killed run's leavings before the next verify sweeps them; a
+/// view's partition is finished and its store dropped before the next view's is created, so two
+/// views sharing a name after the substitution would still not share a file.
+fn scratch_name(view_id: &str) -> String {
+    view_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Surjectivity of one view's row space onto its segments' rows, and every row's `tessera_id`
+/// against `identity.key`.
+///
+/// **Both halves in one pass over a window, so neither costs a row-indexed array over the view.**
+/// Surjectivity is a count: the row space claims a row at most once (`validate_rows` on the base,
+/// `is_well_formed` on each extent, both at open, over disjoint row ranges), so as many claims as
+/// there are rows is a claim on every row. The identity check needs the entity at each row, and
+/// entity order is staging order where row order is Morton — the two disagree, which is what an
+/// array over the whole view was buying.
+///
+/// Above [`DIRECT_WINDOW_ROWS`] each claim is instead appended to a [`Partition`] bucketed by row
+/// range, and a bucket is read back, scattered into a window over its own rows, and walked there.
+/// Memory is then one bucket and one window, both a 128th of row space, and the disk is twelve
+/// bytes a row released bucket by bucket.
+///
+/// The sweep is over the whole row space, base *and* extents: a bundle that has flushed holds rows
+/// above the base permutation, and a sweep of the base alone would refuse every such bundle as
+/// "not a bijection" (the false refusal §18 obligation 10 names).
+///
+/// **What the identity half actually covers is the base's rows.** An extent has no stored mapping:
+/// `SegmentExtent::rebuild` recovers one at open by inverting each row's `tessera_id` under the
+/// bundle's key (contracts §2.1). Comparing that `tessera_id` back against what the key derives
+/// for the entity the inversion produced is therefore a tautology over an extent's rows — it
+/// restates the inversion. Over the base's rows, whose mapping is `permutation.bin`, the comparison
+/// is between two artefacts and is the check contracts §2.6 r6 describes. The extent rows are still
+/// walked, because their surjectivity is not tautological and because the walk is what refuses a
+/// row no entity claims.
+///
+/// **Where the offender is reported from moved.** The walk is in row order, so for a view with
+/// more than one segment the first row that disagrees is the first in row space, where it used to
+/// be the first in the order the manifest listed the segments. Every message is unchanged; which
+/// one comes out of a bundle with more than one defect can differ.
+///
+/// **Not built: the partition route has no free-space pre-flight.** It writes twelve bytes a row
+/// and finds out that the filesystem is full by failing the write, where a build's passes size
+/// their spill against the free space first. A verifier that fills the disk reports an I/O error
+/// and leaves nothing behind ([`VerifyTmp`] sweeps), so this is a poor message rather than a
+/// hazard.
+fn check_view_identity(
+    root: &Path,
+    scratch: &mut Option<VerifyTmp>,
+    direct_window_rows: u64,
+    view_id: &str,
+    view: &mosaica_store::read::ViewData,
+    identity: Identity<'_>,
+) -> Result<()> {
+    let total_rows = view.row_space.total_rows();
+
+    // Each segment's rows in view row space. A segment's `columns.arrow` rows are local
+    // `0..row_count`; in the view they begin at the extent's `row_base` (the base segment's at 0).
+    // The offset is looked up from the row space and then sorted on, so the walk below is in row
+    // order however the manifest happened to list the segments.
+    let mut layout: Vec<SegmentRows<'_>> = view
+        .segments
+        .iter()
+        .map(|segment| {
+            let row_base = view
+                .row_space
+                .extents()
+                .iter()
+                .find(|extent| extent.seg_id == segment.seg_id)
+                .map(|extent| u64::from(extent.row_base))
+                .unwrap_or(0);
+            (row_base, segment.columns.row_count(), segment.as_ref())
+        })
+        .collect();
+    layout.sort_by_key(|(row_base, _, _)| *row_base);
+    // A segment holding rows past where the row space ends is the defect the per-row refusal
+    // below reports, so the window covers those rows rather than leaving them unwalked.
+    let row_bound = layout
+        .iter()
+        .map(|(row_base, rows, _)| row_base + u64::from(*rows))
+        .chain(std::iter::once(total_rows))
+        .max()
+        .unwrap_or(0);
+
+    let surjective = |claimed: u64| -> Result<()> {
+        if claimed != total_rows {
+            return Err(BuildError::Invalid(format!(
+                "view '{view_id}': the row space claims {claimed} rows but the segments hold \
+                 {total_rows} — not a bijection"
+            )));
+        }
+        Ok(())
+    };
+
+    if row_bound <= direct_window_rows {
+        let mut window = vec![NO_ENTITY; row_bound as usize];
+        let claimed = claim_rows(view, |row, entity| {
+            window[row as usize] = entity;
+            Ok(())
+        })?;
+        surjective(claimed)?;
+        return walk_window(view_id, &layout, &window, 0, row_bound, identity);
+    }
+
+    // The one place the pass writes anything, so the one place the scratch directory is made.
+    if scratch.is_none() {
+        *scratch = Some(VerifyTmp::create(root)?);
+    }
+    let scratch = scratch.as_ref().expect("the scratch was just created");
+    let boundaries = spill::boundaries_uniform(row_bound);
+    let mut partition = spill::Partition::create(
+        scratch.path(),
+        &format!("verify-rows-{}", scratch_name(view_id)),
+        boundaries.clone(),
+        ROW_ENTITY_RECORD,
+        total_rows,
+    )?;
+    let claimed = claim_rows(view, |row, entity| {
+        let mut record = [0u8; ROW_ENTITY_RECORD];
+        record[..4].copy_from_slice(&row.to_le_bytes());
+        record[4..].copy_from_slice(&entity.to_le_bytes());
+        partition.push(&record)?;
+        Ok(())
+    })?;
+    surjective(claimed)?;
+
+    let mut store = partition.finish()?;
+    let mut window: Vec<u64> = Vec::new();
+    for k in 0..boundaries.len() {
+        let lo = u64::from(boundaries[k]);
+        let hi = boundaries
+            .get(k + 1)
+            .map(|&first| u64::from(first))
+            .unwrap_or(row_bound)
+            .min(row_bound);
+        if hi <= lo {
+            store.delete(k)?;
+            continue;
+        }
+        window.clear();
+        window.resize((hi - lo) as usize, NO_ENTITY);
+        for record in store.load(k)?.as_chunks::<ROW_ENTITY_RECORD>().0 {
+            let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes")) as u64;
+            let entity = u64::from_le_bytes(record[4..].try_into().expect("eight bytes"));
+            window[(row - lo) as usize] = entity;
+        }
+        // The bucket's disk comes back before its rows are walked: the window holds everything
+        // the walk needs.
+        store.delete(k)?;
+        walk_window(view_id, &layout, &window, lo, hi, identity)?;
+    }
+    Ok(())
+}
+
+/// Every `(row, entity)` the view's row space claims, base first and then each extent, to `claim`.
+/// Returns how many there were.
+fn claim_rows(
+    view: &mosaica_store::read::ViewData,
+    mut claim: impl FnMut(u32, u64) -> Result<()>,
+) -> Result<u64> {
+    let mut claimed = 0u64;
+    view.row_space.base().try_for_each_slot(|entity, row| {
+        claimed += 1;
+        claim(row.raw(), entity)
+    })?;
+    for extent in view.row_space.extents() {
+        for (entity, slot) in extent.pairs() {
+            claimed += 1;
+            claim(extent.row_base + slot, entity)?;
+        }
+    }
+    Ok(claimed)
+}
+
+/// The rows of `[lo, hi)` that a segment holds, in row order: each one's entity from `window`, and
+/// its stored `tessera_id` against what the key derives for that entity.
+/// What a row's `tessera_id` is checked against: the key and shard it is derived under, and the
+/// edited items a moved row's entity is found in.
+#[derive(Clone, Copy)]
+struct Identity<'a> {
+    key: &'a IdentityKey,
+    shard_id: u32,
+    edited: &'a mosaica_store::edited::EditedIndex,
+}
+
+fn walk_window(
+    view_id: &str,
+    layout: &[SegmentRows<'_>],
+    window: &[u64],
+    lo: u64,
+    hi: u64,
+    identity: Identity<'_>,
+) -> Result<()> {
+    let (identity_key, shard_id) = (identity.key, identity.shard_id);
+    for (row_base, rows, segment) in layout {
+        let from = (*row_base).max(lo);
+        let to = (row_base + u64::from(*rows)).min(hi);
+        if from >= to {
+            continue;
+        }
+        let ids = segment.columns.tessera_id();
+        for row in from..to {
+            let local = (row - row_base) as usize;
+            let entity = window[(row - lo) as usize];
+            if entity == NO_ENTITY {
+                return Err(BuildError::Invalid(format!(
+                    "view '{view_id}' segment '{}' row {local}: no entity claims this row",
+                    segment.seg_id
+                )));
+            }
+            let id = ids[local];
+            let recorded = segment.entities.recorded(local as u32).map(u64::from);
+            if recorded.is_some_and(|recorded| recorded != entity) {
+                return Err(BuildError::Invalid(format!(
+                    "view '{view_id}' segment '{}' row {local}: the row space claims entity \
+                     {entity} and the segment records entity {}",
+                    segment.seg_id,
+                    recorded.unwrap_or_default()
+                )));
+            }
+            let expected = identity_key
+                .forward(shard_id, EntityId::new(entity))
+                .map_err(BuildError::Identity)?
+                .raw();
+            if id == expected {
+                continue;
+            }
+            // A row an edit moved records its entity, and its `tessera_id` is its number's, whose
+            // entries in the edited items name the entity.
+            let (shard, number) = identity_key.invert(mosaica_types::TesseraId::new(id));
+            let moved = recorded.is_some()
+                && shard == shard_id
+                && u32::try_from(number.raw()).is_ok_and(|number| {
+                    identity
+                        .edited
+                        .entities_of(&[number])
+                        .is_ok_and(|held| held.iter().any(|(_, e)| u64::from(*e) == entity))
+                });
+            if !moved {
+                return Err(BuildError::Invalid(format!(
+                    "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} does not \
+                     match identity.key's derivation {expected:#x} for entity {entity}",
+                    segment.seg_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_pairs_parquet(path: &Path, per_term: &[Vec<u32>]) -> Result<()> {
+    let mut writer = PairsParquetWriter::create(path)?;
+    for (t, entity_ids) in per_term.iter().enumerate() {
+        writer.push_run(t as u32, entity_ids)?;
+    }
+    writer.finish()?;
+    Ok(())
+}
+
+/// Write the hierarchy containment report into the bundle root's `reports/`.
+///
+/// **Beside the prefix, never inside it**, on the fold report's rule: a prefix is reclaimed and a
+/// notice nobody has read yet would go with it. **Written even when empty**, for the same reason
+/// that report is — an operator polling the directory must be able to tell *this build found
+/// nothing* from *this build never looked*, and an absent file says the second.
+///
+/// It decides nothing. A violating edge is published exactly as a clean one is; what the report
+/// buys is that the edge is named before a viewer meets its consequences.
+///
+/// **A build that registered no layers writes nothing at all** — not even the directory. There are
+/// no edges to have checked, so an empty report there would answer a question nobody asked, and
+/// creating `reports/` for it would mean every bundle carries the fold's notice directory before a
+/// fold has ever run.
+pub(crate) fn write_containment_report(
+    root: &Path,
+    published: &crate::layers::PublishedLayers,
+) -> Result<()> {
+    if published.layers.is_empty() {
+        return Ok(());
+    }
+    let violations = &published.containment_violations;
+    let dir = root.join("reports");
+    std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+    let rows: Vec<serde_json::Value> = violations
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "layer": v.layer,
+                "level": v.level,
+                "child": v.child,
+                "parent": v.parent,
+                "escaping_members": v.escaping_members,
+            })
+        })
+        .collect();
+
+    // **The splits that lose the most, and how many were not listed.** A tree has one of these per
+    // internal node, which at 10⁷ artifacts is a report nobody opens; naming the worst is what an
+    // operator actually reads, and saying how many were dropped is what keeps the list from
+    // reading as "these are all of them" (`docs/agents/` — no silent caps).
+    const LISTED: usize = 100;
+    let mut splits: Vec<_> = published.split_coverage.iter().collect();
+    splits.sort_by(|a, b| {
+        (b.stray_members, b.members, &b.parent).cmp(&(a.stray_members, a.members, &a.parent))
+    });
+    let non_covering = splits.iter().filter(|s| s.stray_members > 0).count();
+    let listed: Vec<serde_json::Value> = splits
+        .iter()
+        .take(LISTED)
+        .map(|s| {
+            serde_json::json!({
+                "layer": s.layer,
+                "level": s.level,
+                "parent": s.parent,
+                "children": s.children,
+                "members": s.members,
+                "stray_members": s.stray_members,
+            })
+        })
+        .collect();
+
+    let hierarchies: Vec<serde_json::Value> = published
+        .hierarchy_shapes
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "layer": s.layer,
+                "level": s.level,
+                "kind": s.kind,
+                "artifacts": s.artifacts,
+                "edges": s.edges,
+                "roots": s.roots,
+                "multi_parent": s.multi_parent,
+                "max_parents": s.max_parents,
+            })
+        })
+        .collect();
+
+    write_json(
+        &dir.join("containment.json"),
+        &serde_json::json!({
+            "hierarchies": hierarchies,
+            "violations": rows,
+            "splits": {
+                "total": splits.len(),
+                "non_covering": non_covering,
+                "listed": listed.len(),
+                "not_listed": splits.len().saturating_sub(listed.len()),
+                "by_stray_members": listed,
+            },
+        }),
+    )
+}
+
+pub(crate) fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| BuildError::Invalid(format!("serialising {}: {e}", path.display())))?;
+    write_bytes(path, &bytes)
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = File::create(path).map_err(|e| BuildError::io(path, e))?;
+    file.write_all(bytes).map_err(|e| BuildError::io(path, e))?;
+    file.sync_all().map_err(|e| BuildError::io(path, e))?;
+    if let Some(parent) = path.parent() {
+        fsync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn fsync_file(path: &Path) -> Result<()> {
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    file.sync_all().map_err(|e| BuildError::io(path, e))?;
+    if let Some(parent) = path.parent() {
+        fsync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn fsync_dir(path: &Path) -> Result<()> {
+    let dir = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    dir.sync_all().map_err(|e| BuildError::io(path, e))
+}
+
+/// How much of a file is held in memory at once while hashing it. One mebibyte is large enough
+/// that the syscall cost is noise against the hashing and small enough to be irrelevant to the
+/// build's peak.
+const DIGEST_CHUNK_BYTES: usize = 1 << 20;
+
+/// SHA-256 and size of `path`, read in fixed-size chunks. Never `fs::read` here: at 10⁹ items
+/// `columns.arrow` alone is over 20 GB, and slurping it to hash it would reintroduce the very
+/// ceiling this build was rewritten to remove.
+fn digest_file(path: &Path) -> Result<FileDigest> {
+    use std::io::Read;
+    let mut file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; DIGEST_CHUNK_BYTES];
+    let mut size = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| BuildError::io(path, e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok(FileDigest {
+        size,
+        sha256: hex_digest(hasher.finalize().as_slice()),
+    })
+}
+
+pub(crate) fn hex_digest(digest: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Manifest keys are prefix-relative with forward slashes (R1), on every platform.
+fn relative_to(prefix_dir: &Path, path: &Path) -> Result<String> {
+    let rel = path.strip_prefix(prefix_dir).map_err(|_| {
+        BuildError::Invalid(format!(
+            "{} is not inside the bundle prefix {}",
+            path.display(),
+            prefix_dir.display()
+        ))
+    })?;
+    Ok(rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The count is over *distinct* codes, and every point is counted — the two numbers the
+    /// report prints are not derived from each other.
+    #[test]
+    fn occupancy_counts_distinct_cells_and_every_point() {
+        let o = Occupancy::of_sorted_codes([7u32, 7, 7, 9, 9, 40]);
+        assert_eq!((o.points, o.cells), (6, 3));
+        assert!((o.points_per_cell() - 2.0).abs() < 1e-9);
+        assert_eq!(Occupancy::of_sorted_codes([]).cells, 0);
+    }
+
+    /// A run count is exact only in tiler order, and out of order it *over*-reports cells — which
+    /// would be a warning that quietly stops firing. Loud instead.
+    #[test]
+    #[should_panic(expected = "tiler order")]
+    fn occupancy_refuses_codes_out_of_tiler_order() {
+        Occupancy::of_sorted_codes([9u32, 7]);
+    }
+
+    /// **Ten points in ten cells is a perfectly framed corpus, not a sparse one.** The measure is
+    /// a ratio for exactly this reason: a count of cells would scold every small corpus.
+    #[test]
+    fn a_tiny_well_framed_corpus_earns_no_warning() {
+        let o = Occupancy::of_sorted_codes(0..10u32);
+        assert_eq!(o.warning("s0"), None);
+        assert!(o
+            .report("s0")
+            .contains("10 point(s) landed in 10 distinct cell(s)"));
+    }
+
+    /// The threshold is a ratio, so it fires at the same proportion at any scale — and the raw
+    /// numbers are printed either side of it. Ten points per occupied cell is the same statement
+    /// as a tenth of the points having a position of their own, which is how it is reported.
+    #[test]
+    fn the_warning_fires_on_the_ratio_not_the_size() {
+        let just_under = Occupancy {
+            points: 99,
+            cells: 10,
+        };
+        let just_over = Occupancy {
+            points: 100,
+            cells: 10,
+        };
+        assert_eq!(just_under.warning("s0"), None);
+        assert!(just_under
+            .report("s0")
+            .contains("10.1% of them have a position of their own"));
+        let warning = just_over
+            .warning("s0")
+            .expect("10 points per cell is the threshold");
+        assert!(warning.contains("RESOLUTION LOST"), "{warning}");
+        assert!(
+            warning.contains("stored at the same position and cannot be told apart"),
+            "{warning}"
+        );
+        // The same ratio a thousand times larger says the same thing.
+        let big = Occupancy {
+            points: 100_000,
+            cells: 10_000,
+        };
+        assert!(big.warning("s0").is_some());
+    }
+
+    #[test]
+    fn signature_key_is_sorted_deduplicated_and_order_independent() {
+        let a = signature_sort_key(&[TermId::new(5), TermId::new(1), TermId::new(5)]);
+        assert_eq!(a, vec![1, 5]);
+        assert_eq!(signature_sort_key(&[TermId::new(1), TermId::new(5)]), a);
+    }
+
+    #[test]
+    fn relative_paths_use_forward_slashes() {
+        let prefix = Path::new("/bundle/v00000");
+        let path = prefix
+            .join("partitions")
+            .join("default")
+            .join("SEGMENTS-0.json");
+        assert_eq!(
+            relative_to(prefix, &path).unwrap(),
+            "partitions/default/SEGMENTS-0.json"
+        );
+    }
+}
+
+/// [`Occupancy::of_sorted_codes`] fed one code at a time.
+///
+/// **The segment assembly emits its rows one Morton bucket at a time** and never holds the codes
+/// as a slice, so the run count that the other producer takes over an iterator is taken here over
+/// a stream. Same arithmetic and the same order assertion — it is the one implementation, and
+/// `of_sorted_codes` is the iterator wrapper over it.
+#[derive(Default)]
+pub(crate) struct OccupancyRun {
+    points: u64,
+    cells: u64,
+    previous: Option<u32>,
+}
+
+impl OccupancyRun {
+    pub(crate) fn push(&mut self, code: u32) {
+        self.points += 1;
+        match self.previous {
+            Some(last) => {
+                assert!(
+                    code >= last,
+                    "occupancy: Morton codes must arrive in tiler order ({last} then {code})"
+                );
+                self.cells += u64::from(code != last);
+            }
+            None => self.cells = 1,
+        }
+        self.previous = Some(code);
+    }
+
+    pub(crate) fn finish(self) -> Occupancy {
+        Occupancy {
+            points: self.points,
+            cells: self.cells,
+        }
+    }
+}

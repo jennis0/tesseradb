@@ -2,7 +2,7 @@
 // A write cycle on a running deployment: what happens to a label when a document it was written
 // from is deleted.
 //
-//   TESSERA_OPERATOR_CRED=… node clients/ts/scripts/write-cycle-demo.mjs
+//   MOSAICA_OPERATOR_CRED=… node clients/ts/scripts/write-cycle-demo.mjs
 //
 // A client cannot see a label's generating set, so the script publishes its own small cluster and
 // one label over documents it chose, then deletes one of them. The steps:
@@ -30,8 +30,8 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const operatorCred = process.env.TESSERA_OPERATOR_CRED;
-if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
+const operatorCred = process.env.MOSAICA_OPERATOR_CRED;
+if (!operatorCred) throw new Error('set MOSAICA_OPERATOR_CRED');
 const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', credential: operatorCred});
 
 const dryRun = 'dry-run' in args;

@@ -1,6 +1,6 @@
-site_name: Tessera
+site_name: Mosaica
 site_description: A per-viewer, access-controlled map over billions of records, served from one machine.
-repo_url: https://github.com/jennis0/tesseradb
+repo_url: https://github.com/jennis0/mosaica
 edit_uri: ""
 docs_dir: docs
 strict: true
@@ -101,10 +101,10 @@ nav:
       - Your first map from files: start/first-map.md
   - Guides:
       - guides/index.md
-      - Run Tessera under systemd: guides/systemd.md
-      - Run Tessera with Docker: guides/docker.md
+      - Run Mosaica under systemd: guides/systemd.md
+      - Run Mosaica with Docker: guides/docker.md
       - Operate a deployment: guides/operating.md
-      - Put Tessera behind TLS: guides/tls.md
+      - Put Mosaica behind TLS: guides/tls.md
       - Rebuild and replace the bundle: guides/rebuild.md
   - Reference:
       - reference/index.md
@@ -112,7 +112,7 @@ nav:
       - Wire framing: openapi/README.md
       - Capabilities: reference/capabilities.md
       - CLI: reference/cli.md
-      - tessera.toml: reference/tessera-toml.md
+      - mosaica.toml: reference/mosaica-toml.md
       - corpus.toml: reference/corpus-toml.md
       - Python client:
           - reference/python/index.md
@@ -126,30 +126,30 @@ nav:
       # clients/ts/scripts/reference.mjs, which scripts/check-docs.sh runs before the build.
       - TypeScript client:
           - reference/typescript.md
-          - "@tesseradb/client": reference/typescript/client.md
-          - "@tesseradb/deck": reference/typescript/deck.md
-          - "@tesseradb/components": reference/typescript/components.md
-          - "@tesseradb/react": reference/typescript/react.md
-          - "@tesseradb/react/components": reference/typescript/react/components.md
+          - "@mosaicajs/client": reference/typescript/client.md
+          - "@mosaicajs/deck": reference/typescript/deck.md
+          - "@mosaicajs/components": reference/typescript/components.md
+          - "@mosaicajs/react": reference/typescript/react.md
+          - "@mosaicajs/react/components": reference/typescript/react/components.md
       - Components:
           - reference/components.md
-          - tessera-explorer: reference/components/tessera-explorer.md
-          - tessera-map: reference/components/tessera-map.md
-          - tessera-store: reference/components/tessera-store.md
-          - tessera-status: reference/components/tessera-status.md
-          - tessera-count: reference/components/tessera-count.md
-          - tessera-layer-picker: reference/components/tessera-layer-picker.md
-          - tessera-view-picker: reference/components/tessera-view-picker.md
-          - tessera-key-picker: reference/components/tessera-key-picker.md
-          - tessera-filter-panel: reference/components/tessera-filter-panel.md
-          - tessera-field-card: reference/components/tessera-field-card.md
-          - tessera-filter: reference/components/tessera-filter.md
-          - tessera-cluster-filter: reference/components/tessera-cluster-filter.md
-          - tessera-colour-editor: reference/components/tessera-colour-editor.md
-          - tessera-selection: reference/components/tessera-selection.md
-          - tessera-item-card: reference/components/tessera-item-card.md
-          - tessera-artifact-card: reference/components/tessera-artifact-card.md
-          - tessera-hierarchy: reference/components/tessera-hierarchy.md
+          - mosaica-explorer: reference/components/mosaica-explorer.md
+          - mosaica-map: reference/components/mosaica-map.md
+          - mosaica-store: reference/components/mosaica-store.md
+          - mosaica-status: reference/components/mosaica-status.md
+          - mosaica-count: reference/components/mosaica-count.md
+          - mosaica-layer-picker: reference/components/mosaica-layer-picker.md
+          - mosaica-view-picker: reference/components/mosaica-view-picker.md
+          - mosaica-key-picker: reference/components/mosaica-key-picker.md
+          - mosaica-filter-panel: reference/components/mosaica-filter-panel.md
+          - mosaica-field-card: reference/components/mosaica-field-card.md
+          - mosaica-filter: reference/components/mosaica-filter.md
+          - mosaica-cluster-filter: reference/components/mosaica-cluster-filter.md
+          - mosaica-colour-editor: reference/components/mosaica-colour-editor.md
+          - mosaica-selection: reference/components/mosaica-selection.md
+          - mosaica-item-card: reference/components/mosaica-item-card.md
+          - mosaica-artifact-card: reference/components/mosaica-artifact-card.md
+          - mosaica-hierarchy: reference/components/mosaica-hierarchy.md
           - Events: reference/components/events.md
           - Theme tokens: reference/components/tokens.md
   - How it works:

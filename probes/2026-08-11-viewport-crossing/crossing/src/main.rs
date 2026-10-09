@@ -18,7 +18,7 @@
 //!     `probes/2026-08-08-filter-layout/` arm 3 measured, and **the system has no such array**.
 //!   - **B-real** does what the engine would actually have to do: read the row's `tessera_id`
 //!     (a `u64` column read, modelled as an indexed gather) and `IdentityKey::invert` it. The
-//!     real Feistel, from `tessera-types`, not a stand-in.
+//!     real Feistel, from `mosaica-types`, not a stand-in.
 //! - **C — coarse Morton pre-filter.** A second bitmap per coarse Morton cell, holding the
 //!   *entities* whose rows fall in it. Union the cells the viewport touches, intersect with the
 //!   result, and project only the survivors. Stays in entity space until the last step; the
@@ -33,7 +33,7 @@
 use std::time::Instant;
 
 use croaring::{Bitmap, Portable};
-use tessera_types::{EntityId, IdentityKey};
+use mosaica_types::{EntityId, IdentityKey};
 
 /// Tiles a viewport resolves to (`filter-surface.md` §4 and arm 3 both use ~300).
 const TILES: usize = 300;
@@ -147,7 +147,7 @@ fn route_per_tile_real(
     for &(lo, hi) in tiles {
         for row in lo..hi {
             let id = tessera_id_by_row[row as usize];
-            let (_shard, entity) = key.invert(tessera_types::TesseraId::new(id));
+            let (_shard, entity) = key.invert(mosaica_types::TesseraId::new(id));
             if result.contains(entity.raw() as u32) {
                 out.add(row);
             }
@@ -173,7 +173,7 @@ fn route_per_tile_batched(
         scratch.clear();
         for row in lo..hi {
             let id = tessera_id_by_row[row as usize];
-            let (_shard, entity) = key.invert(tessera_types::TesseraId::new(id));
+            let (_shard, entity) = key.invert(mosaica_types::TesseraId::new(id));
             scratch.push(entity.raw() as u32);
         }
         for (offset, &entity) in scratch.iter().enumerate() {

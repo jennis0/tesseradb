@@ -1,11 +1,11 @@
 import {afterAll, beforeAll, describe, expect, it, type TestContext} from 'vitest';
-import {TesseraClient, TesseraError} from '../src/client.js';
+import {MosaicaClient, MosaicaError} from '../src/client.js';
 import {tileOfCode} from '../src/coords.js';
 import type {Meta, Session, ViewportRequest} from '../src/types.js';
 import {GROUP, start, type Served} from './served.js';
 
 /**
- * `TesseraClient` against a real `tessera serve` over the notebook corpus (`served.ts` builds and
+ * `MosaicaClient` against a real `mosaica serve` over the notebook corpus (`served.ts` builds and
  * starts it). Each test checks a decoded value against another route's answer or against the
  * declaration, so a field read from the wrong place, or not at all, fails here.
  *
@@ -17,14 +17,14 @@ import {GROUP, start, type Served} from './served.js';
 const TERMS = ['cs.LG', 'cs.CV', 'hep-ph'];
 
 let served: Served | string = 'the server has not started';
-let client: TesseraClient;
+let client: MosaicaClient;
 let session: Session;
 let meta: Meta;
 
 beforeAll(async () => {
   served = await start();
   if (typeof served === 'string') return;
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential});
+  client = new MosaicaClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential});
   session = await client.authorise({terms: TERMS});
   meta = await client.meta(session.token);
 }, 120_000);
@@ -48,7 +48,7 @@ function whole(extra: Partial<ViewportRequest> = {}): ViewportRequest {
 const total = (tiles: readonly {visible: bigint; matched: bigint; served: bigint}[], field: 'visible' | 'matched' | 'served') =>
   tiles.reduce((sum, t) => sum + t[field], 0n);
 
-describe('TesseraClient against a live server', () => {
+describe('MosaicaClient against a live server', () => {
   it('authorises a session whose expiry is within the deployment’s token lifetime', (ctx) => {
     live(ctx);
     expect(session.token).not.toBe('');
@@ -277,7 +277,7 @@ describe('TesseraClient against a live server', () => {
   it('refuses a bad token and a reversed bbox with typed errors', async (ctx) => {
     live(ctx);
     const refused = client.meta('not-a-real-token');
-    await expect(refused).rejects.toBeInstanceOf(TesseraError);
+    await expect(refused).rejects.toBeInstanceOf(MosaicaError);
     await expect(refused).rejects.toMatchObject({status: 401, code: 'bad-credential'});
     await expect(client.viewport(session.token, {view: 's0', zoom: 2, bbox: [10, 10, 0, 0]})).rejects.toMatchObject({status: 422, code: 'contract'});
   });

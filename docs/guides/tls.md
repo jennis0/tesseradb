@@ -1,19 +1,19 @@
-# Put Tessera behind TLS
+# Put Mosaica behind TLS
 
-Browsers should reach Tessera's viewer address over TLS, and preferably from the same origin as the
-page that shows the map. Tessera doesn't terminate TLS itself, so this guide puts nginx in front of
+Browsers should reach Mosaica's viewer address over TLS, and preferably from the same origin as the
+page that shows the map. Mosaica doesn't terminate TLS itself, so this guide puts nginx in front of
 it. It assumes an install from [the systemd guide](systemd.md), with the viewer address on
 `127.0.0.1:9151`. Under [Docker](docker.md), point nginx at `127.0.0.1:9161` instead.
 
 Only the viewer address goes behind the proxy. The session and control addresses stay private, as
 [Addresses and credentials](operating.md#addresses-and-credentials) explains.
 
-The viewer address also takes passwords, at `POST /v1/login`, and Tessera accepts them over plain
+The viewer address also takes passwords, at `POST /v1/login`, and Mosaica accepts them over plain
 HTTP. A deployment whose users log in with a password needs this proxy for that reason alone.
 
 ## Configure nginx
 
-This configuration serves your application at `maps.example.org` and passes `/v1/` to Tessera:
+This configuration serves your application at `maps.example.org` and passes `/v1/` to Mosaica:
 
 ```nginx
 server {
@@ -47,7 +47,7 @@ nginx refuses a request body over 1 MiB unless told otherwise. A viewport reques
 tiles can be larger than that, and the viewer address itself accepts up to 2 MiB, so
 `client_max_body_size 2m` raises nginx's limit to match.
 
-Both nginx and Tessera stop a response after 60 seconds, so leave nginx's timeout alone.
+Both nginx and Mosaica stop a response after 60 seconds, so leave nginx's timeout alone.
 
 ## Forward every header
 
@@ -55,29 +55,29 @@ nginx passes on every response header unless you tell it not to. Add no `proxy_h
 these:
 
 - `etag`
-- `x-tessera-identity-key`
-- `x-tessera-pin`
-- `x-tessera-stale`
-- `x-tessera-server-us`
-- `x-tessera-admission-us`
-- `x-tessera-region`
+- `x-mosaica-identity-key`
+- `x-mosaica-pin`
+- `x-mosaica-stale`
+- `x-mosaica-server-us`
+- `x-mosaica-admission-us`
+- `x-mosaica-region`
 - `retry-after`, sent with a 429 when the server is busy
 
 The browser client keeps the answers it has already been sent, filed under
-`x-tessera-identity-key`. Despite its name, that header is not the identity key. It is a value
+`x-mosaica-identity-key`. Despite its name, that header is not the identity key. It is a value
 derived from the viewer's grant and the view, and it changes when either does. Without it, one
 person's cached map could be shown to the next person who signs in on the same page. The client
-reads `etag`, `x-tessera-pin` and `x-tessera-stale` to tell whether what it holds is out of date.
+reads `etag`, `x-mosaica-pin` and `x-mosaica-stale` to tell whether what it holds is out of date.
 
 To check the headers come through, get a token from the session address and ask for a viewport
 through the proxy:
 
 ```console
-tessera$ TOKEN=$(curl -sS http://127.0.0.1:9152/session/authorise \
+mosaica$ TOKEN=$(curl -sS http://127.0.0.1:9152/session/authorise \
   -H "authorization: Bearer $(cat secrets/operator.secret)" \
   -H 'content-type: application/json' \
   -d '{"terms": ["public"]}' | jq -r .token)
-tessera$ curl -sS -o /dev/null -D - https://maps.example.org/v1/viewport \
+mosaica$ curl -sS -o /dev/null -D - https://maps.example.org/v1/viewport \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
   -d '{"view": "ireland", "zoom": 0, "tiles": [0], "k": 0}'
@@ -85,19 +85,19 @@ HTTP/2 200
 server: nginx/1.18.0 (Ubuntu)
 date: Thu, 24 Sep 2026 09:26:04 GMT
 content-type: application/octet-stream
-x-tessera-identity-key: 3a6acc325d736e5fc758f1ae29a489db
-x-tessera-server-us: 363
-x-tessera-admission-us: 1
+x-mosaica-identity-key: 3a6acc325d736e5fc758f1ae29a489db
+x-mosaica-server-us: 363
+x-mosaica-admission-us: 1
 etag: "e0bf26387bb9b086ad036a0f8206a42f"
-x-tessera-pin: {"prefix":"v00000","segments_version":0}
-x-tessera-stale: 0
+x-mosaica-pin: {"prefix":"v00000","segments_version":0}
+x-mosaica-stale: 0
 ```
 
 ## Let a page on another origin in
 
 If the page with the map comes from a different origin, such as `https://www.example.org` calling
-the viewer at `https://maps.example.org`, the browser hands it the response only if Tessera names
-the page's origin. List it under `[serve]` in `tessera.toml`:
+the viewer at `https://maps.example.org`, the browser hands it the response only if Mosaica names
+the page's origin. List it under `[serve]` in `mosaica.toml`:
 
 ```toml
 cors_origins = ["https://www.example.org"]
@@ -107,7 +107,7 @@ The list applies to the viewer address only. A page on those origins still canno
 address, which has no cross-origin support. A wildcard is refused:
 
 ```text
-tessera serve: refused to start: serve.cors_origins contains "*", which a CORS origin list cannot hold; list each origin, such as "https://app.example", or remove the key
+mosaica serve: refused to start: serve.cors_origins contains "*", which a CORS origin list cannot hold; list each origin, such as "https://app.example", or remove the key
 ```
 
 Leave `dev_cors_origins` unset outside development. It opens the session address to the pages it

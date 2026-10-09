@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {Driver} from '../src/driver.js';
 import {Replica} from '../src/replica.js';
-import {TesseraError} from '../src/client.js';
+import {MosaicaError} from '../src/client.js';
 import type {Quantisation, ViewportResponse} from '../src/types.js';
 import {mortonOfTile} from '../src/coords.js';
 import {fakeClock, response, result, tile} from './support.js';
@@ -57,7 +57,7 @@ function harness(opts: {
       const n = calls.length;
       calls.push({zoom: req.zoom, k: req.k, background});
       if (opts.hang?.(n, req.k)) await new Promise<void>((resolve) => hung.push(resolve));
-      if (opts.fail?.(n)) throw new TesseraError(429, 'shed', 'saturated');
+      if (opts.fail?.(n)) throw new MosaicaError(429, 'shed', 'saturated');
       return opts.respond ? opts.respond() : emptyResponse();
     },
     Q,
@@ -171,7 +171,7 @@ describe('driver', () => {
     const replica = new Replica(
       async () => {
         calls++;
-        if (shed) throw new TesseraError(429, 'shed', 'saturated');
+        if (shed) throw new MosaicaError(429, 'shed', 'saturated');
         return emptyResponse();
       },
       Q,
@@ -213,7 +213,7 @@ describe('driver', () => {
     const replica = new Replica(
       async () => {
         call++;
-        if (call <= 2) throw new TesseraError(503, 'not-ready', 'unverified bundle');
+        if (call <= 2) throw new MosaicaError(503, 'not-ready', 'unverified bundle');
         return emptyResponse();
       },
       Q,
@@ -421,7 +421,7 @@ describe('driver', () => {
     const replica = new Replica(
       async (req) => {
         calls.push({zoom: req.zoom, k: req.k});
-        if (req.k === 0) throw new TesseraError(500, 'internal', 'no counts for you');
+        if (req.k === 0) throw new MosaicaError(500, 'internal', 'no counts for you');
         return servedResponse(10_000n, 8);
       },
       Q,

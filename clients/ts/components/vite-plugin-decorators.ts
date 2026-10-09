@@ -13,9 +13,9 @@ import type {Plugin} from 'vite';
  * (`enforce: 'pre'`) over the component sources, stripping types in the same pass. It can go once
  * oxc lowers stage-3 decorators.
  */
-export function tesseraDecorators(): Plugin {
+export function mosaicaDecorators(): Plugin {
   return {
-    name: 'tessera-decorators',
+    name: 'mosaica-decorators',
     enforce: 'pre',
     async transform(code, id) {
       if (!/\/components\/src\/[^?]+\.ts$/.test(id)) return null;

@@ -4,20 +4,20 @@ probe row (then deletes it, no flush), measures again, twice."""
 import json, sys, time, uuid, base64, os
 from pathlib import Path
 
-sys.path.insert(0, "/home/user/code/tessera/test_corpora")
+sys.path.insert(0, "/home/user/code/mosaica/test_corpora")
 import requests, pyarrow.parquet as pq
 from common import serve_battery
 from common.deployment import Deployment
 from common.ingest_cycle import Control, probe_batch
 
-R = Path("/home/user/code/tessera")
+R = Path("/home/user/code/mosaica")
 rung = R / "data/ladder/medcpt"
 scratch = Path(sys.argv[1])
 out = {}
 def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 d = Deployment(rung, R / "data/ladder/.measure/medcpt36/allin/bundle", scratch,
-               (8181, 8182, 8183), Path(os.environ.get("TESSERA_BIN", R / "target/release/tessera")))
+               (8181, 8182, 8183), Path(os.environ.get("MOSAICA_BIN", R / "target/release/mosaica")))
 d.clear_scratch()
 t0 = time.perf_counter(); d.start(); out["open_s"] = round(time.perf_counter() - t0, 1)
 log(f"served pid={d.pid} open={out['open_s']} s")

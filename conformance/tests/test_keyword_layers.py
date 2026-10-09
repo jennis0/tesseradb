@@ -36,12 +36,12 @@ The catalogue entries records §10 gives this family, and where each is covered:
 keyword column's window, merges its dictionaries and installs the merged one beside the renumbered
 ordinals as one extent (filter-index §5.2; records §7). Reaching it needs a window's worth of
 flushes and the tick the pass is selected on, which the Rust tests drive deterministically:
-`tessera-server`'s `tests/keyword_coalesce.rs` serves the same set to every operator before and
-after the pass and after a restart; `tessera-engine`'s `tests/filtering.rs`
+`mosaica-server`'s `tests/keyword_coalesce.rs` serves the same set to every operator before and
+after the pass and after a restart; `mosaica-engine`'s `tests/filtering.rs`
 (`a_keyword_windows_extents_become_one_and_every_entity_keeps_its_key`,
 `a_coalesced_keyword_extent_survives_a_restart_and_a_fold`) read the relation entity by entity
 through the reader, the evaluator and a viewport, and across the fold; the merge's own differential
-is `tessera_filter_write::keyword`'s `a_coalesced_keyword_extent_reads_back_every_entitys_own_key`.
+is `mosaica_filter_write::keyword`'s `a_coalesced_keyword_extent_reads_back_every_entitys_own_key`.
 This module covers the two-extent and folded states over the control plane.
 
 Every operator is checked at all three states, so the layered and the folded answers are compared

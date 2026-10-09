@@ -1,5 +1,5 @@
-import {NO_COUNT, NO_MASKED, withMembers, type AggregateEntry, type AggregateTable, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection, type DeclaredScalar, type Meta} from '@tesseradb/client';
-import {regionOperand, servedLineage, SessionArtifactTable, withRegion} from '@tesseradb/client/internal';
+import {NO_COUNT, NO_MASKED, withMembers, type AggregateEntry, type AggregateTable, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection, type DeclaredScalar, type Meta} from '@mosaicajs/client';
+import {regionOperand, servedLineage, SessionArtifactTable, withRegion} from '@mosaicajs/client/internal';
 
 /**
  * A store with no network and no driver: projections a test sets directly, and the subscription

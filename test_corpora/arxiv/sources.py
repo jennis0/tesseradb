@@ -29,7 +29,7 @@ import pyarrow.parquet as pq
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The checkout holding `data/`. A worktree has none of its own, so this is a variable.
-DATA = Path(os.environ.get("TESSERA_DATA", _REPO_ROOT / "data"))
+DATA = Path(os.environ.get("MOSAICA_DATA", _REPO_ROOT / "data"))
 
 #: BGE-large-en-v1.5, which is what `probes/build_embeddings.py` used and therefore what the
 #: keyphrase step has to use for its rankings to mean anything.

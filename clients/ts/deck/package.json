@@ -1,5 +1,5 @@
 {
-  "name": "@tesseradb/deck",
+  "name": "@mosaicajs/deck",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -8,12 +8,12 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "tessera-source": "./src/index.ts",
+      "mosaica-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./internal": {
-      "tessera-source": "./src/internal.ts",
+      "mosaica-source": "./src/internal.ts",
       "types": "./dist/internal.d.ts",
       "default": "./dist/internal.js"
     }
@@ -30,7 +30,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@tesseradb/client": "0.1.0"
+    "@mosaicajs/client": "0.1.0"
   },
   "peerDependencies": {
     "@deck.gl/aggregation-layers": "^9.3.7",

@@ -1,0 +1,4686 @@
+//! **Filtering, end to end**: a built bundle, a real principal's mask, a real deny, and the answer
+//! checked against a brute-force reference computed from the source data.
+//!
+//! Everything the filter index had been tested with before this was a hand-made candidate bitmap
+//! over a single build segment. That covers the scan and misses the two things most likely to be
+//! wrong: whether the candidate a session actually produces is the *composed* one, and whether the
+//! result agrees with what the corpus says once permissions are applied.
+//!
+//! **The reference is computed from the fixture, not from the artefact.** Every assertion works out
+//! the expected set from `terms_of` and the source attribute values — the same inputs the build
+//! was given — so an implementation that stored the wrong thing and then read it back consistently
+//! fails here. Comparing the index against itself is the failure mode this file exists to avoid.
+
+mod common;
+
+use mosaica_engine::SuggestRequest;
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use arrow::array::{Float64Array, StringArray, UInt64Array};
+use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+
+use common::*;
+use croaring::Bitmap;
+use mosaica_build::config::Config;
+use mosaica_build::{build, BuildArgs};
+use mosaica_engine::filter::{
+    candidate, ComposeError, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand,
+    OpenedExtent, Scalar, MAX_FILTER_DEPTH,
+};
+use mosaica_engine::ViewportRequest;
+use mosaica_lifecycle::command::UnallocatedRow;
+use mosaica_lifecycle::wal::WalScalar;
+use mosaica_store::read::open_bundle;
+use mosaica_types::AttrLocalId;
+
+const N: u64 = 60;
+/// The whole declared extent, so a depth-0 request covers every item.
+const FULL_VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
+/// Two `u8` categories and a per-item string. `department` is `derived`, which is the shape that
+/// owes membership postings *and* keeps the scan for filtering (decision 0063); `archive` is
+/// `public`, which is the shape whose filter is routed through those postings. The two carry the
+/// same value distribution under different names, so the routed answer and the scanned one are
+/// comparable value by value. The string is `index`-only, which is the shape that owes no postings
+/// at all.
+///
+/// `score` is **rendered and filtered**, which is the shape that affords both routes for a
+/// number: the hot column answers it over the request's own rows, the entity-space column over the
+/// whole corpus, and 0068 chooses between them on the request's span. `bonus` is `index`-only and
+/// is the column with absences — see [`bonus_of`], and the row-route note there.
+///
+/// `ops` and `ww` are declared and carried by nothing, which is the empty-value case: a code the
+/// vocabulary binds, that no posting holds, and that no principal may be offered until something
+/// carries it.
+const SCHEMA_TOML: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "closed"
+visibility = "derived"
+  [vocabulary.values]
+  eng = 1
+  sales = 2
+  legal = 3
+  ops = 4
+
+[[vocabulary]]
+name       = "archive"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  xx = 11
+  yy = 22
+  zz = 33
+  ww = 44
+
+[[attribute]]
+name       = "department"
+type       = "category"
+render     = true
+index      = true
+vocabulary = "department"
+
+[[attribute]]
+name       = "archive"
+type       = "category"
+render     = true
+index      = true
+vocabulary = "archive"
+
+[[attribute]]
+name     = "title"
+type     = "keyword"
+index    = true
+
+[[attribute]]
+name     = "score"
+type     = "i32"
+render   = true
+index    = true
+
+[[attribute]]
+name     = "bonus"
+type     = "i32"
+index    = true
+
+[[attribute]]
+name     = "prose"
+type     = "text"
+index    = true
+analyser = "unicode"
+"#;
+
+/// Source id → department key. Every fifth item carries none, so the absent path is exercised
+/// against a real build rather than only in a unit test.
+///
+/// **Deliberately decorrelated from the permission model.** `terms_of` grants `SUBSET_TERM` on
+/// `e % 3`, so a department keyed on `e % 3` would make every "eng" item exactly the set the subset
+/// principal can see — and every cross-principal assertion would pass while proving nothing, because
+/// masking and filtering would be selecting the same items for different reasons. `e / 2 % 3` shares
+/// no factor with the term model, so the two genuinely cut across each other.
+fn department_of(e: u64) -> Option<&'static str> {
+    if e.is_multiple_of(5) {
+        None
+    } else {
+        Some(["eng", "sales", "legal"][(e / 2 % 3) as usize])
+    }
+}
+
+/// The `public` column's value, one-to-one with the `derived` one's. Two columns carrying the
+/// same partition of the corpus under different visibilities is what makes the routed answer and the
+/// scanned answer comparable set for set.
+fn archive_of(e: u64) -> Option<&'static str> {
+    match department_of(e) {
+        Some("eng") => Some("xx"),
+        Some("sales") => Some("yy"),
+        Some("legal") => Some("zz"),
+        _ => None,
+    }
+}
+
+/// A numeric column, decorrelated from both the term model and the department cycle.
+fn score_of(e: u64) -> i32 {
+    (e as i32 * 7) % 100
+}
+
+/// A numeric column **with absences**, and the one place this corpus exercises them.
+///
+/// Every third item carries no bonus, and the values that *are* carried straddle zero — which is
+/// the whole point. Absence used to be stored as `0` and marked present (decision 0064), so an item
+/// with no bonus matched every range containing zero; a fixture whose values were all positive
+/// could not tell the two apart.
+///
+/// ⊘ **`index`-only, because the row route's presence bitmap is not yet written.** The scan reads
+/// one — `viewport.rs`'s `an_absent_number_matches_no_range_not_even_one_containing_zero` fixes
+/// that behaviour against a bitmap directly — but nothing produces one for a segment yet, so a
+/// rendered column with absences would answer the 2026-08-11 defect over its own rows. Rendering
+/// this column is what closes that loop once the build, flush, merge and fold write the bitmap.
+fn bonus_of(e: u64) -> Option<i32> {
+    if e.is_multiple_of(3) {
+        None
+    } else {
+        Some((e as i32 % 21) - 10)
+    }
+}
+
+fn title_of(e: u64) -> String {
+    format!("paper-{e:02}")
+}
+
+/// The analysed column: one word every item carries and one only this item does, so a `match`
+/// answer is a set no other item's prose can fake.
+fn prose_of(e: u64) -> String {
+    format!("shared p{e:02}")
+}
+
+fn write_points(path: &Path) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("department", DataType::Utf8, true),
+        Field::new("archive", DataType::Utf8, true),
+        Field::new("title", DataType::Utf8, true),
+        Field::new("score", DataType::Int32, false),
+        Field::new("bonus", DataType::Int32, true),
+        Field::new("prose", DataType::Utf8, true),
+    ]));
+    let ids: Vec<u64> = (0..N).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let departments: Vec<Option<String>> = ids
+        .iter()
+        .map(|&e| department_of(e).map(|s| s.to_string()))
+        .collect();
+    let archives: Vec<Option<String>> = ids
+        .iter()
+        .map(|&e| archive_of(e).map(|s| s.to_string()))
+        .collect();
+    let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
+    let scores: Vec<i32> = ids.iter().map(|&e| score_of(e)).collect();
+    let bonuses: Vec<Option<i32>> = ids.iter().map(|&e| bonus_of(e)).collect();
+    let prose: Vec<Option<String>> = ids.iter().map(|&e| Some(prose_of(e))).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(departments)),
+            Arc::new(StringArray::from(archives)),
+            Arc::new(StringArray::from(titles)),
+            Arc::new(arrow::array::Int32Array::from(scores)),
+            Arc::new(arrow::array::Int32Array::from(bonuses)),
+            Arc::new(StringArray::from(prose)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    bundle: std::path::PathBuf,
+    /// Source id → entity id. Entity ids are signature-sorted, so a source id is not its own.
+    entity_of: BTreeMap<u64, u64>,
+    columns: FilterColumns,
+    codes: HashMap<String, u32>,
+    /// The `public` column's bindings, kept apart from `department`'s because the two vocabularies
+    /// mint independently and a shared map would silently resolve one column's key against the
+    /// other's code space.
+    archive_codes: HashMap<String, u32>,
+    prefix: String,
+    /// The manifest's own view of the columns, snapshotted at build. Kept so a test that has
+    /// deliberately corrupted a *file* can still reopen the columns: `open_bundle` verifies every
+    /// digest, so it refuses first and the reader under test is never reached.
+    phash: String,
+    manifest: mosaica_store::manifest::Manifest,
+    extents: Vec<mosaica_store::manifest::AttrExtent>,
+}
+
+fn fixture() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_points(&points);
+    write_pairs_n(&pairs, N);
+    let bundle = dir.path().join("bundle");
+
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
+
+    build(&BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: mosaica_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: mosaica_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
+        out: bundle.clone(),
+        limit: None,
+        strict: false,
+        identity_key: test_key(),
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: with_id(schema),
+    })
+    .expect("the fixture builds");
+
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("CURRENT")).unwrap()).unwrap();
+    let prefix = current["prefix"].as_str().unwrap().to_string();
+    let entity_of = source_to_new_map(&bundle, &prefix);
+
+    let opened = open_bundle(&bundle).unwrap();
+    let phash = opened.partitions.keys().next().unwrap().clone();
+    let columns = FilterColumns::open(
+        &bundle.join(&prefix),
+        &phash,
+        &opened.manifest,
+        // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
+        mosaica_engine::filter::PartitionExtents::of(Some(&opened.partitions[&phash].manifest)),
+        &[],
+        // Mapped, which is what the engine does at session open — so the round-trip these tests
+        // assert is the one a served request actually takes.
+        true,
+    )
+    .expect("declared filter columns open");
+    let bindings = |name: &str| -> HashMap<String, u32> {
+        opened
+            .manifest
+            .vocabularies
+            .iter()
+            .find(|v| v.name == name)
+            .expect("the manifest records the vocabulary")
+            .values
+            .iter()
+            .map(|v| (v.key.clone(), v.code))
+            .collect()
+    };
+    let codes = bindings("department");
+    let archive_codes = bindings("archive");
+
+    Fixture {
+        _dir: dir,
+        bundle,
+        entity_of,
+        columns,
+        codes,
+        archive_codes,
+        prefix,
+        phash: phash.clone(),
+        manifest: opened.manifest.clone(),
+        extents: opened.partitions[&phash].manifest.attr_extents.clone(),
+    }
+}
+
+/// The brute-force reference: source ids satisfying `pred`, restricted to those a principal holding
+/// `terms` can see, mapped to entity ids.
+fn expected(fx: &Fixture, terms: &[u64], pred: impl Fn(u64) -> bool) -> Vec<u32> {
+    let mut v: Vec<u32> = (0..N)
+        .filter(|&e| terms_of(e).iter().any(|t| terms.contains(t)))
+        .filter(|&e| pred(e))
+        .map(|e| fx.entity_of[&e] as u32)
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+fn leaf(column: &str, operand: FilterOperand) -> FilterExpr {
+    FilterExpr::Leaf {
+        column: column.to_string(),
+        operand,
+    }
+}
+
+fn as_vec(b: &Bitmap) -> Vec<u32> {
+    b.iter().collect()
+}
+
+/// Open an engine, authorise, and take the composed entity-space candidate the design requires.
+fn candidate_for(fx: &Fixture, credential: &[u8]) -> (mosaica_engine::Engine, Bitmap) {
+    let cache = fx._dir.path().join(format!("cache-{}", credential.len()));
+    let wal = fx._dir.path().join(format!("wal-{}", credential.len()));
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+    let session = engine
+        .authorise(credential)
+        .expect("the credential resolves");
+    let generation = engine.generation();
+    let cand = candidate(
+        session.fragment_at_authorise_for_test(),
+        session.satisfied_for_test(),
+        &generation.overlay,
+        &generation.buffer,
+    );
+    (engine, cand)
+}
+
+/// **A filter result is what the corpus says, restricted to what the principal may see.** The
+/// reference comes from the fixture's own inputs, not from the index.
+#[test]
+fn a_category_filter_agrees_with_the_corpus_under_a_real_mask() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &subset_credential());
+
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let got = fx
+        .columns
+        .resolve("department", &FilterOperand::Equals(eng), &cand)
+        .expect("department is filterable");
+
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[SUBSET_TERM], |e| department_of(e) == Some("eng")),
+        "the filtered set must be exactly the corpus's, masked"
+    );
+    // And it is inside the candidate — I12, asserted rather than assumed.
+    assert!(got.andnot(&cand).is_empty());
+}
+
+/// The **same operand under a wider principal returns a strict superset**, and the narrower result
+/// is exactly the wider one intersected with the narrower mask. A filter that leaked would break
+/// this by returning something the subset principal cannot account for.
+#[test]
+fn a_wider_principal_sees_a_superset_of_the_same_filter() {
+    let fx = fixture();
+    let (_e1, narrow) = candidate_for(&fx, &subset_credential());
+    let (_e2, wide) = candidate_for(&fx, &full_coverage_credential());
+
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let narrow_hits = fx
+        .columns
+        .resolve("department", &FilterOperand::Equals(eng), &narrow)
+        .unwrap();
+    let wide_hits = fx
+        .columns
+        .resolve("department", &FilterOperand::Equals(eng), &wide)
+        .unwrap();
+
+    assert!(narrow_hits.andnot(&wide_hits).is_empty(), "not a subset");
+    assert_eq!(as_vec(&narrow_hits), as_vec(&wide_hits.and(&narrow)));
+    // Guards against a vacuous fixture: if the attribute correlated with the permission term the
+    // two sets would be equal, both assertions above would hold, and neither would mean anything.
+    assert!(
+        wide_hits.cardinality() > narrow_hits.cardinality(),
+        "the fixture must make masking and filtering select different items"
+    );
+    assert!(
+        narrow_hits.cardinality() > 0,
+        "and the narrow set must be non-empty"
+    );
+}
+
+/// **A principal who can see nothing gets nothing**, for every operand — including one naming a
+/// value that certainly exists. This is the shape an index that filtered *after* answering would
+/// get wrong.
+#[test]
+fn a_zero_coverage_principal_matches_nothing() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &zero_credential());
+    assert!(cand.is_empty());
+
+    for operand in [
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        FilterOperand::TextPrefix("paper".to_string()),
+        FilterOperand::TextContains("-".to_string()),
+    ] {
+        let column = match operand {
+            FilterOperand::Equals(_) => "department",
+            _ => "title",
+        };
+        assert!(fx
+            .columns
+            .resolve(column, &operand, &cand)
+            .unwrap()
+            .is_empty());
+    }
+}
+
+/// One keyword case: what to call it, the operand, and the corpus predicate it must agree with.
+type KeywordCase = (&'static str, FilterOperand, fn(u64) -> bool);
+
+/// Every keyword operand over a real mask, against the corpus: equality, a set, a prefix and a
+/// substring, on the built `title` column. The set names a key nobody carries beside two that are
+/// carried, so a miss inside an `in` is answered rather than refused.
+#[test]
+fn string_filters_agree_with_the_corpus_under_a_real_mask() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &subset_credential());
+    let terms = [SUBSET_TERM];
+
+    let cases: [KeywordCase; 4] = [
+        ("eq", FilterOperand::TextEquals(title_of(3)), |e| e == 3),
+        (
+            "in",
+            FilterOperand::TextIn(vec![
+                title_of(3),
+                title_of(9),
+                "paper-no-such-thing".to_string(),
+            ]),
+            |e| e == 3 || e == 9,
+        ),
+        (
+            "prefix",
+            FilterOperand::TextPrefix("paper-1".into()),
+            |e| title_of(e).starts_with("paper-1"),
+        ),
+        (
+            "contains",
+            FilterOperand::TextContains("-2".into()),
+            |e| title_of(e).contains("-2"),
+        ),
+    ];
+    for (label, operand, carries) in cases {
+        let got = fx.columns.resolve("title", &operand, &cand).unwrap();
+        let want = expected(&fx, &terms, carries);
+        assert!(!want.is_empty(), "{label}: the fixture selects nothing");
+        assert_eq!(as_vec(&got), want, "{label}");
+    }
+}
+
+/// **Composition is intersection, and it commutes with the corpus.** Two operands over different
+/// columns give exactly the items satisfying both.
+#[test]
+fn two_operands_compose_by_intersection() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let eng = FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"]));
+    let prefix = FilterOperand::TextPrefix("paper-1".to_string());
+    let got = fx
+        .columns
+        .evaluate(
+            &FilterExpr::AllOf(vec![leaf("department", eng), leaf("title", prefix)]),
+            &cand,
+        )
+        .unwrap();
+
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("eng")
+            && title_of(e).starts_with("paper-1"))
+    );
+}
+
+/// **An item with no value matches no operand over that column** — not equality, not a prefix that
+/// would match the empty string. The absent path against a real build.
+#[test]
+fn an_item_with_no_category_matches_no_category_operand() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let mut union = Bitmap::new();
+    for code in fx.codes.values() {
+        union |= fx
+            .columns
+            .resolve(
+                "department",
+                &FilterOperand::Equals(AttrLocalId::new(*code)),
+                &cand,
+            )
+            .unwrap();
+    }
+    for source in (0..N).filter(|e| department_of(*e).is_none()) {
+        assert!(
+            !union.contains(fx.entity_of[&source] as u32),
+            "source {source} carries no department"
+        );
+    }
+}
+
+/// **An undeclared column is `None`, not an empty result.** A caller naming a column the schema
+/// never made filterable is a caller error; an empty answer would be indistinguishable from a
+/// correctly-computed one.
+#[test]
+fn an_undeclared_column_is_distinguishable_from_an_empty_result() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+    assert!(matches!(
+        fx.columns
+            .resolve("no_such_column", &FilterOperand::TextPrefix("x".into()), &cand),
+        Err(FilterError::UndeclaredColumn(ref c)) if c == "no_such_column"
+    ));
+    assert!(fx
+        .columns
+        .resolve("title", &FilterOperand::TextPrefix("zzz".into()), &cand)
+        .is_ok_and(|b| b.is_empty()));
+}
+
+// =================================================================================================
+// The per-flush extent (filter-index §2.1, §2.5)
+// =================================================================================================
+
+fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting: {what}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Ingest one row and wait for the flush that publishes it.
+///
+/// `department` is passed as a `WalScalar` rather than a key so a caller can express **absence** —
+/// the reserved code 0, which is what the ingest boundary turns a null category into — beside the
+/// ordinary key case a declared vocabulary resolves at the commit window.
+fn ingest_and_flush(
+    engine: &mosaica_engine::Engine,
+    external: &str,
+    department: WalScalar,
+    title: &str,
+    score: i32,
+) -> u64 {
+    ingest_and_flush_with(
+        engine,
+        external,
+        department,
+        WalScalar::U8(0),
+        title,
+        score,
+        WalScalar::Null,
+    )
+}
+
+/// As [`ingest_and_flush`], but naming the `public` column's value too — the case the routed filter
+/// and `/v1/categories`' extent sweep both have to see.
+#[allow(clippy::too_many_arguments)]
+fn ingest_and_flush_with(
+    engine: &mosaica_engine::Engine,
+    external: &str,
+    department: WalScalar,
+    archive: WalScalar,
+    title: &str,
+    score: i32,
+    bonus: WalScalar,
+) -> u64 {
+    let flushes_before = engine.write_executor_stats().flushes;
+    let row = UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        // One per declared column, positionally — including the `filter`-only `title`, which is
+        // why `declared_scalars` keeps the full list while the *segment* narrows to render columns.
+        // A category arrives as its **key**, never a code (contracts §2.4).
+        scalars: vec![
+            department,
+            archive,
+            WalScalar::Utf8(title.to_string()),
+            WalScalar::I32(score),
+            // `bonus` is the nullable numeric: the default above passes `WalScalar::Null`, which is
+            // how an ingested item says it carries no value for a column (decision 0064).
+            bonus,
+            // The analysed column, keyed off the batch name so each flushed item carries a word
+            // no other item holds.
+            WalScalar::Utf8(format!("shared {external}")),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let allocated = engine
+        .ingest_rows(vec![row], external.to_string(), [0u8; 32])
+        .expect("ingest is accepted")[0];
+    assert!(
+        allocated.raw() >= N,
+        "the new entity is above the build's high-water"
+    );
+    engine.request_flush();
+    wait_until("the flush to publish", || {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        engine.write_executor_stats().flushes > flushes_before
+    });
+    allocated.raw()
+}
+
+/// The candidate a full-coverage session sees against the engine's live generation.
+fn live_candidate(engine: &mosaica_engine::Engine) -> (Arc<mosaica_engine::Generation>, Bitmap) {
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("credential resolves");
+    let generation = engine.generation();
+    let cand = candidate(
+        session.fragment_at_authorise_for_test(),
+        session.satisfied_for_test(),
+        &generation.overlay,
+        &generation.buffer,
+    );
+    (generation, cand)
+}
+
+/// **An entity ingested after the build answers a filter on its own value.**
+///
+/// This is the whole point of the per-flush extent (`filter-index.md` §2.1): the build's column
+/// covers `[0, entity_id_high_water)`, the flush appends the entities it publishes, and the reader
+/// composes the two. The negative half is what makes it a filter rather than a bit that says
+/// "recent": the same entity must be *absent* from a filter naming a different value, in all three
+/// families.
+#[test]
+fn an_entity_ingested_after_the_build_answers_a_filter_on_its_own_value() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-flush");
+    let wal = fx._dir.path().join("wal-flush");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let new = ingest_and_flush(
+        &engine,
+        "post-build",
+        WalScalar::Utf8("eng".to_string()),
+        "paper-99",
+        42,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    assert!(cand.contains(new), "the ingested entity is visible");
+    let columns = &generation.filter_columns;
+    let matched = |operand: FilterOperand, column: &str| -> Bitmap {
+        columns
+            .resolve(column, &operand, &cand)
+            .expect("a composed column answers rather than refusing")
+    };
+
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let sales = AttrLocalId::new(fx.codes["sales"]);
+    assert!(matched(FilterOperand::Equals(eng), "department").contains(new));
+    assert!(!matched(FilterOperand::Equals(sales), "department").contains(new));
+    assert!(matched(FilterOperand::In(vec![sales, eng]), "department").contains(new));
+
+    assert!(matched(FilterOperand::TextEquals("paper-99".into()), "title").contains(new));
+    assert!(!matched(FilterOperand::TextEquals("paper-01".into()), "title").contains(new));
+    assert!(matched(FilterOperand::TextPrefix("paper-9".into()), "title").contains(new));
+    assert!(matched(FilterOperand::TextContains("per-99".into()), "title").contains(new));
+
+    let at = |v: i128| Endpoint {
+        value: Scalar::Int(v),
+        inclusive: true,
+    };
+    assert!(matched(
+        FilterOperand::Range {
+            lo: Some(at(42)),
+            hi: Some(at(42))
+        },
+        "score"
+    )
+    .contains(new));
+    assert!(!matched(
+        FilterOperand::Range {
+            lo: Some(at(43)),
+            hi: None
+        },
+        "score"
+    )
+    .contains(new));
+
+    // A tree over columns reaches the extent too — every leaf composes its own layers, so a
+    // conjunction narrowing the candidate as it goes cannot lose the new entity between them.
+    let tree = FilterExpr::AllOf(vec![
+        FilterExpr::Leaf {
+            column: "department".to_string(),
+            operand: FilterOperand::Equals(eng),
+        },
+        FilterExpr::Leaf {
+            column: "title".to_string(),
+            operand: FilterOperand::TextPrefix("paper-9".into()),
+        },
+    ]);
+    assert!(columns.evaluate(&tree, &cand).unwrap().contains(new));
+}
+
+/// **The build's own entities answer exactly as they did before the flush.**
+///
+/// An extent adds a layer; it must not move what the base layer says. Asserted as bitmap equality
+/// over every column and every family rather than by spot check, because the failure this guards —
+/// an extent's slots being read against base entities — shifts *values along entities* and would
+/// leave most spot checks passing.
+#[test]
+fn a_flush_does_not_disturb_what_the_build_already_answered() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-undisturbed");
+    let wal = fx._dir.path().join("wal-undisturbed");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let operands: Vec<(&str, FilterOperand)> = vec![
+        ("department", FilterOperand::Equals(eng)),
+        ("title", FilterOperand::TextPrefix("paper-1".into())),
+        ("title", FilterOperand::TextContains("2".into())),
+        (
+            "score",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(20),
+                    inclusive: true,
+                }),
+                hi: Some(Endpoint {
+                    value: Scalar::Int(60),
+                    inclusive: false,
+                }),
+            },
+        ),
+    ];
+
+    let (_generation, cand) = live_candidate(&engine);
+    let built: Vec<Bitmap> = operands
+        .iter()
+        .map(|(column, operand)| fx.columns.resolve(column, operand, &cand).unwrap())
+        .collect();
+
+    ingest_and_flush(
+        &engine,
+        "post-build",
+        WalScalar::Utf8("eng".to_string()),
+        "paper-12",
+        42,
+    );
+
+    let (generation, cand_after) = live_candidate(&engine);
+    let below = cand_after.and(&Bitmap::from_range(0..N as u32));
+    for ((column, operand), before) in operands.iter().zip(&built) {
+        let after = generation
+            .filter_columns
+            .resolve(column, operand, &below)
+            .unwrap();
+        assert_eq!(
+            after.to_vec(),
+            before.to_vec(),
+            "column '{column}' answered differently for the build's own entities after a flush"
+        );
+    }
+}
+
+/// **An ingested entity with no value for a column is absent from every predicate on it**, which is
+/// not the same as matching nothing: its *other* columns still answer.
+///
+/// A category spends the reserved code 0 on absence (per-point-attributes §3.4), so the flush gives
+/// that entity no slot in the department extent at all — while the same flush's title and score
+/// extents carry it. An extent that treated absence as a value would put every such item in
+/// whichever bucket code 0 named.
+#[test]
+fn an_ingested_entity_with_no_value_is_absent_from_every_predicate_on_that_column() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-absent");
+    let wal = fx._dir.path().join("wal-absent");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    // Code 0 at the declared width: what the ingest boundary turns a null category into.
+    let new = ingest_and_flush(&engine, "no-dept", WalScalar::U8(0), "paper-98", 7) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let columns = &generation.filter_columns;
+    let every_code: Vec<AttrLocalId> = fx.codes.values().map(|c| AttrLocalId::new(*c)).collect();
+    for operand in [
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["sales"])),
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["legal"])),
+        FilterOperand::In(every_code),
+        // Code 0 itself is the unresolvable sentinel, and an item carrying no value must not match
+        // a filter naming it either.
+        FilterOperand::Equals(AttrLocalId::new(0)),
+    ] {
+        assert!(
+            !columns
+                .resolve("department", &operand, &cand)
+                .unwrap()
+                .contains(new),
+            "an item with no department matched {operand:?}"
+        );
+    }
+    assert!(
+        columns
+            .resolve(
+                "title",
+                &FilterOperand::TextEquals("paper-98".into()),
+                &cand
+            )
+            .unwrap()
+            .contains(new),
+        "the same flush's other columns still carry it"
+    );
+}
+
+/// **The flush writes absence the way the build does**, so a flushed item with no number and a
+/// built one answer a range identically.
+///
+/// The two write paths are separate code — `write_column_values` reads a `ScalarValue` out of a
+/// points file, `extent_values` reads a `WalScalar` out of the buffer — and the failure this pins is
+/// one of them treating every entity as present. That is invisible against the build's own items
+/// (they are in another layer) and shows up only where a range containing zero meets a flushed item
+/// with no value.
+#[test]
+fn a_flushed_item_with_no_number_matches_no_range_either() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-flush-absent");
+    let wal = fx._dir.path().join("wal-flush-absent");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let with_bonus = ingest_and_flush_with(
+        &engine,
+        "has-bonus",
+        WalScalar::Utf8("eng".to_string()),
+        WalScalar::Utf8("xx".to_string()),
+        "paper-90",
+        11,
+        WalScalar::I32(4),
+    ) as u32;
+    let without = ingest_and_flush_with(
+        &engine,
+        "no-bonus",
+        WalScalar::Utf8("eng".to_string()),
+        WalScalar::Utf8("xx".to_string()),
+        "paper-91",
+        12,
+        WalScalar::Null,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let range = |lo: i128, hi: i128| FilterOperand::Range {
+        lo: Some(Endpoint {
+            value: Scalar::Int(lo),
+            inclusive: true,
+        }),
+        hi: Some(Endpoint {
+            value: Scalar::Int(hi),
+            inclusive: true,
+        }),
+    };
+
+    let straddling_zero = generation
+        .filter_columns
+        .resolve("bonus", &range(-100, 100), &cand)
+        .unwrap();
+    assert!(
+        straddling_zero.contains(with_bonus),
+        "the flushed item that carries a bonus lost it"
+    );
+    assert!(
+        !straddling_zero.contains(without),
+        "a flushed item with no bonus matched a range containing zero"
+    );
+
+    // And the same flush's other columns still carry the item — absence in one column is not
+    // absence from the corpus.
+    assert!(
+        generation
+            .filter_columns
+            .resolve(
+                "title",
+                &FilterOperand::TextEquals("paper-91".into()),
+                &cand
+            )
+            .unwrap()
+            .contains(without),
+        "the item disappeared from a column it does carry a value for"
+    );
+}
+
+/// **Several flushes compose**, and each entity answers on its own value.
+///
+/// One extent working is not the property; the property is that layers accumulate. A composition
+/// that kept only the newest extent, or that read the second extent's slots through the first's
+/// presence, passes the single-flush test and fails this one.
+#[test]
+fn several_flushes_compose_and_each_entity_keeps_its_own_value() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-many");
+    let wal = fx._dir.path().join("wal-many");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let first = ingest_and_flush(
+        &engine,
+        "first",
+        WalScalar::Utf8("eng".to_string()),
+        "alpha",
+        1,
+    ) as u32;
+    let second = ingest_and_flush(
+        &engine,
+        "second",
+        WalScalar::Utf8("sales".to_string()),
+        "beta",
+        2,
+    ) as u32;
+    let third = ingest_and_flush(
+        &engine,
+        "third",
+        WalScalar::Utf8("legal".to_string()),
+        "gamma",
+        3,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let columns = &generation.filter_columns;
+    for (entity, key, title, score) in [
+        (first, "eng", "alpha", 1i128),
+        (second, "sales", "beta", 2),
+        (third, "legal", "gamma", 3),
+    ] {
+        let code = AttrLocalId::new(fx.codes[key]);
+        let by_code = columns
+            .resolve("department", &FilterOperand::Equals(code), &cand)
+            .unwrap();
+        assert!(by_code.contains(entity), "{key} lost its own value");
+        for (other, other_key) in [(first, "eng"), (second, "sales"), (third, "legal")] {
+            if other != entity {
+                assert!(
+                    !by_code.contains(other),
+                    "{other_key} matched {key}'s value: the layers are being read against the \
+                     wrong entities"
+                );
+            }
+        }
+        assert!(columns
+            .resolve("title", &FilterOperand::TextEquals(title.into()), &cand)
+            .unwrap()
+            .contains(entity));
+        let at = |v: i128| Endpoint {
+            value: Scalar::Int(v),
+            inclusive: true,
+        };
+        assert!(columns
+            .resolve(
+                "score",
+                &FilterOperand::Range {
+                    lo: Some(at(score)),
+                    hi: Some(at(score))
+                },
+                &cand
+            )
+            .unwrap()
+            .contains(entity));
+    }
+}
+
+/// **The extents survive a restart**, which is what makes them the artefact rather than a cache of
+/// what this process happened to flush.
+///
+/// The reopened engine composes exactly the extents the partition's side-manifest names — so this
+/// also pins that they *are* named there, since a manifest that recorded nothing would reopen with
+/// the build's coverage alone and answer this filter short.
+#[test]
+fn a_restart_composes_the_extents_the_manifest_names() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-restart");
+    let wal = fx._dir.path().join("wal-restart");
+    let new = {
+        let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+        ingest_and_flush(
+            &engine,
+            "post-build",
+            WalScalar::Utf8("legal".to_string()),
+            "paper-97",
+            11,
+        ) as u32
+    };
+
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+    let (generation, cand) = live_candidate(&engine);
+    assert!(cand.contains(new), "the flushed entity is visible again");
+    let legal = AttrLocalId::new(fx.codes["legal"]);
+    assert!(generation
+        .filter_columns
+        .resolve("department", &FilterOperand::Equals(legal), &cand)
+        .unwrap()
+        .contains(new));
+    assert!(generation
+        .filter_columns
+        .resolve(
+            "title",
+            &FilterOperand::TextEquals("paper-97".into()),
+            &cand
+        )
+        .unwrap()
+        .contains(new));
+}
+
+/// **A named extent that is not there refuses to open**, rather than degrading to "those entities
+/// carry no value".
+///
+/// That degradation is the failure mode this whole composition replaced a refusal to avoid: a
+/// short answer is indistinguishable from a correct one. The manifest names and digests both files,
+/// so a missing one means the bundle is not what its manifest says — and the presence bitmap is the
+/// half a reader could most easily be tempted to treat as optional, since a *base* column's missing
+/// presence file legitimately means positional addressing.
+///
+/// Asserted against the reader rather than against `Engine::open`, deliberately: a bundle whose
+/// newest side-manifest names a missing file is *stepped past* by the loader (contracts §2.3), so
+/// an engine opening over one answers from the previous manifest and never reaches this rule. The
+/// rule still has to hold, because the manifest a loader does select is one every file of which it
+/// believes to be there.
+#[test]
+fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-missing");
+    let wal = fx._dir.path().join("wal-missing");
+    {
+        let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+        ingest_and_flush(
+            &engine,
+            "post-build",
+            WalScalar::Utf8("eng".to_string()),
+            "paper-96",
+            5,
+        );
+    }
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fx.bundle.join("CURRENT")).unwrap()).unwrap();
+    let prefix = fx.bundle.join(current["prefix"].as_str().unwrap());
+    let opened = open_bundle(&fx.bundle).unwrap();
+    let phash = opened.partitions.keys().next().unwrap().clone();
+    let extents = opened.partitions[&phash].manifest.attr_extents.clone();
+    assert!(
+        !extents.is_empty(),
+        "the flush recorded its extents in the side-manifest"
+    );
+    let open = |extents: &[mosaica_store::manifest::AttrExtent]| {
+        FilterColumns::open(
+            &prefix,
+            &phash,
+            &opened.manifest,
+            mosaica_engine::filter::PartitionExtents {
+                attrs: extents,
+                ..Default::default()
+            },
+            &[],
+            true,
+        )
+    };
+    assert!(open(&extents).is_ok(), "the extents as written compose");
+
+    for named in [&extents[0].values, &extents[0].presence] {
+        let path = prefix.join(named);
+        let held = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            open(&extents).is_err(),
+            "an extent the manifest names but that is absent ({named}) must refuse, never read as \
+             'those entities carry no value'"
+        );
+        std::fs::write(&path, held).unwrap();
+    }
+    assert!(open(&extents).is_ok(), "restored, it composes again");
+}
+
+/// An extent as a publication hands one over. Only the column name, the values path and the two
+/// readers are composed from; the rest of the entry is what the manifest carries.
+fn opened(
+    column: &str,
+    values_rel: &str,
+    values: Arc<mosaica_filter::ValueColumn>,
+    dict: Option<Arc<mosaica_filter::SortedDict>>,
+) -> OpenedExtent {
+    OpenedExtent {
+        extent: mosaica_store::manifest::AttrExtent {
+            column: column.to_string(),
+            view: None,
+            incarnation: None,
+            values: values_rel.to_string(),
+            presence: format!("{values_rel}.roaring"),
+            dict: dict.is_some().then(|| format!("{values_rel}.dict")),
+            postings: None,
+            offsets: None,
+        },
+        values,
+        dict,
+    }
+}
+
+/// A keyword extent built in this process: the ordinal column and the dictionary that numbers it.
+///
+/// The two are returned together because they are one layer. An ordinal is a position in **this**
+/// dictionary and means nothing against any other (records §4.3), so a test that handed `compose`
+/// the values without the dictionary would not be testing a shorter version of the same thing — it
+/// would be testing a layer that has no reading, which is what `compose` refuses.
+fn keyword_extent(
+    entities: &[u32],
+    values: &[String],
+) -> (
+    Arc<mosaica_filter::ValueColumn>,
+    Arc<mosaica_filter::SortedDict>,
+) {
+    let mut keys: Vec<&str> = values.iter().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut bytes = Vec::new();
+    let mut writer = mosaica_filter::SortedDictWriter::new(&mut bytes).expect("a writer opens");
+    for key in &keys {
+        writer.push(key).expect("keys ascend strictly");
+    }
+    writer.finish().expect("the dictionary closes");
+    let ordinals: Vec<u32> = values
+        .iter()
+        .map(|v| keys.binary_search(&v.as_str()).expect("built from these") as u32)
+        .collect();
+    let mut presence = Bitmap::new();
+    for e in entities {
+        presence.add(*e);
+    }
+    (
+        Arc::new(
+            mosaica_filter::ValueColumn::partial(
+                mosaica_filter::Codes::U32(ordinals.into()),
+                presence,
+            )
+            .unwrap(),
+        ),
+        Arc::new(mosaica_filter::SortedDict::from_vec(bytes).expect("the dictionary reads back")),
+    )
+}
+
+/// **Two layers may not claim one entity, and that is checked rather than reasoned about.**
+///
+/// Entity ids are permanent and issued from the high-water (**I9**), so an extent can only add ids
+/// no earlier layer holds — the overlap is unreachable through the write path. What makes it worth
+/// a check is the symptom if I9 ever failed: the entity would carry two values at once and a filter
+/// naming either would return it, with nothing anywhere to notice.
+#[test]
+fn an_extent_overlapping_an_earlier_layer_is_refused() {
+    let fx = fixture();
+    let (overlapping, dict) = keyword_extent(&[0], &["collision".to_string()]);
+    let err = fx
+        .columns
+        .with_extents(
+            &[opened(
+                "title",
+                "attrs/title/extents/overlapping.arrow",
+                overlapping,
+                Some(dict),
+            )],
+            &[],
+            &[],
+            &[],
+        )
+        .expect_err("an extent claiming entity 0 overlaps the base column");
+    assert!(
+        matches!(&err, ComposeError::Overlap { column } if column == "title"),
+        "{err:?}"
+    );
+
+    // And an extent for a column the schema does not declare filterable is refused too: it would
+    // otherwise be silently dropped, which is a value column quietly going missing.
+    let (stray, stray_dict) = keyword_extent(&[N as u32 + 1], &["stray".to_string()]);
+    assert!(fx
+        .columns
+        .with_extents(
+            &[opened(
+                "no_such_column",
+                "attrs/no_such_column/extents/stray.arrow",
+                stray,
+                Some(stray_dict),
+            )],
+            &[],
+            &[],
+            &[]
+        )
+        .is_err());
+}
+
+/// **A row longer than the schema is refused, not a panic; a shorter one is padded.**
+///
+/// The commit window indexes `row.scalars` positionally against `declared_scalars` to find a
+/// category key's vocabulary. A row longer than the schema would pair values with columns that
+/// do not exist and is refused before the submit. A shorter row is a batch decoded against the
+/// schema before a column was declared at a running service, or one that omits a column at the
+/// tail (`ingest.md` §7.1): it is accepted, and the close pads it with each missing column's
+/// absence, so indexing by declared position never reaches past the row.
+#[test]
+fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-arity");
+    let wal = fx._dir.path().join("wal-arity");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let long = UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        // The schema declares seven columns, the fixture's `id` last.
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("xx".to_string()),
+            WalScalar::Utf8("paper-97".to_string()),
+            WalScalar::I32(43),
+            WalScalar::Null,
+            WalScalar::Utf8("shared p97".to_string()),
+            WalScalar::Null,
+            WalScalar::I32(1),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let err = engine
+        .ingest_rows(vec![long], "batch-long".to_string(), [1u8; 32])
+        .expect_err("a long row is refused");
+    assert!(
+        matches!(
+            err,
+            mosaica_engine::AcceptError::ScalarArity {
+                expected: 7,
+                got: 8,
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    let short = UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: vec![WalScalar::Utf8("eng".to_string())],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    assert!(
+        engine
+            .ingest_rows(vec![short], "batch-short".to_string(), [3u8; 32])
+            .is_ok(),
+        "a short row is padded at the close, never indexed past its end"
+    );
+
+    // The engine is still usable — a refusal before the submit acks nothing, burns no entity id
+    // (I9) and leaves the executor running.
+    let good = UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("xx".to_string()),
+            WalScalar::Utf8("paper-98".to_string()),
+            WalScalar::I32(43),
+            // A value for every declared column, absence included: `bonus` is nullable and this
+            // row carries none, which is a complete row rather than a short one.
+            WalScalar::Null,
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    assert!(engine
+        .ingest_rows(vec![good], "batch-good".to_string(), [2u8; 32])
+        .is_ok());
+}
+
+/// **A filtered viewport returns only matching marks — end to end, through the engine.**
+///
+/// This is the first assertion that the filter reaches the *served* answer rather than an
+/// entity-space bitmap a test built itself. The expected set comes from the fixture's inputs, and
+/// the comparison is on `tessera_id` rather than row, because the served order is the engine's.
+/// **A filtered viewport composes the fragment brought forward, not the session's own.**
+///
+/// A session's fragment is fixed at authorise, and composition treats every entity below the live
+/// watermark as fragment-resident — so composing a filter against the session's own fragment omits
+/// everything flushed since it authorised. That failure is *narrowing*, which **I12** permits, and
+/// that is exactly what makes it dangerous: the response is a correct-looking subset with no error
+/// anywhere. The unfiltered path has always brought the fragment forward; this pins the filtered
+/// one to the same rule.
+///
+/// Asserted by agreement between two sessions rather than by a count alone: one authorised before
+/// the flush and one after must answer the same filtered viewport identically, which is the
+/// property, and the count then says the flushed entity is genuinely in both.
+#[test]
+fn a_filtered_viewport_sees_entities_flushed_since_the_session_authorised() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-vp-stale");
+    let wal = fx._dir.path().join("wal-vp-stale");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    // Authorised *before* the flush: this session's own fragment cannot contain the new entity.
+    let before = engine.authorise(&full_coverage_credential()).unwrap();
+
+    ingest_and_flush(
+        &engine,
+        "post-build-vp",
+        WalScalar::Utf8("eng".to_string()),
+        "paper-99",
+        42,
+    );
+
+    // Authorised after it, so its own fragment already holds the entity — the control.
+    let after = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let eng = FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"]));
+    let filtered = |session: &mosaica_engine::Session| {
+        engine
+            .viewport(
+                session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                    .filter(leaf("department", eng.clone())),
+            )
+            .expect("a filtered viewport answers")
+    };
+
+    let stale = filtered(&before);
+    let fresh = filtered(&after);
+
+    let built = (0..N).filter(|&e| department_of(e) == Some("eng")).count() as u64;
+    assert!(
+        built > 0,
+        "the fixture has matching entities before the flush"
+    );
+    assert_eq!(
+        fresh.points.len() as u64,
+        built + 1,
+        "the flushed entity carries `eng` and is served to a session that post-dates it"
+    );
+    assert_eq!(
+        stale.points.len(),
+        fresh.points.len(),
+        "a session authorised before the flush sees the same filtered set as one authorised after"
+    );
+
+    let stale_ids: std::collections::HashSet<u64> =
+        stale.points.tessera_ids.iter().copied().collect();
+    let fresh_ids: std::collections::HashSet<u64> =
+        fresh.points.tessera_ids.iter().copied().collect();
+    assert_eq!(
+        stale_ids, fresh_ids,
+        "and the same identities, not merely as many"
+    );
+}
+
+#[test]
+fn a_filtered_viewport_serves_only_matching_marks() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-vp");
+    let wal = fx._dir.path().join("wal-vp");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let unfiltered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000),
+        )
+        .expect("an unfiltered viewport answers");
+
+    let eng = FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"]));
+    let filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(leaf("department", eng)),
+        )
+        .expect("a filtered viewport answers");
+
+    let expected_count = (0..N).filter(|&e| department_of(e) == Some("eng")).count() as u64;
+    assert!(expected_count > 0 && expected_count < N, "a real subset");
+
+    assert_eq!(
+        filtered.points.len() as u64,
+        expected_count,
+        "the filtered viewport draws exactly the matching items"
+    );
+    assert_eq!(unfiltered.points.len() as u64, N);
+
+    // Every filtered mark is one the unfiltered request also served — a filter narrows and never
+    // widens (I12), asserted on the served identities rather than on counts alone.
+    let unfiltered_ids: std::collections::HashSet<u64> =
+        unfiltered.points.tessera_ids.iter().copied().collect();
+    for id in &filtered.points.tessera_ids {
+        assert!(unfiltered_ids.contains(id));
+    }
+}
+
+/// §8.5's match-layer count rule: a filtered request serves every match up to the cap, and θ's
+/// threshold clause never thins it. Every other filtered test in this file saturates θ by fixture
+/// (`common::config`'s doc says why), so this is the one place the interaction is genuinely live:
+/// without the rule, a filtered tile is pushed through the *unfiltered* θ odds, and a filter that
+/// narrows a tile a hundredfold draws the `k_min` floor instead of its matches — the map thins in
+/// proportion to the filter's selectivity, silently.
+#[test]
+fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-vp-theta");
+    let wal = fx._dir.path().join("wal-vp-theta");
+    // θ live and small, unlike every other engine these tests open.
+    let live_theta = mosaica_engine::EngineConfig {
+        theta_target_marks: 4,
+        ..config()
+    };
+    let engine = mosaica_engine::Engine::open(
+        &fx.bundle,
+        &cache,
+        &wal,
+        live_theta,
+    )
+    .expect("engine should open against a freshly built bundle");
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // The control: the threshold clause genuinely thins the unfiltered map under this config. If
+    // this stops holding, θ is no longer live here and the assertions below prove nothing.
+    let unfiltered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000),
+        )
+        .expect("an unfiltered viewport answers");
+    assert!(
+        (unfiltered.points.len() as u64) < N,
+        "θ must be live for this test: {} of {N} served unfiltered",
+        unfiltered.points.len()
+    );
+
+    let matches = (0..N).filter(|&e| department_of(e) == Some("eng")).count() as u64;
+    let eng = FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"]));
+    let filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                .filter(leaf("department", eng.clone())),
+        )
+        .expect("a filtered viewport answers");
+    assert_eq!(
+        filtered.points.len() as u64,
+        matches,
+        "a filtered request serves its matches in full below the cap, θ notwithstanding"
+    );
+    for tile in &filtered.tiles {
+        assert_eq!(
+            tile.served, tile.matched,
+            "below the cap, every matched row in a tile is served"
+        );
+    }
+
+    // The cap still caps: a request `k` below the match count serves exactly `k`, and the
+    // truncated set is the `tessera_id` prefix of the full one — the nesting argument's
+    // client-truncation clause holds for the match layer too. One tile at zoom 0, so the
+    // response's point order is the tile's ascending-id order and a slice comparison is exact.
+    let capped = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 5).filter(leaf("department", eng)),
+        )
+        .expect("a capped filtered viewport answers");
+    assert_eq!(
+        capped.points.len(),
+        5,
+        "the cap governs when matches exceed it"
+    );
+    assert_eq!(
+        capped.points.tessera_ids,
+        filtered.points.tessera_ids[..5],
+        "the capped served set is the id-prefix of the uncapped one"
+    );
+}
+
+/// A viewport far smaller than the filter's result crosses into row space by **testing its own
+/// rows** rather than projecting the whole result, and the two routes agree.
+///
+/// This is the end-to-end half of `viewport::tests::filter_routes_agree_over_the_domain`, which
+/// asserts the same equality directly over a 40,000-row domain. What it adds is the wiring: that
+/// the route is actually reached through a served request, that the restricted bitmap it produces
+/// survives every count and selection the request goes on to take (the debug assertion in
+/// `EffectiveMask` fires here if a range outside the tile set is ever consulted under a filter),
+/// and that the answer is the same one the projecting route gives for the same window.
+///
+/// The window is chosen to sit past `PER_TILE_CROSSING_RATIO`, and the route counters assert it
+/// landed there rather than leaving the test to pass on the route it was meant to exercise.
+///
+/// **The predicate is on `bonus`, an entity-only column, and that is load-bearing.** This test
+/// drove `department` until decision 0068 admitted the row-space operand, and `score` until 0064's
+/// render half made a number rendered-and-filtered too: a column affording the row route takes it
+/// for a window this narrow, so the request stops crossing at all and the counters go to zero. The
+/// crossing is still the only route an entity-only column has, and that is what this test exists to
+/// cover; the row route has its own tests below.
+#[test]
+fn a_narrow_viewport_over_a_broad_filter_tests_its_own_rows() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-pertile");
+    let wal = fx._dir.path().join("wal-pertile");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    // Every bonus that exists lies in `[-10, 10]`, so this range is "carries a bonus" — two items
+    // in three of the 60, against a window of ~11 rows: broad enough to clear the ratio, and still
+    // a genuine narrowing, since the third that carries none matches no range at all.
+    let any_bonus = leaf(
+        "bonus",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(-10),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(10),
+                inclusive: true,
+            }),
+        },
+    );
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let zoom = 8;
+
+    let unfiltered_narrow = engine
+        .viewport(&session, ViewportRequest::new("s0", zoom, narrow, 10_000))
+        .expect("the narrow window answers unfiltered");
+
+    let before = engine.filter_crossing_routes();
+    let filtered_narrow = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", zoom, narrow, 10_000).filter(any_bonus.clone()),
+        )
+        .expect("the narrow window answers filtered");
+    let after = engine.filter_crossing_routes();
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (0, 1),
+        "this request was supposed to take the per-tile route; the window or the ratio moved"
+    );
+
+    // The same filter over the whole extent is far below the ratio and projects — so this is the
+    // other route's answer to the same question, computed independently of the one under test.
+    let before = engine.filter_crossing_routes();
+    let filtered_full = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(any_bonus),
+        )
+        .expect("the full extent answers filtered");
+    let after = engine.filter_crossing_routes();
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (1, 0),
+        "the control request was supposed to project"
+    );
+
+    let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+        out.points.tessera_ids.iter().copied().collect()
+    };
+    let (narrow_all, narrow_matched, full_matched) = (
+        ids(&unfiltered_narrow),
+        ids(&filtered_narrow),
+        ids(&filtered_full),
+    );
+
+    assert_eq!(
+        narrow_matched,
+        full_matched.intersection(&narrow_all).copied().collect(),
+        "the per-tile route's marks differ from the projecting route's over the same window"
+    );
+    // Non-degenerate in both directions: the window holds items, and the filter removed some of
+    // them. Without this the equality above would hold over two empty sets.
+    assert!(!narrow_matched.is_empty(), "the window matched nothing");
+    assert!(
+        narrow_matched.len() < narrow_all.len(),
+        "the filter removed nothing from this window, so the routes agreeing proves little"
+    );
+
+    // And the per-tile bitmap is a legitimate answer for the *counts* too, not just the marks: a
+    // restricted bitmap that under-reported would show up here first, since `matched` is a count
+    // over the whole tile rather than over the served prefix.
+    let matched_total: u64 = filtered_narrow.tiles.iter().map(|t| t.matched).sum();
+    assert_eq!(
+        matched_total,
+        narrow_matched.len() as u64,
+        "Σ matched over tiles disagrees with the marks the same request served"
+    );
+    let visible_total: u64 = filtered_narrow.tiles.iter().map(|t| t.visible).sum();
+    assert_eq!(
+        visible_total,
+        narrow_all.len() as u64,
+        "a filter changed `visible`, which is the composed count and must not move (§7.1)"
+    );
+}
+
+/// **The selection threshold stays anchored on the unfiltered total** (§8.4, I12). A filter may
+/// move the frontier up, never down — so the anchor a filtered request uses is the same one the
+/// unfiltered request uses, and a viewer typing does not coarsen their own map.
+#[test]
+fn a_filter_does_not_move_the_threshold_anchor() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-theta");
+    let wal = fx._dir.path().join("wal-theta");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let unfiltered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000),
+        )
+        .unwrap();
+    let filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            )),
+        )
+        .unwrap();
+
+    let sum = |v: &[mosaica_engine::TileCount], f: fn(&mosaica_engine::TileCount) -> u64| -> u64 {
+        v.iter().map(f).sum()
+    };
+    // `visible` is the composed count and must not move with the filter — that is what keeps θ's
+    // anchor unfiltered, and with it I12's "a filter moves the frontier up, never down".
+    assert_eq!(
+        sum(&filtered.tiles, |t| t.visible),
+        sum(&unfiltered.tiles, |t| t.visible),
+        "`visible` must not move with the filter"
+    );
+    // `matched` is what does move, and it is the filtered figure.
+    assert_eq!(
+        sum(&filtered.tiles, |t| t.matched),
+        (0..N).filter(|&e| department_of(e) == Some("eng")).count() as u64
+    );
+    assert_eq!(
+        sum(&unfiltered.tiles, |t| t.matched),
+        sum(&unfiltered.tiles, |t| t.visible),
+        "unfiltered, matched == visible"
+    );
+}
+
+/// An undeclared column refuses the request rather than serving an empty viewport — an empty
+/// answer is a real one, and must not stand in for one that could not be computed.
+#[test]
+fn a_viewport_naming_an_undeclared_column_is_refused() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-bad");
+    let wal = fx._dir.path().join("wal-bad");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let err = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(leaf(
+                "no_such_column",
+                FilterOperand::TextPrefix("x".into()),
+            )),
+        )
+        .expect_err("an undeclared column is refused");
+    assert!(
+        format!("{err}").contains("not declared filterable"),
+        "{err}"
+    );
+}
+
+/// **Disjunction across columns** — the case `in` cannot express, since `in` only ORs values within
+/// one column. Checked against the corpus, not against the index.
+#[test]
+fn any_of_unions_across_columns() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let expr = FilterExpr::AnyOf(vec![
+        leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["legal"])),
+        ),
+        leaf("title", FilterOperand::TextPrefix("paper-1".into())),
+    ]);
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("legal")
+            || title_of(e).starts_with("paper-1"))
+    );
+    // A union of subsets of the candidate is still a subset — I12 by shape rather than by check.
+    assert!(got.andnot(&cand).is_empty());
+}
+
+/// **`none_of` means *carries a value in this column, and none of these matches it*** — not the
+/// complement of the candidate.
+///
+/// The distinction is the whole of why a negation is expressible at all, and it is asserted here
+/// against a column that genuinely has absences: an item with no department must be missing from
+/// `none_of: [eng]`, where a complement would return it.
+#[test]
+fn none_of_requires_a_value_rather_than_taking_the_complement() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let expr = FilterExpr::NoneOf(vec![leaf(
+        "department",
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+    )]);
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| department_of(e).is_some()
+            && department_of(e) != Some("eng")),
+        "none_of returned items carrying no department, which is the complement rather than the \
+         negation"
+    );
+    // Non-degenerate in both directions: the corpus has items with no department at all, and the
+    // negation really did exclude something.
+    assert!((0..N).any(|e| department_of(e).is_none()));
+    assert!((0..N).any(|e| department_of(e) == Some("eng")));
+    // I12 by shape: a negation is still a subset of the candidate.
+    assert!(got.andnot(&cand).is_empty());
+}
+
+/// **The positivity property, asserted rather than argued** (filter-index §5).
+///
+/// Every "this failure degrades safely under I12" argument in the design holds because each operand
+/// is positive: an entity whose value is unreachable matches nothing, so a lost value under-reports
+/// and under-reporting narrows. A complement-style negation inverts that — the same failures would
+/// *widen*.
+///
+/// The unreachable entity here is a **buffered** one: accepted and acked, in the candidate, and in
+/// no layer until its flush (filter-index §5 rules on exactly this lag). Under a complement it
+/// would match every `none_of`; under the built semantics it matches none.
+#[test]
+fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-positivity");
+    let wal = fx._dir.path().join("wal-positivity");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    // Accepted and acked, deliberately *not* flushed — so it is in the candidate and in no layer.
+    let row = UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("xx".to_string()),
+            WalScalar::Utf8("paper-77".to_string()),
+            WalScalar::I32(3),
+            WalScalar::Null,
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let buffered = engine
+        .ingest_rows(vec![row], "batch-buffered".to_string(), [9u8; 32])
+        .expect("ingest is accepted")[0]
+        .raw() as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    assert!(
+        cand.contains(buffered),
+        "the buffered entity must be in the candidate, or this proves nothing"
+    );
+
+    for expr in [
+        FilterExpr::NoneOf(vec![leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["legal"])),
+        )]),
+        FilterExpr::NoneOf(vec![leaf("title", FilterOperand::TextPrefix("zzz".into()))]),
+    ] {
+        let got = generation.filter_columns.evaluate(&expr, &cand).unwrap();
+        assert!(
+            !got.contains(buffered),
+            "an entity with no reachable value matched a negation — the failure arithmetic has \
+             inverted and every 'degrades safely under I12' argument with it"
+        );
+    }
+}
+
+/// **Decision 0062's C11 existence oracle, closed by construction.**
+///
+/// The attack: `none_of: [every value I was offered]` returning a non-empty set would prove there
+/// exist values of a `derived` category the principal was not shown. It cannot, and not because
+/// of an extra intersection — because evaluation happens inside the candidate, so an entity in the
+/// candidate carrying value *v* is itself the witness that makes *v* visible under C11's
+/// derivation. Every value reachable in the result was therefore offered.
+///
+/// Asserted with a **narrow** principal, since a full-coverage one is offered everything and the
+/// oracle has nothing to reveal to it.
+#[test]
+fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
+    let fx = fixture();
+    let (engine, cand) = candidate_for(&fx, &subset_credential());
+    let session = engine.authorise(&subset_credential()).unwrap();
+    let generation = engine.generation();
+
+    // The vocabulary this principal is actually offered, derived the way `/v1/categories` derives
+    // it — membership against its own composed candidate.
+    let membership = generation
+        .filter_columns
+        .category_membership("department", &cand)
+        .expect("a `derived` category carries membership postings");
+    let offered: Vec<AttrLocalId> = fx
+        .codes
+        .values()
+        .filter(|c| membership.carries(**c).unwrap())
+        .map(|c| AttrLocalId::new(*c))
+        .collect();
+    // **The fixture must withhold a value the corpus actually carries**, or the oracle has nothing
+    // to reveal and an empty result proves nothing. `legal` is that value: the subset principal
+    // sees `e % 3 == 0`, and every item carrying `legal` falls outside it.
+    assert!(!offered.is_empty(), "this principal is offered nothing");
+    let withheld: Vec<&str> = ["eng", "sales", "legal"]
+        .into_iter()
+        .filter(|k| !membership.carries(fx.codes[*k]).unwrap())
+        .collect();
+    assert_eq!(
+        withheld,
+        vec!["legal"],
+        "the fixture must withhold a value some item genuinely carries"
+    );
+    assert!(
+        (0..N).any(|e| department_of(e) == Some("legal")),
+        "'legal' must be carried by something, or withholding it discloses nothing"
+    );
+
+    let expr = FilterExpr::NoneOf(vec![leaf("department", FilterOperand::In(offered.clone()))]);
+    let got = generation.filter_columns.evaluate(&expr, &cand).unwrap();
+
+    assert!(
+        got.is_empty(),
+        "none_of over every offered value returned {} entities, which proves to this principal \
+         that values it was not shown exist (C11)",
+        got.cardinality()
+    );
+    let _ = session;
+}
+
+/// **A value's count is what a filter on that value returns** under the same candidate, the two
+/// being different code over the same postings and the same extents. The fixture has extents, so
+/// a count that multiplied or dropped a half would disagree.
+///
+/// **Mutations this kills:** counting extent codes as a set rather than per entity; counting the
+/// posting whole instead of against the candidate; adding a half twice.
+#[test]
+fn a_values_count_is_what_a_filter_on_that_value_returns() {
+    let fx = fixture();
+    let (engine, cand) = candidate_for(&fx, &subset_credential());
+    let generation = engine.generation();
+    let membership = generation
+        .filter_columns
+        .category_membership("department", &cand)
+        .expect("a `derived` category carries membership postings");
+    let codes: Vec<u32> = fx.codes.values().copied().collect();
+    let counts = generation
+        .filter_columns
+        .category_counts(
+            "department",
+            &cand,
+            mosaica_engine::filter::CountCodes::All(&|visit| codes.iter().for_each(|&c| visit(c))),
+            &|_| {},
+        )
+        .expect("a declared category counts");
+
+    for (key, code) in &fx.codes {
+        let resolved = generation
+            .filter_columns
+            .resolve(
+                "department",
+                &mosaica_engine::filter::FilterOperand::Equals(AttrLocalId::new(*code)),
+                &cand,
+            )
+            .expect("a declared category resolves");
+        assert_eq!(counts.get(*code), resolved.cardinality(), "{key} (code {code})");
+        // And the boolean is the count's own emptiness, so the two gates cannot disagree.
+        assert_eq!(
+            membership.carries(*code).unwrap(),
+            resolved.cardinality() > 0,
+            "{key}: carries and count disagree"
+        );
+    }
+}
+
+/// A `none_of` naming two columns is refused, because it would have to pick which column's presence
+/// to require and either choice answers a question the caller did not ask. `all_of` of two
+/// single-column negations is the same set and says which.
+#[test]
+fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let spanning = FilterExpr::NoneOf(vec![
+        leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        ),
+        leaf("title", FilterOperand::TextPrefix("paper-1".into())),
+    ]);
+    let err = fx
+        .columns
+        .evaluate(&spanning, &cand)
+        .expect_err("a negation over two columns is refused");
+    assert!(
+        matches!(&err, FilterError::NegationSpansColumns { columns }
+            if columns == &["department".to_string(), "title".to_string()]),
+        "{err:?}"
+    );
+
+    // And the composition it points at is accepted, and is the intersection of the two negations.
+    let composed = FilterExpr::AllOf(vec![
+        FilterExpr::NoneOf(vec![leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        )]),
+        FilterExpr::NoneOf(vec![leaf(
+            "title",
+            FilterOperand::TextPrefix("paper-1".into()),
+        )]),
+    ]);
+    let got = fx.columns.evaluate(&composed, &cand).unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| department_of(e).is_some()
+            && department_of(e) != Some("eng")
+            && !title_of(e).starts_with("paper-1"))
+    );
+
+    // An empty negation names no column at all, and is refused for the same reason.
+    assert!(fx
+        .columns
+        .evaluate(&FilterExpr::NoneOf(vec![]), &cand)
+        .is_err());
+}
+
+/// A negation nests inside the other combinators and counts against the same depth budget.
+#[test]
+fn a_negation_nests_and_counts_towards_the_depth_limit() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let expr = FilterExpr::AnyOf(vec![
+        FilterExpr::NoneOf(vec![leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        )]),
+        leaf("title", FilterOperand::TextEquals("paper-00".into())),
+    ]);
+    assert_eq!(expr.depth(), 3);
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| (department_of(e).is_some()
+            && department_of(e) != Some("eng"))
+            || title_of(e) == "paper-00")
+    );
+}
+
+/// Nesting: a conjunction one of whose clauses is a disjunction.
+#[test]
+fn a_conjunction_may_contain_a_disjunction() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let expr = FilterExpr::AllOf(vec![
+        leaf("title", FilterOperand::TextContains("-1".into())),
+        FilterExpr::AnyOf(vec![
+            leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            ),
+            leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["legal"])),
+            ),
+        ]),
+    ]);
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| title_of(e).contains("-1")
+            && matches!(department_of(e), Some("eng") | Some("legal")))
+    );
+}
+
+/// The two empty cases are the identities of their operators, and they differ. `all_of: []` is the
+/// whole candidate — nothing was asked for, so nothing is excluded. `any_of: []` is empty — items
+/// matching one of no alternatives. Stated because the asymmetry looks like a bug on sight.
+#[test]
+fn the_empty_combinators_are_their_operators_identities() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &subset_credential());
+
+    assert_eq!(
+        fx.columns
+            .evaluate(&FilterExpr::AllOf(vec![]), &cand)
+            .unwrap()
+            .cardinality(),
+        cand.cardinality()
+    );
+    assert!(fx
+        .columns
+        .evaluate(&FilterExpr::AnyOf(vec![]), &cand)
+        .unwrap()
+        .is_empty());
+}
+
+/// Nesting is bounded and **refused rather than flattened** — a silently flattened expression
+/// answers a different question. Unbounded depth is unbounded per-request work from one
+/// authenticated call, the argument §7.3's sub-cell budget already makes.
+#[test]
+fn an_over_deep_expression_is_refused() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let mut expr = leaf("title", FilterOperand::TextPrefix("p".into()));
+    for _ in 0..8 {
+        expr = FilterExpr::AllOf(vec![expr]);
+    }
+    let err = fx.columns.evaluate(&expr, &cand).expect_err("too deep");
+    assert!(
+        matches!(err, FilterError::TooDeep { depth, max } if depth == 9 && max == MAX_FILTER_DEPTH),
+        "{err:?}"
+    );
+}
+
+/// A disjunction whose branches a principal cannot see is empty, not an error — and costs the same
+/// as one they can, since every branch is evaluated under their own candidate.
+#[test]
+fn a_disjunction_stays_inside_a_narrow_principals_mask() {
+    let fx = fixture();
+    let (_engine, narrow) = candidate_for(&fx, &subset_credential());
+
+    let expr = FilterExpr::AnyOf(vec![
+        leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        ),
+        leaf(
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["sales"])),
+        ),
+    ]);
+    let got = fx.columns.evaluate(&expr, &narrow).unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[SUBSET_TERM], |e| matches!(
+            department_of(e),
+            Some("eng") | Some("sales")
+        ))
+    );
+    assert!(got.andnot(&narrow).is_empty());
+}
+
+/// **A range is a scan, and it agrees with the corpus under a real mask.** No level tree, no bit
+/// slicing, no zone map — `filter-index.md` §3 declines all three, zone maps outright because their
+/// block skip consults unmasked extrema.
+#[test]
+fn a_numeric_range_agrees_with_the_corpus() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &subset_credential());
+
+    // [40, 70)
+    let expr = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(40),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(70),
+                inclusive: false,
+            }),
+        },
+    );
+    let got = fx.columns.evaluate(&expr, &cand).unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[SUBSET_TERM], |e| (40..70).contains(&score_of(e)))
+    );
+    assert!(got.andnot(&cand).is_empty());
+}
+
+/// **An item with no value for a numeric column matches no range — including one containing zero.**
+///
+/// The bug this pins: absence was stored as `0` and marked present, so "score between −10 and 10"
+/// returned every item that never had a score. It is a wrong answer rather than a missing feature,
+/// which is why it is asserted against a range straddling zero rather than any range at all —
+/// against `[1, 10]` the broken and the fixed build agree, and the test would pass on both.
+///
+/// [Decision 0064]: absence is the presence bitmap beside the column, which is the same mechanism
+/// the other two families already use.
+///
+/// [Decision 0064]: ../../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md
+#[test]
+fn an_item_with_no_number_matches_no_range_not_even_one_containing_zero() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    let straddling_zero = leaf(
+        "bonus",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(-10),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(10),
+                inclusive: true,
+            }),
+        },
+    );
+    let got = fx.columns.evaluate(&straddling_zero, &cand).unwrap();
+
+    // Every item that carries a bonus is inside [-10, 10] by construction, so this range is
+    // "everything with a value" — and the absent third must be missing from it.
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &[ALL_TERM], |e| bonus_of(e).is_some()),
+        "an item with no bonus matched a range containing zero"
+    );
+    // Non-degenerate: the fixture really does have absences, and really does have values that
+    // would land in the range if they were read.
+    assert!((0..N).any(|e| bonus_of(e).is_none()), "no absences to test");
+    assert!(
+        (0..N).any(|e| bonus_of(e) == Some(0)),
+        "no genuine zero to distinguish absence from"
+    );
+    // And a genuine zero still matches — the fix must not have thrown out the value with the
+    // absence, which an over-eager presence rule would.
+    let zero_only = leaf(
+        "bonus",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(0),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(0),
+                inclusive: true,
+            }),
+        },
+    );
+    assert_eq!(
+        as_vec(&fx.columns.evaluate(&zero_only, &cand).unwrap()),
+        expected(&fx, &[ALL_TERM], |e| bonus_of(e) == Some(0)),
+        "a real zero stopped matching"
+    );
+}
+
+/// The presence bitmap and the value slots must stay in step: the *k*-th set bit's value is at slot
+/// *k*, so an absent entity occupying a slot would shift every later item's number onto its
+/// neighbour — every value present, none against its own identity, and no error anywhere.
+///
+/// Asserted by reading every entity's value back individually rather than through a predicate,
+/// because a uniform shift is exactly what a predicate over a whole column can miss.
+#[test]
+fn every_entity_reads_back_its_own_number_across_the_absences() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    for source in 0..N {
+        let Some(&entity) = fx.entity_of.get(&source) else {
+            continue;
+        };
+        let entity = entity as u32;
+        if !cand.contains(entity) {
+            continue;
+        }
+        let want = bonus_of(source);
+        // A one-value range is the narrowest question the numeric surface can ask.
+        let hit = |v: i32| {
+            let expr = leaf(
+                "bonus",
+                FilterOperand::Range {
+                    lo: Some(Endpoint {
+                        value: Scalar::Int(v as i128),
+                        inclusive: true,
+                    }),
+                    hi: Some(Endpoint {
+                        value: Scalar::Int(v as i128),
+                        inclusive: true,
+                    }),
+                },
+            );
+            fx.columns.evaluate(&expr, &cand).unwrap().contains(entity)
+        };
+        match want {
+            Some(v) => assert!(
+                hit(v),
+                "source {source} (entity {entity}) lost its bonus {v}"
+            ),
+            None => {
+                for v in -10..=10 {
+                    assert!(
+                        !hit(v),
+                        "source {source} (entity {entity}) has no bonus but matched {v}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// An open side is a bound on one end only.
+#[test]
+fn an_open_ended_range_bounds_one_side() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+    let expr = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(90),
+                inclusive: true,
+            }),
+            hi: None,
+        },
+    );
+    assert_eq!(
+        as_vec(&fx.columns.evaluate(&expr, &cand).unwrap()),
+        expected(&fx, &[ALL_TERM], |e| score_of(e) >= 90)
+    );
+}
+
+/// A range composes with the other families by the same combinators.
+#[test]
+fn a_range_composes_with_a_category_and_a_string() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+    let expr = FilterExpr::AllOf(vec![
+        leaf(
+            "score",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(50),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+        ),
+        FilterExpr::AnyOf(vec![
+            leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            ),
+            leaf("title", FilterOperand::TextPrefix("paper-1".into())),
+        ]),
+    ]);
+    assert_eq!(
+        as_vec(&fx.columns.evaluate(&expr, &cand).unwrap()),
+        expected(&fx, &[ALL_TERM], |e| score_of(e) >= 50
+            && (department_of(e) == Some("eng")
+                || title_of(e).starts_with("paper-1")))
+    );
+}
+
+// =================================================================================================
+// The category postings route (decision 0063) and `/v1/categories` under `derived`
+// =================================================================================================
+
+/// Where the build wrote one column's derived postings.
+fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
+    fx.bundle
+        .join(&fx.prefix)
+        .join("partitions")
+        .join(&fx.phash)
+        .join("attrs")
+        .join(column)
+        .join("postings.arrow")
+}
+
+/// Reopen the fixture's columns from disk — used after a test has rewritten a postings file, since
+/// the route is decided and the file mapped at open.
+fn reopen(fx: &Fixture) -> Result<FilterColumns, mosaica_engine::filter::ComposeError> {
+    FilterColumns::open(
+        &fx.bundle.join(&fx.prefix),
+        &fx.phash,
+        // The manifest as it stood at the build: this fixture declares no view group
+        // (`views.md` §5), so no incarnation is ever asked for.
+        &fx.manifest,
+        mosaica_engine::filter::PartitionExtents {
+            attrs: &fx.extents,
+            ..Default::default()
+        },
+        &[],
+        true,
+    )
+}
+
+/// **A `public` category answers `eq` and `in` exactly as the corpus says**, under a real mask.
+///
+/// The reference is the fixture's own inputs, so a routed answer that read the wrong posting, or
+/// that forgot to intersect with the candidate, fails here rather than agreeing with itself.
+#[test]
+fn a_public_category_route_agrees_with_the_corpus_under_a_real_mask() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &subset_credential());
+    let terms = [SUBSET_TERM];
+
+    let xx = AttrLocalId::new(fx.archive_codes["xx"]);
+    let yy = AttrLocalId::new(fx.archive_codes["yy"]);
+    let ww = AttrLocalId::new(fx.archive_codes["ww"]);
+
+    let got = fx
+        .columns
+        .resolve("archive", &FilterOperand::Equals(xx), &cand)
+        .unwrap();
+    assert_eq!(
+        as_vec(&got),
+        expected(&fx, &terms, |e| archive_of(e) == Some("xx"))
+    );
+    assert!(got.andnot(&cand).is_empty(), "I12: inside the candidate");
+
+    let both = fx
+        .columns
+        .resolve("archive", &FilterOperand::In(vec![xx, yy]), &cand)
+        .unwrap();
+    assert_eq!(
+        as_vec(&both),
+        expected(&fx, &terms, |e| matches!(
+            archive_of(e),
+            Some("xx") | Some("yy")
+        ))
+    );
+
+    // A declared value nothing carries is an empty answer, not an error: a keyed postings file
+    // drops empty records, so this is the `None` arm of `posting_at` reaching the surface.
+    assert!(fx
+        .columns
+        .resolve("archive", &FilterOperand::Equals(ww), &cand)
+        .unwrap()
+        .is_empty());
+    // As is the reserved absent sentinel, which no entity may match on either route.
+    assert!(fx
+        .columns
+        .resolve(
+            "archive",
+            &FilterOperand::Equals(AttrLocalId::new(0)),
+            &cand
+        )
+        .unwrap()
+        .is_empty());
+}
+
+/// **The route is the declaration, and this is the assertion that proves it.**
+///
+/// Both columns carry the same partition of the corpus. Each column's postings file is rewritten
+/// with a deliberately wrong mapping — every code claiming entity 0 and nothing else — and the two
+/// then answer differently: the `public` column returns the corrupted postings' answer, because it
+/// is routed through them; the `derived` column returns the *correct* answer, because decision
+/// 0063 keeps it on the scan. Nothing else in this file can tell the two routes apart, since a
+/// working route and a working scan agree by construction.
+#[test]
+fn a_public_column_reads_its_postings_and_a_derived_one_does_not() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+
+    // Every code in both vocabularies, mapped to entity 0 alone.
+    for (column, codes) in [("archive", &fx.archive_codes), ("department", &fx.codes)] {
+        let mut entries: Vec<(u32, Vec<u32>)> =
+            codes.values().map(|&code| (code, vec![0u32])).collect();
+        entries.sort_by_key(|(code, _)| *code);
+        mosaica_authz::write_delta_tier_at(&postings_path(&fx, column), &entries, 32).unwrap();
+    }
+    let columns = reopen(&fx).expect("the rewritten files are well-formed and open");
+
+    let archived = columns
+        .resolve(
+            "archive",
+            &FilterOperand::Equals(AttrLocalId::new(fx.archive_codes["xx"])),
+            &cand,
+        )
+        .unwrap();
+    assert_eq!(
+        as_vec(&archived),
+        vec![0u32],
+        "a `public` column must answer from its postings — this is what decision 0063 buys, and \
+         with the file corrupted it is the only way the answer can be this"
+    );
+
+    let departmental = columns
+        .resolve(
+            "department",
+            &FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            &cand,
+        )
+        .unwrap();
+    assert_eq!(
+        as_vec(&departmental),
+        expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("eng")),
+        "a `derived` column must be answered by the masked scan, whatever its postings say: \
+         the postings' work is a function of the value named, which is the disclosure \
+         `visibility = \"derived\"` exists to prevent (decision 0063)"
+    );
+    assert!(
+        departmental.cardinality() > 1,
+        "the fixture must make the two answers distinguishable"
+    );
+}
+
+/// **A routed column still sees everything ingested since the build.**
+///
+/// The postings cover `[0, entity_id_high_water)` and no flush writes any, so an answer taken from
+/// them alone would omit every entity flushed since — narrower, safe under I12, and
+/// indistinguishable from a correct answer. Several flushes, because one extent working is not the
+/// property: the property is that they accumulate.
+#[test]
+fn a_routed_public_category_unions_the_postings_with_every_extent() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-routed-extents");
+    let wal = fx._dir.path().join("wal-routed-extents");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let first = ingest_and_flush_with(
+        &engine,
+        "routed-1",
+        WalScalar::Utf8("eng".to_string()),
+        WalScalar::Utf8("xx".to_string()),
+        "routed-alpha",
+        1,
+        WalScalar::Null,
+    ) as u32;
+    let second = ingest_and_flush_with(
+        &engine,
+        "routed-2",
+        WalScalar::Utf8("sales".to_string()),
+        WalScalar::Utf8("yy".to_string()),
+        "routed-beta",
+        2,
+        WalScalar::Null,
+    ) as u32;
+    // `ww` is declared and carried by nothing in the build, so this entity is its *only* member —
+    // the case a postings-only answer gets exactly backwards.
+    let third = ingest_and_flush_with(
+        &engine,
+        "routed-3",
+        WalScalar::Utf8("legal".to_string()),
+        WalScalar::Utf8("ww".to_string()),
+        "routed-gamma",
+        3,
+        WalScalar::Null,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let columns = &generation.filter_columns;
+    let code = |key: &str| AttrLocalId::new(fx.archive_codes[key]);
+    let hits = |operand: FilterOperand| columns.resolve("archive", &operand, &cand).unwrap();
+
+    let xx = hits(FilterOperand::Equals(code("xx")));
+    assert!(xx.contains(first), "the first flush's entity is missing");
+    assert!(!xx.contains(second));
+    assert!(!xx.contains(third));
+    // And the base build's members are still there, so the union is a union and not a replacement.
+    assert!(
+        xx.cardinality() > 1,
+        "the build's own `xx` members must survive the union with the extents"
+    );
+
+    assert!(hits(FilterOperand::Equals(code("yy"))).contains(second));
+
+    let ww = hits(FilterOperand::Equals(code("ww")));
+    assert_eq!(
+        as_vec(&ww),
+        vec![third],
+        "a value whose only member arrived after the build must still be found"
+    );
+
+    let any = hits(FilterOperand::In(vec![code("xx"), code("ww")]));
+    assert!(any.contains(first) && any.contains(third) && !any.contains(second));
+}
+
+/// **A routed column whose postings cannot be read refuses**, rather than degrading to the scan or
+/// to "no entity carries this value". Both would answer, and one of them would answer *correctly* —
+/// which is worse, because the artefact would be broken with nothing to notice.
+#[test]
+fn a_public_column_with_unreadable_postings_refuses_to_open() {
+    let fx = fixture();
+    let path = postings_path(&fx, "archive");
+    let held = std::fs::read(&path).unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        reopen(&fx).is_err(),
+        "a declared column whose postings are missing must refuse at open"
+    );
+
+    std::fs::write(&path, &held[..held.len() / 2]).unwrap();
+    assert!(
+        reopen(&fx).is_err(),
+        "a truncated postings file must refuse at open"
+    );
+
+    std::fs::write(&path, &held).unwrap();
+    assert!(reopen(&fx).is_ok(), "restored, it opens again");
+}
+
+/// **A `derived` category column is not filterable merely because it is held.**
+///
+/// The map now carries every column the build wrote a value column for, which includes a
+/// `derived` category declared `render`-only — its postings are what `/v1/categories` derives
+/// visibility from. Holding it must open no operand the schema did not declare, so `resolve` gates
+/// on the declaration and not on presence. (`department` here *is* declared filterable; the guard
+/// is asserted at the seam it protects, in `filter.rs`'s `Layers::filterable`.)
+#[test]
+fn a_column_the_schema_did_not_declare_filterable_is_still_refused() {
+    let fx = fixture();
+    let (_engine, cand) = candidate_for(&fx, &full_coverage_credential());
+    assert!(matches!(
+        fx.columns.resolve(
+            "no_such_column",
+            &FilterOperand::Equals(AttrLocalId::new(1)),
+            &cand
+        ),
+        Err(FilterError::UndeclaredColumn(_))
+    ));
+}
+
+// =================================================================================================
+// `/v1/categories` under `visibility = "derived"` (per-point-attributes §3.3)
+// =================================================================================================
+
+/// Every value `column` offers this principal, in key order, paged at `limit` so the cursor is
+/// exercised on the ordinary path rather than only on a contrived one.
+fn offered(
+    engine: &mosaica_engine::Engine,
+    session: &mosaica_engine::Session,
+    column: &str,
+    limit: usize,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = engine
+            .categories(
+                session,
+                column,
+                mosaica_engine::CategoryQuery::Page {
+                    after: after.as_deref(),
+                    limit,
+                },
+            )
+            .expect("the column is served")
+            .expect("the column is a category");
+        keys.extend(page.values.iter().map(|v| v.key.clone()));
+        match page.next {
+            Some(cursor) => after = Some(cursor),
+            None => break,
+        }
+    }
+    keys
+}
+
+/// **A value is offered iff the principal can see an item carrying it** (§3.3), derived per request
+/// and never maintained.
+///
+/// `legal` is the assertion that matters: the subset principal's items are exactly `e % 3 == 0`,
+/// and none of those carries `legal` — so a value that certainly exists, and that a wider principal
+/// is offered, is withheld from this one. `ops` is declared and carried by nobody, so it is offered
+/// to neither: the empty-value case, which membership-derivation answers by hiding.
+#[test]
+fn a_derived_value_is_offered_only_where_a_visible_item_carries_it() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats");
+    let wal = fx._dir.path().join("wal-cats");
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+
+    let wide = engine.authorise(&full_coverage_credential()).unwrap();
+    let narrow = engine.authorise(&subset_credential()).unwrap();
+    let none = engine.authorise(&zero_credential()).unwrap();
+
+    assert_eq!(
+        offered(&engine, &wide, "department", 2),
+        ["eng", "legal", "sales"]
+    );
+    assert_eq!(offered(&engine, &narrow, "department", 2), ["eng", "sales"]);
+    assert!(
+        offered(&engine, &none, "department", 2).is_empty(),
+        "a principal who can see nothing is offered nothing — and is told so with a real answer, \
+         since an empty value set is what that principal's derivation yields"
+    );
+
+    // Cross-check the fixture rather than trusting the arithmetic above: `legal` must genuinely be
+    // a value the narrow principal has no member of, or this test asserts nothing.
+    assert!((0..N)
+        .filter(|e| terms_of(*e).contains(&SUBSET_TERM))
+        .all(|e| department_of(e) != Some("legal")));
+}
+
+/// **One gate, both request forms.** Bulk lookup and enumeration are separate walks, and a gate
+/// applied to one is the existence oracle reached through the other.
+#[test]
+fn both_category_request_forms_apply_the_membership_gate() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats-forms");
+    let wal = fx._dir.path().join("wal-cats-forms");
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+    let narrow = engine.authorise(&subset_credential()).unwrap();
+
+    let asked: Vec<u32> = ["eng", "sales", "legal", "ops"]
+        .iter()
+        .map(|k| fx.codes[*k])
+        .collect();
+    let page = engine
+        .categories(
+            &narrow,
+            "department",
+            mosaica_engine::CategoryQuery::Codes(&asked),
+        )
+        .unwrap()
+        .unwrap();
+    let keys: Vec<&str> = page.values.iter().map(|v| v.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["eng", "sales"],
+        "a code naming a value this principal has no member of must be omitted, exactly as an \
+         unbound code is — the two must be one outcome"
+    );
+}
+
+/// **The page is cut after the gate, never before.** Filtering a page once it has been taken
+/// returns short pages whose length counts what the principal cannot see, and terminates the walk
+/// early — here it would drop `sales` entirely, since `ops` is invisible and sits between.
+#[test]
+fn a_derived_page_is_filtered_before_it_is_cut() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats-page");
+    let wal = fx._dir.path().join("wal-cats-page");
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+    let wide = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let first = engine
+        .categories(
+            &wide,
+            "department",
+            mosaica_engine::CategoryQuery::Page {
+                after: None,
+                limit: 2,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let keys: Vec<&str> = first.values.iter().map(|v| v.key.as_str()).collect();
+    assert_eq!(keys, ["eng", "legal"]);
+    assert_eq!(
+        first.next.as_deref(),
+        Some("legal"),
+        "a third visible value remains — `ops` sits between it and this page in key order and \
+         must not be allowed to end the walk"
+    );
+
+    let second = engine
+        .categories(
+            &wide,
+            "department",
+            mosaica_engine::CategoryQuery::Page {
+                after: Some("legal"),
+                limit: 2,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let keys: Vec<&str> = second.values.iter().map(|v| v.key.as_str()).collect();
+    assert_eq!(keys, ["sales"]);
+    assert!(second.next.is_none());
+}
+
+/// **A `public` vocabulary is served as authored, to every principal alike** — including a value
+/// nothing carries, and including a principal who can see nothing. It derives no membership at all,
+/// which is why its filter may be routed through the postings (decision 0063) while a `derived`
+/// one may not.
+#[test]
+fn a_public_vocabulary_is_served_as_authored_to_every_principal() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats-public");
+    let wal = fx._dir.path().join("wal-cats-public");
+    let engine = open_engine(&fx.bundle, &cache, &wal);
+
+    for credential in [
+        full_coverage_credential(),
+        subset_credential(),
+        zero_credential(),
+    ] {
+        let session = engine.authorise(&credential).unwrap();
+        assert_eq!(
+            offered(&engine, &session, "archive", 3),
+            ["ww", "xx", "yy", "zz"],
+            "a `public` set is an authored assertion, so every principal is served the same one"
+        );
+    }
+}
+
+/// **A value carried only by entities ingested since the build is still offered.**
+///
+/// The membership postings cover `[0, entity_id_high_water)` and no flush writes any, so deriving
+/// visibility from them alone would withhold a value the principal can plainly see — the same
+/// omission the routed filter has to avoid, in the endpoint that publishes the legend. `ops` is
+/// declared and carried by nothing in the build, so the flushed entity is its only member.
+#[test]
+fn a_value_carried_only_since_the_build_is_offered_to_whoever_can_see_it() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-cats-flush");
+    let wal = fx._dir.path().join("wal-cats-flush");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let wide = engine.authorise(&full_coverage_credential()).unwrap();
+    let none = engine.authorise(&zero_credential()).unwrap();
+    assert!(
+        !offered(&engine, &wide, "department", 4).contains(&"ops".to_string()),
+        "nothing carries `ops` in the build"
+    );
+
+    ingest_and_flush_with(
+        &engine,
+        "ops-1",
+        WalScalar::Utf8("ops".to_string()),
+        WalScalar::U8(0),
+        "ops-paper",
+        9,
+        WalScalar::Null,
+    );
+
+    assert_eq!(
+        offered(&engine, &wide, "department", 4),
+        ["eng", "legal", "ops", "sales"],
+        "the flushed entity's value must be offered to a principal who can see it"
+    );
+    assert!(
+        offered(&engine, &none, "department", 4).is_empty(),
+        "and to nobody who cannot"
+    );
+}
+
+// =================================================================================================
+// The fold's attribute pass (`filter-index.md` §6.2)
+// =================================================================================================
+//
+// A fold rewrites a bundle into a new prefix and reclaims the old one, so every artefact it does
+// not carry forward is *gone*. These cases are the attribute half of that: that a folded bundle
+// answers what the pre-fold one answered over the build's entities and the flushed ones alike,
+// that a deleted entity's value bytes leave the corpus while a suppressed one's do not (Rules F and
+// S, which must never be conflated), and that the two obligations publication owes — the files and
+// the manifest's `attr_extents` list — are both discharged. Doing one of those two is worse than
+// doing neither: the bundle then opens cleanly and answers filters short, which is a wrong answer
+// wearing a correct one's clothes.
+
+/// One operand per family and per route, answered against `columns` under `candidate`.
+///
+/// **Both routes are here on purpose.** `archive` is `visibility = "public"`, so its `eq`/`in` are
+/// answered by the derived postings — which the fold *rebuilds*, where it *merges* the value column
+/// — and `department` is `derived`, so the same values are answered by the scan. A pass that
+/// rebuilt one and lost the other would leave half of this table right.
+fn probe_every_operand(
+    fx: &Fixture,
+    columns: &FilterColumns,
+    candidate: &Bitmap,
+) -> Vec<(String, Vec<u32>)> {
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let sales = AttrLocalId::new(fx.codes["sales"]);
+    let xx = AttrLocalId::new(fx.archive_codes["xx"]);
+    let yy = AttrLocalId::new(fx.archive_codes["yy"]);
+    let at = |v: i128| Endpoint {
+        value: Scalar::Int(v),
+        inclusive: true,
+    };
+    let probes: Vec<(&str, &str, FilterOperand)> = vec![
+        ("department", "eq eng", FilterOperand::Equals(eng)),
+        (
+            "department",
+            "in eng+sales",
+            FilterOperand::In(vec![eng, sales]),
+        ),
+        ("archive", "eq xx (routed)", FilterOperand::Equals(xx)),
+        (
+            "archive",
+            "in xx+yy (routed)",
+            FilterOperand::In(vec![xx, yy]),
+        ),
+        (
+            "title",
+            "eq paper-07",
+            FilterOperand::TextEquals("paper-07".into()),
+        ),
+        (
+            "title",
+            "prefix paper-1",
+            FilterOperand::TextPrefix("paper-1".into()),
+        ),
+        (
+            "title",
+            "contains er-2",
+            FilterOperand::TextContains("er-2".into()),
+        ),
+        (
+            "score",
+            "range 20..=60",
+            FilterOperand::Range {
+                lo: Some(at(20)),
+                hi: Some(at(60)),
+            },
+        ),
+    ];
+    probes
+        .into_iter()
+        .map(|(column, label, operand)| {
+            let answer = columns
+                .resolve(column, &operand, candidate)
+                .expect("a declared column answers");
+            (format!("{column} {label}"), as_vec(&answer))
+        })
+        .collect()
+}
+
+/// **A folded bundle answers exactly what it answered before the fold** — over the build's entities
+/// and over one ingested since it, in every family and on both routes.
+///
+/// This is the case the gap was loudest in: a fold carries forward exactly the files its new
+/// manifest names, `attrs/` was in none of those lists, and the folded bundle had no filter
+/// artefact at all. What makes it a *filter* test rather than an openability one is the flushed
+/// entity: its value lives in an extent, the fold consumes every extent into the new base, and an
+/// answer that lost it would be narrower, safe under **I12**, and indistinguishable from a correct
+/// one.
+///
+/// **Mutations this kills:** dropping the attribute pass (nothing to open — the bundle refuses);
+/// folding the base column and skipping the extents (the flushed entity answers nothing); writing
+/// the new base without blanking (caught by the deletion case below rather than here).
+#[test]
+fn a_folded_bundle_answers_every_filter_it_answered_before() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-answers");
+    let wal = fx._dir.path().join("wal-fold-answers");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let flushed = ingest_and_flush_with(
+        &engine,
+        "post-build",
+        WalScalar::Utf8("eng".to_string()),
+        WalScalar::Utf8("xx".to_string()),
+        "paper-77",
+        42,
+        WalScalar::Null,
+    ) as u32;
+
+    let (generation, cand) = live_candidate(&engine);
+    let before = probe_every_operand(&fx, &generation.filter_columns, &cand);
+    // The reference is the corpus, not the index: the build's own answer for one operand is
+    // checked against the fixture's inputs, so a pass that folded a self-consistent lie fails here
+    // and not only against itself.
+    let build_eng = expected(&fx, &[ALL_TERM], |e| department_of(e) == Some("eng"));
+    assert!(
+        before[0]
+            .1
+            .iter()
+            .filter(|e| **e != flushed)
+            .copied()
+            .eq(build_eng.iter().copied()),
+        "the pre-fold answer is the corpus's own"
+    );
+    assert!(before[0].1.contains(&flushed));
+    drop(generation);
+
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+
+    let (folded, cand_after) = live_candidate(&engine);
+    assert_eq!(
+        as_vec(&cand_after),
+        as_vec(&cand),
+        "the fold retires nothing here, so the candidate is the same entity set"
+    );
+    let after = probe_every_operand(&fx, &folded.filter_columns, &cand_after);
+    assert_eq!(
+        after, before,
+        "every operand answers what it answered before"
+    );
+    assert_eq!(
+        folded
+            .bundle
+            .partitions
+            .values()
+            .next()
+            .expect("one partition")
+            .manifest
+            .attr_extents
+            .len(),
+        0,
+        "every snapshot extent folded into the base; carrying an untouched one forward is declined"
+    );
+}
+
+/// **A node restarts onto a folded bundle and opens** — the failure the gap produced today, stated
+/// as its own case because it is the one an operator meets first.
+///
+/// A declared column whose files are missing is an *error* rather than an absence
+/// (`FilterColumns::open`), which is what made the missing `attrs/` a loud refusal instead of a
+/// silent one. That rule is unchanged; what the pass changes is which files it binds.
+#[test]
+fn a_node_restarts_onto_a_folded_bundle_and_answers_from_it() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-restart");
+    let wal = fx._dir.path().join("wal-fold-restart");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    ingest_and_flush_with(
+        &engine,
+        "post-build",
+        WalScalar::Utf8("legal".to_string()),
+        WalScalar::Utf8("zz".to_string()),
+        "paper-88",
+        11,
+        WalScalar::Null,
+    );
+    fold(&engine);
+    let (generation, cand) = live_candidate(&engine);
+    let before = probe_every_operand(&fx, &generation.filter_columns, &cand);
+    drop(generation);
+    drop(engine);
+
+    let restarted = open_engine_publishing(&fx.bundle, &cache, &wal);
+    assert_eq!(restarted.generation().prefix, "v00001");
+    let (generation, cand) = live_candidate(&restarted);
+    assert_eq!(
+        probe_every_operand(&fx, &generation.filter_columns, &cand),
+        before,
+        "a restart onto the folded prefix composes exactly what the process that folded it served"
+    );
+}
+
+/// The folded prefix's value column for one attribute, opened directly off disc.
+fn folded_column(fx: &Fixture, prefix: &str, column: &str) -> mosaica_filter::ValueColumn {
+    mosaica_filter::ValueColumn::open_dir(
+        &attr_dir(fx, prefix, column),
+        mosaica_filter::Access::Read,
+    )
+    .expect("the folded column opens")
+}
+
+fn attr_dir(fx: &Fixture, prefix: &str, column: &str) -> PathBuf {
+    fx.bundle
+        .join(prefix)
+        .join("partitions")
+        .join(&fx.phash)
+        .join("attrs")
+        .join(column)
+}
+
+/// The **key** a folded keyword column holds for one entity, resolved through the dictionary
+/// written beside it.
+///
+/// An ordinal alone says nothing: it is a position in one layer's dictionary and means nothing
+/// against another's (records §4.3), so a test asserting what an entity carries has to read the
+/// pair. `None` where no slot is held — which is what a blanked entity leaves behind.
+fn folded_key(fx: &Fixture, prefix: &str, column: &str, entity: u32) -> Option<String> {
+    let dir = attr_dir(fx, prefix, column);
+    let values = folded_column(fx, prefix, column);
+    let ordinal = values.value_of(entity)?.raw();
+    let dict = mosaica_filter::SortedDict::open_dir(&dir, mosaica_filter::Access::Read)
+        .expect("a keyword column's dictionary is beside its values");
+    let mut scratch = Vec::new();
+    Some(
+        dict.key_of(ordinal, &mut scratch)
+            .expect("the ordinal names a key in its own layer's dictionary")
+            .to_string(),
+    )
+}
+
+/// **A deleted entity is gone from every predicate after the fold, and its bytes are gone with
+/// it** (Rule F, and the retention asymmetry §6 gives as the reason for blanking).
+///
+/// The masked scan would never have visited its slot — the fold has already removed it from
+/// `M_auth` — so this is not a correctness repair but a *retention* one: after a fold the item's
+/// render value is gone because its row is gone, while its filter value would persist because the
+/// slot is positional and **I9** forbids renumbering it away. The byte assertion is what makes that
+/// a test rather than a claim.
+///
+/// **Mutations this kills:** blanking by writing a sentinel over the slot (the title's bytes are
+/// still in `values.arrow`); skipping `D₀` in the presence bitmap but not in the values (every
+/// value after the deleted entity is paired with the wrong entity, so the surviving titles move);
+/// rebuilding the postings from the pre-fold column (the deleted entity is still a member).
+#[test]
+fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-delete");
+    let wal = fx._dir.path().join("wal-fold-delete");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    // Sources 2 and 8 carry the same department and archive values and the titles `paper-02` and
+    // `paper-08`: one is deleted and the other is the survivor every assertion is read against, so
+    // "gone" cannot be satisfied by emptying the column.
+    let deleted = fx.entity_of[&2];
+    let survivor = fx.entity_of[&8];
+    assert_eq!(department_of(2), department_of(8));
+    assert_eq!(archive_of(2), archive_of(8));
+    let dept = AttrLocalId::new(fx.codes[department_of(2).expect("source 2 carries one")]);
+    let arch = AttrLocalId::new(fx.archive_codes[archive_of(2).expect("source 2 carries one")]);
+    engine
+        .accept_change(
+            mosaica_types::EntityId::new(deleted),
+            mosaica_lifecycle::wal::ChangeOp::Delete,
+        )
+        .expect("a delete is accepted");
+    fold(&engine);
+    assert_eq!(
+        engine.overlay_depth(),
+        0,
+        "the tombstone retired in the fold's own publication (Rule F)"
+    );
+
+    let (generation, cand) = live_candidate(&engine);
+    let columns = &generation.filter_columns;
+    for (column, operand) in [
+        ("department", FilterOperand::Equals(dept)),
+        ("archive", FilterOperand::Equals(arch)),
+        ("title", FilterOperand::TextPrefix("paper-".into())),
+        ("title", FilterOperand::TextEquals(title_of(2))),
+    ] {
+        let answer = columns.resolve(column, &operand, &cand).expect("answers");
+        assert!(
+            !answer.contains(deleted as u32),
+            "the deleted entity still matches {column}"
+        );
+    }
+    assert!(columns
+        .resolve("department", &FilterOperand::Equals(dept), &cand)
+        .unwrap()
+        .contains(survivor as u32));
+
+    // The artefact itself: no slot, no bytes, no posting. For a keyword the value's bytes live in
+    // the dictionary rather than in the ordinal column, so that is where "gone" has to be read —
+    // the fold rebuilds the dictionary from the surviving entities alone, and a key no survivor
+    // carries is not in it.
+    assert_eq!(folded_key(&fx, "v00001", "title", deleted as u32), None);
+    assert_eq!(
+        folded_key(&fx, "v00001", "title", survivor as u32).as_deref(),
+        Some(title_of(8).as_str())
+    );
+    // Walked rather than searched for as bytes: the dictionary is front-coded, so a key's bytes
+    // are not contiguous in the file and a byte-window search would report absence for keys that
+    // are present — passing vacuously, which is the direction that hides the failure.
+    let dict = mosaica_filter::SortedDict::open_dir(
+        &attr_dir(&fx, "v00001", "title"),
+        mosaica_filter::Access::Read,
+    )
+    .expect("the folded dictionary is on disc");
+    let mut keys = Vec::new();
+    dict.walk(|_, key| keys.push(key.to_string()))
+        .expect("the folded dictionary walks");
+    assert!(
+        !keys.contains(&title_of(2)),
+        "the deleted entity's value is still a key of the folded dictionary — blanking removes the \
+         entity from presence and rebuilds the keys from the survivors, never writing a sentinel \
+         over them"
+    );
+    assert!(
+        keys.contains(&title_of(8)),
+        "and the survivor's key is still there, so 'gone' is not satisfied by emptying the \
+         dictionary"
+    );
+
+    let postings = mosaica_filter::ColumnPostings::open_keyed(
+        &fx.bundle
+            .join("v00001")
+            .join("partitions")
+            .join(&fx.phash)
+            .join("attrs/archive/postings.arrow"),
+    )
+    .expect("the rebuilt postings open");
+    let members = postings.entities(arch).expect("the code has members");
+    assert!(!members.contains(deleted as u32), "and no posting names it");
+    assert!(members.contains(survivor as u32));
+}
+
+/// **A session established before a fold is never offered the value only the retired entity
+/// carried**, on any of the three surfaces that derive it: the legend, the suggestion page and a
+/// filtered viewport.
+///
+/// A fold retires the deletion's tombstone and rotates the bundle identity without moving the
+/// watermark, so the session's own fragment — frozen at authorise — still names the retired entity
+/// and the overlay no longer denies it. `/v1/categories` and its suggest form derive a `derived`
+/// column's visible values from that fragment **in entity space**, with no row projection between
+/// them and the answer; a filtered viewport crosses into row space. `ops` is declared and carried
+/// by nothing in the build, so the ingested entity is its only member and the value is exactly as
+/// visible as that one entity.
+#[test]
+fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-derived");
+    let wal = fx._dir.path().join("wal-fold-derived");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    // A refresh pass rebuilds each resident session's fragment, which would make a request path
+    // that failed to notice the rotation indistinguishable from one that noticed.
+    engine.set_background_refresh_for_test(false);
+
+    let doomed = ingest_and_flush_with(
+        &engine,
+        "ops-1",
+        WalScalar::Utf8("ops".to_string()),
+        WalScalar::U8(0),
+        "ops-paper",
+        9,
+        WalScalar::Null,
+    );
+
+    // Authorised after the flush, so nothing but the fold's identity rotation can invalidate this
+    // fragment: its watermark is already the live one.
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let ops = AttrLocalId::new(fx.codes["ops"]);
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let served = |operand: AttrLocalId| {
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                    .filter(leaf("department", FilterOperand::Equals(operand))),
+            )
+            .expect("a filtered viewport answers")
+    };
+    let suggested = || {
+        let page = engine
+            .suggest(
+                &session,
+                SuggestRequest {
+                    column: "department",
+                    view: None,
+                    filter: None,
+                    q: "",
+                    limit: 20,
+                    counts: false,
+                    walk_budget: 100_000,
+                    max_suggest_set_entities: 0,
+                    cancel: None,
+                },
+            )
+            .expect("the column suggests")
+            .expect("the column is a category");
+        page.values
+            .iter()
+            .map(|v| v.key.clone())
+            .collect::<Vec<String>>()
+    };
+
+    assert!(offered(&engine, &session, "department", 4).contains(&"ops".to_string()));
+    assert!(suggested().contains(&"ops".to_string()));
+    let before = served(ops);
+    assert_eq!(
+        before.points.len(),
+        1,
+        "the ingested entity is the value's only member, or the assertions below hold vacuously"
+    );
+
+    engine
+        .accept_change(
+            mosaica_types::EntityId::new(doomed),
+            mosaica_lifecycle::wal::ChangeOp::Delete,
+        )
+        .expect("a delete is accepted");
+    assert!(
+        !offered(&engine, &session, "department", 4).contains(&"ops".to_string()),
+        "the overlay's tombstone alone withdraws the value while it stands"
+    );
+
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+    assert_eq!(
+        engine.overlay_depth(),
+        0,
+        "the tombstone retired, so nothing but the folded corpus withholds the value now"
+    );
+
+    // The premise, without which every assertion below holds for the wrong reason: the fragment
+    // this session authorised with still names the retired entity, and the overlay no longer
+    // does, so an answer derived from that fragment alone would carry the value.
+    assert!(
+        session.fragment_at_authorise_for_test().view().contains(doomed as u32),
+        "the frozen fragment must still name the retired entity"
+    );
+
+    // The same session, never re-authorised.
+    assert!(
+        !offered(&engine, &session, "department", 4).contains(&"ops".to_string()),
+        "the legend offered a value whose only member the fold retired"
+    );
+    assert!(
+        !suggested().contains(&"ops".to_string()),
+        "the suggestion page offered a value whose only member the fold retired"
+    );
+    let after = served(ops);
+    assert!(after.points.tessera_ids.is_empty(), "and nothing is drawn");
+    assert_eq!(
+        after.tiles.iter().map(|tile| tile.matched).sum::<u64>(),
+        0,
+        "and the count is zero, not one"
+    );
+
+    // A value the fold left alone is still offered and still filters, so "gone" is not satisfied
+    // by an empty answer everywhere.
+    assert!(offered(&engine, &session, "department", 4).contains(&"eng".to_string()));
+    assert!(suggested().contains(&"eng".to_string()));
+    assert!(!served(eng).points.tessera_ids.is_empty());
+}
+
+/// **A suppression changes no attribute artefact at all** (Rule S), and the fold is where that is
+/// most easily got wrong — the two removal rules have been conflated twice in this project's review
+/// history, and giving a suppression any retirement route is fail-open.
+///
+/// So the folded column still holds the suppressed entity's value and the rebuilt postings still
+/// name it; what hides the item is the overlay, which the fold leaves standing. The unsuppress at
+/// the end is what proves the value was still there to be revealed rather than merely unreachable.
+#[test]
+fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-suppress");
+    let wal = fx._dir.path().join("wal-fold-suppress");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let suppressed = fx.entity_of[&2];
+    let arch = AttrLocalId::new(fx.archive_codes[archive_of(2).expect("source 2 carries one")]);
+    engine
+        .accept_change(
+            mosaica_types::EntityId::new(suppressed),
+            mosaica_lifecycle::wal::ChangeOp::Suppress,
+        )
+        .expect("a suppression is accepted");
+    fold(&engine);
+    assert_eq!(
+        engine.overlay_depth(),
+        1,
+        "Rule S: a live item's suppression retires only on unsuppress, and no fold executes it"
+    );
+
+    assert_eq!(
+        folded_key(&fx, "v00001", "title", suppressed as u32),
+        Some(title_of(2)),
+        "the suppressed entity keeps its slot and its key: no attribute artefact changes for a \
+         suppression"
+    );
+    let postings = mosaica_filter::ColumnPostings::open_keyed(
+        &fx.bundle
+            .join("v00001")
+            .join("partitions")
+            .join(&fx.phash)
+            .join("attrs/archive/postings.arrow"),
+    )
+    .expect("the rebuilt postings open");
+    assert!(postings
+        .entities(arch)
+        .expect("members")
+        .contains(suppressed as u32));
+
+    // Hidden by the overlay throughout, and revealed by the unsuppress — which is only possible
+    // because the artefact still holds the value.
+    let (generation, cand) = live_candidate(&engine);
+    assert!(!cand.contains(suppressed as u32), "still hidden");
+    drop(generation);
+    engine
+        .accept_change(
+            mosaica_types::EntityId::new(suppressed),
+            mosaica_lifecycle::wal::ChangeOp::Unsuppress,
+        )
+        .expect("an unsuppress is accepted");
+    let (generation, cand) = live_candidate(&engine);
+    assert!(generation
+        .filter_columns
+        .resolve("title", &FilterOperand::TextEquals(title_of(2)), &cand)
+        .expect("answers")
+        .contains(suppressed as u32));
+}
+
+/// **An extent published during the fold's flight survives it, is listed, and is composed.**
+///
+/// This is publication's two obligations in one case. The extent's *files* are hard-linked into the
+/// new prefix and its *entry* is written into the new `SEGMENTS-<n>.json`'s `attr_extents`; either
+/// one alone is worse than neither. Files without the entry produce a bundle that opens cleanly and
+/// answers filters missing every post-snapshot entity — a wrong answer with no symptom — and the
+/// entry without the files is a refusal at the next open.
+///
+/// **Mutations this kills:** publishing `attr_extents: Vec::new()` (the mid-flight entity answers
+/// nothing, here and after a restart); leaving the extent's files out of the carry-forward set (the
+/// new prefix does not open once the old one is reclaimed).
+#[test]
+fn an_extent_published_during_the_folds_flight_is_carried_forward_and_composed() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-flight");
+    let wal = fx._dir.path().join("wal-fold-flight");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let before = engine.write_executor_stats();
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !engine.fold_is_holding_for_test() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never reached its hold"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Accepted and flushed *after* the fold's snapshot: its extent is post-snapshot, so the pass
+    // never saw it and publication must carry it.
+    let mid_flight = ingest_and_flush_with(
+        &engine,
+        "mid-flight",
+        WalScalar::Utf8("sales".to_string()),
+        WalScalar::Utf8("yy".to_string()),
+        "paper-66",
+        7,
+        WalScalar::Null,
+    ) as u32;
+    engine.set_fold_paused_for_test(false);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold discarded"
+        );
+        if now.folds > before.folds {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let (generation, cand) = live_candidate(&engine);
+    let partition = generation
+        .bundle
+        .partitions
+        .values()
+        .next()
+        .expect("one partition");
+    let extents = &partition.manifest.attr_extents;
+    assert!(
+        !extents.is_empty(),
+        "the flight's extents are named in the folded manifest — the list is half of publishing \
+         an attribute artefact, and the half that fails silently"
+    );
+    for extent in extents {
+        for rel in [&extent.values, &extent.presence] {
+            assert!(
+                fx.bundle.join("v00001").join(rel).exists(),
+                "{rel} is named by the folded manifest but is not under the new prefix"
+            );
+        }
+    }
+    assert!(generation
+        .filter_columns
+        .resolve(
+            "title",
+            &FilterOperand::TextEquals("paper-66".into()),
+            &cand
+        )
+        .expect("answers")
+        .contains(mid_flight));
+    assert!(generation
+        .filter_columns
+        .resolve(
+            "archive",
+            &FilterOperand::Equals(AttrLocalId::new(fx.archive_codes["yy"])),
+            &cand
+        )
+        .expect("answers")
+        .contains(mid_flight));
+    drop(generation);
+
+    // And after a restart, which is what reads the list rather than the process's own composition.
+    drop(engine);
+    let restarted = open_engine_publishing(&fx.bundle, &cache, &wal);
+    let (generation, cand) = live_candidate(&restarted);
+    assert!(generation
+        .filter_columns
+        .resolve(
+            "department",
+            &FilterOperand::Equals(AttrLocalId::new(fx.codes["sales"])),
+            &cand
+        )
+        .expect("answers")
+        .contains(mid_flight));
+}
+
+/// **The flip opens the filter columns over the new prefix**, rather than cloning the live
+/// generation's.
+///
+/// The clone is the shape this replaced, and its symptom is not a wrong answer — a folded entity is
+/// outside every candidate anyway, so the values a stale column serves are unreachable — which is
+/// exactly why it needs a test that looks at the *mappings* rather than at an answer. What a clone
+/// costs is the fold's reason for existing: the superseded prefix's files stay mapped for the
+/// process's lifetime, so the reclamation unlinks directory entries and frees nothing, and the
+/// bundle keeps a second copy of every value column on disc until a restart.
+///
+/// Linux-only, and skipped rather than failed elsewhere: `/proc/self/maps` is the only route to the
+/// question, and the alternative — asserting on an answer — is the thing that does not work here.
+#[test]
+fn the_flip_maps_the_new_prefixs_columns_and_not_the_superseded_ones() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-maps");
+    let wal = fx._dir.path().join("wal-fold-maps");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    let Ok(before) = std::fs::read_to_string("/proc/self/maps") else {
+        return;
+    };
+    let folded_attrs = fx
+        .bundle
+        .join("v00001")
+        .join("partitions")
+        .join(&fx.phash)
+        .join("attrs")
+        .display()
+        .to_string();
+    assert!(!before.contains(&folded_attrs));
+
+    fold(&engine);
+    let after = std::fs::read_to_string("/proc/self/maps").expect("maps");
+    assert!(
+        after.contains(&folded_attrs),
+        "nothing in this process maps the folded prefix's value columns, so the generation is \
+         serving the superseded prefix's mappings — files the reclamation has just unlinked"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The extent coalesce (`filter-index.md` §5.2)
+//
+// Two files per column per flush is ~31,000 a day at sixteen columns, and nothing between folds
+// bounds it. The pass that does is the engine's entity-space coalesce, and these are the claims it
+// has to make good on: the file count comes **down**, every answer is unchanged because the merge
+// is a content-preserving re-encode, the bound survives a restart, a coalesced extent coalesces
+// again, and **nothing retires** — a deleted entity's value rides through, because removal is the
+// fold's (Rule F).
+// ---------------------------------------------------------------------------------------------
+
+/// The coalesce policy's width: a column needs this many extents before a window is selected.
+const COALESCE_WIDTH: usize = 8;
+
+/// One flush per ingested row, with the merge held off so the assertions are about this axis.
+///
+/// The row-space merge is independent and safe beside a coalesce — each discards a plan that no
+/// longer rebases — but not deterministic enough to assert list lengths against.
+fn engine_for_coalesce(fx: &Fixture, tag: &str) -> mosaica_engine::Engine {
+    let engine = open_engine_publishing(
+        &fx.bundle,
+        &fx._dir.path().join(format!("cache-{tag}")),
+        &fx._dir.path().join(format!("wal-{tag}")),
+    );
+    engine.set_merge_for_test(false);
+    engine
+}
+
+/// Ingest and flush `COALESCE_WIDTH` rows, then drive the tick the coalesce is selected on and wait
+/// for it to publish. Returns the entities, in ingest order.
+fn flush_a_window(engine: &mosaica_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
+    let entities: Vec<u64> = (from..from + COALESCE_WIDTH)
+        .map(|i| {
+            ingest_and_flush_with(
+                engine,
+                &format!("{tag}-{i}"),
+                WalScalar::Utf8(["eng", "sales", "legal"][i % 3].to_string()),
+                WalScalar::Utf8(["xx", "yy", "zz"][i % 3].to_string()),
+                &format!("{tag}-title-{i:02}"),
+                1_000 + i as i32,
+                WalScalar::Null,
+            )
+        })
+        .collect();
+    attrs_coalesced(engine);
+    entities
+}
+
+/// Drive ticks until every column's live attribute extents are fewer than a window: the pass that
+/// takes them has published.
+fn attrs_coalesced(engine: &mosaica_engine::Engine) {
+    tick_until(engine, "the attribute extents to coalesce", std::time::Duration::from_secs(30), || {
+        let generation = engine.generation();
+        let (_, partition) = generation.bundle.partitions.iter().next().unwrap();
+        let mut per_column: BTreeMap<&str, usize> = BTreeMap::new();
+        for extent in &partition.manifest.attr_extents {
+            *per_column.entry(extent.column.as_str()).or_default() += 1;
+        }
+        per_column.values().all(|&n| n < COALESCE_WIDTH)
+    });
+}
+
+/// This partition's live `attr_extents`, per column.
+fn extents_per_column(fx: &Fixture) -> BTreeMap<String, usize> {
+    let opened = open_bundle(&fx.bundle).unwrap();
+    let phash = opened.partitions.keys().next().unwrap().clone();
+    let mut counts = BTreeMap::new();
+    for extent in &opened.partitions[&phash].manifest.attr_extents {
+        *counts.entry(extent.column.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Every filter answer this fixture can express, over the live candidate — the whole surface a
+/// content-preserving re-encode has to leave alone.
+fn every_answer(engine: &mosaica_engine::Engine, fx: &Fixture) -> Vec<(String, Vec<u32>)> {
+    let (generation, cand) = live_candidate(engine);
+    let mut out = Vec::new();
+    for key in ["eng", "sales", "legal"] {
+        for (column, codes) in [("department", &fx.codes), ("archive", &fx.archive_codes)] {
+            let code = match column {
+                "department" => codes[key],
+                _ => {
+                    codes[match key {
+                        "eng" => "xx",
+                        "sales" => "yy",
+                        _ => "zz",
+                    }]
+                }
+            };
+            let answer = generation
+                .filter_columns
+                .resolve(
+                    column,
+                    &FilterOperand::Equals(AttrLocalId::new(code)),
+                    &cand,
+                )
+                .expect("answers");
+            out.push((format!("{column}={key}"), answer.iter().collect()));
+        }
+    }
+    for operand in [
+        FilterOperand::TextPrefix("paper-".into()),
+        FilterOperand::TextPrefix("coalesce-title-".into()),
+        FilterOperand::TextContains("title-0".into()),
+    ] {
+        let answer = generation
+            .filter_columns
+            .resolve("title", &operand, &cand)
+            .expect("answers");
+        out.push((format!("title {operand:?}"), answer.iter().collect()));
+    }
+    let answer = generation
+        .filter_columns
+        .resolve(
+            "score",
+            &FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(1_000),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+            &cand,
+        )
+        .expect("answers");
+    out.push(("score >= 1000".to_string(), answer.iter().collect()));
+    out
+}
+
+/// **A window of extents becomes one file per column, and every answer is unchanged** — and a
+/// coalesced extent is coalesced again, which is the recursion the per-column selection unit is
+/// what makes free.
+///
+/// The layers are unioned at composition, so their division into files is immaterial and what must
+/// not change is the set of `(entity, column, value)` triples. Asserted as *every* answer the
+/// fixture can express rather than a sample, because the failure this guards against — a merge that
+/// pairs values with the wrong entities — moves some answers and not others.
+///
+/// **`title` is a keyword and is taken like every other column.** Its merge renumbers: the window's
+/// dictionaries become one and every ordinal is rewritten against it, and the coalesced extent is
+/// installed with that dictionary as one layer (records §4.3, §7). The prefix and contains answers
+/// over `title` below are what say the renumbering stayed inside the layer.
+///
+/// **Mutations this kills:** dropping the coalesced extent from `attr_extents` (the post-build
+/// entities stop matching); pushing the coalesced layer without removing the consumed ones (the
+/// disjointness check refuses at the replace); merging in list order rather than in entity order
+/// (the values pair with the wrong entities).
+#[test]
+fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
+    let fx = fixture();
+    let engine = engine_for_coalesce(&fx, "coalesce");
+    let entities = flush_a_window(&engine, "coalesce", 0);
+
+    let per_column = extents_per_column(&fx);
+    assert!(
+        per_column.contains_key("title"),
+        "the keyword column's window was flushed: {per_column:?}"
+    );
+    for (column, count) in per_column {
+        assert_eq!(
+            count, 1,
+            "column '{column}' still holds {count} extents where the window collapsed to one"
+        );
+        // **And the live generation serves from the coalesced layer**, base plus one — or the
+        // bound is a manifest edit the running process keeps ignoring until its next restart.
+        assert_eq!(
+            engine.generation().filter_columns.layer_count(&column),
+            Some(2),
+            "column '{column}' is still served from the layers the coalesce replaced"
+        );
+    }
+    let after = every_answer(&engine, &fx);
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let (generation, cand) = live_candidate(&engine);
+    let matched = generation
+        .filter_columns
+        .resolve("department", &FilterOperand::Equals(eng), &cand)
+        .expect("answers");
+    for (i, entity) in entities.iter().enumerate() {
+        assert_eq!(
+            matched.contains(*entity as u32),
+            i % 3 == 0,
+            "entity {entity} (ingested at {i}) answers 'eng' wrongly after the coalesce"
+        );
+    }
+
+    // The recursion: another window's worth of flushes, and the coalesced extent is an entry in
+    // the same per-column subsequence, selected at the next rung identically.
+    let more = flush_a_window(&engine, "again", COALESCE_WIDTH);
+    assert!(engine.write_executor_stats().coalesces >= 2);
+    for (column, count) in extents_per_column(&fx) {
+        assert!(
+            count <= 2,
+            "column '{column}' holds {count} extents; a coalesced extent must coalesce again"
+        );
+    }
+    let (generation, cand) = live_candidate(&engine);
+    let matched = generation
+        .filter_columns
+        .resolve("department", &FilterOperand::Equals(eng), &cand)
+        .expect("answers");
+    for (i, entity) in more.iter().enumerate() {
+        assert_eq!(
+            matched.contains(*entity as u32),
+            (i + COALESCE_WIDTH).is_multiple_of(3),
+            "entity {entity} answers wrongly after the second coalesce"
+        );
+    }
+    // Every answer the first coalesce left, still whole after the second — the first window's
+    // entities are inside the second coalesce's inputs, so this is what says the recursion carried
+    // them rather than re-encoding only the newest layers.
+    let last = every_answer(&engine, &fx);
+    for ((what, before), (_, now)) in after.iter().zip(&last) {
+        assert!(
+            before.iter().all(|e| now.contains(e)),
+            "the second coalesce lost entities from '{what}'"
+        );
+    }
+}
+
+/// **A restart opens what the coalesce committed.** The manifest edit and the live swap must
+/// describe the same bundle, or a process that had coalesced comes back holding a different set of
+/// layers than the one it was serving from — and for this artefact the symptom of getting the
+/// *files* half right and the list half wrong is a bundle that opens cleanly and answers filters
+/// missing every entity the window held (filter-index §6.2).
+#[test]
+fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
+    let fx = fixture();
+    let entities = {
+        let engine = engine_for_coalesce(&fx, "coalesce-restart");
+        flush_a_window(&engine, "restart", 0)
+    };
+
+    let reopened = engine_for_coalesce(&fx, "coalesce-restart-2");
+    assert_eq!(
+        extents_per_column(&fx)["title"],
+        1,
+        "the keyword column reopens from its one coalesced extent"
+    );
+    assert_eq!(
+        reopened.generation().filter_columns.layer_count("title"),
+        Some(2),
+        "base plus the coalesced layer, its dictionary opened from the manifest entry"
+    );
+    let (generation, cand) = live_candidate(&reopened);
+    for (i, entity) in entities.iter().enumerate() {
+        let key = ["eng", "sales", "legal"][i % 3];
+        let answer = generation
+            .filter_columns
+            .resolve(
+                "department",
+                &FilterOperand::Equals(AttrLocalId::new(fx.codes[key])),
+                &cand,
+            )
+            .expect("answers");
+        assert!(
+            answer.contains(*entity as u32),
+            "entity {entity} lost its value to the restart"
+        );
+        let title = generation
+            .filter_columns
+            .resolve(
+                "title",
+                &FilterOperand::TextEquals(format!("restart-title-{i:02}")),
+                &cand,
+            )
+            .expect("answers");
+        assert!(title.contains(*entity as u32));
+    }
+}
+
+/// Everything one generation's filter columns hold and answer, as one comparable value: per
+/// declared column the layer counts and the placement, one representative operand per family, and
+/// the record stack's depth.
+fn composition_reading(
+    engine: &mosaica_engine::Engine,
+    fx: &Fixture,
+) -> BTreeMap<String, String> {
+    let (generation, cand) = live_candidate(engine);
+    let columns = &generation.filter_columns;
+    let mut out = BTreeMap::new();
+    out.insert("candidate".to_string(), cand.cardinality().to_string());
+    out.insert(
+        "record layers".to_string(),
+        columns.record_layers().to_string(),
+    );
+    for column in ["department", "archive", "title", "score", "bonus"] {
+        out.insert(
+            format!("{column}: layers"),
+            format!(
+                "{:?} value, {:?} text",
+                columns.layer_count(column),
+                columns.text_layer_count(column)
+            ),
+        );
+        let placement = columns.placement(column).expect("a filterable column");
+        out.insert(
+            format!("{column}: placement"),
+            format!(
+                "entity={} row={} family={}",
+                placement.entity,
+                placement.row,
+                placement.family.as_str()
+            ),
+        );
+    }
+    // The analysed column, which has no value column and so no placement: what it holds is its
+    // text layers, and what it answers is a `match`.
+    out.insert(
+        "prose: layers".to_string(),
+        format!("{:?} text", columns.text_layer_count("prose")),
+    );
+    for (family, column, operand) in [
+        (
+            "category",
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        ),
+        (
+            "category",
+            "archive",
+            FilterOperand::Equals(AttrLocalId::new(fx.archive_codes["xx"])),
+        ),
+        (
+            "keyword",
+            "title",
+            FilterOperand::TextPrefix("differential-title-".into()),
+        ),
+        (
+            "keyword",
+            "title",
+            FilterOperand::TextContains("title-0".into()),
+        ),
+        (
+            "numeric",
+            "score",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(1_000),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+        ),
+        // A word of the build's own prose, and one only the flushed items carry: a layer lost at
+        // the reopen shows in one of the two and not the other.
+        (
+            "text",
+            "prose",
+            FilterOperand::Match {
+                query: "p05".to_string(),
+                minimum: None,
+            },
+        ),
+        (
+            "text",
+            "prose",
+            FilterOperand::Match {
+                query: "differential".to_string(),
+                minimum: None,
+            },
+        ),
+    ] {
+        let answer = columns.resolve(column, &operand, &cand).expect("answers");
+        let members = as_vec(&answer);
+        assert!(
+            !members.is_empty(),
+            "{family} {column}: the fixture answers nothing, so the comparison is vacuous"
+        );
+        out.insert(
+            format!("{family} {column} {operand:?}"),
+            format!("{members:?}"),
+        );
+    }
+    out
+}
+
+/// **A build is an ingest into an empty database**, so a live generation's filter columns and a
+/// reopen of the same bundle are the same database — which nothing pinned as a whole.
+///
+/// A window's worth of flushes and the coalesce they trigger make a generation the build alone
+/// cannot: a base, a coalesced layer, and the manifest entries that say so. What is compared is
+/// what each composition *holds* — the value and text layer counts per column, each column's
+/// placement, the record stack's depth — and what it *answers*, one representative operand per
+/// family under a candidate taken the same way from each.
+///
+/// A publication that edited the manifest without replacing the live layers differs in the counts;
+/// one that replaced the live layers without committing the entries differs in them the other way;
+/// a merge that paired values with the wrong entities differs in the answers.
+#[test]
+fn a_live_generation_and_a_reopen_of_the_same_bundle_hold_and_answer_alike() {
+    let fx = fixture();
+    let live = {
+        let engine = engine_for_coalesce(&fx, "differential");
+        flush_a_window(&engine, "differential", 0);
+        assert!(
+            engine.write_executor_stats().coalesces >= 1,
+            "the reading is of a generation a coalesce has published into"
+        );
+        composition_reading(&engine, &fx)
+    };
+    let reopened = engine_for_coalesce(&fx, "differential-reopen");
+    assert_eq!(live, composition_reading(&reopened, &fx));
+}
+
+/// The keys the keyword tests below ingest, one per flush of a window. Repeated across flushes and
+/// out of sorted order, so each flush's dictionary numbers its key 0 and the merged dictionary
+/// numbers five keys another way: a replacement read against any consumed layer's dictionary, or
+/// a consumed layer left beside the merged one, answers another key's entities.
+const KEYS: [&str; COALESCE_WIDTH] = [
+    "delta", "alpha", "gamma", "alpha", "beta", "delta", "epsilon", "gamma",
+];
+
+/// Ingest and flush one window's worth of rows whose `title` is `{tag}-{KEYS[i]}`, one flush each.
+fn flush_keyed_window(engine: &mosaica_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
+    (0..COALESCE_WIDTH)
+        .map(|i| {
+            ingest_and_flush_with(
+                engine,
+                &format!("{tag}-{}", from + i),
+                WalScalar::Utf8(["eng", "sales", "legal"][i % 3].to_string()),
+                WalScalar::Utf8("xx".to_string()),
+                &format!("{tag}-{}", KEYS[i]),
+                1_000 + i as i32,
+                WalScalar::Null,
+            )
+        })
+        .collect()
+}
+
+/// Every keyword answer over `title` for a `{tag}-` window, through the three routes a value is
+/// read by: the column reader, the filter expression evaluator, and a viewport request. Each
+/// answer is a sorted id list, so two captures compare as one value.
+fn keyword_answers(
+    engine: &mosaica_engine::Engine,
+    fx: &Fixture,
+    tag: &str,
+) -> Vec<(String, Vec<u64>)> {
+    let (generation, cand) = live_candidate(engine);
+    let mut out = Vec::new();
+    let mut operands: Vec<FilterOperand> = KEYS
+        .iter()
+        .map(|key| FilterOperand::TextEquals(format!("{tag}-{key}")))
+        .collect();
+    operands.push(FilterOperand::TextPrefix(format!("{tag}-")));
+    operands.push(FilterOperand::TextPrefix(format!("{tag}-a")));
+    operands.push(FilterOperand::TextContains("lta".into()));
+    operands.push(FilterOperand::TextContains("psi".into()));
+    operands.push(FilterOperand::TextEquals(format!("{tag}-zeta")));
+    for operand in &operands {
+        let answer = generation
+            .filter_columns
+            .resolve("title", operand, &cand)
+            .expect("answers");
+        out.push((
+            format!("resolve {operand:?}"),
+            answer.iter().map(u64::from).collect(),
+        ));
+        let expr = FilterExpr::AllOf(vec![
+            leaf("title", operand.clone()),
+            leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            ),
+        ]);
+        let answer = generation
+            .filter_columns
+            .evaluate(&expr, &cand)
+            .expect("answers");
+        out.push((
+            format!("evaluate {operand:?} and eng"),
+            answer.iter().map(u64::from).collect(),
+        ));
+    }
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("credential resolves");
+    for operand in &operands {
+        let served = engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                    .filter(leaf("title", operand.clone())),
+            )
+            .expect("a filtered viewport answers");
+        let mut ids: Vec<u64> = served.points.tessera_ids.clone();
+        ids.sort_unstable();
+        out.push((format!("viewport {operand:?}"), ids));
+    }
+    out
+}
+
+/// Drive the tick a coalesce is selected on, with the pass enabled, and wait for it to publish.
+fn coalesce_now(engine: &mosaica_engine::Engine) {
+    engine.set_coalesce_for_test(true);
+    attrs_coalesced(engine);
+}
+
+/// **A keyword column's window becomes one extent, installed with the dictionary its merge minted,
+/// and every entity reads the key it was ingested with** — the same answer before and after, over
+/// every operator the family publishes, through the column reader, the expression evaluator and a
+/// viewport request.
+///
+/// The invariant under test is records §7's: no ordinal is resolved against a dictionary other
+/// than the one that minted it. The coalesce renumbers every ordinal in the window, so the only
+/// way the answers stay equal is that the replacement layer's ordinals are read against the
+/// merged dictionary and nothing else — which `FilterColumns::with_coalesced` makes so by
+/// installing the two as one layer or refusing.
+///
+/// **Mutations this kills:** install the coalesced values with a consumed layer's dictionary
+/// (every `TextEquals` moves); leave a consumed layer beside the replacement (its entities answer
+/// twice, under two keys); merge the window byte-preserved (entity 0 reads `alpha` for `delta`).
+#[test]
+fn a_keyword_windows_extents_become_one_and_every_entity_keeps_its_key() {
+    let fx = fixture();
+    let engine = engine_for_coalesce(&fx, "kw-coalesce");
+    engine.set_coalesce_for_test(false);
+    let entities = flush_keyed_window(&engine, "kw", 0);
+    assert_eq!(
+        extents_per_column(&fx)["title"],
+        COALESCE_WIDTH,
+        "one extent per flush before the pass runs"
+    );
+    let before = keyword_answers(&engine, &fx, "kw");
+
+    coalesce_now(&engine);
+    assert_eq!(
+        extents_per_column(&fx)["title"],
+        1,
+        "the keyword window collapsed to one extent"
+    );
+    assert_eq!(
+        engine.generation().filter_columns.layer_count("title"),
+        Some(2),
+        "the live generation serves the base and the one coalesced layer"
+    );
+    let after = keyword_answers(&engine, &fx, "kw");
+    assert_eq!(after, before, "an answer moved across the coalesce");
+
+    // And the relation, entity by entity: each reads exactly its own key, and no other.
+    let (generation, cand) = live_candidate(&engine);
+    for (i, entity) in entities.iter().enumerate() {
+        for key in ["alpha", "beta", "delta", "epsilon", "gamma"] {
+            let answer = generation
+                .filter_columns
+                .resolve(
+                    "title",
+                    &FilterOperand::TextEquals(format!("kw-{key}")),
+                    &cand,
+                )
+                .expect("answers");
+            assert_eq!(
+                answer.contains(*entity as u32),
+                KEYS[i] == key,
+                "entity {entity} (ingested with {}) answers '{key}' wrongly",
+                KEYS[i]
+            );
+        }
+    }
+    assert!(!before.iter().all(|(_, ids)| ids.is_empty()));
+}
+
+/// **A coalesced keyword extent survives a restart and a fold, and coalesces again after both.**
+///
+/// A restart opens the extent from the manifest entry — values, presence and dictionary named
+/// together — so what the process served and what it reopens are the same three files. The fold
+/// then reads the coalesced extent as one of the column's layers, its ordinals against its own
+/// dictionary, and rebuilds the base from the survivors; a fold that resolved the coalesced
+/// ordinals against a flush's dictionary would write a recoloured base with no error.
+#[test]
+fn a_coalesced_keyword_extent_survives_a_restart_and_a_fold() {
+    let fx = fixture();
+    let entities = {
+        let engine = engine_for_coalesce(&fx, "kw-life");
+        engine.set_coalesce_for_test(false);
+        let entities = flush_keyed_window(&engine, "life", 0);
+        coalesce_now(&engine);
+        entities
+    };
+    let expected: Vec<(String, Vec<u64>)> = {
+        let engine = engine_for_coalesce(&fx, "kw-life-2");
+        engine.set_coalesce_for_test(false);
+        assert_eq!(extents_per_column(&fx)["title"], 1);
+        let reopened = keyword_answers(&engine, &fx, "life");
+        for (i, entity) in entities.iter().enumerate() {
+            let (name, ids) = &reopened[2 * i];
+            assert!(
+                ids.contains(entity),
+                "{name} lost entity {entity} to the restart"
+            );
+        }
+
+        fold(&engine);
+        assert!(
+            !extents_per_column(&fx).contains_key("title"),
+            "the fold consumed the coalesced extent"
+        );
+        assert_eq!(
+            engine.generation().filter_columns.layer_count("title"),
+            Some(1),
+            "one base again"
+        );
+        let folded = keyword_answers(&engine, &fx, "life");
+        assert_eq!(folded, reopened, "an answer moved across the fold");
+
+        // A second window after the fold, coalesced against the folded base.
+        let more = flush_keyed_window(&engine, "life", COALESCE_WIDTH);
+        coalesce_now(&engine);
+        assert_eq!(extents_per_column(&fx)["title"], 1);
+        let again = keyword_answers(&engine, &fx, "life");
+        for (i, entity) in more.iter().enumerate() {
+            let (name, ids) = &again[2 * i];
+            assert!(ids.contains(entity), "{name} misses entity {entity}");
+        }
+        for ((name, was), (_, now)) in reopened.iter().zip(&again) {
+            assert!(
+                was.iter().all(|e| now.contains(e)),
+                "{name} lost entities to the second coalesce"
+            );
+        }
+        again
+    };
+    // And once more from disc, after the fold and the second coalesce.
+    let engine = engine_for_coalesce(&fx, "kw-life-3");
+    assert_eq!(keyword_answers(&engine, &fx, "life"), expected);
+}
+
+/// **A coalesce retires nothing** (§5.2, §6): a deleted-but-unfolded entity's value rides through
+/// untouched, because removal is the fold's alone (Rule F) and the deny model depends on the two
+/// retirement routes never being conflated.
+///
+/// Read from the artefact rather than from an answer, and it has to be: a deleted entity is outside
+/// every candidate, so a pass that *had* blanked it here would be invisible to every filter until
+/// an unsuppress or a restore made it matter.
+///
+/// **Mutation:** hand the overlay's tombstones to `coalesce_attr_extents` and the value is gone.
+#[test]
+fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
+    let fx = fixture();
+    let engine = engine_for_coalesce(&fx, "coalesce-delete");
+    let entities = flush_a_window(&engine, "kept", 0);
+    let deleted = entities[3];
+    engine
+        .accept_change(
+            mosaica_types::EntityId::new(deleted),
+            mosaica_lifecycle::wal::ChangeOp::Delete,
+        )
+        .expect("a delete is accepted");
+    assert!(
+        engine.overlay_depth() > 0,
+        "the tombstone is live, unfolded"
+    );
+    // A second window, so a coalesce runs with the deletion outstanding.
+    flush_a_window(&engine, "kept2", COALESCE_WIDTH);
+
+    let opened = open_bundle(&fx.bundle).unwrap();
+    let phash = opened.partitions.keys().next().unwrap().clone();
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fx.bundle.join("CURRENT")).unwrap()).unwrap();
+    let prefix = fx.bundle.join(current["prefix"].as_str().unwrap());
+    let mut held = None;
+    for extent in &opened.partitions[&phash].manifest.attr_extents {
+        if extent.column != "title" {
+            continue;
+        }
+        let column = mosaica_filter::open_extent(
+            &prefix.join(&extent.values),
+            &prefix.join(&extent.presence),
+            mosaica_filter::Access::Read,
+        )
+        .expect("a listed extent opens");
+        // The ordinal alone would not settle it: a key is what the entity carried, and only this
+        // extent's own dictionary numbers this extent's ordinals (records §4.3).
+        let Some(ordinal) = column.value_of(deleted as u32).map(|v| v.raw()) else {
+            continue;
+        };
+        let dict_rel = extent
+            .dict
+            .as_ref()
+            .expect("a keyword extent lists its dictionary beside its values");
+        let dict =
+            mosaica_filter::SortedDict::open(&prefix.join(dict_rel), mosaica_filter::Access::Read)
+                .expect("the listed dictionary opens");
+        let mut scratch = Vec::new();
+        held = Some(
+            dict.key_of(ordinal, &mut scratch)
+                .expect("the ordinal names a key in its own extent's dictionary")
+                .to_string(),
+        );
+    }
+    assert_eq!(
+        held.as_deref(),
+        Some("kept-title-03"),
+        "the deleted entity's value left the corpus at a coalesce; only the fold may retire it \
+         (Rule F), and conflating the two removal rules is fail-open"
+    );
+}
+
+/// **Replacing layers checks presence *equality*, where appending checks disjointness.**
+///
+/// The two conditions are different and only one of them is `compose`'s. A coalesced layer covering
+/// less than the window it replaces would leave `covered` naming entities no layer holds, so every
+/// later disjointness check tests against the wrong coverage — silently, and for the life of the
+/// generation. The merge's own duplicate guard makes the mismatch unreachable, which is exactly why
+/// it is cheap to verify and wrong to assume.
+///
+/// Asserted over `bonus`, a plain numeric column, so the window carries no dictionary and the
+/// coverage check is the only one in play. A keyword window's other refusal — arriving without the
+/// dictionary its ordinals are numbered against — is its own test, in `filter.rs`'s `keyword_tests`.
+#[test]
+fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
+    let fx = fixture();
+    let extent = |entities: &[u32]| {
+        let mut presence = Bitmap::new();
+        for e in entities {
+            presence.add(*e);
+        }
+        Arc::new(
+            mosaica_filter::ValueColumn::partial(
+                mosaica_filter::Codes::I32(
+                    entities
+                        .iter()
+                        .map(|e| *e as i32)
+                        .collect::<Vec<_>>()
+                        .into(),
+                ),
+                presence,
+            )
+            .unwrap(),
+        )
+    };
+    let first = "attrs/bonus/extents/a.arrow".to_string();
+    let second = "attrs/bonus/extents/b.arrow".to_string();
+    let columns = fx
+        .columns
+        .with_extents(
+            &[
+                opened("bonus", &first, extent(&[100, 101]), None),
+                opened("bonus", &second, extent(&[200, 201]), None),
+            ],
+            &[],
+            &[],
+            &[],
+        )
+        .expect("two extents above the build's high-water compose");
+
+    let window =
+        |values: Arc<mosaica_filter::ValueColumn>| mosaica_engine::filter::CoalescedWindow {
+            consumed: vec![first.clone(), second.clone()],
+            replacement: opened("bonus", "coalesced/c-1/attrs/bonus/values.arrow", values, None),
+        };
+    let err = columns
+        .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None, None)
+        .expect_err("a coalesced layer short of its window is refused");
+    assert!(
+        matches!(
+            &err,
+            ComposeError::CoverageMismatch {
+                column,
+                replacement: 3,
+                consumed: 2,
+                covered: 4,
+            } if column == "bonus"
+        ),
+        "{err:?}"
+    );
+
+    // And one naming a layer this generation does not hold: the plan and the process disagree
+    // about what the bundle is, which is a refusal rather than a no-op.
+    let mut stray = window(extent(&[100, 101, 200, 201]));
+    stray
+        .consumed
+        .push("attrs/bonus/extents/never.arrow".to_string());
+    assert!(columns.with_coalesced(&[stray], &[], None, None).is_err());
+
+    // The well-formed replace, which is what the pass actually publishes.
+    let next = columns
+        .with_coalesced(&[window(extent(&[100, 101, 200, 201]))], &[], None, None)
+        .expect("the coalesced layer covers exactly its window");
+    let mut cand = Bitmap::new();
+    cand.add_range(0..300);
+    let answer = next
+        .resolve(
+            "bonus",
+            &FilterOperand::NumEquals(mosaica_filter::Scalar::Int(201)),
+            &cand,
+        )
+        .expect("answers");
+    assert_eq!(answer.iter().collect::<Vec<_>>(), vec![201]);
+}
+
+// =================================================================================================
+// The row-space route (decision 0068): suppression, route agreement, and θ's anchor
+// =================================================================================================
+
+/// **A suppressed entity is gone from every answer a render-column filter gives** — the mark, the
+/// count and the record alike.
+///
+/// This is the differential `Engine::evaluate_row_route`'s module doc names, and it pins the half
+/// of the route that is easiest to get wrong and impossible to see. The row bitmap the route
+/// returns *still contains the suppressed row*: the hot column holds its value and Rule S says no
+/// filter artefact may ever be touched by a suppression, so the value is there to be matched. What
+/// removes the entity is that the bitmap narrows the request only through `EffectiveMask`, whose
+/// consumers intersect the composed mask — fragment minus overlay — last. A route that took the
+/// raw fragment as its candidate, or that let the row bitmap stand as the answer, would resurrect
+/// every suppressed item that happens to match the predicate, and would do so while every count
+/// stayed self-consistent.
+///
+/// The unsuppress at the end is what distinguishes "hidden" from "never matched": the entity comes
+/// back through the same filter, so its value was in the column throughout.
+///
+/// Run for both row-space families. The rule is a property of where the row bitmap is consumed
+/// rather than of what the leaf read, but "the hot column still holds a suppressed row's value" is
+/// exactly as true of a number as of a code, and the differential costs one more predicate.
+#[test]
+fn a_suppressed_entity_is_absent_from_a_render_column_filters_marks_counts_and_record() {
+    let fx = fixture();
+    // Source 1 carries "sales" and scores 7; each predicate is its own value, so the entity
+    // matches the filter and only the suppression can remove it.
+    let department = department_of(1).expect("source 1 carries a department");
+    let category = leaf(
+        "department",
+        FilterOperand::Equals(AttrLocalId::new(fx.codes[department])),
+    );
+    let number = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(score_of(1) as i128),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(score_of(1) as i128),
+                inclusive: true,
+            }),
+        },
+    );
+    suppression_is_a_differential_on(&fx, "category", category);
+    suppression_is_a_differential_on(&fx, "number", number);
+}
+
+fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: FilterExpr) {
+    let cache = fx._dir.path().join(format!("cache-row-suppress-{family}"));
+    let wal = fx._dir.path().join(format!("wal-row-suppress-{family}"));
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let source = 1u64;
+    let entity = fx.entity_of[&source];
+    let id = engine
+        .tessera_id_of(mosaica_types::EntityId::new(entity))
+        .expect("identity is computable");
+    let raw = id.raw();
+
+    let filtered = |engine: &mosaica_engine::Engine, session: &mosaica_engine::Session| {
+        engine
+            .viewport(
+                session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(predicate.clone()),
+            )
+            .expect("the filtered viewport answers")
+    };
+
+    let before_routes = engine.filter_row_routes();
+    let before = filtered(&engine, &session);
+    assert_eq!(
+        engine.filter_row_routes() - before_routes,
+        1,
+        "{family}: this differential is about the row route, and the request did not take it"
+    );
+    let drawn: std::collections::BTreeSet<u64> =
+        before.points.tessera_ids.iter().copied().collect();
+    assert!(
+        drawn.contains(&raw),
+        "{family}: the fixture is degenerate — the entity must match the filter before it is \
+             suppressed"
+    );
+    let matched =
+        |out: &mosaica_engine::ViewportOut| -> u64 { out.tiles.iter().map(|t| t.matched).sum() };
+    let matched_before = matched(&before);
+
+    engine
+        .accept_change(
+            mosaica_types::EntityId::new(entity),
+            mosaica_lifecycle::wal::ChangeOp::Suppress,
+        )
+        .expect("a suppression is accepted");
+
+    // A session authorised before the suppression must not still see it: the mask composes
+    // against the live overlay, not the one that existed at authorise.
+    let after = filtered(&engine, &session);
+    let drawn: std::collections::BTreeSet<u64> = after.points.tessera_ids.iter().copied().collect();
+    assert!(
+        !drawn.contains(&raw),
+        "{family}: a suppressed entity was drawn as a mark by a render-column filter"
+    );
+    assert_eq!(
+        matched(&after),
+        matched_before - 1,
+        "{family}: the filtered count still counts the suppressed entity"
+    );
+    assert!(
+        engine
+            .item(&session, id)
+            .expect("the drill-down succeeds")
+            .is_none(),
+        "{family}: a suppressed entity still answers drill-down"
+    );
+
+    engine
+        .accept_change(
+            mosaica_types::EntityId::new(entity),
+            mosaica_lifecycle::wal::ChangeOp::Unsuppress,
+        )
+        .expect("an unsuppress is accepted");
+    let restored = filtered(&engine, &session);
+    let drawn: std::collections::BTreeSet<u64> =
+        restored.points.tessera_ids.iter().copied().collect();
+    assert!(
+        drawn.contains(&raw),
+        "{family}: the unsuppress must reveal the entity through the same filter — proving its \
+         value was in the column throughout, hidden rather than erased (Rule S)"
+    );
+}
+
+/// **Both routes answer the same question over the same window**, which is the whole licence for
+/// admitting a second operand kind (decision 0068): a row-space result is exact over the request's
+/// domain, so the route may be chosen on cost alone.
+///
+/// The route rule is `rows_in_ranges ≤ |M_auth|`, so what selects the routown visible total — the same predicate, the same mask, once
+/// through each route, must draw the same marks over the same domain. The counters assert each
+/// request landed on the route it was meant to exercise rather than leaving the equality to hold
+/// trivially because both took the same one.
+///
+/// **The mask is a subset credential, and that is what makes the pair reachable.** Under full
+/// coverage the whole extent's row span *equals* the visible total, so the rule's `≤` chooses row
+/// space for every window and the entity route is unreachable from this fixture. A principal who
+/// sees part of the corpus has a visible total below the full extent's row span, which is the
+/// ordinary shape the rule was written for.
+#[test]
+fn the_row_route_and_the_entity_route_agree_over_the_domain() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-route-agree");
+    let wal = fx._dir.path().join("wal-route-agree");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&subset_credential()).unwrap();
+
+    let predicate = FilterExpr::AnyOf(
+        ["eng", "sales"]
+            .iter()
+            .map(|d| {
+                leaf(
+                    "department",
+                    FilterOperand::Equals(AttrLocalId::new(fx.codes[*d])),
+                )
+            })
+            .collect(),
+    );
+    let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+        out.points.tessera_ids.iter().copied().collect()
+    };
+
+    // A narrow window: few rows in range, so the row route is the cheaper one and is chosen.
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let before = engine.filter_row_routes();
+    let narrow_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 8, narrow, 10_000).filter(predicate.clone()),
+        )
+        .expect("the narrow window answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        1,
+        "the narrow request was supposed to take the row route; the window or the rule moved"
+    );
+
+    // The same window, unfiltered, gives the domain the comparison is made over.
+    let narrow_all = ids(&engine
+        .viewport(&session, ViewportRequest::new("s0", 8, narrow, 10_000))
+        .expect("the narrow window answers unfiltered"));
+
+    // The whole extent: rows in range now exceed the principal's total, so the entity route runs.
+    let before = engine.filter_row_routes();
+    let full_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(predicate),
+        )
+        .expect("the full extent answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        0,
+        "the full-extent request was supposed to take the entity route"
+    );
+
+    let (row_marks, entity_marks) = (ids(&narrow_filtered), ids(&full_filtered));
+    assert_eq!(
+        row_marks,
+        entity_marks
+            .intersection(&narrow_all)
+            .copied()
+            .collect::<std::collections::BTreeSet<u64>>(),
+        "the row route's marks differ from the entity route's over the same domain"
+    );
+    assert!(
+        !row_marks.is_empty() && row_marks.len() < narrow_all.len(),
+        "non-degenerate in both directions: the window holds matches, and the filter removed some"
+    );
+}
+
+/// **The two routes agree over a numeric range as well as over a category**, which is what admits
+/// a rendered number to the row-space operand at all (decision 0064's render half).
+///
+/// A number is the family the row route could most easily get wrong: its bounds have to be read the
+/// same way on both sides — exclusivity folded, a bound past the type's edge meaning no constraint
+/// or no match — and the two narrowings are separate transcriptions across a crate boundary
+/// (`viewport.rs`'s `range_run` says why). Route agreement over the domain is what holds them
+/// together; the endpoint rules themselves are pinned directly in that module's own tests.
+#[test]
+fn the_row_route_and_the_entity_route_agree_over_a_numeric_range() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-route-agree-num");
+    let wal = fx._dir.path().join("wal-route-agree-num");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&subset_credential()).unwrap();
+
+    // `score_of(e) = (7e) % 100`, so this range takes roughly a third of the corpus and its upper
+    // bound is exclusive — the endpoint the two narrowings must fold identically.
+    let predicate = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(20),
+                inclusive: true,
+            }),
+            hi: Some(Endpoint {
+                value: Scalar::Int(55),
+                inclusive: false,
+            }),
+        },
+    );
+    let ids = |out: &mosaica_engine::ViewportOut| -> std::collections::BTreeSet<u64> {
+        out.points.tessera_ids.iter().copied().collect()
+    };
+
+    // A narrow window: few rows in range, so the row route is the cheaper one and is chosen.
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let before = engine.filter_row_routes();
+    let narrow_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 8, narrow, 10_000).filter(predicate.clone()),
+        )
+        .expect("the narrow window answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        1,
+        "the narrow request was supposed to take the row route; the window or the rule moved"
+    );
+    let narrow_all = ids(&engine
+        .viewport(&session, ViewportRequest::new("s0", 8, narrow, 10_000))
+        .expect("the narrow window answers unfiltered"));
+
+    // The whole extent: rows in range now exceed the principal's total, so the entity route runs.
+    let before = engine.filter_row_routes();
+    let full_filtered = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000).filter(predicate),
+        )
+        .expect("the full extent answers filtered");
+    assert_eq!(
+        engine.filter_row_routes() - before,
+        0,
+        "the full-extent request was supposed to take the entity route"
+    );
+
+    let (row_marks, entity_marks) = (ids(&narrow_filtered), ids(&full_filtered));
+    assert_eq!(
+        row_marks,
+        entity_marks
+            .intersection(&narrow_all)
+            .copied()
+            .collect::<std::collections::BTreeSet<u64>>(),
+        "the row route's marks differ from the entity route's over the same numeric range"
+    );
+    assert!(
+        !row_marks.is_empty() && row_marks.len() < narrow_all.len(),
+        "non-degenerate in both directions: the window holds matches, and the filter removed some"
+    );
+
+    // The corpus itself, not just the other route: an agreement between two wrong readings of the
+    // same bounds would satisfy the assertion above.
+    let expected_full: std::collections::BTreeSet<u64> = (0..N)
+        .filter(|&e| (20..55).contains(&score_of(e)))
+        .filter_map(|e| fx.entity_of.get(&e).copied())
+        .filter_map(|entity| {
+            engine
+                .tessera_id_of(mosaica_types::EntityId::new(entity))
+                .ok()
+        })
+        .map(|id| id.raw())
+        .collect();
+    assert!(
+        entity_marks.is_subset(&expected_full),
+        "a route returned an item outside the range the corpus says matches"
+    );
+}
+
+/// **A filter narrows the selection and never moves θ** (I3/I12): the label frontier anchors on the
+/// unfiltered composed mask, so the same viewport answers the same θ filtered or not.
+///
+/// This is the invariant a row-space route is most likely to break by accident, because the route
+/// is evaluated inside the same sweep that computes the anchor — and an anchor taken after the
+/// filter would let a caller move the frontier by narrowing, which is a disclosure rather than a
+/// view. The unfiltered total is asserted alongside it: it is `visible_total()`, computed above the
+/// filter and deliberately blind to it.
+///
+/// Both row-space families run it: the anchor is computed above the filter whatever the leaf reads,
+/// and a rule that held for a category's codes and not for a number's bounds would be a coincidence
+/// of where the code sits rather than a property of the sweep.
+#[test]
+fn a_render_column_filter_narrows_the_selection_without_moving_the_anchor() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-anchor");
+    let wal = fx._dir.path().join("wal-anchor");
+    let engine = open_engine_uncapped(&fx.bundle, &cache, &wal);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let narrow = [0.0, 0.0, 400.0, 400.0];
+    let unfiltered = engine
+        .viewport(&session, ViewportRequest::new("s0", 8, narrow, 10_000))
+        .expect("unfiltered");
+
+    let category = leaf(
+        "department",
+        FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+    );
+    // `score_of(e) = (7e) % 100`, so the top fifth is a genuine narrowing of any window.
+    let number = leaf(
+        "score",
+        FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(80),
+                inclusive: true,
+            }),
+            hi: None,
+        },
+    );
+
+    for (family, predicate) in [("category", category), ("number", number)] {
+        let before = engine.filter_row_routes();
+        let filtered = engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 8, narrow, 10_000).filter(predicate),
+            )
+            .expect("filtered");
+        assert_eq!(
+            engine.filter_row_routes() - before,
+            1,
+            "{family}: this test is only meaningful if the row route ran"
+        );
+
+        // `TileCount::visible` is the anchor's own input — the composed mask's count for the tile,
+        // computed above the filter — while `matched` is what the filter narrowed to. The first
+        // must be identical across the pair; the second must not be.
+        let anchor = |out: &mosaica_engine::ViewportOut| -> Vec<(u64, u64)> {
+            out.tiles.iter().map(|t| (t.tile, t.visible)).collect()
+        };
+        let (visible, visible_unfiltered) = (anchor(&filtered), anchor(&unfiltered));
+        assert_eq!(
+            visible, visible_unfiltered,
+            "{family}: the filter moved the anchor: θ anchors on the unfiltered composed mask \
+             (I3/I12)"
+        );
+        let matched: u64 = filtered.tiles.iter().map(|t| t.matched).sum();
+        let visible_total: u64 = filtered.tiles.iter().map(|t| t.visible).sum();
+        assert!(
+            matched < visible_total,
+            "{family}: the filter must actually have narrowed the matched set beneath the anchor"
+        );
+        let drawn: std::collections::BTreeSet<u64> =
+            filtered.points.tessera_ids.iter().copied().collect();
+        let all: std::collections::BTreeSet<u64> =
+            unfiltered.points.tessera_ids.iter().copied().collect();
+        assert!(
+            drawn.is_subset(&all) && drawn.len() < all.len(),
+            "{family}: a filter may only narrow (I12), and this one must actually have narrowed"
+        );
+    }
+}

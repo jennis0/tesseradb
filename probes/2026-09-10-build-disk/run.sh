@@ -44,13 +44,13 @@ forecast() {
   local corpus="$1" binary="$2" out="$3"
   rm -rf "$out"; mkdir -p "$out"
   set -a; . "$corpus/.env"; set +a
-  "$binary" build --deployment "$corpus/tessera.toml" --config "$corpus/corpus.toml" \
+  "$binary" build --deployment "$corpus/mosaica.toml" --config "$corpus/corpus.toml" \
     --out "$out/bundle" > "$out/out.log" 2>&1 &
   local pid=$!
   # The pid the loop below waits on is the build's own: a wrapper shell's would fall through at
   # once and record a forecast that was never printed.
   case "$(ps -o comm= -p "$pid" 2>/dev/null)" in
-    *tessera*) ;;
+    *mosaica*) ;;
     *) echo "the pid is not the build" >&2; return 1 ;;
   esac
   while kill -0 "$pid" 2>/dev/null; do
@@ -77,7 +77,7 @@ for name in ${IDENTITY:-multiview treeoflife-1m medcpt-1m geonames}; do
   for which in before after; do
     binary="$([ "$which" = before ] && echo "$before" || echo "$after")"
     rm -rf "$work/$name-$which"
-    ( cd "$corpus" && "$binary" build --deployment tessera.toml --config corpus.toml \
+    ( cd "$corpus" && "$binary" build --deployment mosaica.toml --config corpus.toml \
         --out "$work/$name-$which" > "$work/$name-$which.log" 2>&1 ) \
       || { echo "$name: $which build failed"; tail -5 "$work/$name-$which.log"; continue; }
   done

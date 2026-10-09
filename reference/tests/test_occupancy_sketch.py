@@ -1,7 +1,7 @@
 """Known-answer tests for `oracle.occupancy` — θ's second anchor, and the sketch it takes above one
 segment.
 
-**The vectors at the bottom are the contract.** `crates/tessera-engine/src/occupancy.rs`'s
+**The vectors at the bottom are the contract.** `crates/mosaica-engine/src/occupancy.rs`'s
 `the_ladder_matches_the_python_oracle_vector_for_vector` asserts the same three lists over the same
 three inputs. They are what keeps the two implementations of the estimator from drifting: the
 served set depends on θ, θ depends on `N_occ(d)`, and above one segment `N_occ(d)` is an estimate,

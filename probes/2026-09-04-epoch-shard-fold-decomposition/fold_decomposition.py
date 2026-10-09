@@ -3,13 +3,13 @@
 Serves a copy of the bundle, authorises three grants of different coverage, warms each with one
 zoom-0 all-layers viewport, ingests one batch of rows carrying `mesh/descriptors` keys, deletes a
 hundred of them, flushes, folds, and then repeats the viewports. Every step is timed with the
-server's own figure where the API gives one (`x-tessera-server-us`, `/control/status`'s staircase)
+server's own figure where the API gives one (`x-mosaica-server-us`, `/control/status`'s staircase)
 and wall time otherwise. The server's resident set is sampled at every step and once a second
 during the fold.
 
 Usage: fold_decomposition.py <scratch dir> <output dir>
 
-`TESSERA_BUNDLE` names the bundle to serve. It must be a copy: a fold writes a new prefix into
+`MOSAICA_BUNDLE` names the bundle to serve. It must be a copy: a fold writes a new prefix into
 it and reclaims the old one.
 """
 
@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, "/home/user/code/tessera/test_corpora")
+sys.path.insert(0, "/home/user/code/mosaica/test_corpora")
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 import requests  # noqa: E402
@@ -36,12 +36,12 @@ from common import serve_battery  # noqa: E402
 from common.deployment import Deployment  # noqa: E402
 from common.ingest_cycle import Control, wait_for  # noqa: E402
 
-R = Path("/home/user/code/tessera")
+R = Path("/home/user/code/mosaica")
 RUNG = R / "data/ladder/medcpt"
 BUNDLE = Path(
-    os.environ.get("TESSERA_BUNDLE", R / "data/ladder/.measure/medcpt36-foldprobe/bundle")
+    os.environ.get("MOSAICA_BUNDLE", R / "data/ladder/.measure/medcpt36-foldprobe/bundle")
 )
-BINARY = Path(os.environ.get("TESSERA_BIN", R / "target/release/tessera"))
+BINARY = Path(os.environ.get("MOSAICA_BIN", R / "target/release/mosaica"))
 PORTS = (8221, 8222, 8223)
 LAYER = "mesh/descriptors"
 BATCH_ROWS = 10_000

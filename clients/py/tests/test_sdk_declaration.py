@@ -9,9 +9,9 @@ lists the insert prints.
 import pyarrow.parquet as pq
 import pytest
 
-from tesseradb._database import create
-from tesseradb._refusal import Refusal
-from tesseradb._toml import Inline, dumps
+from mosaica._database import create
+from mosaica._refusal import Refusal
+from mosaica._toml import Inline, dumps
 
 pd = pytest.importorskip("pandas")
 

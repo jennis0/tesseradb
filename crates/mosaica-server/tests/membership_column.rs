@@ -1,0 +1,1675 @@
+//! **A point names its artifacts on the wire** (`artifacts-from-points.md` §6.2), and the database
+//! it produces is the one a build produces from the same corpus.
+//!
+//! [Decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md) rules
+//! that there is no difference in functionality or client experience between a build and an ingest,
+//! and marked exactly one breach of its own rule: a point could name its artifacts in a file and not
+//! on the wire. This file is that breach closed, and the test it names is the headline here — the
+//! same corpus, split between the two entry points, is the same database *to every client*: same
+//! memberships, same masked counts, same computed content, same gates. Not the same bytes, because
+//! ids are assigned differently at the two entry points and nothing a client holds exposes that.
+//!
+//! **The corpus arrives two ways, and one of them is wholly**: every point built on one side, and
+//! on the other a bundle with *no* points at all, into which the whole corpus is ingested. That
+//! arm is 0091's own headline —
+//! [`a_wholly_ingested_corpus_is_the_database_a_build_produces`] — and until 2026-09-03 it could
+//! not be written, because both builds refused a bundle with no items and so *ingest into an empty
+//! database* was not a state this system could be put in through its own tools. The refusal is
+//! gone (`mosaica-build/tests/empty_bundle.rs`); what remains build-only is fitting an `auto`
+//! extent to no rows, which is about acquisition rather than meaning.
+//!
+//! The split arms stay beside it. They are not a weaker substitute: a seed built and the rest
+//! ingested is the mixed state a real deployment is always in, and it is where a growth path and a
+//! minting path can disagree with each other.
+//!
+//! **The list column is here because the lineage inference is the half most likely to drift.** A
+//! scalar key is one lookup; a list's positions carry levels and its adjacency carries edges, and
+//! those rules live in `mosaica_types::layer` precisely so a build and a wire batch cannot read one
+//! file two ways.
+
+mod common;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use arrow::array::{
+    Array, ArrayRef, Float32Array, Int64Array, ListArray, StringArray, UInt32Array,
+    UInt64Array,
+};
+use arrow::buffer::OffsetBuffer;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::writer::StreamWriter;
+use arrow::record_batch::RecordBatch;
+use serde_json::json;
+use tempfile::TempDir;
+
+use common::*;
+use mosaica_build::{build, BuildArgs};
+
+/// The corpus. Small enough for a flush and a fold inside a test, wide enough that a clustering
+/// over it has clusters of different sizes and a masked count that moves between principals.
+const N: u64 = 240;
+
+/// How many of those points the *ingest* side builds when the case is about **growth**: every key
+/// the clustering uses appears within this prefix, so every ingested point joins an artifact that
+/// already exists.
+const SEED: u64 = 30;
+
+/// The same, when the case is about **minting**. Four clustered points name a handful of the
+/// clustering's keys and no more, so most of it does not exist when the tail starts arriving and the
+/// arriving points create it — which is what `value_set = "open"` says they may
+/// (`artifacts-from-points.md` §3).
+const MINT_SEED: u64 = 5;
+
+const LAYER: &str = "clusters/a";
+
+fn x_of(e: u64) -> f64 {
+    ((e * 37) % 1000) as f64
+}
+fn y_of(e: u64) -> f64 {
+    ((e * 53) % 1000) as f64
+}
+
+/// The scalar clustering: eight clusters, every tenth point noise (`-1`) and every seventeenth
+/// unclustered (null) — the two spellings of *this point is in no artifact*.
+fn cluster_of(e: u64) -> Option<i64> {
+    if e.is_multiple_of(17) {
+        None
+    } else if e.is_multiple_of(10) {
+        Some(-1)
+    } else {
+        Some((e % 8) as i64)
+    }
+}
+
+/// The lineage: one root, three groups under it, six leaves under those — each point a member of
+/// every artifact its list names, and the adjacency the edges between them.
+fn lineage_of(e: u64) -> Vec<Option<i64>> {
+    if e.is_multiple_of(17) {
+        // Noise at the finest resolution: a point clustered at the two coarser levels and at none
+        // of the leaves. The edge across the gap is the one that must not be invented.
+        return vec![Some(1), Some(10 + (e % 3) as i64), None];
+    }
+    vec![
+        Some(1),
+        Some(10 + (e % 3) as i64),
+        Some(100 + (e % 6) as i64),
+    ]
+}
+
+/// The artifacts a point belongs to under each spelling — the fixture's own answer, which the
+/// oracle counts and the two inputs are written from.
+fn scalar_key_of(e: u64) -> Vec<i64> {
+    cluster_of(e).filter(|k| *k >= 0).into_iter().collect()
+}
+
+fn lineage_keys_of(e: u64) -> Vec<i64> {
+    lineage_of(e).into_iter().flatten().collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// The two sides: a build, and a build plus an ingest
+// ---------------------------------------------------------------------------------------------
+
+const VIEW_TOML: &str = r#"
+[sources]
+points = "points.parquet"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 1000.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+"#;
+
+/// The layer both sides declare, at the hierarchy kind the case is about. `value_set = "open"` so a
+/// key no artifact declares creates one — at a build, where it makes the point column a roster, and
+/// at ingest, where an arriving point creates the cluster it names. The `closed` half of the same
+/// key is a control-plane layer below, since a build refuses a closed layer with members and no
+/// artifact source of its own.
+fn layer_toml(kind: &str, key_column: &str) -> String {
+    format!(
+        r#"
+[[layer]]
+name = "{LAYER}"
+title = "clusters"
+views = ["s0"]
+membership = "enumerated"
+value_set = "open"
+visibility = "public"
+artifact_visibility = {{ default = "inherited" }}
+require_member_visibility = {{ count = 4 }}
+hierarchy = {{ kind = "{kind}", prune_children = false }}
+content = {{ computed = ["centroid", "box"] }}
+
+  [layer.members]
+  source = "points"
+  fields = {{ key = "{key_column}" }}
+"#
+    )
+}
+
+/// The level the levelled fixture places a point's scalar key at: `e % 3`, and null, which is
+/// level 0, on every seventh point.
+fn level_of(e: u64) -> Option<u32> {
+    (!e.is_multiple_of(7)).then_some((e % 3) as u32)
+}
+
+/// A `level` column over `rows`.
+fn levels(rows: &[u64]) -> ArrayRef {
+    Arc::new(UInt32Array::from(
+        rows.iter().map(|e| level_of(*e)).collect::<Vec<_>>(),
+    ))
+}
+
+/// The points file: geometry, and the two membership spellings beside it, with a `level` column
+/// where `with_levels` is set.
+///
+/// `rows` is which of the corpus's points this file carries — the whole of it on the built side, its
+/// seed on the ingested one.
+fn write_membership_points(path: &Path, rows: &[u64], with_levels: bool) {
+    let item = Arc::new(Field::new("item", DataType::Int64, true));
+    let mut offsets: Vec<i32> = vec![0];
+    let mut entries: Vec<Option<i64>> = Vec::new();
+    for e in rows {
+        entries.extend(lineage_of(*e));
+        offsets.push(entries.len() as i32);
+    }
+    let lineage = ListArray::new(
+        item,
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(Int64Array::from(entries)) as ArrayRef,
+        None,
+    );
+    let cluster = Int64Array::from(rows.iter().map(|e| cluster_of(*e)).collect::<Vec<_>>());
+    let mut columns = vec![
+        column("cluster", true, cluster),
+        column("lineage", true, lineage),
+    ];
+    if with_levels {
+        let level = UInt32Array::from(rows.iter().map(|e| level_of(*e)).collect::<Vec<_>>());
+        columns.push(column("level", true, level));
+    }
+    write_points(path, rows, |e| (x_of(e), y_of(e)), columns);
+}
+
+/// The labels an ingested row carries, one per term — the same terms the pairs file gives a
+/// built one.
+fn access_of(e: u64) -> Vec<String> {
+    terms_of(e).iter().map(|t| t.to_string()).collect()
+}
+
+struct Built {
+    _tmp: TempDir,
+    dir: PathBuf,
+}
+
+/// Build a bundle over `rows`, with the layer reading its members from the point table.
+fn build_side(rows: &[u64], layer: &str) -> Built {
+    build_side_with(rows, layer, false)
+}
+
+/// [`build_side`], with the point table carrying a `level` column where `with_levels` is set.
+fn build_side_with(rows: &[u64], layer: &str, with_levels: bool) -> Built {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    let config_path = dir.join("config.toml");
+    write_membership_points(&points, rows, with_levels);
+    write_pairs(&pairs, rows);
+    std::fs::write(&config_path, format!("{VIEW_TOML}{layer}")).unwrap();
+
+    let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the fixture declaration parses");
+    let args = BuildArgs {
+        attribute_sources: mosaica_build::config::AttributeSource::over(
+            points.clone(),
+            &config.schema,
+        ),
+        layers: config.layers,
+        layer_inputs: config.layer_sources,
+        schema: config.schema,
+        ..build_args(
+            &dir.join("bundle"),
+            vec![view_args("s0", &points, AccessInput::relation(pairs))],
+        )
+    };
+    build(&args).expect("the fixture build succeeds");
+    Built { _tmp: tmp, dir }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The wire: an ingest batch carrying a column named for a layer
+// ---------------------------------------------------------------------------------------------
+
+/// One ingest batch: each point's `id`, the reserved geometry columns, and a column **named for
+/// the layer** carrying each point's artifacts.
+fn ingest_batch(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
+    ingest_batch_with(rows, vec![(column, keys)])
+}
+
+/// [`ingest_batch`] with any columns beside the reserved ones.
+fn ingest_batch_with(rows: &[u64], columns: Vec<(&str, ArrayRef)>) -> Vec<u8> {
+    let labels: Vec<Vec<String>> = rows.iter().map(|e| access_of(*e)).collect();
+    let labels: Vec<Vec<&str>> = labels
+        .iter()
+        .map(|row| row.iter().map(String::as_str).collect())
+        .collect();
+    let labels: Vec<&[&str]> = labels.iter().map(Vec::as_slice).collect();
+    let access = access_lists(&labels);
+    let mut fields = vec![
+        Field::new("id", DataType::UInt64, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+    ];
+    let mut arrays: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from(rows.to_vec())),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|e| x_of(*e) as f32),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|e| y_of(*e) as f32),
+        )),
+        Arc::new(access),
+    ];
+    for (name, array) in columns {
+        fields.push(Field::new(name, array.data_type().clone(), true));
+        arrays.push(array);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// The scalar column: one cluster key per point.
+fn scalar_keys(rows: &[u64]) -> ArrayRef {
+    Arc::new(Int64Array::from(
+        rows.iter().map(|e| cluster_of(*e)).collect::<Vec<_>>(),
+    ))
+}
+
+/// The list column: the artifacts a point belongs to, coarse to fine.
+fn lineage_keys(rows: &[u64]) -> ArrayRef {
+    let item = Arc::new(Field::new("item", DataType::Int64, true));
+    let mut offsets: Vec<i32> = vec![0];
+    let mut entries: Vec<Option<i64>> = Vec::new();
+    for e in rows {
+        entries.extend(lineage_of(*e));
+        offsets.push(entries.len() as i32);
+    }
+    Arc::new(ListArray::new(
+        item,
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(Int64Array::from(entries)) as ArrayRef,
+        None,
+    ))
+}
+
+/// What a 200 says its own keys created (`artifacts-from-points.md` §3): a typo mints a permanent
+/// object rather than being refused, and the caller who made it is told the number.
+fn minted_of(body: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(body).unwrap()["minted"]
+        .as_u64()
+        .expect("every accepted ingest reports what it minted")
+}
+
+/// Register a layer over the control plane, for the cases a build cannot express — a closed layer
+/// binding members with no artifact source of its own, and a layer whose artifacts arrive by
+/// publication rather than from a file.
+async fn register_layer(
+    server: &TestServer,
+    name: &str,
+    kind: &str,
+    value_set: &str,
+    criterion: serde_json::Value,
+) {
+    let criterion = criterion
+        .as_object()
+        .is_some_and(|c| !c.is_empty())
+        .then_some(criterion);
+    let mut layer = flat_layer(name);
+    layer["value_set"] = json!(value_set);
+    layer["require_member_visibility"] = json!(criterion);
+    layer["hierarchy"]["kind"] = json!(kind);
+    register(server, layer).await;
+}
+
+/// Publish artifacts into a registered layer, returning the response's per-artifact rows — which is
+/// where a `tessera_id` a suppression can name comes from.
+async fn publish_artifacts(
+    server: &TestServer,
+    layer: &str,
+    artifacts: serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let encoded = layer.replace('/', "%2F");
+    let resp = server
+        .client
+        .put(server.control_url(&format!("/control/layers/{encoded}/artifacts")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "artifacts": artifacts }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status, 201, "{body}");
+    body["artifacts"].as_array().cloned().unwrap_or_default()
+}
+
+/// One `/control/changes` entry against an artifact's own identifier.
+async fn suppress(server: &TestServer, tessera_id: &str, op: &str) {
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!([{ "op": op, "match": { "tessera_id": tessera_id } }]))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    assert_eq!(status, 200, "{}", resp.text().await.unwrap());
+}
+
+/// The keys of one layer's artifacts as a full-coverage principal sees them.
+async fn served_keys(server: &TestServer, layer: &str) -> Vec<String> {
+    client_view(server, &["0", "1"])
+        .await
+        .artifacts
+        .into_iter()
+        .filter(|a| a.layer == layer)
+        .filter_map(|a| a.key)
+        .collect()
+}
+
+async fn post_ingest(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, String) {
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.text().await.unwrap())
+}
+
+/// Ingest the corpus's tail in batches, then flush and fold so the rows are base rows.
+///
+/// **The fold is not tidiness.** An artifact's membership is projected through *base* rows
+/// (`annotation-write-cycle.md` §4.1), so a point ingested since the last fold contributes to no
+/// masked count however its membership was recorded — fail-closed, and the reason the comparison
+/// below runs after one.
+///
+/// Returns how many artifacts the tail **minted**, summed over its batches — zero where every key
+/// was already in the seed, and the rest of the clustering where it was not.
+async fn ingest_tail(
+    server: &TestServer,
+    column: &str,
+    keys: fn(&[u64]) -> ArrayRef,
+    seed: u64,
+) -> u64 {
+    let tail: Vec<u64> = (seed..N).collect();
+    let mut minted = 0;
+    for (i, chunk) in tail.chunks(70).enumerate() {
+        let body = ingest_batch(chunk, column, keys(chunk));
+        let (status, detail) = post_ingest(server, &format!("tail-{i}"), body).await;
+        assert_eq!(status, 200, "{detail}");
+        minted += serde_json::from_str::<serde_json::Value>(&detail).unwrap()["minted"]
+            .as_u64()
+            .expect("every 200 reports what its own keys created");
+    }
+    tick(server).await;
+    fold(server).await;
+    minted
+}
+
+// ---------------------------------------------------------------------------------------------
+// What a client sees
+// ---------------------------------------------------------------------------------------------
+
+/// One artifact as a client reads it out of the artifacts frame, **with the identifiers replaced by
+/// the caller's own keys**.
+///
+/// A `tessera_id` is a blinding permutation of an entity id, and 0091 says in as many words that the
+/// two entry points assign entities differently — so an identifier is exactly the field that may
+/// differ. The key is what a publisher named the artifact, and the parent travels as *its* key,
+/// resolved within the response, which is the same edge without the identity.
+#[derive(Debug, Clone, PartialEq)]
+struct ClientArtifact {
+    layer: String,
+    key: Option<String>,
+    masked_count: u64,
+    centroid: Option<[f64; 2]>,
+    bbox: Option<[u32; 4]>,
+    /// The keys of the parents the response named — every one of them in the same response, so
+    /// the identifiers resolve here. Empty is *no parent named*, which covers a root and a
+    /// parent withheld from this viewer alike; the ambiguity is deliberate on the wire and is
+    /// kept here.
+    parent_keys: Vec<String>,
+}
+
+/// The whole map, as one principal sees it: the tile counts, and every artifact served.
+struct ClientView {
+    tiles: Vec<TileRow>,
+    points: usize,
+    artifacts: Vec<ClientArtifact>,
+}
+
+async fn client_view(server: &TestServer, terms: &[&str]) -> ClientView {
+    let auth = authorise(server, terms).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": "s0",
+            "zoom": 0,
+            "bbox": [0.0, 0.0, 1000.0, 1000.0],
+            "k": 200,
+            "layers": "all",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let bytes = resp.bytes().await.unwrap();
+    let decoded = decode_viewport_frames(&bytes);
+    let body = json!({
+        "view": "s0",
+        "zoom": 0,
+        "per_tile": 1000,
+        "bbox": [0.0, 0.0, 1000.0, 1000.0],
+        "layers": "all",
+    });
+    let resp = post_viewport_artifacts(server, token, &body).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let artifacts = artifacts_by_key(&resp.bytes().await.unwrap());
+    ClientView {
+        tiles: decoded.tiles,
+        points: decoded.points.len(),
+        artifacts,
+    }
+}
+
+/// Decode every artifacts frame of a tile route's body in full, the parent edges resolved to keys.
+fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
+    use arrow::array::Float64Array as F64;
+    let frames = mosaica_wire::split_frames(body).expect("well-formed frames");
+    let batches = frames
+        .iter()
+        .filter(|(kind, _)| *kind == mosaica_wire::FRAME_ARTIFACTS)
+        .flat_map(|(_, payload)| {
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(payload.to_vec()), None)
+                .unwrap()
+        });
+    let mut rows: Vec<(u64, ClientArtifact)> = Vec::new();
+    for batch in batches {
+        let batch = batch.unwrap();
+        let column = |i: usize| batch.column(i).clone();
+        // `layer` is dictionary-encoded (contracts §3.2 r43): u16 keys over utf8 values.
+        let layer = column(0);
+        let layer = layer
+            .as_any()
+            .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::UInt16Type>>()
+            .unwrap()
+            .clone();
+        let layer_values = layer.values().clone();
+        let layer_values = layer_values
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .clone();
+        let layer_at = |i: usize| {
+            layer_values
+                .value(layer.key(i).expect("layer is never null"))
+                .to_string()
+        };
+        let ids = column(1);
+        let ids = ids.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let keys = column(2);
+        let keys = keys.as_any().downcast_ref::<StringArray>().unwrap();
+        let counts = column(3);
+        let counts = counts.as_any().downcast_ref::<UInt64Array>().unwrap();
+        // Column 11 of the r43 order — after `content` at 10, before `rung` at 12 — a
+        // `list<uint64>`, non-nullable, ascending (`dag-hierarchies.md` §7).
+        let parents = column(11);
+        let parents = parents
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap();
+        let parents_at = |i: usize| -> Vec<u64> {
+            let entry = parents.value(i);
+            entry
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        };
+        let f64_at = |col: usize, i: usize| {
+            let a = batch.column(col).clone();
+            let a = a.as_any().downcast_ref::<F64>().unwrap().clone();
+            a.is_valid(i).then(|| a.value(i))
+        };
+        let u32_at = |col: usize, i: usize| {
+            let a = batch.column(col).clone();
+            let a = a.as_any().downcast_ref::<UInt32Array>().unwrap().clone();
+            a.is_valid(i).then(|| a.value(i))
+        };
+        for i in 0..batch.num_rows() {
+            let centroid = match (f64_at(4, i), f64_at(5, i)) {
+                (Some(x), Some(y)) => Some([x, y]),
+                _ => None,
+            };
+            let bbox = match (u32_at(6, i), u32_at(7, i), u32_at(8, i), u32_at(9, i)) {
+                (Some(a), Some(b), Some(c), Some(d)) => Some([a, b, c, d]),
+                _ => None,
+            };
+            rows.push((
+                ids.value(i),
+                ClientArtifact {
+                    layer: layer_at(i),
+                    key: keys.is_valid(i).then(|| keys.value(i).to_string()),
+                    masked_count: counts.value(i),
+                    centroid,
+                    bbox,
+                    parent_keys: parents_at(i).iter().map(u64::to_string).collect(),
+                },
+            ));
+        }
+    }
+    // The parent travels as an identifier, and an identifier is the one field that legitimately
+    // differs between the two databases. Resolve it against this same response, which is the only
+    // place a client could resolve it either.
+    let key_of: std::collections::BTreeMap<String, Option<String>> = rows
+        .iter()
+        .map(|(id, a)| (id.to_string(), a.key.clone()))
+        .collect();
+    let mut artifacts: Vec<ClientArtifact> = rows
+        .into_iter()
+        .map(|(_, mut a)| {
+            a.parent_keys = a
+                .parent_keys
+                .into_iter()
+                .map(|id| key_of.get(&id).cloned().flatten().unwrap_or(id))
+                .collect();
+            a
+        })
+        .collect();
+    artifacts.sort_by(|a, b| (&a.layer, &a.key).cmp(&(&b.layer, &b.key)));
+    artifacts
+}
+
+/// What the fixture *says* the memberships are, for a principal who can see every point — computed
+/// from the same functions both inputs are written from.
+///
+/// **The equality between the two sides is not enough on its own.** Two databases that both dropped
+/// the membership column would agree perfectly, so one of them is pinned to the fixture here and the
+/// comparison carries the other.
+fn expected_memberships(keys_of: fn(u64) -> Vec<i64>) -> std::collections::BTreeMap<String, u64> {
+    let mut sizes: std::collections::BTreeMap<String, u64> = Default::default();
+    for e in 0..N {
+        let mut keys = keys_of(e);
+        keys.sort_unstable();
+        keys.dedup();
+        for key in keys {
+            *sizes.entry(key.to_string()).or_default() += 1;
+        }
+    }
+    // The layer's criterion: an artifact serving four or more visible members. Applied here so the
+    // oracle is the whole of what a client should see rather than a subset of it.
+    sizes.retain(|_, size| *size >= 4);
+    sizes
+}
+
+/// The comparison 0091 names: two databases, one client at a time.
+async fn assert_same_database(
+    built: &TestServer,
+    ingested: &TestServer,
+    keys_of: fn(u64) -> Vec<i64>,
+    what: &str,
+) {
+    // The oracle first: what the built side serves a full-coverage principal is what the fixture
+    // says it should be, key by key.
+    let full = client_view(built, &["0", "1"]).await;
+    let served: std::collections::BTreeMap<String, u64> = full
+        .artifacts
+        .iter()
+        .map(|a| {
+            (
+                a.key.clone().expect("a built artifact carries its key"),
+                a.masked_count,
+            )
+        })
+        .collect();
+    assert_eq!(
+        served,
+        expected_memberships(keys_of),
+        "{what}: the built side does not serve the memberships the fixture declares"
+    );
+
+    for terms in [vec!["0"], vec!["1"], vec!["0", "1"]] {
+        let a = client_view(built, &terms).await;
+        let b = client_view(ingested, &terms).await;
+        assert_eq!(
+            a.tiles, b.tiles,
+            "{what}: the tile counts differ for a principal holding {terms:?} — the same points at \
+             the same coordinates under the same labels"
+        );
+        assert_eq!(a.points, b.points, "{what}: the points served differ");
+        assert_eq!(
+            a.artifacts, b.artifacts,
+            "{what}: the artifacts differ for a principal holding {terms:?}"
+        );
+        assert!(
+            !a.artifacts.is_empty(),
+            "{what}: neither side served an artifact, so the comparison proved nothing"
+        );
+    }
+    // Not a vacuous comparison: the layer's criterion and the mask must actually bite, or two
+    // identical *empty* answers would pass every assertion above.
+    let broad = client_view(built, &["0", "1"]).await;
+    let narrow = client_view(built, &["1"]).await;
+    assert_eq!(
+        broad
+            .tiles
+            .iter()
+            .map(|(_, visible, _)| visible)
+            .sum::<u64>(),
+        N,
+        "{what}: the principal who can see everything is not being shown the whole corpus, so the \
+         two sides could agree on a corpus neither of them holds"
+    );
+    assert!(
+        narrow.artifacts.len() < broad.artifacts.len()
+            || narrow.artifacts.iter().map(|a| a.masked_count).sum::<u64>()
+                < broad.artifacts.iter().map(|a| a.masked_count).sum::<u64>(),
+        "{what}: masking makes no difference to this fixture, so it cannot show that the two \
+         entry points mask alike"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 0091's own test
+// ---------------------------------------------------------------------------------------------
+
+/// **The headline, at a scalar key.** One corpus, one clustering, two entry points.
+#[tokio::test]
+async fn a_scalar_membership_column_ingests_the_database_a_member_table_builds() {
+    let layer = layer_toml("flat", "cluster");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let seed: Vec<u64> = (0..SEED).collect();
+    let ingested = build_side(&seed, &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    let minted = ingest_tail(&ingested, LAYER, scalar_keys, SEED).await;
+    assert_eq!(
+        minted, 0,
+        "every key of this clustering is in the seed, so this case is growth alone — a mint here \
+         would mean the resolution missed an artifact that exists"
+    );
+
+    assert_same_database(&built, &ingested, scalar_key_of, "a cluster column").await;
+}
+
+/// **0091's headline: the whole corpus ingested into a bundle with no points in it.** One side
+/// builds every point from a member table; the other builds *nothing* — a bundle with the frame
+/// stated, an empty segment, an empty dictionary and a registered layer holding no artifact — and
+/// then takes all 240 points through `/control/ingest`, minting the clustering as it goes.
+///
+/// This is the arm the build's own zero-item refusal used to block, and it is the strongest form
+/// of the rule: not *the route a point took leaves no trace*, but *the route the whole corpus took
+/// leaves no trace*. Every artifact here is minted on the wire, so the built side's roster and the
+/// ingested side's are two independent constructions of one clustering.
+#[tokio::test]
+async fn a_wholly_ingested_corpus_is_the_database_a_build_produces() {
+    let layer = layer_toml("flat", "cluster");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    // No points at all: the frame is stated, so there is nothing to fit and nothing to hold.
+    let ingested = build_side(&[], &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+
+    // The empty bundle serves before a byte is written to it: ready, well-formed metadata, and
+    // zero everywhere under every principal — rather than a refusal or an error.
+    let ready = reqwest::get(ingested.viewer_url("/readyz")).await.unwrap();
+    assert_eq!(ready.status().as_u16(), 200, "an empty bundle is ready");
+    // A term the dictionary has never seen mints an extension id, exactly as at any ingest — the
+    // empty dictionary is not a smaller vocabulary, it is the same one before anything is in it.
+    let unseen = common::authorise(&ingested, &["0", "1", "never-seen-before"]).await;
+    assert!(unseen["token"].as_str().is_some_and(|t| !t.is_empty()));
+    let before = client_view(&ingested, &["0", "1"]).await;
+    assert!(
+        before.tiles.iter().all(|(_, visible, _)| *visible == 0),
+        "a bundle with no points must serve zero everywhere, not fail"
+    );
+    assert!(before.artifacts.is_empty());
+
+    let minted = ingest_tail(&ingested, LAYER, scalar_keys, 0).await;
+    assert_eq!(
+        minted,
+        expected_memberships(scalar_key_of).len() as u64,
+        "every artifact of this clustering has to be minted on the wire — the empty bundle held \
+         none of them"
+    );
+
+    assert_same_database(&built, &ingested, scalar_key_of, "a wholly ingested corpus").await;
+}
+
+/// **The same, at a list key — and the lineage is the half that would drift.** Every entry is a
+/// membership and every consecutive pair an edge, so a client's view carries both: the counts at
+/// three resolutions, and which artifact contains which.
+#[tokio::test]
+async fn a_lineage_column_ingests_the_database_a_member_table_builds() {
+    let layer = layer_toml("nested", "lineage");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let seed: Vec<u64> = (0..SEED).collect();
+    let ingested = build_side(&seed, &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    let minted = ingest_tail(&ingested, LAYER, lineage_keys, SEED).await;
+    assert_eq!(minted, 0, "growth alone, as the scalar case above");
+
+    // The fixture is a tree, and the comparison is only worth running if the response says so.
+    let view = client_view(&built, &["0", "1"]).await;
+    assert!(
+        view.artifacts.iter().any(|a| !a.parent_keys.is_empty()),
+        "the built side served no edge, so the lineage comparison would prove nothing"
+    );
+
+    assert_same_database(&built, &ingested, lineage_keys_of, "a lineage column").await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The wire's own rules
+// ---------------------------------------------------------------------------------------------
+
+/// **On a closed layer a key no artifact holds refuses the batch, naming it** — and the batch has
+/// no effect: no entity id, no row, no partial membership. Closed is declare-then-use, and it is the
+/// default: a mistyped id would otherwise publish a phantom artifact carrying the members it stole
+/// from a real one, whose masked count then goes quietly short.
+///
+/// The layer is registered over the control plane because a *build* refuses a closed layer that
+/// binds members with no artifact source of its own — which is the same rule from the other side.
+#[tokio::test]
+async fn a_closed_layer_refuses_an_unknown_key_and_ingests_nothing() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+    register_layer(&server, "closed/x", "flat", "closed", json!({})).await;
+    publish_artifacts(
+        &server,
+        "closed/x",
+        json!([{ "key": "3", "members": members(0..4u64) }]),
+    )
+    .await;
+
+    let before = control_status(&server).await;
+    let rows = [SEED, SEED + 1];
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3), Some(4_242)]));
+    let (status, detail) = post_ingest(
+        &server,
+        "unknown-key",
+        ingest_batch(&rows, "closed/x", keys),
+    )
+    .await;
+    assert_eq!(status, 422, "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
+    assert!(
+        detail.contains("4242"),
+        "the refusal names the key the caller can act on: {detail}"
+    );
+    let after = control_status(&server).await;
+    assert_eq!(
+        before["entity_id_high_water"], after["entity_id_high_water"],
+        "a refused batch spends no entity id: {detail}"
+    );
+
+    // And the same batch with every key known is accepted, so the refusal was the key and not the
+    // column.
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3), Some(3)]));
+    let (status, detail) =
+        post_ingest(&server, "known-key", ingest_batch(&rows, "closed/x", keys)).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        0,
+        "a closed layer never creates an artifact: {detail}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Minting: what an open layer does with a key nothing holds
+// ---------------------------------------------------------------------------------------------
+
+/// **0091's own test, with the clustering arriving rather than existing.** The built side reads the
+/// whole corpus from a member table and mints every key it meets; the ingested side is seeded with
+/// four clustered points and is sent the rest down the wire, minting the clusters it has never
+/// heard of as it goes. The two are then the same database to every client — same memberships,
+/// same masked counts, same computed content, same gates.
+#[tokio::test]
+async fn a_scalar_column_mints_the_clusters_its_seed_never_held() {
+    let layer = layer_toml("flat", "cluster");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    let minted = ingest_tail(&ingested, LAYER, scalar_keys, MINT_SEED).await;
+    assert!(
+        minted > 0,
+        "the seed does not hold this clustering, so the tail must have created part of it — \
+         without that this is the growth case again and proves nothing new"
+    );
+
+    assert_same_database(&built, &ingested, scalar_key_of, "a minting cluster column").await;
+}
+
+/// **The same at a lineage, which is where minting is hard.** A point's list names clusters that do
+/// not exist yet — including the interior parents nothing else would ever name — and the chain has
+/// to be created *and linked*, parent before child, in one batch. A growth adds members and never
+/// edges, so the edges here can only come from the publication that mints, which is where lineage
+/// has always been settled.
+#[tokio::test]
+async fn a_lineage_column_mints_the_chain_and_the_edges_it_declares() {
+    let layer = layer_toml("nested", "lineage");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
+    assert!(minted > 0, "the seed does not hold this tree");
+
+    // The comparison below carries the edges, and is only worth running if there are any.
+    let view = client_view(&ingested, &["0", "1"]).await;
+    assert!(
+        view.artifacts
+            .iter()
+            .filter(|a| !a.parent_keys.is_empty())
+            .count()
+            >= 3,
+        "the ingested side served no lineage, so the edges were not created: {:?}",
+        view.artifacts
+    );
+
+    assert_same_database(
+        &built,
+        &ingested,
+        lineage_keys_of,
+        "a minting lineage column",
+    )
+    .await;
+}
+
+/// **A `dag` layer's list column is memberships and declares no edges**, at ingest exactly as at a
+/// build (decision 0125): the same lists a `nested` layer reads as a lineage are, on a DAG, the
+/// artifacts each point is a member of and nothing more — every artifact minted a root, and no edge
+/// named for the executor to record. A DAG's edges are spelled on the artifact row's `parent` list,
+/// by publication; the case above is the `nested` column still minting and linking its chain.
+#[tokio::test]
+async fn a_dag_list_column_ingests_memberships_and_no_edges() {
+    let layer = layer_toml("dag", "lineage");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
+    assert!(minted > 0, "the seed does not hold every key");
+
+    let view = client_view(&ingested, &["0", "1"]).await;
+    assert!(
+        view.artifacts.len() >= 3,
+        "the keys the lists named are served: {:?}",
+        view.artifacts
+    );
+    assert!(
+        view.artifacts.iter().all(|a| a.parent_keys.is_empty()),
+        "a dag list column declares no edge, so every artifact is a root: {:?}",
+        view.artifacts
+    );
+    assert_same_database(&built, &ingested, lineage_keys_of, "a dag list column").await;
+}
+
+/// The lineage column as a `large_list`, which carries the same keys as a `list`.
+fn large_lineage_keys(rows: &[u64]) -> ArrayRef {
+    let list = lineage_keys(rows);
+    arrow::compute::cast(
+        &list,
+        &DataType::LargeList(Arc::new(Field::new("item", DataType::Int64, true))),
+    )
+    .unwrap()
+}
+
+/// A `large_list` key column is read as a `list` one is.
+#[tokio::test]
+async fn a_large_list_column_ingests_the_database_a_list_builds() {
+    let layer = layer_toml("nested", "lineage");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..SEED).collect::<Vec<_>>(), &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    ingest_tail(&ingested, LAYER, large_lineage_keys, SEED).await;
+    assert_same_database(&built, &ingested, lineage_keys_of, "a large_list column").await;
+}
+
+/// The artifacts one principal is served, in one order whatever order a side lists them in.
+async fn sorted_artifacts(server: &TestServer, terms: &[&str]) -> Vec<ClientArtifact> {
+    let mut artifacts = client_view(server, terms).await.artifacts;
+    artifacts.sort_by(|a, b| {
+        (&a.key, a.masked_count, &a.parent_keys).cmp(&(&b.key, b.masked_count, &b.parent_keys))
+    });
+    artifacts
+}
+
+/// One JSON ingest body carrying `rows`' cluster keys and their levels.
+fn levelled_json(rows: &[u64]) -> Vec<u8> {
+    let records: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|e| {
+            json!({
+                "id": e,
+                "x": x_of(*e),
+                "y": y_of(*e),
+                "access": access_of(*e),
+                LAYER: cluster_of(*e),
+                "level": level_of(*e),
+            })
+        })
+        .collect();
+    serde_json::to_vec(&records).unwrap()
+}
+
+/// **A `level` column places a scalar key at its level on the wire, as it does in a member
+/// table**, and a null there is level 0. The first batch is JSON and the rest Arrow.
+#[tokio::test]
+async fn a_level_column_places_a_scalar_key_on_the_wire_as_at_a_build() {
+    let layer = stacked_layer();
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side_with(&all, &layer, true);
+    let ingested = build_side_with(&[], &layer, true);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    for (i, chunk) in all.chunks(70).enumerate() {
+        let (status, detail) = match i {
+            0 => {
+                let resp = ingested
+                    .client
+                    .post(ingested.control_url("/control/ingest"))
+                    .bearer_auth(OPERATOR_CREDENTIAL)
+                    .header("x-mosaica-batch-id", "levelled-json")
+                    .header("content-type", "application/json")
+                    .body(levelled_json(chunk))
+                    .send()
+                    .await
+                    .unwrap();
+                (resp.status().as_u16(), resp.text().await.unwrap())
+            }
+            _ => {
+                let body = ingest_batch_with(
+                    chunk,
+                    vec![(LAYER, scalar_keys(chunk)), ("level", levels(chunk))],
+                );
+                post_ingest(&ingested, &format!("levelled-{i}"), body).await
+            }
+        };
+        assert_eq!(status, 200, "{detail}");
+    }
+    tick(&ingested).await;
+    fold(&ingested).await;
+
+    let served = sorted_artifacts(&built, &["0", "1"]).await;
+    let keys: std::collections::BTreeSet<_> = served.iter().map(|a| a.key.clone()).collect();
+    assert!(
+        served.len() > keys.len(),
+        "one key at several levels is several artifacts, or the levels were not read: {served:?}"
+    );
+    for terms in [vec!["0"], vec!["1"], vec!["0", "1"]] {
+        assert_eq!(
+            sorted_artifacts(&built, &terms).await,
+            sorted_artifacts(&ingested, &terms).await,
+            "the artifacts differ for a principal holding {terms:?}"
+        );
+    }
+}
+
+/// A stacked layer of three levels, reading its scalar keys from `cluster`.
+fn stacked_layer() -> String {
+    let mut layer = layer_toml("stacked", "cluster");
+    layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
+    layer
+}
+
+/// A `level` column is refused, and the batch has no effect, where it is not `uint32`, where the
+/// batch carries no layer column for it to place, and where it names a level the layer does not
+/// declare.
+#[tokio::test]
+async fn a_level_column_the_batch_cannot_use_is_refused() {
+    let built = build_side(&[], &stacked_layer());
+    let server = open(&built.dir).await;
+    let rows: Vec<u64> = (0..10).collect();
+    let wide: ArrayRef = Arc::new(Int64Array::from(
+        rows.iter().map(|e| (e % 3) as i64).collect::<Vec<_>>(),
+    ));
+    let beyond: ArrayRef = Arc::new(UInt32Array::from(vec![7u32; rows.len()]));
+    let batches = [
+        vec![(LAYER, scalar_keys(&rows)), ("level", wide)],
+        vec![("level", levels(&rows))],
+        vec![(LAYER, scalar_keys(&rows)), ("level", beyond)],
+    ];
+    for (i, columns) in batches.into_iter().enumerate() {
+        let body = ingest_batch_with(&rows, columns);
+        let (status, detail) = post_ingest(&server, &format!("level-{i}"), body).await;
+        assert_eq!(status, 422, "{detail}");
+    }
+    tick(&server).await;
+    assert!(client_view(&server, &["0", "1"]).await.artifacts.is_empty());
+
+    // The same rows with a level column the batch can use are accepted.
+    let body = ingest_batch_with(&rows, vec![(LAYER, scalar_keys(&rows)), ("level", levels(&rows))]);
+    let (status, detail) = post_ingest(&server, "level-usable", body).await;
+    assert_eq!(status, 200, "{detail}");
+}
+
+/// **A tiered chain mints a level at a time, coarse first** — the ordering constraint edges carry
+/// (`annotation-representation.md` §5.0.4) applied to one batch. A tiered layer's parent sits in a
+/// *coarser* level than its child, so the level below has to have claimed its ordinals before the
+/// level above can name one, and neither has been applied anywhere a lookup could see.
+#[tokio::test]
+async fn a_tiered_column_mints_the_coarse_level_before_the_fine_one() {
+    let mut layer = layer_toml("tiered", "lineage");
+    layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
+    assert!(minted > 0, "the seed does not hold this taxonomy");
+
+    let view = client_view(&ingested, &["0", "1"]).await;
+    assert!(
+        view.artifacts
+            .iter()
+            .filter(|a| !a.parent_keys.is_empty())
+            .count()
+            >= 3,
+        "a tiered containment was not created: {:?}",
+        view.artifacts
+    );
+    assert_same_database(
+        &built,
+        &ingested,
+        lineage_keys_of,
+        "a minting tiered column",
+    )
+    .await;
+}
+
+/// **At most one live artifact per key per level** (`artifacts-from-points.md` §5's second ruling):
+/// several points in one batch naming one unknown key mint **one** artifact and all join it, and a
+/// later batch naming the same key mints nothing at all.
+#[tokio::test]
+async fn one_unknown_key_mints_one_artifact_however_many_points_name_it() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+    let before = server.state.engine.published_artifacts();
+
+    let rows: Vec<u64> = (SEED..SEED + 6).collect();
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(9_001); 6]));
+    let (status, detail) =
+        post_ingest(&server, "six-of-one", ingest_batch(&rows, LAYER, keys)).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        1,
+        "six points naming one key are one cluster, not six: {detail}"
+    );
+
+    let more: Vec<u64> = (SEED + 6..SEED + 10).collect();
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(9_001); 4]));
+    let (status, detail) =
+        post_ingest(&server, "four-more", ingest_batch(&more, LAYER, keys)).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        0,
+        "the key names a live artifact now, so this batch grows it: {detail}"
+    );
+    assert_eq!(
+        server.state.engine.published_artifacts(),
+        before + 1,
+        "ten points, one artifact"
+    );
+
+    tick(&server).await;
+    fold(&server).await;
+    let view = client_view(&server, &["0", "1"]).await;
+    let minted = view
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("9001"))
+        .expect("the minted cluster serves like any other");
+    assert_eq!(
+        minted.masked_count, 10,
+        "every point that named it joined it"
+    );
+}
+
+/// **A suppressed artifact still exists, and its key is never minted again** — the one fail-open
+/// this design has, closed by construction (`artifacts-from-points.md` §5's third ruling).
+///
+/// Written the natural way — *is this key unknown?* — against what is currently **served**, a
+/// suppressed artifact reads as absent: a second artifact is minted under its key, the new one is
+/// not suppressed, and a suppression has been defeated by ingesting a point. What stops it is that
+/// resolution reads `ArtifactStore::ordinal_of_key`, the store's own key index, which a suppression
+/// never touches (write-path §5.4, Rule S) — so there is nothing in the lookup that *could* see one.
+///
+/// The test drives exactly that: suppress, ingest a point naming the suppressed key, and assert
+/// nothing was minted, nothing is served, and — after the suppression is lifted — that the point had
+/// joined the artifact that was there all along.
+///
+/// **Three things would each have to fail before a suppression could be defeated**, and the third
+/// is structural rather than a check anyone added: the resolution at admission, the re-resolution at
+/// the close, and `prepare_publish`'s own refusal of a key its level already holds. Breaking the
+/// first two together turns this test red on the *publication's* refusal — a 422 rather than a
+/// second artifact — which is the fail-closed direction and is how the guards are known to be
+/// load-bearing rather than decorative.
+#[tokio::test]
+async fn a_suppressed_artifacts_key_mints_nothing_and_the_point_joins_it() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+    register_layer(&server, "hidden/x", "flat", "open", json!({ "count": 1 })).await;
+    let published = publish_artifacts(
+        &server,
+        "hidden/x",
+        json!([{ "key": "k", "members": members(0..4u64) }]),
+    )
+    .await;
+    let id = published[0]["tessera_id"].as_str().unwrap().to_string();
+    let before = server.state.engine.published_artifacts();
+
+    suppress(&server, &id, "suppress").await;
+    assert!(
+        served_keys(&server, "hidden/x").await.is_empty(),
+        "the suppression is in force at the ack"
+    );
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("k")]));
+    let (status, detail) = post_ingest(
+        &server,
+        "join-suppressed",
+        ingest_batch(&[SEED], "hidden/x", keys),
+    )
+    .await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        0,
+        "the key names an artifact that exists and is merely hidden: {detail}"
+    );
+    assert_eq!(
+        server.state.engine.published_artifacts(),
+        before,
+        "a second artifact under the same key is the fail-open this rule exists against"
+    );
+    assert!(
+        served_keys(&server, "hidden/x").await.is_empty(),
+        "and nothing under that key is served, which is what a defeated suppression would look like"
+    );
+
+    // The point joined the artifact that was there all along: lift the suppression, fold so the
+    // ingested row is a base row, and the masked count carries it.
+    suppress(&server, &id, "unsuppress").await;
+    tick(&server).await;
+    fold(&server).await;
+    let view = client_view(&server, &["0", "1"]).await;
+    let artifact = view
+        .artifacts
+        .iter()
+        .find(|a| a.layer == "hidden/x")
+        .expect("the artifact serves again once the suppression is lifted");
+    assert_eq!(
+        artifact.masked_count, 5,
+        "four published members and the point that joined while it was hidden"
+    );
+}
+
+/// **A deleted key that returns is a new artifact** ([decision 0047](../../../docs/decisions/0047-edit-is-delete-plus-reingest.md)
+/// and [0081](../../../docs/decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)
+/// applied): uniqueness is *at most one live artifact per key*, and a tombstoned one does not count.
+/// Nothing of the old artifact carries — its identity was its ordinal, and minting allocates a new
+/// one.
+#[tokio::test]
+async fn a_deleted_key_that_returns_is_a_new_artifact() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+    register_layer(&server, "gone/x", "flat", "open", json!({ "count": 1 })).await;
+    let published = publish_artifacts(
+        &server,
+        "gone/x",
+        json!([{ "key": "k", "members": members(0..4u64) }]),
+    )
+    .await;
+    let id = published[0]["tessera_id"].as_str().unwrap().to_string();
+
+    suppress(&server, &id, "delete").await;
+    // **The fold is what frees the key**, and that is Rule F rather than anything about minting: a
+    // deletion retires at the compaction fold that executes it, and until then the store's key
+    // index still holds the artifact's own key.
+    fold(&server).await;
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("k")]));
+    let (status, detail) = post_ingest(
+        &server,
+        "key-returns",
+        ingest_batch(&[SEED], "gone/x", keys),
+    )
+    .await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        1,
+        "the key names no live artifact, so it creates one: {detail}"
+    );
+
+    tick(&server).await;
+    fold(&server).await;
+    let view = client_view(&server, &["0", "1"]).await;
+    let artifact = view
+        .artifacts
+        .iter()
+        .find(|a| a.layer == "gone/x")
+        .expect("the new artifact serves");
+    assert_eq!(
+        artifact.masked_count, 1,
+        "nothing of the deleted artifact carries: the new one holds the point that named it and \
+         not the four the old one was published with"
+    );
+}
+
+/// **A layer whose declaration a minted artifact could not satisfy refuses the key, naming it** —
+/// the same two refusals a publication makes of an artifact carrying only a name, made where the
+/// batch can still be rejected on its own rather than at the close, where it would cost the window.
+#[tokio::test]
+async fn a_layer_declaring_supplied_content_refuses_to_mint() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "labels/x",
+            "title": "a layer whose artifacts carry a description",
+            "views": ["s0"],
+            "membership": "enumerated",
+            "value_set": "open",
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "content": {
+                "computed": [],
+                "supplied": [{ "name": "label", "type": "text", "require_member_visibility": "inherited" }]
+            },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the layer may be declared");
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("nobody-declared-this")]));
+    let (status, detail) = post_ingest(
+        &server,
+        "unmintable",
+        ingest_batch(&[SEED], "labels/x", keys),
+    )
+    .await;
+    assert_eq!(status, 422, "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
+    assert!(
+        detail.contains("nobody-declared-this"),
+        "the refusal names the key: {detail}"
+    );
+}
+
+/// A layer that reads each artifact's own labels refuses to mint from a key column, since a
+/// minted artifact states no labels; nothing is published under the key.
+#[tokio::test]
+async fn a_layer_reading_labels_refuses_to_mint() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "teams/x",
+            "title": "a layer whose artifacts carry their own labels",
+            "views": ["s0"],
+            "membership": "enumerated",
+            "value_set": "open",
+            "visibility": null,
+            "artifact_visibility": { "field": "team", "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "content": { "computed": [], "supplied": [] },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the layer may be declared");
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("unlabelled")]));
+    let (status, detail) =
+        post_ingest(&server, "unlabelled", ingest_batch(&[SEED], "teams/x", keys)).await;
+    assert_eq!(status, 422, "{detail}");
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers/teams%2Fx/artifacts"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "artifacts": [{ "key": "unlabelled", "members": {}, "access": null }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the key is free");
+}
+
+/// A column that names neither a declared scalar nor a registered layer is refused exactly as it
+/// was before this existed — and the message says which two things it could have been.
+#[tokio::test]
+async fn a_column_naming_neither_an_attribute_nor_a_layer_is_refused() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3)]));
+    let (status, detail) = post_ingest(
+        &server,
+        "misspelt",
+        ingest_batch(&[SEED], "clusters/typo", keys),
+    )
+    .await;
+    assert_eq!(status, 422, "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
+    assert!(detail.contains("clusters/typo"), "{detail}");
+}
+
+/// **`fields` does not reach the wire.** A build maps a file's column name onto the canonical
+/// meaning; an ingest batch names the layer. A column named for the *file's* spelling is a column
+/// naming nothing, and is refused as one — the same split `[[attribute]]` already has between its
+/// `name` and its `field`.
+#[tokio::test]
+async fn the_build_time_field_name_is_not_a_wire_column() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3)]));
+    let (status, detail) =
+        post_ingest(&server, "by-field", ingest_batch(&[SEED], "cluster", keys)).await;
+    assert_eq!(status, 422, "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
+    assert!(detail.contains("'cluster'"), "{detail}");
+}
+
+/// **A list against a levelled declaration is one entry per level**, and a row of another length is
+/// a lineage against a levelled layer — refused rather than guessed, because either reading
+/// publishes a hierarchy the caller did not write.
+#[tokio::test]
+async fn a_row_whose_list_is_not_one_entry_per_level_is_refused() {
+    let mut layer = layer_toml("tiered", "lineage");
+    layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
+    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer);
+    let server = open(&built.dir).await;
+
+    let item = Arc::new(Field::new("item", DataType::Int64, true));
+    let keys: ArrayRef = Arc::new(ListArray::new(
+        item,
+        OffsetBuffer::new(vec![0i32, 2].into()),
+        Arc::new(Int64Array::from(vec![Some(1), Some(10)])) as ArrayRef,
+        None,
+    ));
+    let (status, detail) =
+        post_ingest(&server, "short-list", ingest_batch(&[SEED], LAYER, keys)).await;
+    assert_eq!(status, 422, "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
+}
+
+/// **A layer whose membership is evaluated has nothing for a column to say.** A predicate layer
+/// answers *who is inside this* per request; a stored membership beside it would be a frozen answer
+/// that diverges at the first write — which is what the artifact store already refuses a publication
+/// for, made here one step earlier, where the batch can still be rejected without effect.
+#[tokio::test]
+async fn a_column_naming_a_predicate_layer_is_refused() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "regions/inside",
+            "title": "a shape",
+            "views": ["s0"],
+            "membership": "spatial",
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": { "count": 2 },
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "content": { "computed": [], "supplied": [] },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "a predicate layer may be declared"
+    );
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("anything")]));
+    let (status, detail) = post_ingest(
+        &server,
+        "predicate",
+        ingest_batch(&[SEED], "regions/inside", keys),
+    )
+    .await;
+    assert_eq!(status, 422, "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
+}
+
+/// **An edge the artifact does not yet hold is recorded, as a build records it.**
+///
+/// A roster published with names and no parents is the ordinary mixed state: the artifacts arrive by
+/// publication and the tree arrives with the points. A build derives the edge from the same column,
+/// so dropping it here made one input two databases — a hierarchy on one path and a flat level on
+/// the other.
+#[tokio::test]
+async fn a_lineage_naming_an_edge_the_layer_does_not_hold_records_it() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "tree/x",
+            "title": "a tree with no edges yet",
+            "views": ["s0"],
+            "membership": "enumerated",
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "nested", "prune_children": false },
+            "content": { "computed": [], "supplied": [] },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201);
+
+    let members = members(0..4u64);
+    let resp = server
+        .client
+        // A layer name is path-shaped, so its slash is percent-encoded into the one path segment
+        // the route captures — the same encoding the drop route already takes.
+        .put(server.control_url("/control/layers/tree%2Fx/artifacts"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "artifacts": [
+                { "key": "root", "members": members.clone() },
+                { "key": "leaf", "members": members },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "two artifacts, neither carrying a parent"
+    );
+
+    let item = Arc::new(Field::new("item", DataType::Utf8, true));
+    let keys: ArrayRef = Arc::new(ListArray::new(
+        item,
+        OffsetBuffer::new(vec![0i32, 2].into()),
+        Arc::new(StringArray::from(vec![Some("root"), Some("leaf")])) as ArrayRef,
+        None,
+    ));
+    let (status, detail) =
+        post_ingest(&server, "no-edge", ingest_batch(&[SEED], "tree/x", keys)).await;
+    assert_eq!(
+        status, 200,
+        "the memberships are unambiguous, so the batch lands: {detail}"
+    );
+
+    let view = client_view(&server, &["0", "1"]).await;
+    let leaf = view
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("leaf"))
+        .expect("the published artifact serves");
+    assert_eq!(
+        leaf.parent_keys,
+        vec!["root".to_string()],
+        "the child takes the parent its list column declared"
+    );
+    let root = view
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("root"))
+        .expect("the parent serves");
+    assert!(root.parent_keys.is_empty(), "the parent is still a root");
+}
+
+/// **A scalar names the artifact at level 0**, which is what a member table with no `level` column
+/// means — so a levelled layer takes one, and it is not read as a list of the wrong length.
+#[tokio::test]
+async fn a_scalar_column_on_a_levelled_layer_names_level_zero() {
+    let mut layer = layer_toml("tiered", "lineage");
+    layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
+    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer);
+    let server = open(&built.dir).await;
+
+    // Key 1 is the root, published at level 0 by the seed's own lineage column.
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(1)]));
+    let (status, detail) =
+        post_ingest(&server, "scalar-tiered", ingest_batch(&[SEED], LAYER, keys)).await;
+    assert_eq!(status, 200, "{detail}");
+}
+
+/// **Two spellings of one edge, disagreeing, is a refusal** — the same answer a build gives when two
+/// points name different parents for one cluster. A growth adds members and never lineage, so the
+/// adjacency a point declares is checked against the edge the publication stored.
+#[tokio::test]
+async fn a_lineage_contradicting_the_stored_edge_refuses_the_batch() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("nested", "lineage"),
+    );
+    let server = open(&built.dir).await;
+
+    // 100's parent is 10 in every row of the seed; this point says it is 11.
+    let item = Arc::new(Field::new("item", DataType::Int64, true));
+    let keys: ArrayRef = Arc::new(ListArray::new(
+        item,
+        OffsetBuffer::new(vec![0i32, 3].into()),
+        Arc::new(Int64Array::from(vec![Some(1), Some(11), Some(100)])) as ArrayRef,
+        None,
+    ));
+    let (status, detail) =
+        post_ingest(&server, "two-parents", ingest_batch(&[SEED], LAYER, keys)).await;
+    assert_eq!(status, 422, "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
+    assert!(
+        detail.contains("100") && detail.contains("11"),
+        "the refusal names the child and the parent claimed: {detail}"
+    );
+}

@@ -197,7 +197,7 @@ def test_the_keyword_column_has_the_shapes_its_catalogue_entries_need(catalogue_
     # Heavy prefix sharing: one region's prefix must span far more keys than a front-coded block
     # holds, or a prefix range never crosses a restart at all and the range scan is tested inside
     # one block. The shipped writer restarts every 16 keys
-    # (`tessera_filter::DEFAULT_RESTART_INTERVAL`); a hundred clears that by enough that changing
+    # (`mosaica_filter::DEFAULT_RESTART_INTERVAL`); a hundred clears that by enough that changing
     # the interval cannot silently make this claim false.
     spanning = [key for key in ordered if key.startswith("node-emea-")]
     assert len(spanning) > 100, len(spanning)

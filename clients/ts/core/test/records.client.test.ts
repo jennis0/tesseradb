@@ -13,7 +13,7 @@ import {
   vectorFromArray
 } from 'apache-arrow';
 import {afterEach, describe, expect, it} from 'vitest';
-import {TesseraClient, TesseraError} from '../src/client.js';
+import {MosaicaClient, MosaicaError} from '../src/client.js';
 import type {Frame} from '../src/frame.js';
 import {refusalOf} from '../src/presented.js';
 import type {RecordsRead} from '../src/records.js';
@@ -21,7 +21,7 @@ import type {ArtifactsHead, ItemsHead, ItemsRequest} from '../src/types.js';
 import {chunked, framed, manual, rejectsAsRefused, u64} from './support.js';
 
 /**
- * `TesseraClient.items` and `artifacts` over bodies built here from the wire layout: a head
+ * `MosaicaClient.items` and `artifacts` over bodies built here from the wire layout: a head
  * (kind 6), records frames (7) each followed by a page end (8), and a trailer (4).
  */
 
@@ -77,7 +77,7 @@ const rowsOf = (table: Table) => table.toArray().map((row) => ({...row.toJSON()}
  */
 function clientFor(answer: Response | ((body: Record<string, unknown>) => Response)) {
   const sent: {url: string; body: Record<string, unknown>; signal: AbortSignal | null | undefined}[] = [];
-  const client = new TesseraClient({
+  const client = new MosaicaClient({
     viewerUrl: 'http://viewer',
     sessionUrl: 'http://session',
     fetch: (async (url: string, init?: RequestInit) => {
@@ -169,7 +169,7 @@ class HostCodec extends HostEncoder {
 // Each test starts with no zstd codec registered, as a host that registered none.
 afterEach(() => compressionRegistry.set(CompressionType.ZSTD, {}));
 
-describe('TesseraClient.items and artifacts', () => {
+describe('MosaicaClient.items and artifacts', () => {
   it('sends the request as given, each field that is set under its wire name', async () => {
     const empty = responseOf([[page([]), null]], null, {order: 'stored', page_rows: 10});
     const {client, sent} = clientFor(() => chunked(empty));
@@ -215,7 +215,7 @@ describe('TesseraClient.items and artifacts', () => {
 
   it('yields each page as a table with the cursor after it, however the body is split', async () => {
     const body = framed(parts());
-    const headers = {'x-tessera-region': 'exact', 'x-tessera-identity-key': 'ik', 'x-tessera-server-us': '41', 'x-tessera-admission-us': '3'};
+    const headers = {'x-mosaica-region': 'exact', 'x-mosaica-identity-key': 'ik', 'x-mosaica-server-us': '41', 'x-mosaica-admission-us': '3'};
     for (const size of [body.byteLength, 64, 3, 1]) {
       const read = await clientFor(chunked(body, size, {headers})).client.items('tok', REQUEST);
       expect(read.head).toEqual<ItemsHead>({order: 'map', pageRows: 3, visible: 8, matched: 8});
@@ -251,7 +251,7 @@ describe('TesseraClient.items and artifacts', () => {
     expect(read.cursor).toBeNull();
   });
 
-  it('throws a refused follow-up’s TesseraError after the pages that arrived, its cursor past the last page end', async () => {
+  it('throws a refused follow-up’s MosaicaError after the pages that arrived, its cursor past the last page end', async () => {
     for (const [status, code] of [[422, 'contract'], [429, 'backpressure']] as const) {
       const {client, sent} = clientFor(byCursor({'': TWO[''], t2: () => refusal(status, code)}));
       const read = await client.items('tok', REQUEST);
@@ -262,7 +262,7 @@ describe('TesseraClient.items and artifacts', () => {
         () => null,
         (error: unknown) => error
       );
-      expect(thrown).toBeInstanceOf(TesseraError);
+      expect(thrown).toBeInstanceOf(MosaicaError);
       expect(thrown).toMatchObject({status, code});
       expect(got.map(rowsOf)).toEqual(PAGES.slice(0, 2).map(rowsOf));
       expect(sent).toHaveLength(2);
@@ -456,10 +456,10 @@ describe('TesseraClient.items and artifacts', () => {
     }
   });
 
-  it('throws a refusal before any page, as a TesseraError with its code', async () => {
+  it('throws a refusal before any page, as a MosaicaError with its code', async () => {
     const {client} = clientFor(new Response(JSON.stringify({error: 'contract', detail: 'unknown field'}), {status: 422}));
     const thrown = await client.items('tok', REQUEST).catch((error: unknown) => error);
-    expect(thrown).toBeInstanceOf(TesseraError);
+    expect(thrown).toBeInstanceOf(MosaicaError);
     expect(thrown).toMatchObject({status: 422});
     expect(refusalOf(thrown).code).toBe('contract');
   });

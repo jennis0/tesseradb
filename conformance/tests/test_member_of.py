@@ -87,7 +87,7 @@ def member_server(tmp_path_factory):
     build_bundle(work, points)
     (work / "gated.toml").write_text(config_toml() + gated_layer_toml())
     bundle = work / "bundle-gated"
-    deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
+    deployment = write_deployment(work / "mosaica-gated.toml", bundle=bundle, schema=work / "gated.toml")
     cli_build(deployment, bundle)
     server, proc = spawn_server(
         bundle,
@@ -152,7 +152,7 @@ def test_an_unknown_a_foreign_a_suppressed_and_a_withheld_artifact_are_one_respo
         the two timing ones (C4's channel, quantified elsewhere and deliberately not asserted)."""
         resp = server.viewport_response(token, VIEW_ID, 0, WHOLE_MAP, k=100_000, filters=clause)
         assert resp.status_code == 200, resp.text
-        headers = {k: v for k, v in resp.headers.items() if k.startswith("x-tessera-") and k not in ("x-tessera-server-us", "x-tessera-admission-us")}
+        headers = {k: v for k, v in resp.headers.items() if k.startswith("x-mosaica-") and k not in ("x-mosaica-server-us", "x-mosaica-admission-us")}
         frames = [(kind, payload) for kind, payload in split_frames(resp.content) if kind != FRAME_TRAILER]
         return frames, headers
 
@@ -199,7 +199,7 @@ def test_member_of_is_a_reserved_column_name(tmp_path):
     build_bundle(work, points)
     config = work / "shapes.toml"
     config.write_text(config_toml().replace('name   = "fx_key"', 'name   = "member_of"'))
-    deployment = write_deployment(work / "tessera-reserved.toml", bundle=work / "bundle-reserved", schema=config)
+    deployment = write_deployment(work / "mosaica-reserved.toml", bundle=work / "bundle-reserved", schema=config)
     result = subprocess.run(
         [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(work / "bundle-reserved")],
         cwd=REPO_ROOT,

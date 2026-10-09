@@ -1,7 +1,7 @@
 """The serving grid, engine-side: layer × principal breadth × viewport, through the real request path.
 
 `artifact-serving-at-scale.md` §7 is a probe-side grid — a bench binary owning its own control flow
-over the engine's structures. This is the same grid asked over HTTP, of a running `tessera serve`,
+over the engine's structures. This is the same grid asked over HTTP, of a running `mosaica serve`,
 with sessions established the way a client establishes them and frames decoded the way a client
 decodes them. Where the two align the campaign compares them; where a cell runs more than twice the
 probe's figure the collation flags it.

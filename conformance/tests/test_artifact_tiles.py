@@ -90,7 +90,7 @@ def tiles_server(tmp_path_factory):
     assert "groups.parquet" in config
     (work / "gated.toml").write_text(config + gated_layer_toml() + groups_layer_toml())
     bundle = work / "bundle-gated"
-    deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
+    deployment = write_deployment(work / "mosaica-gated.toml", bundle=bundle, schema=work / "gated.toml")
     cli_build(deployment, bundle)
     server, proc = spawn_server(
         bundle,

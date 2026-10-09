@@ -1,5 +1,5 @@
 /**
- * `@tesseradb/client/internal`: what `@tesseradb/deck`, `@tesseradb/components` and the demo
+ * `@mosaicajs/client/internal`: what `@mosaicajs/deck`, `@mosaicajs/components` and the demo
  * viewer use of this package beyond the root entry. It is not a public API. Its exports change with
  * those packages, which depend on this package's exact version.
  */

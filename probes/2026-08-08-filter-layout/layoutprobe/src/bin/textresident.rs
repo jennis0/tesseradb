@@ -17,7 +17,7 @@
 
 use std::time::Instant;
 
-use tessera_filter::{write_value_column, Codes, ValueColumn};
+use mosaica_filter::{write_value_column, Codes, ValueColumn};
 
 /// One `/proc/self/status` size field, in bytes.
 fn status_kb(field: &str) -> u64 {
@@ -46,7 +46,7 @@ fn main() {
         .map(|s| s.parse().expect("n"))
         .unwrap_or(20_000_000);
 
-    let dir = std::env::temp_dir().join("tessera-textresident");
+    let dir = std::env::temp_dir().join("mosaica-textresident");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let values = dir.join("values.arrow");
     let presence = dir.join("presence.roaring");

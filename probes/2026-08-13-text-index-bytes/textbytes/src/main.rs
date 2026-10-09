@@ -13,8 +13,8 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 
-use tessera_analyse::Analyser;
-use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
+use mosaica_analyse::Analyser;
+use mosaica_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 fn main() {
     let mut snapshot = String::new();
@@ -92,11 +92,11 @@ fn report(name: &str, values: &[String]) {
 
     let dir = tempfile::tempdir().expect("a temp dir");
     let dict_path = dir.path().join("dict.bin");
-    tessera_filter::write_sorted_dict(&dict_path, terms.keys().map(String::as_str))
+    mosaica_filter::write_sorted_dict(&dict_path, terms.keys().map(String::as_str))
         .expect("the dictionary writes");
     let per_term: Vec<Vec<u32>> = terms.values().cloned().collect();
     let postings_path = dir.path().join("postings.arrow");
-    tessera_authz::postings::write_postings(&postings_path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT)
+    mosaica_authz::postings::write_postings(&postings_path, &per_term, SMALL_TERM_THRESHOLD_DEFAULT)
         .expect("the postings write");
 
     let bytes = |p: &std::path::Path| std::fs::metadata(p).expect("a written file").len() as f64;

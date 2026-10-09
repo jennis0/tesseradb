@@ -1,58 +1,58 @@
 /**
- * Every `tessera-*` element as a React component with typed props and event handlers, made with
- * `@lit/react`. `TesseraMap` wraps `<tessera-map>`, and so on. A prop that names an element
+ * Every `mosaica-*` element as a React component with typed props and event handlers, made with
+ * `@lit/react`. `MosaicaMap` wraps `<mosaica-map>`, and so on. A prop that names an element
  * property is set as that property, so an object such as `store` reaches the element under React
  * 18, which sets a custom element's props as attributes. Each element's events are handler props,
- * such as `onPick` for `tessera-pick`. The element classes are exported as types with an `Element`
+ * such as `onPick` for `mosaica-pick`. The element classes are exported as types with an `Element`
  * suffix, such as `MapElement`, for typing a ref. Each element's attributes, properties, events,
  * slots and parts are on its page in the Components reference, which each wrapper's type links to.
  *
- * `TesseraStore`, `TesseraMap` and `TesseraExplorer` read their `authorise` prop through a ref, so
+ * `MosaicaStore`, `MosaicaMap` and `MosaicaExplorer` read their `authorise` prop through a ref, so
  * an inline function does not build a new store on every render. To show the map to another
  * viewer, change `token` or `viewerUrl`, or give the component a new `key`.
  *
- * This entry imports `@tesseradb/components`, and with it Lit and deck.gl. The hooks are in the
- * package root, `@tesseradb/react`, which imports neither.
+ * This entry imports `@mosaicajs/components`, and with it Lit and deck.gl. The hooks are in the
+ * package root, `@mosaicajs/react`, which imports neither.
  *
- * @module @tesseradb/react/components
+ * @module @mosaicajs/react/components
  */
 import {createComponent, type EventName} from '@lit/react';
 import * as React from 'react';
 import {
-  TesseraArtifactCard as ArtifactCardElement,
-  TesseraColourEditor as ColourEditorElement,
-  TesseraCount as CountElement,
-  TesseraExplorer as ExplorerElement,
-  TesseraFieldCard as FieldCardElement,
-  TesseraFilterPanel as FilterPanelElement,
-  TesseraHierarchy as HierarchyElement,
-  TesseraItemCard as ItemCardElement,
-  TesseraKeyPicker as KeyPickerElement,
-  TesseraLayerPicker as LayerPickerElement,
-  TesseraMap as MapElement,
-  TesseraSelection as SelectionElement,
-  TesseraStatus as StatusElement,
-  TesseraStore as StoreElement,
-  TesseraViewPicker as ViewPickerElement,
-  type TesseraEventMap
-} from '@tesseradb/components';
-import type {TokenSupplier} from '@tesseradb/client';
+  MosaicaArtifactCard as ArtifactCardElement,
+  MosaicaColourEditor as ColourEditorElement,
+  MosaicaCount as CountElement,
+  MosaicaExplorer as ExplorerElement,
+  MosaicaFieldCard as FieldCardElement,
+  MosaicaFilterPanel as FilterPanelElement,
+  MosaicaHierarchy as HierarchyElement,
+  MosaicaItemCard as ItemCardElement,
+  MosaicaKeyPicker as KeyPickerElement,
+  MosaicaLayerPicker as LayerPickerElement,
+  MosaicaMap as MapElement,
+  MosaicaSelection as SelectionElement,
+  MosaicaStatus as StatusElement,
+  MosaicaStore as StoreElement,
+  MosaicaViewPicker as ViewPickerElement,
+  type MosaicaEventMap
+} from '@mosaicajs/components';
+import type {TokenSupplier} from '@mosaicajs/client';
 
 
 /**
- * The events the elements emit, by name, each a `CustomEvent` with its detail: `TesseraEventMap`
- * from `@tesseradb/components`.
+ * The events the elements emit, by name, each a `CustomEvent` with its detail: `MosaicaEventMap`
+ * from `@mosaicajs/components`.
  */
-export type TesseraEvents = TesseraEventMap;
+export type MosaicaEvents = MosaicaEventMap;
 
-const ev = <K extends keyof TesseraEvents>(name: K) => name as EventName<TesseraEvents[K]>;
+const ev = <K extends keyof MosaicaEvents>(name: K) => name as EventName<MosaicaEvents[K]>;
 
 const wrap = <E extends HTMLElement, Ev extends Record<string, EventName>>(tagName: string, elementClass: new () => E, events: Ev) =>
   createComponent({react: React, tagName, elementClass, events, displayName: elementClass.name});
 
 /**
  * Hands the element one function per mount in place of the `authorise` prop, and calls the latest
- * prop through a ref, as `useTesseraStore` does. An element builds a new store when its `authorise`
+ * prop through a ref, as `useMosaicaStore` does. An element builds a new store when its `authorise`
  * function changes, so an inline arrow passed straight through would build one on every render.
  * The store is built again when `authorise` is given or removed; to show another viewer, change
  * `token`, `viewerUrl` or the component's `key`.
@@ -73,128 +73,128 @@ const withStableAuthorise = <C extends React.ForwardRefExoticComponent<any>>(Inn
 
 /** The handler props for events a map emits, which the explorer also carries. */
 const mapEvents = {
-  onPick: ev('tessera-pick'),
-  onMiss: ev('tessera-miss'),
-  onHover: ev('tessera-hover'),
-  onViewChange: ev('tessera-viewchange'),
-  onSelectChange: ev('tessera-selectchange'),
-  onArtifactOpen: ev('tessera-artifactopen'),
-  onLayerChange: ev('tessera-layerchange')
+  onPick: ev('mosaica-pick'),
+  onMiss: ev('mosaica-miss'),
+  onHover: ev('mosaica-hover'),
+  onViewChange: ev('mosaica-viewchange'),
+  onSelectChange: ev('mosaica-selectchange'),
+  onArtifactOpen: ev('mosaica-artifactopen'),
+  onLayerChange: ev('mosaica-layerchange')
 };
 
-/** `<tessera-store>` as a React component. It has no event props. */
-export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreElement, {}));
+/** `<mosaica-store>` as a React component. It has no event props. */
+export const MosaicaStore = withStableAuthorise(wrap('mosaica-store', StoreElement, {}));
 /**
- * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
+ * `<mosaica-explorer>` as a React component. It has a handler prop for every event, since the
  * elements inside it emit them and each event bubbles out of it: `onPick`, `onMiss`, `onHover`,
  * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactFit`,
  * `onColourChange`, `onLevelChange`, `onValueColour`, `onClusterColour`, `onPaletteChange`, `onClusterPaletteChange`,
  * `onDisplayChange`, `onSizeChange`, `onBudgetChange`, `onClusterBudgetChange`, `onFold`,
  * `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`, `onClauseChange`,
- * `onViewSwitch` and `onViewFollow`, each for the `tessera-` event of the same name in lower case.
+ * `onViewSwitch` and `onViewFollow`, each for the `mosaica-` event of the same name in lower case.
  */
-export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', ExplorerElement, {
+export const MosaicaExplorer = withStableAuthorise(wrap('mosaica-explorer', ExplorerElement, {
   ...mapEvents,
-  onArtifactFit: ev('tessera-artifactfit'),
-  onColourChange: ev('tessera-colourchange'),
-  onLevelChange: ev('tessera-levelchange'),
-  onValueColour: ev('tessera-valuecolour'),
-  onClusterColour: ev('tessera-clustercolour'),
-  onPaletteChange: ev('tessera-palettechange'),
-  onClusterPaletteChange: ev('tessera-clusterpalettechange'),
-  onDisplayChange: ev('tessera-displaychange'),
-  onSizeChange: ev('tessera-sizechange'),
-  onBudgetChange: ev('tessera-budgetchange'),
-  onClusterBudgetChange: ev('tessera-clusterbudgetchange'),
-  onFold: ev('tessera-fold'),
-  onFilterChange: ev('tessera-filterchange'),
-  onStateChange: ev('tessera-statechange'),
-  onExpired: ev('tessera-expired'),
-  onOpen: ev('tessera-open'),
-  onClose: ev('tessera-close'),
-  onClauseChange: ev('tessera-clausechange'),
-  onViewSwitch: ev('tessera-viewswitch'),
-  onViewFollow: ev('tessera-viewfollow')
+  onArtifactFit: ev('mosaica-artifactfit'),
+  onColourChange: ev('mosaica-colourchange'),
+  onLevelChange: ev('mosaica-levelchange'),
+  onValueColour: ev('mosaica-valuecolour'),
+  onClusterColour: ev('mosaica-clustercolour'),
+  onPaletteChange: ev('mosaica-palettechange'),
+  onClusterPaletteChange: ev('mosaica-clusterpalettechange'),
+  onDisplayChange: ev('mosaica-displaychange'),
+  onSizeChange: ev('mosaica-sizechange'),
+  onBudgetChange: ev('mosaica-budgetchange'),
+  onClusterBudgetChange: ev('mosaica-clusterbudgetchange'),
+  onFold: ev('mosaica-fold'),
+  onFilterChange: ev('mosaica-filterchange'),
+  onStateChange: ev('mosaica-statechange'),
+  onExpired: ev('mosaica-expired'),
+  onOpen: ev('mosaica-open'),
+  onClose: ev('mosaica-close'),
+  onClauseChange: ev('mosaica-clausechange'),
+  onViewSwitch: ev('mosaica-viewswitch'),
+  onViewFollow: ev('mosaica-viewfollow')
 }));
 /**
- * `<tessera-map>` as a React component. Event props: `onPick` (`tessera-pick`), `onMiss`
- * (`tessera-miss`), `onHover` (`tessera-hover`), `onViewChange` (`tessera-viewchange`), `onSelectChange`
- * (`tessera-selectchange`), `onArtifactOpen` (`tessera-artifactopen`) and `onLayerChange`
- * (`tessera-layerchange`).
+ * `<mosaica-map>` as a React component. Event props: `onPick` (`mosaica-pick`), `onMiss`
+ * (`mosaica-miss`), `onHover` (`mosaica-hover`), `onViewChange` (`mosaica-viewchange`), `onSelectChange`
+ * (`mosaica-selectchange`), `onArtifactOpen` (`mosaica-artifactopen`) and `onLayerChange`
+ * (`mosaica-layerchange`).
  */
-export const TesseraMap = withStableAuthorise(wrap('tessera-map', MapElement, mapEvents));
-/** `<tessera-status>` as a React component. Event props: `onStateChange` (`tessera-statechange`) and `onExpired` (`tessera-expired`). */
-export const TesseraStatus = wrap('tessera-status', StatusElement, {onStateChange: ev('tessera-statechange'), onExpired: ev('tessera-expired')});
-/** `<tessera-count>` as a React component. It has no event props. */
-export const TesseraCount = wrap('tessera-count', CountElement, {});
+export const MosaicaMap = withStableAuthorise(wrap('mosaica-map', MapElement, mapEvents));
+/** `<mosaica-status>` as a React component. Event props: `onStateChange` (`mosaica-statechange`) and `onExpired` (`mosaica-expired`). */
+export const MosaicaStatus = wrap('mosaica-status', StatusElement, {onStateChange: ev('mosaica-statechange'), onExpired: ev('mosaica-expired')});
+/** `<mosaica-count>` as a React component. It has no event props. */
+export const MosaicaCount = wrap('mosaica-count', CountElement, {});
 /**
- * `<tessera-item-card>` as a React component. Event props: `onOpen` (`tessera-open`), `onClose`
- * (`tessera-close`) and `onViewFollow` (`tessera-viewfollow`).
+ * `<mosaica-item-card>` as a React component. Event props: `onOpen` (`mosaica-open`), `onClose`
+ * (`mosaica-close`) and `onViewFollow` (`mosaica-viewfollow`).
  */
-export const TesseraItemCard = wrap('tessera-item-card', ItemCardElement, {onOpen: ev('tessera-open'), onClose: ev('tessera-close'), onViewFollow: ev('tessera-viewfollow')});
+export const MosaicaItemCard = wrap('mosaica-item-card', ItemCardElement, {onOpen: ev('mosaica-open'), onClose: ev('mosaica-close'), onViewFollow: ev('mosaica-viewfollow')});
 /**
- * `<tessera-filter-panel>` as a React component. Event props: `onFilterChange`
- * (`tessera-filterchange`), `onChipOpen` (`tessera-chipopen`), and from its cards
- * `onClauseChange` (`tessera-clausechange`), `onColourChange` (`tessera-colourchange`),
- * `onLevelChange` (`tessera-levelchange`), `onValueColour` (`tessera-valuecolour`),
- * `onClusterColour` (`tessera-clustercolour`) and `onFold` (`tessera-fold`).
+ * `<mosaica-filter-panel>` as a React component. Event props: `onFilterChange`
+ * (`mosaica-filterchange`), `onChipOpen` (`mosaica-chipopen`), and from its cards
+ * `onClauseChange` (`mosaica-clausechange`), `onColourChange` (`mosaica-colourchange`),
+ * `onLevelChange` (`mosaica-levelchange`), `onValueColour` (`mosaica-valuecolour`),
+ * `onClusterColour` (`mosaica-clustercolour`) and `onFold` (`mosaica-fold`).
  */
-export const TesseraFilterPanel = wrap('tessera-filter-panel', FilterPanelElement, {
-  onFilterChange: ev('tessera-filterchange'),
-  onChipOpen: ev('tessera-chipopen'),
-  onClauseChange: ev('tessera-clausechange'),
-  onColourChange: ev('tessera-colourchange'),
-  onLevelChange: ev('tessera-levelchange'),
-  onValueColour: ev('tessera-valuecolour'),
-  onClusterColour: ev('tessera-clustercolour'),
-  onFold: ev('tessera-fold')
+export const MosaicaFilterPanel = wrap('mosaica-filter-panel', FilterPanelElement, {
+  onFilterChange: ev('mosaica-filterchange'),
+  onChipOpen: ev('mosaica-chipopen'),
+  onClauseChange: ev('mosaica-clausechange'),
+  onColourChange: ev('mosaica-colourchange'),
+  onLevelChange: ev('mosaica-levelchange'),
+  onValueColour: ev('mosaica-valuecolour'),
+  onClusterColour: ev('mosaica-clustercolour'),
+  onFold: ev('mosaica-fold')
 });
-/** `<tessera-selection>` as a React component. Event prop: `onSelectChange` (`tessera-selectchange`). */
-export const TesseraSelection = wrap('tessera-selection', SelectionElement, {onSelectChange: ev('tessera-selectchange')});
-/** `<tessera-layer-picker>` as a React component. Event prop: `onLayerChange` (`tessera-layerchange`). */
-export const TesseraLayerPicker = wrap('tessera-layer-picker', LayerPickerElement, {onLayerChange: ev('tessera-layerchange')});
-/** `<tessera-view-picker>` as a React component. Event prop: `onViewSwitch` (`tessera-viewswitch`). */
-export const TesseraViewPicker = wrap('tessera-view-picker', ViewPickerElement, {onViewSwitch: ev('tessera-viewswitch')});
-/** `<tessera-key-picker>` as a React component. Event prop: `onViewSwitch` (`tessera-viewswitch`). */
-export const TesseraKeyPicker = wrap('tessera-key-picker', KeyPickerElement, {onViewSwitch: ev('tessera-viewswitch')});
+/** `<mosaica-selection>` as a React component. Event prop: `onSelectChange` (`mosaica-selectchange`). */
+export const MosaicaSelection = wrap('mosaica-selection', SelectionElement, {onSelectChange: ev('mosaica-selectchange')});
+/** `<mosaica-layer-picker>` as a React component. Event prop: `onLayerChange` (`mosaica-layerchange`). */
+export const MosaicaLayerPicker = wrap('mosaica-layer-picker', LayerPickerElement, {onLayerChange: ev('mosaica-layerchange')});
+/** `<mosaica-view-picker>` as a React component. Event prop: `onViewSwitch` (`mosaica-viewswitch`). */
+export const MosaicaViewPicker = wrap('mosaica-view-picker', ViewPickerElement, {onViewSwitch: ev('mosaica-viewswitch')});
+/** `<mosaica-key-picker>` as a React component. Event prop: `onViewSwitch` (`mosaica-viewswitch`). */
+export const MosaicaKeyPicker = wrap('mosaica-key-picker', KeyPickerElement, {onViewSwitch: ev('mosaica-viewswitch')});
 /**
- * `<tessera-artifact-card>` as a React component. Event props: `onArtifactFit`
- * (`tessera-artifactfit`), `onClauseChange` (`tessera-clausechange`) and `onClose`
- * (`tessera-close`).
+ * `<mosaica-artifact-card>` as a React component. Event props: `onArtifactFit`
+ * (`mosaica-artifactfit`), `onClauseChange` (`mosaica-clausechange`) and `onClose`
+ * (`mosaica-close`).
  */
-export const TesseraArtifactCard = wrap('tessera-artifact-card', ArtifactCardElement, {
-  onArtifactFit: ev('tessera-artifactfit'),
-  onClauseChange: ev('tessera-clausechange'),
-  onClose: ev('tessera-close')
-});
-/**
- * `<tessera-field-card>` as a React component. Event props: `onFilterChange`
- * (`tessera-filterchange`), `onClauseChange` (`tessera-clausechange`), `onColourChange`
- * (`tessera-colourchange`), `onLevelChange` (`tessera-levelchange`), `onValueColour`
- * (`tessera-valuecolour`), `onClusterColour` (`tessera-clustercolour`) and `onFold` (`tessera-fold`).
- */
-export const TesseraFieldCard = wrap('tessera-field-card', FieldCardElement, {
-  onFold: ev('tessera-fold'),
-  onFilterChange: ev('tessera-filterchange'),
-  onClauseChange: ev('tessera-clausechange'),
-  onColourChange: ev('tessera-colourchange'),
-  onLevelChange: ev('tessera-levelchange'),
-  onValueColour: ev('tessera-valuecolour'),
-  onClusterColour: ev('tessera-clustercolour')
+export const MosaicaArtifactCard = wrap('mosaica-artifact-card', ArtifactCardElement, {
+  onArtifactFit: ev('mosaica-artifactfit'),
+  onClauseChange: ev('mosaica-clausechange'),
+  onClose: ev('mosaica-close')
 });
 /**
- * `<tessera-colour-editor>` as a React component. Event props: `onValueColour`
- * (`tessera-valuecolour`) and `onClusterColour` (`tessera-clustercolour`).
+ * `<mosaica-field-card>` as a React component. Event props: `onFilterChange`
+ * (`mosaica-filterchange`), `onClauseChange` (`mosaica-clausechange`), `onColourChange`
+ * (`mosaica-colourchange`), `onLevelChange` (`mosaica-levelchange`), `onValueColour`
+ * (`mosaica-valuecolour`), `onClusterColour` (`mosaica-clustercolour`) and `onFold` (`mosaica-fold`).
  */
-export const TesseraColourEditor = wrap('tessera-colour-editor', ColourEditorElement, {
-  onValueColour: ev('tessera-valuecolour'),
-  onClusterColour: ev('tessera-clustercolour')
+export const MosaicaFieldCard = wrap('mosaica-field-card', FieldCardElement, {
+  onFold: ev('mosaica-fold'),
+  onFilterChange: ev('mosaica-filterchange'),
+  onClauseChange: ev('mosaica-clausechange'),
+  onColourChange: ev('mosaica-colourchange'),
+  onLevelChange: ev('mosaica-levelchange'),
+  onValueColour: ev('mosaica-valuecolour'),
+  onClusterColour: ev('mosaica-clustercolour')
 });
 /**
- * `<tessera-hierarchy>` as a React component. Event props: `onClauseChange` (`tessera-clausechange`)
- * and `onArtifactFit` (`tessera-artifactfit`).
+ * `<mosaica-colour-editor>` as a React component. Event props: `onValueColour`
+ * (`mosaica-valuecolour`) and `onClusterColour` (`mosaica-clustercolour`).
  */
-export const TesseraHierarchy = wrap('tessera-hierarchy', HierarchyElement, {onClauseChange: ev('tessera-clausechange'), onArtifactFit: ev('tessera-artifactfit')});
+export const MosaicaColourEditor = wrap('mosaica-colour-editor', ColourEditorElement, {
+  onValueColour: ev('mosaica-valuecolour'),
+  onClusterColour: ev('mosaica-clustercolour')
+});
+/**
+ * `<mosaica-hierarchy>` as a React component. Event props: `onClauseChange` (`mosaica-clausechange`)
+ * and `onArtifactFit` (`mosaica-artifactfit`).
+ */
+export const MosaicaHierarchy = wrap('mosaica-hierarchy', HierarchyElement, {onClauseChange: ev('mosaica-clausechange'), onArtifactFit: ev('mosaica-artifactfit')});
 
 export type {
   ArtifactCardElement,

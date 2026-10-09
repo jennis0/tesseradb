@@ -1,6 +1,6 @@
 # Security
 
-Every count, cluster, density figure and label Tessera serves is computed from inside the
+Every count, cluster, density figure and label Mosaica serves is computed from inside the
 requesting viewer's own visible set, not filtered into that shape afterward.
 
 ## The adversary and the boundary
@@ -112,7 +112,7 @@ flowchart LR
 
   subgraph trusted["inside the boundary"]
     session["login and session plane<br/>turn a credential into a token<br/>holding the principal's terms"]
-    serve["tessera serve<br/>composes the visible set every request,<br/>answers only from inside it"]
+    serve["mosaica serve<br/>composes the visible set every request,<br/>answers only from inside it"]
     control["control plane<br/>write: ingest, delete, suppress,<br/>flush, compact;<br/>admin: catalogue, status"]
     bundle["bundle and log on disc<br/>everything, including the<br/>identifier key"]
   end
@@ -255,7 +255,7 @@ first property.
 
 The `tessera_id` a client receives is a keyed permutation of the entity id, so two of them reveal
 nothing about whether their items are adjacent. The key is drawn from the operating system's random
-source each time `tessera build` creates a bundle, and is stored in that bundle's manifest. Nobody
+source each time `mosaica build` creates a bundle, and is stored in that bundle's manifest. Nobody
 configures or supplies it, and no response or log line carries it. A copy of a bundle keeps its
 `tessera_id`s. A rebuild creates a new bundle with a new key, so every `tessera_id` changes. No
 request accepts an entity id, so a client cannot enumerate them by trying values. A bulk read's

@@ -1,15 +1,15 @@
 """The WGS84 to view-frame transform, as a second implementation of the one the engine runs.
 
 **This module was written to be replaced, and it has been.** It placed both built geographic
-corpora while Tessera had no projection layer; it places none now. `tessera_spatial::projection`
+corpora while Mosaica had no projection layer; it places none now. `mosaica_spatial::projection`
 is the transform, a view declares which one it uses, and every `prepare.py` in this tree emits
 `lon`/`lat` in degrees for the build to transform (`docs/design/projections.md` §3).
 
 What it is instead is the **independent check on the engine's arithmetic**, in both directions.
 The vectors are data in `projection-vectors.json` beside this file — one description that two
 languages read, rather than two implementations of one — and `python -m
-test_corpora.common.projection` checks this half while `tessera_spatial::projection` checks the
-other. Beyond the vectors, `tessera_spatial::projection`'s `agrees_with_the_python_reference` runs
+test_corpora.common.projection` checks this half while `mosaica_spatial::projection` checks the
+other. Beyond the vectors, `mosaica_spatial::projection`'s `agrees_with_the_python_reference` runs
 this module over 100,000 sampled coordinates and requires the same *stored* position rather than a
 similar float. A built corpus is checked the same way: on 2026-08-30 every point of both geographic
 rungs had its expected 32-bit fixed-point position recomputed here from the source degrees and

@@ -1,7 +1,7 @@
 """Two deployments of one corpus: one built with a declaration, one declared at a running service.
 
 The corpus is small and synthetic, every value a pure function of an item's source id, so the two
-deployments are fed exactly the same items. A deployment writes its files, runs `tessera build`
+deployments are fed exactly the same items. A deployment writes its files, runs `mosaica build`
 into a bundle root of its own and serves it through `suite.driver.SuiteHarness`, with the tick
 clock pinned and the automatic folds off, so the test decides when a flush or a fold happens.
 
@@ -280,7 +280,7 @@ class Deployment:
         self.work = work
         self.bundle = work / "bundle"
         schema = corpus.write(work / "corpus")
-        deployment = write_deployment(work / "tessera-build.toml", bundle=self.bundle, schema=schema)
+        deployment = write_deployment(work / "mosaica-build.toml", bundle=self.bundle, schema=schema)
         cli_build(deployment, self.bundle, capture_output=True)
         run_dir = work / "run"
         run_dir.mkdir(exist_ok=True)
@@ -338,7 +338,7 @@ class Deployment:
     def control(self, method: str, path: str, *, expect=(200, 201), view=None, **kwargs):
         headers = {"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"}
         if view is not None:
-            headers["x-tessera-view"] = view
+            headers["x-mosaica-view"] = view
         headers.update(kwargs.pop("headers", {}))
         resp = requests.request(
             method, f"{self.server.control_base}{path}", headers=headers, timeout=60, **kwargs
@@ -356,7 +356,7 @@ class Deployment:
                 route,
                 expect=(200,),
                 view=view,
-                headers={"x-tessera-batch-id": f"{batch}-{n}", "content-type": "application/json"},
+                headers={"x-mosaica-batch-id": f"{batch}-{n}", "content-type": "application/json"},
                 data=json.dumps(rows[start : start + 500]),
             )
             for key, value in resp.json().items():

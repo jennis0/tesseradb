@@ -11,8 +11,8 @@ import type {PageEnd, RecordsTrailer, RegionVerdict, Timings} from './types.js';
 export type RecordsRequest = (cursor?: string) => Promise<Response>;
 
 /**
- * A whole bulk read of `POST /v1/items` or `POST /v1/artifacts`, as {@link TesseraClient.items}
- * and {@link TesseraClient.artifacts} return it: each page as an Arrow table as it arrives,
+ * A whole bulk read of `POST /v1/items` or `POST /v1/artifacts`, as {@link MosaicaClient.items}
+ * and {@link MosaicaClient.artifacts} return it: each page as an Arrow table as it arrives,
  * response after response, each response requested from the cursor the one before it ended with,
  * until that cursor is null.
  *
@@ -60,19 +60,19 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
 
   /** The latest response's identity coordinate for this principal and view; empty where it carried none. */
   get identityKey(): string {
-    return this.headers.get('x-tessera-identity-key') ?? '';
+    return this.headers.get('x-mosaica-identity-key') ?? '';
   }
 
-  /** The latest response's `x-tessera-region` verdict, present where `filters` carried a `region` leaf. */
+  /** The latest response's `x-mosaica-region` verdict, present where `filters` carried a `region` leaf. */
   get region(): RegionVerdict | null {
-    return parseRegionVerdict(this.headers.get('x-tessera-region'));
+    return parseRegionVerdict(this.headers.get('x-mosaica-region'));
   }
 
   /** The latest response's time from admission to its head, and the time admission took, in microseconds. */
   get timings(): Pick<Timings, 'serverUs' | 'admissionUs'> {
     return {
-      serverUs: Number(this.headers.get('x-tessera-server-us') ?? 0),
-      admissionUs: Number(this.headers.get('x-tessera-admission-us') ?? 0)
+      serverUs: Number(this.headers.get('x-mosaica-server-us') ?? 0),
+      admissionUs: Number(this.headers.get('x-mosaica-admission-us') ?? 0)
     };
   }
 
@@ -99,7 +99,7 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
    * The next page, or `done` once the read has ended.
    *
    * @throws `Error` for a response cut or ended without its trailer, or whose trailer counts other
-   *   pages or rows than it carried, after the pages before it; {@link TesseraError} for a
+   *   pages or rows than it carried, after the pages before it; {@link MosaicaError} for a
    *   follow-up request the server refuses; and the signal's reason once it aborts.
    */
   next(): Promise<IteratorResult<Table, undefined>> {

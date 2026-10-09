@@ -20,8 +20,8 @@
 # (measuring through a concurrent build) hard to hit by accident.
 #
 # Usage:
-#   scripts/bench-slot.sh cargo bench -p tessera-engine
-#   BENCH_SLOT_MAX_LOAD=1.5 BENCH_SLOT_TIMEOUT=1800 scripts/bench-slot.sh ./target/release/tessera-bench ...
+#   scripts/bench-slot.sh cargo bench -p mosaica-engine
+#   BENCH_SLOT_MAX_LOAD=1.5 BENCH_SLOT_TIMEOUT=1800 scripts/bench-slot.sh ./target/release/mosaica-bench ...
 #
 # Environment:
 #   BENCH_SLOT_MAX_LOAD   1-minute loadavg to wait for before starting  (default 2.0)
@@ -33,7 +33,7 @@
 
 set -uo pipefail
 
-LOCK_FILE="${BENCH_SLOT_LOCK:-/tmp/tessera-bench.slot.lock}"
+LOCK_FILE="${BENCH_SLOT_LOCK:-/tmp/mosaica-bench.slot.lock}"
 MAX_LOAD="${BENCH_SLOT_MAX_LOAD:-2.0}"
 TIMEOUT="${BENCH_SLOT_TIMEOUT:-3600}"
 SETTLE="${BENCH_SLOT_SETTLE:-30}"

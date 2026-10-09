@@ -96,14 +96,14 @@ def dig(node, *path, default=None):
 
 
 def cargo_release_binary() -> Path:
-    """`cargo build --release -p tessera-cli`, and the binary it wrote."""
+    """`cargo build --release -p mosaica-cli`, and the binary it wrote."""
     env = dict(os.environ, CARGO_PROFILE_RELEASE_DEBUG="0")
     built = run(
-        ["cargo", "build", "--release", "-p", "tessera-cli"], CHECKOUT, env=env
+        ["cargo", "build", "--release", "-p", "mosaica-cli"], CHECKOUT, env=env
     )
     if built["returncode"] != 0:
-        raise SystemExit(f"cargo build --release -p tessera-cli failed:\n{built['stderr_tail']}")
-    return CHECKOUT / "target" / "release" / "tessera"
+        raise SystemExit(f"cargo build --release -p mosaica-cli failed:\n{built['stderr_tail']}")
+    return CHECKOUT / "target" / "release" / "mosaica"
 
 
 def battery_argv(
@@ -205,7 +205,7 @@ def views_compared(equivalence: dict) -> tuple[bool, str]:
 def correctness(result: dict) -> list[tuple[str, bool, str]]:
     """One `(check, held, the number that decides it)` per line of the correctness section."""
     rows = []
-    for step, label in (("check", "tessera check"), ("build", "build"), ("verify", "verify --deep")):
+    for step, label in (("check", "mosaica check"), ("build", "build"), ("verify", "verify --deep")):
         code = dig(result, step, "returncode", default=None)
         rows.append((f"{label} clean", code == 0, f"exit {'n/a' if code is None else code}"))
 
@@ -362,13 +362,13 @@ def report(result: dict, results_dir: Path, this_file: Path) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="workload", description=__doc__.splitlines()[0])
-    ap.add_argument("--rung", required=True, help="a rung directory's name under $TESSERA_LADDER")
+    ap.add_argument("--rung", required=True, help="a rung directory's name under $MOSAICA_LADDER")
     ap.add_argument("--work", required=True, help="scratch for the bundle, the caches and the WALs")
     ap.add_argument("--quick", action="store_true", help="the shape for a change under review")
-    ap.add_argument("--binary", help="a tessera binary; built from this checkout when absent")
+    ap.add_argument("--binary", help="a mosaica binary; built from this checkout when absent")
     ap.add_argument("--cap-bytes", type=int, default=CAP_BYTES)
     ap.add_argument("--port0", type=int, default=8171)
-    ap.add_argument("--results", help="default $TESSERA_LADDER/<rung>/workload-results/")
+    ap.add_argument("--results", help="default $MOSAICA_LADDER/<rung>/workload-results/")
     args = ap.parse_args(argv)
 
     rung_dir = ladder(args.rung)
@@ -422,7 +422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     with steps.step("check"):
         result["check"] = run([binary, "check"], rung_dir, dict(os.environ))
     if result["check"]["returncode"] != 0:
-        failures.append(f"tessera check refused {args.rung}: {result['check']['stderr_tail'][-300:]}")
+        failures.append(f"mosaica check refused {args.rung}: {result['check']['stderr_tail'][-300:]}")
 
     bundle = work / "bundle"
     with steps.step("build"):
@@ -441,7 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result["verify"] = run([binary, "verify", "--deep", bundle], rung_dir, dict(os.environ))
         result["verify"]["wall_s"] = steps["verify"]
         if result["verify"]["returncode"] != 0:
-            failures.append(f"tessera verify --deep refused the bundle: {result['verify']['stderr_tail'][-300:]}")
+            failures.append(f"mosaica verify --deep refused the bundle: {result['verify']['stderr_tail'][-300:]}")
 
     if result["build"]["returncode"] == 0 and ranks is not None:
         with steps.step("serve"):

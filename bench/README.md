@@ -3,7 +3,7 @@
 How to run the suite at whatever scales and label sets you want, and how to read what comes out.
 
 Findings and methodology live elsewhere: each arm's module doc in
-[`crates/tessera-bench/src/arms/`](../crates/tessera-bench/src/arms/) records what it measured and
+[`crates/mosaica-bench/src/arms/`](../crates/mosaica-bench/src/arms/) records what it measured and
 what it means, and the design memos in [`docs/evidence/memos/`](../docs/evidence/memos/) carry the
 individual findings. This file is operational.
 
@@ -12,8 +12,8 @@ individual findings. This file is operational.
 ## 0. Prerequisites
 
 ```bash
-cargo build --release -p tessera-cli     # the build/serve binary
-cargo build --release -p tessera-bench   # the harness (bench-timing is ON by default here)
+cargo build --release -p mosaica-cli     # the build/serve binary
+cargo build --release -p mosaica-bench   # the harness (bench-timing is ON by default here)
 ```
 
 The corpus must be present under `data/scaled/` — `geometry.parquet` (10⁹ rows) plus one
@@ -26,7 +26,7 @@ The concurrency arm additionally needs the Python environment at `reference/.ven
 
 ## 1. The two configuration axes
 
-**Scale is a prefix filter, not a separate corpus.** `tessera build --limit N` keeps source rows
+**Scale is a prefix filter, not a separate corpus.** `mosaica build --limit N` keeps source rows
 with `entity_id < N`. Any N works — 5,000,000 is as valid as the defaults — because there is one
 geometry file and a scale is a view onto it. Never take "the first N rows" of `geometry.parquet`
 instead: it is stored in Morton order, not entity order (`probes/dataset.md` §5 rule 1).
@@ -73,7 +73,7 @@ Both axes take comma-separated flags; `--help` lists them all:
 `--list` prints the plan and builds nothing — worth running first, since a full default build is
 ~40 minutes. Idempotent otherwise: a bundle whose `CURRENT` exists is reported `HAVE` and skipped,
 so a killed run resumes by re-invocation. Per-build logs go to `--log-dir` (default
-`/tmp/tessera-bench/logs`).
+`/tmp/mosaica-bench/logs`).
 
 Budget roughly **47 B/item** of disk (measured flat across 100× of scale), plus the label set's
 postings — `hiterms` is ~10× the others because it carries ~130 terms per item.
@@ -81,7 +81,7 @@ postings — `hiterms` is ~10× the others because it carries ~130 terms per ite
 Check what you have:
 
 ```bash
-./target/release/tessera-bench fixtures
+./target/release/mosaica-bench fixtures
 ```
 
 ---
@@ -93,20 +93,20 @@ fixture found. A filter matching nothing is an error, not an empty run.
 
 ```bash
 # Mask construction across every fixture
-./target/release/tessera-bench authorise --run-dir /tmp/run1
+./target/release/mosaica-bench authorise --run-dir /tmp/run1
 
 # One scale, two label sets, custom axes
-./target/release/tessera-bench gather \
+./target/release/mosaica-bench gather \
     --scale 25000000 --label-set categories-archive,hash-flat \
     --pattern contiguous,scattered --k 1000 --coverage 0.05 \
     --repeat 7 --run-dir /tmp/run1
 
 # Whole-viewport latency with per-stage attribution
-./target/release/tessera-bench viewport \
+./target/release/mosaica-bench viewport \
     --scale 2422486 --mode battery --k 30 --coverage 0.05 --run-dir /tmp/run1
 
 # Design §7.2's density rule, swept over its own clause parameters
-./target/release/tessera-bench viewport \
+./target/release/mosaica-bench viewport \
     --scale 2422486 --mode battery --k 1000 --coverage 0.05 \
     --k-max-marks 30,128,500,1000 --theta-target 16,128 --run-dir /tmp/selection
 ```
@@ -136,15 +136,15 @@ perturbation), core count, free memory, and whether `bench-timing` is actually o
 sets. Preview before committing to a long run:
 
 ```bash
-./target/release/tessera-bench matrix --plan
+./target/release/mosaica-bench matrix --plan
 ```
 
 It reports **cell counts**, which is the number that matters — the obvious every-axis matrix is
 ~27,000 cells; the shipped one is ~6,900. Then:
 
 ```bash
-./target/release/tessera-bench matrix --run-dir /tmp/tessera-bench/runs/$(date +%F)
-./target/release/tessera-bench matrix --only gather --run-dir ...   # one arm
+./target/release/mosaica-bench matrix --run-dir /tmp/mosaica-bench/runs/$(date +%F)
+./target/release/mosaica-bench matrix --only gather --run-dir ...   # one arm
 ```
 
 Resumable at cell granularity: re-invoking the same command skips what the run directory's ledger
@@ -170,7 +170,7 @@ driven from Python:
 
 ```bash
 reference/.venv/bin/python scripts/bench_concurrency.py \
-    --bundle /tmp/tessera-bench/fixtures/2422486/categories-subclass \
+    --bundle /tmp/mosaica-bench/fixtures/2422486/categories-subclass \
     --scale 2422486 --concurrency 5,10,100,1000 --arms B,A --duration 8 --w 10
 ```
 
@@ -181,7 +181,7 @@ flags any cell within 3× of the generator's own ceiling.
 **`ingest-build`** is minutes per cell and writes a whole bundle to temp:
 
 ```bash
-./target/release/tessera-bench ingest-build \
+./target/release/mosaica-bench ingest-build \
     --scale 250000,2422486,25000000 --label-set categories-subclass \
     --data-root . --run-dir /tmp/run1
 ```
@@ -259,7 +259,7 @@ Flags worth knowing:
 | `major_faults` | the cell read from disk, so its latency is a page-cache artefact |
 | `single_repetition` | a build, timed once — min-of-N is unaffordable at minutes per cell |
 
-With `bench-timing` (on by default in `tessera-bench`), viewport records also carry `stages`: a
+With `bench-timing` (on by default in `mosaica-bench`), viewport records also carry `stages`: a
 per-stage nanosecond breakdown plus `clock_overhead_ns`, the perturbation the instrumentation
 itself introduced. Subtract it rather than assuming it's zero.
 
@@ -271,7 +271,7 @@ cross-worker CPU-time sums, so their total can legitimately exceed the request's
 `compute_threads = 1` cell against a `compute_threads > 1` cell on these fields is comparing CPU
 time against CPU time, which is a meaningful comparison for *cost*, but not for *latency* — read
 `min_ns`/wall clock for latency, and the per-stage breakdown for where CPU time went. See
-`tessera_engine::timing`'s module doc for the full reasoning; nothing above this paragraph
+`mosaica_engine::timing`'s module doc for the full reasoning; nothing above this paragraph
 changed.
 
 **That cross-worker-sum behaviour only applies above the calibration serial fallback.** Below

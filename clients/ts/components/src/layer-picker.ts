@@ -1,6 +1,6 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
-import {isFilterLayer, layerEntries, type LayerEntry} from '@tesseradb/client';
-import {TesseraElement, emit} from './base.js';
+import {isFilterLayer, layerEntries, type LayerEntry} from '@mosaicajs/client';
+import {MosaicaElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
@@ -10,12 +10,12 @@ import {chrome, tokens} from './tokens.js';
  * that others depend on (a clustering and its labels) is one entry that turns on the whole group;
  * the entry's tooltip names the layers in it. A filter layer has nothing to draw and gets no
  * checkbox: a quiet note beneath the list names the filter layers, which are applied as clauses
- * through `<tessera-hierarchy>`.
+ * through `<mosaica-hierarchy>`.
  *
  * @summary Which annotation layers the map draws.
- * @tagname tessera-layer-picker
+ * @tagname mosaica-layer-picker
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - A checkbox
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-layerchange']>} mosaica-layerchange - A checkbox
  *   changed, with the layers now drawn.
  * @csspart title - The heading.
  * @csspart state - The state line, with `data-state`.
@@ -25,7 +25,7 @@ import {chrome, tokens} from './tokens.js';
  * @csspart note - The note naming the filter layers, such as "Venues can be used as a filter
  *   only.", with `data-layers` listing their names.
  */
-export class TesseraLayerPicker extends TesseraElement {
+export class MosaicaLayerPicker extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -43,7 +43,7 @@ export class TesseraLayerPicker extends TesseraElement {
       [part='note'] {
         margin: 8px 0 0;
         font-size: 12px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
       }
       [part='name'] {
         overflow: hidden;
@@ -72,7 +72,7 @@ export class TesseraLayerPicker extends TesseraElement {
     const current = new Set(s.get('artifacts').layers);
     const roots = this.entries().filter((e) => (e.root.name === entry.root.name ? on : current.has(e.root.name))).map((e) => e.root.name);
     s.setLayers(roots);
-    emit(this, 'tessera-layerchange', {layers: roots});
+    emit(this, 'mosaica-layerchange', {layers: roots});
   }
 
   override render(): TemplateResult | typeof nothing {
@@ -107,10 +107,10 @@ function filterNote(titles: string[]): string {
 }
 
 attachContextRoot();
-defineOnce('tessera-layer-picker', TesseraLayerPicker);
+defineOnce('mosaica-layer-picker', MosaicaLayerPicker);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-layer-picker': TesseraLayerPicker;
+    'mosaica-layer-picker': MosaicaLayerPicker;
   }
 }

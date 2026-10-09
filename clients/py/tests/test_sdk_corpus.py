@@ -1,6 +1,6 @@
 """A corpus declaration regenerated from calls, and what it discloses.
 
-`tessera check` prints one page: the schemas it read, with their paths, then what the declaration
+`mosaica check` prints one page: the schemas it read, with their paths, then what the declaration
 discloses. It is run here over both declarations: the committed one and the one the verbs wrote.
 The two name the same files by different paths, one reading `data/notebook/` directly and one
 reading it through a relative path from a temporary directory. **The lines that name a path are
@@ -8,7 +8,7 @@ compared by file name, and the rest of the page whole, but for the `[sources]` k
 the SDK names each file after the target it was inserted into, and the committed declaration
 chose its own names.
 
-Beside it, the first commit through `tessera build`.
+Beside it, the first commit through `mosaica build`.
 """
 
 import json
@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 
 from conftest import binary, notebook_corpus
-from tesseradb._auth import authorise
-from tesseradb._database import create
+from mosaica._auth import authorise
+from mosaica._database import create
 
 pytest.importorskip("pyarrow")
 
@@ -169,7 +169,7 @@ def page_without_sources(page: str) -> list[str]:
 
 
 def read_schema_lines(stderr: str) -> list[str]:
-    """`tessera check`'s "read schema" lines, with the path column cut to its file name.
+    """`mosaica check`'s "read schema" lines, with the path column cut to its file name.
 
     The two declarations name one set of files by two paths, one relative to `data/notebook/` and
     one relative to a temporary directory, so the file name is what can be compared. What is being
@@ -191,17 +191,17 @@ def read_schema_lines(stderr: str) -> list[str]:
     return lines
 
 
-def check_committed(tessera: str, declaration: Path, directory: Path) -> str:
-    """`tessera check` over a declaration this repository holds, and the page it printed."""
+def check_committed(mosaica: str, declaration: Path, directory: Path) -> str:
+    """`mosaica check` over a declaration this repository holds, and the page it printed."""
     (directory / "cache").mkdir(parents=True, exist_ok=True)
-    (directory / "tessera.toml").write_text(
+    (directory / "mosaica.toml").write_text(
         "[bundle]\n"
         'path = "bundle"\ncache = "cache"\nwal = "wal.log"\n\n'
         f'[build]\nschema = "{declaration}"\n\n'
         "[disclosure]\ntoken_max_lifetime = 3600\n"
     )
     done = subprocess.run(
-        [tessera, "check", "--deployment", str(directory / "tessera.toml")],
+        [mosaica, "check", "--deployment", str(directory / "mosaica.toml")],
         capture_output=True,
         text=True,
     )
@@ -210,14 +210,14 @@ def check_committed(tessera: str, declaration: Path, directory: Path) -> str:
 
 
 def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_discloses(tmp_path):
-    tessera = binary()
+    mosaica = binary()
     corpus = notebook_corpus()
     db = create(tmp_path / "db")
     declare_notebook(db, corpus)
     report = db.check()
     assert report.ok, report.log
-    committed = check_committed(tessera, corpus / "schema.toml", tmp_path / "committed")
-    generated = check_committed(tessera, db.path / "schema.toml", tmp_path / "generated")
+    committed = check_committed(mosaica, corpus / "schema.toml", tmp_path / "committed")
+    generated = check_committed(mosaica, db.path / "schema.toml", tmp_path / "generated")
     assert page_without_sources(generated) == page_without_sources(committed)
     # And the same files read by the same objects: the paths differ, the file names do not.
     read = read_schema_lines(generated)
@@ -255,12 +255,12 @@ def test_the_regenerated_declaration_states_what_the_committed_one_leaves_to_a_d
 
 
 @pytest.mark.skipif(
-    not (Path(os.environ.get("TESSERA_LADDER", "/nonexistent")) / "arxiv").is_dir(),
-    reason="$TESSERA_LADDER/arxiv is not on this machine: the ladder's arXiv rung is not staged",
+    not (Path(os.environ.get("MOSAICA_LADDER", "/nonexistent")) / "arxiv").is_dir(),
+    reason="$MOSAICA_LADDER/arxiv is not on this machine: the ladder's arXiv rung is not staged",
 )
 def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_discloses(tmp_path):
-    tessera = binary()
-    corpus = Path(os.environ["TESSERA_LADDER"]) / "arxiv"
+    mosaica = binary()
+    corpus = Path(os.environ["MOSAICA_LADDER"]) / "arxiv"
     declaration = corpus / "corpus.toml"
     if "clusters/toponymy" in declaration.read_text():
         pytest.skip("this rung's copy carries the spliced Toponymy layer, which §10.2 does not")
@@ -348,7 +348,7 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
         )
     report = db.check()
     assert report.ok, report.log
-    committed = check_committed(tessera, declaration, tmp_path / "committed")
+    committed = check_committed(mosaica, declaration, tmp_path / "committed")
     assert page_without_sources(report.log) == page_without_sources(committed)
     assert read_schema_lines(report.log) == read_schema_lines(committed)
 
@@ -373,15 +373,15 @@ def test_the_first_commit_builds_a_bundle(tmp_path):
     )
 
 
-def build_committed(tessera: str, declaration: Path, directory: Path) -> Path:
+def build_committed(mosaica: str, declaration: Path, directory: Path) -> Path:
     """Build a declaration this repository holds, and return its disclosure report."""
-    check_committed(tessera, declaration, directory)
+    check_committed(mosaica, declaration, directory)
     done = subprocess.run(
         [
-            tessera,
+            mosaica,
             "build",
             "--deployment",
-            str(directory / "tessera.toml"),
+            str(directory / "mosaica.toml"),
         ],
         capture_output=True,
         text=True,

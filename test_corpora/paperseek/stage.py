@@ -9,7 +9,7 @@ hours and **there must be exactly one**. Everything after this script — the la
 `title` and `abstract` separately would be a second 45 GB of SMB round trips for columns that are
 already on the wire. A row group at a time, all four columns, straight through.
 
-Per chunk `N`, under `$TESSERA_LADDER/paperseek/staging/`:
+Per chunk `N`, under `$MOSAICA_LADDER/paperseek/staging/`:
 
 - **`chunk_NN.parquet`** — `row` (the global row index, which is `entity_id`), `id` (the `W…` part
   of the OpenAlex URL), `title` and `abstract`, one row group per source row group, written as they
@@ -182,7 +182,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--chunks", type=str, default=None,
                     help="comma-separated chunk numbers; default all 53, in numeric order")
-    ap.add_argument("--out", type=Path, default=None, help="default $TESSERA_LADDER/paperseek")
+    ap.add_argument("--out", type=Path, default=None, help="default $MOSAICA_LADDER/paperseek")
     ap.add_argument("--force", action="store_true", help="restage chunks already recorded")
     args = ap.parse_args()
 

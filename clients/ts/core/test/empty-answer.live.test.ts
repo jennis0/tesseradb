@@ -1,24 +1,24 @@
 import {afterAll, beforeAll, describe, expect, it, type TestContext} from 'vitest';
-import {TesseraClient} from '../src/client.js';
+import {MosaicaClient} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
 import type {Meta, Session} from '../src/types.js';
 import {camera} from './support.js';
 import {start, type Served} from './served.js';
 
 /**
- * A filter that matches nothing, against a real `tessera serve` over the notebook corpus
+ * A filter that matches nothing, against a real `mosaica serve` over the notebook corpus
  * (`served.ts`): the store draws nothing and the served artifacts say none of them matches.
  */
 
 let served: Served | string = 'the server has not started';
-let client: TesseraClient;
+let client: MosaicaClient;
 let session: Session;
 let meta: Meta;
 
 beforeAll(async () => {
   served = await start();
   if (typeof served === 'string') return;
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential});
+  client = new MosaicaClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential});
   session = await client.authorise({terms: ['cs.LG', 'cs.CV', 'hep-ph']});
   meta = await client.meta(session.token);
 }, 120_000);

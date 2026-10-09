@@ -6,8 +6,8 @@
  * Colour decides nothing about what is drawn: every served mark gets a colour, and a value that
  * does not resolve gets grey.
  */
-import type {CategoryValue, Ranks, ScalarColumn} from '@tesseradb/client';
-import {hasValue, numericValues, rankedValues} from '@tesseradb/client/internal';
+import type {CategoryValue, Ranks, ScalarColumn} from '@mosaicajs/client';
+import {hasValue, numericValues, rankedValues} from '@mosaicajs/client/internal';
 
 /** RGBA, 0–255, the form deck.gl's binary `getFillColor` attribute wants. */
 type Rgba = readonly [number, number, number, number];

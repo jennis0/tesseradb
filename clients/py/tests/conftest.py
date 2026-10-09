@@ -1,6 +1,6 @@
 """What every test that needs a served database uses: the binary, the corpus and the fixture.
 
-A test of the paged commit runs against a real `tessera serve` over a real bundle. There is no
+A test of the paged commit runs against a real `mosaica serve` over a real bundle. There is no
 double: what is being tested is that the SDK's pages are what the control plane takes, so a fake
 control plane would test the SDK against the SDK's own reading of the contract.
 """
@@ -13,19 +13,19 @@ from pathlib import Path
 
 import pytest
 
-from tesseradb import _instance
+from mosaica import _instance
 
 
 def binary() -> str:
     try:
         return _instance.find_binary()[0]
     except Exception as why:  # noqa: BLE001, the skip message is the whole point
-        pytest.skip(f"no tessera binary: {why}")
+        pytest.skip(f"no mosaica binary: {why}")
 
 
 def notebook_corpus() -> Path:
     """`data/notebook/`, which is gitignored and shared by every worktree of this checkout."""
-    named = os.environ.get("TESSERA_NOTEBOOK_DATA")
+    named = os.environ.get("MOSAICA_NOTEBOOK_DATA")
     if named:
         return Path(named)
     here = Path(__file__).resolve()
@@ -42,7 +42,7 @@ def notebook_corpus() -> Path:
     for root in roots:
         if (root / "data" / "notebook" / "schema.toml").exists():
             return root / "data" / "notebook"
-    pytest.skip("data/notebook/ is not in this checkout; set TESSERA_NOTEBOOK_DATA")
+    pytest.skip("data/notebook/ is not in this checkout; set MOSAICA_NOTEBOOK_DATA")
 
 
 @pytest.fixture
@@ -58,9 +58,9 @@ def checked():
     In process where the extension module is installed, and through the binary where it is not,
     which is what a test with neither is skipped for.
     """
-    from tesseradb import _database
+    from mosaica import _database
 
-    if _database._tessera is None:
+    if _database._mosaica is None:
         binary()
 
     def run(db):
@@ -79,7 +79,7 @@ def served(tmp_path, corpus):
     started = []
 
     def build(declare) -> "object":
-        from tesseradb._database import create
+        from mosaica._database import create
 
         db = create(tmp_path / f"db{len(started)}")
         started.append(db)
@@ -96,9 +96,9 @@ def served(tmp_path, corpus):
 @pytest.fixture
 def stub_bundle(monkeypatch, tmp_path):
     """The components' bundle, stubbed: no browser here, and nothing reads its text."""
-    import tesseradb.widget as widget
+    import mosaica.widget as widget
 
-    stub = tmp_path / "tessera-components.js"
+    stub = tmp_path / "mosaica-components.js"
     stub.write_text("export function render() {}")
     monkeypatch.setattr(widget, "bundle_path", lambda: stub)
     return stub

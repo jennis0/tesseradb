@@ -2,7 +2,7 @@ import {act} from 'react';
 import {StrictMode, createElement, useState, type ReactNode} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import type {Projections, Store, StoreOptions} from '@tesseradb/client';
+import type {Projections, Store, StoreOptions} from '@mosaicajs/client';
 import {fakeStore} from '../../components/test/fake-store.js';
 
 /**
@@ -10,8 +10,8 @@ import {fakeStore} from '../../components/test/fake-store.js';
  * builds is a fake with a counted `dispose`, and the network never enters.
  */
 const built: {options: StoreOptions; store: ReturnType<typeof fakeStore>; disposed: number}[] = [];
-vi.mock('@tesseradb/client', async (importActual) => {
-  const actual = await importActual<typeof import('@tesseradb/client')>();
+vi.mock('@mosaicajs/client', async (importActual) => {
+  const actual = await importActual<typeof import('@mosaicajs/client')>();
   return {
     ...actual,
     createStore: (options: StoreOptions) => {
@@ -25,7 +25,7 @@ vi.mock('@tesseradb/client', async (importActual) => {
     }
   };
 });
-const {useProjection, useTesseraStore} = await import('../src/index.js');
+const {useProjection, useMosaicaStore} = await import('../src/index.js');
 
 (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -44,11 +44,11 @@ afterEach(async () => {
 
 const render = async (node: ReactNode) => act(async () => root.render(node));
 
-describe('useTesseraStore', () => {
+describe('useMosaicaStore', () => {
   it('builds one store in an effect and disposes it on unmount', async () => {
     const seen: (Store | null)[] = [];
     function Host() {
-      seen.push(useTesseraStore({viewerUrl: 'http://x', token: 't'}));
+      seen.push(useMosaicaStore({viewerUrl: 'http://x', token: 't'}));
       return null;
     }
     await render(createElement(Host));
@@ -63,7 +63,7 @@ describe('useTesseraStore', () => {
   it('under StrictMode the double mount leaks nothing: every store but the live one is disposed', async () => {
     let live: Store | null = null;
     function Host() {
-      live = useTesseraStore({viewerUrl: 'http://x', token: 't'});
+      live = useMosaicaStore({viewerUrl: 'http://x', token: 't'});
       return null;
     }
     await render(createElement(StrictMode, null, createElement(Host)));
@@ -80,7 +80,7 @@ describe('useTesseraStore', () => {
     const calls: string[] = [];
     let rerender = () => {};
     function Host({tag}: {tag: string}) {
-      useTesseraStore({
+      useMosaicaStore({
         viewerUrl: 'http://x',
         authorise: async () => {
           calls.push(tag);
@@ -106,7 +106,7 @@ describe('useTesseraStore', () => {
     function Host() {
       const [token, set] = useState('t1');
       setToken = set;
-      useTesseraStore({viewerUrl: 'http://x', token});
+      useMosaicaStore({viewerUrl: 'http://x', token});
       return null;
     }
     await render(createElement(Host));

@@ -8,7 +8,7 @@ import numpy as np, json
 import pyarrow.parquet as pq
 from pyroaring import BitMap
 
-FIX = '/tmp/tessera-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
+FIX = '/tmp/mosaica-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
 OUT = 'probes/2026-08-15-artifact-representation'
 
 d = np.load(f'{OUT}/tier_a_assign.npz')

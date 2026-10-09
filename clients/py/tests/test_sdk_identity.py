@@ -12,7 +12,7 @@ import pyarrow as pa
 import pytest
 
 from conftest import browse, item, viewport
-from tesseradb._refusal import Refusal
+from mosaica._refusal import Refusal
 
 pytest.importorskip("pyarrow")
 

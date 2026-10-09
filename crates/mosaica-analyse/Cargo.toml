@@ -1,0 +1,19 @@
+[package]
+name = "mosaica-analyse"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+# These four crates are required at exactly this version. `UNICODE_VERSION` in src/lib.rs writes
+# `icu4x-2.2` into every bundle's manifest, and readers compare that string. With a caret
+# requirement, `cargo update` could change the segmenter's dictionary data, and so the tokens,
+# while the recorded version stayed the same. When upgrading these crates, change that constant.
+icu_normalizer = "=2.2"
+icu_casemap = "=2.2"
+icu_properties = "=2.2"
+icu_segmenter = "=2.2"
+
+[dev-dependencies]
+serde_json = "1"
+sha2 = { workspace = true }

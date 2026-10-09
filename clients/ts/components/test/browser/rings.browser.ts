@@ -19,13 +19,13 @@ let origin = '';
 let browser: Browser;
 
 beforeAll(async () => {
-  built = mkdtempSync(join(tmpdir(), 'tessera-rings-'));
+  built = mkdtempSync(join(tmpdir(), 'mosaica-rings-'));
   await build({
     configFile: false,
     root: here,
     logLevel: 'silent',
     resolve: {
-      conditions: ['tessera-source', ...defaultClientConditions],
+      conditions: ['mosaica-source', ...defaultClientConditions],
       alias: [{find: /^\.\/aggregation-loader\.js$/, replacement: join(here, '..', '..', '..', 'deck', 'src', 'aggregation-static.ts')}]
     },
     define: {'process.env.NODE_ENV': JSON.stringify('production')},

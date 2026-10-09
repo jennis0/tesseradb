@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {Meta, RegionProjection} from '@tesseradb/client';
+import type {Meta, RegionProjection} from '@mosaicajs/client';
 import '../src/explorer.js';
 import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
 
@@ -24,9 +24,9 @@ const META = meta({
   ]
 });
 
-async function explorer(markup = '<tessera-explorer></tessera-explorer>') {
+async function explorer(markup = '<mosaica-explorer></mosaica-explorer>') {
   const host = await mount(markup);
-  const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+  const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown};
   const store = fakeStore({meta: META, status: status({})});
   el.store = store;
   await settle(host);
@@ -45,11 +45,11 @@ function forwardedBy(el: Element): Map<string, string> {
 
 const partsIn = (root: ParentNode): string[] => [...root.querySelectorAll('[part]')].flatMap((e) => e.getAttribute('part')!.split(/\s+/));
 
-describe('<tessera-explorer> parts', () => {
+describe('<mosaica-explorer> parts', () => {
   it('forwards every part each inner element renders, under a name prefixed by the element, in every state', async () => {
     const mesh = {name: 'mesh', title: 'mesh', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'dag', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1} as unknown as Meta['layers'][number];
-    const host = await mount('<tessera-explorer></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    const host = await mount('<mosaica-explorer></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown};
     const store = fakeStore({meta: {...META, layers: [mesh]}, status: status({})});
     store.setBrowse('roots', {artifacts: [{tesseraId: 1n, key: 'k-1', name: 'Neoplasms', maskedCount: 9n, matchedCount: null, rung: 0, parentIds: [], childCount: 0, slot: null}], parents: [], next: 'more'});
     el.store = store;
@@ -59,9 +59,9 @@ describe('<tessera-explorer> parts', () => {
     const check = async () => {
       await settle(host);
       await settle(host);
-      for (const inner of [...shadow.querySelectorAll('*')].filter((e) => e.tagName.startsWith('TESSERA-'))) {
+      for (const inner of [...shadow.querySelectorAll('*')].filter((e) => e.tagName.startsWith('MOSAICA-'))) {
         const map = forwardedBy(inner);
-        const prefix = inner.tagName.toLowerCase().replace(/^tessera-/, '');
+        const prefix = inner.tagName.toLowerCase().replace(/^mosaica-/, '');
         for (const part of partsIn(inner.shadowRoot!)) {
           seen.add(`${prefix}-${part}`);
           expect(map.get(part), `${prefix} renders ${part}`).toBe(`${prefix}-${part}`);
@@ -80,7 +80,7 @@ describe('<tessera-explorer> parts', () => {
     await check();
     store.set('status', status({stale: true}));
     await check();
-    for (const s of shadow.querySelectorAll('tessera-status')) (s as unknown as {reauthorise: () => void}).reauthorise = () => {};
+    for (const s of shadow.querySelectorAll('mosaica-status')) (s as unknown as {reauthorise: () => void}).reauthorise = () => {};
     store.set('status', status({status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}));
     await check();
     for (const part of ['item-card-headline', 'artifact-card-headline', 'selection-items', 'status-refusal', 'map-refusal', 'status-refresh', 'status-reauthorise']) expect(seen, part).toContain(part);
@@ -90,9 +90,9 @@ describe('<tessera-explorer> parts', () => {
     const {host, shadow, store} = await explorer();
     store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}, author: {family: 'keyword', needle: 'Ada', op: 'eq'}}, highlight: {}}});
     await settle(host);
-    const panel = shadow.querySelector('tessera-filter-panel')!;
+    const panel = shadow.querySelector('mosaica-filter-panel')!;
     const outer = forwardedBy(panel);
-    const cards = [...panel.shadowRoot!.querySelectorAll('tessera-field-card')];
+    const cards = [...panel.shadowRoot!.querySelectorAll('mosaica-field-card')];
     expect(cards.length).toBe(2);
     for (const card of cards) {
       const byCard = forwardedBy(card);
@@ -100,7 +100,7 @@ describe('<tessera-explorer> parts', () => {
         expect(byCard.get(part)).toBe(`field-card-${part}`);
         expect(outer.get(`field-card-${part}`)).toBe(`field-card-${part}`);
       }
-      for (const f of card.shadowRoot!.querySelectorAll('tessera-filter')) {
+      for (const f of card.shadowRoot!.querySelectorAll('mosaica-filter')) {
         const map = forwardedBy(f);
         for (const part of partsIn(f.shadowRoot!)) {
           expect(map.get(part)).toBe(`filter-${part}`);
@@ -112,23 +112,23 @@ describe('<tessera-explorer> parts', () => {
   });
 });
 
-describe('<tessera-explorer title-field>', () => {
+describe('<mosaica-explorer title-field>', () => {
   it('reaches the map’s hover and the default item card', async () => {
-    const {host, shadow, store} = await explorer('<tessera-explorer title-field="author"></tessera-explorer>');
+    const {host, shadow, store} = await explorer('<mosaica-explorer title-field="author"></mosaica-explorer>');
     store.set('selection', {item: {id: 5n, detail: {fields: {author: 'Ada'}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
     await settle(host);
-    expect((shadow.querySelector('tessera-map') as unknown as {titleField: string}).titleField).toBe('author');
-    const card = shadow.querySelector('tessera-item-card')!;
+    expect((shadow.querySelector('mosaica-map') as unknown as {titleField: string}).titleField).toBe('author');
+    const card = shadow.querySelector('mosaica-item-card')!;
     expect(card.shadowRoot!.querySelector('[part="headline"]')?.getAttribute('data-name')).toBe('author');
   });
 });
 
-describe('<tessera-explorer> narrow layout', () => {
+describe('<mosaica-explorer> narrow layout', () => {
   it('draws none of the cards over the map, so nothing hidden asks for counts; a sheet asks for its own', async () => {
-    const {host, el, shadow, store} = await explorer('<tessera-explorer layout="overlay" pinned-filters="archive"></tessera-explorer>');
+    const {host, el, shadow, store} = await explorer('<mosaica-explorer layout="overlay" pinned-filters="archive"></mosaica-explorer>');
     (el as unknown as {narrow: boolean}).narrow = true;
     await settle(host);
-    expect(shadow.querySelector('[part="panel"], [part="sidebar"], tessera-filter-panel')).toBeNull();
+    expect(shadow.querySelector('[part="panel"], [part="sidebar"], mosaica-filter-panel')).toBeNull();
     expect([...registered(store).keys()]).toEqual([]);
     shadow.querySelector<HTMLButtonElement>('[role="tab"][data-sheet="filters"]')!.click();
     await settle(host);
@@ -145,7 +145,7 @@ describe('<tessera-explorer> narrow layout', () => {
     const sheet = shadow.querySelector('[part="sheet"]')!;
     expect([...sheet.querySelectorAll('.sec > .hd, .sec .sec-head .hd')].map((h) => h.textContent)).toEqual(['Points', 'Colour', 'Density']);
     expect(sheet.querySelector('[part="most-points"]')).not.toBeNull();
-    expect(sheet.querySelector('tessera-layer-picker')).not.toBeNull();
+    expect(sheet.querySelector('mosaica-layer-picker')).not.toBeNull();
   });
 
   const tabs = (shadow: ShadowRoot) => [...shadow.querySelectorAll<HTMLButtonElement>('[part="tabs"] [role="tab"]')];
@@ -203,24 +203,24 @@ describe('<tessera-explorer> narrow layout', () => {
   });
 });
 
-describe('<tessera-explorer> detail', () => {
+describe('<mosaica-explorer> detail', () => {
   it('drops the selection when the card is closed', async () => {
     const {host, shadow, store} = await explorer();
     store.set('selection', {item: {id: 5n, detail: {fields: {}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
     await settle(host);
-    (shadow.querySelector('tessera-item-card')!.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
+    (shadow.querySelector('mosaica-item-card')!.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
   });
 });
 
-describe('<tessera-explorer> the item card beside its point', () => {
+describe('<mosaica-explorer> the item card beside its point', () => {
   type Map = HTMLElement & {pickedAt: {kind: 'item' | 'artifact'; id: bigint; world: [number, number]} | null; screenOf(w: [number, number]): [number, number]; lookAt(x: number, y: number): boolean};
   const item = (id: bigint) => ({item: {id, detail: {fields: {author: `A${id}`}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
 
   /** An explorer whose map is 1000 × 600 px, with an item picked at `world`. */
   async function picked(world: [number, number]) {
-    const ctx = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
-    const map = ctx.shadow.querySelector('tessera-map') as Map;
+    const ctx = await explorer('<mosaica-explorer layout="overlay"></mosaica-explorer>');
+    const map = ctx.shadow.querySelector('mosaica-map') as Map;
     Object.defineProperty(map, 'clientWidth', {configurable: true, value: 1000});
     Object.defineProperty(map, 'clientHeight', {configurable: true, value: 600});
     map.pickedAt = {kind: 'item', id: 5n, world};
@@ -236,7 +236,7 @@ describe('<tessera-explorer> the item card beside its point', () => {
     const {shadow, map} = await picked([256, 256]);
     const [card] = callouts(shadow);
     expect(card).toBeDefined();
-    expect(card!.querySelector('tessera-item-card')!.hasAttribute('compact')).toBe(true);
+    expect(card!.querySelector('mosaica-item-card')!.hasAttribute('compact')).toBe(true);
     expect(shadow.querySelector('.right [part="detail"]')).toBeNull();
     const [px, py] = map.screenOf([256, 256]);
     const [left, top] = placedAt(card!);
@@ -248,7 +248,7 @@ describe('<tessera-explorer> the item card beside its point', () => {
 
   it('follows its point as the camera moves, without drawing the explorer again, and hides while the point is off the map', async () => {
     const {host, shadow, map} = await picked([256, 256]);
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void};
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {requestUpdate(): void};
     const before = placedAt(callouts(shadow)[0]!);
     let renders = 0;
     const render = (el as unknown as {render: () => unknown}).render.bind(el);
@@ -263,12 +263,12 @@ describe('<tessera-explorer> the item card beside its point', () => {
     expect(placedAt(callouts(shadow)[0]!)).not.toEqual(before);
     expect(renders).toBe(0);
     map.pickedAt = {kind: 'item', id: 5n, world: [-100_000, 0]};
-    (host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void}).requestUpdate();
+    (host.querySelector('mosaica-explorer') as HTMLElement & {requestUpdate(): void}).requestUpdate();
     await settle(host);
     expect(callouts(shadow)).toHaveLength(0);
     // The selection stays; the card returns with its point.
     map.pickedAt = {kind: 'item', id: 5n, world: [256, 256]};
-    (host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void}).requestUpdate();
+    (host.querySelector('mosaica-explorer') as HTMLElement & {requestUpdate(): void}).requestUpdate();
     await settle(host);
     expect(callouts(shadow)).toHaveLength(1);
   });
@@ -285,7 +285,7 @@ describe('<tessera-explorer> the item card beside its point', () => {
     await settle(host);
     expect(callouts(shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['item:5', 'live']);
     // Closing the pinned card leaves the selection.
-    const pinned = callouts(shadow)[0]!.querySelector('tessera-item-card')!;
+    const pinned = callouts(shadow)[0]!.querySelector('mosaica-item-card')!;
     (pinned.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
     await settle(host);
     expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(0);
@@ -296,7 +296,7 @@ describe('<tessera-explorer> the item card beside its point', () => {
     await settle(host);
     expect(callouts(shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['live']);
     // Closing the live card drops the selection.
-    (callouts(shadow)[0]!.querySelector('tessera-item-card')!.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
+    (callouts(shadow)[0]!.querySelector('mosaica-item-card')!.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
   });
 
@@ -326,7 +326,7 @@ describe('<tessera-explorer> the item card beside its point', () => {
   it('closes the card that is not pinned and drops the selection on a click that finds nothing; a pinned card stays', async () => {
     const {host, shadow, store, map} = await pinnedAndLive();
     map.pickedAt = null;
-    map.dispatchEvent(new CustomEvent('tessera-miss', {detail: {}, bubbles: true, composed: true}));
+    map.dispatchEvent(new CustomEvent('mosaica-miss', {detail: {}, bubbles: true, composed: true}));
     await settle(host);
     expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
     store.set('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
@@ -344,8 +344,8 @@ describe('<tessera-explorer> the item card beside its point', () => {
   });
 
   it('is named by its item’s title, is the next stop after the map, closes on Escape with the selection, and gives focus back to the map', async () => {
-    const ctx = await explorer('<tessera-explorer layout="overlay" title-field="author"></tessera-explorer>');
-    const map = ctx.shadow.querySelector('tessera-map') as Map;
+    const ctx = await explorer('<mosaica-explorer layout="overlay" title-field="author"></mosaica-explorer>');
+    const map = ctx.shadow.querySelector('mosaica-map') as Map;
     Object.defineProperty(map, 'clientWidth', {configurable: true, value: 1000});
     Object.defineProperty(map, 'clientHeight', {configurable: true, value: 600});
     map.pickedAt = {kind: 'item', id: 5n, world: [256, 256]};
@@ -354,13 +354,13 @@ describe('<tessera-explorer> the item card beside its point', () => {
     const [card] = callouts(ctx.shadow);
     expect(card!.getAttribute('aria-label')).toBe('A5');
     // The left card comes first in the tab order, then the map, then the card beside the point.
-    const order = [...ctx.shadow.querySelectorAll('tessera-map, [part~="callout"], [part="panel"]')].map((e) => e.getAttribute('part') ?? e.tagName.toLowerCase());
-    expect(order).toEqual(['panel', 'tessera-map', 'callout']);
+    const order = [...ctx.shadow.querySelectorAll('mosaica-map, [part~="callout"], [part="panel"]')].map((e) => e.getAttribute('part') ?? e.tagName.toLowerCase());
+    expect(order).toEqual(['panel', 'mosaica-map', 'callout']);
     // Tab from the map goes to the card.
     map.focus();
     map.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, composed: true, cancelable: true}));
     expect(ctx.shadow.activeElement).toBe(card);
-    card!.querySelector('tessera-item-card')!.shadowRoot!.querySelector<HTMLButtonElement>('[part="close"]')!.focus();
+    card!.querySelector('mosaica-item-card')!.shadowRoot!.querySelector<HTMLButtonElement>('[part="close"]')!.focus();
     // The ring the map draws round the picked point.
     (map as unknown as {selectedWorldXY: [number, number] | null}).selectedWorldXY = [256, 256];
     card!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
@@ -392,37 +392,37 @@ describe('<tessera-explorer> the item card beside its point', () => {
   });
 });
 
-describe('<tessera-explorer> layouts', () => {
+describe('<mosaica-explorer> layouts', () => {
   it('puts the field column on the left, docked in a sidebar or in a card over the map, and nothing on the right', async () => {
-    const docked = await explorer('<tessera-explorer layout="docked"></tessera-explorer>');
-    expect(docked.shadow.querySelector('[part="sidebar"] tessera-filter-panel')).not.toBeNull();
+    const docked = await explorer('<mosaica-explorer layout="docked"></mosaica-explorer>');
+    expect(docked.shadow.querySelector('[part="sidebar"] mosaica-filter-panel')).not.toBeNull();
     expect(docked.shadow.querySelector('[part="panel"]')).toBeNull();
     expect([...docked.shadow.querySelector('.right')!.children].filter((c) => c.tagName !== 'SLOT')).toEqual([]);
     document.body.innerHTML = '';
-    const overlay = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    const overlay = await explorer('<mosaica-explorer layout="overlay"></mosaica-explorer>');
     expect(overlay.shadow.querySelector('[part="sidebar"]')).toBeNull();
-    expect(overlay.shadow.querySelector('[part="panel"] tessera-filter-panel')).not.toBeNull();
+    expect(overlay.shadow.querySelector('[part="panel"] mosaica-filter-panel')).not.toBeNull();
     // No hierarchy panel, and no legend or In view list.
-    expect(deep(overlay.host, 'tessera-hierarchy')).toBeNull();
-    expect(deep(overlay.host, 'tessera-legend, tessera-artifact-list')).toBeNull();
+    expect(deep(overlay.host, 'mosaica-hierarchy')).toBeNull();
+    expect(deep(overlay.host, 'mosaica-legend, mosaica-artifact-list')).toBeNull();
   });
 
   it('shows a card per field holding a clause in the left card, the clauses as chips, and no Filter / Highlight switch', async () => {
-    const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    const {host, shadow, store} = await explorer('<mosaica-explorer layout="overlay"></mosaica-explorer>');
     store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {archive: {family: 'category', keys: ['cs']}}}});
     await settle(host);
     const card = shadow.querySelector('[part="panel"]')!;
-    expect(deepAll(card, 'tessera-field-card')).toHaveLength(1);
+    expect(deepAll(card, 'mosaica-field-card')).toHaveLength(1);
     expect(deepAll(card, '[part="chip"]').map((c) => c.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
     expect(deep(card, '[part="mode"]')).toBeNull();
   });
 
   it('heads the card with the dataset title over the view’s name, or the view’s name alone', async () => {
-    const titled = await explorer('<tessera-explorer layout="overlay" dataset-title="arXiv abstracts"></tessera-explorer>');
+    const titled = await explorer('<mosaica-explorer layout="overlay" dataset-title="arXiv abstracts"></mosaica-explorer>');
     expect(titled.shadow.querySelector('[part="dataset-title"]')?.textContent).toBe('arXiv abstracts');
     expect(titled.shadow.querySelector('[part="view-name"]')?.textContent).toBe('default');
     document.body.innerHTML = '';
-    const plain = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    const plain = await explorer('<mosaica-explorer layout="overlay"></mosaica-explorer>');
     expect(plain.shadow.querySelector('[part="dataset-title"]')).toBeNull();
     expect(plain.shadow.querySelector('[part="view-name"]')?.textContent).toBe('default');
     // A name that is only the view's id says nothing, and is left out.
@@ -435,13 +435,13 @@ describe('<tessera-explorer> layouts', () => {
     plain.store.set('meta', {...META, views: [...META.views, {...META.views[0]!, id: 's1', displayName: 'other'}]});
     await settle(plain.host);
     expect(plain.shadow.querySelector('[part="view-name"]')).toBeNull();
-    expect(plain.shadow.querySelector('tessera-view-picker')?.shadowRoot?.querySelector('select')).not.toBeNull();
+    expect(plain.shadow.querySelector('mosaica-view-picker')?.shadowRoot?.querySelector('select')).not.toBeNull();
   });
 
   const REGION: RegionProjection = {shape: {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]}, status: 'shown' as const, refusal: null, visible: {value: 3, exact: true}, matched: {value: 3, exact: true}, served: {shown: 1, total: 3, exact: true}, verdict: {exact: true, depth: null}, held: {ids: BigUint64Array.of(5n), positions: new Float32Array(2), count: 1}};
 
   it('puts a selected region in the right column', async () => {
-    const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    const {host, shadow, store} = await explorer('<mosaica-explorer layout="overlay"></mosaica-explorer>');
     store.set('region', REGION);
     await settle(host);
     const corner = shadow.querySelector('.right')!;
@@ -449,18 +449,18 @@ describe('<tessera-explorer> layouts', () => {
   });
 
   it('folds every field card to one line in the compact form, the column 264 px wide', async () => {
-    const {host, el, shadow} = await explorer('<tessera-explorer layout="overlay" pinned-filters="archive author"></tessera-explorer>');
+    const {host, el, shadow} = await explorer('<mosaica-explorer layout="overlay" pinned-filters="archive author"></mosaica-explorer>');
     (el as unknown as {compact: boolean}).compact = true;
     await settle(host);
-    const panel = shadow.querySelector('tessera-filter-panel') as HTMLElement & {compact: boolean};
+    const panel = shadow.querySelector('mosaica-filter-panel') as HTMLElement & {compact: boolean};
     expect(panel.compact).toBe(true);
-    expect(deepAll(panel.shadowRoot!, 'tessera-field-card').map((c) => c.hasAttribute('folded'))).toEqual([true, true]);
+    expect(deepAll(panel.shadowRoot!, 'mosaica-field-card').map((c) => c.hasAttribute('folded'))).toEqual([true, true]);
   });
 
   it('opens the layer picker from the Layers button, passes its change on, and closes on Escape', async () => {
     const clusters = {name: 'clusters', title: 'Clusters', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1} as unknown as Meta['layers'][number];
-    const host = await mount('<tessera-explorer></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    const host = await mount('<mosaica-explorer></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown};
     const store = fakeStore({meta: {...META, layers: [clusters]}, status: status({})});
     el.store = store;
     await settle(host);
@@ -471,7 +471,7 @@ describe('<tessera-explorer> layouts', () => {
     await settle(host);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     const seen: unknown[] = [];
-    host.addEventListener('tessera-layerchange', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-layerchange', (e) => seen.push((e as CustomEvent).detail));
     const box = deep(shadow.querySelector('[part="layers-popover"]')!, '[part="entry"] input') as HTMLInputElement;
     box.checked = true;
     box.dispatchEvent(new Event('change', {bubbles: true}));
@@ -494,12 +494,12 @@ describe('<tessera-explorer> layouts', () => {
   });
 
   it('changes its map’s display from the Display section and reports every setting', async () => {
-    const {host, shadow} = await explorer('<tessera-explorer density="smooth"></tessera-explorer>');
+    const {host, shadow} = await explorer('<mosaica-explorer density="smooth"></mosaica-explorer>');
     const seen: {density: string; points: boolean; densityColours: string | null}[] = [];
-    host.addEventListener('tessera-displaychange', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-displaychange', (e) => seen.push((e as CustomEvent).detail));
     shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
     await settle(host);
-    const map = shadow.querySelector('tessera-map') as unknown as {density: string; noPoints: boolean; densityColours: string; densityStrength: number};
+    const map = shadow.querySelector('mosaica-map') as unknown as {density: string; noPoints: boolean; densityColours: string; densityStrength: number};
     const mode = (m: string) => shadow.querySelector<HTMLButtonElement>(`[part="density-mode"] [data-mode="${m}"]`)!;
     // The host's setting is the one shown checked.
     expect(mode('smooth').getAttribute('aria-checked')).toBe('true');
@@ -552,18 +552,18 @@ describe('<tessera-explorer> layouts', () => {
       ]
     });
 
-    async function popover(markup = '<tessera-explorer></tessera-explorer>') {
+    async function popover(markup = '<mosaica-explorer></mosaica-explorer>') {
       const host = await mount(markup);
-      const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+      const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown};
       const store = fakeStore({meta: SIZED, status: status({})});
       el.store = store;
       await settle(host);
       const shadow = el.shadowRoot!;
       shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
       await settle(host);
-      const map = shadow.querySelector('tessera-map') as unknown as {sizeBy: string; sizeMin: number | null; sizeMax: number | null; sizeScale: string; radius: number | null};
+      const map = shadow.querySelector('mosaica-map') as unknown as {sizeBy: string; sizeMin: number | null; sizeMax: number | null; sizeScale: string; radius: number | null};
       const seen: unknown[] = [];
-      host.addEventListener('tessera-sizechange', (e) => seen.push((e as CustomEvent).detail));
+      host.addEventListener('mosaica-sizechange', (e) => seen.push((e as CustomEvent).detail));
       const part = <T extends Element = HTMLElement>(name: string) => shadow.querySelector<T & Element>(`[part~="${name}"]`);
       return {host, store, shadow, map, seen, part};
     }
@@ -629,18 +629,18 @@ describe('<tessera-explorer> layouts', () => {
       const {host, store, shadow, part} = await popover();
       await answer(host, store, 'score');
       expect(part('size-by')!.textContent!.trim()).toBe('Score');
-      (shadow.querySelector('tessera-map') as unknown as {sizeMax: number}).sizeMax = 7;
+      (shadow.querySelector('mosaica-map') as unknown as {sizeMax: number}).sizeMax = 7;
       await settle(host);
       expect(part('size-range')!.textContent!.trim()).toBe('2 – 7 px');
     });
 
     it('shows the size a host sets, passes it to the map, and leaves the slider out under hide-size', async () => {
-      const {map, part} = await popover('<tessera-explorer radius="5"></tessera-explorer>');
+      const {map, part} = await popover('<mosaica-explorer radius="5"></mosaica-explorer>');
       expect(map.radius).toBe(5);
       expect(part<HTMLInputElement>('point-size')!.value).toBe('5');
       expect(part('point-size')!.getAttribute('aria-valuetext')).toBe('5 px');
       document.body.innerHTML = '';
-      const hidden = await popover('<tessera-explorer radius="5" hide-size></tessera-explorer>');
+      const hidden = await popover('<mosaica-explorer radius="5" hide-size></mosaica-explorer>');
       expect(hidden.part('point-size')).toBeNull();
       expect(hidden.part('size-by')).not.toBeNull();
       expect(hidden.map.radius).toBe(5);
@@ -680,9 +680,9 @@ describe('<tessera-explorer> layouts', () => {
   });
 });
 
-describe('<tessera-explorer> the point budget', () => {
+describe('<mosaica-explorer> the point budget', () => {
   const budgets = (store: FakeStore) => store.calls.filter((c) => c.name === 'setBudget').map((c) => c.args[0]);
-  const mapOf = (shadow: ShadowRoot) => shadow.querySelector('tessera-map') as unknown as {budget: number; budgetMin: number; budgetMax: number};
+  const mapOf = (shadow: ShadowRoot) => shadow.querySelector('mosaica-map') as unknown as {budget: number; budgetMin: number; budgetMax: number};
 
   it('leaves the store’s budget unless the host sets one, and offers 1,000 to 2,000,000', async () => {
     const {store, shadow} = await explorer();
@@ -691,9 +691,9 @@ describe('<tessera-explorer> the point budget', () => {
   });
 
   it('offers Most points on a log scale from budget-min to budget-max, and sets the store’s budget only when it is let go', async () => {
-    const {host, shadow, store} = await explorer('<tessera-explorer budget-min="1000" budget-max="2000000"></tessera-explorer>');
+    const {host, shadow, store} = await explorer('<mosaica-explorer budget-min="1000" budget-max="2000000"></mosaica-explorer>');
     const seen: unknown[] = [];
-    host.addEventListener('tessera-budgetchange', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-budgetchange', (e) => seen.push((e as CustomEvent).detail));
     shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
     await settle(host);
     const slider = shadow.querySelector<HTMLInputElement>('[part="most-points"]')!;
@@ -717,7 +717,7 @@ describe('<tessera-explorer> the point budget', () => {
   });
 
   it('passes the host’s budget and range to the map and the budget to the store, and a change of budget too', async () => {
-    const {host, el, store, shadow} = await explorer('<tessera-explorer budget="40000" budget-min="500" budget-max="90000"></tessera-explorer>');
+    const {host, el, store, shadow} = await explorer('<mosaica-explorer budget="40000" budget-min="500" budget-max="90000"></mosaica-explorer>');
     expect(budgets(store)).toEqual([40_000]);
     expect(mapOf(shadow)).toMatchObject({budget: 40_000, budgetMin: 500, budgetMax: 90_000});
     (el as unknown as {budget: number}).budget = 60_000;
@@ -726,15 +726,15 @@ describe('<tessera-explorer> the point budget', () => {
   });
 });
 
-describe('<tessera-explorer> the Colour section', () => {
+describe('<mosaica-explorer> the Colour section', () => {
   const NUMBERED = meta({
     declaredScalars: [...META.declaredScalars, scalar('year', 'u16', {render: true, homes: ['rendered']})],
     filterOperands: META.filterOperands
   });
 
   async function colour() {
-    const host = await mount('<tessera-explorer></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    const host = await mount('<mosaica-explorer></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown};
     const store = fakeStore({meta: NUMBERED, status: status({})});
     el.store = store;
     await settle(host);
@@ -747,7 +747,7 @@ describe('<tessera-explorer> the Colour section', () => {
   it('lists None and the rendered columns in Colour by, and colours by the one chosen', async () => {
     const {host, store, shadow, part} = await colour();
     const seen: unknown[] = [];
-    host.addEventListener('tessera-colourchange', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-colourchange', (e) => seen.push((e as CustomEvent).detail));
     expect(part('colour-by')!.textContent!.trim()).toBe('None');
     part('colour-by')!.click();
     await settle(host);
@@ -765,7 +765,7 @@ describe('<tessera-explorer> the Colour section', () => {
   it('offers the palette for a category, and the ramp, its scale and Reverse for a number', async () => {
     const {host, store, part} = await colour();
     const changes: unknown[] = [];
-    host.addEventListener('tessera-palettechange', (e) => changes.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-palettechange', (e) => changes.push((e as CustomEvent).detail));
     store.set('legend', {...store.get('legend'), colourBy: 'archive'});
     await settle(host);
     expect(part('palette')!.textContent).toContain('Tableau 10');
@@ -781,12 +781,12 @@ describe('<tessera-explorer> the Colour section', () => {
   });
 });
 
-describe('<tessera-explorer> Edit colours', () => {
+describe('<mosaica-explorer> Edit colours', () => {
   const topics = {name: 'topics', title: 'Topics', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1} as unknown as Meta['layers'][number];
 
-  async function withEditor(markup = '<tessera-explorer></tessera-explorer>') {
+  async function withEditor(markup = '<mosaica-explorer></mosaica-explorer>') {
     const host = await mount(markup);
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; clusterColours: Record<string, Record<string, string>> | null; valueColours: unknown};
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown; clusterColours: Record<string, Record<string, string>> | null; valueColours: unknown};
     const store = fakeStore({meta: {...META, layers: [topics]}, status: status({})});
     el.store = store;
     await settle(host);
@@ -835,7 +835,7 @@ describe('<tessera-explorer> Edit colours', () => {
     button().click();
     await settle(host);
     const kept: unknown[] = [];
-    host.addEventListener('tessera-clustercolour', (e) => kept.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-clustercolour', (e) => kept.push((e as CustomEvent).detail));
     (deep(host, '[part="reset-all"]') as HTMLButtonElement).click();
     await settle(host);
     expect(kept).toEqual([
@@ -857,10 +857,10 @@ describe('<tessera-explorer> Edit colours', () => {
   });
 });
 
-describe('<tessera-explorer> the Palette menu while the points are coloured by a layer', () => {
+describe('<mosaica-explorer> the Palette menu while the points are coloured by a layer', () => {
   it('lists each palette as a row of its colours, its name and its size, and sets the one chosen on the store', async () => {
-    const host = await mount('<tessera-explorer></tessera-explorer>');
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; palette: string};
+    const host = await mount('<mosaica-explorer></mosaica-explorer>');
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown; palette: string};
     const store = fakeStore({meta: META, status: status({})});
     store.set('legend', {...store.get('legend'), colourBy: 'cluster:clusters'});
     el.store = store;
@@ -891,7 +891,7 @@ describe('<tessera-explorer> the Palette menu while the points are coloured by a
     ]);
     expect((options[0]!.querySelector('.swatches > span') as HTMLElement).style.background).toBe('#e69f00');
     const chosen: unknown[] = [];
-    host.addEventListener('tessera-clusterpalettechange', (e) => chosen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-clusterpalettechange', (e) => chosen.push((e as CustomEvent).detail));
     options[3]!.click();
     await settle(host);
     // Set on the store, and again through the map the explorer passes it to; the store ignores the second.
@@ -902,14 +902,14 @@ describe('<tessera-explorer> the Palette menu while the points are coloured by a
   });
 });
 
-describe('<tessera-explorer> the cluster budget', () => {
+describe('<mosaica-explorer> the cluster budget', () => {
   const tree = {name: 'tree', title: 'tree', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'nested', pruneChildren: true}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1} as unknown as Meta['layers'][number];
   const flat = {...tree, name: 'flat', hierarchy: {kind: 'flat', pruneChildren: false}} as unknown as Meta['layers'][number];
   const budgets = (store: FakeStore) => store.calls.filter((c) => c.name === 'setClusterBudget').map((c) => c.args[0]);
 
-  async function withLayers(markup = '<tessera-explorer></tessera-explorer>') {
+  async function withLayers(markup = '<mosaica-explorer></mosaica-explorer>') {
     const host = await mount(markup);
-    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown; clusterBudget: number};
+    const el = host.querySelector('mosaica-explorer') as HTMLElement & {store: unknown; clusterBudget: number};
     const store = fakeStore({meta: {...META, layers: [tree, flat]}, status: status({})});
     el.store = store;
     await settle(host);
@@ -924,7 +924,7 @@ describe('<tessera-explorer> the cluster budget', () => {
     el.clusterBudget = 250;
     await settle(host);
     expect(budgets(store)).toEqual([1_000, 250]);
-    const other = await withLayers('<tessera-explorer cluster-budget="40"></tessera-explorer>');
+    const other = await withLayers('<mosaica-explorer cluster-budget="40"></mosaica-explorer>');
     expect(budgets(other.store)).toEqual([40]);
   });
 
@@ -933,12 +933,12 @@ describe('<tessera-explorer> the cluster budget', () => {
     el.clusterBudget = 0;
     await settle(host);
     expect(budgets(store)).toEqual([1_000, null]);
-    const none = await withLayers('<tessera-explorer cluster-budget="0"></tessera-explorer>');
+    const none = await withLayers('<mosaica-explorer cluster-budget="0"></mosaica-explorer>');
     expect(budgets(none.store)).toEqual([]);
   });
 
   it('offers Most clusters only while a tree layer is drawn, from cluster-budget-min to cluster-budget-max, and sets the cut only when it is let go', async () => {
-    const {host, shadow, store} = await withLayers('<tessera-explorer cluster-budget-min="10" cluster-budget-max="10000"></tessera-explorer>');
+    const {host, shadow, store} = await withLayers('<mosaica-explorer cluster-budget-min="10" cluster-budget-max="10000"></mosaica-explorer>');
     const slider = () => shadow.querySelector<HTMLInputElement>('[part="most-clusters"]');
     expect(slider()).toBeNull();
     store.set('artifacts', {...store.get('artifacts'), layers: ['flat']});
@@ -950,7 +950,7 @@ describe('<tessera-explorer> the cluster budget', () => {
     const value = () => shadow.querySelector('[part="most-clusters-value"]')!.textContent;
     expect(value()).toBe('1K');
     const seen: unknown[] = [];
-    host.addEventListener('tessera-clusterbudgetchange', (e) => seen.push((e as CustomEvent).detail));
+    host.addEventListener('mosaica-clusterbudgetchange', (e) => seen.push((e as CustomEvent).detail));
     slider()!.value = '1000';
     slider()!.dispatchEvent(new Event('input'));
     await settle(host);

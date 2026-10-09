@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {TesseraError} from '../src/client.js';
+import {MosaicaError} from '../src/client.js';
 import type {Composition} from '../src/compose.js';
 import {Legend, type LegendProjection} from '../src/legend.js';
 import type {CategoryValue} from '../src/types.js';
@@ -44,7 +44,7 @@ describe('the category legend', () => {
     expect(answers).toHaveLength(1);
 
     legend.clear();
-    answers[0]!(new TesseraError(500, 'fail-closed', 'vocabulary unreadable'));
+    answers[0]!(new MosaicaError(500, 'fail-closed', 'vocabulary unreadable'));
     await settle();
     expect(published!.categoryErrors).toEqual({});
   });

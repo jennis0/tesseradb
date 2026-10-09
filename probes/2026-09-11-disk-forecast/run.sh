@@ -16,7 +16,7 @@
 # ROW_GROUPS and IDENTITY name the prefixes and the corpora; the defaults are the four row counts
 # the peaks were measured at and the two corpora the bundles are compared over.
 #
-# The two binaries must be named so `ps -o comm=` can tell them from a wrapper shell — `tessera-*`.
+# The two binaries must be named so `ps -o comm=` can tell them from a wrapper shell — `mosaica-*`.
 # WORK wants ~15 GB on the same filesystem as the builds.
 set -uo pipefail
 before="${BEFORE:?BEFORE is the binary to measure against}"
@@ -35,13 +35,13 @@ forecast() {
   local corpus="$1" binary="$2" out="$3"
   rm -rf "$out"; mkdir -p "$out"
   set -a; . "$corpus/.env"; set +a
-  "$binary" build --deployment "$corpus/tessera.toml" --config "$corpus/corpus.toml" \
+  "$binary" build --deployment "$corpus/mosaica.toml" --config "$corpus/corpus.toml" \
     --out "$out/bundle" > "$out/out.log" 2>&1 &
   local pid=$!
   # The pid the loop waits on is the build's own: a wrapper shell's would fall through at once and
   # record a forecast that was never printed.
   case "$(ps -o comm= -p "$pid" 2>/dev/null)" in
-    tessera*) ;;
+    mosaica*) ;;
     *) echo "the pid is not the build" >&2; return 1 ;;
   esac
   while kill -0 "$pid" 2>/dev/null; do
@@ -71,7 +71,7 @@ for name in ${IDENTITY:-treeoflife-1m medcpt-1m}; do
   for which in before after; do
     binary="$([ "$which" = before ] && echo "$before" || echo "$after")"
     rm -rf "$work/$name-$which"
-    ( cd "$corpus" && "$binary" build --deployment tessera.toml --config corpus.toml \
+    ( cd "$corpus" && "$binary" build --deployment mosaica.toml --config corpus.toml \
         --out "$work/$name-$which" > "$work/$name-$which.log" 2>&1 ) \
       || { echo "$name: $which build failed"; tail -5 "$work/$name-$which.log"; continue; }
   done

@@ -1,0 +1,907 @@
+//! **The post-bundle artifact pass** — the build choosing each level's serving layout and writing
+//! the derived structures for it, in the prefix it has just finished.
+//!
+//! # The defect this closes
+//!
+//! [Decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)
+//! says the layout is chosen **at the build** and re-evaluated at every fold. Until this existed
+//! only the second half happened: `layers::publish` registers each level at its pin or at
+//! artifact-major and stops, because it runs at pipeline stage 8 — before the tiler sort — and
+//! *there is no row space yet*. Every observation the pick reads is a fact about where the data
+//! landed in row order, and at stage 8 nothing has landed.
+//!
+//! What that cost is measured: `docs/evidence/memos/2026-08-22-artifact-scale-campaign.md`'s
+//! finding 1 and §6. A freshly built bundle served its two enumerated layers artifact-major against
+//! its own reported statistics, and the first fold flipped both — **2 430 → 221 ms** and
+//! **1 464 → 139 ms**, eleven and ten and a half times, paid by every deployment between its build
+//! and its first fold. Beside it, finding 2: because the build wrote none of the derived files, the
+//! first request naming such a level built the row form *inside the response* and was truncated at
+//! the 60-second whole-stream deadline.
+//!
+//! # Where it runs, and why there
+//!
+//! **After the segment write and before the manifests** (pipeline step 10.5). By then the
+//! permutation and `row_entity` are on disk and fsynced, so a `RowSpace` over the published bundle
+//! exists; the record batch and the sort's scratch have been dropped, so the pass runs past the
+//! build's residency peak rather than on top of it. And the manifests have not been written, which
+//! is what makes this **one** manifest write rather than two: the extents this produces and the
+//! layouts it records go into the same `SegmentsManifest` the build was always going to write.
+//!
+//! # One implementation, not a second transcription
+//!
+//! Every byte written here comes from [`mosaica_store::membership`] — the same functions the fold's
+//! artifact pass calls, beside the formats they produce. This module supplies the walks (a level's
+//! records against the row space) and the coordinates; it packs nothing and names no file itself.
+//! A build and a fold therefore cannot file the same structure two ways, which is the failure a
+//! second copy of the naming rule would have made available.
+//!
+//! # What a failure does
+//!
+//! **Reports and continues.** Every structure here is derived — a level without one composes it on
+//! first use, which is what every request did before any of this existed — so a permutation that
+//! will not reload, a directory that will not fsync or a column that will not compose costs a
+//! recomputation and never a refusal. The pass reports what it produced, including nothing.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+
+use croaring::Bitmap;
+use mosaica_authz::postings::{PostingRef, PostingsReader};
+use mosaica_lifecycle::membership::ArtifactStore;
+use mosaica_store::derived::{resolve_segment, HeldShape, ShapeIndex};
+use mosaica_store::read::SegmentData;
+// The derived structures' writer half lives beside the formats it writes; the alias is what keeps
+// the call sites below reading as what they do rather than as which file they are in.
+use mosaica_store::derived;
+use mosaica_store::derived::{DerivedIndex, Filed, PostingSlice, SignatureIndex};
+use mosaica_store::manifest::DerivedForm;
+use mosaica_store::permutation::ProjectScratch;
+use mosaica_store::RowSpace;
+use mosaica_types::layer::{LevelShape, MembershipSource, RegisteredLayer, ServingLayout};
+
+use crate::layers::PublishedLayers;
+
+/// One `(view, layer, level)`'s observed shape and the form it was recorded in — decision 0092's
+/// (c), discharged at build time at last.
+#[derive(Debug, Clone)]
+pub struct LevelLayoutReport {
+    pub view: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's declared zoom range, which since 2026-08-28 decides whether a request that names
+    /// no `levels` is answered at it. Reported so a gap or an inverted range is visible at the build
+    /// rather than as a blank map at one zoom band.
+    pub zoom: Option<(u32, u32)>,
+    pub shape: LevelShape,
+    /// How many artifacts the level's registry holds, which is **not** [`LevelShape::artifacts`]:
+    /// the shape counts the ones whose stored membership the walk found rows in, and an attribute
+    /// predicate's membership is not stored at all (see [`Self::observed`]).
+    pub registered: u64,
+    /// Whether [`Self::shape`] describes anything. False for an attribute predicate, whose members
+    /// *are* the value column and are evaluated per request, so the walk this pass makes finds no
+    /// rows and every figure in the shape comes out zero — for a level that holds its artifacts and
+    /// serves them. Reporting those zeros reads as an empty layer and is how an hour was spent
+    /// looking for a defect in a layer that was working (2026-08-28, the Overture rung).
+    pub observed: bool,
+    pub pinned: bool,
+    pub chosen: ServingLayout,
+}
+
+impl LevelLayoutReport {
+    /// The artifact count to *report* — the observed one where there is one, and the registry's
+    /// otherwise. Never the input to a layout choice, which stays [`LevelShape::artifacts`].
+    fn artifacts(&self) -> u64 {
+        if self.observed {
+            self.shape.artifacts
+        } else {
+            self.registered
+        }
+    }
+}
+
+/// What the pass produced, for the manifest and for the report.
+#[derive(Default)]
+pub struct ArtifactPass {
+    /// Every derived file the pass wrote: tile indexes, row-major columns, shape row forms and
+    /// held shapes.
+    pub derived_extents: Vec<mosaica_store::manifest::DerivedExtent>,
+    /// Every file this pass wrote, for `MANIFEST.files` — an undigested file is one a torn write
+    /// cannot be attributed to.
+    pub paths: Vec<std::path::PathBuf>,
+    pub levels: Vec<LevelLayoutReport>,
+    /// Per spatial level, what resolving the build's segment against its shapes cost
+    /// (`polygon-membership.md` §9's per-flush row, measured here over the one segment a build
+    /// writes — decision 0091: the build does what the flush does).
+    pub resolutions: Vec<(String, u32, crate::shapes::ResolutionReport)>,
+    /// The pass's own wall time. Reported because it is new work at the end of every build and an
+    /// operator should not have to infer it from the total.
+    pub elapsed_ms: u64,
+}
+
+/// Choose every level's layout, write the derived structures for it, and record both.
+///
+/// `published` is edited in place: the chosen layouts replace the registered records the build
+/// wrote at stage 8, so the manifest assembled after this carries them without a second write.
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    published: &mut PublishedLayers,
+    store: &ArtifactStore,
+    prefix_dir: &Path,
+    partition: &str,
+    view: &str,
+    row_count: u32,
+    scratch_dir: &Path,
+    index: &mut DerivedIndex,
+) -> ArtifactPass {
+    let started = Instant::now();
+    let mut pass = ArtifactPass::default();
+    // **One set of projection buffers for the whole pass.** Every walk below projects a membership
+    // per artifact, and `Permutation::project` allocates and zeroes a 512 KB stamp on each call —
+    // it is written for one call per session and says so. Shared through a `RefCell` because the
+    // walks are `Fn` closures.
+    let scratch = std::cell::RefCell::new(ProjectScratch::default());
+
+    // **Only the layers drawn on this view.** A layer appears in the views it declares and no
+    // others (`views.md` §3.5), so a pass over a view a layer does not name would write that
+    // layer an extent in a row space it is not drawn in — which the serving path would then
+    // answer from.
+    let drawn: std::collections::BTreeSet<&str> = published
+        .layers
+        .iter()
+        .filter(|layer| {
+            layer
+                .declaration
+                .views
+                .iter()
+                .any(|declared| declared == view)
+        })
+        .map(|layer| layer.declaration.name.as_str())
+        .collect();
+    // **An artifact of a scoped layer is drawn in its own view and in no other** (`views.md`
+    // §3.5): its membership is entity space and every view holds some of those entities, so a
+    // Q1 cluster projected into Q2's row space would be a real, wrong artifact there. The view's
+    // own key is what an artifact names, so a group's several layouts over one key set — `quarter`
+    // and `quarter_alt` — draw the same artifact in each.
+    let view_key = mosaica_store::view_path_components(view)
+        .last()
+        .copied()
+        .unwrap_or(view)
+        .to_string();
+    let elsewhere = |layer: &str, level: u32, ordinal: u32| -> bool {
+        published
+            .artifact_views
+            .get(layer)
+            .and_then(|artifacts| artifacts.get(&(level, ordinal)))
+            .is_some_and(|owner| owner != &view_key)
+    };
+
+    let levels: Vec<(String, u32)> = store
+        .levels_and_extents()
+        .filter(|(layer, _, _)| drawn.contains(layer))
+        .map(|(layer, level, _)| (layer.to_string(), level))
+        .collect();
+    if levels.is_empty() {
+        return pass;
+    }
+
+    // **The row space of the bundle this build just wrote**, opened from the file rather than kept
+    // from the sort: the permutation is fsynced by now, and reading it back is what makes this pass
+    // a function of the published prefix rather than of a structure that only existed in memory.
+    let permutation_path =
+        mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), view)
+            .join("permutation.bin");
+    let space = match mosaica_store::Permutation::load(&permutation_path) {
+        Ok(permutation) => RowSpace::new(std::sync::Arc::new(permutation), row_count),
+        Err(error) => {
+            eprintln!(
+                "artifact pass: the permutation this build just wrote would not reload ({error}); \
+                 every level is recorded artifact-major and its structures are derived on first \
+                 request"
+            );
+            pass.elapsed_ms = started.elapsed().as_millis() as u64;
+            return pass;
+        }
+    };
+
+    // ---- the pick, per level ----------------------------------------------------------------
+    let by_layer: BTreeMap<String, RegisteredLayer> = published
+        .layers
+        .iter()
+        .map(|layer| (layer.declaration.name.clone(), layer.clone()))
+        .collect();
+
+    // ---- the shape layers' memberships, resolved over the segment this build wrote -------------
+    //
+    // **The build does what the flush does** (decision 0091; `polygon-membership.md` §6.3): every
+    // row of the one segment is resolved against each spatial level's shapes — interior tiles as
+    // whole ranges, boundary-cell rows one by one — and the per-row source that produces is what
+    // the pick observes and the column is composed from below, exactly as an enumerated level's
+    // member table is. The serving engine resolves the same segment again at open from the same
+    // shapes (`mosaica_engine::shapes`), so nothing here is persisted but the layout and the
+    // column; what this pass buys is the pick and the report.
+    let segment = load_build_segment(prefix_dir, partition, view, row_count);
+    let mut resolved: BTreeMap<(String, u32), Vec<Option<Bitmap>>> = BTreeMap::new();
+    let mut decomposed: BTreeMap<(String, u32), Vec<Option<HeldShape>>> = BTreeMap::new();
+    for (layer, level) in &levels {
+        let Some(registered) = by_layer.get(layer) else {
+            continue;
+        };
+        let spatial = registered.declaration.membership == MembershipSource::Spatial
+            && registered.declaration.shape.is_some();
+        if !spatial {
+            continue;
+        }
+        let Some(segment) = &segment else {
+            continue;
+        };
+        let started = Instant::now();
+        let ordinals = store
+            .level(layer, *level)
+            .map(|(o, _)| o as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let shapes: Vec<Option<HeldShape>> = (0..ordinals as u32)
+            .map(|ordinal| {
+                store
+                    .shape_of(layer, *level, ordinal)
+                    .and_then(|shapes| shapes.for_view(view))
+                    .and_then(|bytes| HeldShape::from_bytes(bytes).ok())
+            })
+            .collect();
+        let index = ShapeIndex::build(&shapes);
+        let out = resolve_segment(segment, &shapes, &index);
+        pass.resolutions.push((
+            layer.clone(),
+            *level,
+            crate::shapes::ResolutionReport {
+                rows: u64::from(segment.row_count),
+                rows_tested: out.rows_tested,
+                rows_interior: out.rows_interior,
+                artifacts_empty: out.artifacts_empty,
+                empty_keys: out
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, rows)| rows.as_ref().is_some_and(Bitmap::is_empty))
+                    .filter_map(|(ordinal, _)| {
+                        store
+                            .level(layer, *level)
+                            .find(|(o, _)| *o as usize == ordinal)
+                            .and_then(|(_, record)| record.key.clone())
+                    })
+                    .take(EMPTY_KEYS_REPORTED)
+                    .collect(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            },
+        ));
+        resolved.insert((layer.clone(), *level), out.rows);
+        decomposed.insert((layer.clone(), *level), shapes);
+    }
+    let walk_resolved = |rows: &[Option<Bitmap>], visit: &mut dyn FnMut(u32, &Bitmap)| {
+        for (ordinal, rows) in rows.iter().enumerate() {
+            if let Some(rows) = rows {
+                visit(ordinal as u32, rows);
+            }
+        }
+    };
+
+    let mut chosen: Vec<(String, u32, ServingLayout)> = Vec::with_capacity(levels.len());
+    for (layer, level) in &levels {
+        let Some(registered) = by_layer.get(layer) else {
+            continue;
+        };
+        // One membership at a time, exactly as the fold observes it: the figure is the same either
+        // way and what differs is what is held while it runs.
+        //
+        // A borrowing level is observed over the membership it is served on, because
+        // `members_of` answers with the target's where the record declares none (decision 0145).
+        // The report and the layout pick are then about the level as served. What this pass then
+        // files for such a level is true when it is written and the engine does not read it: the
+        // borrowed set moves with the target's level version, the file is keyed on this level's,
+        // so the engine serves a borrowing level artifact-major and derives its tile index from
+        // the form it has just resolved (`ArtifactRows::inherit`). Two directions would change
+        // that. Observe a borrowing level as artifact-major here, so no column is written for one;
+        // or carry the borrowed versions in the extent's manifest entry, so a reader can claim a
+        // filed index while they still match.
+        let shape = derived::observe_shape(space.base_rows(), &|visit| {
+            if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
+                walk_resolved(rows, visit);
+                return;
+            }
+            for (ordinal, record) in store.level(layer, *level) {
+                if elsewhere(layer, *level, ordinal) {
+                    continue;
+                }
+                visit(
+                    ordinal,
+                    &store
+                        .members_of(record)
+                        .projected(|part| space.project_base_with(part, &mut scratch.borrow_mut())),
+                );
+            }
+        });
+        let layout = mosaica_types::layer::choose(&registered.declaration, shape);
+        pass.levels.push(LevelLayoutReport {
+            view: view.to_string(),
+            layer: layer.clone(),
+            level: *level,
+            zoom: registered
+                .declaration
+                .levels
+                .iter()
+                .find(|l| l.level == *level)
+                .and_then(|l| l.zoom),
+            shape,
+            registered: store.level(layer, *level).count() as u64,
+            observed: !matches!(
+                registered.declaration.membership,
+                MembershipSource::Attribute(_)
+            ),
+            pinned: registered.declaration.layout.is_some(),
+            chosen: layout,
+        });
+        chosen.push((layer.clone(), *level, layout));
+    }
+
+    // **Recorded before a byte is written**, which is the fold's own ordering and for the fold's
+    // own reason: the files and the record are one publication, and a record taken afterwards could
+    // describe a level the prefix does not carry.
+    for registered in &mut published.layers {
+        for (layer, level, layout) in &chosen {
+            if &registered.declaration.name != layer {
+                continue;
+            }
+            let idx = *level as usize;
+            if registered.layouts.len() <= idx {
+                registered.layouts.resize(idx + 1, ServingLayout::default());
+            }
+            registered.layouts[idx] = *layout;
+        }
+    }
+
+    // ---- the tile indexes: every level that is not row-major -----------------------------------
+    //
+    // **A row-major level has nothing to index** (selection memo §1): its candidacy is a scan of
+    // `viewport ∩ M_auth`, which the viewport already bounds.
+    let mut tile_indexes: Vec<Filed> = Vec::new();
+    for (layer, level, layout) in &chosen {
+        if layout.is_row_major() {
+            continue;
+        }
+        let ordinals = store.level(layer, *level).count() as u32;
+        tile_indexes.push(Filed {
+            view: Some(view.to_string()),
+            // **A build coins each key once, so every structure it writes is the declared
+            // incarnation** (decision 0115). There is no drop at a build to leave a predecessor.
+            incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
+            layer: layer.clone(),
+            level: *level,
+            level_version: store.level_version(layer, *level),
+            form: DerivedForm::TileIndex,
+            bytes: derived::FiledBytes::InHand(derived::project_tile_index(
+                ordinals,
+                space.base_rows(),
+                &|visit| {
+                    if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
+                        walk_resolved(rows, visit);
+                        return;
+                    }
+                    for (ordinal, record) in store.level(layer, *level) {
+                        if elsewhere(layer, *level, ordinal) {
+                            continue;
+                        }
+                        visit(
+                            ordinal,
+                            &store.members_of(record).projected(|part| {
+                                space.project_base_with(part, &mut scratch.borrow_mut())
+                            }),
+                        );
+                    }
+                },
+            )),
+        });
+    }
+    pass.derived_extents.extend(derived::file_derived(
+        prefix_dir,
+        partition,
+        MANIFEST_N,
+        index,
+        tile_indexes,
+    ));
+
+    // ---- the columns: a row-major level's, and every other level's labels --------------------
+    //
+    // ⊘ **An attribute level's column is not this pass's to write**, for the reason the fold gives:
+    // its labels come from the value column the predicate names, and this composes from stored
+    // memberships — which such a level has none of. Composing anyway would write a file of nothing
+    // but holes and leave a reader adopting a column no request will claim. A spatial level's
+    // column is composed from the rows resolved above.
+    //
+    // A level served artifact-major gets a label column where its memberships partition the rows
+    // (`derived::level_column`), and every label column gets its copy in the order of the
+    // segment's bands.
+    let mut columns: Vec<Filed> = Vec::new();
+    for (layer, level, layout) in &chosen {
+        let composable = by_layer.get(layer).is_some_and(|registered| {
+            matches!(
+                registered.declaration.membership,
+                MembershipSource::Enumerated | MembershipSource::Spatial
+            )
+        });
+        if !composable {
+            continue;
+        }
+        let partitions = pass
+            .levels
+            .iter()
+            .find(|l| &l.layer == layer && l.level == *level)
+            .is_some_and(|l| l.shape.partitions);
+        let Some((composed_as, form)) = derived::level_column(*layout, partitions) else {
+            continue;
+        };
+        let ordinals = store.level(layer, *level).count() as u32;
+        let level_version = store.level_version(layer, *level);
+        let staged = derived::project_row_column(
+            ordinals,
+            space.base_rows(),
+            composed_as,
+            scratch_dir,
+            &|visit| {
+                if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
+                    walk_resolved(rows, visit);
+                    return;
+                }
+                for (ordinal, record) in store.level(layer, *level) {
+                    if elsewhere(layer, *level, ordinal) {
+                        continue;
+                    }
+                    visit(
+                        ordinal,
+                        &store.members_of(record).projected(|part| {
+                            space.project_base_with(part, &mut scratch.borrow_mut())
+                        }),
+                    );
+                }
+            },
+        );
+        let filed = |form: DerivedForm, path: std::path::PathBuf| Filed {
+            view: Some(view.to_string()),
+            incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
+            layer: layer.clone(),
+            level: *level,
+            level_version,
+            form,
+            bytes: derived::FiledBytes::Staged(path),
+        };
+        match staged {
+            Ok(Some(path)) => {
+                // A served column is filed only with its members beside it, and a level whose
+                // members would not be written composes both on first use.
+                if matches!(form, DerivedForm::RowColumn { .. }) {
+                    match derived::stage_row_members(&path, composed_as, scratch_dir) {
+                        Ok(members) => columns.push(filed(DerivedForm::RowMembers, members)),
+                        Err(error) => {
+                            eprintln!(
+                                "artifact pass: {layer} level {level}'s members would not be \
+                                 written beside its column ({error}); that level derives both on \
+                                 first use"
+                            );
+                            let _ = std::fs::remove_file(&path);
+                            continue;
+                        }
+                    }
+                }
+                if composed_as == ServingLayout::RowMajorLabel {
+                    if let Some(segment) = &segment {
+                        match derived::stage_band_labels(&path, &segment.bands, scratch_dir) {
+                            Ok(copy) => columns.push(filed(
+                                DerivedForm::BandLabels {
+                                    seg_id: segment.seg_id.clone(),
+                                },
+                                copy,
+                            )),
+                            Err(error) => eprintln!(
+                                "artifact pass: {layer} level {level}'s labels would not be \
+                                 copied into the bands' order ({error}); the level has no copy"
+                            ),
+                        }
+                    }
+                }
+                columns.push(filed(form, path));
+            }
+            // A level served artifact-major whose memberships overlap has no label column, and
+            // that is its shape rather than a fault.
+            Ok(None) if !layout.is_row_major() => {}
+            // The build-time half of the refusal the declaration could not make: whether an
+            // attribute is single-valued is a property of the data, and so is whether a level's
+            // entries fit the `u32` the list form's offsets are. The level is served
+            // artifact-major, every answer unchanged.
+            Ok(None) => eprintln!(
+                "artifact pass: {layer} level {level} was recorded {} and {}, so it is served \
+                 artifact-major. Every answer is unchanged; the layout is not",
+                layout.pin_word(),
+                match layout {
+                    ServingLayout::RowMajorList =>
+                        "its member entries outrun the u32 its offsets are",
+                    _ => "its memberships do not partition",
+                }
+            ),
+            // **A derived structure, so a failure is a dropped file and not a refused build.** The
+            // level composes its column on first request, which is what every request did before
+            // the file existed.
+            Err(error) => eprintln!(
+                "artifact pass: {layer} level {level}'s {} would not be composed ({error}); that \
+                 level derives it on first use",
+                form.dir()
+            ),
+        }
+    }
+    let columns = derived::file_derived(prefix_dir, partition, MANIFEST_N, index, columns);
+
+    // ---- the shape row forms: every spatial level whose persisted form is not a column ---------
+    //
+    // A level served row-major has its column above and the open inverts that; one served
+    // artifact-major — and one recorded row-major whose column would not compose, which is served
+    // artifact-major — has no other durable form of what was just resolved, so the row form is
+    // written for it, keyed by the build's segment and the level's version.
+    let mut shape_rows: Vec<Filed> = Vec::new();
+    if let Some(segment) = &segment {
+        for ((layer, level), rows) in &resolved {
+            let has_column = columns.iter().any(|e| {
+                matches!(e.form, DerivedForm::RowColumn { .. })
+                    && &e.layer == layer
+                    && e.level == *level
+            });
+            if has_column {
+                continue;
+            }
+            let level_version = store.level_version(layer, *level);
+            shape_rows.push(Filed {
+                view: Some(view.to_string()),
+                incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
+                layer: layer.clone(),
+                level: *level,
+                level_version,
+                form: DerivedForm::ShapeRows {
+                    seg_id: segment.seg_id.clone(),
+                    row_count: segment.row_count,
+                },
+                bytes: derived::FiledBytes::InHand(derived::shape_rows_bytes(
+                    level_version,
+                    &segment.seg_id,
+                    segment.row_count,
+                    rows,
+                )),
+            });
+        }
+    }
+    pass.derived_extents.extend(columns);
+    pass.derived_extents.extend(derived::file_derived(
+        prefix_dir, partition, MANIFEST_N, index, shape_rows,
+    ));
+
+    // ---- the decompositions, per spatial level ------------------------------------------------
+    let held: Vec<Filed> = decomposed
+        .iter()
+        .map(|((layer, level), shapes)| {
+            let level_version = store.level_version(layer, *level);
+            let entries: Vec<(Option<&[u8]>, Option<&HeldShape>)> = (0..shapes.len() as u32)
+                .map(|ordinal| {
+                    (
+                        store
+                            .shape_of(layer, *level, ordinal)
+                            .and_then(|shapes| shapes.for_view(view)),
+                        shapes[ordinal as usize].as_ref(),
+                    )
+                })
+                .collect();
+            Filed {
+                view: Some(view.to_string()),
+                incarnation: Some(mosaica_store::manifest::DECLARED_INCARNATION),
+                layer: layer.clone(),
+                level: *level,
+                level_version,
+                form: DerivedForm::ShapeHeld,
+                bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(
+                    level_version,
+                    &entries,
+                )),
+            }
+        })
+        .collect();
+    pass.derived_extents.extend(derived::file_derived(
+        prefix_dir, partition, MANIFEST_N, index, held,
+    ));
+
+    for entry in &pass.derived_extents {
+        pass.paths.push(prefix_dir.join(&entry.path));
+    }
+    pass.elapsed_ms = started.elapsed().as_millis() as u64;
+    pass
+}
+
+/// The one segment a build writes, reopened from the prefix so the pass resolves the same bytes
+/// the serving engine will. `None` — said so — where it will not reopen; the shape layers then
+/// resolve at the engine's open and are recorded in their pinned or default layout.
+fn load_build_segment(
+    prefix_dir: &Path,
+    partition: &str,
+    view: &str,
+    row_count: u32,
+) -> Option<SegmentData> {
+    let dir = mosaica_store::view_path(&prefix_dir.join("partitions").join(partition), view)
+        .join("segments")
+        .join(crate::BUILD_SEG_ID);
+    match SegmentData::load(
+        &dir,
+        crate::BUILD_SEG_ID,
+        row_count,
+        mosaica_store::edited::RowEntities::Numbers,
+    ) {
+        Ok(segment) => Some(segment),
+        Err(error) => {
+            eprintln!(
+                "artifact pass: the segment this build just wrote would not reopen ({error}); \
+                 every shape layer is recorded in its pinned or default layout and resolved at \
+                 the engine's open"
+            );
+            None
+        }
+    }
+}
+
+/// How many of a level's row-less artifacts the report names. Enough to look into the count
+/// without printing a level's worth of keys.
+const EMPTY_KEYS_REPORTED: usize = 10;
+
+/// The publication number every file this pass writes is named after.
+///
+/// **Zero, because a build is publication zero.** The fold names its files after the manifest
+/// generation it is about to publish; a build writes `SEGMENTS-0.json` and has exactly one.
+const MANIFEST_N: u64 = 0;
+
+/// Compose and file this prefix's containment partitions, one per `(layer, level)`.
+///
+/// **Once for the prefix.** A partition is a function of the level's records and the prefix's
+/// postings, so it is the same bytes whichever view is being written and its manifest entry
+/// carries no view. Composing it inside [`run`], which runs per view, would write every level one
+/// identical file and one entry per view. The fold composes for every level in one call
+/// (`Executor::write_containment_partitions`) and this does the same, which is why the level list
+/// here is the store's rather than one view's drawn layers.
+pub fn containment(
+    store: &ArtifactStore,
+    prefix_dir: &Path,
+    partition: &str,
+    index: &mut DerivedIndex,
+) -> Vec<mosaica_store::manifest::DerivedExtent> {
+    let postings_path = prefix_dir
+        .join("partitions")
+        .join(partition)
+        .join("terms")
+        .join("postings.arrow");
+    let postings = match PostingsReader::open(&postings_path, true) {
+        Ok(postings) => postings,
+        Err(error) => {
+            eprintln!(
+                "artifact pass: the postings this build just wrote would not open ({error}); every \
+                 level composes its containment partition on first use"
+            );
+            return Vec::new();
+        }
+    };
+
+    let levels: Vec<(String, u32)> = store
+        .levels_and_extents()
+        .map(|(layer, level, _)| (layer.to_string(), level))
+        .collect();
+    let mut composed: Vec<Filed> = Vec::new();
+    for (layer, level) in &levels {
+        let contents = |visit: &mut dyn FnMut(u32, &[&Bitmap])| {
+            for (ordinal, record) in store.level(layer, *level) {
+                let generating: Vec<&Bitmap> =
+                    record.contents.iter().map(|c| &c.generated_from).collect();
+                visit(ordinal, &generating);
+            }
+        };
+        // **Every level, including one whose artifacts carry no content at all.** The fold composes
+        // for every level and the reader adopts per level, so a level skipped here is one the first
+        // request composes — an empty table, cheaply, but composed on the request path all the
+        // same. `SignatureIndex::build` returns immediately on an empty set, so the cost of the
+        // symmetry is a file header.
+        let wanted = derived::generating_entities(&contents);
+        // The one adapter between the postings format and the composer — `mosaica-store` may not
+        // depend on `mosaica-authz`, so the shape is handed across and the walk is written once.
+        // The engine holds the identical six lines (`containment::signature_index`).
+        let signatures = SignatureIndex::build(&wanted, postings.term_count(), &|term, visit| {
+            if let Some(posting) = postings.posting_at(term)? {
+                match posting {
+                    PostingRef::Array(bytes) => visit(PostingSlice::Array(bytes)),
+                    PostingRef::Roaring(view) => visit(PostingSlice::Roaring(&view)),
+                }
+            }
+            Ok(())
+        });
+        let signatures = match signatures {
+            Ok(signatures) => signatures,
+            Err(error) => {
+                eprintln!(
+                    "artifact pass: {layer} level {level}'s containment signatures would not be \
+                     read ({error}); that level composes its partition on first use"
+                );
+                continue;
+            }
+        };
+        composed.push(Filed {
+            view: None,
+            incarnation: None,
+            layer: layer.clone(),
+            level: *level,
+            level_version: store.level_version(layer, *level),
+            form: DerivedForm::Containment,
+            bytes: derived::FiledBytes::InHand(derived::compose_containment(
+                &contents,
+                &signatures,
+            )),
+        });
+    }
+    derived::file_derived(prefix_dir, partition, MANIFEST_N, index, composed)
+}
+
+/// The pass's own report, printed where `report_attribute_coverage` prints — so both entry points
+/// into the build show it and neither has to reconstruct it.
+///
+/// The `everywhere` fraction decides a treed or spatial level's layout
+/// (`mosaica_types::layer::ROW_MAJOR_EVERYWHERE_FRACTION`), and blocks per artifact says how much
+/// work a membership is; both are reported for every level.
+pub fn report(pass: &ArtifactPass) {
+    if pass.levels.is_empty() {
+        return;
+    }
+    eprintln!(
+        "artifact layouts, chosen from the bundle's own row space ({} ms):",
+        pass.elapsed_ms
+    );
+    for level in &pass.levels {
+        // **A level whose membership is not stored has no shape to print**, and printing the zeros
+        // the walk returned would say it holds nothing. Its artifacts are its column's values and
+        // its form follows from the membership, so the count and the form are the whole of what
+        // there is to say.
+        if !level.observed {
+            eprintln!(
+                "  {} level {} [{}]: {} artifact(s) from its column — served {}; no spread to \
+                 observe, the membership being the column rather than a stored bitmap",
+                level.layer,
+                level.level,
+                level.view,
+                level.registered,
+                level.chosen.pin_word(),
+            );
+            continue;
+        }
+        eprintln!(
+            "  {} level {} [{}]: {} artifact(s) with rows, {:.3} everywhere, {:.1} \
+             blocks/artifact, {} — served {}{}",
+            level.layer,
+            level.level,
+            level.view,
+            level.shape.artifacts,
+            level.shape.everywhere_fraction,
+            level.shape.blocks_per_artifact,
+            if level.shape.partitions {
+                "disjoint"
+            } else {
+                "overlapping"
+            },
+            level.chosen.pin_word(),
+            if level.pinned { " (pinned)" } else { "" },
+        );
+    }
+    for (layer, level, r) in &pass.resolutions {
+        eprintln!(
+            "  {layer} level {level}: resolved the build's segment against its shapes — {} row(s), \
+             {} admitted from interior tiles, {} tested one by one in boundary cells; {} \
+             artifact(s) hold a shape and no row of it; {} ms",
+            r.rows, r.rows_interior, r.rows_tested, r.artifacts_empty, r.elapsed_ms
+        );
+        if !r.empty_keys.is_empty() {
+            eprintln!(
+                "    with a shape and no row{}: {}",
+                if r.artifacts_empty as usize > r.empty_keys.len() {
+                    format!(" (first {} of {})", r.empty_keys.len(), r.artifacts_empty)
+                } else {
+                    String::new()
+                },
+                r.empty_keys.join(", ")
+            );
+        }
+    }
+    let written = |dir: &str| {
+        pass.derived_extents
+            .iter()
+            .filter(|e| e.form.dir() == dir)
+            .count()
+    };
+    eprintln!(
+        "  wrote {} tile index(es), {} row-major column(s), {} label column(s), {} band label \
+         cop(ies), {} shape row form(s), {} decomposition file(s)",
+        written("tile-index"),
+        written("row-column"),
+        written("labels"),
+        written("band-labels"),
+        written("shape-rows"),
+        written("shape-held"),
+    );
+
+    // **What a whole-layer response costs, reported and never refused**
+    // ([decision 0103](../../../docs/decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md),
+    // owner ruling 2026-08-28). The lines above give each level its own count; this is the sum per
+    // layer, and the sum is what predicts response volume, a response carrying one row per served
+    // artifact.
+    //
+    // **This is the whole of what replaces an artifact ceiling.** A large response is slow, not
+    // wrong: it discloses nothing the mask did not already allow and a rerun costs nothing, so it
+    // is the operator's call. What bounds it is the request's `levels`, whose absent case follows
+    // the zoom ranges printed here — so an operator who does not like a number has a declaration to
+    // change, and this is where they see it.
+    //
+    // **No byte estimate.** Bytes per artifact follow what the layer declares — a count-only level
+    // is tens of bytes and one declaring a hull is unbounded, the rings being a function of the
+    // membership — so a constant would be a guess wearing a measurement's clothes.
+    let mut by_layer: std::collections::BTreeMap<&str, Vec<&LevelLayoutReport>> =
+        std::collections::BTreeMap::new();
+    for level in &pass.levels {
+        by_layer
+            .entry(level.layer.as_str())
+            .or_default()
+            .push(level);
+    }
+    for (layer, mut levels) in by_layer {
+        // **Only where there is more than one level**, because for a single-level layer the sum is
+        // the line already printed above and repeating it is noise — and noise here costs the same
+        // as anywhere else: a report that says something about every layer stops being read.
+        if levels.len() < 2 {
+            continue;
+        }
+        levels.sort_by_key(|l| l.level);
+        let total: u64 = levels.iter().map(|l| l.artifacts()).sum();
+        let ranges = levels.iter().any(|l| l.zoom.is_some());
+        if ranges {
+            eprintln!(
+                "  {layer}: {total} artifact(s) across {} levels — what a response naming it \
+                 carries at `levels: \"all\"`. Omitting `levels` serves the levels whose declared \
+                 zoom range covers the request's depth:",
+                levels.len()
+            );
+        } else {
+            // No range on any level, so there is no map for the *absent* case to follow and it
+            // serves all of them — the total is what an ordinary request pays. An explicit
+            // `levels` still selects here, the layer having levels to select; what it has no
+            // default for is the omitted case.
+            eprintln!(
+                "  {layer}: {total} artifact(s) across {} levels, none declaring a zoom range — so \
+                 a response omitting `levels` carries all of them. Declare a range per level to \
+                 bound it:",
+                levels.len()
+            );
+        }
+        for l in levels {
+            match l.zoom {
+                Some((lo, hi)) => eprintln!(
+                    "    level {} [{}]: {} artifact(s), zoom {lo}–{hi}",
+                    l.level,
+                    l.view,
+                    l.artifacts()
+                ),
+                // A level with no range of its own beside levels that have one is served at every
+                // depth: it has no scale to be outside of.
+                None => eprintln!(
+                    "    level {} [{}]: {} artifact(s), no zoom range — served at every depth",
+                    l.level,
+                    l.view,
+                    l.artifacts()
+                ),
+            }
+        }
+    }
+}

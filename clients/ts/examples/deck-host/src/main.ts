@@ -1,10 +1,10 @@
 import {Deck, OrthographicView} from '@deck.gl/core';
-import {createStore, type Store} from '@tesseradb/client';
-import {TesseraLayer, viewInputOf} from '@tesseradb/deck';
+import {createStore, type Store} from '@mosaicajs/client';
+import {MosaicaLayer, viewInputOf} from '@mosaicajs/deck';
 import {fitWorld, worldEdge, type ViewState} from './view.js';
 
 /**
- * `TesseraLayer` in a `Deck` the host builds. The host owns the view and the camera, tells the
+ * `MosaicaLayer` in a `Deck` the host builds. The host owns the view and the camera, tells the
  * store where the camera is through `viewInputOf`, and draws a layer of its own under the marks.
  * The layer makes its GPU buffers on the deck's device and releases them itself.
  */
@@ -38,9 +38,9 @@ function tell(): void {
   if (input) store.setView(input);
 }
 
-/** The layer list: the host's own layer, then Tessera's over the current store. */
+/** The layer list: the host's own layer, then Mosaica's over the current store. */
 function draw(): void {
-  deck.setProps({layers: [worldEdge(), store ? new TesseraLayer({id: 'tessera', store}) : null]});
+  deck.setProps({layers: [worldEdge(), store ? new MosaicaLayer({id: 'mosaica', store}) : null]});
 }
 
 /** The newest sign-in asked for; an older one's token that lands later is dropped. */

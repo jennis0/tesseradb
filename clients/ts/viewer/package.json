@@ -1,5 +1,5 @@
 {
-  "name": "@tesseradb/viewer",
+  "name": "@mosaicajs/viewer",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
@@ -14,9 +14,9 @@
     "@deck.gl/core": "^9.3.7",
     "@deck.gl/layers": "^9.3.7",
     "@luma.gl/core": "^9.3.6",
-    "@tesseradb/client": "*",
-    "@tesseradb/components": "*",
-    "@tesseradb/deck": "*",
+    "@mosaicajs/client": "*",
+    "@mosaicajs/components": "*",
+    "@mosaicajs/deck": "*",
     "lit": "^3.3.0"
   },
   "devDependencies": {

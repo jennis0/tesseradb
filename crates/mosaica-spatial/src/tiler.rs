@@ -1,0 +1,157 @@
+//! The tiler: sorts a batch of items into Morton/row order.
+//!
+//! One implementation shared by a build and a streaming flush, free of I/O. Priority is not
+//! computed here: it is the leading 16 bits of the `tessera_id` the caller supplies.
+
+pub use mosaica_types::scalar::{ScalarType, ScalarValue};
+use mosaica_types::{EntityId, TesseraId};
+
+use crate::morton::split32;
+
+/// One item to be placed into a segment: its wire identity, geometry, and any declared scalars.
+/// Geometry is already quantised: 32-bit fixed point per axis against the build extent
+/// ([`crate::fixed32`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TilerItem {
+    pub tessera_id: TesseraId,
+    /// 32-bit fixed-point x against the build extent; `qx >> 16` is the cell.
+    pub qx: u32,
+    /// 32-bit fixed-point y against the build extent; `qy >> 16` is the cell.
+    pub qy: u32,
+    pub scalars: Vec<ScalarValue>,
+}
+
+/// Sort `items` into segment (row) order: `(morton, tessera_id)` ascending. `tessera_id` is a
+/// bijection over 2^64 with one row per entity, so no further tiebreak is needed. The entity ID
+/// is not a sort key; it is passed alongside to keep `permutation.bin` aligned with the new row
+/// order.
+///
+/// Returns the sorted items' Morton codes as `u32`s: the high half of each item's fixed-point
+/// position ([`split32`]), already computed against the build extent, so this does not
+/// re-quantise. `entity_ids` is permuted identically to `items` and must be the same length.
+pub fn sort_batch(items: &mut Vec<TilerItem>, entity_ids: &mut Vec<EntityId>) -> Vec<u32> {
+    assert_eq!(
+        items.len(),
+        entity_ids.len(),
+        "sort_batch: items and entity_ids must be the same length"
+    );
+
+    let codes: Vec<u32> = items
+        .iter()
+        .map(|item| split32(item.qx, item.qy).0.raw())
+        .collect();
+
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&a, &b| {
+        codes[a]
+            .cmp(&codes[b])
+            .then_with(|| items[a].tessera_id.cmp(&items[b].tessera_id))
+    });
+
+    // Each index appears once in `order`, so every item moves and none is cloned.
+    let mut unsorted: Vec<Option<TilerItem>> = items.drain(..).map(Some).collect();
+    items.extend(order.iter().map(|&i| unsorted[i].take().expect("an index sorts once")));
+    *entity_ids = order.iter().map(|&i| entity_ids[i]).collect();
+    order.iter().map(|&i| codes[i]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::morton::{morton_of, Bounds};
+
+    fn unit_extent() -> Bounds {
+        Bounds {
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0,
+        }
+    }
+
+    /// An item at coordinate `(x, y)`, quantised against the unit extent the way the importer
+    /// quantises: the tiler itself never sees a coordinate.
+    fn item(tessera_id: u64, x: f64, y: f64) -> TilerItem {
+        let e = unit_extent();
+        TilerItem {
+            tessera_id: TesseraId::new(tessera_id),
+            qx: crate::morton::fixed32(x, e.x_min, e.x_max),
+            qy: crate::morton::fixed32(y, e.y_min, e.y_max),
+            scalars: vec![],
+        }
+    }
+
+    #[test]
+    fn sorts_by_morton_then_tessera_id() {
+        // Two items at the identical coordinate plus a third sharing the leading 16 bits: must
+        // order purely by ascending `tessera_id`, or the Morton collision proves nothing.
+        let mut items = vec![item(9, 0.5, 0.5), item(2, 0.5, 0.5), item(1, 0.5, 0.5)];
+        let mut entity_ids = vec![EntityId::new(90), EntityId::new(20), EntityId::new(10)];
+        let codes = sort_batch(&mut items, &mut entity_ids);
+        assert_eq!(
+            items.iter().map(|i| i.tessera_id.raw()).collect::<Vec<_>>(),
+            vec![1, 2, 9]
+        );
+        // `entity_ids` must be permuted identically to `items`.
+        assert_eq!(
+            entity_ids.iter().map(|e| e.raw()).collect::<Vec<_>>(),
+            vec![10, 20, 90]
+        );
+        assert_eq!(codes.len(), 3);
+        assert_eq!(codes[0], codes[1]);
+        assert_eq!(codes[1], codes[2]);
+    }
+
+    #[test]
+    fn ordering_by_the_priority_prefix_then_the_full_id_equals_ordering_by_the_id() {
+        // `priority` is a prefix of `tessera_id`, so the two orders are the same order. Ids
+        // share their high 16 bits so the test proves something about the tie.
+        let ids: Vec<TesseraId> = vec![
+            TesseraId::new(0x0001_0000_0000_0005),
+            TesseraId::new(0x0001_0000_0000_0002),
+            TesseraId::new(0x0001_0000_0000_0009),
+            TesseraId::new(0x0002_0000_0000_0000),
+            TesseraId::new(0x0000_ffff_ffff_ffff),
+        ];
+
+        let mut by_id = ids.clone();
+        by_id.sort();
+
+        let mut by_prefix_then_id = ids.clone();
+        by_prefix_then_id.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.cmp(b)));
+
+        assert_eq!(by_id, by_prefix_then_id);
+    }
+
+    #[test]
+    fn returned_codes_are_non_decreasing() {
+        let mut items = vec![item(1, 0.9, 0.9), item(2, 0.1, 0.1), item(3, 0.5, 0.5)];
+        let mut entity_ids = vec![EntityId::new(1), EntityId::new(2), EntityId::new(3)];
+        let codes = sort_batch(&mut items, &mut entity_ids);
+        assert!(codes.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    /// The code the tiler returns for a point equals `morton_of` on the coordinate it came from:
+    /// the join between shifting the importer's fixed point and quantising directly.
+    #[test]
+    fn returned_codes_are_u32_and_match_morton_of_on_the_source_coordinates() {
+        let e = unit_extent();
+        let coords = [(1u64, 0.75, 0.75), (2, 0.10, 0.10)];
+        let mut items: Vec<TilerItem> = coords.iter().map(|&(id, x, y)| item(id, x, y)).collect();
+        let mut entity_ids = vec![EntityId::new(1), EntityId::new(2)];
+        let codes: Vec<u32> = sort_batch(&mut items, &mut entity_ids);
+        assert_eq!(codes.len(), 2);
+        assert!(codes[0] <= codes[1]);
+        for (i, it) in items.iter().enumerate() {
+            let &(_, x, y) = coords
+                .iter()
+                .find(|&&(id, _, _)| id == it.tessera_id.raw())
+                .expect("every sorted item came from a source coordinate");
+            assert_eq!(
+                codes[i],
+                morton_of(x, y, &e).raw(),
+                "row {i}: returned code must equal morton_of() on the source coordinate"
+            );
+        }
+    }
+}

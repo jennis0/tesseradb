@@ -1,0 +1,2719 @@
+//! The row-major columns: **a level's membership addressed by row instead of by artifact.**
+//!
+//! An artifact-major level answers a viewport by walking the tile index and probing each candidate's
+//! bitmap. A row-major level answers it by scanning `viewport ∩ M_auth` once and reading off which
+//! artifact each visible row belongs to — so candidacy costs **points rather than artifacts**, and
+//! nothing in the request is a function of how many artifacts the layer holds
+//! (`design/artifact-serving-at-scale.md` §5.1).
+//!
+//! Two forms, and which one applies is not a choice:
+//!
+//! - **[`ServingLayout::RowMajorLabel`]** — one label per row, for a level whose memberships
+//!   partition the corpus. A single-valued attribute predicate is the motivating case: every point
+//!   carries exactly one value, so the memberships are disjoint.
+//! - **[`ServingLayout::RowMajorList`]** — a list per row, the same inversion at a larger constant,
+//!   for a level whose memberships overlap.
+//!
+//! **A level that claims to partition and does not is composed artifact-major**, loudly
+//! ([`RowColumn::compose`] and [`RowColumn::project`] both return `None` on a double claim). Keeping
+//! the last writer would give each contested row to whichever artifact happened to be walked last,
+//! which is a masked count short for one artifact and long for another with nothing reporting it.
+//! **A level served from its column has no artifact-major form to be composed into**, so a label
+//! column that stops partitioning under an amendment takes the list form instead
+//! ([`RowColumn::recompose_as_list`]).
+//!
+//! # What this replaces, and what it does not
+//!
+//! It replaces the **candidacy walk** and the **counting route** for the levels it covers, and the
+//! per-artifact declared size the proportional criterion divides by. It does **not** replace the
+//! generating sets containment is tested against, or the visible-row set derived content is computed
+//! from: both are per-artifact row-space questions with no row-addressed form, and both go on being
+//! answered from [`crate::artifacts::MembershipRows`] exactly as they were.
+//!
+//! **The residency half of §5.1 is taken.** A level whose column the manifest names is served from
+//! that one file: the column answers candidacy, the masked counts and the declared sizes, each
+//! artifact's extent is folded out of its own bytes in the pass that already walks it
+//! ([`RowColumn::extents`]), and the artifact-major bitmaps are never built
+//! ([`crate::artifacts::MembershipRows::rows_held`]). At the rung 6 corpus — 1,646,192 artifacts
+//! over ~3.4×10⁹ member entries a level — the form that replaces was a measured ~28 GB retained and
+//! ~10 GB transient per level. Every write reaches the column and the extents beside it; nothing is
+//! transposed back.
+//!
+//! **Where a layer derives a hull, the artifact-major form is read off the members written beside
+//! the column** ([`crate::row_members`], [`RowColumn::transpose`], and
+//! [`crate::artifacts::ArtifactRows::build_from_column`] is the caller) rather than projected a
+//! second time from the level's memberships: the members are the column's labels transposed once,
+//! when the column was written, so reaching the other address costs a copy of each bitmap out of the
+//! mapping.
+//!
+//! **Three things are not in the column and still project**: each content's **generating set**,
+//! which containment is tested against and which is a different set from the membership; a level
+//! whose column this prefix does not hold, which projects and then composes its column as before;
+//! and an attribute predicate's column, whose labels come from the value column rather than from
+//! any stored membership. The transposition also refuses a column with a live **tail** — the base
+//! alone is what a projection produces, and a form stopping short of the flushed rows would be
+//! narrow. Every one of those is a fallback to the route that existed before, so the worst case is
+//! the old cost and never a wrong answer.
+//!
+//! # The declared sizes are derived, never stored
+//!
+//! §10's answer to the proportional criterion's denominator on a row-major level is the per-artifact
+//! **unmasked** membership size, which is mask-independent and corpus-wide. It is folded up in the
+//! same pass that validates the column — an artifact's size is how many rows carry its label — so it
+//! is a function of the bytes beside it rather than a second thing that could disagree with them.
+//! That is [`crate::tile_index`]'s rule for the node hierarchy, one structure along.
+
+use std::sync::Arc;
+
+use croaring::Bitmap;
+
+use mosaica_lifecycle::membership::ArtifactRecord;
+use mosaica_store::membership::{
+    pack_label_column, LabelColumnPack, ListColumnPack, ROW_COLUMN_HOLE, TILE_INDEX_EMPTY,
+    TILE_INDEX_HOLE,
+};
+use mosaica_store::permutation::RowSpace;
+use mosaica_types::layer::ServingLayout;
+
+use crate::artifacts::MembershipRows;
+use crate::derived::{place, Placement};
+
+/// One walk of a level's live artifacts, handing each ordinal its **projected** rows — and the
+/// bytes are produced by [`mosaica_store::derived::project_row_column`], beside the format.
+///
+/// **A callback rather than an iterator**, because the caller has to be able to run it more than
+/// once: a list column is an offset table sized by one pass and filled by a second, and the fold's
+/// walk holds one membership at a time rather than the level's. An iterator would have to be
+/// re-created, which is what this type is.
+type LevelWalk<'a> = mosaica_store::derived::LevelWalk<'a>;
+use crate::compose::WholeMask;
+
+/// How many rows one `next_many` read takes out of the mask: 1,024 × 4 B is a 4 KiB buffer, the
+/// same block [`crate::derived::RowLocator::positions`] reads its runs out of.
+const ROW_BLOCK: usize = 1_024;
+
+/// Every row of `rows`, read a block at a time. Every scan over the composed mask below takes this
+/// walk, so it is written once here.
+///
+/// The bitmap's iterator crosses the library's boundary on every `next`, which the compiler cannot
+/// inline through, and the bodies below are an indexed load and a compare each. `next_many` fills
+/// the block inside the library and hands back a slice. The rows, and so the answers, are the same
+/// ones in the same order.
+///
+/// Measured on a whole-map viewport over `gbif-64p`'s 25,846,007 rows, served hot, 2026-09-14:
+/// **3.2 ns a visible row against 6.6** for the row-at-a-time form.
+/// [`crate::derived::RowLocator::positions`] measured the same change at 168 ms → 44 ms over
+/// 12.8×10⁶ rows.
+fn for_each_row(rows: &Bitmap, mut visit: impl FnMut(u32)) {
+    let mut it = rows.iter();
+    let mut block = [0u32; ROW_BLOCK];
+    loop {
+        let n = it.next_many(&mut block);
+        if n == 0 {
+            return;
+        }
+        for &row in &block[..n] {
+            visit(row);
+        }
+    }
+}
+
+/// [`for_each_row`] over `rows` from `lo` up to but not including `end`: one chunk of a split walk.
+fn for_each_row_in(rows: &Bitmap, lo: u32, end: u64, mut visit: impl FnMut(u32)) {
+    let mut it = rows.iter();
+    it.reset_at_or_after(lo);
+    let mut block = [0u32; ROW_BLOCK];
+    loop {
+        let n = it.next_many(&mut block);
+        if n == 0 {
+            return;
+        }
+        for &row in &block[..n] {
+            if (row as u64) >= end {
+                return;
+            }
+            visit(row);
+        }
+    }
+}
+
+/// How many rows of the view one chunk of [`RowColumn::accumulate`] spans. Small beside a large
+/// view's row space, so the pool keeps every worker busy over a mask whose visible rows are
+/// bunched into a few stretches.
+const CHUNK_ROWS: u32 = 1 << 20;
+
+/// A chunk's visible rows are scattered, and their pages asked for before it is walked, where they
+/// lie at least this many rows apart on average. Closer, read-ahead serves them, and the calls
+/// cost more than they save.
+const SCATTERED_ROWS_APART: u64 = 64;
+
+/// How many artifacts of a level to each row scanned, past which a scan lists its hits rather
+/// than marking a byte per artifact.
+const SPARSE_MARKS: u64 = 64;
+
+/// How many artifacts' bytes a scan marks in the time it reads one row.
+const MARKS_PER_ROW: u64 = 32;
+
+/// The ordinals a scan has seen: a byte per ordinal, or a list where the rows are few.
+enum Marks {
+    Dense(Vec<bool>),
+    Sparse { len: u32, hits: Vec<u32> },
+}
+
+impl Marks {
+    fn new(len: usize, sparse: bool) -> Self {
+        match sparse {
+            true => Marks::Sparse {
+                len: len as u32,
+                hits: Vec::new(),
+            },
+            false => Marks::Dense(vec![false; len]),
+        }
+    }
+
+    /// Mark `ordinal`; one past the level's end is passed over.
+    fn mark(&mut self, ordinal: u32) {
+        match self {
+            Marks::Dense(seen) => {
+                if let Some(hit) = seen.get_mut(ordinal as usize) {
+                    *hit = true;
+                }
+            }
+            Marks::Sparse { len, hits } => {
+                if ordinal < *len {
+                    hits.push(ordinal);
+                }
+            }
+        }
+    }
+
+    /// Added in one call rather than one `add` per hit: each `add` crosses the bitmap library's
+    /// boundary, and a level's ordinal count is in the millions.
+    fn into_bitmap(self) -> Bitmap {
+        let mut hits: Vec<u32> = match self {
+            Marks::Dense(seen) => seen
+                .iter()
+                .enumerate()
+                .filter(|(_, hit)| **hit)
+                .map(|(ordinal, _)| ordinal as u32)
+                .collect(),
+            Marks::Sparse { hits, .. } => hits,
+        };
+        hits.sort_unstable();
+        hits.dedup();
+        let mut out = Bitmap::new();
+        out.add_many(&hits);
+        out.run_optimize();
+        out
+    }
+}
+
+/// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
+/// where a publication built it.
+///
+/// `Clone` so that `Arc::make_mut` can amend a column in place: between requests the executor
+/// thread is the column's only holder and no copy is made; where a request is still reading the
+/// form, the copy is the amendment, the counts and a live tail's labels where there is one — never
+/// the pack or the base counts, which stay behind their `Arc`s. That copy is what makes the
+/// cost bound below conditional: a write under a reader pays the accumulated amendment once more,
+/// which is small beside the form's own copy `bring_forward` logs as `cloned_ms`.
+#[derive(Clone)]
+pub struct RowColumn {
+    /// **Shared, because a live tail is attached by deriving a second column over the same base.**
+    /// A predicate level's base is a function of the prefix and the level's version; its tail moves
+    /// at every flush. Copying four bytes a row per flush is what this `Arc` exists to avoid — at
+    /// 10⁹ rows the base is the 4 GB the layout was chosen for.
+    pack: Arc<Pack>,
+    /// Per ordinal, how many **rows** carry this artifact's label — the unmasked membership size in
+    /// this view's row space, base and tail together. Derived at open; see the module doc.
+    declared: Vec<u32>,
+    /// The base's own half of `declared`, kept so [`RowColumn::with_tail`] can add a tail's counts
+    /// without re-walking four bytes a row.
+    base_declared: Arc<Vec<u32>>,
+    /// Per ordinal, the lowest and highest **base** row carrying this artifact's label — folded up
+    /// in the same pass as `base_declared` and read by [`Self::extents`].
+    ///
+    /// **The extents are a function of the column's own bytes**, which is what makes a level served
+    /// from the column alone need no second file: a fold-written extent column and this one could
+    /// disagree, and a hole in the index would make an artifact's rows read as absent where the
+    /// membership has them — a silently short answer. Derived here, the two cannot part company,
+    /// which is [`crate::tile_index`]'s rule for the node hierarchy one structure along.
+    base_extents: Arc<Vec<(u32, u32)>>,
+    /// **The rows above the base a fold has not yet absorbed**, where this column has any.
+    tail: Option<TailLabels>,
+    /// **The labels a write added to a column that was already built**, where any were added.
+    ///
+    /// [`TailLabels`] one step further: that one answers for rows *above* the base, this one adds
+    /// to rows anywhere. A growth joins entities to an artifact that already exists, and the rows
+    /// those entities hold are ordinary base rows the pack already addresses — so the label cannot
+    /// go in the tail and, for a list column, cannot go in the pack either without rewriting the
+    /// offset table and every value above the insertion. Held beside the pack, the write costs the
+    /// rows it touched and the pack's bytes are not read, copied or rewritten
+    /// (`2026-09-03-post-flush-artifact-frames.md`).
+    ///
+    /// **Every label at an extent row is here**, whether a flush, a growth or the column's own
+    /// composition put it there ([`Self::compose_over_base`]), and the pack labels base rows
+    /// alone. That is the rule a merge's rebase rests on ([`Self::rebase`]): the rows a merge
+    /// renumbers are extent rows, so their labels are all in the one half of the column that can
+    /// be edited.
+    ///
+    /// ⊘ **Bounded by what has accumulated since the last fold**, on [`TailLabels`]' own note and
+    /// with the same reset: the fold rewrites the level's column whole, and a deployment that
+    /// never folds accumulates one entry per `(row, artifact)` every write adds whatever this
+    /// structure does. What has accumulated bounds the memory and not the write: a write costs its
+    /// own batch ([`RowColumn::amend`]) while the column is unshared, however much is already held.
+    added: Option<Added>,
+    /// **The base rows by artifact, and each artifact's covering**, written from this column's own
+    /// labels whenever the column was ([`crate::row_members`]). Held here so that whatever replaces
+    /// or drops the column replaces or drops them with it. `None` only on a column read for its
+    /// labels alone ([`Self::open_labels`]) and on an attribute predicate's, whose labels are a value
+    /// column's rather than a stored membership's.
+    members: Option<crate::row_members::LevelMembers>,
+    /// **Which base labels this column carries**, unique in the process: a column composed, opened,
+    /// recomposed or claimed for a new form takes a new one, and a copy made to amend in place
+    /// keeps it. Two columns with one identity hold the same base labels up to the growth steps
+    /// one of them has taken further ([`Self::steps`]), so counts taken over one column's base rows
+    /// are brought forward by the steps rather than counted again.
+    identity: u64,
+    /// **The base labels each level-version move added**, in order: what a cached count over the
+    /// base rows takes to follow a growth or a publication without walking the rows again. One
+    /// step per publication of the form this column serves, empty where the move added no base
+    /// label.
+    steps: Vec<GrowthStep>,
+}
+
+/// The base labels one publication added to a column, between two versions of its level.
+#[derive(Debug, Clone)]
+pub struct GrowthStep {
+    pub from: u64,
+    pub to: u64,
+    /// `(row, ordinal)`, every row below the base, none of them a pair the column carried before.
+    pub pairs: Arc<[(u32, u32)]>,
+}
+
+/// A process-unique [`RowColumn::identity`].
+fn next_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How many of an artifact's most extreme rows a pass keeps on each side of its box.
+pub const RESERVE: usize = 8;
+
+/// One artifact's reserve: per side of the box, `x` low, `y` low, `x` high and `y` high, up to
+/// [`RESERVE`] rows as sort keys, most extreme first and [`RESERVE_EMPTY`] past the last. A key is
+/// the coordinate, turned round on the high sides so a smaller key is always more extreme, above
+/// the row, which breaks ties: [`reserve_key`] and [`reserve_row`].
+pub type Reserve = [[u64; RESERVE]; 4];
+
+/// A reserve slot holding no row.
+pub const RESERVE_EMPTY: u64 = u64::MAX;
+
+/// The reserve key of a row at `(x, y)` on `side`.
+#[inline]
+pub fn reserve_key(side: usize, row: u32, (x, y): (u32, u32)) -> u64 {
+    let along = match side {
+        0 => x,
+        1 => y,
+        2 => u32::MAX - x,
+        _ => u32::MAX - y,
+    };
+    (u64::from(along) << 32) | u64::from(row)
+}
+
+/// The coordinate on `side` a reserve key holds.
+#[inline]
+pub fn reserve_value(side: usize, key: u64) -> u32 {
+    let along = (key >> 32) as u32;
+    match side {
+        0 | 1 => along,
+        _ => u32::MAX - along,
+    }
+}
+
+/// The row a reserve key names.
+#[inline]
+pub fn reserve_row(key: u64) -> u32 {
+    key as u32
+}
+
+/// Keep `key` among `side`'s most extreme, if it is.
+#[inline]
+pub fn reserve_offer(side: &mut [u64; RESERVE], key: u64) {
+    if key >= side[RESERVE - 1] {
+        return;
+    }
+    let at = side.partition_point(|&held| held < key);
+    side.copy_within(at..RESERVE - 1, at + 1);
+    side[at] = key;
+}
+
+/// Keep the [`RESERVE`] most extreme of `held` and `offered`, two sides each holding its keys most
+/// extreme first: what [`reserve_offer`] of each of `offered`'s keys keeps, in one pass. A key is
+/// never in both, since a row is walked once.
+#[inline]
+fn reserve_merge(held: &mut [u64; RESERVE], offered: &[u64; RESERVE]) {
+    if offered[0] >= held[RESERVE - 1] {
+        return;
+    }
+    let mut out = [RESERVE_EMPTY; RESERVE];
+    let (mut i, mut j) = (0, 0);
+    for slot in &mut out {
+        if held[i] <= offered[j] {
+            *slot = held[i];
+            i += 1;
+        } else {
+            *slot = offered[j];
+            j += 1;
+        }
+    }
+    *held = out;
+}
+
+/// What one pass over a viewer's visible rows folded up, per ordinal: see
+/// [`RowColumn::accumulate`].
+#[derive(Debug, Default)]
+pub struct LevelAccumulation {
+    /// Every visible row carrying the ordinal's label, placed or not. This is the masked count.
+    pub counts: Vec<u32>,
+    /// The visible rows a segment places, which is the divisor for the mean. Equal to `counts`
+    /// wherever the row space places its own rows. Empty, like `sums` and `boxes`, when the walk
+    /// was given no positions.
+    pub placed: Vec<u32>,
+    /// `u64` and not `f64`, so the sum is exact and the order chunks are merged in cannot change
+    /// it. A row space is `u32`-addressed and a grid coordinate is a `u32`, so a per-axis sum is
+    /// below `2^64`.
+    pub sums: Vec<[u64; 2]>,
+    /// `[x_min, y_min, x_max, y_max]` over the placed rows.
+    pub boxes: Vec<[u32; 4]>,
+    /// The placed rows at the extremes of each ordinal's box, by ordinal, ascending, for every
+    /// ordinal with a placed row. `None` where the pass was not asked for them.
+    pub reserves: Option<Vec<(u32, Reserve)>>,
+}
+
+impl LevelAccumulation {
+    fn empty(ordinals: usize, geometry: bool, reserve: bool) -> Self {
+        let placed = if geometry { ordinals } else { 0 };
+        LevelAccumulation {
+            counts: vec![0; ordinals],
+            placed: vec![0; placed],
+            sums: vec![[0; 2]; placed],
+            boxes: vec![[u32::MAX, u32::MAX, 0, 0]; placed],
+            reserves: (geometry && reserve).then(Vec::new),
+        }
+    }
+
+    /// The figures `workers` folded up between them, each ordinal's merged on its own, so the
+    /// ordinals are shared out over the pool and no worker's figures are copied whole.
+    fn merged(workers: &[Tallies], ordinals: usize, geometry: bool, reserve: bool) -> Self {
+        use rayon::prelude::*;
+        if !geometry {
+            let mut counts = vec![0u32; ordinals];
+            counts
+                .par_chunks_mut(MERGE_ORDINALS)
+                .enumerate()
+                .for_each(|(at, counts)| {
+                    let from = at * MERGE_ORDINALS;
+                    for worker in workers {
+                        let theirs = &worker.counts[from..from + counts.len()];
+                        for (a, b) in counts.iter_mut().zip(theirs) {
+                            *a += b;
+                        }
+                    }
+                });
+            return LevelAccumulation {
+                counts,
+                ..LevelAccumulation::default()
+            };
+        }
+        type Merged = (Vec<Tally>, Vec<(u32, Reserve)>);
+        let merged: Vec<Merged> = (0..ordinals.div_ceil(MERGE_ORDINALS))
+            .into_par_iter()
+            .map(|at| {
+                let from = at * MERGE_ORDINALS;
+                let to = (from + MERGE_ORDINALS).min(ordinals);
+                let mut tallies = vec![Tally::default(); to - from];
+                let mut reserves: Vec<(u32, Reserve)> = Vec::new();
+                for (i, t) in tallies.iter_mut().enumerate() {
+                    let ordinal = from + i;
+                    let mut reserve: Option<Reserve> = None;
+                    for worker in workers {
+                        let theirs = &worker.tallies[ordinal];
+                        if theirs.count == 0 {
+                            continue;
+                        }
+                        t.merge(theirs);
+                        if theirs.reserve != 0 {
+                            let offered = &worker.reserves[theirs.reserve as usize - 1];
+                            match &mut reserve {
+                                None => reserve = Some(*offered),
+                                Some(held) => {
+                                    for (held, offered) in held.iter_mut().zip(offered) {
+                                        reserve_merge(held, offered);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(reserve) = reserve {
+                        reserves.push((ordinal as u32, reserve));
+                    }
+                }
+                (tallies, reserves)
+            })
+            .collect();
+        let mut out = LevelAccumulation {
+            counts: Vec::with_capacity(ordinals),
+            placed: Vec::with_capacity(ordinals),
+            sums: Vec::with_capacity(ordinals),
+            boxes: Vec::with_capacity(ordinals),
+            reserves: reserve.then(Vec::new),
+        };
+        for (tallies, reserves) in merged {
+            for t in &tallies {
+                out.counts.push(t.count);
+                out.placed.push(t.placed);
+                out.sums.push(t.sums);
+                out.boxes.push([!t.low[0], !t.low[1], t.high[0], t.high[1]]);
+            }
+            if let Some(out) = &mut out.reserves {
+                out.extend(reserves);
+            }
+        }
+        out
+    }
+}
+
+/// How many ordinals one task of a merge takes.
+const MERGE_ORDINALS: usize = 1 << 14;
+
+/// One ordinal's running figures in one worker's walk with positions, in one cache line. Every
+/// field is zero before the ordinal's first row, so a worker's figures are allocated zeroed and a
+/// page of them is written only where an ordinal on it is met: a viewer who sees few rows writes
+/// few pages.
+#[derive(Debug, Default, Clone, Copy)]
+#[repr(C, align(64))]
+struct Tally {
+    count: u32,
+    placed: u32,
+    sums: [u64; 2],
+    /// `!x_min` and `!y_min`, so that zero is the empty box.
+    low: [u32; 2],
+    high: [u32; 2],
+    /// Per side, `!` of the furthest coordinate a row may lie at and still enter that side's
+    /// reserve: the coordinate of its last key once it is full. Zero, which admits every row,
+    /// while it has room.
+    bar: [u32; 4],
+    /// One more than where the ordinal's reserve is in [`Tallies::reserves`], or zero for none.
+    reserve: u32,
+}
+
+impl Tally {
+    fn merge(&mut self, other: &Tally) {
+        self.count += other.count;
+        self.placed += other.placed;
+        self.sums[0] += other.sums[0];
+        self.sums[1] += other.sums[1];
+        self.low[0] = self.low[0].max(other.low[0]);
+        self.low[1] = self.low[1].max(other.low[1]);
+        self.high[0] = self.high[0].max(other.high[0]);
+        self.high[1] = self.high[1].max(other.high[1]);
+    }
+}
+
+/// One worker's figures over the rows it has walked: the counts alone, or a [`Tally`] an ordinal
+/// and a reserve for each ordinal it has offered a row to.
+struct Tallies {
+    counts: Vec<u32>,
+    tallies: Box<[Tally]>,
+    /// Whether the walk keeps reserves.
+    reserve: bool,
+    reserves: Vec<Reserve>,
+}
+
+impl Tallies {
+    fn new(ordinals: usize, geometry: bool, reserve: bool) -> Self {
+        let tallies = match geometry {
+            // SAFETY: every field of a `Tally` is an integer, for which zero bits are a value.
+            true => unsafe { Box::<[Tally]>::new_zeroed_slice(ordinals).assume_init() },
+            false => Box::default(),
+        };
+        Tallies {
+            counts: if geometry { Vec::new() } else { vec![0; ordinals] },
+            tallies,
+            reserve: geometry && reserve,
+            reserves: Vec::new(),
+        }
+    }
+
+    /// One visible row labelled `ordinal`, at `position` where a segment places it. An ordinal
+    /// past the level is dropped, as [`RowColumn::candidates`] drops it.
+    #[inline]
+    fn add(&mut self, row: u32, ordinal: u32, position: Option<(u32, u32)>) {
+        let i = ordinal as usize;
+        if self.tallies.is_empty() {
+            if let Some(count) = self.counts.get_mut(i) {
+                *count += 1;
+            }
+            return;
+        }
+        let Some(t) = self.tallies.get_mut(i) else {
+            return;
+        };
+        t.count += 1;
+        let Some((x, y)) = position else {
+            return;
+        };
+        t.placed += 1;
+        t.sums[0] += u64::from(x);
+        t.sums[1] += u64::from(y);
+        t.low[0] = t.low[0].max(!x);
+        t.low[1] = t.low[1].max(!y);
+        t.high[0] = t.high[0].max(x);
+        t.high[1] = t.high[1].max(y);
+        if !self.reserve {
+            return;
+        }
+        let along = [x, y, u32::MAX - x, u32::MAX - y];
+        for (side, &along) in along.iter().enumerate() {
+            if along > !t.bar[side] {
+                continue;
+            }
+            if t.reserve == 0 {
+                self.reserves.push([[RESERVE_EMPTY; RESERVE]; 4]);
+                t.reserve = self.reserves.len() as u32;
+            }
+            let held = &mut self.reserves[t.reserve as usize - 1][side];
+            reserve_offer(held, reserve_key(side, row, (x, y)));
+            if held[RESERVE - 1] != RESERVE_EMPTY {
+                t.bar[side] = !((held[RESERVE - 1] >> 32) as u32);
+            }
+        }
+    }
+}
+
+/// Labels added to rows a column already addresses — see [`RowColumn::added`].
+#[derive(Debug, Default, Clone)]
+struct Added {
+    /// `(row, ordinal)`, ascending and deduplicated, and never a pair the column already carries.
+    pairs: Vec<(u32, u32)>,
+    /// The rows [`Self::pairs`] names — so a scan asks *is any of this in view* in
+    /// O(containers touched) rather than walking the pairs.
+    rows: Bitmap,
+    /// One past the highest row named, which may be above the pack's own row count: a flush
+    /// publishes rows the pack never covered, and this is what carries them.
+    row_end: u32,
+}
+
+impl Added {
+    /// Every ordinal added at `row`, ascending. Empty for a row this adds nothing at.
+    fn at(&self, row: u32) -> &[(u32, u32)] {
+        let lo = self.pairs.partition_point(|(r, _)| *r < row);
+        let hi = self.pairs.partition_point(|(r, _)| *r <= row);
+        &self.pairs[lo..hi]
+    }
+
+    /// Remove every pair at a row in `lo..hi`, returning how many each ordinal lost — the half of
+    /// a merge's rebase that gives the renumbered span up ([`RowColumn::rebase`]). One
+    /// `partition_point` at each end and one move of what lies above, never a pass over the pairs
+    /// below.
+    fn drain_span(&mut self, lo: u32, hi: u32) -> Vec<(u32, u32)> {
+        let from = self.pairs.partition_point(|(r, _)| *r < lo);
+        let to = self.pairs.partition_point(|(r, _)| *r < hi);
+        self.rows.remove_range(lo..hi);
+        self.pairs.drain(from..to).collect()
+    }
+
+    /// Merge `batch` into [`Self::pairs`], keeping it ascending. `batch` is ascending,
+    /// deduplicated and disjoint from what is held, which [`RowColumn::amend`] arranges.
+    ///
+    /// An append where the batch lies wholly above what is held, which is where a flush's rows and
+    /// most growths lie; otherwise one pass from the back, in place. The held list is never
+    /// re-sorted, so a write costs its batch plus, on the merge path, one move of what is held.
+    fn merge(&mut self, batch: Vec<(u32, u32)>) {
+        let Some(&first) = batch.first() else {
+            return;
+        };
+        if self.pairs.last().is_none_or(|last| *last < first) {
+            self.pairs.extend(batch);
+            return;
+        }
+        let held = self.pairs.len();
+        self.pairs.resize(held + batch.len(), (0, 0));
+        let (mut i, mut j, mut k) = (held, batch.len(), self.pairs.len());
+        while j > 0 {
+            k -= 1;
+            if i > 0 && self.pairs[i - 1] > batch[j - 1] {
+                self.pairs[k] = self.pairs[i - 1];
+                i -= 1;
+            } else {
+                self.pairs[k] = batch[j - 1];
+                j -= 1;
+            }
+        }
+    }
+}
+
+/// The labels of the rows **above** a column's base — the flushed tail.
+///
+/// **A second dense array rather than a wider base**, and the cadence is the whole reason. A base
+/// column is a function of the prefix and the level's version, so it survives every flush; the tail
+/// is a function of the geometry and is rebuilt whenever `segments_version` moves. Widening the
+/// base instead would rebuild four bytes a row at every flush — the cost `RowSpace::project_base`
+/// exists to avoid, arriving through the other door.
+///
+/// ⊘ **Bounded by the flushed tail**, which the merge ladder bounds and the fold resets. Nothing
+/// here bounds it independently: a deployment that never folds accumulates rows above its base
+/// whatever this structure does, and the tail is one `u32` per such row.
+#[derive(Clone)]
+pub struct TailLabels {
+    /// The first row this covers — the base's row count.
+    row_base: u32,
+    /// One label per row of `[row_base, row_base + labels.len())`, [`ROW_COLUMN_HOLE`] where no
+    /// artifact claims the row.
+    labels: Vec<u32>,
+}
+
+impl TailLabels {
+    /// A tail over `[row_base, row_base + labels.len())`.
+    pub fn new(row_base: u32, labels: Vec<u32>) -> Self {
+        TailLabels { row_base, labels }
+    }
+
+    /// The label at an absolute row, or [`ROW_COLUMN_HOLE`] where the row is outside this tail.
+    fn label(&self, row: u32) -> u32 {
+        row.checked_sub(self.row_base)
+            .and_then(|at| self.labels.get(at as usize).copied())
+            .unwrap_or(ROW_COLUMN_HOLE)
+    }
+
+    /// One past the last row this covers.
+    fn row_end(&self) -> u32 {
+        self.row_base.saturating_add(self.labels.len() as u32)
+    }
+}
+
+enum Pack {
+    Label(LabelColumnPack),
+    List(ListColumnPack),
+}
+
+impl std::fmt::Debug for RowColumn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowColumn")
+            .field("layout", &self.layout())
+            .field("ordinals", &self.len())
+            .field("rows", &self.row_count())
+            .finish()
+    }
+}
+
+impl RowColumn {
+    /// Compose one from a level's resident row form — what a publication or a growth builds, before
+    /// any fold has consolidated it.
+    ///
+    /// `None` where `layout` is [`ServingLayout::RowMajorLabel`] and the memberships do not
+    /// partition: the caller composes the level artifact-major instead and says so.
+    ///
+    /// **Framed and read back through the same checks a mapped file takes**, for the reason
+    /// [`crate::containment::ContainmentPartition`] gives: the two routes are one reader, so a
+    /// framing rule can never hold for a file and not for the form a publication built.
+    pub fn compose(
+        membership: &MembershipRows,
+        row_count: u32,
+        layout: ServingLayout,
+        scratch: &std::path::Path,
+    ) -> Option<Self> {
+        let ordinals = membership.len() as u32;
+        let each = |visit: &mut dyn FnMut(u32, &Bitmap)| {
+            for ordinal in 0..ordinals {
+                if let Some(rows) = membership.get(ordinal) {
+                    visit(ordinal, rows);
+                }
+            }
+        };
+        Self::assemble(ordinals, row_count, layout, scratch, &each)
+    }
+
+    /// [`Self::compose`] with **the pack over the base rows alone and every row above them in the
+    /// amendment** — what a form built while the row space already carries extents composes.
+    ///
+    /// The split is what a merge's rebase rests on ([`Self::rebase`]): a merge renumbers extent
+    /// rows, and the amendment is the one half of a column that can give a span of rows up and
+    /// take it again, while the pack is packed bytes that are shared and never rewritten. A pack
+    /// that reached above the base would hold labels at rows a merge has since renumbered, with no
+    /// edit cheaper than composing the column again. So the pack covers `[0, base_rows)` whatever
+    /// the row space held when the column was composed, and the rows in `[base_rows, row_count)`
+    /// enter through [`Self::amend`], which a flush and a growth also use. A membership entirely
+    /// below the base costs nothing extra; one that reaches above it is copied once, at the
+    /// composition that already walks it whole.
+    ///
+    /// `None` on [`Self::compose`]'s terms: a label column whose memberships do not partition.
+    pub fn compose_over_base(
+        membership: &MembershipRows,
+        base_rows: u32,
+        row_count: u32,
+        layout: ServingLayout,
+        scratch: &std::path::Path,
+    ) -> Option<Self> {
+        let ordinals = membership.len() as u32;
+        let reaches_above = |rows: &Bitmap| rows.maximum().is_some_and(|max| max >= base_rows);
+        let each = |visit: &mut dyn FnMut(u32, &Bitmap)| {
+            for ordinal in 0..ordinals {
+                if let Some(rows) = membership.get(ordinal) {
+                    if reaches_above(rows) {
+                        let mut below = rows.clone();
+                        below.remove_range(base_rows..);
+                        visit(ordinal, &below);
+                    } else {
+                        visit(ordinal, rows);
+                    }
+                }
+            }
+        };
+        let mut column = Self::assemble(ordinals, base_rows, layout, scratch, &each)?;
+        if row_count <= base_rows {
+            return Some(column);
+        }
+        let mut above: Vec<(u32, u32)> = Vec::new();
+        for ordinal in 0..ordinals {
+            if let Some(rows) = membership.get(ordinal).filter(|rows| reaches_above(rows)) {
+                let mut iter = rows.iter();
+                iter.reset_at_or_after(base_rows);
+                above.extend(iter.map(|row| (row, ordinal)));
+            }
+        }
+        // A label column composed over the base already partitions, and the rows above it are the
+        // same memberships' rows, so the amendment cannot be refused here.
+        if !column.amend(&above, row_count) {
+            return None;
+        }
+        Some(column)
+    }
+
+    /// **Every `(row, ordinal)` this column carries**, in row order over the pack and then the two
+    /// live halves — one sequential pass, nothing held.
+    ///
+    /// `below` bounds it to the base rows, which is what a recomposition's pack takes
+    /// ([`Self::compose_over_base`]'s split).
+    fn for_each_pair(&self, below: Option<u32>, visit: &mut dyn FnMut(u32, u32)) {
+        let ceiling = below.unwrap_or(u32::MAX);
+        match &*self.pack {
+            Pack::Label(pack) => {
+                let end = (pack.rows() as usize).min(ceiling as usize);
+                for row in 0..end {
+                    let label = pack.label(row);
+                    if label != ROW_COLUMN_HOLE {
+                        visit(row as u32, label);
+                    }
+                }
+            }
+            Pack::List(pack) => {
+                let end = (pack.rows() as usize).min(ceiling as usize);
+                for row in 0..end {
+                    for ordinal in pack.list(row) {
+                        visit(row as u32, ordinal);
+                    }
+                }
+            }
+        }
+        if let Some(tail) = &self.tail {
+            for row in tail.row_base..tail.row_end().min(ceiling) {
+                let label = tail.label(row);
+                if label != ROW_COLUMN_HOLE {
+                    visit(row, label);
+                }
+            }
+        }
+        if let Some(added) = &self.added {
+            for row in added.rows.iter() {
+                if row >= ceiling {
+                    continue;
+                }
+                for (_, ordinal) in added.at(row) {
+                    visit(row, *ordinal);
+                }
+            }
+        }
+    }
+
+    /// **Take the list form, from this column's own bytes plus the pairs that would not fit the
+    /// label form** — what a level served from its column does when an amendment makes its
+    /// memberships overlap.
+    ///
+    /// A label column refuses a row that would come to carry two artifacts, and a level served from
+    /// its column has no other membership to fall back to. The bounded answer is the one the fold
+    /// already takes for such a level (decision 0094): the list form, composed through the
+    /// disk-backed partition route ([`mosaica_store::derived::project_row_column_pairs`]) from the
+    /// pairs this column already holds and the pairs the amendment added. **Nothing row-sized is
+    /// held while it runs** — one partition bucket, exactly as the fold's composition and the
+    /// build's — so the level never materialises the artifact-major form the layout exists to
+    /// avoid.
+    ///
+    /// The pack covers `[0, base_rows)` and everything above enters as the amendment, which is
+    /// [`Self::compose_over_base`]'s split and is what a later merge's rebase rests on.
+    ///
+    /// `None` where the composition could not be written or read back — an I/O failure rather than
+    /// a shape this cannot express: a list column takes any membership, so there is no second
+    /// refusal below this one.
+    pub fn recompose_as_list(
+        &self,
+        extra: &[(u32, u32)],
+        base_rows: u32,
+        row_count: u32,
+        scratch: &std::path::Path,
+    ) -> Option<Self> {
+        // **Each pair once, whatever the caller offered.** `added` is deliberately a superset of
+        // the pairs an amendment gave the column — a growth on a form that holds no rows offers
+        // the artifact's whole membership, because it has no held set to subtract — and
+        // [`Self::amend`] absorbs that by skipping a pair the column already carries. This feed
+        // has to make the same subtraction itself: a list row naming one ordinal twice counts that
+        // artifact twice in the histogram, twice in the declared size the proportional criterion
+        // divides by, and twice in the accumulated centroid.
+        let mut fresh: Vec<(u32, u32)> = extra
+            .iter()
+            .copied()
+            .filter(|(row, ordinal)| {
+                let mut carried = false;
+                self.for_each_label(*row, |held| carried |= held == *ordinal);
+                !carried
+            })
+            .collect();
+        fresh.sort_unstable();
+        fresh.dedup();
+        let ordinals = self
+            .len()
+            .max(fresh.iter().map(|(_, o)| *o as usize + 1).max().unwrap_or(0))
+            as u32;
+        let pairs = |visit: &mut dyn FnMut(u32, u32)| {
+            self.for_each_pair(Some(base_rows), visit);
+            for (row, ordinal) in &fresh {
+                if *row < base_rows {
+                    visit(*row, *ordinal);
+                }
+            }
+        };
+        let mut column = Self::assemble_pairs(
+            ordinals,
+            base_rows,
+            ServingLayout::RowMajorList,
+            scratch,
+            &pairs,
+        )?;
+        if row_count <= base_rows {
+            return Some(column);
+        }
+        let mut above: Vec<(u32, u32)> = Vec::new();
+        self.for_each_pair(None, &mut |row, ordinal| {
+            if row >= base_rows {
+                above.push((row, ordinal));
+            }
+        });
+        // The rows above the base go in through `amend`, which makes the same subtraction against
+        // the column being built — so these are the pairs this column does not yet carry, and the
+        // two halves cannot disagree about which they are.
+        above.extend(fresh.iter().copied().filter(|(row, _)| *row >= base_rows));
+        // A list column refuses nothing, so this cannot fail for a reason the form can express.
+        if !column.amend(&above, row_count) {
+            return None;
+        }
+        Some(column)
+    }
+
+    /// The same column, projected straight from a level's records without building the row form
+    /// first — what the fold writes.
+    ///
+    /// **Equal to [`Self::compose`] over the row form of the same level**, by construction rather
+    /// than by an argument: both read `RowSpace::project_base`'s output, which is precisely what
+    /// [`MembershipRows`] stores. What differs is what is held while it runs — one membership at a
+    /// time rather than the whole level's, which is the same asymmetry
+    /// [`crate::tile_index::TileIndex::project`] takes and for the same reason.
+    ///
+    /// **`level` is called more than once**, and it has to be: a list column is an offset table and
+    /// a value array, and sizing the first needs a pass the second then fills. A label column takes
+    /// one pass and is handed the same closure.
+    ///
+    /// ⊘ **No production caller.** The fold writes its columns through
+    /// `mosaica_store::derived::project_row_column` and the engine composes through the same
+    /// function, so what reaches this is `crates/mosaica-bench/src/bin/epoch_shard_tile_index.rs`
+    /// and this crate's tests. Kept because it is the projection the two routes are asserted equal
+    /// against.
+    ///
+    /// ⊘ It reads the membership each record declares. An attached artifact that declares none is
+    /// served over its target's (decision 0145), which is read from the artifact store, and this
+    /// function is not given one. Its callers project levels whose artifacts carry no attachment,
+    /// so the two agree there and would not on a borrowing level. Taking the store, as
+    /// [`crate::tile_index::TileIndex::project`] does, is the fix, and it moves the bench's call
+    /// with it.
+    pub fn project<'a, I>(
+        ordinals: u32,
+        space: &RowSpace,
+        layout: ServingLayout,
+        scratch: &std::path::Path,
+        level: impl Fn() -> I,
+    ) -> Option<Self>
+    where
+        I: Iterator<Item = (u32, &'a ArtifactRecord)>,
+    {
+        let each = |visit: &mut dyn FnMut(u32, &Bitmap)| {
+            for (ordinal, record) in level() {
+                visit(
+                    ordinal,
+                    &record.members.projected(|part| space.project_base(part)),
+                );
+            }
+        };
+        Self::assemble(ordinals, space.base_rows(), layout, scratch, &each)
+    }
+
+    /// Open a fold-written column, mapped in place, and check it is the form the manifest claims.
+    ///
+    /// **The tag is checked against the file, not trusted over it** (selection memo §5). Each format
+    /// carries its own magic, so a manifest that names a list where a label column sits refuses at
+    /// the first bytes rather than reading an offset table as labels — and the caller's answer to a
+    /// refusal is to recompose the level, which is what every request did before this structure
+    /// existed.
+    ///
+    /// `members` is the member file written beside it ([`crate::row_members`]); a column is not
+    /// served without them, so a refusal of either refuses both.
+    pub fn open(
+        path: &std::path::Path,
+        members: &std::path::Path,
+        expected: ServingLayout,
+    ) -> mosaica_store::Result<Self> {
+        let mut column = Self::open_labels(path, expected)?;
+        let members = mosaica_store::row_members::RowMembersPack::open(members)?;
+        if members.rows() != column.base_rows() || members.ordinals() as usize != column.len() {
+            return Err(mosaica_store::StoreError::MalformedBundle {
+                detail: format!(
+                    "row-major column {}: its member file covers {} rows and {} ordinals where the \
+                     column has {} and {}; the two are written together, so one of them is another \
+                     level's",
+                    path.display(),
+                    members.rows(),
+                    members.ordinals(),
+                    column.base_rows(),
+                    column.len()
+                ),
+            });
+        }
+        column.members = Some(crate::row_members::LevelMembers::new(members));
+        Ok(column)
+    }
+
+    /// A fold-written column read for its labels alone, with no members beside it: for a reader
+    /// that turns the labels into something else, never for a column that is served.
+    pub fn open_labels(
+        path: &std::path::Path,
+        expected: ServingLayout,
+    ) -> mosaica_store::Result<Self> {
+        let pack = match expected {
+            ServingLayout::RowMajorLabel => Pack::Label(LabelColumnPack::open(path)?),
+            ServingLayout::RowMajorList => Pack::List(ListColumnPack::open(path)?),
+            ServingLayout::ArtifactMajor => {
+                return Err(mosaica_store::StoreError::MalformedBundle {
+                    detail: format!(
+                        "row-major column {}: the manifest tags it {}, which has no column — the \
+                         entry names a file no writer produces",
+                        path.display(),
+                        expected.pin_word()
+                    ),
+                })
+            }
+        };
+        Ok(Self::over(pack))
+    }
+
+    /// **A label column over `labels`, addressed by row** — what a *predicate* level's membership
+    /// is, built from the value column the layer names rather than from any stored membership.
+    ///
+    /// **The label form only**, because a single-valued column partitions by construction: every
+    /// row carries one value, so the double claim [`Self::compose`] has to guard against cannot
+    /// arise here. A row no artifact claims carries [`ROW_COLUMN_HOLE`], which is what a point with
+    /// no value for the column has.
+    pub fn from_labels(ordinals: u32, labels: &[u32]) -> Self {
+        let bytes = pack_label_column(ordinals, labels);
+        Self::over(Pack::Label(
+            LabelColumnPack::from_bytes(bytes)
+                .expect("a column this crate just packed frames by construction"),
+        ))
+    }
+
+    /// This column with `tail` attached — the rows above its base that a fold has not yet absorbed.
+    ///
+    /// **The base is shared, not copied.** A predicate level's base is valid for a whole prefix and
+    /// its tail moves at every flush, so the flush pays one walk of the tail rather than a second
+    /// copy of four bytes a row.
+    ///
+    /// ⊘ **The label form only.** A list column's tail would be an offset table continuing the
+    /// base's, and no predicate produces one — the two row-major forms a *stored* membership takes
+    /// are written whole by the fold and have no live half.
+    pub fn with_tail(&self, tail: TailLabels) -> Self {
+        let mut declared = self.base_declared.as_ref().clone();
+        for label in &tail.labels {
+            if *label != ROW_COLUMN_HOLE {
+                if let Some(count) = declared.get_mut(*label as usize) {
+                    *count += 1;
+                }
+            }
+        }
+        RowColumn {
+            pack: Arc::clone(&self.pack),
+            declared,
+            base_declared: Arc::clone(&self.base_declared),
+            base_extents: Arc::clone(&self.base_extents),
+            tail: Some(tail),
+            // A predicate base is never amended — `bring_forward` and `extend_flushed` take a
+            // stored level only — so there is no amendment to carry, and `declared` above counts
+            // none. Carrying one here would understate the proportional criterion's denominator.
+            added: None,
+            members: self.members.clone(),
+            // The tail is above the base, so the base labels are the base column's.
+            identity: self.identity,
+            steps: self.steps.clone(),
+        }
+    }
+
+    /// **Add `pairs` at the rows they name** — what a growth, a publication or a flush writes into
+    /// a level whose column is already built.
+    ///
+    /// `pairs` is `(row, ordinal)` in any order, repeats allowed. A pair the column already carries
+    /// is dropped rather than counted twice. The cost is the batch and not what has accumulated:
+    /// the batch is sorted on its own, merged into the amendment already held
+    /// ([`Added::merge`]), and moves [`Self::declared`] by one per pair added. The pack is neither
+    /// read whole, copied nor rewritten: it is shared, exactly as [`Self::with_tail`] shares it.
+    ///
+    /// **`false` where the form cannot express the result**, and the column is then as it was —
+    /// the label column, and a row that would come to carry two artifacts, whether the first claim
+    /// is in the pack, in an earlier amendment or elsewhere in this batch. That is the double claim
+    /// the module doc forbids: the memberships have stopped partitioning, so the layout has
+    /// stopped being true, and the caller's answer is the artifact-major route, which answers
+    /// identically and says so. A list column has no such case.
+    ///
+    /// **Recomposing instead is what this replaces.** At rung 3's `mesh/descriptors` — 30,217
+    /// artifacts over 1.66×10⁹ entries — composing the list column again cost ~100 s on the
+    /// executor thread, where it blocks every ingest and every deny, for one entity joining three
+    /// artifacts (`2026-09-03-post-flush-artifact-frames.md`).
+    pub fn amend(&mut self, pairs: &[(u32, u32)], row_count: u32) -> bool {
+        self.amend_kept(pairs, row_count).is_some()
+    }
+
+    /// [`Self::amend`], answering with the pairs it added, ascending, or `None` where it refused.
+    pub fn amend_kept(&mut self, pairs: &[(u32, u32)], row_count: u32) -> Option<Vec<(u32, u32)>> {
+        let label_form = matches!(*self.pack, Pack::Label(_));
+        let mut batch: Vec<(u32, u32)> = pairs.to_vec();
+        batch.sort_unstable();
+        batch.dedup();
+        // What the column does not yet carry, in batch order. Nothing is written until the whole
+        // batch has been read, so a refusal leaves the column as it was.
+        let mut kept: Vec<(u32, u32)> = Vec::with_capacity(batch.len());
+        for (row, ordinal) in batch {
+            let mut carried = false;
+            let mut occupied = false;
+            self.for_each_label(row, |held| {
+                occupied = true;
+                carried |= held == ordinal;
+            });
+            if carried {
+                continue;
+            }
+            // `kept` is ascending by row, so a second claim inside the batch is the pair before.
+            if label_form && (occupied || kept.last().is_some_and(|(r, _)| *r == row)) {
+                return None;
+            }
+            kept.push((row, ordinal));
+        }
+        let added = self.added.get_or_insert_with(Added::default);
+        added.row_end = added.row_end.max(row_count);
+        if let Some((last, _)) = kept.last() {
+            added.row_end = added.row_end.max(last.saturating_add(1));
+        }
+        // **A publication adds ordinals the pack never had**, and `declared` is what [`Self::len`]
+        // answers from — so the column grows to cover them or every reader sized by that length
+        // would index past its own count.
+        if let Some(highest) = kept.iter().map(|(_, ordinal)| *ordinal as usize + 1).max() {
+            if self.declared.len() < highest {
+                self.declared.resize(highest, 0);
+            }
+        }
+        for (row, ordinal) in &kept {
+            self.declared[*ordinal as usize] += 1;
+            added.rows.add(*row);
+        }
+        added.rows.run_optimize();
+        if let Some(members) = &mut self.members {
+            members.grow(&kept);
+        }
+        added.merge(kept.clone());
+        Some(kept)
+    }
+
+    /// Record that the level moved from version `from` to `to`, adding `pairs` — what an amendment
+    /// kept — of which only those below the base are steps' business. Consecutive moves that
+    /// added nothing below the base are held as one.
+    pub fn record_step(&mut self, from: u64, to: u64, pairs: &[(u32, u32)]) {
+        let base_rows = self.base_rows();
+        let below: Vec<(u32, u32)> = pairs
+            .iter()
+            .copied()
+            .filter(|(row, _)| *row < base_rows)
+            .collect();
+        if let Some(last) = self.steps.last_mut() {
+            if below.is_empty() && last.pairs.is_empty() && last.to == from {
+                last.to = to;
+                return;
+            }
+        }
+        self.steps.push(GrowthStep {
+            from,
+            to,
+            pairs: below.into(),
+        });
+    }
+
+    /// The base labels added between level versions `from` and `to`, step by step, or `None` where
+    /// this column's steps do not run from the one to the other. A step that added labels is
+    /// taken whole or not at all; one that added none may be entered or left part of the way.
+    pub fn steps_between(&self, from: u64, to: u64) -> Option<Vec<&GrowthStep>> {
+        let mut at = from;
+        let mut out = Vec::new();
+        for step in &self.steps {
+            if at >= to {
+                break;
+            }
+            if step.to <= at {
+                continue;
+            }
+            if step.from > at {
+                return None;
+            }
+            if step.pairs.is_empty() {
+                at = step.to.min(to);
+                continue;
+            }
+            if step.from != at || step.to > to {
+                return None;
+            }
+            out.push(step);
+            at = step.to;
+        }
+        (at == to).then_some(out)
+    }
+
+    /// See [`Self::identity`]'s field.
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// This column under an identity of its own: for a copy that will be amended apart from the
+    /// column it was copied from.
+    pub fn renewed(mut self) -> Self {
+        self.identity = next_identity();
+        self.steps.clear();
+        self
+    }
+
+    /// **Give up every label in `lo..hi` and take `pairs` in their place** — what a row-space merge
+    /// does to a level's column: the rows inside the merged span name other entities afterwards,
+    /// so the labels there are dropped and the same memberships are labelled again at the rows
+    /// they now hold. `pairs` is the renumbered span's `(row, ordinal)` in any order, as
+    /// [`Self::amend`] takes them.
+    ///
+    /// **Only the amendment can hold a label inside the span**, and that is what makes this an
+    /// edit rather than a composition: the pack covers the base rows alone
+    /// ([`Self::compose_over_base`]), a merge never consumes the base segment, and a live tail
+    /// belongs to an attribute predicate whose column is composed again at every geometry move
+    /// and is never rebased. So the span's labels are drained from the amendment in one move, the
+    /// counts go down by what was drained, and the new pairs enter through `amend`. A merge
+    /// preserves the row count, so `row_count` is what it was.
+    ///
+    /// `false` on [`Self::amend`]'s terms — the label form and a row that would carry two
+    /// artifacts. The span's old labels are already gone by then, so the caller does what it does
+    /// for a refused amendment: the level is served artifact-major from here on, and every answer
+    /// is unchanged.
+    pub fn rebase(&mut self, lo: u32, hi: u32, pairs: &[(u32, u32)], row_count: u32) -> bool {
+        debug_assert!(
+            lo >= self.base_rows(),
+            "a merge's span begins inside the base rows, which a merge never consumes"
+        );
+        if let Some(added) = &mut self.added {
+            for (_, ordinal) in added.drain_span(lo, hi) {
+                if let Some(count) = self.declared.get_mut(ordinal as usize) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
+        self.amend(pairs, row_count)
+    }
+
+    /// Which form this is.
+    pub fn layout(&self) -> ServingLayout {
+        match *self.pack {
+            Pack::Label(_) => ServingLayout::RowMajorLabel,
+            Pack::List(_) => ServingLayout::RowMajorList,
+        }
+    }
+
+    /// How many ordinals this column covers, holes included.
+    pub fn len(&self) -> usize {
+        self.declared.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.declared.is_empty()
+    }
+
+    /// The row space this column was addressed in — the base, plus the tail where it has one.
+    pub fn row_count(&self) -> u32 {
+        let base = match &*self.pack {
+            Pack::Label(pack) => pack.rows(),
+            Pack::List(pack) => pack.rows(),
+        };
+        let with_tail = match &self.tail {
+            Some(tail) => tail.row_end().max(base),
+            None => base,
+        };
+        // **And the amendment**, which may name rows above both: a flush publishes rows the pack
+        // never covered and there is no tail on a list column to hold them.
+        match &self.added {
+            Some(added) => added.row_end.max(with_tail),
+            None => with_tail,
+        }
+    }
+
+    /// The base's row count alone — where the durable half ends and the live one begins.
+    pub fn base_rows(&self) -> u32 {
+        match &*self.pack {
+            Pack::Label(pack) => pack.rows(),
+            Pack::List(pack) => pack.rows(),
+        }
+    }
+
+    /// The artifact's **unmasked** membership size in this view's row space — the proportional
+    /// criterion's denominator on a row-major level.
+    ///
+    /// Zero for a hole and for a live artifact whose membership projects to nothing, exactly as the
+    /// row form's cardinality is: the two are told apart by the records, never here.
+    pub fn declared_size(&self, ordinal: u32) -> u64 {
+        self.declared
+            .get(ordinal as usize)
+            .copied()
+            .map(u64::from)
+            .unwrap_or(0)
+    }
+
+    /// **Candidacy: one scan of `viewport ∩ M_auth`, marking labels.**
+    ///
+    /// Every ordinal returned has a member the viewer can see inside the viewport — which is
+    /// *exactly* the question the artifact-major route reaches through the tile index's walk and a
+    /// masked probe per candidate. There is no separate probe here because the scan already asked
+    /// it: a row in `here` is visible by construction, so the artifact it labels has a visible
+    /// member in view.
+    ///
+    /// `here` must come from the composed mask and from nothing else — see
+    /// [`MaskedSet::visible_rows`], which is the only way to obtain one.
+    ///
+    /// **Ascending**, which is what the cut downstream is entitled to.
+    ///
+    /// A `Vec<bool>` over the level's ordinals rather than adding into the bitmap as the scan goes:
+    /// a scattered layer's rows hit the same handful of ordinals over and over, and a set insert per
+    /// row is the cost the marking array exists to remove. It is one byte per artifact for the
+    /// length of the call, so a scan of rows fewer than the level's artifacts by
+    /// [`SPARSE_MARKS`] lists its hits instead ([`Self::candidates_cost`]).
+    ///
+    /// Where the viewport covers the whole mask this is not called: the level's masked-count
+    /// histogram already holds the answer, and [`crate::artifacts::ArtifactRows::candidacy`]
+    /// carries the argument. What reaches here is a viewport narrower than the mask, and a filtered
+    /// request's narrower set again ([`crate::artifacts::ArtifactRows::matched`]).
+    pub fn candidates(&self, here: &Bitmap) -> Bitmap {
+        let mut seen = Marks::new(self.len(), self.marks_sparsely(here.cardinality()));
+        let base_rows = self.base_rows();
+        if let (Some(first), Some(last)) = (here.minimum(), here.maximum()) {
+            self.will_need_scattered(here, first, u64::from(last) + 1, &[]);
+        }
+        match &*self.pack {
+            Pack::Label(pack) => {
+                for_each_row(here, |row| {
+                    // **The tail answers for the rows above the base**, which is what makes a
+                    // point ingested since the last fold a candidate on the next request: its row
+                    // is above the base, so the packed column does not label it and the live half
+                    // does.
+                    let label = if row < base_rows {
+                        pack.label(row as usize)
+                    } else {
+                        self.tail.as_ref().map_or(ROW_COLUMN_HOLE, |t| t.label(row))
+                    };
+                    if label != ROW_COLUMN_HOLE {
+                        seen.mark(label);
+                    }
+                });
+            }
+            Pack::List(pack) => {
+                for_each_row(here, |row| {
+                    if row >= base_rows {
+                        return;
+                    }
+                    for ordinal in pack.list(row as usize) {
+                        seen.mark(ordinal);
+                    }
+                });
+            }
+        }
+        // **The amendment, as a second pass over the rows it names that are in view** — never per
+        // row of `here`, which is the scan this layout exists to keep at one pass. `and` is
+        // O(containers touched), so a column nothing has amended pays one empty intersection.
+        if let Some(added) = &self.added {
+            for row in added.rows.and(here).iter() {
+                for (_, ordinal) in added.at(row) {
+                    seen.mark(*ordinal);
+                }
+            }
+        }
+        seen.into_bitmap()
+    }
+
+    /// Whether a scan of `rows` rows lists its hits rather than marking a byte per artifact.
+    fn marks_sparsely(&self, rows: u64) -> bool {
+        rows.saturating_mul(SPARSE_MARKS) < self.len() as u64
+    }
+
+    /// What [`Self::candidates`] over `rows` rows costs, in rows read: the rows, and where it marks
+    /// a byte per artifact, that marking too.
+    pub fn candidates_cost(&self, rows: u64) -> u64 {
+        match self.marks_sparsely(rows) {
+            true => rows,
+            false => rows + self.len() as u64 / MARKS_PER_ROW,
+        }
+    }
+
+    /// Every artifact of this level that labels `row`: one for the label form, any number for the
+    /// list form, none at a hole and — for a list column, which has no live tail — none above the
+    /// base. The per-point membership column reads a served point's leaf here
+    /// (`client-components.md` §5.10); `row` is one the caller already gathered, so this discloses
+    /// nothing the walk up to a served ancestor does not then bound.
+    pub fn for_each_label(&self, row: u32, mut visit: impl FnMut(u32)) {
+        let base_rows = self.base_rows();
+        match &*self.pack {
+            Pack::Label(pack) => {
+                let label = if row < base_rows {
+                    pack.label(row as usize)
+                } else {
+                    self.tail.as_ref().map_or(ROW_COLUMN_HOLE, |t| t.label(row))
+                };
+                if label != ROW_COLUMN_HOLE {
+                    visit(label);
+                }
+            }
+            Pack::List(pack) => {
+                if row < base_rows {
+                    for ordinal in pack.list(row as usize) {
+                        visit(ordinal);
+                    }
+                }
+            }
+        }
+        // **And whatever a write added at this row** ([`Self::added`]). Asked of a bitmap first, so
+        // a column nothing has amended pays one `contains` and a column that has pays a binary
+        // search only at the rows it names — this is on the histogram's per-row walk.
+        if let Some(added) = &self.added {
+            if added.rows.contains(row) {
+                for (_, ordinal) in added.at(row) {
+                    visit(*ordinal);
+                }
+            }
+        }
+    }
+
+
+    /// **The artifact-major bitmaps: the members written beside this column**, one per ordinal it
+    /// covers, a hole and an artifact no row labels both empty. Telling the two apart is the
+    /// caller's job, from the records, as it is on the projecting route.
+    ///
+    /// **The base alone**, which is what [`RowSpace::project_base`] produces and so what a
+    /// projected form holds: `None` where a tail or an amendment is attached, so a caller is never
+    /// handed a form that stops short of rows the live half labels, and `None` on a column that
+    /// carries no members ([`Self::open_labels`], a predicate's).
+    pub fn transpose(&self) -> Option<Vec<Bitmap>> {
+        if self.tail.is_some() || self.added.is_some() {
+            return None;
+        }
+        self.members.as_ref()?.base_bitmaps(self.len())
+    }
+
+    /// The masked count of every artifact of this level: how many rows of the composed mask
+    /// carry its label.
+    ///
+    /// Taken over the whole mask and not the viewport, so the number beside an artifact does not
+    /// move as a viewer pans, and two boxes cannot be differenced for the members between them.
+    /// The mask carries no filter, so an artifact's existence criterion cannot move with one.
+    pub fn histogram(&self, mask: &impl WholeMask) -> Vec<u32> {
+        self.histogram_over(mask.visible_all())
+    }
+
+    /// The same count over a row set the caller already holds. Browse's filtered count is the one
+    /// caller that passes anything but the composed mask, and it passes the mask narrowed by a
+    /// filter.
+    pub fn histogram_over(&self, visible: &Bitmap) -> Vec<u32> {
+        self.accumulate(visible, None, &|| true)
+            .expect("a walk that is never stopped answers")
+            .counts
+    }
+
+    /// One pass over the rows of `visible`, folding up every artifact's count and, given
+    /// `places`, the position sum and bounding box of its placed rows.
+    ///
+    /// A level served from its column alone has no per-artifact membership, and taking one
+    /// artifact's rows out of the column costs every visible row inside its extent, which for a
+    /// scattered artifact is the whole mask. This pass answers for every artifact of the level at
+    /// once.
+    ///
+    /// The row space is cut into chunks of [`CHUNK_ROWS`], walked in parallel on the pool the
+    /// caller installs. Each chunk reads the mask as runs of consecutive rows, and each run reads
+    /// its labels and positions as slices. Every row lands in one chunk and the merge adds and
+    /// takes minima and maxima, so the answer does not depend on how the pool schedules them.
+    ///
+    /// Each worker holds one accumulator for the whole pass: 4 B an ordinal for the counts, or
+    /// 64 B with the geometry, allocated zeroed so that only the pages of the ordinals it meets
+    /// are written, and a reserve for each ordinal it offers a row to. A pass holds at most the
+    /// pool's width of them, and merges them an ordinal at a time over the pool.
+    ///
+    /// `before_chunk` is called before each chunk is walked, and may block. Once it returns
+    /// `false` no further chunk is walked and the pass answers `None`.
+    pub fn accumulate(
+        &self,
+        visible: &Bitmap,
+        places: Option<&[Placement<'_>]>,
+        before_chunk: &(dyn Fn() -> bool + Sync),
+    ) -> Option<LevelAccumulation> {
+        self.accumulate_in_chunks(visible, u32::MAX, places, false, CHUNK_ROWS, before_chunk)
+    }
+
+    /// [`Self::accumulate`] over the rows of `visible` below `below` alone, keeping each artifact's
+    /// [`RESERVE`] most extreme rows per side of its box where `reserve` asks and `places` are
+    /// given.
+    pub fn accumulate_below(
+        &self,
+        visible: &Bitmap,
+        below: u32,
+        places: Option<&[Placement<'_>]>,
+        reserve: bool,
+        before_chunk: &(dyn Fn() -> bool + Sync),
+    ) -> Option<LevelAccumulation> {
+        self.accumulate_in_chunks(visible, below, places, reserve, CHUNK_ROWS, before_chunk)
+    }
+
+    fn accumulate_in_chunks(
+        &self,
+        visible: &Bitmap,
+        below: u32,
+        places: Option<&[Placement<'_>]>,
+        reserve: bool,
+        chunk_rows: u32,
+        before_chunk: &(dyn Fn() -> bool + Sync),
+    ) -> Option<LevelAccumulation> {
+        use rayon::prelude::*;
+        use std::sync::{Mutex, PoisonError};
+
+        let ordinals = self.len();
+        let geometry = places.is_some();
+        let last = match below.checked_sub(1) {
+            Some(ceiling) => visible.maximum().map(|last| last.min(ceiling)),
+            None => None,
+        };
+        let (Some(first), Some(last)) = (visible.minimum().filter(|&f| f < below), last) else {
+            return Some(LevelAccumulation::empty(ordinals, geometry, reserve));
+        };
+        let places = places.unwrap_or(&[]);
+        // The amendment's visible rows, intersected once rather than asked of every row.
+        let added = self.added.as_ref().map(|added| (added, added.rows.and(visible)));
+        let chunk = u64::from(chunk_rows.max(1));
+        let held: Mutex<Vec<Tallies>> = Mutex::new(Vec::new());
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        (u64::from(first) / chunk..u64::from(last) / chunk + 1)
+            .into_par_iter()
+            .for_each(|c| {
+                let (lo, end) = (c * chunk, ((c + 1) * chunk).min(u64::from(below)));
+                let lo = u32::try_from(lo).expect("a chunk starts at or below the mask's last row");
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) || !before_chunk() {
+                    stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                let mut acc = held
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .pop()
+                    .unwrap_or_else(|| Tallies::new(ordinals, geometry, reserve));
+                self.will_need_scattered(visible, lo, end, places);
+                self.walk_chunk(visible, lo, end, places, &mut acc);
+                if let Some((added, rows)) = &added {
+                    for_each_row_in(rows, lo, end, |row| {
+                        let position = place(places, row);
+                        for (_, ordinal) in added.at(row) {
+                            acc.add(row, *ordinal, position);
+                        }
+                    });
+                }
+                held.lock().unwrap_or_else(PoisonError::into_inner).push(acc);
+            });
+        if stopped.into_inner() {
+            return None;
+        }
+        let workers = held.into_inner().unwrap_or_else(PoisonError::into_inner);
+        Some(LevelAccumulation::merged(&workers, ordinals, geometry, geometry && reserve))
+    }
+
+    /// Ask for the pages of a label column and of `places`' positions under the rows of `visible`
+    /// in `[lo, end)`, where those rows are scattered, before they are read. Read-ahead around
+    /// each fault is sized for a sequential reader, and over scattered rows it reads many times
+    /// the pages they are on.
+    fn will_need_scattered(&self, visible: &Bitmap, lo: u32, end: u64, places: &[Placement<'_>]) {
+        let hi = u32::try_from(end).unwrap_or(u32::MAX);
+        let rows = visible.range_cardinality(lo..hi);
+        if rows == 0 || rows * SCATTERED_ROWS_APART > end - u64::from(lo) {
+            return;
+        }
+        let labels = match &*self.pack {
+            Pack::Label(pack) => Some((pack.labels(), usize::from(pack.width()), pack.rows())),
+            Pack::List(_) => None,
+        };
+        let page = !(mosaica_store::bands::page_size() - 1);
+        let mut pages = Vec::new();
+        // The last page asked for in each of the three columns, so each page is listed once.
+        let mut last = [usize::MAX; 3];
+        let mut ask = |column: usize, address: usize| {
+            if last[column] != address & page {
+                last[column] = address & page;
+                pages.push(address);
+            }
+        };
+        let mut at = 0usize;
+        for_each_row_in(visible, lo, end, |row| {
+            if let Some((labels, width, held)) = labels {
+                if row < held {
+                    ask(0, labels.as_ptr() as usize + row as usize * width);
+                }
+            }
+            while places.get(at).is_some_and(|p| p.end() <= u64::from(row)) {
+                at += 1;
+            }
+            if let Some(p) = places.get(at).filter(|p| p.row_base <= row) {
+                let (morton, residual) = p.columns();
+                let local = (row - p.row_base) as usize;
+                ask(1, mosaica_store::bands::element(morton, local));
+                ask(2, mosaica_store::bands::element(residual, local));
+            }
+        });
+        mosaica_store::bands::will_need(&mut pages);
+    }
+
+    /// The pack's and the tail's labels over the visible rows of `[lo, end)`, a run at a time.
+    fn walk_chunk(
+        &self,
+        visible: &Bitmap,
+        lo: u32,
+        end: u64,
+        places: &[Placement<'_>],
+        acc: &mut Tallies,
+    ) {
+        let mut it = visible.iter();
+        it.reset_at_or_after(lo);
+        let mut block = [0u32; ROW_BLOCK];
+        // The first placement that ends past the rows walked so far. Rows ascend, so it only moves
+        // forward.
+        let mut at = 0usize;
+        loop {
+            let n = it.next_many(&mut block);
+            if n == 0 {
+                return;
+            }
+            let mut i = 0;
+            while i < n {
+                let start = u64::from(block[i]);
+                if start >= end {
+                    return;
+                }
+                let mut j = i + 1;
+                while j < n && block[j] == block[j - 1] + 1 && u64::from(block[j]) < end {
+                    j += 1;
+                }
+                let mut row = start;
+                let run_end = start + (j - i) as u64;
+                while row < run_end {
+                    while places.get(at).is_some_and(|p| p.end() <= row) {
+                        at += 1;
+                    }
+                    let (piece_end, here) = match places.get(at) {
+                        Some(p) if u64::from(p.row_base) <= row => (run_end.min(p.end()), Some(p)),
+                        Some(p) => (run_end.min(u64::from(p.row_base)), None),
+                        None => (run_end, None),
+                    };
+                    self.labels_in(row, piece_end, |r, ordinal| {
+                        acc.add(r, ordinal, here.map(|p| p.position(r)));
+                    });
+                    row = piece_end;
+                }
+                i = j;
+            }
+        }
+    }
+
+    /// Every label the pack and the tail give the rows of `[from, to)`, in row order. The
+    /// amendment's labels are not included: [`Self::accumulate`] reads them from its own rows.
+    fn labels_in(&self, from: u64, to: u64, mut visit: impl FnMut(u32, u32)) {
+        let base_rows = u64::from(self.base_rows());
+        let below = to.min(base_rows);
+        if from < below {
+            match &*self.pack {
+                Pack::Label(pack) => pack.for_each_row_label(from as usize, below as usize, &mut visit),
+                Pack::List(pack) => pack.for_each_row_value(from as usize, below as usize, &mut visit),
+            }
+        }
+        // A list column has no tail: rows above its base are labelled by the amendment alone.
+        let (Pack::Label(_), Some(tail)) = (&*self.pack, &self.tail) else {
+            return;
+        };
+        let lo = from.max(base_rows).max(u64::from(tail.row_base));
+        let hi = to.min(u64::from(tail.row_end()));
+        if lo >= hi {
+            return;
+        }
+        let skip = (lo - u64::from(tail.row_base)) as usize;
+        for (row, &label) in (lo..hi).zip(&tail.labels[skip..]) {
+            if label != ROW_COLUMN_HOLE {
+                visit(row as u32, label);
+            }
+        }
+    }
+
+    /// The durable bytes — what the fold writes into the prefix.
+    ///
+    /// **The base alone**, and that is the same rule the layout rests on: a fold renumbers the base
+    /// row space and publishes a new prefix, so the tail it would have written is exactly the part
+    /// that fold has just absorbed.
+    pub fn as_bytes(&self) -> &[u8] {
+        match &*self.pack {
+            Pack::Label(pack) => pack.as_bytes(),
+            Pack::List(pack) => pack.as_bytes(),
+        }
+    }
+
+    /// One pass over the packed column, folding up the per-artifact declared sizes.
+    fn over(pack: Pack) -> Self {
+        let ordinals = match &pack {
+            Pack::Label(pack) => pack.ordinals(),
+            Pack::List(pack) => pack.ordinals(),
+        };
+        let mut declared = vec![0u32; ordinals as usize];
+        // **The extents come off the same walk**, so a level served from the column alone pays no
+        // second pass for them: `u32::MAX, 0` is the empty accumulator and reads back as the
+        // *empty* sentinel, which is what an ordinal no row labels is.
+        let mut extents = vec![(u32::MAX, 0u32); ordinals as usize];
+        let mut widen = |ordinal: u32, row: usize| {
+            let e = &mut extents[ordinal as usize];
+            let row = row as u32;
+            e.0 = e.0.min(row);
+            e.1 = e.1.max(row);
+        };
+        match &pack {
+            Pack::Label(pack) => {
+                for row in 0..pack.rows() as usize {
+                    let label = pack.label(row);
+                    if label != ROW_COLUMN_HOLE {
+                        declared[label as usize] += 1;
+                        widen(label, row);
+                    }
+                }
+            }
+            Pack::List(pack) => {
+                for row in 0..pack.rows() as usize {
+                    for ordinal in pack.list(row) {
+                        declared[ordinal as usize] += 1;
+                        widen(ordinal, row);
+                    }
+                }
+            }
+        }
+        RowColumn {
+            pack: Arc::new(pack),
+            base_declared: Arc::new(declared.clone()),
+            base_extents: Arc::new(extents),
+            declared,
+            tail: None,
+            added: None,
+            members: None,
+            identity: next_identity(),
+            steps: Vec::new(),
+        }
+    }
+
+    /// **Each artifact's lowest and highest row, from the column's own bytes** — the extents a
+    /// level served from the column alone is placed in the tile index by.
+    ///
+    /// `live` marks the ordinals the level has a record for, parallel to the level's ordinals: the
+    /// column cannot tell a **hole** from an artifact whose membership projects to nothing, both
+    /// labelling no row, and the two are different things (`crate::tile_index::Extent`). An ordinal
+    /// `live` does not mark is a hole; one it marks that no row labels is empty.
+    ///
+    /// The base half is folded at construction ([`Self::base_extents`]); the tail and the labels a
+    /// write added are walked here, and both are bounded by what has arrived since the last fold
+    /// rather than by the row space.
+    pub fn extents(&self, live: &[bool]) -> Vec<(u32, u32)> {
+        let mut out: Vec<(u32, u32)> = self
+            .base_extents
+            .iter()
+            .enumerate()
+            .map(|(ordinal, &(lo, hi))| {
+                match live.get(ordinal) {
+                    Some(true) | None if lo <= hi => (lo, hi),
+                    Some(true) | None => TILE_INDEX_EMPTY,
+                    Some(false) => TILE_INDEX_HOLE,
+                }
+            })
+            .collect();
+        // An ordinal published after the base was written is live and labels no base row.
+        if let Some(later) = live.get(out.len()..) {
+            out.extend(
+                later
+                    .iter()
+                    .map(|&live| if live { TILE_INDEX_EMPTY } else { TILE_INDEX_HOLE }),
+            );
+        }
+        let mut widen = |ordinal: u32, row: u32| {
+            let Some(e) = out.get_mut(ordinal as usize) else {
+                return;
+            };
+            if *e == TILE_INDEX_HOLE {
+                return;
+            }
+            if *e == TILE_INDEX_EMPTY {
+                *e = (row, row);
+            } else {
+                e.0 = e.0.min(row);
+                e.1 = e.1.max(row);
+            }
+        };
+        if let Some(tail) = &self.tail {
+            for row in tail.row_base..tail.row_end() {
+                let label = tail.label(row);
+                if label != ROW_COLUMN_HOLE {
+                    widen(label, row);
+                }
+            }
+        }
+        if let Some(added) = &self.added {
+            for row in added.rows.iter() {
+                for (_, ordinal) in added.at(row) {
+                    widen(*ordinal, row);
+                }
+            }
+        }
+        out
+    }
+
+    /// [`Self::assemble`] fed by `(row, ordinal)` pairs — see
+    /// [`mosaica_store::derived::project_row_column_pairs`]. The two share the composition; what
+    /// differs is only how the caller has the membership to hand.
+    fn assemble_pairs(
+        ordinals: u32,
+        row_count: u32,
+        layout: ServingLayout,
+        scratch: &std::path::Path,
+        each: mosaica_store::derived::PairWalk<'_>,
+    ) -> Option<Self> {
+        let path = match mosaica_store::derived::project_row_column_pairs(
+            ordinals, row_count, layout, scratch, each,
+        ) {
+            Ok(Some(path)) => path,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "a row-major column would not be composed from the column it replaces"
+                );
+                return None;
+            }
+        };
+        let pack = match layout {
+            ServingLayout::RowMajorLabel => LabelColumnPack::open(&path).map(Pack::Label),
+            _ => ListColumnPack::open(&path).map(Pack::List),
+        };
+        let _ = std::fs::remove_file(&path);
+        match pack {
+            Ok(pack) => Self::with_members(pack, scratch),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "a row-major column this process just composed would not be read back"
+                );
+                None
+            }
+        }
+    }
+
+    /// The two builders, sharing one walk protocol: `each` calls `visit` once per live artifact with
+    /// its projected rows, and may be called more than once.
+    fn assemble(
+        ordinals: u32,
+        row_count: u32,
+        layout: ServingLayout,
+        scratch: &std::path::Path,
+        each: LevelWalk<'_>,
+    ) -> Option<Self> {
+        // **The composition writes the column into a file and this reads it back**, which is what
+        // it costs to have one implementation of the column on both sides (owner ruling,
+        // 2026-09-12; `docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.6). What the
+        // file buys is the row-sized lane it replaces: the pass held four bytes a row while it
+        // composed, and now holds one partition bucket. The bytes it reads back are the column the
+        // form was going to hold anyway.
+        let path = match mosaica_store::derived::project_row_column(
+            ordinals, row_count, layout, scratch, each,
+        ) {
+            Ok(Some(path)) => path,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "a row-major column would not be composed; the level is served artifact-major"
+                );
+                return None;
+            }
+        };
+        // **Mapped, not read into a heap vector.** The column is 4 B a row for the label form and
+        // more for the list one — 14 GB a level at rung 6 — and reading it back would put the
+        // row-sized array the composition just stopped holding straight back on the heap, on the
+        // serving side. The pack frames a mapping and an owned buffer through the same checks, so
+        // what is served is the same structure either way.
+        //
+        // **Unlinked as soon as it is mapped**: the mapping holds the bytes after the directory
+        // entry goes, and the entry is this process's scratch that nothing else reads.
+        let pack = match layout {
+            ServingLayout::RowMajorLabel => LabelColumnPack::open(&path).map(Pack::Label),
+            _ => ListColumnPack::open(&path).map(Pack::List),
+        };
+        let _ = std::fs::remove_file(&path);
+        match pack {
+            Ok(pack) => Self::with_members(pack, scratch),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "a row-major column this process just composed would not be read back; the \
+                     level is served artifact-major"
+                );
+                None
+            }
+        }
+    }
+
+    /// The column over `pack`, with the members written from its labels beside it, as the build and
+    /// the fold write them beside theirs. `None` where they could not be written or read back, an
+    /// I/O failure the caller treats as a column that did not compose.
+    fn with_members(pack: Pack, scratch: &std::path::Path) -> Option<Self> {
+        let labels = match &pack {
+            Pack::Label(pack) => mosaica_store::derived::ColumnLabels::Label(pack),
+            Pack::List(pack) => mosaica_store::derived::ColumnLabels::List(pack),
+        };
+        let opened = mosaica_store::derived::project_row_members(labels, scratch).and_then(|path| {
+            let members = mosaica_store::row_members::RowMembersPack::open(&path);
+            let _ = std::fs::remove_file(&path);
+            members
+        });
+        match opened {
+            Ok(members) => {
+                let mut column = Self::over(pack);
+                column.members = Some(crate::row_members::LevelMembers::new(members));
+                Some(column)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "a row-major column's members would not be written beside it; the column is \
+                     not composed"
+                );
+                None
+            }
+        }
+    }
+
+    /// This column's members by artifact and their coverings — see [`Self::members`]'s field.
+    pub fn members(&self) -> Option<&crate::row_members::LevelMembers> {
+        self.members.as_ref()
+    }
+
+    /// Frame a column this process just produced and read it back through the same checks a mapped
+    /// file takes — the reason [`crate::containment::ContainmentPartition`] gives: the two routes
+    /// are one reader, so a framing rule can never hold for a file and not for the form a
+    /// publication built.
+    pub fn of_bytes(bytes: Vec<u8>, layout: ServingLayout) -> Self {
+        let pack = match layout {
+            ServingLayout::RowMajorLabel => Pack::Label(
+                LabelColumnPack::from_bytes(bytes)
+                    .expect("a column this crate just packed frames by construction"),
+            ),
+            _ => Pack::List(
+                ListColumnPack::from_bytes(bytes)
+                    .expect("a column this crate just packed frames by construction"),
+            ),
+        };
+        Self::over(pack)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compose::MaskedSet;
+
+    /// The scratch a composition partitions through. One directory for the whole test binary: a
+    /// composition names its own files and removes them, so they cannot collide.
+    fn scratch() -> &'static std::path::Path {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| tempfile::tempdir().expect("a scratch directory"))
+            .path()
+    }
+
+    fn composed(
+        membership: &MembershipRows,
+        row_count: u32,
+        layout: ServingLayout,
+    ) -> Option<RowColumn> {
+        RowColumn::compose(membership, row_count, layout, scratch())
+    }
+
+    fn composed_over_base(
+        membership: &MembershipRows,
+        base_rows: u32,
+        row_count: u32,
+        layout: ServingLayout,
+    ) -> Option<RowColumn> {
+        RowColumn::compose_over_base(membership, base_rows, row_count, layout, scratch())
+    }
+
+    fn rows_of(sets: &[Option<&[u32]>]) -> MembershipRows {
+        MembershipRows::of_rows(
+            sets.iter()
+                .map(|set| set.map(|s| s.iter().copied().collect::<Bitmap>()))
+                .collect(),
+        )
+    }
+
+    fn bitmap(values: &[u32]) -> Bitmap {
+        values.iter().copied().collect()
+    }
+
+    /// **The label form answers the three questions the route asks of it**, and the hole is a real
+    /// state: a row no artifact claims contributes to nobody's count.
+    #[test]
+    fn a_label_column_answers_candidacy_counts_and_sizes() {
+        // Ordinal 0 holds rows 0..3, ordinal 1 holds 5 and 6, ordinal 2 is a hole, ordinal 3 is
+        // live with an empty projection. Rows 4, 7, 8, 9 belong to nobody.
+        let membership = rows_of(&[Some(&[0, 1, 2]), Some(&[5, 6]), None, Some(&[])]);
+        let column =
+            composed(&membership, 10, ServingLayout::RowMajorLabel).expect("partitions");
+
+        assert_eq!(column.layout(), ServingLayout::RowMajorLabel);
+        assert_eq!(column.len(), 4);
+        assert_eq!(column.row_count(), 10);
+        assert_eq!(column.declared_size(0), 3);
+        assert_eq!(column.declared_size(1), 2);
+        assert_eq!(column.declared_size(2), 0, "a hole has no rows");
+        assert_eq!(column.declared_size(3), 0, "and neither has an empty one");
+        assert_eq!(column.declared_size(99), 0, "past the level is not a panic");
+
+        // Candidacy over a viewport∩mask holding row 1 and row 6.
+        assert_eq!(
+            column
+                .candidates(&bitmap(&[1, 6]))
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        // A viewport holding only unclaimed rows returns nothing.
+        assert!(column.candidates(&bitmap(&[4, 8])).is_empty());
+
+        // The histogram is over the whole mask, not the viewport.
+        let mask = bitmap(&[0, 2, 5, 9]);
+        assert_eq!(column.histogram(&mask), vec![2, 1, 0, 0]);
+    }
+
+    /// The list form is the same three answers where a row belongs to several artifacts — which is
+    /// exactly the state the label form refuses to represent.
+    #[test]
+    fn a_list_column_carries_a_row_that_several_artifacts_claim() {
+        let membership = rows_of(&[Some(&[0, 1]), Some(&[1, 2]), Some(&[])]);
+        let column =
+            composed(&membership, 4, ServingLayout::RowMajorList).expect("always builds");
+        assert_eq!(column.layout(), ServingLayout::RowMajorList);
+        assert_eq!(column.declared_size(0), 2);
+        assert_eq!(column.declared_size(1), 2);
+        assert_eq!(column.declared_size(2), 0);
+
+        // Row 1 is claimed by both, so a viewport holding only it makes both candidates.
+        assert_eq!(
+            column.candidates(&bitmap(&[1])).iter().collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(column.histogram(&bitmap(&[0, 1, 2, 3])), vec![2, 2, 0]);
+    }
+
+    /// **A level that does not partition is refused a label column**, rather than served one whose
+    /// contested rows went to whichever artifact was walked last. The list form takes the same
+    /// memberships.
+    #[test]
+    fn a_double_claim_declines_the_label_form_and_not_the_list_form() {
+        let overlapping = rows_of(&[Some(&[0, 1]), Some(&[1, 2])]);
+        assert!(composed(&overlapping, 4, ServingLayout::RowMajorLabel).is_none());
+        assert!(composed(&overlapping, 4, ServingLayout::RowMajorList).is_some());
+        // And artifact-major has no column at all, in either builder.
+        assert!(composed(&overlapping, 4, ServingLayout::ArtifactMajor).is_none());
+    }
+
+    /// **A composed column and a mapped one are the same structure**, so the fold's consolidation is
+    /// a change of backing rather than a second encoder — and a file offered under the wrong tag is
+    /// a refusal rather than a misread.
+    #[test]
+    fn a_column_answers_the_same_mapped_as_composed() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (layout, name) in [
+            (ServingLayout::RowMajorLabel, "c.tslb"),
+            (ServingLayout::RowMajorList, "c.tsll"),
+        ] {
+            let membership = rows_of(&[Some(&[0, 1, 2]), None, Some(&[5, 6]), Some(&[])]);
+            let composed = composed(&membership, 8, layout).expect("builds");
+            let path = tmp.path().join(name);
+            std::fs::write(&path, composed.as_bytes()).unwrap();
+            let mapped = RowColumn::open_labels(&path, layout).unwrap();
+
+            assert_eq!(mapped.len(), composed.len());
+            assert_eq!(mapped.row_count(), composed.row_count());
+            for ordinal in 0..4u32 {
+                assert_eq!(
+                    mapped.declared_size(ordinal),
+                    composed.declared_size(ordinal)
+                );
+            }
+            let here = bitmap(&[1, 6]);
+            assert_eq!(
+                mapped.candidates(&here).iter().collect::<Vec<_>>(),
+                composed.candidates(&here).iter().collect::<Vec<_>>()
+            );
+            let mask = bitmap(&[0, 1, 5]);
+            assert_eq!(mapped.histogram(&mask), composed.histogram(&mask));
+
+            // The other tag over the same bytes: the distinct magics are what make this a refusal.
+            let other = match layout {
+                ServingLayout::RowMajorLabel => ServingLayout::RowMajorList,
+                _ => ServingLayout::RowMajorLabel,
+            };
+            assert!(RowColumn::open_labels(&path, other).is_err());
+            assert!(RowColumn::open_labels(&path, ServingLayout::ArtifactMajor).is_err());
+        }
+    }
+
+    /// **The transposed form is the membership the column was composed from**, ordinal for
+    /// ordinal — the property `ArtifactRows::build_from_column` rests on, and the reason a level
+    /// recorded row-major need not project its memberships a second time at open. Both forms, and
+    /// the fixtures carry the two states a transposition could lose: a hole and an artifact whose
+    /// projection is empty, which transpose to the same empty bitmap and are told apart by the
+    /// records rather than here.
+    #[test]
+    fn a_transposed_column_is_the_membership_it_was_composed_from() {
+        // Ordinal 2 is a hole and ordinal 3 is live with an empty projection; rows 4 and 9 belong
+        // to nobody. Disjoint, so both forms compose.
+        let partitioned = rows_of(&[Some(&[0, 1, 2]), Some(&[5, 6]), None, Some(&[])]);
+        // The same three questions where rows are claimed several times over, which is the state
+        // the label form refuses and the list form is for.
+        let overlapping = rows_of(&[Some(&[0, 1, 7]), Some(&[1, 2, 7]), None, Some(&[7])]);
+        for (membership, layout) in [
+            (&partitioned, ServingLayout::RowMajorLabel),
+            (&partitioned, ServingLayout::RowMajorList),
+            (&overlapping, ServingLayout::RowMajorList),
+        ] {
+            let column = composed(membership, 10, layout).expect("composes");
+            let transposed = column.transpose().expect("a column with no tail transposes");
+            assert_eq!(transposed.len(), column.len());
+            for ordinal in 0..transposed.len() as u32 {
+                let projected = membership.get(ordinal).cloned().unwrap_or_default();
+                let rows = &transposed[ordinal as usize];
+                assert_eq!(
+                    rows.to_vec(),
+                    projected.to_vec(),
+                    "transposed rows disagreed at ordinal {ordinal} under {layout:?}"
+                );
+                assert_eq!(
+                    column.declared_size(ordinal),
+                    rows.cardinality(),
+                    "the declared size disagreed with the transposition at ordinal {ordinal}"
+                );
+            }
+        }
+    }
+
+    /// **A column with a live tail refuses to transpose**, rather than handing back a form that
+    /// stops at the base: the rows a flush appended are labelled by the tail and by nothing in the
+    /// packed bytes, so a form built from the base alone would be narrow — the direction a row
+    /// form must never be wrong in.
+    #[test]
+    fn a_tailed_column_does_not_transpose() {
+        let membership = rows_of(&[Some(&[0, 1]), Some(&[2])]);
+        let base = composed(&membership, 4, ServingLayout::RowMajorLabel).expect("builds");
+        assert!(base.transpose().is_some());
+        let tailed = base.with_tail(TailLabels::new(4, vec![1, ROW_COLUMN_HOLE]));
+        assert!(tailed.transpose().is_none());
+    }
+
+    /// The column and the row form agree about every artifact's size and every artifact's masked
+    /// count — which is the property the whole route rests on, asserted here at the structure and
+    /// again end to end in `tests/artifact_row_major.rs`.
+    #[test]
+    fn the_column_and_the_row_form_agree_artifact_for_artifact() {
+        let sets: Vec<Vec<u32>> = (0..64u32)
+            .map(|i| ((i * 7)..(i * 7 + 7)).collect())
+            .collect();
+        let refs: Vec<Option<&[u32]>> = sets.iter().map(|s| Some(s.as_slice())).collect();
+        let membership = rows_of(&refs);
+        let row_count = 64 * 7;
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let column = composed(&membership, row_count, layout).expect("partitions");
+            let mask: Bitmap = (0..row_count).filter(|r| r % 3 == 0).collect();
+            let histogram = column.histogram(&mask);
+            for ordinal in 0..64u32 {
+                let rows = membership.get(ordinal).unwrap();
+                assert_eq!(
+                    u64::from(histogram[ordinal as usize]),
+                    mask.count_intersection(rows),
+                    "masked count disagreed at ordinal {ordinal} under {layout:?}"
+                );
+                assert_eq!(
+                    column.declared_size(ordinal),
+                    rows.cardinality(),
+                    "declared size disagreed at ordinal {ordinal} under {layout:?}"
+                );
+            }
+        }
+    }
+
+    /// Every `(row, ordinal)` the column labels, ascending — the observable an amendment changes.
+    fn every_pair(column: &RowColumn) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for row in 0..column.row_count() {
+            column.for_each_label(row, |ordinal| out.push((row, ordinal)));
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// What an amended column holds beside its pack: pairs, rows, `row_end` and the counts.
+    #[derive(Debug, PartialEq)]
+    struct Amendment {
+        pairs: Vec<(u32, u32)>,
+        rows: Vec<u32>,
+        row_end: u32,
+        declared: Vec<u32>,
+    }
+
+    fn amendment(column: &RowColumn) -> Amendment {
+        let added = column.added.as_ref().expect("the column was amended");
+        Amendment {
+            pairs: added.pairs.clone(),
+            rows: added.rows.iter().collect(),
+            row_end: added.row_end,
+            declared: column.declared.clone(),
+        }
+    }
+
+    /// **Many small amendments equal one**, on both row-major forms. The writes append above the
+    /// highest row amended so far, merge into rows below it, repeat a pair the pack carries and one
+    /// an earlier write added, name an ordinal the pack never had and, on the list form, put a
+    /// second label at rows an earlier write labelled. What is compared is the representation —
+    /// pairs, rows, `row_end` and the declared counts — and the counts are then checked against a
+    /// walk of the labels.
+    #[test]
+    fn many_small_amendments_equal_one_batch_on_both_forms() {
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let list = layout == ServingLayout::RowMajorList;
+            // Ordinal 0 holds rows 0..10, 1 holds 20..30, 2 is a hole, 3 holds 40..50; on the list
+            // form ordinal 1 also holds 45..50. Rows 10..20, 30..40 and 50..64 belong to nobody.
+            let zero: Vec<u32> = (0..10).collect();
+            let one: Vec<u32> = (20..30).chain(if list { 45..50 } else { 0..0 }).collect();
+            let three: Vec<u32> = (40..50).collect();
+            let membership = rows_of(&[
+                Some(zero.as_slice()),
+                Some(one.as_slice()),
+                None,
+                Some(three.as_slice()),
+            ]);
+            let base = composed(&membership, 64, layout).expect("composes");
+
+            let mut writes: Vec<(Vec<(u32, u32)>, u32)> = vec![
+                // A flush's rows, above everything held: an append.
+                ((64..72).map(|row| (row, 1)).collect(), 72),
+                // A growth into unclaimed base rows below the highest amended row: a merge.
+                ((12..16).map(|row| (row, 3)).collect(), 72),
+                // An append carrying a pair the pack holds and a pair the first write added.
+                (
+                    [(5, 0), (64, 1)]
+                        .into_iter()
+                        .chain((80..84).map(|row| (row, 0)))
+                        .collect(),
+                    90,
+                ),
+                // A merge, out of order and with a repeat, to an ordinal the pack never had.
+                (vec![(35, 5), (33, 5), (34, 5), (33, 5)], 90),
+            ];
+            if list {
+                // A second label at rows an earlier write labelled, and at rows the pack labels.
+                writes.push((vec![(64, 2), (66, 2), (12, 0), (25, 3)], 90));
+            }
+
+            let mut stepwise = base.clone();
+            let mut every: Vec<(u32, u32)> = Vec::new();
+            for (batch, row_count) in &writes {
+                assert!(
+                    stepwise.amend(batch, *row_count),
+                    "{layout:?}: no write here claims a row twice"
+                );
+                every.extend(batch);
+            }
+            every.reverse();
+            let mut at_once = base.clone();
+            assert!(at_once.amend(&every, 90));
+
+            assert_eq!(amendment(&stepwise), amendment(&at_once), "{layout:?}");
+            assert_eq!(every_pair(&stepwise), every_pair(&at_once), "{layout:?}");
+            assert_eq!(stepwise.row_count(), 90, "{layout:?}");
+            assert_eq!(stepwise.len(), 6, "{layout:?}: ordinal 5 widened the column");
+
+            let mut counted = vec![0u32; stepwise.len()];
+            for (_, ordinal) in every_pair(&stepwise) {
+                counted[ordinal as usize] += 1;
+            }
+            assert_eq!(stepwise.declared, counted, "{layout:?}: the counts are the labels");
+
+            let pack_only = every_pair(&base);
+            let beyond_the_pack: Vec<(u32, u32)> = every_pair(&stepwise)
+                .into_iter()
+                .filter(|pair| !pack_only.contains(pair))
+                .collect();
+            assert_eq!(
+                stepwise.added.as_ref().unwrap().pairs,
+                beyond_the_pack,
+                "{layout:?}: the amendment holds exactly what the pack does not"
+            );
+            assert_eq!(
+                stepwise.as_bytes(),
+                base.as_bytes(),
+                "{layout:?}: the pack is untouched"
+            );
+        }
+    }
+
+    /// **A column composed over the base answers as one composed whole**, on both forms: the same
+    /// pairs, counts and row count — and its pack stops at the base, every row above it being in
+    /// the amendment. Ordinal 1 straddles the base so one membership is split between the two.
+    #[test]
+    fn a_column_composed_over_the_base_answers_as_one_composed_whole() {
+        let membership = rows_of(&[
+            Some(&[0, 1, 2]),
+            Some(&[6, 7, 8, 9]),
+            None,
+            Some(&[12, 13, 15]),
+        ]);
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let whole = composed(&membership, 16, layout).expect("partitions");
+            let split =
+                composed_over_base(&membership, 8, 16, layout).expect("partitions");
+            assert_eq!(every_pair(&split), every_pair(&whole), "{layout:?}");
+            assert_eq!(split.declared, whole.declared, "{layout:?}");
+            assert_eq!(split.row_count(), 16, "{layout:?}");
+            assert_eq!(
+                split.base_rows(),
+                8,
+                "{layout:?}: the pack stops at the base"
+            );
+            assert_eq!(
+                amendment(&split).pairs,
+                vec![(8, 1), (9, 1), (12, 3), (13, 3), (15, 3)],
+                "{layout:?}: every row above the base is in the amendment"
+            );
+            let mask: Bitmap = (0..16).filter(|r| r % 2 == 1).collect();
+            assert_eq!(split.histogram(&mask), whole.histogram(&mask), "{layout:?}");
+        }
+        // Nothing above the base: no amendment at all, so the column can still transpose.
+        let base_only =
+            composed_over_base(&membership, 16, 16, ServingLayout::RowMajorList)
+                .expect("builds");
+        assert!(base_only.added.is_none());
+        assert!(base_only.transpose().is_some());
+    }
+
+    /// **A rebase gives up exactly the span's labels and takes the new ones**, equal to a column
+    /// composed over the rebased memberships: the rows in `8..16` are permuted as a merge permutes
+    /// them, and rows below and above the span stay as they were, on both forms.
+    #[test]
+    fn a_rebase_relabels_the_span_and_nothing_else() {
+        let before = rows_of(&[
+            Some(&[0, 1, 8, 9, 20]),
+            Some(&[4, 12, 13, 21]),
+            None,
+            Some(&[14, 15, 22]),
+        ]);
+        // The merge's permutation of rows 8..16: 8→13, 9→12, 12→8, 13→9, 14→15, 15→14.
+        let after = rows_of(&[
+            Some(&[0, 1, 13, 12, 20]),
+            Some(&[4, 8, 9, 21]),
+            None,
+            Some(&[15, 14, 22]),
+        ]);
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let mut column =
+                composed_over_base(&before, 8, 24, layout).expect("partitions");
+            let span: Vec<(u32, u32)> = vec![(13, 0), (12, 0), (8, 1), (9, 1), (15, 3), (14, 3)];
+            assert!(column.rebase(8, 16, &span, 24), "{layout:?}");
+            let expected = composed_over_base(&after, 8, 24, layout).expect("partitions");
+            assert_eq!(every_pair(&column), every_pair(&expected), "{layout:?}");
+            assert_eq!(column.declared, expected.declared, "{layout:?}");
+            assert_eq!(amendment(&column), amendment(&expected), "{layout:?}");
+            assert_eq!(
+                column.row_count(),
+                24,
+                "{layout:?}: a merge preserves the row count"
+            );
+        }
+    }
+
+    /// **A growth into a row an earlier growth labelled is refused on the label form.** The first
+    /// claim is in the amendment rather than in the pack and the rule is the same; the refusal
+    /// leaves the column as it was. A pair already carried is dropped rather than refused, and the
+    /// list form takes the second label.
+    #[test]
+    fn a_growth_into_a_row_already_amended_is_refused_on_the_label_form() {
+        let membership = rows_of(&[Some(&[0, 1]), Some(&[4, 5])]);
+        let mut label = composed(&membership, 8, ServingLayout::RowMajorLabel)
+            .expect("partitions");
+        assert!(label.amend(&[(2, 0), (9, 1)], 10));
+        let before = amendment(&label);
+        assert!(!label.amend(&[(9, 0)], 10), "row 9 already carries ordinal 1");
+        assert!(
+            !label.amend(&[(7, 0), (2, 1)], 10),
+            "one double claim refuses the whole batch"
+        );
+        assert!(
+            !label.amend(&[(7, 0), (7, 1)], 10),
+            "and so does a double claim inside the batch"
+        );
+        assert_eq!(amendment(&label), before, "a refused amendment changes nothing");
+        assert!(
+            label.amend(&[(9, 1), (2, 0), (0, 0)], 10),
+            "pairs already carried are dropped, not refused"
+        );
+        assert_eq!(amendment(&label), before);
+
+        let mut list = composed(&membership, 8, ServingLayout::RowMajorList)
+            .expect("always builds");
+        assert!(list.amend(&[(2, 0), (9, 1)], 10));
+        assert!(
+            list.amend(&[(9, 0), (2, 1)], 10),
+            "the list form carries a row several artifacts claim"
+        );
+        assert_eq!(list.declared, vec![4, 4]);
+        assert_eq!(
+            every_pair(&list)[2..],
+            [(2, 0), (2, 1), (4, 1), (5, 1), (9, 0), (9, 1)]
+        );
+    }
+
+    /// A deterministic mask over `rows` rows, roughly `numerator/denominator` of them set, in runs
+    /// rather than isolated rows so both shapes the block reader meets are covered.
+    fn sampled_mask(seed: u64, rows: u32, numerator: u32, denominator: u32) -> Bitmap {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut out = Bitmap::new();
+        let mut row = 0u32;
+        while row < rows {
+            let run = rng.gen_range(1..=17u32).min(rows - row);
+            if rng.gen_ratio(numerator, denominator) {
+                out.add_range(row..row + run);
+            }
+            row += run;
+        }
+        out
+    }
+
+    /// **The block reader and the row-at-a-time reader are the same walk.** `next_many` fills a
+    /// fixed block inside the bitmap library, so the two places it could differ from `iter()` are
+    /// the block boundary and the chunk bound. An off-by-one at either drops rows from a scan,
+    /// which reads as an artifact with no visible member and is served as absence.
+    #[test]
+    fn the_block_reader_walks_exactly_the_rows_the_iterator_does() {
+        // Around the block size, so a mask ending mid-block, one ending exactly on a block, and one
+        // a row past it are all walked.
+        let block = ROW_BLOCK as u32;
+        for count in [0u32, 1, block - 1, block, block + 1, 9_973] {
+            for (seed, num, den) in [(1u64, 1u32, 1u32), (2, 1, 2), (3, 1, 37)] {
+                let mask = sampled_mask(seed, count, num, den);
+                let expected: Vec<u32> = mask.iter().collect();
+                let mut seen = Vec::new();
+                for_each_row(&mask, |row| seen.push(row));
+                assert_eq!(seen, expected, "count={count} seed={seed}");
+
+                // And the chunked form, whose bound is exclusive: every cut of the row space
+                // partitions the same walk into two.
+                for cut in [0u64, 1, (count / 3) as u64, (count / 2) as u64, count as u64] {
+                    let mut walked = Vec::new();
+                    for_each_row_in(&mask, 0, cut, |row| walked.push(row));
+                    for_each_row_in(&mask, cut as u32, u64::from(u32::MAX) + 1, |row| {
+                        walked.push(row)
+                    });
+                    assert_eq!(walked, expected, "count={count} seed={seed} cut={cut}");
+                }
+            }
+        }
+    }
+
+    /// **The one pass is a row-at-a-time reading of the same labels and positions.** The pass
+    /// reads the pack, the tail and the amendment by three routes, each a run at a time, and
+    /// places a run by the segment it falls in. The reference asks [`RowColumn::for_each_label`]
+    /// of each visible row and resolves its position by scanning the segments, so a run split at
+    /// the wrong row, a segment boundary or a chunk boundary shows up as a count, a sum or a box
+    /// that differs.
+    #[test]
+    fn one_pass_is_a_row_at_a_time_reading() {
+        use rand::{Rng, SeedableRng};
+
+        let disjoint: Vec<Vec<u32>> = (0..24u32)
+            .map(|i| ((i * 41)..(i * 41 + 41)).collect())
+            .collect();
+        let overlapping: Vec<Vec<u32>> = (0..24u32)
+            .map(|i| ((i * 29)..(i * 29 + 71)).map(|r| r % 1_000).collect())
+            .collect();
+        let mut columns = Vec::new();
+        for (layout, sets) in [
+            (ServingLayout::RowMajorLabel, &disjoint),
+            (ServingLayout::RowMajorList, &overlapping),
+        ] {
+            let slices: Vec<Option<&[u32]>> = sets.iter().map(|s| Some(s.as_slice())).collect();
+            let base = composed(&rows_of(&slices), 1_000, layout).expect("builds");
+            columns.push(base.clone());
+            let mut amended = if layout == ServingLayout::RowMajorLabel {
+                let tail = TailLabels::new(
+                    1_000,
+                    (0..200u32)
+                        .map(|i| if i % 5 == 0 { ROW_COLUMN_HOLE } else { i % 24 })
+                        .collect(),
+                );
+                let tailed = base.with_tail(tail);
+                columns.push(tailed.clone());
+                tailed
+            } else {
+                base.clone()
+            };
+            let mut pairs = vec![(1_200, 3), (1_201, 7), (1_202, 3), (1_299, 23)];
+            if layout == ServingLayout::RowMajorList {
+                // A second label at base rows the pack already labels.
+                pairs.splice(0..0, [(17, 5), (18, 5), (999, 0)]);
+            }
+            assert!(amended.amend(&pairs, 1_300));
+            columns.push(amended);
+        }
+
+        // Rows 0..3 below every segment; the first segment's columns stop short of the second's
+        // base, the second's run past the third's, and the last is shorter than the row space.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(5);
+        let mut column = |len: usize| -> Vec<u32> { (0..len).map(|_| rng.gen()).collect() };
+        let segments: Vec<(u32, Vec<u32>, Vec<u32>)> = vec![
+            (3, column(380), column(390)),
+            (400, column(600), column(600)),
+            (900, column(350), column(340)),
+        ];
+        let raw: Vec<(u32, &[u32], &[u32])> = segments
+            .iter()
+            .map(|(base, m, r)| (*base, m.as_slice(), r.as_slice()))
+            .collect();
+        let places = crate::derived::Placement::of_columns(&raw);
+        let reference_position = |row: u32| -> Option<(u32, u32)> {
+            let (base, morton, residual) = raw.iter().rev().find(|(base, _, _)| row >= *base)?;
+            let at = (row - base) as usize;
+            Some(mosaica_spatial::morton::unsplit32(
+                mosaica_types::MortonCode::new(*morton.get(at)?),
+                *residual.get(at)?,
+            ))
+        };
+
+        for column in &columns {
+            let ordinals = column.len();
+            // Seed 0 is one row in a hundred, further apart than `SCATTERED_ROWS_APART`, so the
+            // larger chunks ask for their rows' pages before they are walked.
+            for (seed, num, den) in [(21u64, 1u32, 1u32), (22, 1, 2), (23, 1, 13), (0, 1, 100)] {
+                // Past the column's rows too: a mask may hold rows the column has not yet
+                // addressed, which carry no label.
+                let mask = match seed {
+                    0 => (0..column.row_count() + 70).step_by(100).collect(),
+                    _ => sampled_mask(seed, column.row_count() + 70, num, den),
+                };
+                assert!(mask.maximum().is_some_and(|last| last >= column.row_count()) || num < den);
+                // Every row, and the rows below a bound inside the column.
+                for below in [u32::MAX, column.row_count() / 2] {
+                    let mut expected = LevelAccumulation::empty(ordinals, true, true);
+                    // Each artifact's placed rows by side, every one of them, to read the reserve
+                    // off.
+                    let mut sides: Vec<[Vec<u64>; 4]> = vec![Default::default(); ordinals];
+                    for row in mask.iter().take_while(|&row| row < below) {
+                        let position = reference_position(row);
+                        column.for_each_label(row, |ordinal| {
+                            let i = ordinal as usize;
+                            let Some(count) = expected.counts.get_mut(i) else {
+                                return;
+                            };
+                            *count += 1;
+                            let Some((x, y)) = position else {
+                                return;
+                            };
+                            expected.placed[i] += 1;
+                            expected.sums[i][0] += u64::from(x);
+                            expected.sums[i][1] += u64::from(y);
+                            let b = &mut expected.boxes[i];
+                            *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+                            for (side, keys) in sides[i].iter_mut().enumerate() {
+                                keys.push(reserve_key(side, row, (x, y)));
+                            }
+                        });
+                    }
+                    let reserves: Vec<(u32, Reserve)> = sides
+                        .iter_mut()
+                        .enumerate()
+                        .filter(|(_, sides)| !sides[0].is_empty())
+                        .map(|(ordinal, sides)| {
+                            let mut reserve = [[RESERVE_EMPTY; RESERVE]; 4];
+                            for (held, keys) in reserve.iter_mut().zip(sides.iter_mut()) {
+                                keys.sort_unstable();
+                                for (slot, key) in held.iter_mut().zip(keys.iter()) {
+                                    *slot = *key;
+                                }
+                            }
+                            (ordinal as u32, reserve)
+                        })
+                        .collect();
+                    expected.reserves = Some(reserves);
+                    for chunk in [1u32, 7, 64, 333, CHUNK_ROWS] {
+                        let what = format!("{:?} seed={seed} chunk={chunk} below={below}", column.layout());
+                        let got = column
+                            .accumulate_in_chunks(&mask, below, Some(&places), true, chunk, &|| true)
+                            .unwrap();
+                        assert_eq!(got.counts, expected.counts, "{what}");
+                        assert_eq!(got.placed, expected.placed, "{what}");
+                        assert_eq!(got.sums, expected.sums, "{what}");
+                        assert_eq!(got.boxes, expected.boxes, "{what}");
+                        assert_eq!(got.reserves, expected.reserves, "{what}");
+                        let counts = column
+                            .accumulate_in_chunks(&mask, below, None, false, chunk, &|| true)
+                            .unwrap();
+                        assert_eq!(counts.counts, expected.counts, "{what}");
+                        assert!(counts.placed.is_empty() && counts.sums.is_empty());
+                    }
+                    if below != u32::MAX {
+                        continue;
+                    }
+                    assert!(
+                        num < den
+                            || expected.placed.iter().sum::<u32>()
+                                < expected.counts.iter().sum::<u32>(),
+                        "some visible rows are unplaced, or the placed count is not being tested"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A column's steps lead from one level version to another only along what it recorded**:
+    /// the base pairs of each move, in order, each taken whole.
+    #[test]
+    fn steps_lead_only_along_what_the_column_recorded() {
+        let membership = rows_of(&[Some(&[0, 1]), Some(&[4]), Some(&[])]);
+        let mut column = composed_over_base(&membership, 8, 12, ServingLayout::RowMajorList)
+            .expect("a list column takes anything");
+        let kept = column.amend_kept(&[(2, 1), (9, 2), (0, 0)], 12).expect("a list column takes it");
+        assert_eq!(kept, vec![(2, 1), (9, 2)], "a pair the column carried is not kept");
+        column.record_step(3, 4, &kept);
+        column.record_step(4, 5, &[]);
+        column.record_step(5, 6, &[]);
+        let kept = column.amend_kept(&[(5, 2)], 12).unwrap();
+        column.record_step(6, 7, &kept);
+
+        let pairs_of = |column: &RowColumn, from: u64, to: u64| -> Option<Vec<(u32, u32)>> {
+            column
+                .steps_between(from, to)
+                .map(|steps| steps.iter().flat_map(|s| s.pairs.iter().copied()).collect())
+        };
+        let pairs = |from, to| pairs_of(&column, from, to);
+        assert_eq!(pairs(3, 7), Some(vec![(2, 1), (5, 2)]), "rows above the base are not steps'");
+        assert_eq!(pairs(4, 7), Some(vec![(5, 2)]));
+        assert_eq!(pairs(5, 7), Some(vec![(5, 2)]), "4 to 6 added nothing, so 5 is inside it");
+        assert_eq!(pairs(3, 5), Some(vec![(2, 1)]));
+        assert_eq!(pairs(7, 7), Some(Vec::new()));
+        assert_eq!(pairs(2, 7), None, "nothing was recorded from 2");
+        assert_eq!(pairs(3, 8), None, "nothing reaches 8");
+        column.record_step(7, 9, &[(1, 2)]);
+        assert_eq!(pairs_of(&column, 8, 9), None, "a step that added labels is taken whole");
+        let renewed = column.clone().renewed();
+        assert_ne!(renewed.identity(), column.identity());
+        assert_eq!(renewed.steps_between(3, 7).map(|s| s.len()), None);
+    }
+
+    /// **Candidacy is the histogram's non-zero ordinals, over whatever set the two are given.**
+    ///
+    /// This is what licenses the whole-map route in
+    /// [`crate::artifacts::ArtifactRows::candidacy`]: where the viewport covers the mask the two
+    /// walks are taken over the same set, so reading the cached histogram is the scan's answer
+    /// without the scan. Asserted over both forms, over a base, a tail and an amendment, and over
+    /// masks from full to sparse — the equality has to hold at every row the two walks reach by
+    /// different code, not only at the rows a hand-written case names.
+    #[test]
+    fn candidacy_is_the_histograms_non_zero_ordinals() {
+        let disjoint: Vec<Vec<u32>> = (0..24u32)
+            .map(|i| ((i * 41)..(i * 41 + 41)).collect())
+            .collect();
+        let overlapping: Vec<Vec<u32>> = (0..24u32)
+            .map(|i| ((i * 29)..(i * 29 + 71)).map(|r| r % 1_000).collect())
+            .collect();
+
+        for (layout, sets) in [
+            (ServingLayout::RowMajorLabel, &disjoint),
+            (ServingLayout::RowMajorList, &overlapping),
+        ] {
+            let slices: Vec<Option<&[u32]>> =
+                sets.iter().map(|s| Some(s.as_slice())).collect();
+            let membership = rows_of(&slices);
+            let base = composed(&membership, 1_000, layout).expect("builds");
+
+            // Three states of one column: the base alone, the base with a flush's rows labelled by
+            // a tail, and the base with an amendment over it. All three are reachable between
+            // folds, and candidacy and the histogram read the live halves by different code.
+            let mut columns = vec![base.clone()];
+            if layout == ServingLayout::RowMajorLabel {
+                let tail = TailLabels::new(1_000, (0..200u32).map(|i| i % 24).collect());
+                columns.push(base.with_tail(tail));
+            }
+            let mut amended = base.clone();
+            assert!(amended.amend(&[(1_200, 3), (1_201, 7), (1_202, 3)], 1_300));
+            columns.push(amended);
+
+            for column in &columns {
+                for (seed, num, den) in [(11u64, 1u32, 1u32), (12, 1, 2), (13, 1, 11), (14, 1, 97)]
+                {
+                    let mask = sampled_mask(seed, column.row_count(), num, den);
+                    let scanned: Vec<u32> = column.candidates(&mask).iter().collect();
+                    let counted: Vec<u32> = column
+                        .histogram_over(&mask)
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &count)| count > 0)
+                        .map(|(ordinal, _)| ordinal as u32)
+                        .collect();
+                    assert_eq!(scanned, counted, "{layout:?} seed={seed} {num}/{den}");
+                }
+            }
+        }
+    }
+}

@@ -1,6 +1,6 @@
 import {fileURLToPath} from 'node:url';
 import {defaultClientConditions, defineConfig} from 'vite';
-import {tesseraDecorators} from './vite-plugin-decorators.js';
+import {mosaicaDecorators} from './vite-plugin-decorators.js';
 
 /**
  * The self-contained bundle: one minified ESM file with lit and deck.gl inside it and the decode
@@ -8,13 +8,13 @@ import {tesseraDecorators} from './vite-plugin-decorators.js';
  * with those as dependencies and peers.
  */
 export default defineConfig({
-  plugins: [tesseraDecorators()],
+  plugins: [mosaicaDecorators()],
   // The workspace packages resolve to their sources, so the bundle needs no prior library build.
   // The deck package's lazy loader of the aggregation layers becomes a static one here: one file
   // holds them either way, and an inlined dynamic import makes the bundler wrap every module in a
   // lazy initialiser, about 40 KB more.
   resolve: {
-    conditions: ['tessera-source', ...defaultClientConditions],
+    conditions: ['mosaica-source', ...defaultClientConditions],
     alias: [{find: /^\.\/aggregation-loader\.js$/, replacement: fileURLToPath(new URL('../deck/src/aggregation-static.ts', import.meta.url))}]
   },
   // deck.gl reads `process.env.NODE_ENV` unguarded, and library mode does not substitute it. A
@@ -26,7 +26,7 @@ export default defineConfig({
     lib: {
       entry: 'src/bundle.ts',
       formats: ['es'],
-      fileName: () => 'tessera-components.js'
+      fileName: () => 'mosaica-components.js'
     },
     // The library build sits in the same directory.
     emptyOutDir: false,

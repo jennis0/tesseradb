@@ -1,0 +1,601 @@
+//! The ingest buffer: `WalRow`s not yet in any segment.
+//!
+//! **It holds exactly the rows without geometry, and nothing else may reach it.** An ingested item
+//! is durable (WAL-fsynced) and participates in authorisation state (I1's composition rule 4) the
+//! moment it is accepted, but it has no `Permutation::row_of` entry anywhere until the flush tick
+//! gives it one — so an ack is a durability receipt, never a visibility promise, and the gap is
+//! bounded by `flush_max_age_secs` (write-path §4.1).
+//!
+//! Two rules keep membership exact, and both are enforced away from here because both are
+//! statements about the *other* state a row can be in. A row that acquired geometry leaves at its
+//! flush's publication (`Executor::publish_flush`, by consumed id) or at replay
+//! (`WritePath::reconstruct`, by the `row_of` predicate). A row that was **deleted** leaves as the
+//! deletion applies (`crate::overlay::drop_deleted`): it will never acquire geometry, so nothing
+//! else would ever remove it, and [`IngestBuffer::oldest_wal_pos`] is the WAL's reclaim bound —
+//! one such row pins its member and every member after it, for ever.
+//!
+//! Term descriptors are resolved through [`DescriptorResolver`]: the bundle dictionary first,
+//! then a deterministic in-memory extension interned in replay order for descriptors the
+//! dictionary has never seen. A term that lives only in the extension is unsatisfiable by any
+//! session's `satisfied` set (which is resolved from a credential's terms against the
+//! dictionary the session authorised at, so an in-memory-only id is never in it), so this is
+//! fail-closed, not fail-open: a novel descriptor can buffer an item, but cannot make it
+//! visible, until the next build assigns it a durable term id.
+//!
+//! **Extension ids are allocated from the top of the `u32` range downward**,
+//! never from `dict.len()` upward: a downward-from-`u32::MAX` extension id can never collide with
+//! a *future* dictionary ordinal the way an upward one could. An upward scheme's "unsatisfiable"
+//! property was prose-only and silently broken by growth: extension id `N == dict.len()` at
+//! replay time is exactly the ordinal the *next* `mosaica build` would assign to some unrelated,
+//! real descriptor; if the overlay/buffer ever survived a bundle swap without a fresh replay
+//! against the new dictionary — nothing does that today, and nothing in this module guarantees
+//! nothing ever will — a stale extension-tagged entity would silently start
+//! evaluating against whatever real term inherited that ordinal, and a viewer legitimately holding
+//! that term would then be shown it. Reserving the top of the id space (the
+//! `max_distinct_terms` bound is 200,000,000, vanishingly far from `u32::MAX`'s ~4.29 billion)
+//! makes that collision structurally impossible rather than merely unlikely-so-far.
+
+use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
+
+use mosaica_authz::Dict;
+use mosaica_types::{EntityId, TermId};
+
+use crate::wal::{WalRow, WalScalar};
+
+/// Resolves term descriptors to `TermId`s: the bundle dictionary first, then a deterministic
+/// (replay-order) in-memory extension for descriptors the dictionary has never interned.
+///
+/// Determinism obligation: called in WAL replay order (or live-accept order, which is the same
+/// append order), so the same WAL byte-for-byte always yields the same extension assignment —
+/// this is what makes replay reproducible across restarts, not merely "some valid resolution".
+pub struct DescriptorResolver<'a> {
+    dict: &'a Dict,
+    extension: FxHashMap<Vec<u8>, TermId>,
+    next_extension_id: u32,
+}
+
+// Manual (not derived): `Dict` itself carries no `Debug` impl, and adding one purely to satisfy
+// this struct's derive would be scope creep on another crate. `dict` is omitted from the output.
+impl std::fmt::Debug for DescriptorResolver<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DescriptorResolver")
+            .field("extension", &self.extension)
+            .field("next_extension_id", &self.next_extension_id)
+            .finish()
+    }
+}
+
+/// Extension ids count down from here — see this module's doc for why the top of the range,
+/// never `dict.len()` upward. [`mosaica_authz::MAX_DISTINCT_TERMS`]
+/// (200,000,000) is the largest a real dictionary is sized for; this leaves a margin of roughly
+/// 4.09 billion ids between the highest extension id ever handed out in a single session and the
+/// highest ordinal a dictionary could plausibly reach, so exhausting it would require an
+/// implausible number of distinct novel descriptors in one session, not merely dictionary growth
+/// over time.
+const EXTENSION_ID_START: u32 = u32::MAX;
+
+/// Compile-time guarantee that the extension range starts strictly above
+/// [`mosaica_authz::MAX_DISTINCT_TERMS`] — a real dictionary is never sized to reach
+/// anywhere near this range, so an extension id can never be mistaken for one.
+const _: () = assert!(EXTENSION_ID_START as u64 > mosaica_authz::MAX_DISTINCT_TERMS);
+
+impl<'a> DescriptorResolver<'a> {
+    pub fn new(dict: &'a Dict) -> Self {
+        DescriptorResolver {
+            dict,
+            extension: FxHashMap::default(),
+            next_extension_id: EXTENSION_ID_START,
+        }
+    }
+
+    /// Resolve one descriptor: a dictionary hit returns the durable, bundle-relative `TermId`
+    /// unchanged; a miss is interned into the in-memory extension (assigning the next id counting
+    /// down from [`EXTENSION_ID_START`] — never colliding with a dictionary ordinal, however much
+    /// the dictionary grows) and that assignment is reused for any repeat of the same descriptor
+    /// within this resolver's lifetime.
+    pub fn resolve(&mut self, descriptor: &[u8]) -> TermId {
+        if let Some(id) = self.dict.lookup(descriptor) {
+            return id;
+        }
+        if let Some(&id) = self.extension.get(descriptor) {
+            return id;
+        }
+        let id = TermId::new(self.next_extension_id);
+        debug_assert!(
+            self.next_extension_id > self.dict.len(),
+            "descriptor extension id space exhausted down to the dictionary's own range — an \
+             implausible number of distinct novel descriptors in one session"
+        );
+        self.next_extension_id -= 1;
+        self.extension.insert(descriptor.to_vec(), id);
+        id
+    }
+
+    /// Resume a resolver from a previously-persisted extension state.
+    ///
+    /// The server keeps accepting live `/control/ingest`/`/control/changes` requests after
+    /// `replay` has returned — a fresh `DescriptorResolver::new` for each live request would
+    /// restart extension-id assignment from [`EXTENSION_ID_START`] every time, colliding with ids
+    /// already handed out to *other* novel descriptors earlier in the same process's lifetime
+    /// (breaking the determinism obligation this module's doc describes: the same WAL, replayed
+    /// again after a restart, must reproduce the same assignment). Extracting a resolver's state
+    /// via [`DescriptorResolver::into_state`] after `replay` and resuming it here — once, at
+    /// `Engine::open`, then persisting the state back after every live resolution — keeps one
+    /// continuous assignment sequence across the whole process lifetime, matching what a full
+    /// WAL replay (bundle + WAL + these new records) would compute.
+    pub fn resume(
+        dict: &'a Dict,
+        extension: FxHashMap<Vec<u8>, TermId>,
+        next_extension_id: u32,
+    ) -> Self {
+        DescriptorResolver {
+            dict,
+            extension,
+            next_extension_id,
+        }
+    }
+
+    /// Extract this resolver's mutable extension state, detaching it from `dict`'s borrow so it
+    /// can be stored (e.g. behind a `Mutex`, in `mosaica-engine`'s `Engine`) and later resumed.
+    pub fn into_state(self) -> (FxHashMap<Vec<u8>, TermId>, u32) {
+        (self.extension, self.next_extension_id)
+    }
+}
+
+/// One buffered item's authorisation-relevant state: its resolved terms and the geometry/scalars
+/// carried by its WAL row. The geometry is kept for a flush that would give the item a row;
+/// composition reads only `terms`.
+///
+/// `view` is carried because a flush reads the *buffer*, not the WAL, and has to know which row
+/// space each item's row belongs in — see [`crate::wal::WalRow`]'s field for why that cannot be
+/// re-derived.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BufferedItem {
+    pub terms: Vec<TermId>,
+    pub view: String,
+    /// **This row joined an entity that already exists to a second view** (`views.md` §4) — it
+    /// carries geometry and nothing else.
+    ///
+    /// The entity, its label and its entity-scoped attributes are the ones it already had, so a
+    /// join carries no descriptors, contributes no postings and no filter-column value, and is
+    /// invisible to every entity-space walk over this buffer ([`IngestBuffer::get`] and
+    /// [`IngestBuffer::iter`] answer with the entity's *own* row). That is structural rather than
+    /// disciplinary: a join that contributed terms would be a re-label with no overlay entry —
+    /// exactly what decision 0047 makes a delete plus a re-ingest — and the shape here is what
+    /// makes it unreachable.
+    pub join: bool,
+    pub x: f64,
+    pub y: f64,
+    pub scalars: Vec<WalScalar>,
+    /// This row's values for the **group-scoped** attribute families of its view's group
+    /// ([`WalRow::scoped`], `views.md` §5) — positional against
+    /// `MANIFEST.groups[..].scoped_scalars` in manifest order, and empty everywhere no family is
+    /// in scope.
+    ///
+    /// **Held per `(entity, view)`, which this buffer already is.** A scoped value belongs to the
+    /// pair and not to the entity, so an entity buffered in two views of one group carries each
+    /// view's own value here — including on a **join** row, the one thing a second view's row
+    /// brings with it beyond geometry (`views.md` §4).
+    pub scoped: Vec<WalScalar>,
+    /// The sequence-global WAL position of the record this row arrived in — what a rotation
+    /// reclaims below (write-path §4.5).
+    ///
+    /// **`None` means "not known", and it is not the same as zero.** Both are fail-safe, because a
+    /// rotation may only reclaim below the oldest position it is *sure* of — but a caller that
+    /// treated `None` as a position would reclaim everything, so the distinction is carried in the
+    /// type rather than in a sentinel. It is `None` on the way out of [`IngestBuffer::insert_row`]
+    /// because neither replay nor the live apply knows the position at that point; both stamp it
+    /// immediately afterwards with [`IngestBuffer::set_wal_pos`].
+    pub wal_pos: Option<u64>,
+}
+
+/// Replayed `WalRow`s not yet folded into a bundle, keyed by (internal) `EntityId` — the id the
+/// row was allocated under (SA §6.2: WAL rows carry their already-allocated id; replay reuses it,
+/// never re-allocates).
+/// `Clone` because the live `/control/ingest` acceptance path builds the
+/// next generation's buffer by cloning the current one and inserting the newly-accepted rows,
+/// rather than mutating shared state in place — the immutable-snapshot-behind-`ArcSwap` design
+/// (see `mosaica_engine::Generation`'s doc) requires every generation's buffer to be a distinct,
+/// never-mutated-after-publication value.
+#[derive(Debug, Default, Clone)]
+pub struct IngestBuffer {
+    /// **`Arc<BufferedItem>`, because this map is cloned far more often than it is read.**
+    ///
+    /// `Executor::apply_window` deep-copies the whole buffer once per commit-window close, to build
+    /// the next generation's immutable snapshot — so with `B` rows buffered between flushes and a
+    /// close every `W`, a flush interval pays `B²/2W` item copies. Measured at 5.99 us/row (42% of
+    /// ingest) at a 250M base and 2.60 us/row at 1M; the difference is term density, since a
+    /// `BufferedItem` carries a `Vec<TermId>`, an `Option<Vec<u8>>`, a `String` and a scalars `Vec`
+    /// — four heap allocations copied per row per close.
+    ///
+    /// Behind an `Arc` the clone copies a pointer and bumps a refcount, and the items themselves
+    /// are shared across every generation that still names them. The snapshot property is
+    /// unchanged: an `Arc<BufferedItem>` is never mutated in place once a generation holds it —
+    /// [`IngestBuffer::set_wal_pos`] is the one writer and it goes through `Arc::make_mut`, which
+    /// copies only when the item is genuinely shared.
+    ///
+    /// This does **not** remove the O(buffered) term — the hash table itself is still copied per
+    /// close. It removes the per-item deep copy, which is what the measurement says dominates it.
+    ///
+    /// **The row list is behind an `Arc` too, for the same reason one step out.** With a bare
+    /// `Vec` as the value, cloning the map allocates one `Vec` per *entity* — so a close paid a
+    /// malloc and a copy per buffered row however cheap the items themselves had become, measured
+    /// at ~145 ns per entry and 14.3 µs per ingested row at a 1M-row buffer
+    /// (`probes/2026-09-04-ingest-executor/`). Behind an `Arc` the clone copies control bytes and
+    /// pointers and allocates nothing, and the four mutators go through `Arc::make_mut`, which
+    /// copies one entity's list — usually a single element — only where a published generation
+    /// still shares it.
+    /// **Keyed by entity, one entry per view that entity has a row in** — usually exactly one.
+    ///
+    /// An entity may hold a row in several views at once (`views.md` §4: the same point in two
+    /// views is two batches and one item), and both of them may be awaiting the same
+    /// flush. A map keyed by entity alone would have let the second overwrite the first, losing an
+    /// acked row silently; keyed by `(entity, view)` alone, every entity-space reader here would
+    /// have had to dedupe. The entity's own row — the one that carries its terms — is the first
+    /// element, which is what makes [`IngestBuffer::get`] a lookup rather than a scan.
+    items: FxHashMap<EntityId, Arc<Vec<Arc<BufferedItem>>>>,
+    /// Rows, not entities: what the occupancy bound counts and what a flush consumes.
+    rows: usize,
+}
+
+impl IngestBuffer {
+    pub fn new() -> Self {
+        IngestBuffer {
+            items: FxHashMap::default(),
+            rows: 0,
+        }
+    }
+
+    /// Insert one WAL row's item, resolving its term descriptors via `resolver`.
+    pub fn insert_row(&mut self, row: &WalRow, resolver: &mut DescriptorResolver<'_>) {
+        let terms = row
+            .descriptors
+            .iter()
+            .map(|d| resolver.resolve(d))
+            .collect();
+        self.insert_row_with_terms(row, terms);
+    }
+
+    /// Insert one WAL row's item with already-resolved `terms`, bypassing descriptor resolution.
+    /// Exposed for tests (and any future caller that already holds resolved `TermId`s, e.g. a
+    /// live-accept path that resolved descriptors once up front); production replay should
+    /// normally go through [`Self::insert_row`].
+    pub fn insert_row_with_terms(&mut self, row: &WalRow, terms: Vec<TermId>) {
+        let item = Arc::new(BufferedItem {
+            terms,
+            view: row.view.clone(),
+            join: row.join,
+            x: row.x,
+            y: row.y,
+            scalars: row.scalars.clone(),
+            scoped: row.scoped.clone(),
+            wal_pos: None,
+        });
+        // `make_mut` on a fresh entry is in place (refcount one); on an entity a published
+        // generation still holds, it copies that entity's list alone.
+        let rows = Arc::make_mut(self.items.entry(row.entity_id).or_default());
+        // **One row per (entity, view), and a repeat replaces rather than accumulates.** The
+        // ingest join refuses a second row in a view the entity is already in — that is the arm
+        // the permutation *and* this buffer are both consulted for — so a replacement here is
+        // replay meeting a row it has already seen, never two acked rows for one position.
+        let added = match rows.iter_mut().find(|held| held.view == row.view) {
+            Some(existing) => {
+                *existing = item;
+                false
+            }
+            // The entity's own row goes first, a join after it, so `get` answers with the row that
+            // carries the entity's terms whatever order the two arrived in.
+            None => {
+                if row.join {
+                    rows.push(item);
+                } else {
+                    rows.insert(0, item);
+                }
+                true
+            }
+        };
+        if added {
+            self.rows += 1;
+        }
+    }
+
+    /// Record which WAL position `entity`'s row arrived at. No-op if the entity is not buffered,
+    /// which is the ordinary case for a stamp arriving after a flush has consumed the row.
+    pub fn set_wal_pos(&mut self, entity: EntityId, view: &str, wal_pos: u64) {
+        if let Some(rows) = self.items.get_mut(&entity) {
+            if let Some(item) = Arc::make_mut(rows).iter_mut().find(|item| item.view == view) {
+                // Copies only if a published generation still shares this item; at the call site it
+                // is stamped immediately after insert, where the refcount is one and this is in
+                // place.
+                Arc::make_mut(item).wal_pos = Some(wal_pos);
+            }
+        }
+    }
+
+    /// The lowest WAL position any buffered row arrived at, or `None` if any of them does not know
+    /// its own — **the position a rotation may reclaim below** (write-path §4.5).
+    ///
+    /// Every other record class below that point is already redundant: `Change` records are
+    /// restated by the rotation's own overlay snapshot, `Lease` records by the side-manifest's
+    /// entity-id high-water, and `Flush` records by nothing needing them. Only an ingest row that
+    /// has not yet acquired geometry pins the log.
+    ///
+    /// `Some(None)` is impossible by construction; the outer `Option` is emptiness and the inner
+    /// answer is "one of them is unknown, so reclaim nothing".
+    pub fn oldest_wal_pos(&self) -> Option<Option<u64>> {
+        if self.items.is_empty() {
+            return None;
+        }
+        Some(
+            self.items
+                .values()
+                .flat_map(|rows| rows.iter())
+                .map(|item| item.wal_pos)
+                .try_fold(u64::MAX, |acc, pos| pos.map(|p| acc.min(p))),
+        )
+    }
+
+    /// Whether anything buffered belongs to one of these entities.
+    pub fn holds_any(&self, entities: &[EntityId]) -> bool {
+        entities.iter().any(|e| self.items.contains_key(e))
+    }
+
+    /// Drops every row buffered for a deleted entity. No flush consumes a deleted entity's rows,
+    /// and each holds the log at its position, so one left here would stop the log rotating.
+    pub fn remove(&mut self, entity: EntityId) {
+        if let Some(rows) = self.items.remove(&entity) {
+            self.rows -= rows.len();
+        }
+    }
+
+    /// Drop every row buffered for every entity `condemned` answers `true` for, on
+    /// [`Self::remove`]'s terms.
+    pub fn remove_where(&mut self, condemned: impl Fn(EntityId) -> bool) {
+        let held: Vec<EntityId> = self
+            .items
+            .keys()
+            .copied()
+            .filter(|entity| condemned(*entity))
+            .collect();
+        for entity in held {
+            self.remove(entity);
+        }
+    }
+
+    /// Remove one **(entity, view)** row — what a flush's publication does with exactly the rows
+    /// it consumed, and what a dropped view does with the rows that named it.
+    ///
+    /// A flush consumes one view at a time, so removing the entity outright would take a row of
+    /// another view with it — a row that has no geometry, is in no segment, and would be lost from
+    /// both.
+    pub fn remove_in_view(&mut self, entity: EntityId, view: &str) {
+        let Some(rows) = self.items.get_mut(&entity) else {
+            return;
+        };
+        let before = rows.len();
+        let rows = Arc::make_mut(rows);
+        rows.retain(|item| item.view != view);
+        let removed = before - rows.len();
+        let empty = rows.is_empty();
+        self.rows -= removed;
+        if empty {
+            self.items.remove(&entity);
+        }
+    }
+
+    /// Remove every row of the views `ids` name, as a dropped view does: they name a coordinate
+    /// system that no longer exists, so nothing will ever give them geometry.
+    ///
+    /// An entity whose own row goes and which keeps a row in another view is not lost with it:
+    /// that row becomes its own, taking the label and the values the own row
+    /// carried, so the flush of the view it is in writes what the item holds.
+    pub fn remove_views(&mut self, ids: &[String]) {
+        let entities: Vec<EntityId> = self
+            .items
+            .iter()
+            .filter(|(_, rows)| rows.iter().any(|item| ids.contains(&item.view)))
+            .map(|(entity, _)| *entity)
+            .collect();
+        for entity in entities {
+            let rows = Arc::make_mut(self.items.get_mut(&entity).expect("listed above"));
+            let own = rows
+                .iter()
+                .find(|item| !item.join && ids.contains(&item.view))
+                .cloned();
+            let before = rows.len();
+            rows.retain(|item| !ids.contains(&item.view));
+            self.rows -= before - rows.len();
+            if let (Some(own), Some(first)) = (own, rows.first_mut()) {
+                if first.join {
+                    let first = Arc::make_mut(first);
+                    first.join = false;
+                    first.terms = own.terms.clone();
+                    first.scalars = own.scalars.clone();
+                }
+            }
+            if rows.is_empty() {
+                self.items.remove(&entity);
+            }
+        }
+    }
+
+    /// The entity's **own** row — the one carrying its terms and its scalars —
+    /// or `None` where every buffered row for it is a join (`views.md` §4).
+    ///
+    /// **A join is not an answer here, and that is what keeps a second view out of the
+    /// authorisation path.** A join carries no terms, so returning one would put an entity whose
+    /// label lives in a segment through the buffer's rule and judge it by an empty term set —
+    /// invisible to everyone until the next flush. `None` means "the buffer has no opinion", which
+    /// sends the caller to the fragment that does.
+    pub fn get(&self, entity: EntityId) -> Option<&BufferedItem> {
+        self.items
+            .get(&entity)
+            .and_then(|rows| rows.iter().find(|item| !item.join))
+            .map(|item| &**item)
+    }
+
+    /// Every buffered row this entity holds, in **any** view — joins included.
+    ///
+    /// **The scoped cell arm's source** (`views.md` §5, decision 0116). A scoped value is addressed
+    /// by `(entity, attribute, key)`, so the question "does this deployment already hold a value
+    /// for the cell this row names" is asked of every row of the entity whose view resolves to the
+    /// same key, not of the entity's own row alone — which is what [`Self::get`] answers and is a
+    /// different question, about labels.
+    pub fn rows_of(&self, entity: EntityId) -> impl Iterator<Item = &BufferedItem> {
+        self.items
+            .get(&entity)
+            .into_iter()
+            .flat_map(|rows| rows.iter().map(|item| &**item))
+    }
+
+    /// Does this entity hold **any** buffered row?
+    pub fn contains(&self, entity: EntityId) -> bool {
+        self.items.contains_key(&entity)
+    }
+
+    /// Does this entity hold a buffered row **in this view**? — the commit-window half of the join
+    /// rule's "already in the view" arm (`views.md` §4). A row accepted but not yet flushed is in
+    /// no permutation, and a check that missed it would let two batches in one window hand flush
+    /// two rows for one entity in one view.
+    pub fn contains_in_view(&self, entity: EntityId, view: &str) -> bool {
+        self.items
+            .get(&entity)
+            .is_some_and(|rows| rows.iter().any(|item| item.view == view))
+    }
+
+    /// Every entity the buffer has an **opinion** about, with its own row — the entity-space walk
+    /// (`compose`, `filter`), which is about labels and dispositions rather than about geometry.
+    /// An entity whose only buffered rows are joins is absent, exactly as [`Self::get`] is `None`
+    /// for it.
+    pub fn iter(&self) -> impl Iterator<Item = (&EntityId, &BufferedItem)> {
+        self.items.iter().filter_map(|(entity, rows)| {
+            rows.iter()
+                .find(|item| !item.join)
+                .map(|item| (entity, &**item))
+        })
+    }
+
+    /// Every buffered **row**, joins included — the flush's walk, which is about geometry and is
+    /// scoped to one view.
+    pub fn rows(&self) -> impl Iterator<Item = (&EntityId, &BufferedItem)> {
+        self.items
+            .iter()
+            .flat_map(|(entity, rows)| rows.iter().map(move |item| (entity, &**item)))
+    }
+
+    /// **Rows, not entities.** The occupancy bound is about what a flush has to write and what a
+    /// window's clone has to copy, and both are per row.
+    pub fn len(&self) -> usize {
+        self.rows
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn dict_with(descriptors: &[&[u8]]) -> (Dict, TempDir) {
+        let temp = TempDir::new().unwrap();
+        let mut writer = mosaica_authz::DictWriter::new(temp.path());
+        for d in descriptors {
+            writer.intern(d);
+        }
+        let paths = writer.finish().unwrap();
+        (Dict::load(&paths).unwrap(), temp)
+    }
+
+    #[test]
+    fn resolver_prefers_dict_then_extends_deterministically() {
+        let (dict, _temp) = dict_with(&[b"1207", b"9"]);
+        let mut resolver = DescriptorResolver::new(&dict);
+
+        assert_eq!(resolver.resolve(b"1207"), TermId::new(0));
+        assert_eq!(resolver.resolve(b"9"), TermId::new(1));
+        // Novel descriptor: extension counts down from `u32::MAX`, never up from `dict.len()`.
+        assert_eq!(resolver.resolve(b"novel"), TermId::new(u32::MAX));
+        // Repeat resolves to the same extension id.
+        assert_eq!(resolver.resolve(b"novel"), TermId::new(u32::MAX));
+        // A second distinct novel descriptor gets the next (one lower) id.
+        assert_eq!(resolver.resolve(b"novel-2"), TermId::new(u32::MAX - 1));
+    }
+
+    fn row(entity: u64, view: &str, join: bool) -> WalRow {
+        WalRow {
+            entity_id: EntityId::new(entity),
+            view: view.to_string(),
+            join,
+            descriptors: Vec::new(),
+            x: 0.0,
+            y: 0.0,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+        }
+    }
+
+    /// The predicate is asked of every entity the buffer holds a row for, a join-only one
+    /// included.
+    #[test]
+    fn a_removal_by_predicate_reaches_a_join() {
+        let mut buffer = IngestBuffer::new();
+        buffer.insert_row_with_terms(&row(1, "a", true), Vec::new());
+        buffer.insert_row_with_terms(&row(4, "a", false), vec![TermId::new(1)]);
+
+        buffer.remove_where(|entity| entity.raw() != 4);
+
+        assert!(!buffer.contains(EntityId::new(1)));
+        assert_eq!(buffer.len(), 1, "the entity the predicate spared keeps its row");
+        assert_eq!(buffer.oldest_wal_pos(), Some(None), "and nothing else holds the log");
+    }
+
+    /// A dropped view's own row gives what it carried to the entity's row in another view, so
+    /// the item is not lost with the view; a join-only entity's row just goes.
+    #[test]
+    fn a_dropped_views_own_row_passes_its_item_to_another_view() {
+        let mut buffer = IngestBuffer::new();
+        let mut own = row(1, "a", false);
+        own.scalars = vec![WalScalar::U8(7)];
+        buffer.insert_row_with_terms(&own, vec![TermId::new(3)]);
+        buffer.insert_row_with_terms(&row(1, "b", true), Vec::new());
+        buffer.insert_row_with_terms(&row(2, "a", true), Vec::new());
+
+        buffer.remove_views(&["a".to_string()]);
+
+        let kept = buffer.get(EntityId::new(1)).expect("entity 1 keeps an own row");
+        assert_eq!(kept.view, "b");
+        assert_eq!(kept.terms, vec![TermId::new(3)]);
+        assert_eq!(kept.scalars, vec![WalScalar::U8(7)]);
+        assert!(!buffer.contains(EntityId::new(2)));
+        assert_eq!(buffer.len(), 1);
+    }
+
+    /// Extension ids must never be able to collide with a dictionary ordinal,
+    /// however large the dictionary grows — encoded as a property over dictionaries up to
+    /// [`mosaica_authz::MAX_DISTINCT_TERMS`], far below where extension ids start.
+    #[test]
+    fn extension_ids_never_collide_with_a_dictionary_sized_up_to_the_declared_bound() {
+        const MAX_DISTINCT_TERMS: u32 = mosaica_authz::MAX_DISTINCT_TERMS as u32;
+
+        // The compile-time assertion next to `EXTENSION_ID_START`'s definition already proves
+        // `EXTENSION_ID_START > MAX_DISTINCT_TERMS` unconditionally; a real dictionary this large
+        // would be expensive to build in a unit test, so exercise the property that actually
+        // depends on runtime behaviour: resolving several novel descriptors against a small real
+        // dictionary never produces an id anywhere near dictionary-ordinal range.
+        let (dict, _temp) = dict_with(&[b"a", b"b", b"c"]);
+        let mut resolver = DescriptorResolver::new(&dict);
+        for (i, descriptor) in [b"x".as_slice(), b"y", b"z"].iter().enumerate() {
+            let id = resolver.resolve(descriptor).raw();
+            assert!(
+                id > MAX_DISTINCT_TERMS,
+                "extension id {id} (descriptor #{i}) collides with the declared-bound dictionary \
+                 ordinal range"
+            );
+        }
+    }
+}

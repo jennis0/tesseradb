@@ -46,7 +46,7 @@ const check = (claim, ok, evidence) => {
 };
 
 await page.goto(url, {waitUntil: 'load'});
-const map = page.locator('tessera-map').first();
+const map = page.locator('mosaica-map').first();
 
 /** The served artifacts, as the page holds them: identity, lineage, shape and extent. */
 const servedArtifacts = () =>
@@ -115,7 +115,7 @@ page.setDefaultTimeout(180_000);
   const started = Date.now();
   while (Date.now() - started < 180_000) {
     const served = await map.evaluate((el) => /** @type {any} */ (el).activeStore?.get('artifacts')?.served.length ?? 0);
-    const marks = await page.evaluate(() => window.__tesseraProbeOf?.()?.marks ?? window.__tesseraProbe?.marks ?? 0);
+    const marks = await page.evaluate(() => window.__mosaicaProbeOf?.()?.marks ?? window.__mosaicaProbe?.marks ?? 0);
     if (served > 0 && marks > 0) break;
     await page.waitForTimeout(400);
   }

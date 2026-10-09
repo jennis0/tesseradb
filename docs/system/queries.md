@@ -190,7 +190,7 @@ such as one past a tile's quota, the store reads it with a bulk read by `ids`.
 
 The Python client reads the same route with `Viewer.viewport_artifacts` and
 `Database.viewport_artifacts`, each returning a `pyarrow.Table` with a `tile` column, and reads
-artifacts by identifier with `ids=` on `Viewer.artifacts` and `Database.artifacts`. `tessera
+artifacts by identifier with `ids=` on `Viewer.artifacts` and `Database.artifacts`. `mosaica
 artifacts --ids` does the same at the command line, which has no viewport command and so no tile
 route.
 
@@ -272,7 +272,7 @@ would cost more regardless of its size.
 The count is exact for the shape as drawn, unless the shape's boundary crosses more cells than a
 published limit (`max_region_cells`) allows. Then the decomposition stops early, every remaining
 boundary cell is counted as if it were inside, and the answer is exact for a shape slightly larger
-than the one drawn; the response's `x-tessera-region` header says which case applies. A region
+than the one drawn; the response's `x-mosaica-region` header says which case applies. A region
 clause composes with every other kind: it can sit alongside a category or text clause, and it can
 be negated to mean everything outside the shape.
 
@@ -368,7 +368,7 @@ A page holds `tessera_id`, then the named fields in the order named, then either
 system fields: `position`, and `labels`, the clauses of the item's labels this viewer satisfies,
 as the item card serves them. A unique
 field is named like any other. Under `keep_unmatched` every visible item is returned, with a
-`tessera:matched` column. Every named field is present whether or not an item holds a value, and a
+`mosaica:matched` column. Every named field is present whether or not an item holds a value, and a
 value it does not hold is a null. A category arrives as its value keys, and each page's dictionary
 holds only the keys its own rows carry.
 
@@ -689,7 +689,7 @@ extreme rows on each side, or from a walk of F − D where D holds all eight.*
 
 A build and a fold tally the base in entity order, a span of 2^18 entities at a time, so they read
 each entity's key list and held values in the order they are stored and ask one rank a span.
-Measured with `tessera-bench`'s `field_tallies_scale` on a synthetic corpus, a 12-thread machine
+Measured with `mosaica-bench`'s `field_tallies_scale` on a synthetic corpus, a 12-thread machine
 with the files in the page cache, two held fields and 384 key lists, the tally pass took 0.23 s
 over 10 million rows, 1.9 s over 100 million and 18.6 s over a billion, 19 to 23 ns a row. The
 entity terms reader finds an entity's rank from a table of each block's rank below it, which took
@@ -715,7 +715,7 @@ of integer fields by value; a grouping of one kind inside another of the same ki
 within cells; and counts across views. A caller asks for each such figure through `/v1/items`
 and computes it.
 
-The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps each
+The TypeScript client reads a whole result with `MosaicaClient.aggregate`, and its store keeps each
 aggregate a component registers with `Store.setAggregate` counted over the store's current filters
 and selected region, within the camera's area or over the whole visible set where the registration
 asks, and asks again when its request changes, as
@@ -723,8 +723,8 @@ asks, and asks again when its request changes, as
 reads one with `Viewer.aggregate`, `Database.aggregate` and `Selection.aggregate`, each table a
 `pyarrow.Table`. Both follow the cursor until the result is whole.
 
-`tessera aggregate` reads one grouping's table from a running server and writes it as Arrow
-IPC or Parquet, following the cursor as `tessera items` does.
+`mosaica aggregate` reads one grouping's table from a running server and writes it as Arrow
+IPC or Parquet, following the cursor as `mosaica items` does.
 
 ## What is not built
 
@@ -740,5 +740,5 @@ read at once.
 `docs/design/architecture.md` §7, §8; `docs/design/filter-index.md` §1, §2, §6;
 `docs/design/filter-surface.md` §1–§3, §5, §8; `docs/design/selection-operand.md`;
 `docs/design/records-and-search.md` §4.4, §4.5; `docs/design/value-suggestion.md` §1–§3, §8;
-`docs/design/highlight-and-hierarchy.md` §1–§4; `docs/openapi/tessera.yaml`; decisions 0062, 0063,
+`docs/design/highlight-and-hierarchy.md` §1–§4; `docs/openapi/mosaica.yaml`; decisions 0062, 0063,
 0066, 0069, 0104, 0114, 0118–0124.

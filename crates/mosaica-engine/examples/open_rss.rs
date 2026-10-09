@@ -1,0 +1,52 @@
+//! Perf harness (not a test): open the 2.4M-item bundle at `/tmp/mosaica-2m4` (built by
+//! `mosaica-bench`'s `viewport_latency` binary, reused here) and then block, so
+//! `/usr/bin/time -v` (or any external RSS sampler) can read this process's peak/resident memory
+//! after `Engine::open` returns.
+//!
+//! Usage: `cargo run --release --example open_rss -- /tmp/mosaica-2m4`
+
+use std::env;
+use std::path::PathBuf;
+
+use tempfile::TempDir;
+use mosaica_engine::{Engine, EngineConfig};
+
+fn main() {
+    let bundle_root = env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/mosaica-2m4"));
+
+    let tmp = TempDir::new().unwrap();
+    let engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        EngineConfig {
+            token_max_lifetime_secs: 3600,
+            max_k: 200,
+            k_min: 2,
+            k_max_marks: 200,
+            theta_target_marks: u64::MAX,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
+            max_tiles_per_request: 262_144,
+            compute_threads: mosaica_engine::default_compute_threads(),
+            flush_max_age_secs: 90,
+            // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
+            // what bounds the window close's O(buffered) copy. Nothing here reaches it.
+            flush_max_items: 40_000,
+            max_merged_segment_bytes: None,
+            tier_width: None,
+            segment_floor_bytes: None,
+            coalesce_width: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: mosaica_engine::CompactionSchedule::off(),
+        },
+    )
+    .expect("engine should open the 2.4M bundle");
+
+    // Keep `engine` alive until the process is measured and killed.
+    println!("opened bundle at {}", bundle_root.display());
+    std::mem::forget(engine);
+}

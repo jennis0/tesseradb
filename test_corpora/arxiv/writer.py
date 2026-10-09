@@ -1,4 +1,4 @@
-"""The build inputs, in the shapes `tessera build` reads them (`annotation-write-cycle.md` §6.1).
+"""The build inputs, in the shapes `mosaica build` reads them (`annotation-write-cycle.md` §6.1).
 
 **One file per layer, one row per artifact.** A row's `contents` is its ranking — best first, one
 entry per rank, one value per supplied kind — and is null where the artifact carries none. No row
@@ -9,7 +9,7 @@ the cluster it hangs from; the rung's clusterings carry their own titles as cont
 **A member file names each member by the item's `id`**, the value the points file carries as
 `entity_id`, in a column called `entity`; each `[layer.members]` block says so with
 `fields = { id = "entity" }`. A member naming no item is a refused row, counted in the build's
-report, and `tessera build --strict` refuses the build instead. A dropped member moves both the
+report, and `mosaica build --strict` refuses the build instead. A dropped member moves both the
 count a viewer is shown and the size a proportional criterion divides by, so read that count.
 
 Both stages of the rung write through this class, which is why it is here rather than in

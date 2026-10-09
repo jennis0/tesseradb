@@ -9,7 +9,7 @@ import type {FilterExpr, RegionOperand, RegionVerdict} from './types.js';
  * ranges, and cells on the boundary test each point's stored position, so the count is exact for
  * the shape. Where the perimeter crosses more than the deployment's `max_region_cells`, the answer
  * is for a cover at a depth the server states. This module spells the leaf, reads the verdict from
- * `x-tessera-region`, and holds the client's copy of the server's point-in-polygon predicate.
+ * `x-mosaica-region`, and holds the client's copy of the server's point-in-polygon predicate.
  */
 
 /** A polygon in world space, as the lasso draws it: at least three vertices, implicitly closed. @internal */
@@ -30,7 +30,7 @@ export function quantise(v: number): number {
 /**
  * Whether a world-space point is inside a polygon, by the server's predicate: even-odd over the
  * quantised edges, a point on an edge inside, and the ray counting an edge where exactly one end is
- * strictly above it (as `tessera_spatial::shape::polygon`). A self-crossing lasso still answers.
+ * strictly above it (as `mosaica_spatial::shape::polygon`). A self-crossing lasso still answers.
  * Integer arithmetic throughout, in `BigInt` where a product leaves a double's exact range.
  *
  * This is for a drawn selection. Which artifact a point belongs to is the `membership:<layer>`
@@ -111,7 +111,7 @@ export function withRegion(expr: FilterExpr | null, operand: RegionOperand | nul
 }
 
 /**
- * Parses `x-tessera-region`: `exact`, or `cover; depth=<d>`, an answer exact for a cover of the shape
+ * Parses `x-mosaica-region`: `exact`, or `cover; depth=<d>`, an answer exact for a cover of the shape
  * at that depth, which is a superset. `null` where the request carried no region leaf or the header
  * is not understood.
  *

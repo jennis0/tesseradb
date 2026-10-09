@@ -8,11 +8,11 @@ boots the server ONCE and reuses it across every k value, since boot at 10^9 cos
 (row-projection cache fill) is fired before the first measured k and excluded from every sample.
 
 `[serve] max_k` defaults to 200 and `Engine::viewport` clamps k to it
-(crates/tessera-engine/src/viewport.rs) -- this script's generated config raises `max_k` to
+(crates/mosaica-engine/src/viewport.rs) -- this script's generated config raises `max_k` to
 comfortably above the largest k swept, and the per-k report includes mean/max points actually
 returned so a plateau (== clamp still firing) is visible directly in the output, not inferred.
 
-Usage: reference/.venv/bin/python scripts/bench_k_sweep.py [--bundle /tmp/tessera-1e9] [-n 500]
+Usage: reference/.venv/bin/python scripts/bench_k_sweep.py [--bundle /tmp/mosaica-1e9] [-n 500]
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ viewer = "127.0.0.1:{viewer_port}"
 session = "127.0.0.1:{session_port}"
 control = "127.0.0.1:{control_port}"
 max_k = {max_k}
-operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
+operator_credential_env = "MOSAICA_REFERENCE_OPERATOR_CRED"
 """
     overrides = {
         "compute_threads": compute_threads,
@@ -106,7 +106,7 @@ operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
             config_text += f"{key} = {value}\n"
 
     config_text += f'\n[catalogue]\ndir = "{tmp_dir / "catalogue"}"\n'
-    config_path = tmp_dir / "tessera.toml"
+    config_path = tmp_dir / "mosaica.toml"
     config_path.write_text(config_text)
     return config_path
 
@@ -150,7 +150,7 @@ def spawn_with_long_boot_deadline(
     import os
 
     env = os.environ.copy()
-    env["TESSERA_REFERENCE_OPERATOR_CRED"] = harness.OPERATOR_CREDENTIAL
+    env["MOSAICA_REFERENCE_OPERATOR_CRED"] = harness.OPERATOR_CREDENTIAL
 
     log_file = open(log_path, "ab")
     boot_start = time.monotonic()
@@ -170,7 +170,7 @@ def spawn_with_long_boot_deadline(
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             extra = log_path.read_text(errors="replace")
-            raise RuntimeError(f"tessera serve exited early ({proc.returncode}):\n{extra}")
+            raise RuntimeError(f"mosaica serve exited early ({proc.returncode}):\n{extra}")
         try:
             resp = requests.get(f"{srv.viewer_base}/healthz", timeout=2)
             if resp.status_code == 200:
@@ -183,7 +183,7 @@ def spawn_with_long_boot_deadline(
 
     if not up:
         proc.terminate()
-        raise RuntimeError(f"tessera serve did not become healthy within {boot_deadline_s}s")
+        raise RuntimeError(f"mosaica serve did not become healthy within {boot_deadline_s}s")
 
     return srv, proc, boot_elapsed
 
@@ -212,8 +212,8 @@ def gen_viewports(seed: int, n: int):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bundle", default="/tmp/tessera-1e9")
-    ap.add_argument("--tmp", default="/tmp/tessera-1e9-serve-ksweep")
+    ap.add_argument("--bundle", default="/tmp/mosaica-1e9")
+    ap.add_argument("--tmp", default="/tmp/mosaica-1e9-serve-ksweep")
     ap.add_argument("-n", "--n-viewports", type=int, default=500)
     ap.add_argument("--width", type=int, default=10_000, help="grant width w")
     ap.add_argument("--seed", type=int, default=0)
@@ -270,7 +270,7 @@ def main() -> int:
         t0 = time.perf_counter()
         warm_resp = srv.viewport_response(token, "s0", 6, [0.0, 0.0, EXTENT, EXTENT], k=30)
         warmup_s = time.perf_counter() - t0
-        warmup_server_us = int(warm_resp.headers.get("x-tessera-server-us", "0"))
+        warmup_server_us = int(warm_resp.headers.get("x-mosaica-server-us", "0"))
         results["warmup_end_to_end_ms"] = warmup_s * 1000
         results["warmup_server_us"] = warmup_server_us
         print(
@@ -293,7 +293,7 @@ def main() -> int:
                 resp = srv.viewport_response(token, "s0", zoom, bbox, k=k)
                 e2e = (time.perf_counter() - t0) * 1e6
                 e2e_us.append(e2e)
-                server_us.append(float(resp.headers.get("x-tessera-server-us", "nan")))
+                server_us.append(float(resp.headers.get("x-mosaica-server-us", "nan")))
                 body = resp.content
                 resp_bytes.append(len(body))
                 # Only decode a subsample of responses for point counts -- pyarrow IPC decode of

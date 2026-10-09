@@ -1,10 +1,10 @@
 /**
  * The headless client. `createStore` returns the store a host draws from and steers.
- * `TesseraClient` calls the viewer and session routes, `Control` the operator's control plane, and
+ * `MosaicaClient` calls the viewer and session routes, `Control` the operator's control plane, and
  * `RecordsRead` is a bulk read of items or artifacts. The helpers build the filter drafts and
  * member clauses the store takes, say which layers it draws and colours by, and format its counts.
  *
- * @module @tesseradb/client
+ * @module @mosaicajs/client
  */
 export {createStore, CLUSTER_PREFIX, DEFAULT_BUDGET, REGION_HELD_LIMIT, type Store} from './store.js';
 export type {
@@ -63,7 +63,7 @@ export {memberKey, memberLeaf, memberOf, withMember, withMembers, withoutMember,
 export {GRID32, MAX_DEPTH, WORLD_SIZE, dataToWorldXY, gridToWorld, gridToWorldXY} from './coords.js';
 export {lonLatOfCell} from './projection.js';
 
-export {TesseraClient, TesseraError, type PartSink, type TesseraClientOptions, type TileSink} from './client.js';
+export {MosaicaClient, MosaicaError, type PartSink, type MosaicaClientOptions, type TileSink} from './client.js';
 export {inlineDecoder, setWorkerFactory, type Decoder} from './decoder.js';
 export {RecordsRead} from './records.js';
 export {PartialAggregate} from './aggregate.js';

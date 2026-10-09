@@ -25,7 +25,7 @@ import pyarrow as pa  # noqa: E402
 import pyarrow.ipc as ipc  # noqa: E402
 
 from conftest import post  # noqa: E402
-from tesseradb import PartialRead, Refusal, connect  # noqa: E402
+from mosaica import PartialRead, Refusal, connect  # noqa: E402
 
 VENUES = ["neurips", "icml", "iclr", "kdd"]
 PAPERS = [f"p{i}" for i in range(20)]
@@ -372,8 +372,8 @@ def test_a_position_is_the_coordinates_the_item_was_inserted_with(db):
     assert len(rows) == 20
     for row in rows:
         i = row["n"]
-        assert row["tessera:x"] == pytest.approx(float(i), abs=1e-6)
-        assert row["tessera:y"] == pytest.approx(0.5 * (i % 3), abs=1e-6)
+        assert row["mosaica:x"] == pytest.approx(float(i), abs=1e-6)
+        assert row["mosaica:y"] == pytest.approx(0.5 * (i % 3), abs=1e-6)
 
 
 def test_a_filter_narrows_the_read_and_count_is_read_from_the_head(db):
@@ -388,7 +388,7 @@ def test_a_filter_narrows_the_read_and_count_is_read_from_the_head(db):
         pages=1,
     )
     assert sorted(table.column("n").to_pylist()) == [5, 6, 7, 8, 9]
-    head = json.loads(table.schema.metadata[b"tessera.head"])
+    head = json.loads(table.schema.metadata[b"mosaica.head"])
     assert (head["visible"], head["matched"]) == (20, 5)
 
 
@@ -645,5 +645,5 @@ def test_artifacts_under_a_filter_carry_their_matched_count(db):
     )
     matched = table.column("matched_count").to_pylist()
     assert dict(zip(table.column("key").to_pylist(), matched)) == {"c0": 4, "c1": 1}
-    head = json.loads(table.schema.metadata[b"tessera.head"])
+    head = json.loads(table.schema.metadata[b"mosaica.head"])
     assert (head["served"], head["matched"]) == (5, 2)

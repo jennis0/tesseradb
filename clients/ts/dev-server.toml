@@ -1,7 +1,7 @@
 [bundle]
 path = "data/bench-fixtures/1e9"
-cache = "tessera-demo/dev-server/cache"
-wal = "tessera-demo/dev-server/wal.log"
+cache = "mosaica-demo/dev-server/cache"
+wal = "mosaica-demo/dev-server/wal.log"
 
 [disclosure]
 token_max_lifetime = 3600
@@ -11,8 +11,8 @@ viewer = "127.0.0.1:37585"
 session = "127.0.0.1:49303"
 control = "127.0.0.1:45721"
 max_k = 5000
-operator_credential_env = "TESSERA_OPERATOR_CRED"
+operator_credential_env = "MOSAICA_OPERATOR_CRED"
 dev_cors_origins = ["http://localhost:5173"]
 
 [catalogue]
-dir = "tessera-demo/dev-server/catalogue"
+dir = "mosaica-demo/dev-server/catalogue"

@@ -42,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT / "conformance"))
 
 @pytest.fixture(scope="session")
 def catalogue_bundle_root() -> Path:
-    """The adversarial mask catalogue's bundle, built once per `tessera` binary."""
+    """The adversarial mask catalogue's bundle, built once per `mosaica` binary."""
     from oracle.catalogue import build_catalogue_bundle  # noqa: PLC0415
 
     root, _fx = build_catalogue_bundle()

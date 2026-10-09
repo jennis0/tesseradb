@@ -5,7 +5,7 @@ import type {ViewportResult} from './types.js';
  * Turns a `/v1/viewport` body into typed arrays, and a `/v1/artifacts/viewport` frame into
  * artifacts. The default decodes in web workers, off the thread
  * that draws; {@link inlineDecoder} decodes on the calling thread, for a test, a script or a
- * runtime without `Worker`. Pass one as a {@link TesseraClient}'s `decoder` option.
+ * runtime without `Worker`. Pass one as a {@link MosaicaClient}'s `decoder` option.
  *
  * @category HTTP client
  */
@@ -235,7 +235,7 @@ export function workerDecoder(): Decoder | null {
 
 /**
  * {@link workerDecoder} where a worker can be made, {@link inlineDecoder} otherwise. The decoder a
- * {@link TesseraClient} uses when given none.
+ * {@link MosaicaClient} uses when given none.
  *
  * @category HTTP client
  */

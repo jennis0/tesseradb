@@ -1,7 +1,7 @@
 """**The identity rule at the service, against its model** (`oracle.naming`).
 
 Every write names items by `tessera_id` and by the values of fields declared unique. This module
-sends ingest batches, changes and member tables to a real `tessera serve` and compares each answer
+sends ingest batches, changes and member tables to a real `mosaica serve` and compares each answer
 with the model's: which rows were refused and why, the receipt's counts and `tessera_ids`, the
 status a strict request is refused with, and what the deployment then serves, read back through
 `/v1/items`.
@@ -124,7 +124,7 @@ def pristine_bundle(tmp_path_factory) -> Path:
     )
     (work / "identity.toml").write_text(CONFIG)
     bundle = work / "bundle"
-    deployment = write_deployment(work / "tessera.toml", bundle=bundle, schema=work / "identity.toml")
+    deployment = write_deployment(work / "mosaica.toml", bundle=bundle, schema=work / "identity.toml")
     cli_build(deployment, bundle)
     return bundle
 
@@ -173,7 +173,7 @@ class Deployment:
                 if row[column] is not None:
                     values[column] = row[column]
             for column in ("x", "y"):
-                got = row[f"tessera:{column}"]
+                got = row[f"mosaica:{column}"]
                 assert abs(got - round(got)) < 1e-3, row
                 values[column] = float(round(got))
             out[int(row["tessera_id"])] = values
@@ -214,8 +214,8 @@ class Deployment:
             params=params,
             headers={
                 "Authorization": f"Bearer {self.server.operator_credential}",
-                "x-tessera-batch-id": batch_id,
-                "x-tessera-view": VIEW,
+                "x-mosaica-batch-id": batch_id,
+                "x-mosaica-view": VIEW,
                 "Content-Type": content_type,
             },
             data=data,

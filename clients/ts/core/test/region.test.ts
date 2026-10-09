@@ -109,7 +109,7 @@ describe('withRegion: the leaf composed with the other filters', () => {
   });
 });
 
-describe('parseRegionVerdict: x-tessera-region', () => {
+describe('parseRegionVerdict: x-mosaica-region', () => {
   it('reads exact, a cover at a depth, and nothing', () => {
     expect(parseRegionVerdict('exact')).toEqual({exact: true, depth: null});
     expect(parseRegionVerdict('cover; depth=11')).toEqual({exact: false, depth: 11});

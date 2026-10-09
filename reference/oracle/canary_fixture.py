@@ -180,7 +180,7 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
         (visible_points_path, visible_pairs_path, visible_bundle),
     ):
         deployment = write_deployment(
-            work_dir / f"{out_dir.name}-tessera.toml", bundle=out_dir, schema=config_path
+            work_dir / f"{out_dir.name}-mosaica.toml", bundle=out_dir, schema=config_path
         )
         cli_build(
             deployment,

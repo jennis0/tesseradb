@@ -1,5 +1,5 @@
 {
-  "name": "tessera-clients",
+  "name": "mosaica-clients",
   "license": "Apache-2.0",
   "private": true,
   "workspaces": [
@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
-    "build": "npm run build -w @tesseradb/client && npm run build -w @tesseradb/deck && npm run build -w @tesseradb/components && npm run build -w @tesseradb/react",
+    "build": "npm run build -w @mosaicajs/client && npm run build -w @mosaicajs/deck && npm run build -w @mosaicajs/components && npm run build -w @mosaicajs/react",
     "typecheck": "npm run typecheck --workspaces --if-present && tsc -p scripts/tsconfig.json"
   },
   "devDependencies": {

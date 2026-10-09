@@ -2,8 +2,8 @@
 // Checks, against a running deployment, which label description each principal is served and
 // that a label does not outlive the cluster it labels.
 //
-//   TESSERA_OPERATOR_CRED=… node clients/ts/scripts/check-labels.mjs \
-//     --presets ../../tessera-demo/presets/stage3.json --clusters centroids/kmeans-2026-08 \
+//   MOSAICA_OPERATOR_CRED=… node clients/ts/scripts/check-labels.mjs \
+//     --presets ../../mosaica-demo/presets/stage3.json --clusters centroids/kmeans-2026-08 \
 //     --labels topics/ctfidf-2026-08 --term 46
 //
 // Publish the two layers with `publish-clusters.mjs --labels … --label-term …` first. The script
@@ -27,13 +27,13 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const operatorCred = process.env.TESSERA_OPERATOR_CRED;
-if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
+const operatorCred = process.env.MOSAICA_OPERATOR_CRED;
+if (!operatorCred) throw new Error('set MOSAICA_OPERATOR_CRED');
 const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', credential: operatorCred});
 const clusterLayer = args.clusters ?? 'centroids/kmeans-2026-08';
 const labelLayer = args.labels ?? 'topics/ctfidf-2026-08';
 const labelTerm = args.term ?? '46';
-const presets = JSON.parse(await readFile(args.presets ?? '../../tessera-demo/presets/stage3.json', 'utf8'));
+const presets = JSON.parse(await readFile(args.presets ?? '../../mosaica-demo/presets/stage3.json', 'utf8'));
 
 /** This deployment's `/v1/meta`. */
 async function metaOf(token) {

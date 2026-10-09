@@ -6,13 +6,13 @@ exists for: the **MeSH descriptor DAG** — 30,954 concepts, 42,287 edges, a mem
 through it, and 1.66×10⁹ member rows to show for it.
 
 It is a **demonstrator and a speed benchmark** (owner rulings 2026-09-01 and 2026-09-02: this
-corpus tests Tessera's speed and memory, not the UMAP pipeline; layout quality matters only as far
+corpus tests Mosaica's speed and memory, not the UMAP pipeline; layout quality matters only as far
 as the demo looks good). Recall against an exact neighbour search is not measured and layout
-fidelity is not judged. Every figure below *is* a claim about what this pipeline and `tessera
+fidelity is not judged. Every figure below *is* a claim about what this pipeline and `mosaica
 build` cost, and each names its medium.
 
 ```bash
-export TESSERA_LADDER="$PWD/data/ladder"
+export MOSAICA_LADDER="$PWD/data/ladder"
 
 # once: 163 GB off the share, resumable per chunk — the only pass over the publisher's bytes
 ~/venvs/projection/bin/python -m test_corpora.medcpt.stage
@@ -20,7 +20,7 @@ export TESSERA_LADDER="$PWD/data/ladder"
 # the corpus; --sample 0 takes all 35,920,666
 ~/venvs/projection/bin/python -m test_corpora.medcpt.prepare --sample 1000000
 
-cd "$TESSERA_LADDER/medcpt" && tessera check --payloads && tessera build
+cd "$MOSAICA_LADDER/medcpt" && mosaica check --payloads && mosaica build
 ```
 
 ## One view, and why it is not called a topic map
@@ -107,14 +107,14 @@ NVMe, box otherwise idle, 2026-09-02:
 | `points.parquet` | 118.6 MB | 634.6 MB | 4.3 GB → 22.8 GB |
 | prepare's *write points* step | 0.7 s | 115.6 s | — |
 | prepare peak RSS | 15.6 GB | 16.2 GB | — |
-| `tessera build` wall | 19.7 s | 34.3 s | — |
-| **`tessera build` peak RSS** | **716 MB** | **2,246 MB** | 25.7 GB → **80.7 GB** |
+| `mosaica build` wall | 19.7 s | 34.3 s | — |
+| **`mosaica build` peak RSS** | **716 MB** | **2,246 MB** | 25.7 GB → **80.7 GB** |
 | bundle on disk | 333 MB | 799 MB | 12.0 GB → 28.7 GB |
 
 Abstract coverage is 689,132 of 1,000,000 (68.9%), which is also the whole-corpus figure (68.9%).
 ⊘ **The two prepare runs were not equally loaded** — the `off` run shared the box with a demo server
 and a `verify`, which cost its MeSH step 222 s against the `on` run's 45 s — so read the *prepare*
-rows as indicative. The `tessera build` and bundle rows are the ones the ruling turns on and both
+rows as indicative. The `mosaica build` and bundle rows are the ones the ruling turns on and both
 builds ran alone.
 The last column is a **linear extrapolation and not a measurement**: the build's peak is known not
 to be bounded by `--memory-budget` (the campaign's W2), so the 80.7 GB is what to expect to meet
@@ -181,7 +181,7 @@ it; the same step on an idle box in the `--abstracts` run below was 45 s over th
 k-means cells (18 … 51,243 members, median 27,693), 43 of 43 with a distinctive title out of 39,906
 candidate terms.
 
-`tessera build` **19.7 s** to a **333 MB** bundle at **716 MB** peak RSS; `verify --deep` clean at
+`mosaica build` **19.7 s** to a **333 MB** bundle at **716 MB** peak RSS; `verify --deep` clean at
 1,000,000 rows and 4,601,362 pairs; **no containment violation** over 29,229 descriptors and 40,075
 edges, 9,831 splits of which 9,362 are non-covering.
 
@@ -218,7 +218,7 @@ one.
 | `unindexed` | 5,415,899 articles (15.1%) |
 | (article, branch) labels | 165,272,740 over 17 terms |
 
-**`tessera build`: 12 m 10 s, 16.03 GB peak RSS, an 11.15 GB bundle** over 35,920,666 items,
+**`mosaica build`: 12 m 10 s, 16.03 GB peak RSS, an 11.15 GB bundle** over 35,920,666 items,
 18 terms and 165,272,740 pairs. `verify --deep` clean in 5.1 s at 1.15 GB: 1 partition, 1 view,
 1 segment, 35,920,666 rows. The build's own report, verbatim:
 
@@ -243,7 +243,7 @@ Served through `run_demo.sh` on its own deployment, the principals ladder is 4,9
 ⊘ **The bundle's manifest was corrected by hand.** The run wrote
 `umap.graph = "cagra fp16, sharded"` and no fit size — the name of a path `knn_graph` can take and
 this rung does not. `prepare.py` writes the route it ran from `65796880` onward; the
-`$TESSERA_LADDER/medcpt/manifest.json` beside the built bundle was patched rather than regenerated,
+`$MOSAICA_LADDER/medcpt/manifest.json` beside the built bundle was patched rather than regenerated,
 and says so in a `corrected_by_hand` field.
 
 ### The rung's scaling finding
@@ -311,12 +311,12 @@ in truth: entity **12,149,178** (chunk 12) is **missing two ancestor rows**, `ge
 first — **rows dropped, not shifted, and the totals not preserved** — which is also why the two runs
 disagree by three rows in the total MeSH membership written, 1,658,437,807 against 1,658,437,804.
 
-**The second run's build also crashed once, and then did not.** `tessera build` died of `SIGSEGV`
+**The second run's build also crashed once, and then did not.** `mosaica build` died of `SIGSEGV`
 3 m 12 s in at 5.3 GB, immediately after the attribute pass. The kernel log:
 
 ```
-tessera[6825]: segfault at 64c86c6fad9b ip 000064c82c388730 sp 00007ffcf8252f20 error 6
-               in tessera[ae7730,64c82c07c000+165f000] likely on CPU 5
+mosaica[6825]: segfault at 64c86c6fad9b ip 000064c82c388730 sp 00007ffcf8252f20 error 6
+               in mosaica[ae7730,64c82c07c000+165f000] likely on CPU 5
 ```
 
 `error 6` is a write to a non-present page. Relaunched on the **same binary and the same inputs**
@@ -334,7 +334,7 @@ boundary, and would not change shape between runs; this machine has a standing m
 suspicion from three corruption-class symptoms on 2026-08-22/23. **The action is a memtest**, not
 more code.
 
-**What caught it.** `tessera build`'s containment report named all 45 rows of the first fault
+**What caught it.** `mosaica build`'s containment report named all 45 rows of the first fault
 individually, by parent and child, without being asked — and the second fault's single row too,
 after 1.66×10⁹ rows had been written each time. `prepare.py` now also refuses per slice, before a
 member row reaches the file, on the property that cannot fail on sound data: a row's closure

@@ -53,23 +53,23 @@ What only accumulation shows, and where this module looks for it:
 **Verification cadence is what makes a long run affordable** (§6). The read battery rides every
 stage, through `run_plan` exactly as the short tiers use it. Total verification (§9 — every
 served row at its own identity, plus the per-tile census) runs on a sampled subset of fold
-cycles and totally at the end. The deep structural verifier (`tessera verify <bundle> --deep`, a
+cycles and totally at the end. The deep structural verifier (`mosaica verify <bundle> --deep`, a
 full re-hash) runs every *n*th fold and at the end, never every stage — at a thousand writes the
 re-hash would be the whole run.
 
-**This is a backstop, never a gate** (§6, §13). It is skipped unless `TESSERA_SUITE_ENDURANCE=1`
+**This is a backstop, never a gate** (§6, §13). It is skipped unless `MOSAICA_SUITE_ENDURANCE=1`
 is set, so a plain `pytest conformance/suite` — including CI's — never runs it; wiring it into a
 gate and then disabling it is the failure that sentence in the design exists to prevent. It runs
 on demand and before a release. The knobs (defaults are the real thing, §16's tier table):
 
-    TESSERA_SUITE_ENDURANCE=1   opt in (required; everything below is optional)
-    TESSERA_SUITE_BASE=1000000  built corpus items
-    TESSERA_SUITE_ROUNDS=2000   ingest-and-flush writes
-    TESSERA_SUITE_FOLDS=100     compaction folds
-    TESSERA_SUITE_ROWS=256      rows per write
-    TESSERA_SUITE_SEED=20260816 corpus seed
-    TESSERA_SUITE_VERIFY=every:10  deep-verify and total-verification cadence, in folds
-    TESSERA_SUITE_KILL=1        kill one sampled fold at its publication seam (§10.1)
+    MOSAICA_SUITE_ENDURANCE=1   opt in (required; everything below is optional)
+    MOSAICA_SUITE_BASE=1000000  built corpus items
+    MOSAICA_SUITE_ROUNDS=2000   ingest-and-flush writes
+    MOSAICA_SUITE_FOLDS=100     compaction folds
+    MOSAICA_SUITE_ROWS=256      rows per write
+    MOSAICA_SUITE_SEED=20260816 corpus seed
+    MOSAICA_SUITE_VERIFY=every:10  deep-verify and total-verification cadence, in folds
+    MOSAICA_SUITE_KILL=1        kill one sampled fold at its publication seam (§10.1)
 
 ## Composition, not modification
 
@@ -95,7 +95,7 @@ outside their sight. The sampled cadence is the affordability trade §6 names, m
 ## A defect this tier found on its first run, pinned rather than tolerated silently
 
 A merge planned on the same tick as a flush used to publish its side-manifest with the
-watermark it captured at *plan* time (`tessera-engine::merge`'s `rebase_into` overwrote the
+watermark it captured at *plan* time (`mosaica-engine::merge`'s `rebase_into` overwrote the
 cloned manifest's), one batch behind the flush that shared its tick — every later publication
 cloned the stale value forward and a reboot under-reported by exactly one batch, with total
 verification green across it (the boot rebuilds the buffer by `row_of`, not the watermark).
@@ -105,7 +105,7 @@ regress a durable scalar, so the same shape on the next field is a loud refusal 
 silent regression. The one-batch allowance the assertions below carried while the defect was
 pinned is deleted: the watermark is held strictly monotone, live and durable alike, and the
 durable value may never trail the served one. The interleaving itself is pinned
-deterministically in `crates/tessera-engine/tests/merge.rs`.
+deterministically in `crates/mosaica-engine/tests/merge.rs`.
 
 A second defect fell out of running long before any assertion could: the driver's spawn pipes
 the server's stdout/stderr and nothing reads it, so after roughly one pipe buffer of logging the
@@ -222,7 +222,7 @@ AXIS_CEILING = 32
 #: Non-base segments allowed beyond the flushed-bytes ÷ saturation term: up to three unmerged
 #: segments per active ladder size class, a few classes deep.
 LADDER_SLACK = 9
-#: WAL members: rotation's steady state is two (`tessera-lifecycle::wal`), plus transients.
+#: WAL members: rotation's steady state is two (`mosaica-lifecycle::wal`), plus transients.
 WAL_MEMBER_CEILING = 4
 #: Bytes outside the live prefix after the post-fold reclaim: `CURRENT` aside, there should be
 #: none; slack for a straggling temp file.
@@ -233,7 +233,7 @@ _SIDE_RE = re.compile(r"SEGMENTS-(\d+)\.json$")
 
 
 def parse_verify_cadence(text: str) -> int:
-    """§16's `TESSERA_SUITE_VERIFY` grammar, the slice of it this tier uses: `every:<n>` (deep
+    """§16's `MOSAICA_SUITE_VERIFY` grammar, the slice of it this tier uses: `every:<n>` (deep
     verification and sampled total verification every n folds), `each` meaning every fold, or a
     bare integer."""
     text = text.strip()
@@ -249,7 +249,7 @@ def parse_verify_cadence(text: str) -> int:
 
 @dataclass(frozen=True)
 class Params:
-    """One run's shape, from the `TESSERA_SUITE_*` environment; defaults are §16's endurance row."""
+    """One run's shape, from the `MOSAICA_SUITE_*` environment; defaults are §16's endurance row."""
 
     base: int
     rounds: int
@@ -263,13 +263,13 @@ class Params:
     def from_env(cls) -> "Params":
         env = os.environ.get
         return cls(
-            base=int(env("TESSERA_SUITE_BASE", "1000000")),
-            rounds=int(env("TESSERA_SUITE_ROUNDS", "2000")),
-            folds=int(env("TESSERA_SUITE_FOLDS", "100")),
-            rows=int(env("TESSERA_SUITE_ROWS", "256")),
-            seed=int(env("TESSERA_SUITE_SEED", "20260816")),
-            verify_every=parse_verify_cadence(env("TESSERA_SUITE_VERIFY", "every:10")),
-            kill=env("TESSERA_SUITE_KILL", "1") == "1",
+            base=int(env("MOSAICA_SUITE_BASE", "1000000")),
+            rounds=int(env("MOSAICA_SUITE_ROUNDS", "2000")),
+            folds=int(env("MOSAICA_SUITE_FOLDS", "100")),
+            rows=int(env("MOSAICA_SUITE_ROWS", "256")),
+            seed=int(env("MOSAICA_SUITE_SEED", "20260816")),
+            verify_every=parse_verify_cadence(env("MOSAICA_SUITE_VERIFY", "every:10")),
+            kill=env("MOSAICA_SUITE_KILL", "1") == "1",
         )
 
     @property
@@ -703,7 +703,7 @@ class PipeDrainer:
     The driver pipes the server's output and never reads it, which is invisible to every short
     tier — their servers say less than one pipe buffer (64 KiB) in a lifetime. A long run does
     not: this tier's first three runs each wedged at the same operation count, the executor's
-    thread (`tessera-lifecyc`) parked in `anon_pipe_write` mid-log, ticks never consumed again —
+    thread (`mosaica-lifecyc`) parked in `anon_pipe_write` mid-log, ticks never consumed again —
     found by reading `/proc/<pid>/task/*/wchan` of the wedged process. Draining here keeps the
     executor's logging non-blocking and keeps the tail as the failure report's witness; the
     driver-level fix (its spawn owning the draining, or logging to a file) is `driver.py`'s
@@ -812,7 +812,7 @@ def run_and_check(
 
 
 def deep_verify(bundle_root: Path) -> str:
-    """`tessera verify <bundle> --deep` — §12.4's full re-hash, run between stages while the plan
+    """`mosaica verify <bundle> --deep` — §12.4's full re-hash, run between stages while the plan
     is quiescent (nothing publishes concurrently, which is the reader-safety §12.4 asks for)."""
     run = subprocess.run(
         [str(CLI_BIN), "verify", str(bundle_root), "--deep"],
@@ -877,20 +877,20 @@ def total_verify(
 
 # -- the run ------------------------------------------------------------------------------------
 
-ENDURANCE_OPTED_IN = os.environ.get("TESSERA_SUITE_ENDURANCE") == "1"
+ENDURANCE_OPTED_IN = os.environ.get("MOSAICA_SUITE_ENDURANCE") == "1"
 
 
 @pytest.mark.skipif(
     not ENDURANCE_OPTED_IN,
     reason=(
         "the endurance tier is a backstop, never a gate (correctness-suite §6/§13): "
-        "opt in with TESSERA_SUITE_ENDURANCE=1"
+        "opt in with MOSAICA_SUITE_ENDURANCE=1"
     ),
 )
 def test_endurance_long_life(tmp_path_factory):
     p = Params.from_env()
     assert p.base >= 60_000, (
-        f"TESSERA_SUITE_BASE={p.base}: the suite config's merge cap ({SATURATION_BYTES} bytes) "
+        f"MOSAICA_SUITE_BASE={p.base}: the suite config's merge cap ({SATURATION_BYTES} bytes) "
         f"must sit below the base segment, and a base this small builds one under it — the "
         f"server would refuse the config at boot, so refuse here with the reason instead"
     )
@@ -1165,7 +1165,7 @@ def test_the_defaults_are_the_design_tier():
     saved = {
         k: os.environ.pop(k)
         for k in list(os.environ)
-        if k.startswith("TESSERA_SUITE_") and k != "TESSERA_SUITE_ENDURANCE"
+        if k.startswith("MOSAICA_SUITE_") and k != "MOSAICA_SUITE_ENDURANCE"
     }
     try:
         p = Params.from_env()

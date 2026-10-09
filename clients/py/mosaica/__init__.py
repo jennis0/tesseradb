@@ -1,0 +1,62 @@
+"""Mosaica's Python package: read a Mosaica database, map it in a notebook, and make one.
+
+`connect` reads a database someone else runs, with a token from `login`, from `authorise`, or
+from its operator. `Control` writes to one and manages its principals, credentials, groups,
+grants, OIDC providers and sessions. `create` makes one in a directory from data frames and
+files, and `open` reopens one. Every table the package returns is a pyarrow table, whose
+`.to_pandas()` gives a pandas DataFrame where pandas is installed. `pip install mosaica[widget]`
+adds the notebook map, `Map`.
+
+`Map`, `create`, `open` and `Database` are loaded when first used, so `import mosaica` works
+without anywidget or pyarrow.
+"""
+
+from __future__ import annotations
+
+from ._auth import Token, authorise, login, logout, revoke
+from ._control import Answer, Control
+from ._refusal import Refusal
+from ._viewer import Batches, PartialRead, Sample, Selection, Viewer, connect
+
+__all__ = [
+    "Answer",
+    "Batches",
+    "Control",
+    "Database",
+    "Map",
+    "PartialRead",
+    "Refusal",
+    "Sample",
+    "Selection",
+    "Token",
+    "Viewer",
+    "authorise",
+    "connect",
+    "create",
+    "login",
+    "logout",
+    "open",
+    "revoke",
+    "__version__",
+]
+__version__ = "0.1.0"
+
+_SDK = {"create": "create", "open": "open", "Database": "Database"}
+
+
+def __getattr__(name: str):
+    if name == "Map":
+        try:
+            from .widget import Map
+        except ImportError as e:
+            raise ImportError(
+                "mosaica.Map needs the widget extra: pip install 'mosaica[widget]'"
+            ) from e
+        return Map
+    if name in _SDK:
+        try:
+            from . import _database
+        except ImportError as e:
+            raise ImportError("making a database needs pyarrow: pip install 'pyarrow>=14'") from e
+        return getattr(_database, _SDK[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

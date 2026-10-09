@@ -13,14 +13,14 @@
 // mask, if a cluster is served to everyone alike, or if no geometry or label arrived.
 //
 // Everything is read through the components' parts, the explorer's store and the probe. Requires a running
-// `tessera serve` with a published layer (`scripts/publish-clusters.mjs`) and a running `vite dev`.
+// `mosaica serve` with a published layer (`scripts/publish-clusters.mjs`) and a running `vite dev`.
 import {mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
 
 const args = flags();
 const url = args.url ?? 'http://localhost:5173';
-const shots = args.shots ?? '/tmp/tessera-artifacts';
+const shots = args.shots ?? '/tmp/mosaica-artifacts';
 await mkdir(shots, {recursive: true});
 
 // A layer × principal grid is one settle per cell, so a headed browser helps most here.
@@ -49,7 +49,7 @@ const settled = async (limitMs = 45_000) => {
   let stable = 0;
   while (Date.now() - started < limitMs) {
     await page.waitForTimeout(500);
-    const marks = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    const marks = await page.evaluate(() => window.__mosaicaProbe?.marks ?? -1);
     if (marks === last) {
       if (++stable >= 4) return;
     } else {
@@ -65,7 +65,7 @@ const settled = async (limitMs = 45_000) => {
  */
 const artifactList = async () =>
   page.evaluate(() => {
-    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {status: string; served: {tesseraId: bigint; maskedCount: bigint; content: string[]}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const explorer = /** @type {{activeStore: {get(name: 'artifacts'): {status: string; served: {tesseraId: bigint; maskedCount: bigint; content: string[]}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     const artifacts = explorer?.activeStore?.get('artifacts');
     const counts = {};
     const names = {};
@@ -85,8 +85,8 @@ const artifactList = async () =>
  */
 const drawn = async () =>
   page.evaluate(() => {
-    const p = window.__tesseraProbe;
-    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]; box: unknown; shape: unknown}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const p = window.__mosaicaProbe;
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]; box: unknown; shape: unknown}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')));
     const served = explorer?.store?.get('artifacts').served ?? [];
     const named = served.filter((a) => (a.content[0] ?? '').length > 0).length;
     const withGeometry = served.filter((a) => a.box !== null || a.shape !== null).length;
@@ -95,22 +95,22 @@ const drawn = async () =>
 
 // The picker renders from `/v1/meta`, with an entry only for layers this principal reaches.
 await openLayers();
-await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+await page.locator('mosaica-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 await settled();
 
 await openLayers();
-const layers = await page.locator('tessera-layer-picker [part="entry"]').count();
+const layers = await page.locator('mosaica-layer-picker [part="entry"]').count();
 const principals = await page.locator('#principal option').count();
 const results = [];
 
 for (let l = 0; l < layers; l++) {
   await openLayers();
-  const entry = page.locator('tessera-layer-picker [part="entry"]').nth(l);
+  const entry = page.locator('mosaica-layer-picker [part="entry"]').nth(l);
   const layerName = await entry.getAttribute('data-layer');
   // One layer on at a time: tick this entry, untick the others.
   for (let o = 0; o < layers; o++) {
     await openLayers();
-    const box = page.locator('tessera-layer-picker [part="entry"]').nth(o).locator('input');
+    const box = page.locator('mosaica-layer-picker [part="entry"]').nth(o).locator('input');
     if ((await box.isChecked()) !== (o === l)) await box.click();
   }
   for (let p = 0; p < principals; p++) {
@@ -118,10 +118,10 @@ for (let l = 0; l < layers; l++) {
     await page.selectOption('#principal', String(p));
     // A new session's store: the layer choice is re-applied through the picker after meta.
     await openLayers();
-    await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+    await page.locator('mosaica-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
     for (let o = 0; o < layers; o++) {
       await openLayers();
-      const box = page.locator('tessera-layer-picker [part="entry"]').nth(o).locator('input');
+      const box = page.locator('mosaica-layer-picker [part="entry"]').nth(o).locator('input');
       if ((await box.isChecked()) !== (o === l)) await box.click();
     }
     await settled();
@@ -136,9 +136,9 @@ const shotsTaken = [];
 for (const p of [Math.max(0, principals - 3), principals - 1]) {
   await page.selectOption('#principal', String(p));
   await openLayers();
-  await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+  await page.locator('mosaica-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
   await openLayers();
-  const box = page.locator('tessera-layer-picker [part="entry"]').first().locator('input');
+  const box = page.locator('mosaica-layer-picker [part="entry"]').first().locator('input');
   if (!(await box.isChecked())) await box.click();
   await settled();
   await page.waitForTimeout(1500);
@@ -153,7 +153,7 @@ for (const p of [Math.max(0, principals - 3), principals - 1]) {
 let openedDrawn = null;
 {
   const opened = await page.evaluate(() => {
-    const store = /** @type {{activeStore: {get(name: 'artifacts'): {served: {tesseraId: bigint}[]}; openArtifact(id: bigint): Promise<void>} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')))?.activeStore;
+    const store = /** @type {{activeStore: {get(name: 'artifacts'): {served: {tesseraId: bigint}[]}; openArtifact(id: bigint): Promise<void>} | null} | null} */ (/** @type {unknown} */ (document.querySelector('mosaica-explorer')))?.activeStore;
     const first = store?.get('artifacts').served[0];
     if (!store || !first) return false;
     void store.openArtifact(first.tesseraId);

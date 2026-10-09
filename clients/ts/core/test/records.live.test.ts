@@ -2,7 +2,7 @@ import {createServer} from 'node:http';
 import type {AddressInfo} from 'node:net';
 import type {Table} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, type TestContext} from 'vitest';
-import {TesseraClient, TesseraError} from '../src/client.js';
+import {MosaicaClient, MosaicaError} from '../src/client.js';
 import {Control} from '../src/control.js';
 import {artifactName} from '../src/names.js';
 import {refusalOf} from '../src/presented.js';
@@ -13,7 +13,7 @@ import {camera, rejectsAsRefused} from './support.js';
 import {start, type Served} from './served.js';
 
 /**
- * `TesseraClient.items` and `artifacts` against a real `tessera serve` over the notebook corpus
+ * `MosaicaClient.items` and `artifacts` against a real `mosaica serve` over the notebook corpus
  * (`served.ts`). Each read is carried across several small pages and several responses, and
  * compared with what the viewport, the item card or browse serves for the same data.
  */
@@ -21,7 +21,7 @@ import {start, type Served} from './served.js';
 const TERMS = ['cs.LG', 'cs.CV', 'hep-ph'];
 
 let served: Served | string = 'the server has not started';
-let client: TesseraClient;
+let client: MosaicaClient;
 /** The bulk-read requests `client` has sent, one per response. */
 let requests = 0;
 let session: Session;
@@ -34,7 +34,7 @@ beforeAll(async () => {
     if (/\/v1\/(items|artifacts)$/.test(String(url))) requests += 1;
     return fetch(url, init);
   };
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential, fetch: counting});
+  client = new MosaicaClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential, fetch: counting});
   session = await client.authorise({terms: TERMS});
   meta = await client.meta(session.token);
 }, 120_000);
@@ -98,7 +98,7 @@ async function cuttingProxy(target: string, nth: number, cutAt: (body: Uint8Arra
     const body = new Uint8Array(await upstream.arrayBuffer());
     const headers: Record<string, string> = {};
     upstream.headers.forEach((value, name) => {
-      if (name.startsWith('x-tessera-') || name === 'content-type') headers[name] = value;
+      if (name.startsWith('x-mosaica-') || name === 'content-type') headers[name] = value;
     });
     res.writeHead(upstream.status, headers);
     seen += 1;
@@ -162,8 +162,8 @@ describe('bulk reads against a live server', () => {
     const q = meta.views.find((v) => v.id === 's0')!.quantisation;
     const archive = column(tables, 'archive');
     const title = column(tables, 'title');
-    const x = column(tables, 'tessera:x') as number[];
-    const y = column(tables, 'tessera:y') as number[];
+    const x = column(tables, 'mosaica:x') as number[];
+    const y = column(tables, 'mosaica:y') as number[];
     for (let i = 0; i < ids.length; i += Math.floor(ids.length / 7)) {
       const card = await client.item(session.token, ids[i]!);
       expect(archive[i]).toBe(card.fields.archive);
@@ -194,7 +194,7 @@ describe('bulk reads against a live server', () => {
     expect(dump([...first, ...rest.tables])).toEqual(dump(one.tables));
   });
 
-  it('throws a refused follow-up’s TesseraError, and resumes from its cursor', async (ctx) => {
+  it('throws a refused follow-up’s MosaicaError, and resumes from its cursor', async (ctx) => {
     live(ctx);
     const request: ItemsRequest = {view: 's0', fields: [], pageRows: 500, pages: 1};
     const whole = column((await items(request)).tables, 'tessera_id');
@@ -205,7 +205,7 @@ describe('bulk reads against a live server', () => {
     // Two reads the client does not consume hold both slots of the lane, so the follow-up is shed.
     const holders = await Promise.all([0, 1].map(() => client.items(session.token, {view: 's0', fields: ['title', 'abstract'], pageRows: 50})));
     const thrown = await read.next().catch((error: unknown) => error);
-    expect(thrown).toBeInstanceOf(TesseraError);
+    expect(thrown).toBeInstanceOf(MosaicaError);
     expect(thrown).toMatchObject({status: 429});
     expect(typeof read.cursor).toBe('string');
     for (const holder of holders) await holder.return();
@@ -259,7 +259,7 @@ describe('bulk reads against a live server', () => {
     expect(column(only.tables, 'archive')).toEqual(Array(matched).fill('cs'));
 
     const kept = await items({view: 's0', fields: [], filters, keepUnmatched: true, pageRows: 500});
-    const marks = column(kept.tables, 'tessera:matched');
+    const marks = column(kept.tables, 'mosaica:matched');
     expect(marks.length).toBe(visible);
     expect(marks.filter((m) => m === true).length).toBe(matched);
   });
@@ -341,7 +341,7 @@ describe('bulk reads against a live server', () => {
     const everything = (await client.authorise({terms: primary})).token;
     const bodies: {k?: number; layers?: string[]}[] = [];
     const tiles: {layers?: string[]; per_tile?: number}[] = [];
-    const watching = new TesseraClient({
+    const watching = new MosaicaClient({
       viewerUrl: (served as Served).viewerUrl,
       sessionUrl: (served as Served).sessionUrl,
       fetch: (url, init) => {
@@ -385,7 +385,7 @@ describe('bulk reads against a live server', () => {
     }
   });
 
-  it('refuses a bad request with a TesseraError before any page', async (ctx) => {
+  it('refuses a bad request with a MosaicaError before any page', async (ctx) => {
     live(ctx);
     const first = await client.items(session.token, {view: 's0', fields: [], pageRows: 10});
     for await (const _ of first) break;
@@ -403,7 +403,7 @@ describe('bulk reads against a live server', () => {
         () => null,
         (error: unknown) => error
       );
-      expect(thrown).toBeInstanceOf(TesseraError);
+      expect(thrown).toBeInstanceOf(MosaicaError);
       expect(thrown).toMatchObject({status: 422});
       expect(refusalOf(thrown).code).toBe('contract');
     }
@@ -429,7 +429,7 @@ describe('bulk reads against a live server', () => {
         const label = `response ${nth}, ${name}`;
         const proxy = await cuttingProxy((served as Served).viewerUrl, nth, cutAt);
         try {
-          const cutClient = new TesseraClient({viewerUrl: proxy.url, sessionUrl: (served as Served).sessionUrl});
+          const cutClient = new MosaicaClient({viewerUrl: proxy.url, sessionUrl: (served as Served).sessionUrl});
           const read = await cutClient.items(session.token, request);
           const got: Table[] = [];
           await rejectsAsRefused(

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Drive a running tessera serve (medcpt bundle) with a fixed request sequence, and report
+"""Drive a running mosaica serve (medcpt bundle) with a fixed request sequence, and report
 p50/p99 per request kind. Used to compare 4G / 12G / no-cap runs and to check byte-identical
 correctness of counts across caps.
 
 Usage: python3 drive.py --viewer http://127.0.0.1:8121 --session http://127.0.0.1:8122 \
-    --session-cred $TESSERA_MEDCPT_SESSION_CRED --out results-4g.json [--save-bodies]
+    --session-cred $MOSAICA_MEDCPT_SESSION_CRED --out results-4g.json [--save-bodies]
 """
 import argparse
 import base64
@@ -83,7 +83,7 @@ def viewport(viewer_base, token, view_id, zoom, bbox, k=30, filters=None, extra=
     )
     dt = time.perf_counter() - t0
     r.raise_for_status()
-    server_us = int(r.headers.get("x-tessera-server-us", "0"))
+    server_us = int(r.headers.get("x-mosaica-server-us", "0"))
     counts = tile_counts(r.content)
     return {
         "wall_ms": dt * 1000,
@@ -103,7 +103,7 @@ def browse(viewer_base, token, **body):
         timeout=30,
     )
     dt = time.perf_counter() - t0
-    server_us = int(r.headers.get("x-tessera-server-us", "0")) if r.ok else 0
+    server_us = int(r.headers.get("x-mosaica-server-us", "0")) if r.ok else 0
     return {
         "wall_ms": dt * 1000,
         "server_ms": server_us / 1000,
@@ -241,14 +241,14 @@ def main():
                 )
                 dt = time.perf_counter() - t0
                 r.raise_for_status() if r.status_code not in (200, 404) else None
-                server_us = int(r.headers.get("x-tessera-server-us", "0")) if "x-tessera-server-us" in r.headers else 0
+                server_us = int(r.headers.get("x-mosaica-server-us", "0")) if "x-mosaica-server-us" in r.headers else 0
                 yield {"wall_ms": dt * 1000, "server_ms": server_us / 1000}, {"status": r.status_code}
 
         record_kind("item_drilldown", gen)
 
     # 4. artifact frame -- mesh/descriptors. There is no separate browse route in this build
     # (`/v1/artifacts/browse` in reference/oracle/harness.py is not registered by
-    # crates/tessera-server/src/viewer.rs here); the DAG layer's artifact frames ride the ordinary
+    # crates/mosaica-server/src/viewer.rs here); the DAG layer's artifact frames ride the ordinary
     # `/v1/viewport` response when `layers` includes it, which `layers: "all"` already does above
     # -- so `viewport_pan_*` already exercises "the artifact frame with mesh/descriptors". This
     # step additionally drills into a few artifact ids via `POST /v1/artifacts/{tessera_id}`.
@@ -264,7 +264,7 @@ def main():
                 )
                 dt = time.perf_counter() - t0
                 r.raise_for_status() if r.status_code not in (200, 404, 422) else None
-                server_us = int(r.headers.get("x-tessera-server-us", "0")) if "x-tessera-server-us" in r.headers else 0
+                server_us = int(r.headers.get("x-mosaica-server-us", "0")) if "x-mosaica-server-us" in r.headers else 0
                 yield {"wall_ms": dt * 1000, "server_ms": server_us / 1000}, {"status": r.status_code}
 
         record_kind("artifact_drilldown_mesh", gen)

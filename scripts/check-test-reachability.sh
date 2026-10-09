@@ -12,7 +12,7 @@
 #      on in the workspace build. Cargo's resolver-2 unifies features across a `--workspace`
 #      invocation, so such a test compiles under `cargo test --workspace` and VANISHES under
 #      `cargo test -p <crate>` — the command a developer runs while working on that crate. The
-#      manifests of tessera-engine, tessera-lifecycle and tessera-server already record that
+#      manifests of mosaica-engine, mosaica-lifecycle and mosaica-server already record that
 #      unification as measured rather than assumed; this script is where the consequence for tests
 #      is counted.
 #   3. A test binary that no longer builds under the narrower selection at all.
@@ -117,8 +117,8 @@ for m in $members; do
   # module path it has. A crate whose own listing already contains that final segment did not lose
   # anything — the missing spelling belongs to the other member. Without this the source grep alone
   # reports a false positive for every duplicated test name, which it did:
-  # `an_undersized_bound_does_not_livelock` exists in both `tessera-cache/src` and
-  # `tessera-engine/tests/cache.rs`, and the bare spelling from the second was attributed to the
+  # `an_undersized_bound_does_not_livelock` exists in both `mosaica-cache/src` and
+  # `mosaica-engine/tests/cache.rs`, and the bare spelling from the second was attributed to the
   # first, whose own listing carries it under `tests::`.
   #
   # The trade is deliberate: a crate that genuinely lost a test *and* still lists another test of

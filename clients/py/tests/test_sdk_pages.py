@@ -13,8 +13,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from conftest import browse, item, viewport
-from tesseradb import _commit as commit_module
-from tesseradb._refusal import Refusal
+from mosaica import _commit as commit_module
+from mosaica._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
 
@@ -925,7 +925,7 @@ def test_a_labels_insert_whose_clustering_is_neither_held_nor_inserted_is_refuse
 def test_a_key_column_inserted_into_a_layer_with_supplied_content_is_refused(tmp_path, corpus):
     """§6.3: an artifact served without content its layer declares cannot be told from one whose
     content was withheld, so such a layer takes an artifacts table."""
-    from tesseradb._database import create
+    from mosaica._database import create
 
     db = create(tmp_path / "db")
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
@@ -1171,7 +1171,7 @@ def test_a_label_attached_to_a_cluster_minted_in_the_same_commit_is_served(serve
 
 
 def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(served, corpus):
-    """§6.2 step 1: the runtime `PUT` body comes from `tessera check --payloads`."""
+    """§6.2 step 1: the runtime `PUT` body comes from `mosaica check --payloads`."""
     db = served(clustering)
     db.declare_labels("topics", of="clusters", content_requires="all")
     db.insert(
@@ -1281,7 +1281,7 @@ def test_a_memberless_attached_record_omits_members_and_an_unattached_one_sends_
     """
     import json
 
-    from tesseradb._commit import _artifact_block
+    from mosaica._commit import _artifact_block
 
     label = {
         "key": "t0",

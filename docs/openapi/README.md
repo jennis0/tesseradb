@@ -4,13 +4,13 @@ Three things a power user who installs nothing needs, and where each is:
 
 | | where | kept true by |
 |---|---|---|
-| The API | [`tessera.yaml`](tessera.yaml), OpenAPI 3.1 for the viewer, session and control planes | `crates/tessera-server/tests/openapi.rs`, which starts the server, exercises every route with a success and a refusal, and validates every JSON body against the description's schemas |
+| The API | [`mosaica.yaml`](mosaica.yaml), OpenAPI 3.1 for the viewer, session and control planes | `crates/mosaica-server/tests/openapi.rs`, which starts the server, exercises every route with a success and a refusal, and validates every JSON body against the description's schemas |
 | The framing, to the byte | [The framing](#the-framing) and [the worked decodes](#the-worked-decodes) below | the viewport decodes' tests, over the golden fixtures in `clients/ts/core/test/fixtures/`; the items decodes have none |
 | What the server cannot enforce | [The twelve rules](../system/clients.md#the-twelve-rules) in the clients chapter | reading it |
 
 ## What the description is, and is not
 
-`tessera.yaml` is **hand-authored**. The JSON DTOs live in `tessera-server`, some private, the
+`mosaica.yaml` is **hand-authored**. The JSON DTOs live in `mosaica-server`, some private, the
 control plane's answers built with `json!`, and the Arrow-facing structs carry a deliberate *no
 serde derive*. Nothing generates the description from them, so the test is what stops it drifting:
 every closed DTO is declared `additionalProperties: false`, and a field added to a response and not
@@ -65,7 +65,7 @@ one outcome by design.
 
 ## The worked decodes
 
-Two runnable examples, each importing nothing of Tessera's, each printing the frames of a raw body
+Two runnable examples, each importing nothing of Mosaica's, each printing the frames of a raw body
 and the first rows of every batch, and each tested over the same fixtures to the same answer
 (`clients/ts/wire-example/test/expected.json` is the shared answer sheet).
 

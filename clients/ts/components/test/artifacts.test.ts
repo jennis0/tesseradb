@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection, type Layer} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage, attachedTextOf} from '@tesseradb/client/internal';
+import {type Artifact, type ArtifactsProjection, type Layer} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage, attachedTextOf} from '@mosaicajs/client/internal';
 import '../src/layer-picker.js';
 import '../src/artifact-card.js';
 import '../src/explorer.js';
@@ -72,17 +72,17 @@ function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']
   };
 }
 
-describe('<tessera-layer-picker>', () => {
+describe('<mosaica-layer-picker>', () => {
   it('offers one entry per root with its closure, never a count, and names the closure on toggle', async () => {
-    const host = await mount('<tessera-layer-picker></tessera-layer-picker>');
+    const host = await mount('<mosaica-layer-picker></mosaica-layer-picker>');
     const store = fakeStore({meta: META, status: status({})});
-    (host.querySelector('tessera-layer-picker') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-layer-picker') as unknown as {store: unknown}).store = store;
     await settle(host);
     const entries = deepAll(host, '[part="entry"]').map((e) => e.getAttribute('data-layer'));
     // `labels` depends on `clusters`, so it is inside that entry and not one of its own.
     expect(entries).toEqual(['clusters', 'districts']);
     expect(deep(host, '[part="entry"][data-layer="clusters"]')?.getAttribute('title')).toContain('labels');
-    expect(deep(host, 'tessera-count')).toBeNull();
+    expect(deep(host, 'mosaica-count')).toBeNull();
     const box = deep(host, '[part="entry"][data-layer="clusters"] input') as HTMLInputElement;
     box.checked = true;
     box.dispatchEvent(new Event('change'));
@@ -91,10 +91,10 @@ describe('<tessera-layer-picker>', () => {
   });
 
   it('names a filter layer in a note and gives it no checkbox', async () => {
-    const host = await mount('<tessera-layer-picker></tessera-layer-picker>');
+    const host = await mount('<mosaica-layer-picker></mosaica-layer-picker>');
     const venues = {...layer('venues'), title: 'Venues', computedContent: []};
     const store = fakeStore({meta: {...META, layers: [...META.layers, venues]}, status: status({})});
-    (host.querySelector('tessera-layer-picker') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-layer-picker') as unknown as {store: unknown}).store = store;
     await settle(host);
     expect(deepAll(host, '[part="entry"]').map((e) => e.getAttribute('data-layer'))).toEqual(['clusters', 'districts']);
     expect(deep(host, '[part="note"]')?.getAttribute('data-layers')).toBe('venues');
@@ -102,11 +102,11 @@ describe('<tessera-layer-picker>', () => {
   });
 });
 
-describe('<tessera-artifact-card>', () => {
+describe('<mosaica-artifact-card>', () => {
   it('holds its count across a pan — the served set moves, the card does not', async () => {
-    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const host = await mount('<mosaica-artifact-card></mosaica-artifact-card>');
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n, 1n)])});
-    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-artifact-card') as unknown as {store: unknown}).store = store;
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
     expect(deepText(deep(host, '[part="count"]'))).toContain('100');
@@ -121,9 +121,9 @@ describe('<tessera-artifact-card>', () => {
   });
 
   it('shows the placeholder in the headline where a cluster has no name, and the key only as the key', async () => {
-    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const host = await mount('<mosaica-artifact-card></mosaica-artifact-card>');
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n), artifact(2n, 40n, 1n)])});
-    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-artifact-card') as unknown as {store: unknown}).store = store;
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
     expect(deep(host, '[part="headline"]')?.textContent?.trim()).toBe(UNNAMED);
@@ -139,9 +139,9 @@ describe('<tessera-artifact-card>', () => {
   });
 
   it('renders a refusal as one', async () => {
-    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const host = await mount('<mosaica-artifact-card></mosaica-artifact-card>');
     const store = fakeStore({meta: META, status: status({})});
-    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-artifact-card') as unknown as {store: unknown}).store = store;
     store.set('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: {code: 'not-found', detail: 'no'}});
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('refused');
@@ -149,12 +149,12 @@ describe('<tessera-artifact-card>', () => {
   });
 });
 
-describe('<tessera-artifact-card> follows the served set', () => {
+describe('<mosaica-artifact-card> follows the served set', () => {
   it('lists the children served for the view as the channel answers, and invents no place for a root', async () => {
-    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const host = await mount('<mosaica-artifact-card></mosaica-artifact-card>');
     // Opened before the channel has answered for this view: the served set is empty.
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([])});
-    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-artifact-card') as unknown as {store: unknown}).store = store;
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
     expect(deepAll(host, '[part="child"]').length).toBe(0);
@@ -167,9 +167,9 @@ describe('<tessera-artifact-card> follows the served set', () => {
   });
 
   it('puts no label on a clause made from an artifact with no name', async () => {
-    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const host = await mount('<mosaica-artifact-card></mosaica-artifact-card>');
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n)])});
-    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-artifact-card') as unknown as {store: unknown}).store = store;
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
     (deep(host, '[part="filter"]') as HTMLButtonElement).click();
@@ -178,10 +178,10 @@ describe('<tessera-artifact-card> follows the served set', () => {
   });
 
   it('opens a parent or a child row on Enter and on Space, as on a click', async () => {
-    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const host = await mount('<mosaica-artifact-card></mosaica-artifact-card>');
     const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n, 1n, ['Beta']), artifact(3n, 10n, 2n, ['Gamma'])];
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
-    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-artifact-card') as unknown as {store: unknown}).store = store;
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 2n, detail: {layer: 'clusters', key: 'c-2', maskedCount: 40n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
     const press = (selector: string, key: string) => {
@@ -197,10 +197,10 @@ describe('<tessera-artifact-card> follows the served set', () => {
   });
 
   it('lists a child on the card of each served parent it names (decision 0117)', async () => {
-    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const host = await mount('<mosaica-artifact-card></mosaica-artifact-card>');
     const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 90n, null, ['Beta']), {...artifact(3n, 10n, null, ['Gamma']), parentIds: [1n, 2n]}];
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
-    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    (host.querySelector('mosaica-artifact-card') as unknown as {store: unknown}).store = store;
     for (const id of [1n, 2n]) {
       store.set('selection', {item: null, itemRefusal: null, artifact: {id, detail: {layer: 'clusters', key: `c-${id}`, maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
       await settle(host);
@@ -209,28 +209,28 @@ describe('<tessera-artifact-card> follows the served set', () => {
   });
 });
 
-describe('<tessera-explorer> and the map’s tooltip slot', () => {
+describe('<mosaica-explorer> and the map’s tooltip slot', () => {
   it('forwards the tooltip slot only when the host supplied one, so the map’s fallback survives', async () => {
     // A slot assigned an empty slot counts as filled and would hide the fallback, leaving an
     // empty box beside the pointer.
-    const bare = await mount('<tessera-explorer></tessera-explorer>');
-    (bare.querySelector('tessera-explorer') as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({})});
+    const bare = await mount('<mosaica-explorer></mosaica-explorer>');
+    (bare.querySelector('mosaica-explorer') as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({})});
     await settle(bare);
-    const map = deep(bare, 'tessera-map') as HTMLElement | null;
+    const map = deep(bare, 'mosaica-map') as HTMLElement | null;
     expect(map).not.toBeNull();
     expect(map!.querySelector('slot[name="tooltip"]')).toBeNull();
 
-    const given = await mount('<tessera-explorer><div slot="tooltip">mine</div></tessera-explorer>');
-    (given.querySelector('tessera-explorer') as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({})});
+    const given = await mount('<mosaica-explorer><div slot="tooltip">mine</div></mosaica-explorer>');
+    (given.querySelector('mosaica-explorer') as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({})});
     await settle(given);
-    expect((deep(given, 'tessera-map') as HTMLElement).querySelector('slot[name="tooltip"]')).not.toBeNull();
+    expect((deep(given, 'mosaica-map') as HTMLElement).querySelector('slot[name="tooltip"]')).not.toBeNull();
   });
 });
 
-describe('<tessera-explorer> on an artifact selection', () => {
+describe('<mosaica-explorer> on an artifact selection', () => {
   it('selects — the card — and never moves the camera; fit is the card’s own button', async () => {
-    const host = await mount('<tessera-explorer></tessera-explorer>');
-    const explorer = host.querySelector('tessera-explorer') as unknown as {store: unknown; map: {fitTo(id: bigint): boolean} | null};
+    const host = await mount('<mosaica-explorer></mosaica-explorer>');
+    const explorer = host.querySelector('mosaica-explorer') as unknown as {store: unknown; map: {fitTo(id: bigint): boolean} | null};
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n, null, ['Alpha'])])});
     explorer.store = store;
     await settle(host);
@@ -241,7 +241,7 @@ describe('<tessera-explorer> on an artifact selection', () => {
     };
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
-    const card = deep(host, 'tessera-artifact-card') as HTMLElement;
+    const card = deep(host, 'mosaica-artifact-card') as HTMLElement;
     expect(card).not.toBeNull();
     const fit = deep(card.shadowRoot!, '[part="fit"]') as HTMLButtonElement;
     expect(fit).not.toBeNull();
@@ -265,12 +265,12 @@ describe('a refusal on screen', () => {
   it('carries the server’s code on the refusal part, in every element that shows one', async () => {
     const refusal = {code: 'withheld', detail: 'not for you'};
     const selection = {item: null, itemRefusal: null, artifact: null, artifactRefusal: null};
-    expect(await code('<tessera-item-card></tessera-item-card>', {selection: {...selection, itemRefusal: refusal}})).toBe('withheld');
-    expect(await code('<tessera-artifact-card></tessera-artifact-card>', {selection: {...selection, artifactRefusal: refusal}})).toBe('withheld');
+    expect(await code('<mosaica-item-card></mosaica-item-card>', {selection: {...selection, itemRefusal: refusal}})).toBe('withheld');
+    expect(await code('<mosaica-artifact-card></mosaica-artifact-card>', {selection: {...selection, artifactRefusal: refusal}})).toBe('withheld');
     const box = {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]};
     const held = {ids: new BigUint64Array(0), positions: new Float32Array(0), count: 0};
-    expect(await code('<tessera-selection></tessera-selection>', {region: {shape: box, status: 'refused', refusal, visible: null, matched: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}, verdict: null, held}})).toBe('withheld');
-    expect(await code('<tessera-status></tessera-status>', {status: status({status: 'refused', refusal})})).toBe('withheld');
+    expect(await code('<mosaica-selection></mosaica-selection>', {region: {shape: box, status: 'refused', refusal, visible: null, matched: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}, verdict: null, held}})).toBe('withheld');
+    expect(await code('<mosaica-status></mosaica-status>', {status: status({status: 'refused', refusal})})).toBe('withheld');
   });
 });
 
@@ -294,7 +294,7 @@ describe('a cluster named by the label attached to it', () => {
   }
 
   it('in the artifact card, and on the clause the card makes', async () => {
-    const {host, store} = await shown('<tessera-artifact-card></tessera-artifact-card>');
+    const {host, store} = await shown('<mosaica-artifact-card></mosaica-artifact-card>');
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
     expect(deep(host, '[part="headline"]')?.textContent).toBe('spin magnetic effect');

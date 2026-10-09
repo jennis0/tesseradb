@@ -1,7 +1,7 @@
 """Time to /readyz, the open's own warm-up line, and peak RSS — one fresh process."""
 import os, subprocess, sys, time, signal, requests, re
 
-W = "/tmp/claude-1000/-home-joe-code-tessera/e2f19e9a-6b70-45bd-ad7f-ff1233184a80/scratchpad/work"
+W = "/tmp/claude-1000/-home-joe-code-mosaica/e2f19e9a-6b70-45bd-ad7f-ff1233184a80/scratchpad/work"
 BIN = sys.argv[1]
 TAG = sys.argv[2]
 env = dict(os.environ)
@@ -13,7 +13,7 @@ for line in open(os.path.join(W, ".env")):
 
 log = os.path.join(W, "serve-%s.log" % TAG)
 lf = open(log, "w")
-p = subprocess.Popen([BIN, "serve", "--deployment", os.path.join(W, "tessera.toml")],
+p = subprocess.Popen([BIN, "serve", "--deployment", os.path.join(W, "mosaica.toml")],
                      stdout=lf, stderr=lf, cwd=W, start_new_session=True, env=env)
 t0 = time.monotonic()
 ready = None

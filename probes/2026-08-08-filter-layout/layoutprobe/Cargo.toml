@@ -14,9 +14,9 @@ memchr = "2"
 # binaries here reimplement the loop, which is right for comparing *layouts* but means their
 # constants describe the approach rather than the code. An optimisation measured against a
 # reimplementation is measured against itself.
-tessera-authz = { path = "../../../crates/tessera-authz" }
-tessera-filter = { path = "../../../crates/tessera-filter" }
-tessera-types = { path = "../../../crates/tessera-types" }
+mosaica-authz = { path = "../../../crates/mosaica-authz" }
+mosaica-filter = { path = "../../../crates/mosaica-filter" }
+mosaica-types = { path = "../../../crates/mosaica-types" }
 
 [profile.release]
 opt-level = 3

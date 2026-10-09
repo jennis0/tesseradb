@@ -328,7 +328,7 @@ def build_bundle(work_dir: Path, *, with_layers: bool) -> Path:
     config = work_dir / "labels.toml"
     config.write_text(_config(with_layers))
     bundle = work_dir / "bundle"
-    deployment = write_deployment(work_dir / "tessera.toml", bundle=bundle, schema=config)
+    deployment = write_deployment(work_dir / "mosaica.toml", bundle=bundle, schema=config)
     cli_build(deployment, bundle)
     return bundle
 

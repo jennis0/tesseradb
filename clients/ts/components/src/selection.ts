@@ -1,7 +1,7 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {type RegionProjection} from '@tesseradb/client';
-import {TesseraElement, emit, idString, shapeDetail} from './base.js';
+import {type RegionProjection} from '@mosaicajs/client';
+import {MosaicaElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
@@ -20,9 +20,9 @@ import './count.js';
  * reason on hover.
  *
  * @summary The selected region's counts, marks and actions.
- * @tagname tessera-selection
+ * @tagname mosaica-selection
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - Clear
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-selectchange']>} mosaica-selectchange - Clear
  *   (with `shape` null) or Outside and Inside (with the new shape and `status` `loading`) was
  *   pressed.
  * @csspart title - The heading, with the shape's kind.
@@ -30,16 +30,16 @@ import './count.js';
  *   exact for the shape or for a cover.
  * @csspart refusal - The words "Selection refused", with `data-code` set to the refusal's code.
  * @csspart counts - The counts.
- * @csspart count-served - The `<tessera-count>` of marks shown inside.
- * @csspart count-matched - The `<tessera-count>` matched inside (or outside).
- * @csspart count-visible - The `<tessera-count>` visible inside (or outside).
+ * @csspart count-served - The `<mosaica-count>` of marks shown inside.
+ * @csspart count-matched - The `<mosaica-count>` matched inside (or outside).
+ * @csspart count-visible - The `<mosaica-count>` visible inside (or outside).
  * @csspart label - The heading above the list.
  * @csspart items - The list of held marks inside.
  * @csspart item - One held mark, by `tessera_id`.
  * @csspart actions - The action buttons.
  * @csspart action - One action button.
  */
-export class TesseraSelection extends TesseraElement {
+export class MosaicaSelection extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -50,10 +50,10 @@ export class TesseraSelection extends TesseraElement {
       [part='counts'] {
         margin-bottom: 4px;
       }
-      [part='counts'] tessera-count::part(count) {
+      [part='counts'] mosaica-count::part(count) {
         font-weight: 500;
       }
-      [part='counts'] tessera-count::part(label) {
+      [part='counts'] mosaica-count::part(label) {
         display: none;
       }
       .items-label {
@@ -68,7 +68,7 @@ export class TesseraSelection extends TesseraElement {
       }
       [part='item'] {
         min-height: 26px;
-        font-family: var(--_tessera-font-mono);
+        font-family: var(--_mosaica-font-mono);
         font-size: 12px;
       }
       [part='actions'] {
@@ -97,9 +97,9 @@ export class TesseraSelection extends TesseraElement {
     const counts =
       r.status === 'shown'
         ? html`<div part="counts" class="kv">
-            ${kv('Shown inside', html`<tessera-count part="count-served" .count=${r.served} .stale=${stale} figure="shown"></tessera-count>`)}
-            ${kv(r.shape.outside ? 'Matched outside' : 'Matched inside', html`<tessera-count part="count-matched" .masked=${r.matched} .stale=${stale}></tessera-count>`)}
-            ${r.visible ? kv(r.shape.outside ? 'Visible outside' : 'Visible inside', html`<tessera-count part="count-visible" .masked=${r.visible} .stale=${stale}></tessera-count>`) : nothing}
+            ${kv('Shown inside', html`<mosaica-count part="count-served" .count=${r.served} .stale=${stale} figure="shown"></mosaica-count>`)}
+            ${kv(r.shape.outside ? 'Matched outside' : 'Matched inside', html`<mosaica-count part="count-matched" .masked=${r.matched} .stale=${stale}></mosaica-count>`)}
+            ${r.visible ? kv(r.shape.outside ? 'Visible outside' : 'Visible inside', html`<mosaica-count part="count-visible" .masked=${r.visible} .stale=${stale}></mosaica-count>`) : nothing}
           </div>`
         : nothing;
     const stateRegion =
@@ -127,12 +127,12 @@ export class TesseraSelection extends TesseraElement {
       <div part="actions">
         <button part="action" class="btn" type="button" @click=${() => {
           this.resolvedStore?.select(null);
-          emit(this, 'tessera-selectchange', {shape: null});
+          emit(this, 'mosaica-selectchange', {shape: null});
         }}>${icon('close', 13)}Clear</button>
         <button part="action" class="btn" type="button" title=${r.shape.outside ? 'Filter to the inside of the shape' : 'Filter to the outside of the shape'} @click=${() => {
           const next = {...r.shape, outside: !r.shape.outside};
           this.resolvedStore?.select(next);
-          emit(this, 'tessera-selectchange', {shape: shapeDetail(next), status: 'loading'});
+          emit(this, 'mosaica-selectchange', {shape: shapeDetail(next), status: 'loading'});
         }}>${icon(r.shape.outside ? 'filter' : 'outside', 13)}${r.shape.outside ? 'Inside' : 'Outside'}</button>
         ${waiting('Export', 'Not available yet')}
         ${waiting('Save as artifact', 'Not available yet')}
@@ -142,10 +142,10 @@ export class TesseraSelection extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-selection', TesseraSelection);
+defineOnce('mosaica-selection', MosaicaSelection);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-selection': TesseraSelection;
+    'mosaica-selection': MosaicaSelection;
   }
 }

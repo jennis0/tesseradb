@@ -11,17 +11,17 @@ import {
   type PaletteName,
   type Store,
   type TokenSupplier
-} from '@tesseradb/client';
-import type {Sizing} from '@tesseradb/deck';
-import {hexOf} from '@tesseradb/deck/internal';
+} from '@mosaicajs/client';
+import type {Sizing} from '@mosaicajs/deck';
+import {hexOf} from '@mosaicajs/deck/internal';
 import {idString} from './base.js';
 import {colouringOf, setSizing, sizingOf} from './colouring.js';
-import type {TesseraExplorer} from './explorer.js';
+import type {MosaicaExplorer} from './explorer.js';
 import './explorer.js';
 
 /**
  * The notebook widget's JavaScript half: what anywidget evaluates as `_esm`, exported from the
- * single-file bundle. The kernel half is `clients/py/tesseradb/widget.py`.
+ * single-file bundle. The kernel half is `clients/py/mosaica/widget.py`.
  *
  * The token is not model state: no traitlet carries it, so saving widget state, `nbconvert
  * --execute` or papermill cannot write it into a notebook. `initialize` sends `ready` once per
@@ -68,7 +68,7 @@ export type KernelMessage =
 export type PageMessage = {type: 'ready'} | {type: 'reauthorise'} | {type: 'error'; what: string; detail: string};
 
 type ViewState = {
-  explorer: TesseraExplorer;
+  explorer: MosaicaExplorer;
   store: Store | null;
   unsubscribe: (() => void) | null;
   /** The box this view's camera last reported, in data coordinates, which its settle syncs up. */
@@ -78,7 +78,7 @@ type ViewState = {
 type ModelState = {
   supplier: TokenSupplier;
   storeFactory: StoreFactory;
-  views: Map<TesseraExplorer, ViewState>;
+  views: Map<MosaicaExplorer, ViewState>;
   /** The view whose settles sync up: the last one mounted or moved. */
   active: ViewState | null;
   /** A `bbox` the kernel set before any map could fit it (no view, or no meta yet); fitted at the first chance. */
@@ -490,7 +490,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     fit(bbox as [number, number, number, number]);
   });
   model.on('change:height', () => {
-    for (const v of state.views.values()) v.explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
+    for (const v of state.views.values()) v.explorer.style.setProperty('--mosaica-explorer-height', heightOf(model));
   });
   model.on('change:title_field', () => {
     for (const v of state.views.values()) v.explorer.titleField = titleFieldOf(model);
@@ -522,17 +522,17 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       explorer.budget = budget;
       syncUp({budget});
     };
-    explorer.addEventListener('tessera-budgetchange', onBudget);
+    explorer.addEventListener('mosaica-budgetchange', onBudget);
     // Most clusters likewise.
     const onClusterBudget = (e: Event) => {
       const {budget} = (e as CustomEvent<{budget: number}>).detail;
       explorer.clusterBudget = budget;
       syncUp({cluster_budget: budget});
     };
-    explorer.addEventListener('tessera-clusterbudgetchange', onClusterBudget);
+    explorer.addEventListener('mosaica-clusterbudgetchange', onClusterBudget);
     // A palette chosen in the Colour section reaches the kernel at once.
     const onPalette = (e: Event) => syncUp({palette: (e as CustomEvent<{palette: PaletteName}>).detail.palette});
-    explorer.addEventListener('tessera-clusterpalettechange', onPalette);
+    explorer.addEventListener('mosaica-clusterpalettechange', onPalette);
     // A colour chosen for values or clusters reaches the kernel at once, as every colour the store
     // now holds, which the event's change is already in; the kernel's copy may be `None`, which
     // left the map's choices standing. The explorer's property follows, so a store it builds
@@ -549,14 +549,14 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       explorer.clusterColours = next;
       syncUp({cluster_colours: next});
     };
-    explorer.addEventListener('tessera-valuecolour', onValueColour);
-    explorer.addEventListener('tessera-clustercolour', onClusterColour);
+    explorer.addEventListener('mosaica-valuecolour', onValueColour);
+    explorer.addEventListener('mosaica-clustercolour', onClusterColour);
     return () => {
-      explorer.removeEventListener('tessera-valuecolour', onValueColour);
-      explorer.removeEventListener('tessera-clustercolour', onClusterColour);
-      explorer.removeEventListener('tessera-budgetchange', onBudget);
-      explorer.removeEventListener('tessera-clusterbudgetchange', onClusterBudget);
-      explorer.removeEventListener('tessera-clusterpalettechange', onPalette);
+      explorer.removeEventListener('mosaica-valuecolour', onValueColour);
+      explorer.removeEventListener('mosaica-clustercolour', onClusterColour);
+      explorer.removeEventListener('mosaica-budgetchange', onBudget);
+      explorer.removeEventListener('mosaica-clusterbudgetchange', onClusterBudget);
+      explorer.removeEventListener('mosaica-clusterpalettechange', onPalette);
       state.views.delete(explorer);
       teardown(v);
       if (state.active === v) state.active = [...state.views.values()].at(-1) ?? null;
@@ -575,7 +575,7 @@ function titleFieldOf(model: WidgetModel): string {
  * The point budget, the cluster budget and the range a control for each offers, as the kernel set
  * them; a value it left unset leaves the explorer's.
  */
-function applyBudget(explorer: TesseraExplorer, model: WidgetModel): void {
+function applyBudget(explorer: MosaicaExplorer, model: WidgetModel): void {
   const [budget, min, max, clusters, clustersMin, clustersMax] = ['budget', 'budget_min', 'budget_max', 'cluster_budget', 'cluster_budget_min', 'cluster_budget_max'].map((key) => model.get(key));
   if (typeof budget === 'number') explorer.budget = budget;
   if (typeof min === 'number') explorer.budgetMin = min;
@@ -595,14 +595,14 @@ function clusterColoursOf(store: Store): Record<string, Record<string, string>> 
 }
 
 /** The value and cluster colours the kernel set; one it left unset leaves the explorer's. */
-function applyColours(explorer: TesseraExplorer, model: WidgetModel): void {
+function applyColours(explorer: MosaicaExplorer, model: WidgetModel): void {
   const values = model.get('value_colours');
   const clusters = model.get('cluster_colours');
   if (values && typeof values === 'object') explorer.valueColours = values as Record<string, Record<string, string>>;
   if (clusters && typeof clusters === 'object') explorer.clusterColours = clusters as Record<string, Record<string, string>>;
 }
 
-const mounts = new WeakMap<ModelState, (explorer: TesseraExplorer) => () => void>();
+const mounts = new WeakMap<ModelState, (explorer: MosaicaExplorer) => () => void>();
 
 export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement; signal?: AbortSignal}): () => void {
   let state = states.get(model);
@@ -611,9 +611,9 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
     initialize({model});
     state = states.get(model)!;
   }
-  const explorer = document.createElement('tessera-explorer') as TesseraExplorer;
+  const explorer = document.createElement('mosaica-explorer') as MosaicaExplorer;
   explorer.layout = (model.get('explorer_layout') as 'docked' | 'overlay') || 'docked';
-  explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
+  explorer.style.setProperty('--mosaica-explorer-height', heightOf(model));
   explorer.titleField = titleFieldOf(model);
   applyBudget(explorer, model);
   applyColours(explorer, model);
@@ -624,7 +624,7 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
     v.lastBbox = (e as CustomEvent<{bbox: [number, number, number, number]}>).detail.bbox;
     state!.active = v;
   };
-  explorer.addEventListener('tessera-viewchange', onView);
+  explorer.addEventListener('mosaica-viewchange', onView);
   if (state.pendingFit) {
     const pending = state.pendingFit;
     void explorer.updateComplete.then(() => {
@@ -632,7 +632,7 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
     });
   }
   const cleanup = () => {
-    explorer.removeEventListener('tessera-viewchange', onView);
+    explorer.removeEventListener('mosaica-viewchange', onView);
     unmount();
     explorer.remove();
   };

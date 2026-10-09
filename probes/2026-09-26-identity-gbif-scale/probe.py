@@ -43,7 +43,7 @@ sys.path.insert(0, str(REPO))
 from test_corpora.common.deployment import Deployment  # noqa: E402
 
 HEAD, RECORDS, PAGE_END, TRAILER = 6, 7, 8, 4
-BINARY = REPO / "target" / "release" / "tessera"
+BINARY = REPO / "target" / "release" / "mosaica"
 
 
 # ----------------------------------------------------------------------------------- the server
@@ -414,7 +414,7 @@ def main() -> int:
                 code, _, data, _ = server.control_call(
                     "/control/ingest", arrow_body(holdout.slice(start, batch_rows)),
                     headers={"content-type": "application/vnd.apache.arrow.stream",
-                             "x-tessera-batch-id": f"holdout-{i}"})
+                             "x-mosaica-batch-id": f"holdout-{i}"})
                 answers[code] = answers.get(code, 0) + 1
                 if code == 200:
                     accepted += min(batch_rows, holdout.num_rows - start)
@@ -436,7 +436,7 @@ def main() -> int:
                 code, _, data, took = server.control_call(
                     "/control/ingest", arrow_body(duplicates.slice(i, 1)),
                     headers={"content-type": "application/vnd.apache.arrow.stream",
-                             "x-tessera-batch-id": f"duplicate-{i}"})
+                             "x-mosaica-batch-id": f"duplicate-{i}"})
                 codes[code] = codes.get(code, 0) + 1
                 latencies.append(took)
                 if i == 0:

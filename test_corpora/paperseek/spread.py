@@ -5,7 +5,7 @@ between the 5th and 95th percentile of an artifact's members in x and in y, as a
 whole map's box. **A layer earns its place by drawing something in the view it is declared over**,
 and this is how that is decided rather than argued.
 
-    ~/venvs/projection/bin/python -m test_corpora.paperseek.spread --out $TESSERA_LADDER/paperseek
+    ~/venvs/projection/bin/python -m test_corpora.paperseek.spread --out $MOSAICA_LADDER/paperseek
 
 It reads `points.parquet` and the layers' own member files — the build's inputs, not the bundle —
 so it can be run before or after a build and needs no server.
@@ -132,7 +132,7 @@ def layer_spread(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--out", type=Path, default=None, help="default $TESSERA_LADDER/paperseek")
+    ap.add_argument("--out", type=Path, default=None, help="default $MOSAICA_LADDER/paperseek")
     ap.add_argument("--sample", type=int, default=SAMPLE_PER_LEVEL,
                     help="artifacts measured per level on a layer larger than this")
     ap.add_argument("--seed", type=int, default=0)

@@ -1,5 +1,5 @@
 {
-  "name": "@tesseradb/components",
+  "name": "@mosaicajs/components",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -8,86 +8,86 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "tessera-source": "./src/index.ts",
+      "mosaica-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./store": {
-      "tessera-source": "./src/store-element.ts",
+      "mosaica-source": "./src/store-element.ts",
       "types": "./dist/store-element.d.ts",
       "default": "./dist/store-element.js"
     },
     "./map": {
-      "tessera-source": "./src/map.ts",
+      "mosaica-source": "./src/map.ts",
       "types": "./dist/map.d.ts",
       "default": "./dist/map.js"
     },
     "./status": {
-      "tessera-source": "./src/status.ts",
+      "mosaica-source": "./src/status.ts",
       "types": "./dist/status.d.ts",
       "default": "./dist/status.js"
     },
     "./count": {
-      "tessera-source": "./src/count.ts",
+      "mosaica-source": "./src/count.ts",
       "types": "./dist/count.d.ts",
       "default": "./dist/count.js"
     },
     "./item-card": {
-      "tessera-source": "./src/item-card.ts",
+      "mosaica-source": "./src/item-card.ts",
       "types": "./dist/item-card.d.ts",
       "default": "./dist/item-card.js"
     },
     "./field-card": {
-      "tessera-source": "./src/field-card.ts",
+      "mosaica-source": "./src/field-card.ts",
       "types": "./dist/field-card.d.ts",
       "default": "./dist/field-card.js"
     },
     "./filter-panel": {
-      "tessera-source": "./src/filter-panel.ts",
+      "mosaica-source": "./src/filter-panel.ts",
       "types": "./dist/filter-panel.d.ts",
       "default": "./dist/filter-panel.js"
     },
     "./selection": {
-      "tessera-source": "./src/selection.ts",
+      "mosaica-source": "./src/selection.ts",
       "types": "./dist/selection.d.ts",
       "default": "./dist/selection.js"
     },
     "./layer-picker": {
-      "tessera-source": "./src/layer-picker.ts",
+      "mosaica-source": "./src/layer-picker.ts",
       "types": "./dist/layer-picker.d.ts",
       "default": "./dist/layer-picker.js"
     },
     "./view-picker": {
-      "tessera-source": "./src/view-picker.ts",
+      "mosaica-source": "./src/view-picker.ts",
       "types": "./dist/view-picker.d.ts",
       "default": "./dist/view-picker.js"
     },
     "./key-picker": {
-      "tessera-source": "./src/key-picker.ts",
+      "mosaica-source": "./src/key-picker.ts",
       "types": "./dist/key-picker.d.ts",
       "default": "./dist/key-picker.js"
     },
     "./artifact-card": {
-      "tessera-source": "./src/artifact-card.ts",
+      "mosaica-source": "./src/artifact-card.ts",
       "types": "./dist/artifact-card.d.ts",
       "default": "./dist/artifact-card.js"
     },
     "./hierarchy": {
-      "tessera-source": "./src/hierarchy.ts",
+      "mosaica-source": "./src/hierarchy.ts",
       "types": "./dist/hierarchy.d.ts",
       "default": "./dist/hierarchy.js"
     },
     "./colour-editor": {
-      "tessera-source": "./src/colour-editor.ts",
+      "mosaica-source": "./src/colour-editor.ts",
       "types": "./dist/colour-editor.d.ts",
       "default": "./dist/colour-editor.js"
     },
     "./explorer": {
-      "tessera-source": "./src/explorer.ts",
+      "mosaica-source": "./src/explorer.ts",
       "types": "./dist/explorer.d.ts",
       "default": "./dist/explorer.js"
     },
-    "./tessera-components.js": "./dist/tessera-components.js"
+    "./mosaica-components.js": "./dist/mosaica-components.js"
   },
   "files": [
     "dist"
@@ -103,8 +103,8 @@
   },
   "dependencies": {
     "@lit/context": "^1.1.0",
-    "@tesseradb/client": "0.1.0",
-    "@tesseradb/deck": "0.1.0"
+    "@mosaicajs/client": "0.1.0",
+    "@mosaicajs/deck": "0.1.0"
   },
   "peerDependencies": {
     "@deck.gl/aggregation-layers": "^9.3.7",

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # The TypeScript half of the gate: typecheck every package and the operator scripts, build the four
 # library packages and import each from `dist/` in Node, run the unit suites, run core's live test
-# against a real `tessera serve`, then the components' browser suite in headless Chromium, which
+# against a real `mosaica serve`, then the components' browser suite in headless Chromium, which
 # also decodes through the built worker and renders the built elements.
 #
 # The operator scripts are plain `.mjs` and are checked with `checkJs`, so a block-scoped variable
 # used before its declaration (TS2448) fails here rather than at run time.
 #
-# The live test builds `data/notebook/` with the `tessera` binary. Where either is missing it skips
+# The live test builds `data/notebook/` with the `mosaica` binary. Where either is missing it skips
 # each test and prints the reason, as the Python suite's server tests do.
 set -euo pipefail
 

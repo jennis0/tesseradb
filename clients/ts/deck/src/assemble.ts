@@ -5,8 +5,8 @@ import {
   type ScalarColumn,
   type ScalarValues,
   type StandInPiece
-} from '@tesseradb/client';
-import {assertCompositionMatchesServed, compose, fold, type ReplicaFrame, type TileRect} from '@tesseradb/client/internal';
+} from '@mosaicajs/client';
+import {assertCompositionMatchesServed, compose, fold, type ReplicaFrame, type TileRect} from '@mosaicajs/client/internal';
 
 /**
  * Materialising a core composition into the buffers one `ScatterplotLayer` draws. Core's
@@ -134,7 +134,7 @@ export type StandInBuffers = Assembled['standIn'] & {count: number};
 
 /**
  * The stand-in piece list as concatenated buffers, for the columns a renderer colours by.
- * `TesseraLayer` memoises this on the piece list's identity, which `fold` keeps when it filters
+ * `MosaicaLayer` memoises this on the piece list's identity, which `fold` keeps when it filters
  * nothing.
  */
 export function materialiseStandIn(pieces: readonly StandInPiece[], columns: Iterable<string>, layer = ''): StandInBuffers {

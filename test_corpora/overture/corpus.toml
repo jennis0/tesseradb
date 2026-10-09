@@ -2,7 +2,7 @@
 #
 # Produced by `prepare.py`, which copies this file next to the parquets it writes; `[sources]` is
 # relative to the declaring document (configuration.md §3), so the copy beside the data is what
-# `tessera build` reads and this one is what gets reviewed.
+# `mosaica build` reads and this one is what gets reviewed.
 #
 # **The extent is written on the input side of the projection**, as at the GeoNames rung and for
 # the same reason (`projections.md` §4.2): the box below is longitude and latitude, in degrees, and

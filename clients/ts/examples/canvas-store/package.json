@@ -1,9 +1,9 @@
 {
-  "name": "@tesseradb/example-canvas-store",
+  "name": "@mosaicajs/example-canvas-store",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
-  "description": "C2 with none of Tessera's rendering: the store under a hand-rolled camera on a 2D canvas, the host formatting the counts itself.",
+  "description": "C2 with none of Mosaica's rendering: the store under a hand-rolled camera on a 2D canvas, the host formatting the counts itself.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tesseradb/client": "*"
+    "@mosaicajs/client": "*"
   },
   "devDependencies": {
     "typescript": "^5.9.0",

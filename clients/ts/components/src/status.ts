@@ -1,7 +1,7 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {NO_COUNT, NO_MASKED, type StatusProjection, type ViewProjection} from '@tesseradb/client';
-import {TesseraElement, emit} from './base.js';
+import {NO_COUNT, NO_MASKED, type StatusProjection, type ViewProjection} from '@mosaicajs/client';
+import {MosaicaElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, showsContent, stateOf, type PanelState} from './states.js';
 import {chrome, tokens} from './tokens.js';
@@ -28,11 +28,11 @@ import './count.js';
  * store's `status.refusal`, and the refusal's code is on the refusal part's `data-code`.
  *
  * @summary The state and the counts of the view, on one line.
- * @tagname tessera-status
+ * @tagname mosaica-status
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - On every
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-statechange']>} mosaica-statechange - On every
  *   change of panel state, including the first render.
- * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - Once each time the
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-expired']>} mosaica-expired - Once each time the
  *   session expires.
  * @csspart strip - The one-line strip.
  * @csspart state - The state's dot and words, with `data-state` set to the panel state.
@@ -40,15 +40,15 @@ import './count.js';
  * @csspart refresh - The Refresh button, when the data changed under the view.
  * @csspart retry - The Retry button, when the view was refused.
  * @csspart reauthorise - The Sign in button, on expiry where `reauthorise` is set.
- * @csspart count-shown - The `<tessera-count>` of marks shown.
- * @csspart count-matched - The `<tessera-count>` matched by the filters.
- * @csspart count-highlighted - The `<tessera-count>` the highlight matched, while a highlight is set.
+ * @csspart count-shown - The `<mosaica-count>` of marks shown.
+ * @csspart count-matched - The `<mosaica-count>` matched by the filters.
+ * @csspart count-highlighted - The `<mosaica-count>` the highlight matched, while a highlight is set.
  * @csspart count-of - The matched count the highlighted count is out of, while a highlight is set.
- * @csspart count-visible - The `<tessera-count>` of items the viewer may see here, which the matched
+ * @csspart count-visible - The `<mosaica-count>` of items the viewer may see here, which the matched
  *   count is out of.
  * @csspart card - The card of figures, under `expanded`.
  */
-export class TesseraStatus extends TesseraElement {
+export class MosaicaStatus extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -64,12 +64,12 @@ export class TesseraStatus extends TesseraElement {
         max-width: 100%;
         min-height: 32px;
         overflow: hidden;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        box-shadow: var(--_tessera-shadow);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
+        box-shadow: var(--_mosaica-shadow);
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
@@ -83,11 +83,11 @@ export class TesseraStatus extends TesseraElement {
         padding: 7px 12px;
         flex: none;
       }
-      .cell tessera-count {
+      .cell mosaica-count {
         font-size: inherit;
       }
       .cell + .cell {
-        border-left: 1px solid var(--_tessera-line-2);
+        border-left: 1px solid var(--_mosaica-line-2);
       }
       .cell.dim {
         opacity: 0.4;
@@ -111,25 +111,25 @@ export class TesseraStatus extends TesseraElement {
       [part='state']:not(:has(.btn)) {
         padding-right: 7px;
       }
-      .cell tessera-count::part(count) {
+      .cell mosaica-count::part(count) {
         font-weight: 600;
       }
-      .cell tessera-count[part~='count-visible']::part(count) {
+      .cell mosaica-count[part~='count-visible']::part(count) {
         color: inherit;
         font-weight: 400;
       }
-      .cell tessera-count[part~='count-shown']::part(count) {
+      .cell mosaica-count[part~='count-shown']::part(count) {
         color: inherit;
         font-weight: 400;
       }
-      .cell tessera-count[part~='count-of']::part(count) {
+      .cell mosaica-count[part~='count-of']::part(count) {
         color: inherit;
         font-weight: 400;
       }
-      .cell tessera-count.lit::part(count) {
-        color: var(--_tessera-highlight);
+      .cell mosaica-count.lit::part(count) {
+        color: var(--_mosaica-highlight);
       }
-      .cell tessera-count::part(label) {
+      .cell mosaica-count::part(label) {
         margin-left: 0.3em;
       }
       :host([compact]) .cell + .cell {
@@ -142,10 +142,10 @@ export class TesseraStatus extends TesseraElement {
       [part='card'] {
         margin-top: 8px;
         padding: 10px 12px;
-        background: var(--_tessera-surface);
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius);
-        box-shadow: var(--_tessera-shadow);
+        background: var(--_mosaica-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius);
+        box-shadow: var(--_mosaica-shadow);
         font-size: 12px;
       }
     `
@@ -174,11 +174,11 @@ export class TesseraStatus extends TesseraElement {
     if (state !== this.lastState) {
       const from = this.lastState;
       this.lastState = state;
-      emit(this, 'tessera-statechange', {from, to: state});
+      emit(this, 'mosaica-statechange', {from, to: state});
     }
     if (state === 'expired' && !this.expiryFired) {
       this.expiryFired = true;
-      emit(this, 'tessera-expired', {refusal: this.status?.refusal ?? null});
+      emit(this, 'mosaica-expired', {refusal: this.status?.refusal ?? null});
     } else if (state !== 'expired') {
       this.expiryFired = false;
     }
@@ -227,34 +227,34 @@ export class TesseraStatus extends TesseraElement {
     // the highlight's, so the highlight's cell stands alone and names M.
     const narrowed = this.resolvedStore?.requestFilters() != null;
     const match = html`<div class=${cls}>
-      <tessera-count part="count-matched" .masked=${n.matched} .compact=${this.compact}></tessera-count><span>of</span><tessera-count
-        part="count-visible" .masked=${n.visible} .compact=${this.compact}></tessera-count><span>match</span>
+      <mosaica-count part="count-matched" .masked=${n.matched} .compact=${this.compact}></mosaica-count><span>of</span><mosaica-count
+        part="count-visible" .masked=${n.visible} .compact=${this.compact}></mosaica-count><span>match</span>
     </div>`;
     return html`${v.highlighting && !narrowed ? nothing : match}
       ${v.highlighting
-        ? html`<div class=${cls}><tessera-count part="count-highlighted" class="lit" .masked=${n.highlighted} .compact=${this.compact}></tessera-count><span>highlighted of</span><tessera-count
-              part="count-of" .masked=${n.matched} .compact=${this.compact}></tessera-count></div>`
+        ? html`<div class=${cls}><mosaica-count part="count-highlighted" class="lit" .masked=${n.highlighted} .compact=${this.compact}></mosaica-count><span>highlighted of</span><mosaica-count
+              part="count-of" .masked=${n.matched} .compact=${this.compact}></mosaica-count></div>`
         : nothing}
-      ${this.compact ? nothing : html`<div class=${cls}><tessera-count part="count-shown" .count=${{shown: n.shown, total: n.matched.value, exact: true}} figure="shown" label="shown"></tessera-count></div>`}`;
+      ${this.compact ? nothing : html`<div class=${cls}><mosaica-count part="count-shown" .count=${{shown: n.shown, total: n.matched.value, exact: true}} figure="shown" label="shown"></mosaica-count></div>`}`;
   }
 
   private card(v: ViewProjection, stale: boolean) {
     const row = (label: string, value: unknown) => html`<div class="k">${label}</div><div class="v">${value}</div>`;
     const n = v.inView;
     return html`<div part="card"><div class="kv">
-      ${row('Shown', html`<tessera-count .count=${n ? {shown: n.shown, total: n.matched.value, exact: true} : NO_COUNT} .stale=${stale}></tessera-count>`)}
-      ${row('Match the filters', html`<tessera-count .masked=${n?.matched ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
-      ${v.highlighting ? row('Highlighted', html`<tessera-count .masked=${n?.highlighted ?? NO_MASKED} .stale=${stale}></tessera-count>`) : nothing}
-      ${row('In this view', html`<tessera-count .masked=${n?.visible ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
+      ${row('Shown', html`<mosaica-count .count=${n ? {shown: n.shown, total: n.matched.value, exact: true} : NO_COUNT} .stale=${stale}></mosaica-count>`)}
+      ${row('Match the filters', html`<mosaica-count .masked=${n?.matched ?? NO_MASKED} .stale=${stale}></mosaica-count>`)}
+      ${v.highlighting ? row('Highlighted', html`<mosaica-count .masked=${n?.highlighted ?? NO_MASKED} .stale=${stale}></mosaica-count>`) : nothing}
+      ${row('In this view', html`<mosaica-count .masked=${n?.visible ?? NO_MASKED} .stale=${stale}></mosaica-count>`)}
     </div></div>`;
   }
 }
 
 attachContextRoot();
-defineOnce('tessera-status', TesseraStatus);
+defineOnce('mosaica-status', MosaicaStatus);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-status': TesseraStatus;
+    'mosaica-status': MosaicaStatus;
   }
 }

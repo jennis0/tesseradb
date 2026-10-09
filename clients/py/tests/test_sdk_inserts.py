@@ -10,9 +10,9 @@ import pyarrow.parquet as pq
 import pytest
 
 from conftest import binary
-from tesseradb._database import Database, create
-from tesseradb._database import open as open_database
-from tesseradb._refusal import Refusal
+from mosaica._database import Database, create
+from mosaica._database import open as open_database
+from mosaica._refusal import Refusal
 
 pd = pytest.importorskip("pandas")
 
@@ -176,7 +176,7 @@ def test_a_column_the_build_reads_under_its_own_name_takes_no_other(tmp_path):
 
 
 def test_a_canonical_column_the_call_did_not_name_is_refused_with_its_two_remedies(tmp_path):
-    """A table in Tessera's own shape is no exception to the rule that names are named."""
+    """A table in Mosaica's own shape is no exception to the rule that names are named."""
     db = create(tmp_path / "db")
     db.declare_layer("clusters", kind="flat")
     table = pd.DataFrame({"k": ["a"], "parent": ["b"]})
@@ -207,11 +207,11 @@ def test_create_refuses_a_directory_that_is_not_empty(tmp_path):
     (tmp_path / "db" / "something").write_text("here")
     with pytest.raises(Refusal):
         create(tmp_path / "db")
-    # `replace=True` removes a Tessera database. A directory of somebody else's files is refused
+    # `replace=True` removes a Mosaica database. A directory of somebody else's files is refused
     # naming it, since the alternative is deleting work nobody asked about.
     with pytest.raises(Refusal):
         create(tmp_path / "db", replace=True)
-    (tmp_path / "db" / "tessera.toml").write_text("")
+    (tmp_path / "db" / "mosaica.toml").write_text("")
     database = create(tmp_path / "db", replace=True)
     assert not (database.path / "something").exists()
 
@@ -232,7 +232,7 @@ def test_save_copies_a_temporary_database_out(tmp_path):
     db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
     db.write()
     target = db.save(tmp_path / "kept")
-    assert (target / "schema.toml").exists() and (target / "tessera.toml").exists()
+    assert (target / "schema.toml").exists() and (target / "mosaica.toml").exists()
     db.close()
     assert (target / "schema.toml").exists()
 
@@ -242,7 +242,7 @@ def test_open_reads_the_blocks_and_the_inserts_back_from_the_sdks_own_copy(tmp_p
     db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
     db.declare_attribute("y", type="f64", render=True)
     db.write()
-    from tesseradb._database import open as open_database
+    from mosaica._database import open as open_database
 
     # A database saved before its first commit reopens where it was left, and the blocks it holds
     # are the ones the verbs built rather than a re-reading of the TOML.

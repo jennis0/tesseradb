@@ -2,7 +2,7 @@
 (two pages of a search and the children of a genus, with and without a filter), `/v1/aggregate` grouped by the level, the points viewport
 tagged with the layer, `/v1/artifacts/{id}`, and the bulk read with `ids`.
 
-    python3 probes/2026-10-06-species-tiles/other_routes.py <tessera> <bench run.json> <out.json>
+    python3 probes/2026-10-06-species-tiles/other_routes.py <mosaica> <bench run.json> <out.json>
 
 `DEPLOYMENT` picks the deployment (bench-stage5 by default). The server starts on a fresh cache
 with the bundle's pages evicted, so each viewer's first ask of a route is the cold one, and
@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO))
 from test_corpora.common.deployment import Deployment, read_env_file, tomllib  # noqa: E402
 
 DEPLOYMENT = Path(
-    os.environ.get("DEPLOYMENT", "/home/joe/code/tessera/data/ladder/gbif-64p/bench-stage5")
+    os.environ.get("DEPLOYMENT", "/home/joe/code/mosaica/data/ladder/gbif-64p/bench-stage5")
 )
 SCREEN = (1600, 900)
 REPEATS = int(os.environ.get("REPEATS", "5"))
@@ -63,7 +63,7 @@ def timed(call) -> tuple[float, requests.Response]:
 def main() -> int:
     binary, run_json, out = sys.argv[1:4]
     run = json.loads(Path(run_json).read_text())
-    settings = tomllib.loads((DEPLOYMENT / "tessera.toml").read_text())
+    settings = tomllib.loads((DEPLOYMENT / "mosaica.toml").read_text())
     serve = settings["serve"]
     ports = tuple(int(serve[k].rsplit(":", 1)[1]) for k in ("viewer", "session", "control"))
     bundle = (DEPLOYMENT / settings["bundle"]["path"]).resolve()

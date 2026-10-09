@@ -1,5 +1,5 @@
 import {css, html, nothing, type ReactiveController, type ReactiveElement, type TemplateResult} from 'lit';
-import {hexOf, lighter, rgbOfHex} from '@tesseradb/deck/internal';
+import {hexOf, lighter, rgbOfHex} from '@mosaicajs/deck/internal';
 import {hsvOf, rgbOfHsv, type Hsv} from './hsv.js';
 
 /** The width of the hue knob, which its travel along the bar allows for. */
@@ -285,10 +285,10 @@ export const pickerStyles = css`
     padding: 0;
     width: ${WIDTH}px;
     box-sizing: border-box;
-    background: var(--_tessera-surface);
-    color: var(--_tessera-ink);
-    border: 1px solid var(--_tessera-line);
-    border-radius: var(--_tessera-radius);
+    background: var(--_mosaica-surface);
+    color: var(--_mosaica-ink);
+    border: 1px solid var(--_mosaica-line);
+    border-radius: var(--_mosaica-radius);
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
     font-size: 13px;
     max-height: calc(100vh - 16px);
@@ -322,13 +322,13 @@ export const pickerStyles = css`
   }
   [part='choice'][aria-pressed='true'] {
     box-shadow:
-      0 0 0 2px var(--_tessera-surface),
-      0 0 0 3.5px var(--_tessera-ink);
+      0 0 0 2px var(--_mosaica-surface),
+      0 0 0 3.5px var(--_mosaica-ink);
   }
   .pop .hd {
     margin: 0;
     padding: 10px 14px 4px;
-    border-top: 1px solid var(--_tessera-line-2);
+    border-top: 1px solid var(--_mosaica-line-2);
   }
   .pop .custom {
     display: flex;
@@ -344,7 +344,7 @@ export const pickerStyles = css`
   }
   [part='sv'] {
     height: 120px;
-    border-radius: var(--_tessera-radius-control);
+    border-radius: var(--_mosaica-radius-control);
   }
   [part='hue'] {
     height: 10px;
@@ -370,7 +370,7 @@ export const pickerStyles = css`
     align-items: center;
     gap: 8px;
     font-size: 12px;
-    color: var(--_tessera-ink-2);
+    color: var(--_mosaica-ink-2);
   }
   [part='hex'] {
     font-size: 12px;

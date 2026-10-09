@@ -2,7 +2,7 @@
 
 `--limit N` is a prefix of `points.parquet` alone. A membership row naming an entity past the
 limit names an entity the build did not assign, and the layer publication refuses the batch
-(`tessera build --help`), so a limited build needs a limited membership file, given to it with
+(`mosaica build --help`), so a limited build needs a limited membership file, given to it with
 `--file taxonomy=<path>`.
 
 `entity` ascends across `members-taxonomy.parquet`, checked here against the row-group

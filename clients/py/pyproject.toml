@@ -3,29 +3,29 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tesseradb"
+name = "mosaica"
 version = "0.1.0"
-description = "Read and map a Tessera database from Python, and make one from data frames."
+description = "Read and map a Mosaica database from Python, and make one from data frames."
 license = "Apache-2.0"
 requires-python = ">=3.10"
 # Two dependencies. pyarrow carries every table the package reads or writes. The companion
-# platform wheel `tesseradb-native` carries the `tessera` binary and the `_tessera` extension
-# module, so `pip install tesseradb` can make and serve a database without a Rust toolchain. It is
+# platform wheel `mosaica-native` carries the `mosaica` binary and the `_mosaica` extension
+# module, so `pip install mosaica` can make and serve a database without a Rust toolchain. It is
 # pinned exactly, because the binary and this package change together and a stale database is
 # refused. On a platform the marker leaves out, the package installs without it, and making or
-# serving a database needs a `tessera` binary on `PATH` or named by `TESSERA_BIN`. The wheel itself
+# serving a database needs a `mosaica` binary on `PATH` or named by `MOSAICA_BIN`. The wheel itself
 # is pure Python, `py3-none-any`.
 #
-# `pip install tesseradb --no-deps` skips both. Install `pyarrow>=14` by hand after it, and point
-# `TESSERA_BIN` at a `tessera` binary, or put one on `PATH`, to make or serve a database.
+# `pip install mosaica --no-deps` skips both. Install `pyarrow>=14` by hand after it, and point
+# `MOSAICA_BIN` at a `mosaica` binary, or put one on `PATH`, to make or serve a database.
 dependencies = [
   "pyarrow>=14",
-  "tesseradb-native==0.1.0; platform_machine in 'x86_64 AMD64 aarch64 arm64'",
+  "mosaica-native==0.1.0; platform_machine in 'x86_64 AMD64 aarch64 arm64'",
 ]
 
 [project.optional-dependencies]
 # The notebook map: anywidget plus the components' single-file bundle, which the wheel's build
-# hook (`hatch_build.py`) builds with Node and packages under `tesseradb/static/`. A user
+# hook (`hatch_build.py`) builds with Node and packages under `mosaica/static/`. A user
 # installing the wheel needs no Node; a developer installing from this checkout does.
 widget = ["anywidget>=0.9"]
 # The tests. pandas is here because the tests compute expected answers with it; the package
@@ -38,16 +38,16 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["tesseradb"]
+packages = ["mosaica"]
 # The bundle is produced by the hook, never committed (`static/` is gitignored but for its
 # marker), so it is declared an artifact — hatchling would otherwise drop it as untracked.
-artifacts = ["tesseradb/static/tessera-components.js", "tesseradb/static/tessera-components.js.sri"]
+artifacts = ["mosaica/static/mosaica-components.js", "mosaica/static/mosaica-components.js.sri"]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["tesseradb", "hatch_build.py", "README.md", "tests"]
+include = ["mosaica", "hatch_build.py", "README.md", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

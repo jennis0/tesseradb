@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {gridToWorldXY, type Artifact, type ArtifactsProjection, type Meta, type Shape} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
+import {gridToWorldXY, type Artifact, type ArtifactsProjection, type Meta, type Shape} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import {contourShapes, focusOutlines, outlineOf} from '../src/layer.js';
 import {ringWithin, shapeContains} from '../src/contours.js';
 
@@ -222,7 +222,7 @@ describe('contourShapes — what may be hovered', () => {
 
   it('answers against the box until the shape fetched by identifier arrives', () => {
     // The viewport carries no shape (`artifactChannel.ts` asks for centroid and box), so a served
-    // row's shape is its box until `TesseraStore.needShape` answers; a hover over the box asks.
+    // row's shape is its box until `MosaicaStore.needShape` answers; a hover over the box asks.
     const g = 2 ** 32 - 1;
     const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
     const p = projection([{...artifact(1n, null), shape: null}, {...artifact(2n, null), shape: null}]);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ask 4: true wire calls with 5/10/100/1000 simultaneous users, two arms.
 
-Boots a real `tessera serve`, authorises the sessions, and drives `tessera-bench load` against
+Boots a real `mosaica serve`, authorises the sessions, and drives `mosaica-bench load` against
 it while sampling the server's RSS and CPU. The hot loop is Rust because a Python client is the
 bottleneck at 1000 concurrent connections pulling multi-megabyte Arrow bodies; everything else is
 here, reusing `reference/oracle/harness.py`'s proven config/boot/teardown machinery and
@@ -49,7 +49,7 @@ config is boot-time, not runtime), cover the rest:
     the SAME key while a separate warm pool's traffic on OTHER keys is driven at the same time.
 
 Criterion 7 (byte-identity) is not run from this script at all -- it is `cargo test -p
-tessera-server --test http` plus the `reference/` oracle suite, both already exercised by every
+mosaica-server --test http` plus the `reference/` oracle suite, both already exercised by every
 earlier task in this workstream and re-run directly by the report, not through the HTTP load path.
 """
 
@@ -73,9 +73,9 @@ import requests  # noqa: E402
 from oracle import harness  # noqa: E402
 from bench_k_sweep import read_dictionary_descriptors, spawn_with_long_boot_deadline  # noqa: E402
 
-BENCH_BIN = REPO_ROOT / "target" / "release" / "tessera-bench"
+BENCH_BIN = REPO_ROOT / "target" / "release" / "mosaica-bench"
 
-# Mirrors `crates/tessera-config/src/defaults.rs`'s `DEFAULT_ADMISSION_TIMEOUT_MS`. Duplicated here
+# Mirrors `crates/mosaica-config/src/defaults.rs`'s `DEFAULT_ADMISSION_TIMEOUT_MS`. Duplicated here
 # (rather than parsed out of the Rust source) because it is a small, load-bearing constant this
 # script needs BEFORE the server it describes has booted, to compute the hang-watchdog deadline
 # and the shed/cold-build cells' own timeout overrides.
@@ -380,7 +380,7 @@ def run_cpu_saturation_cell(args, descriptors: list[str], srv, proc, summary: di
 
     print("\ncriterion 4b: c=1 latency, multi-tile viewport, compute_threads 1 vs machine default")
     # Calibration task: a SECOND viewport shape alongside the small one below, deliberately
-    # constructed to sit well above `tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`
+    # constructed to sit well above `mosaica_engine::viewport::SERIAL_FALLBACK_MAX_ROWS`
     # (200,000 rows spanned), so this cell shows BOTH halves of the calibrated behaviour in one
     # run -- default not regressing the small/sparse case AND still winning the large one. The
     # `load` arm's own client (`gen_viewports`) floors its span at half the extent for any zoom
@@ -401,7 +401,7 @@ def run_cpu_saturation_cell(args, descriptors: list[str], srv, proc, summary: di
         try:
             tok = build_tokens(s, descriptors, 1, False, args.w, args.seed)
             # Warms the token's row projection ONCE (keyed on (token, view, segments_version),
-            # not on bbox/zoom -- `tessera-engine/src/viewport.rs`'s cache-key comment), so both
+            # not on bbox/zoom -- `mosaica-engine/src/viewport.rs`'s cache-key comment), so both
             # measured cells below reuse it rather than each paying a fresh warm-up cost.
             warm_viewport(s, tok[0], args.zoom, args.k)
             rec = run_load(
@@ -657,7 +657,7 @@ def main() -> int:
     ap.add_argument("--zoom", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--rss-abort-gib", type=float, default=30.0)
-    ap.add_argument("--run-dir", type=Path, default=Path("/tmp/tessera-bench/runs/concurrency"))
+    ap.add_argument("--run-dir", type=Path, default=Path("/tmp/mosaica-bench/runs/concurrency"))
 
     # Which cells to run. `matrix` is the Arm A/B sweep, with the shed-rate column and the hang
     # watchdog; the other four each boot their own server.
@@ -692,7 +692,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if not BENCH_BIN.exists():
-        print(f"missing {BENCH_BIN} -- cargo build --release -p tessera-bench", file=sys.stderr)
+        print(f"missing {BENCH_BIN} -- cargo build --release -p mosaica-bench", file=sys.stderr)
         return 1
 
     criteria = {c.strip() for c in args.criteria.split(",") if c.strip()}

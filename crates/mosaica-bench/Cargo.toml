@@ -1,0 +1,100 @@
+[package]
+name = "mosaica-bench"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+# The measurement harness. NOTHING may depend on this crate — `scripts/check-layers.sh` asserts
+# that. It sits above every other crate precisely so it can reach across layers (authz + store +
+# spatial + engine + build together) without any shipped crate being allowed to.
+#
+# `bench-timing` is enabled by default HERE and only here. That is safe for this binary and
+# unsafe for the workspace: cargo's resolver-2 unifies features across a `--workspace` build, so
+# `mosaica-cli` compiled in the same invocation also gets it. The second gate — `[serve]
+# stage_timing`, default false — is what makes that harmless, and `scripts/check-no-stage-header.sh`
+# asserts the shipped binary stays quiet.
+
+[features]
+default = ["bench-timing"]
+bench-timing = [
+    "mosaica-engine/bench-timing",
+    "mosaica-server/bench-timing",
+    # `suggest_walk --decomp` prices `ColumnPostings::intersects` a stage at a time.
+    "mosaica-filter/bench-timing",
+    "mosaica-authz/bench-timing",
+]
+
+[dependencies]
+mosaica-types = { path = "../mosaica-types" }
+# `artifact_campaign_fixture` authors the Stage 7 campaign's spatial boxes over the generator's
+# own authored tile prefixes, and constructs its principal ladder in the generator's term space.
+# `check-layers.sh` constrains what `mosaica-corpus` may depend ON — the second statement of the
+# corpus must not learn to read an artefact — and says nothing about who depends on it; the CLI
+# and several test crates already do.
+mosaica-corpus = { path = "../mosaica-corpus" }
+mosaica-authz = { path = "../mosaica-authz" }
+mosaica-spatial = { path = "../mosaica-spatial" }
+mosaica-store = { path = "../mosaica-store" }
+mosaica-roaring = { path = "../mosaica-roaring" }
+mosaica-lifecycle = { path = "../mosaica-lifecycle" }
+mosaica-engine = { path = "../mosaica-engine" }
+mosaica-build = { path = "../mosaica-build" }
+mosaica-server = { path = "../mosaica-server" }
+# `record_blob_ratio` writes and reads the record blob through its own shipped writer and reader
+# rather than a transcription of the format — which is the whole point of measuring the *built*
+# ratio rather than re-measuring the probe. `check-layers.sh`'s deny list forbids
+# `mosaica-filter -> mosaica-store`, `-> mosaica-spatial` and `mosaica-filter -> mosaica-filter-write`;
+# nothing there constrains this crate, which already sits above every other.
+mosaica-filter = { path = "../mosaica-filter" }
+mosaica-filter-write = { path = "../mosaica-filter-write" }
+# `suggest_walk` folds its synthetic keys and queries with the shipped fold, so the entry strings
+# it indexes are the ones a real vocabulary would produce.
+mosaica-analyse = { path = "../mosaica-analyse" }
+
+croaring = { workspace = true }
+# Calibration task: the load arm decodes just enough of a 200 response's tiles frame to sum the
+# `served` column, for the points-served-per-second/per-user/per-request metrics. `mosaica-wire`
+# supplies the frame walk (`split_frames` — the streamed framing, contracts §3.2 r26); `arrow`
+# decodes the one tile batch. Checked against `scripts/check-layers.sh`'s deny list: nothing
+# there forbids `mosaica-bench` (the harness, already above every other crate) from either edge,
+# and both are transitive dependencies of this crate already.
+mosaica-wire = { path = "../mosaica-wire" }
+arrow = { workspace = true }
+# `utf8_retirement_fence` searches dictionary keys for a substring, which is the same question the
+# flat column's `scan_text_contains` answers — and it must ask it with the same searcher, or the
+# two sides of that comparison would differ by their string algorithm as well as by their format.
+# `mosaica-filter` already takes this exact version for that scan.
+memchr = "2"
+# `browse_cost` builds its own synthetic bundle: neither ladder corpus declares a render-only
+# column, so the whole-view scan it prices is unreachable on them (its module doc says so).
+parquet = { workspace = true }
+tempfile = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+# `artifact_serving_scale` prices the serving loop over the pool the engine already uses:
+# the shipped loop is sequential and the machine has twelve cores, so the constant factor is
+# measured before anything structural is proposed.
+rayon = { workspace = true }
+rustc-hash = "1"
+toml = "0.8"
+libc = "0.2"
+# `identity_bands_probe` maps the band files the way the structure under test would be mapped at
+# open, and reads them scattered; a `read` per lookup would price the syscall rather than the
+# structure.
+memmap2 = { workspace = true }
+# `suggest_walk` writes its synthetic index and postings somewhere the run cleans up after itself.
+tokio = { version = "1", features = ["full"] }
+# `blocking` for the campaign's ingest arm: a driver that posts one batch and reads its answer
+# before building the next has no use for a runtime, and the async arms beside it are unaffected.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# `blob_framing_probe` re-compresses each candidate framing at the record blob's own level, so it
+# needs the same libzstd `mosaica-filter` reads the blocks with. Comparing a candidate against a
+# differently-invoked compressor would price the compressor rather than the framing.
+zstd = { workspace = true }
+
+[dev-dependencies]
+# `replay`'s test serves a server's routers itself, as `mosaica-server`'s own tests do.
+axum = "0.8"

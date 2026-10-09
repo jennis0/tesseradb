@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection} from '@tesseradb/client';
-import {GRID32_PER_WORLD_UNIT, SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
+import {type Artifact, type ArtifactsProjection} from '@mosaicajs/client';
+import {GRID32_PER_WORLD_UNIT, SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import '../src/map.js';
 import {fakeStore, mount, settle, status} from './fake-store.js';
 
@@ -74,8 +74,8 @@ const SERVED = [
 
 /** A map with a store and no deck: `worldAt` is stubbed, so a click carries its world point. */
 async function map(): Promise<{el: {onClick(info: unknown): void}; store: ReturnType<typeof fakeStore>}> {
-  const host = await mount('<tessera-map></tessera-map>');
-  const el = host.querySelector('tessera-map') as unknown as {store: unknown; worldAt: unknown; onClick(info: unknown): void; lastPick: unknown};
+  const host = await mount('<mosaica-map></mosaica-map>');
+  const el = host.querySelector('mosaica-map') as unknown as {store: unknown; worldAt: unknown; onClick(info: unknown): void; lastPick: unknown};
   const store = fakeStore({status: status({}), artifacts: artifactsProjection(SERVED)});
   el.store = store;
   el.worldAt = (x: number, y: number) => [x, y];
@@ -107,7 +107,7 @@ describe('a click on a contour', () => {
     // Inside the root's box and outside every frontier shape: the root is served, it is nobody's
     // answer, and clicking where only it reaches opens nothing.
     let missed = 0;
-    (el as unknown as HTMLElement).addEventListener('tessera-miss', () => (missed += 1));
+    (el as unknown as HTMLElement).addEventListener('mosaica-miss', () => (missed += 1));
     el.onClick({index: -1, x: 2, y: 2});
     expect(opened(store)).toEqual([]);
     expect((el as unknown as {lastPick: {kind: string} | null}).lastPick).toEqual({kind: 'miss'});

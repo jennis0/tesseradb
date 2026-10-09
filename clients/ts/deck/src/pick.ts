@@ -1,4 +1,4 @@
-import {NO_ORDINAL, type ArtifactsProjection, type Band} from '@tesseradb/client';
+import {NO_ORDINAL, type ArtifactsProjection, type Band} from '@mosaicajs/client';
 
 /**
  * What {@link resolvePick} found under the pointer, by `kind`:
@@ -30,14 +30,14 @@ export type PickInfo = {
 };
 
 /**
- * Resolves a deck.gl pick on a {@link TesseraLayer} to the item's mark or the artifact's name under
+ * Resolves a deck.gl pick on a {@link MosaicaLayer} to the item's mark or the artifact's name under
  * the pointer. Pass the pick info deck gives `onClick` or `onHover`. Only marks and artifact names
  * are pickable, so a pointer over an outline, a count or the wash away from any mark is a `miss`.
  */
 export function resolvePick(info: PickInfo): Picked {
   if (info.index < 0) return {kind: 'miss'};
   const layer = info.sourceLayer ?? info.layer;
-  const props = (layer?.props ?? {}) as {tesseraIds?: BigUint64Array; tesseraPositions?: Float32Array; artifactIds?: bigint[]};
+  const props = (layer?.props ?? {}) as {tesseraIds?: BigUint64Array; mosaicaPositions?: Float32Array; artifactIds?: bigint[]};
   // A label hit. `artifactIds` maps each text row to its artifact. Contours are not pickable;
   // `hoverAt` resolves them in JS.
   if (props.artifactIds) {
@@ -53,7 +53,7 @@ export function resolvePick(info: PickInfo): Picked {
   }
   // The mark's own position from the buffer deck drew. `info.coordinate` is the cursor, up to a
   // pick radius away, and a marker placed there drifts from its point as the camera zooms in.
-  const pos = props.tesseraPositions;
+  const pos = props.mosaicaPositions;
   const worldXY: [number, number] | null =
     pos && info.index * 2 + 1 < pos.length
       ? [pos[info.index * 2]!, pos[info.index * 2 + 1]!]

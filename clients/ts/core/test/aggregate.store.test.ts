@@ -1,6 +1,6 @@
 import {Table, tableFromArrays} from 'apache-arrow';
 import {describe, expect, it, vi} from 'vitest';
-import {TesseraError, type TesseraClient} from '../src/client.js';
+import {MosaicaError, type MosaicaClient} from '../src/client.js';
 import type {FilterDraft} from '../src/filters.js';
 import {createStore, DEFAULT_BUDGET} from '../src/store.js';
 import type {AggregateRequest, AggregateResult, Meta} from '../src/types.js';
@@ -61,7 +61,7 @@ async function storeWith(
           req,
           signal,
           fail: reject,
-          release: (total, identityKey) => (opts.refuse ? reject(new TesseraError(422, 'contract', 'refused')) : resolve((opts.answer ?? answer)(req, total, identityKey ?? opts.identityKey)))
+          release: (total, identityKey) => (opts.refuse ? reject(new MosaicaError(422, 'contract', 'refused')) : resolve((opts.answer ?? answer)(req, total, identityKey ?? opts.identityKey)))
         });
       })
   );
@@ -70,7 +70,7 @@ async function storeWith(
     viewport: async () => response(viewportResult(), opts.contentKey ? {contentKey: opts.contentKey()} : {}),
     aggregate,
     close: () => {}
-  } as unknown as TesseraClient;
+  } as unknown as MosaicaClient;
   const store = createStore({
     viewerUrl: 'http://viewer',
     token: 'tok',
@@ -123,11 +123,11 @@ describe('the aggregates projection', () => {
     store.setAggregate('bad', {groupings: [{by: {field: 'archive', top: 5}}]});
     await flush();
     expect(pending).toHaveLength(1);
-    pending[0]!.fail(new TesseraError(422, 'contract', 'no such field'));
+    pending[0]!.fail(new MosaicaError(422, 'contract', 'no such field'));
     await flush();
     expect(pending.slice(1).map((p) => p.req.groupings)).toEqual([[{}], [{by: {field: 'archive', top: 5}}]]);
     pending[1]!.release(7);
-    pending[2]!.fail(new TesseraError(422, 'contract', 'no such field'));
+    pending[2]!.fail(new MosaicaError(422, 'contract', 'no such field'));
     await flush();
     expect(store.get('aggregates').get('good')).toMatchObject({status: 'shown'});
     expect(store.get('aggregates').get('bad')).toMatchObject({status: 'refused', refusal: {code: 'contract'}});
@@ -337,7 +337,7 @@ describe('an aggregate the server sheds', () => {
     const {store, pending, clock} = await storeWith();
     store.setAggregate('a', {groupings: [{}]});
     await flush();
-    pending[0]!.fail(new TesseraError(429, 'backpressure', 'shed', 3));
+    pending[0]!.fail(new MosaicaError(429, 'backpressure', 'shed', 3));
     await flush();
     expect(store.get('aggregates').get('a')).toMatchObject({status: 'retrying', refusal: {code: 'backpressure'}});
     await clock.advance(2_999);
@@ -355,7 +355,7 @@ describe('an aggregate the server sheds', () => {
     store.setAggregate('a', {groupings: [{}]});
     for (let i = 0; i < 3; i++) {
       await flush();
-      pending[i]!.fail(new TesseraError(503, 'not-ready', 'starting'));
+      pending[i]!.fail(new MosaicaError(503, 'not-ready', 'starting'));
       await flush();
       await clock.advance(10_000);
     }
@@ -368,7 +368,7 @@ describe('an aggregate the server sheds', () => {
     const {store, pending, clock} = await storeWith();
     store.setAggregate('a', {groupings: [{}]});
     await flush();
-    pending[0]!.fail(new TesseraError(429, 'backpressure', 'shed', 1));
+    pending[0]!.fail(new MosaicaError(429, 'backpressure', 'shed', 1));
     await flush();
     store.setFilters(DRAFT);
     await flush();
@@ -576,7 +576,7 @@ describe('an aggregate over the whole visible set', () => {
 
 describe('the point budget', () => {
   it('is 250,000 unless the store is made with another', () => {
-    const client = {meta: async () => META, viewport: async () => response(viewportResult()), close: () => {}} as unknown as TesseraClient;
+    const client = {meta: async () => META, viewport: async () => response(viewportResult()), close: () => {}} as unknown as MosaicaClient;
     const made = (budget?: number) =>
       createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock: fakeClock(), scheduler: fakeScheduler(), prefetch: false, ...(budget === undefined ? {} : {budget})});
     expect(DEFAULT_BUDGET).toBe(250_000);

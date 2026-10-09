@@ -1,7 +1,7 @@
 """A flat layer published at runtime on gbif-64p, and its first reads on the artifacts viewport.
 
     python3 probes/2026-10-05-serving-layers-bench/runtime_layer.py --deployment <dir> \
-        --binary <tessera> --run <bench run.json> --out <out.json> [--cap 24G] [--swap 2G]
+        --binary <mosaica> --run <bench run.json> --out <out.json> [--cap 24G] [--swap 2G]
 
 It copies the deployment's bundle into a scratch directory, since a publication writes into the
 bundle it serves, and starts the binary on a fresh cache over the copy, with its pages evicted.
@@ -43,7 +43,7 @@ BATCH_MEMBERS = 3_000_000
 
 def members_file(deployment: Path) -> Path:
     """The taxonomy member file the deployment's corpus declaration names."""
-    schema = (deployment / tomllib.loads((deployment / "tessera.toml").read_text())["build"]["schema"]).resolve()
+    schema = (deployment / tomllib.loads((deployment / "mosaica.toml").read_text())["build"]["schema"]).resolve()
     return schema.parent / tomllib.loads(schema.read_text())["sources"]["taxonomy"]
 
 
@@ -141,7 +141,7 @@ def main() -> int:
     scratch = args.deployment / "bench-scratch-runtime-layer"
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True)
-    settings = tomllib.loads((args.deployment / "tessera.toml").read_text())
+    settings = tomllib.loads((args.deployment / "mosaica.toml").read_text())
     original = (args.deployment / settings["bundle"]["path"]).resolve()
     copy = scratch / "bundle"
     served = Deployment.of(

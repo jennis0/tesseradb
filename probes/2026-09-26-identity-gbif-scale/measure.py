@@ -1,6 +1,6 @@
 """Run one command under a memory cap and sample its memory once a second.
 
-    python3 measure.py --cap 26G --out run.json -- tessera build ...
+    python3 measure.py --cap 26G --out run.json -- mosaica build ...
 
 The command runs in a transient systemd scope with `MemoryMax` and `MemorySwapMax=2G`. Each
 sample reads the process's `VmRSS` and its scope's `memory.current`, so a figure includes the

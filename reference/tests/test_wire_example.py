@@ -2,7 +2,7 @@
 fixtures under `clients/ts/core/test/fixtures`, held to the same answer as the JavaScript one by
 `clients/ts/wire-example/test/expected.json`.
 
-The example imports nothing of Tessera's and is loaded here by path, so this test does not pull
+The example imports nothing of Mosaica's and is loaded here by path, so this test does not pull
 it into the oracle package. `pyarrow` is the one dependency; without it the whole module skips
 with the reason printed rather than passing.
 """

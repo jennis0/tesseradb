@@ -1,6 +1,6 @@
 """Total verification — correctness-suite §9 over the generated corpus, build-order row 6.
 
-Every served value is checked against ground truth computed from `tessera-corpus`, at the identity
+Every served value is checked against ground truth computed from `mosaica-corpus`, at the identity
 the served row itself names. Two halves, because they are different claims (§9): the **row half**
 takes every row of every recorded response, reads its `fx_key`, evaluates the generator, and
 compares the Morton code, both quantised coordinates and every other declared field exactly — no
@@ -16,7 +16,7 @@ per-tile census, is blind to none.
 
 **Ground truth is computed, never stored** (§8). At 10⁹ items the expected answer cannot be held
 in a table, so every property of item *e* is a pure function of `(seed, e)` — and the expectation
-side of this module is therefore the `tessera corpus` CLI verbs, which evaluate the one Rust
+side of this module is therefore the `mosaica corpus` CLI verbs, which evaluate the one Rust
 generator. A Python restatement of the generator would put the fixture under test rather than the
 system (§12.1), so this module computes no corpus property itself; the one Python-side quantity is
 the Morton code, taken from `oracle.morton` — the conformance suite's existing independent
@@ -25,8 +25,8 @@ construction: a corrupted `fx_key` inverts to *some* item, whose every property 
 with the served row, so corruption of the join column is caught by the same comparison as
 corruption of any other column.
 
-**Lookups are batched per response, never per row** (§12.1). One `tessera corpus items` call per
-recorded response, ids on stdin; one `tessera corpus census` call per (principal, depth). The
+**Lookups are batched per response, never per row** (§12.1). One `mosaica corpus items` call per
+recorded response, ids on stdin; one `mosaica corpus census` call per (principal, depth). The
 granularity is the design's: the O(*n*) census pass and the per-id evaluation stay in Rust, and
 the Python side compares vectors. A call per row would multiply process spawns by the corpus and
 make the mechanism unaffordable at exactly the sizes it exists for.
@@ -34,11 +34,11 @@ make the mechanism unaffordable at exactly the sizes it exists for.
 ## Materialisation — the shim, and why it exists
 
 The corpus reaches the build as files — points, pairs, the artifact rosters and their
-memberships, `config.toml` — written by the crate's own materialisers. `tessera corpus
+memberships, `config.toml` — written by the crate's own materialisers. `mosaica corpus
 materialise` writes that set, but it writes only that set: §12.1's "the corpus emits a batch and
 the driver posts it" needs one `/control/ingest` body drawn from the same generator over an
 arbitrary item range, and no verb takes a range. So [`materialise_corpus`] compiles a two-file
-cargo shim against `crates/tessera-corpus` itself and runs it, calling the same materialisers the
+cargo shim against `crates/mosaica-corpus` itself and runs it, calling the same materialisers the
 verb calls and then `Corpus::ingest_batch` beside them. This is the same trust chain as invoking
 the CLI — the one Rust generator, reached through a build — and deliberately not a Python
 restatement of the materialisers, for §12.1's reason. Two writers of one input set is the cost:
@@ -126,7 +126,7 @@ class TotalVerificationFailure(AssertionError):
 
 _SHIM_MAIN = """\
 //! Materialise the correctness-suite corpus (written by conformance/suite/verification.py; the
-//! generator and every value are `tessera-corpus`'s — this file only names output paths).
+//! generator and every value are `mosaica-corpus`'s — this file only names output paths).
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -141,8 +141,8 @@ fn main() -> ExitCode {
     let hi: u64 = args[4].parse().expect("ingest_hi");
     let out = std::path::PathBuf::from(&args[5]);
     std::fs::create_dir_all(&out).expect("out dir");
-    let extent = tessera_spatial::Bounds { x_min: 0.0, x_max: 65536.0, y_min: 0.0, y_max: 65536.0 };
-    let corpus = tessera_corpus::Corpus::new(seed, n, extent).expect("corpus");
+    let extent = mosaica_spatial::Bounds { x_min: 0.0, x_max: 65536.0, y_min: 0.0, y_max: 65536.0 };
+    let corpus = mosaica_corpus::Corpus::new(seed, n, extent).expect("corpus");
     corpus.write_points_parquet(&out.join("points.parquet")).expect("points");
     corpus.write_pairs_parquet(&out.join("pairs.parquet")).expect("pairs");
     // Every remaining source `config_toml` declares — the four artifact rosters and their three
@@ -170,10 +170,10 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-tessera-corpus = {{ path = "{corpus_crate}" }}
-tessera-spatial = {{ path = "{spatial_crate}" }}
+mosaica-corpus = {{ path = "{corpus_crate}" }}
+mosaica-spatial = {{ path = "{spatial_crate}" }}
 # Pinned to the workspace lock's exact version: the shim's `arrow` must be type-identical to the
-# one `tessera-corpus` compiled against, or `RecordBatch` is two types and nothing links.
+# one `mosaica-corpus` compiled against, or `RecordBatch` is two types and nothing links.
 arrow = {{ version = "={arrow_version}", default-features = false, features = ["ipc"] }}
 
 [workspace]
@@ -222,8 +222,8 @@ def materialise_corpus(
     SHIM_DIR.joinpath("src").mkdir(parents=True, exist_ok=True)
     (SHIM_DIR / "Cargo.toml").write_text(
         _SHIM_MANIFEST.format(
-            corpus_crate=REPO_ROOT / "crates" / "tessera-corpus",
-            spatial_crate=REPO_ROOT / "crates" / "tessera-spatial",
+            corpus_crate=REPO_ROOT / "crates" / "mosaica-corpus",
+            spatial_crate=REPO_ROOT / "crates" / "mosaica-spatial",
             arrow_version=_workspace_arrow_version(),
         )
     )
@@ -254,7 +254,7 @@ def materialise_corpus(
 
 
 def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
-    """`tessera build` over the materialised inputs, invoked as the catalogue's is
+    """`mosaica build` over the materialised inputs, invoked as the catalogue's is
     (`oracle.harness.cli_build`): a deployment file naming the declaration and the output.
     Every file names its items by the unique field `id`, the item's number `e`, which is also what
     the denies address items by.
@@ -262,13 +262,13 @@ def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
     Nothing names a source or an extent here: the generator's own declaration sits beside the two
     parquet files it names, and carries the grid extent this corpus's expected answers are stated
     in (`configuration.md` §1, §3) — the view it declares included, which is why nothing here names
-    one either: `tessera build` materialises every view the declaration carries and takes no
+    one either: `mosaica build` materialises every view the declaration carries and takes no
     `--view` (fixed 2026-08-31; this function had kept the flag after the catalogue's own
     invocation dropped it, so every caller of it died at `build` with exit 2).
     """
     ensure_cli_built()
     deployment = write_deployment(
-        files.schema.parent / "tessera.toml", bundle=bundle_root, schema=files.schema
+        files.schema.parent / "mosaica.toml", bundle=bundle_root, schema=files.schema
     )
     cli_build(deployment, bundle_root, capture_output=True)
 
@@ -344,7 +344,7 @@ class Declaration:
 
 @dataclass(frozen=True)
 class Expected:
-    """One item's computed ground truth, as `tessera corpus items` states it."""
+    """One item's computed ground truth, as `mosaica corpus items` states it."""
 
     e: int
     fx_key: int
@@ -369,13 +369,13 @@ def _run_cli(args: Sequence[str], stdin: bytes | None = None) -> bytes:
     )
     if run.returncode != 0:
         raise RuntimeError(
-            f"tessera {' '.join(args[:2])} failed: {run.stderr.decode(errors='replace')}"
+            f"mosaica {' '.join(args[:2])} failed: {run.stderr.decode(errors='replace')}"
         )
     return run.stdout
 
 
 def expected_items(seed: int, fx_keys: Iterable[int]) -> dict[int, Expected]:
-    """One `tessera corpus items` call for every id a response carried (§12.1's granularity).
+    """One `mosaica corpus items` call for every id a response carried (§12.1's granularity).
 
     Total over `u64`: a key no item was ever given still answers, as the item it inverts to —
     whose properties then disagree with whatever row carried the key (module doc).
@@ -420,7 +420,7 @@ def expected_items(seed: int, fx_keys: Iterable[int]) -> dict[int, Expected]:
 
 
 def expected_census(seed: int, n: int, depth: int, grant_terms: Iterable[int]) -> dict[int, int]:
-    """One `tessera corpus census` call: the expected masked count per depth-`depth` tile for one
+    """One `mosaica corpus census` call: the expected masked count per depth-`depth` tile for one
     principal, before the harness's own denies are subtracted."""
     out = _run_cli(
         [

@@ -196,11 +196,11 @@ export class Replica {
       /** Speculative work goes to its own decode lane; see `Decoder.decode`. */
       background?: boolean,
       /**
-       * Takes each points frame as it lands; see `TesseraClient.viewport`. The response then
+       * Takes each points frame as it lands; see `MosaicaClient.viewport`. The response then
        * carries no points. A transport that cannot stream may ignore this and answer whole.
        */
       onPart?: (part: ViewportPart) => void | Promise<void>,
-      /** Takes the response's counts as they land; see `TesseraClient.viewport`. */
+      /** Takes the response's counts as they land; see `MosaicaClient.viewport`. */
       onCounts?: (counts: ViewportCounts) => void
     ) => Promise<ViewportResponse>,
     private readonly quantisation: Quantisation,
@@ -221,7 +221,7 @@ export class Replica {
   }
 
   /**
-   * The `x-tessera-region` verdict the last response carried, or `null` where it carried none. A
+   * The `x-mosaica-region` verdict the last response carried, or `null` where it carried none. A
    * frame derived from held bands has no response, so the store reads the verdict here. `reset`
    * forgets it.
    */

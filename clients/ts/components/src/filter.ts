@@ -1,9 +1,9 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {composeFilters, emptyDraft, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestionPage, type SuggestValue} from '@tesseradb/client';
+import {composeFilters, emptyDraft, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestionPage, type SuggestValue} from '@mosaicajs/client';
 import {FloatingList} from './float.js';
-import {TesseraElement, columnCaption, emit} from './base.js';
+import {MosaicaElement, columnCaption, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
@@ -42,9 +42,9 @@ const BAR_FLOOR = 2;
  * the column's control in the filter position of the store's draft.
  *
  * @summary A field card's search box.
- * @tagname tessera-filter
+ * @tagname mosaica-filter
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - The box
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-filterchange']>} mosaica-filterchange - The box
  *   changed the column's filter, with the expression the filter position composes.
  * @csspart entry - The box.
  * @csspart mode - The keyword column's operator button, which opens its menu.
@@ -59,7 +59,7 @@ const BAR_FLOOR = 2;
  * @csspart refusal - The words "Values unavailable" where the values could not be listed, with
  *   `data-code` set to the refusal's code.
  */
-export class TesseraFilter extends TesseraElement {
+export class MosaicaFilter extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -96,11 +96,11 @@ export class TesseraFilter extends TesseraElement {
         gap: 6px;
         height: 28px;
         padding: 0 8px 0 10px;
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius-control);
-        background: var(--_tessera-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius-control);
+        background: var(--_mosaica-surface);
         font-size: 12px;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
         white-space: nowrap;
       }
       [part='operators'] {
@@ -110,10 +110,10 @@ export class TesseraFilter extends TesseraElement {
         box-sizing: border-box;
         min-width: 120px;
         padding: 4px;
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius-control);
-        background: var(--_tessera-surface);
-        color: var(--_tessera-ink);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius-control);
+        background: var(--_mosaica-surface);
+        color: var(--_mosaica-ink);
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
       }
       [part~='operator'] {
@@ -128,7 +128,7 @@ export class TesseraFilter extends TesseraElement {
       [part~='operator']:hover,
       [part~='operator']:focus-visible,
       [part~='operator'][aria-checked='true'] {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part~='operator'][aria-checked='true'] {
         font-weight: 500;
@@ -146,9 +146,9 @@ export class TesseraFilter extends TesseraElement {
         display: flex;
         flex-direction: column;
         padding: 4px;
-        border: 1px solid var(--_tessera-line);
-        border-radius: var(--_tessera-radius-control);
-        background: var(--_tessera-surface);
+        border: 1px solid var(--_mosaica-line);
+        border-radius: var(--_mosaica-radius-control);
+        background: var(--_mosaica-surface);
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
       }
       [part~='tick'] {
@@ -163,7 +163,7 @@ export class TesseraFilter extends TesseraElement {
       [part~='tick']:hover,
       [part~='tick'][data-active],
       [part~='tick'][aria-selected='true'] {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       [part~='tick'][aria-selected='true'] {
         font-weight: 600;
@@ -195,15 +195,15 @@ export class TesseraFilter extends TesseraElement {
       .track {
         height: 3px;
         border-radius: 2px;
-        background: var(--_tessera-surface-3);
+        background: var(--_mosaica-surface-3);
       }
       [part='bar'] {
         height: 3px;
         border-radius: 2px;
-        background: color-mix(in srgb, var(--_tessera-ink-2) 75%, var(--_tessera-surface));
+        background: color-mix(in srgb, var(--_mosaica-ink-2) 75%, var(--_mosaica-surface));
       }
       [aria-selected='true'] [part='bar'] {
-        background: var(--_tessera-ink);
+        background: var(--_mosaica-ink);
       }
       /* Every count in a list as wide as the widest, so the bars' tracks end together. */
       [part='value-count'] {
@@ -212,12 +212,12 @@ export class TesseraFilter extends TesseraElement {
         font-size: 12px;
         font-weight: 400;
         font-variant-numeric: tabular-nums;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='more'] {
         display: block;
         margin-top: 6px;
-        color: var(--_tessera-ink-3);
+        color: var(--_mosaica-ink-3);
         font-size: 12px;
       }
       [part='refusal'] {
@@ -370,7 +370,7 @@ export class TesseraFilter extends TesseraElement {
       const draft = {...held, filter: {...held.filter, [column]: next}};
       this.sent = next;
       s.setFilters(draft);
-      emit(this, 'tessera-filterchange', {column, verb: 'filter', expr: composeFilters(draft, 'filter')});
+      emit(this, 'mosaica-filterchange', {column, verb: 'filter', expr: composeFilters(draft, 'filter')});
     };
     if (immediate) apply();
     else this.typing = setTimeout(apply, TYPING_DEBOUNCE_MS);
@@ -566,10 +566,10 @@ function countWidth(counts: readonly (number | undefined)[]): string {
 }
 
 attachContextRoot();
-defineOnce('tessera-filter', TesseraFilter);
+defineOnce('mosaica-filter', MosaicaFilter);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-filter': TesseraFilter;
+    'mosaica-filter': MosaicaFilter;
   }
 }

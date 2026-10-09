@@ -7,8 +7,8 @@ and refusal it holds. The wording is not asserted.
 import pyarrow as pa
 import pytest
 
-from tesseradb._database import create
-from tesseradb._refusal import Refusal
+from mosaica._database import create
+from mosaica._refusal import Refusal
 
 
 def papers(ids, x=None, labels="public"):

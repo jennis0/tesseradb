@@ -1,21 +1,21 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {TesseraClient} from '../src/client.js';
+import {MosaicaClient} from '../src/client.js';
 import {Control} from '../src/control.js';
 import {headersOf} from './support.js';
 
 /**
- * `TesseraClient` and `Control` reach the operations the HTTP contract publishes.
+ * `MosaicaClient` and `Control` reach the operations the HTTP contract publishes.
  *
  * The contract file is read here rather than a list kept beside it. An operation on the viewer or
- * session plane is reached by the `TesseraClient` method of the same name, and one on the control
+ * session plane is reached by the `MosaicaClient` method of the same name, and one on the control
  * plane by the `Control` method of the same name, or in either case the one `REACHED_AS` gives.
  * Each such method is called against a recording `fetch` to check that it sends the operation's
  * method and path to its plane's listener.
  */
 
-const CONTRACT = join(import.meta.dirname, '../../../../docs/openapi/tessera.yaml');
+const CONTRACT = join(import.meta.dirname, '../../../../docs/openapi/mosaica.yaml');
 
 type Operation = {id: string; method: string; path: string; pattern: RegExp; literal: number};
 
@@ -48,7 +48,7 @@ function operations(text: string): Operation[] {
   return out;
 }
 
-/** Each plane's route prefix, from the `x-tessera-plane` and `x-tessera-route-prefix` of each server. */
+/** Each plane's route prefix, from the `x-mosaica-plane` and `x-mosaica-route-prefix` of each server. */
 function planes(text: string): Map<string, string> {
   const out = new Map<string, string>();
   let inServers = false;
@@ -56,9 +56,9 @@ function planes(text: string): Map<string, string> {
   for (const line of text.split('\n')) {
     if (/^\S/.test(line)) inServers = line.startsWith('servers:');
     if (!inServers) continue;
-    const named = /^ {4}x-tessera-plane:\s*(\S+)\s*$/.exec(line);
+    const named = /^ {4}x-mosaica-plane:\s*(\S+)\s*$/.exec(line);
     if (named) plane = named[1]!;
-    const prefix = /^ {4}x-tessera-route-prefix:\s*(\S+)\s*$/.exec(line);
+    const prefix = /^ {4}x-mosaica-route-prefix:\s*(\S+)\s*$/.exec(line);
     if (prefix && plane) out.set(plane, prefix[1]!);
   }
   return out;
@@ -93,11 +93,11 @@ const NOT_REACHED = new Map([
 ]);
 
 /**
- * One call of each `TesseraClient` method that reaches an operation, with arguments enough to send
+ * One call of each `MosaicaClient` method that reaches an operation, with arguments enough to send
  * its request, and the signal where one is given. A method reaching two operations has a call per
  * operation, keyed by the operation's id.
  */
-const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<unknown>> = {
+const CALLS: Record<string, (c: MosaicaClient, signal?: AbortSignal) => Promise<unknown>> = {
   login: (c, signal) => c.login({apiKey: 'key'}, signal),
   logout: (c, signal) => c.logout('tok', signal),
   authorise: (c, signal) => c.authorise({principal: 'ann'}, signal),
@@ -164,7 +164,7 @@ const CONTROL_CALLS: Record<string, (c: Control) => Promise<unknown>> = {
 const methodOf = (operation: string) => REACHED_AS[operation] ?? operation;
 
 /** The client class whose methods reach operations under `path`. */
-const surfaceOf = (path: string) => (path.startsWith('/control/') ? Control : TesseraClient);
+const surfaceOf = (path: string) => (path.startsWith('/control/') ? Control : MosaicaClient);
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -203,7 +203,7 @@ describe('the client against the HTTP contract', () => {
       sent.push({method: init?.method ?? 'GET', path: at.pathname, origin: at.origin});
       return new Response(JSON.stringify({error: 'contract', detail: 'recorded'}), {status: 422});
     });
-    const client = new TesseraClient({viewerUrl: origins.viewer!, sessionUrl: origins.session!, sessionCredential: 'cred'});
+    const client = new MosaicaClient({viewerUrl: origins.viewer!, sessionUrl: origins.session!, sessionCredential: 'cred'});
     const control = new Control({controlUrl: origins.control!, credential: 'operator'});
     for (const op of ops.filter((o) => !NOT_REACHED.has(o.id))) {
       const method = methodOf(op.id);
@@ -228,7 +228,7 @@ describe('the client against the HTTP contract', () => {
       sent.push({method: init?.method ?? 'GET', headers: headersOf(init), signal: init?.signal});
       return new Response(JSON.stringify({error: 'contract', detail: 'recorded'}), {status: 422});
     };
-    const client = new TesseraClient({
+    const client = new MosaicaClient({
       viewerUrl: 'http://viewer',
       sessionUrl: 'http://session',
       sessionCredential: 'cred',

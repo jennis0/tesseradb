@@ -1,7 +1,7 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
-import {type Meta} from '@tesseradb/client';
-import {enterGroup, hasOneLayout, viewPickerEntries} from '@tesseradb/client/internal';
-import {TesseraElement} from './base.js';
+import {type Meta} from '@mosaicajs/client';
+import {enterGroup, hasOneLayout, viewPickerEntries} from '@mosaicajs/client/internal';
+import {MosaicaElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {switchView} from './view-switch.js';
@@ -14,14 +14,14 @@ import {chrome, tokens} from './tokens.js';
  * last left it on, else at its first view. Renders nothing where the bundle offers one entry.
  *
  * @summary Chooses the view.
- * @tagname tessera-view-picker
+ * @tagname mosaica-view-picker
  * @category Elements
- * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-viewswitch']>} mosaica-viewswitch - The view
  *   changed.
  * @csspart field - The select and its chevron, drawn as the view's title in bold.
  * @csspart select - The select.
  */
-export class TesseraViewPicker extends TesseraElement {
+export class MosaicaViewPicker extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -93,10 +93,10 @@ export class TesseraViewPicker extends TesseraElement {
 }
 
 attachContextRoot();
-defineOnce('tessera-view-picker', TesseraViewPicker);
+defineOnce('mosaica-view-picker', MosaicaViewPicker);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-view-picker': TesseraViewPicker;
+    'mosaica-view-picker': MosaicaViewPicker;
   }
 }

@@ -11,7 +11,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from tesseradb import Refusal
+from mosaica import Refusal
 
 from test_sdk_corpus import declare_notebook
 
@@ -36,7 +36,7 @@ def points():
 def db(tmp_path_factory):
     """The notebook corpus, committed and served once for every test here that only reads it."""
     from conftest import binary, notebook_corpus
-    from tesseradb._database import create
+    from mosaica._database import create
 
     binary()
     one = create(tmp_path_factory.mktemp("selection"))
@@ -173,10 +173,10 @@ def test_a_sample_is_bounded_by_k_and_carries_the_counts_it_came_from(db, points
 
     box = box_of(points, 0.2, 0.8)
     sample = db.view("s0").within(box).sample(zoom=2, k=16)
-    counts = json.loads(sample.schema.metadata[b"tessera.counts"])
+    counts = json.loads(sample.schema.metadata[b"mosaica.counts"])
     assert 0 < sample.num_rows == counts["served"] < counts["matched"]
     assert counts["matched"] == len(inside(points, box))
-    sent = json.loads(sample.schema.metadata[b"tessera.request"])
+    sent = json.loads(sample.schema.metadata[b"mosaica.request"])
     assert sent["bbox"] == list(box) and sent["zoom"] == 2 and sent["k"] == 16
 
 
@@ -192,7 +192,7 @@ def test_a_sample_carries_category_keys_for_the_items_it_drew(db, points):
 
 
 def test_a_second_sample_asks_for_no_key_it_already_has(db, monkeypatch):
-    from tesseradb import Viewer
+    from mosaica import Viewer
 
     asked = []
     send = Viewer._request
@@ -240,8 +240,8 @@ def test_categories_resolves_the_codes_it_is_given(db):
 def test_categories_with_a_prefix_counts_the_items_carrying_each_value(db, points):
     found = db.categories("archive", prefix="ma")
     assert found.column_names == ["key", "code", "title", "count"]
-    assert found.schema.metadata[b"tessera.more"] == b"false"
-    assert found.schema.metadata[b"tessera.total"] == str(len(points)).encode()
+    assert found.schema.metadata[b"mosaica.more"] == b"false"
+    assert found.schema.metadata[b"mosaica.total"] == str(len(points)).encode()
     found = found.to_pandas()
     assert "math" in set(found["key"])
     carried = points["archive"].value_counts()
@@ -272,7 +272,7 @@ def test_categories_under_a_filter_count_the_rows_it_passes(db, points):
     counts = dict(zip(found.column("key").to_pylist(), found.column("count").to_pylist()))
     assert counts == {key: carried.get(key, 0) for key in counts}
     assert 0 in counts.values() and any(counts.values())
-    assert found.schema.metadata[b"tessera.total"] == str(len(passing)).encode()
+    assert found.schema.metadata[b"mosaica.total"] == str(len(passing)).encode()
     with pytest.raises(Refusal):
         db.categories("archive", view="s0", filters=expression)
     with pytest.raises(Refusal):
@@ -310,14 +310,14 @@ def test_every_route_to_a_map_takes_the_point_budget(db, stub_bundle):
 
 def test_a_box_counted_over_a_cover_counts_at_least_the_items_inside(served, corpus, points):
     """A server whose outline budget is one cell counts a box over the cells covering it."""
-    from tesseradb import open as reopen
+    from mosaica import open as reopen
 
     db = served(lambda one: declare_notebook(one, corpus))
     box = box_of(points, 0.3, 0.6)
     exact = len(inside(points, box))
     path = db.path
     db.close()
-    deployment = path / "tessera.toml"
+    deployment = path / "mosaica.toml"
     deployment.write_text(
         deployment.read_text().replace("[serve]\n", "[serve]\nmax_region_cells = 1\n")
     )

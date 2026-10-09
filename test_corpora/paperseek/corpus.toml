@@ -2,7 +2,7 @@
 #
 # Produced by `prepare.py`, which writes an edited copy of this file next to the parquets;
 # `[sources]` is relative to the declaring document (configuration.md §3), so the copy beside the
-# data is what `tessera build` reads and this one is what gets reviewed.
+# data is what `mosaica build` reads and this one is what gets reviewed.
 #
 # **Three markers are filled by the run rather than committed conditional**, and all three are the
 # same fact: `openalex.py` owns the compartment as well as the topic tree, so a run without it

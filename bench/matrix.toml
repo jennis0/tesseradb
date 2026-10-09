@@ -1,8 +1,8 @@
 # The benchmark campaign: which arms run, at which scales, against which label sets.
 #
-#   cargo build --release -p tessera-bench
-#   ./target/release/tessera-bench matrix --plan          # preview, measure nothing
-#   ./target/release/tessera-bench matrix --run-dir /tmp/tessera-bench/runs/$(date +%F)
+#   cargo build --release -p mosaica-bench
+#   ./target/release/mosaica-bench matrix --plan          # preview, measure nothing
+#   ./target/release/mosaica-bench matrix --run-dir /tmp/mosaica-bench/runs/$(date +%F)
 #
 # Resumable at cell granularity: every arm skips what the run directory's ledger records as done,
 # so a killed run is resumed by re-invoking the same command. `--only <arm>` runs one arm.
@@ -34,7 +34,7 @@
 #   * `load` needs a booted server, N authorised sessions and server-side RSS/CPU sampling ->
 #     scripts/bench_concurrency.py, which reuses reference/oracle/harness.py's boot machinery.
 #   * `ingest-build` is minutes per cell and writes a whole bundle to temp -> run it explicitly,
-#     `tessera-bench ingest-build --scale ... --data-root .`. Putting a two-minute cell beside a
+#     `mosaica-bench ingest-build --scale ... --data-root .`. Putting a two-minute cell beside a
 #     two-microsecond one makes the default run useless.
 
 [defaults]
@@ -156,7 +156,7 @@ checkpoint = [100, 1000, 5000, 20000]
 # Separate from the `viewport` arm above because it varies the axes that arm holds fixed, and
 # because each combination costs an `Engine::open`. What it is for: the cap and theta move selection
 # cost independently of `k`, and the serve-all branch's saving scales with the cap — 75 us per
-# 300-tile viewport at cap 30, ~2.7 ms at cap 1000 (`crates/tessera-engine/examples/route_saving.rs`
+# 300-tile viewport at cap 30, ~2.7 ms at cap 1000 (`crates/mosaica-engine/examples/route_saving.rs`
 # measures the same thing in isolation). This arm is what turns that from a number someone re-runs
 # by hand into one tracked over time.
 #

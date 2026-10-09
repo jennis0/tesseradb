@@ -47,7 +47,7 @@ export type ViewerConfig = {
 
 /**
  * Read from the address. A dataset's `apiKey`, from the dataset document or
- * `VITE_TESSERA_API_KEY`, puts a key that can mint a session for any principal into the browser,
+ * `VITE_MOSAICA_API_KEY`, puts a key that can mint a session for any principal into the browser,
  * which is for development only, as is the server's `serve.dev_cors_origins` that lets this page
  * call it. Neither belongs in an integration.
  */
@@ -81,16 +81,16 @@ export async function loadDatasets(): Promise<Dataset[]> {
     label: 'the running server',
     items: 0,
     prose: [],
-    viewerUrl: env.VITE_TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585',
-    sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
-    apiKey: env.VITE_TESSERA_API_KEY ?? '',
+    viewerUrl: env.VITE_MOSAICA_VIEWER_URL ?? 'http://127.0.0.1:37585',
+    sessionUrl: env.VITE_MOSAICA_SESSION_URL ?? 'http://127.0.0.1:49303',
+    apiKey: env.VITE_MOSAICA_API_KEY ?? '',
     presets: []
   };
   // `?datasets=` on the address, else the document named in the environment.
   const source =
     typeof location === 'undefined'
       ? null
-      : (new URLSearchParams(location.search).get('datasets') ?? env.VITE_TESSERA_DATASETS ?? null);
+      : (new URLSearchParams(location.search).get('datasets') ?? env.VITE_MOSAICA_DATASETS ?? null);
   if (!source) return [fallback];
   try {
     const response = await fetch(source, {cache: 'no-store'});

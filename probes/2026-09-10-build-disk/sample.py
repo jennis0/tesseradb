@@ -68,12 +68,12 @@ def sampler():
             peak.update(blocks=tmp_b + out_b, t=t, listing=sorted(listing, key=lambda r: -r[2]))
         stop.wait(SAMPLE_S)
 
-cmd = [binary, "build", "--deployment", str(corpus / "tessera.toml"),
+cmd = [binary, "build", "--deployment", str(corpus / "mosaica.toml"),
        "--config", str(corpus / "corpus.toml"), "--out", str(out),
        "--stage-timings", "--stage-timings-json", str(work / "stages.json")] + extra
 log = open(work / "build.log", "w")
 proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
-if "tessera" not in (subprocess.run(["ps", "-o", "comm=", "-p", str(proc.pid)],
+if "mosaica" not in (subprocess.run(["ps", "-o", "comm=", "-p", str(proc.pid)],
                                     capture_output=True, text=True).stdout):
     proc.kill(); sys.exit("the pid is not the build; refusing to report its disk")
 thread = threading.Thread(target=sampler, daemon=True)

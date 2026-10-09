@@ -7,7 +7,7 @@ half and anything published from it inherits that.
 
 ```bash
 ~/venvs/ingest/bin/python -m test_corpora.overture.prepare
-cd "$TESSERA_LADDER/overture" && tessera check && tessera build
+cd "$MOSAICA_LADDER/overture" && mosaica check && mosaica build
 ```
 
 **Status: built and verified over the whole corpus**, on a declared `web_mercator` projection with
@@ -17,10 +17,10 @@ the division polygons declared in longitude and latitude.
 |---|---|
 | `prepare.py` steps | divisions 109 s · join 2,560 s · entity ids 1,130 s · points 43 s · vocabularies 8 s · members 32 s · artifacts 79 s |
 | places | 73,631,092 |
-| `tessera check` | OK in 526 s — 9 vocabularies, 12 attributes, 3 layers, and the polygon decomposition |
-| `tessera build` | **31:18 wall, 26.75 GB peak RSS** |
+| `mosaica check` | OK in 526 s — 9 vocabularies, 12 attributes, 3 layers, and the polygon decomposition |
+| `mosaica build` | **31:18 wall, 26.75 GB peak RSS** |
 | bundle | **12,565,390,654 bytes** — 170.7 B/point |
-| `tessera verify` | OK in 5.98 s |
+| `mosaica verify` | OK in 5.98 s |
 | artifacts | 2,097 taxonomy minted · 625,754 division declared, every one with a polygon · 9 from the predicate layer |
 | in no artifact | 3,285,234 taxonomy (4.5%, no category path) · 46,844 places in no division (0.06%) |
 
@@ -56,7 +56,7 @@ past the 5×10⁷ wall, and both of the campaign's build-side walls are expected
 
 - **W1** — a whole-corpus root cluster over 7.4×10⁷ members is exactly the enumerated membership
   that failed its own Roaring round trip at 5×10⁷.
-- **W2** — `tessera build`'s peak RSS is not bounded by `--memory-budget`; above ~5×10⁷ points
+- **W2** — `mosaica build`'s peak RSS is not bounded by `--memory-budget`; above ~5×10⁷ points
   carrying artifacts it was OOM-killed at the machine's size, three runs, one number.
 
 Everything else it is the only source of: a **boundary tree that is genuinely a tree rather than a

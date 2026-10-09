@@ -36,7 +36,7 @@
 use std::time::Instant;
 
 use croaring::{Bitmap, Portable};
-use tessera_filter::{Codes, Endpoint, Scalar, ValueColumn};
+use mosaica_filter::{Codes, Endpoint, Scalar, ValueColumn};
 
 #[inline]
 fn splitmix(x: u64) -> u64 {

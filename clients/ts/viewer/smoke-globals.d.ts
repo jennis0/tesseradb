@@ -1,12 +1,12 @@
 /**
  * What the smoke scripts read off the page, for the typecheck that covers them. The object is
- * `@tesseradb/components`' `MapProbe`, which the viewer publishes on `window` with its timing
+ * `@mosaicajs/components`' `MapProbe`, which the viewer publishes on `window` with its timing
  * lanes. Only the fields the scripts read are declared, so reading an undeclared one fails the
  * typecheck. `clients/ts/harness/global.d.ts` declares the harness's view of the same object for
  * a separate `tsc` program.
  */
 interface Window {
-  __tesseraProbe?: {
+  __mosaicaProbe?: {
     paints: number;
     marks: number;
     requests: number;

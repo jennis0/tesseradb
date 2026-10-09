@@ -1,0 +1,385 @@
+//! The flush pipeline end to end: an acknowledged ingest becomes a mark on the map.
+//!
+//! This is the property the whole flush exists for, and it was the last thing to arrive. Until
+//! `Engine::viewport` could union tile ranges across segments — counting each segment's ranges in
+//! view row space and spending one tile's `k` budget over the union, §7.2's cap and floor being
+//! per *tile* rather than per segment — publishing a second segment into a view would have made
+//! every viewport on it fail. That is now built (`select::SelectionParts`), and publication is
+//! unconditional.
+//!
+//! **Every assertion about the published result is made on a fresh open of the bundle**, never on
+//! the publishing process's own in-memory generation. The side-manifest is the commit point, so a
+//! flush that a restart cannot see was not really published — and the restart path is also the
+//! only one that exercises the two reconstructions a flush leaves no artefact for: the row-space
+//! extent (`SegmentExtent::rebuild`) and the live delta postings tiers (`Engine::open`).
+
+mod common;
+
+use std::time::Duration;
+
+use common::*;
+use mosaica_engine::{Engine, EngineConfig, ViewportRequest};
+
+const WAIT: Duration = Duration::from_secs(20);
+
+/// The same engine **without a write executor**: one executor owns a bundle root (write-path
+/// §1.2), and a reopen that runs beside a live publisher is a reader. What it proves is unchanged —
+/// the artefacts on disc rather than the publishing process's own generation.
+fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
+    Engine::open(
+        root,
+        &tmp.join("cache-reader"),
+        &tmp.join("wal-reader.log"),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
+            compaction: mosaica_engine::CompactionSchedule::off(),
+            ..config()
+        },
+    )
+    .expect("engine opens")
+}
+
+/// One row adding `item` to `view`, for a batch of its own.
+fn ingest_into_view(
+    engine: &Engine,
+    batch: &str,
+    item: mosaica_types::EntityId,
+    view: &str,
+) -> mosaica_types::EntityId {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let row = mosaica_lifecycle::command::UnallocatedRow {
+        view: view.to_string(),
+        join: Some(item),
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
+    };
+    engine
+        .ingest_rows(vec![row], batch.to_string(), hash)
+        .expect("the batch is accepted")[0]
+}
+
+/// The tick plans what it would flush, and the gauge separates a stalled flush from healthy
+/// backlog: `flushable_items` is the buffer minus what the three dispositions exclude (§3.5).
+#[test]
+fn the_tick_plans_what_it_would_flush() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
+
+    ingest(&engine, "ext-1");
+    ingest(&engine, "ext-2");
+
+    wait_until("the tick to plan", WAIT, || {
+        engine.write_executor_stats().flushable_items == 2
+    });
+}
+
+/// A tick with nothing flushable plans nothing — no empty segment, no `segments_version` bump,
+/// and so no drain entry per tick on an idle deployment.
+#[test]
+fn an_idle_tick_plans_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
+
+    wait_until("several ticks", WAIT, || {
+        engine.write_executor_stats().ticks >= 3
+    });
+    assert_eq!(engine.write_executor_stats().flushable_items, 0);
+    assert_eq!(engine.generation().segments_version, 0);
+}
+
+/// **The whole pipeline**: the tick plans, the pool writes a segment, a tier and the
+/// side-manifest, and the executor rebases and publishes.
+///
+/// Asserted on **a fresh open of the bundle on disk**, not on the publishing process's own
+/// in-memory generation. That is the property that matters and the one a `Bundle::with_segment`
+/// bug would not show: the side-manifest is the commit point, so if a restart cannot see the
+/// flushed item then nothing was really published.
+#[test]
+fn a_published_flush_is_a_bundle_a_restart_opens() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+    let engine = engine_at(tmp.path(), &root, 1);
+
+    let id = ingest(&engine, "ext-1");
+    wait_until("the flush to publish", WAIT, || {
+        engine.write_executor_stats().flushes >= 1
+    });
+
+    // In the publishing process: the item left the buffer, exactly once, and geometry moved.
+    assert!(!engine.generation().buffer.contains(id));
+    assert_eq!(engine.generation().segments_version, 1);
+
+    // And on disk, read back through the ordinary protocol.
+    let bundle = mosaica_store::open_bundle(&root).expect("the published bundle opens");
+    let partition = bundle.partitions.values().next().unwrap();
+    assert_eq!(
+        partition.segments_n, 1,
+        "the reader settled on the flush-published side-manifest"
+    );
+    assert_eq!(
+        partition.manifest.segments.len(),
+        2,
+        "the build segment and the flush segment"
+    );
+    assert_eq!(
+        partition.manifest.watermark,
+        id.raw() + 1,
+        "one past the highest flushed entity, or it would be in neither fragment nor buffer"
+    );
+    assert_eq!(partition.manifest.deltas.len(), 1, "one delta tier");
+
+    let view = &partition.views["s0"];
+    assert_eq!(view.segments.len(), 2, "both segments mapped");
+
+    // **The extent survives the restart, and nothing on disk carries it.** It is rebuilt from the
+    // flush segment's own `tessera_id` column by inverting the identity permutation
+    // (`SegmentExtent::rebuild`) — the segment is Morton-sorted, so §2.1's four scalars are not a
+    // mapping, and this is what stands in for the file they would otherwise need.
+    assert_eq!(
+        view.row_space.extent_count(),
+        1,
+        "the reopened row space carries an extent for the flush segment"
+    );
+    let extent = &view.row_space.extents()[0];
+    assert_eq!(extent.entity_lo, id.raw());
+    assert_eq!(extent.entity_hi, id.raw());
+    assert_eq!(
+        view.row_space.row_of(id).map(|r| r.raw()),
+        Some(extent.row_base),
+        "and the flushed entity resolves to the first row of its segment"
+    );
+}
+
+/// **A reopened engine does not re-buffer what it already flushed** — and that is what makes
+/// `compose::verdict`'s missing watermark gate safe.
+///
+/// Replay walks every retained WAL record, the `IngestBatch` rows of already-published flushes
+/// included, so without a filter the buffer comes back holding entities that already have segments.
+/// Two things then go wrong: the next flush writes each of them a second time, and `verdict` gets a
+/// buffer hit for an entity the frozen fragment already accounts for. The second was what the
+/// `entity < watermark` gate existed to stop.
+///
+/// **The filter is `row_of`, not a watermark.** A watermark is exact only while entity-allocation
+/// order and flush order coincide — one view per partition, which write-path §4.3 records as
+/// load-bearing and unenforced. `row_of` is the predicate the watermark approximates, so it holds
+/// at any number of views.
+///
+/// The same WAL is reused deliberately: a separate one would exercise nothing, since the point is
+/// precisely that the flushed rows' records are still there.
+#[test]
+fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+
+    let id = {
+        let engine = engine_at(tmp.path(), &root, 1);
+        let id = ingest(&engine, "ext-1");
+        wait_until("the flush to publish", WAIT, || {
+            engine.write_executor_stats().flushes >= 1
+        });
+        assert!(!engine.generation().buffer.contains(id));
+        id
+    };
+
+    // The record is still in the WAL — nothing has rotated — so replay will meet it again.
+    let reopened = engine_at(tmp.path(), &root, 3600);
+    assert!(
+        !reopened.generation().buffer.contains(id),
+        "the row has geometry, so it must not come back into the buffer: the next flush would \
+         write it a second time, and `verdict` would answer from the buffer for an entity the \
+         fragment already covers"
+    );
+    assert!(
+        reopened.generation().buffer.is_empty(),
+        "and nothing else came back either"
+    );
+
+    // The geometry is still there, which is what makes the absence above a filter rather than a
+    // loss.
+    let bundle = mosaica_store::open_bundle(&root).expect("the published bundle opens");
+    let partition = bundle.partitions.values().next().unwrap();
+    assert!(partition.views["s0"].row_space.row_of(id).is_some());
+}
+
+/// **The allocator floor survives on the side-manifest alone** (I9).
+///
+/// `MANIFEST.json`'s `entity_id_high_water` is frozen at build; every flush raises the
+/// *side*-manifest's past the ids it consumed. Seeding from the build value works today only
+/// because the WAL still carries the `Lease` and `IngestBatch` records `high_water_from` derives
+/// the rest from — and rotation deletes exactly those. An id reissued after that grants the new
+/// item every access the old one had.
+///
+/// Asserted by reopening against a WAL that carries nothing: the side-manifest is then the only
+/// surviving statement of how far allocation has gone.
+#[test]
+fn the_allocator_floor_comes_from_the_side_manifest() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+
+    let flushed = {
+        let engine = engine_at(tmp.path(), &root, 1);
+        let id = ingest(&engine, "ext-1");
+        wait_until("the flush to publish", WAIT, || {
+            engine.write_executor_stats().flushes >= 1
+        });
+        id
+    };
+
+    let bundle = mosaica_store::open_bundle(&root).expect("the published bundle opens");
+    let partition = bundle.partitions.values().next().unwrap();
+    assert!(
+        partition.manifest.entity_id_high_water > flushed.raw(),
+        "the flush must raise the side-manifest's floor past the ids it consumed"
+    );
+    assert!(
+        bundle.manifest.entity_id_high_water <= flushed.raw(),
+        "and the build manifest's must be the stale one, or this test proves nothing"
+    );
+
+    // A *fresh* WAL: nothing survives to re-derive the floor from, so only the side-manifest can
+    // supply it. This is the state rotation produces.
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let reopened = engine_at(elsewhere.path(), &root, 3600);
+    let next = ingest(&reopened, "ext-after-rotation");
+    assert!(
+        next.raw() > flushed.raw(),
+        "an id was reissued over a flushed entity: {} is not past {}",
+        next.raw(),
+        flushed.raw()
+    );
+}
+
+/// **An acknowledged ingest becomes a mark on the map.** The property the flush exists for, and
+/// the one the read path could not serve until a tile could union its segments.
+///
+/// **The viewport is tight around the ingested point on purpose.** At a whole-extent zoom the
+/// tile holds 10,001 visible rows against a cap of 200, so §7.2's threshold clause serves the 200
+/// smallest `tessera_id`s and one particular item is drawn only by luck — a test that asserted it
+/// there would be asserting the identity permutation's arithmetic, not the union. Zoomed in, the
+/// tile's visible count is under the cap, `serves_all_visible` fires, and "is it drawn" is a
+/// question about the union and nothing else.
+///
+/// Asserted on a fresh engine opened on the same directory — the restart case. It reads the
+/// extent back through `SegmentExtent::rebuild` and the delta tier back through
+/// `Engine::open`'s reopen, so a rebuild that mapped the entity to the wrong row would draw the
+/// point at the wrong coordinates rather than not at all.
+#[test]
+fn a_flushed_item_is_visible_in_a_viewport() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+    let engine = engine_at(tmp.path(), &root, 1);
+
+    // The ingested item sits at (5, 5) — see `ingest`.
+    let request = || ViewportRequest::new("s0", 10, [4.0, 4.0, 6.0, 6.0], 200);
+
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("the credential authorises");
+    let before = engine
+        .viewport(&session, request())
+        .expect("a viewport before the flush");
+    let visible_before = before.tiles.iter().map(|t| t.visible).sum::<u64>();
+
+    let id = ingest(&engine, "ext-1");
+    wait_until("the flush to publish", WAIT, || {
+        engine.write_executor_stats().flushes >= 1
+    });
+
+    // A fresh engine on the same bundle: the restart path, and the only one that proves the
+    // artefacts rather than the publishing process's own in-memory generation.
+    let reopened = reader_at(tmp.path(), &root);
+    let reopened_session = reopened
+        .authorise(&full_coverage_credential())
+        .expect("the credential authorises against the reopened bundle");
+    let out = reopened
+        .viewport(&reopened_session, request())
+        .expect("a viewport after the flush");
+
+    assert_eq!(
+        out.tiles.iter().map(|t| t.visible).sum::<u64>(),
+        visible_before + 1,
+        "the flushed item is counted exactly once"
+    );
+    // §7.1's count is over the union of segments; the *point* appears only if selection spent the
+    // tile's budget across the union too, and if the gather resolved a view-space row back to
+    // the segment that owns it.
+    let tessera_id = reopened
+        .tessera_id_of(id)
+        .expect("the identity is computable");
+    let point = out
+        .points
+        .iter()
+        .find(|(id, _)| *id == tessera_id)
+        .expect("the flushed item is drawn, not merely counted");
+    // Round-trips through the flush's own quantisation: the Morton code deinterleaves back to the
+    // cell the coordinates were quantised into, so a point gathered from the wrong segment's row
+    // would land somewhere else in the tile.
+    // `code` is the 64-bit interleave: the depth-16 cell in the high half, the residual in the
+    // low. The depth-`z` tile is the cell's top `2z` bits — `code >> (64 - 2z)`.
+    let containing_tile = point.1 >> (64 - 2 * 10);
+    assert!(
+        out.tiles.iter().any(|t| t.tile == containing_tile),
+        "the drawn point lies in one of the tiles this response reported"
+    );
+}
+
+/// **The gauge counts rows at both writers.** An item in two views is two rows to flush, and the
+/// tick that lands behind a flush in flight has to say the same thing the tick that plans one says,
+/// or an operator watching the backlog reads a figure that changes meaning with the flush's timing.
+#[test]
+fn the_backlog_gauge_counts_rows_in_every_view_whether_or_not_a_flush_is_in_flight() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
+    engine
+        .create_plain_view(mosaica_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: mosaica_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+
+    // One item, a row in each view: the second is a join, which carries geometry and no terms.
+    let entity = ingest(&engine, "ext-1");
+    assert_eq!(ingest_into_view(&engine, "b2", entity, "s1"), entity);
+
+    engine.set_flush_paused_for_test(true);
+    wait_until("the planning tick", WAIT, || {
+        engine.write_executor_stats().flushable_items == 2
+    });
+    wait_until("the flush to reach its hold", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+
+    // A tick with the flush still in flight publishes nothing and re-counts the buffer.
+    let behind = engine.write_executor_stats().ticks;
+    wait_until("a tick behind the flush", WAIT, || {
+        engine.write_executor_stats().ticks > behind
+    });
+    assert_eq!(
+        engine.write_executor_stats().flushable_items,
+        2,
+        "the item's row in each view is two rows to flush, whichever writer last wrote the gauge"
+    );
+
+    engine.set_flush_paused_for_test(false);
+    wait_until("both views to flush", WAIT, || {
+        engine.write_executor_stats().flushable_items == 0
+    });
+}

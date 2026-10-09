@@ -6,13 +6,13 @@ import {delimiter, dirname, join, resolve} from 'node:path';
 import {createInterface} from 'node:readline';
 
 /**
- * A real `tessera serve` over the notebook corpus, for the live tests.
+ * A real `mosaica serve` over the notebook corpus, for the live tests.
  *
- * The binary is `TESSERA_BIN`, then this checkout's own `target/release` or `target/debug`, then
- * `tessera` on `PATH`, then a target directory above the checkout; the one used is printed. The
- * corpus is `TESSERA_NOTEBOOK_DATA`, then `data/notebook/` beside the git common directory, which
+ * The binary is `MOSAICA_BIN`, then this checkout's own `target/release` or `target/debug`, then
+ * `mosaica` on `PATH`, then a target directory above the checkout; the one used is printed. The
+ * corpus is `MOSAICA_NOTEBOOK_DATA`, then `data/notebook/` beside the git common directory, which
  * every worktree of a checkout shares. Where either is missing, `start` returns the reason instead
- * of a server, and each test skips with it. A `TESSERA_BIN` naming no file is an error.
+ * of a server, and each test skips with it. A `MOSAICA_BIN` naming no file is an error.
  *
  * The declaration served is the notebook's own `schema.toml` with one view group added, two views
  * over the same points, so `/v1/meta` has a group and a roster to decode. A caller may pass another
@@ -34,19 +34,19 @@ export const GROUP = {name: 'copies', title: 'Two copies', keys: ['first', 'seco
 
 /** The binary and where it was found, or null where there is none. */
 function findBinary(): {path: string; from: string} | null {
-  const named = process.env.TESSERA_BIN;
+  const named = process.env.MOSAICA_BIN;
   if (named) {
-    if (!existsSync(named)) throw new Error(`TESSERA_BIN names ${named}, which does not exist; build it or unset TESSERA_BIN`);
-    return {path: named, from: 'TESSERA_BIN'};
+    if (!existsSync(named)) throw new Error(`MOSAICA_BIN names ${named}, which does not exist; build it or unset MOSAICA_BIN`);
+    return {path: named, from: 'MOSAICA_BIN'};
   }
   const inTarget = (root: string) =>
-    ['release', 'debug'].map((profile) => join(root, 'target', profile, 'tessera')).find((candidate) => existsSync(candidate));
+    ['release', 'debug'].map((profile) => join(root, 'target', profile, 'mosaica')).find((candidate) => existsSync(candidate));
   // This checkout's own build first, so a worktree tests the server built from its own sources.
   const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {cwd: here, encoding: 'utf8'});
   const own = top.status === 0 ? inTarget(top.stdout.trim()) : undefined;
   if (own) return {path: own, from: "this checkout's target"};
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
-    if (dir && existsSync(join(dir, 'tessera'))) return {path: join(dir, 'tessera'), from: 'PATH'};
+    if (dir && existsSync(join(dir, 'mosaica'))) return {path: join(dir, 'mosaica'), from: 'PATH'};
   }
   for (let dir = here; dirname(dir) !== dir; dir = dirname(dir)) {
     const found = inTarget(dir);
@@ -56,7 +56,7 @@ function findBinary(): {path: string; from: string} | null {
 }
 
 function findCorpus(): string | null {
-  const named = process.env.TESSERA_NOTEBOOK_DATA;
+  const named = process.env.MOSAICA_NOTEBOOK_DATA;
   if (named) return existsSync(join(named, 'schema.toml')) ? named : null;
   const roots: string[] = [];
   const common = spawnSync('git', ['rev-parse', '--git-common-dir'], {cwd: here, encoding: 'utf8'});
@@ -88,8 +88,8 @@ ${views}`;
 
 const DEPLOYMENT = `[bundle]
 path  = "bundle"
-cache = ".tessera/cache"
-wal   = ".tessera/wal.log"
+cache = ".mosaica/cache"
+wal   = ".mosaica/wal.log"
 
 [build]
 schema = "schema.toml"
@@ -101,19 +101,19 @@ token_max_lifetime = 3600
 viewer                   = "127.0.0.1:0"
 session                  = "127.0.0.1:0"
 control                  = "127.0.0.1:0"
-operator_credential_file = ".tessera/operator.cred"
+operator_credential_file = ".mosaica/operator.cred"
 
 [catalogue]
-dir = ".tessera/catalogue"
+dir = ".mosaica/catalogue"
 `;
 
 /** Resolves with the three bound addresses from the child's `listening` line, or rejects. */
 function listening(child: ChildProcess, errors: () => string, timeoutMs: number): Promise<{viewer: string; session: string; control: string}> {
   return new Promise((resolveListening, reject) => {
-    const timer = setTimeout(() => reject(new Error(`tessera serve announced no listening line within ${timeoutMs} ms:\n${errors()}`)), timeoutMs);
+    const timer = setTimeout(() => reject(new Error(`mosaica serve announced no listening line within ${timeoutMs} ms:\n${errors()}`)), timeoutMs);
     child.once('exit', (code) => {
       clearTimeout(timer);
-      reject(new Error(`tessera serve exited with ${code} before listening:\n${errors()}`));
+      reject(new Error(`mosaica serve exited with ${code} before listening:\n${errors()}`));
     });
     createInterface({input: child.stdout!}).on('line', (line) => {
       if (!line.startsWith('{')) return;
@@ -140,31 +140,31 @@ export async function start(
 ): Promise<Served | string> {
   let corpus = options.corpus;
   const found = findBinary();
-  if (!found) return 'no tessera binary: set TESSERA_BIN, put tessera on PATH, or run cargo build --release -p tessera-cli';
+  if (!found) return 'no mosaica binary: set MOSAICA_BIN, put mosaica on PATH, or run cargo build --release -p mosaica-cli';
   const binary = found.path;
   console.log(`live test: serving with ${binary}, from ${found.from}`);
   if (!corpus) {
     const notebook = findCorpus();
-    if (!notebook) return 'data/notebook/ is not in this checkout; set TESSERA_NOTEBOOK_DATA';
+    if (!notebook) return 'data/notebook/ is not in this checkout; set MOSAICA_NOTEBOOK_DATA';
     corpus = {directory: notebook, schema: declaration(notebook)};
   }
 
-  const directory = mkdtempSync(join(tmpdir(), 'tessera-ts-live-'));
+  const directory = mkdtempSync(join(tmpdir(), 'mosaica-ts-live-'));
   try {
     for (const name of readdirSync(corpus.directory)) {
       if (name.endsWith('.parquet')) symlinkSync(join(corpus.directory, name), join(directory, name));
     }
     writeFileSync(join(directory, 'schema.toml'), corpus.schema);
-    writeFileSync(join(directory, 'tessera.toml'), DEPLOYMENT);
-    const secrets = join(directory, '.tessera');
+    writeFileSync(join(directory, 'mosaica.toml'), DEPLOYMENT);
+    const secrets = join(directory, '.mosaica');
     mkdirSync(join(secrets, 'cache'), {recursive: true});
     chmodSync(secrets, 0o700);
     const operatorCredential = randomBytes(24).toString('hex');
     writeFileSync(join(secrets, 'operator.cred'), `${operatorCredential}\n`, {mode: 0o600});
-    const deployment = join(directory, 'tessera.toml');
+    const deployment = join(directory, 'mosaica.toml');
 
     const build = spawnSync(binary, ['build', '--deployment', deployment], {cwd: directory, encoding: 'utf8'});
-    if (build.status !== 0) throw new Error(`tessera build failed (${build.status}):\n${build.stderr}${build.stdout}`);
+    if (build.status !== 0) throw new Error(`mosaica build failed (${build.status}):\n${build.stderr}${build.stdout}`);
 
     const child = spawn(binary, ['serve', '--deployment', deployment], {cwd: directory, stdio: ['ignore', 'pipe', 'pipe']});
     let stderr = '';

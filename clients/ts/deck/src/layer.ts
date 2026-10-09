@@ -17,8 +17,8 @@ import {
   type Shape,
   type ShapeKind,
   type Store
-} from '@tesseradb/client';
-import {NEUTRAL} from '@tesseradb/client/internal';
+} from '@mosaicajs/client';
+import {NEUTRAL} from '@mosaicajs/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
@@ -33,12 +33,12 @@ import {DEFAULT_SIZING, buildSizeAttribute, drawnSizing, sizeEncodingOf, sizeSig
 import {MarkSlab, type GpuSlab} from './slab.js';
 
 /**
- * The props of a {@link TesseraLayer}: deck.gl's `CompositeLayerProps` and the props below, all
+ * The props of a {@link MosaicaLayer}: deck.gl's `CompositeLayerProps` and the props below, all
  * optional. `pickable` defaults to true. Set `store`, or set the projection props (`marks`,
  * `depth`, `artifacts`, `meta`, `legend`, `status`) yourself. A projection prop set beside
  * `store` is drawn in place of the store's.
  */
-export type TesseraLayerProps = CompositeLayerProps & {
+export type MosaicaLayerProps = CompositeLayerProps & {
   /** The store to read projections from. The layer subscribes to it and redraws on each change. Defaults to `null`. */
   store?: Store | null;
   /** The marks to draw, in place of the store's `marks`. Defaults to `null`. */
@@ -154,7 +154,7 @@ export type TesseraLayerProps = CompositeLayerProps & {
   densityCounts?: DensityCounts | null;
   /**
    * The {@link DensityCounter} whose counts density is drawn from, where the host keeps one, as
-   * `<tessera-map>` does. Defaults to `null`: with `store` set and no `densityCounts`, the layer
+   * `<mosaica-map>` does. Defaults to `null`: with `store` set and no `densityCounts`, the layer
    * keeps a counter of its own over `store`, told of the layer's viewport and of `density` and
    * `densityResolution`.
    */
@@ -192,7 +192,7 @@ export type TesseraLayerProps = CompositeLayerProps & {
 };
 
 /**
- * What one render of a {@link TesseraLayer} cost and drew, passed to `onTimings`. Times are in
+ * What one render of a {@link MosaicaLayer} cost and drew, passed to `onTimings`. Times are in
  * milliseconds. On a render that draws no marks, `slabMs`, `densityMs` and the mark figures are 0.
  */
 export type LayerTimings = {
@@ -721,17 +721,17 @@ export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
   return null;
 }
 
-/** The props `<tessera-map>` also passes, through `@tesseradb/deck/internal`. */
-export type TesseraLayerInternalProps = TesseraLayerProps & {
+/** The props `<mosaica-map>` also passes, through `@mosaicajs/deck/internal`. */
+export type MosaicaLayerInternalProps = MosaicaLayerProps & {
   /** The marks' GPU buffers. Unset, the layer makes and releases its own; a host's is attached and released by the host. */
   slab?: MarkSlab | null;
 };
 
 /**
- * A deck.gl `CompositeLayer` that draws a Tessera store's marks and artifacts and density from
+ * A deck.gl `CompositeLayer` that draws a Mosaica store's marks and artifacts and density from
  * counts by cell. From bottom to top it draws the hovered and the opened artifact's outline, the
  * density from `densityCounts`, the marks, the artifacts' names at their centroids (with the hovered one's
- * count), the selected region and the picked mark's ring. The props are {@link TesseraLayerProps}.
+ * count), the selected region and the picked mark's ring. The props are {@link MosaicaLayerProps}.
  *
  * The layer draws in the 512-unit world square (`WORLD_SIZE`) for an `OrthographicView` with
  * `flipY: true`, and {@link viewInputOf} turns that view's camera into what `store.setView` takes.
@@ -752,9 +752,9 @@ export type TesseraLayerInternalProps = TesseraLayerProps & {
  * The layer makes its mark buffers and colour lookup texture on its deck's device, and releases
  * them when deck finalises it.
  */
-export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
+export class MosaicaLayer extends CompositeLayer<MosaicaLayerInternalProps> {
   /** @internal */
-  static override layerName = 'TesseraLayer';
+  static override layerName = 'MosaicaLayer';
   /** @internal */
   static override defaultProps = {
     store: null,
@@ -1030,7 +1030,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
       // than what was served.
       for (const band of r.marks.bands) {
         if (!slab.holds(band)) {
-          throw new Error(`TesseraLayer: exact band ${band.prefix} at depth ${band.depth} is drawn but has no slab slot.`);
+          throw new Error(`MosaicaLayer: exact band ${band.prefix} at depth ${band.depth} is drawn but has no slab slot.`);
         }
       }
     }
@@ -1088,7 +1088,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
                     }
               },
               tesseraIds: held.draw.ids,
-              tesseraPositions: held.draw.positions,
+              mosaicaPositions: held.draw.positions,
               useLut,
               highlighting,
               highlightPass: pass,
@@ -1123,7 +1123,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
               }
             },
             tesseraIds: standIn.ids,
-            tesseraPositions: standIn.positions,
+            mosaicaPositions: standIn.positions,
             useLut,
             highlighting,
             highlightPass: pass,
@@ -1313,7 +1313,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
 
   /** Ask for a redraw of the layer that is current for this id, which may no longer be this instance. */
   private redrawLater(): void {
-    const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
+    const current = (this.getCurrentLayer?.() as MosaicaLayer | null) ?? this;
     // A discarded instance has no manager to ask; the next paint reads the state anyway.
     if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
     current.setNeedsUpdate();

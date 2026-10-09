@@ -1,4 +1,4 @@
-//! The **shipped** masked scan, timed — `tessera_filter::ValueColumn`, not a reimplementation.
+//! The **shipped** masked scan, timed — `mosaica_filter::ValueColumn`, not a reimplementation.
 //!
 //! The other binaries in this campaign write their own scan loop, which is correct for comparing
 //! storage *layouts* against each other but means their constants describe the approach rather than
@@ -11,8 +11,8 @@
 use std::time::Instant;
 
 use croaring::Bitmap;
-use tessera_filter::{Codes, ValueColumn};
-use tessera_types::AttrLocalId;
+use mosaica_filter::{Codes, ValueColumn};
+use mosaica_types::AttrLocalId;
 
 const DOMAIN: u32 = 1_000;
 const NEEDLE: u32 = 42;

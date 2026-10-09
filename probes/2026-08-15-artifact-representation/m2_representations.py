@@ -2,7 +2,7 @@
 import numpy as np, json
 from pyroaring import BitMap
 
-FIX='/tmp/tessera-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
+FIX='/tmp/mosaica-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
 OUT='probes/2026-08-15-artifact-representation'
 d=np.load(f'{OUT}/tier_a_assign.npz')
 row_entity=np.fromfile(f'{FIX}/views/s0/row-entity.u32',dtype=np.uint32)

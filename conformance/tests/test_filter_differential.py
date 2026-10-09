@@ -51,7 +51,7 @@ What it deliberately does **not** cover, so the next reader is not left inferrin
   each other (the same argument `conftest.catalogue_server` makes for the mask tests).
 - **Post-build ingest** — a flush now appends a value-column extent and a filter answers over the
   entities it published (`filter-index.md` §2.1). The fixture here is build-only, so that path is
-  exercised in `crates/tessera-engine/tests/filtering.rs` against a real flush rather than over
+  exercised in `crates/mosaica-engine/tests/filtering.rs` against a real flush rather than over
   HTTP; extending the catalogue to ingest would make every other module's server mutable under it,
   which is the same reason Rule S is not driven here.
 """

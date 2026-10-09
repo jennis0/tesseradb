@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A worked decode of a `POST /v1/viewport` or `POST /v1/artifacts/viewport` body, in Python with
 `pyarrow` and nothing of
-Tessera's — not the oracle's `wire.py`, deliberately, so that a stranger holding only this file
+Mosaica's — not the oracle's `wire.py`, deliberately, so that a stranger holding only this file
 and contracts §5 can read a response. `docs/openapi/README.md` walks it.
 
     python3 reference/examples/decode_viewport.py <body.bin>

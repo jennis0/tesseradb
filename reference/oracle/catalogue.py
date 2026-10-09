@@ -16,9 +16,9 @@ of terms) whose posting list **is** the intended entity set, exactly.
 
 ## How the entity IDs are pinned
 
-Entity IDs are not the fixture's to choose — `tessera-build` assigns them, permanently (I9), in
+Entity IDs are not the fixture's to choose — `mosaica-build` assigns them, permanently (I9), in
 **term-signature order**: items are sorted by their sorted term-ID list and each item's entity ID is
-its position in that order (§11.1; `tessera_build::signature_sort_key`). The minor key is the
+its position in that order (§11.1; `mosaica_build::signature_sort_key`). The minor key is the
 **Morton code**, with the item's position in the points file below it for totality
 ([decision 0073](../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md)).
 
@@ -94,7 +94,7 @@ reason: it is rendered, and served on every item card.
 
 ## Reuse is decided by a stamped recipe, not by a predicate over the artefact
 
-The bundle is built once per `tessera` binary and reused. **What may be reused is decided
+The bundle is built once per `mosaica` binary and reused. **What may be reused is decided
 by comparing the full input set against a `FIXTURE.json` receipt written beside the bundle** — see
 [`recipe`] — and never by inspecting the bundle for properties a reader happens to think of. That
 distinction is the whole mechanism, and it is here because the predicate form failed twice: a
@@ -146,10 +146,10 @@ SEED = 20260731
 POINTS_NAME = "catalogue-points.parquet"
 PAIRS_NAME = "catalogue-pairs.parquet"
 SCHEMA_NAME = "catalogue-config.toml"
-DEPLOYMENT_NAME = "catalogue-tessera.toml"
+DEPLOYMENT_NAME = "catalogue-mosaica.toml"
 
 # The declaration that makes `fx_key` a served column (per-point-attributes §4.2). Written beside
-# the points parquet on the build path, and named by `tessera.toml`'s `build.schema`.
+# the points parquet on the build path, and named by `mosaica.toml`'s `build.schema`.
 #
 # **`u64` and not a category**, deliberately: `fx_key` is 64 random bits with no vocabulary and no
 # presentation, and declaring a category would need a value set enumerating every item — the
@@ -485,7 +485,7 @@ def abstract_of(source_id: int) -> str | None:
     entity was *given*, upstream of the tokens the build derived from it.
 
     The oracle answers `match` and `phrase` by tokenising this string through the **same analyser
-    the engine used**, reached over `tessera tokenise` so neither side owns a second segmentation
+    the engine used**, reached over `mosaica tokenise` so neither side owns a second segmentation
     (decision 0070). What the differential then compares is two constructions over one token
     stream: the engine's dictionary-and-postings, and a per-entity walk of this function.
     """

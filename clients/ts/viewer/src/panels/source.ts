@@ -5,7 +5,7 @@ import type {Dataset, Preset} from '../config.js';
 /**
  * What is being looked at: which bundle, as whom, and how many marks.
  *
- * A dataset is a whole server: `tessera serve` serves one bundle, so switching re-authorises
+ * A dataset is a whole server: `mosaica serve` serves one bundle, so switching re-authorises
  * against another server and drops every held band. The picker appears only when more than one is
  * running. `prose indexed` shows which text columns a bundle has, since a missing one otherwise
  * looks like a broken control.

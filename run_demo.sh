@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Bring up the local demo: `tessera serve` over one bundle per scale, plus the viewer.
+# Bring up the local demo: `mosaica serve` over one bundle per scale, plus the viewer.
 #
 # There is no hosted demo and nothing here deploys anywhere (README: "Deploying it → not yet").
 # This is the localhost development shape, and two things about it are development-only: the
@@ -12,21 +12,21 @@
 #   ./run_demo.sh --scale notebook # the notebook corpus: the HDBSCAN tree, its topics, the taxonomy
 #   ./run_demo.sh --scale notebook-2m4  # the same pipeline over the whole corpus, plus toponymy
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have, on its own
-#   ./run_demo.sh --deployment D/tessera.toml --terms "$(cat D/country-terms.txt)" --ranks D/country-ranks.json
+#   ./run_demo.sh --deployment D/mosaica.toml --terms "$(cat D/country-terms.txt)" --ranks D/country-ranks.json
 #                                 # …a rung of the dataset ladder, served on its own deployment:
 #                                 # its ports, its credentials, its disclosure floor, unrewritten
 #   ./run_demo.sh --bundle PATH --terms GB,FR,DE [--ranks R.json] [--label 'Name'] [--prose name]
 #                                 # …whose dictionary is its own, not the fixtures' 0..200
-#   ./run_demo.sh --deployment D/tessera.toml --terms-file D/terms.txt --ranks D/ranks.json
+#   ./run_demo.sh --deployment D/mosaica.toml --terms-file D/terms.txt --ranks D/ranks.json
 #                                 # …whose keys carry commas, so the list is one term per line
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
-# ## Where it writes — `./tessera-demo/`, and nothing in the source tree
+# ## Where it writes — `./mosaica-demo/`, and nothing in the source tree
 #
-# Bundles, cache, WALs, the generated `tessera-<scale>.toml` deployments, the measured presets, the
-# build timings and the dataset document all live under `./tessera-demo/` at the checkout root,
-# which is gitignored. `TESSERA_DEMO_DIR` names somewhere else — a second session on one checkout
+# Bundles, cache, WALs, the generated `mosaica-<scale>.toml` deployments, the measured presets, the
+# build timings and the dataset document all live under `./mosaica-demo/` at the checkout root,
+# which is gitignored. `MOSAICA_DEMO_DIR` names somewhere else — a second session on one checkout
 # wants its own, because the layout holds one slot per scale and two runs sharing it overwrite each
 # other's picker.
 #
@@ -160,13 +160,13 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 REPO="$PWD"
 
 # `data/` is gitignored, so it exists in the primary checkout and not in a worktree. Point
-# TESSERA_DATA at wherever the fixtures actually live.
-DATA="${TESSERA_DATA:-$REPO/data}"
+# MOSAICA_DATA at wherever the fixtures actually live.
+DATA="${MOSAICA_DATA:-$REPO/data}"
 # Everything this run produces: the bundles, their caches and WALs, the generated deployments, the
 # measured presets and the timings. Directory-local rather than under `$HOME`, and gitignored —
 # running the demo writes nothing into the source tree, which is what lets two checkouts, or two
-# sessions with `TESSERA_DEMO_DIR` set, run it without overwriting each other.
-DEMO="${TESSERA_DEMO_DIR:-$REPO/tessera-demo}"
+# sessions with `MOSAICA_DEMO_DIR` set, run it without overwriting each other.
+DEMO="${MOSAICA_DEMO_DIR:-$REPO/mosaica-demo}"
 # What is actually running, which is a fact about this invocation rather than about the repository.
 # The viewer fetches it at startup — restarting against a different set of scales needs no rebuild —
 # and is told where it is by the `?datasets=` parameter in the URL printed at the end, because the
@@ -178,10 +178,10 @@ DATASETS="$DEMO/datasets.json"
 # `VITE_PORT` to run a second viewer beside one already holding 5173.
 VITE_PORT="${VITE_PORT:-5173}"
 
-export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
+export MOSAICA_OPERATOR_CRED="${MOSAICA_OPERATOR_CRED:-dev-operator-credential}"
 
 bundle_override=""
-# A `tessera.toml` an operator already has — a dataset-ladder rung's, which `prepare.py` writes
+# A `mosaica.toml` an operator already has — a dataset-ladder rung's, which `prepare.py` writes
 # beside its parquets. Unlike `--bundle`, nothing here is generated: the bundle path, the three
 # ports, the disclosure floor and the credential variable names are that file's, and it
 # is read rather than rewritten. It is the only route that serves a bundle whose credentials are
@@ -261,7 +261,7 @@ fi
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
-# One trap for every child. Without it a Ctrl-C in the foreground viewer leaves `tessera serve`
+# One trap for every child. Without it a Ctrl-C in the foreground viewer leaves `mosaica serve`
 # holding the WALs and the listeners, and the next run fails on a bound port rather than on the
 # thing that actually went wrong.
 SERVE_PIDS=()
@@ -275,16 +275,16 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# `TESSERA_BIN` serves a binary built elsewhere — a second worktree sharing one machine's release
+# `MOSAICA_BIN` serves a binary built elsewhere — a second worktree sharing one machine's release
 # build rather than paying for its own — and is otherwise this checkout's, built here.
-if [[ -n "${TESSERA_BIN:-}" ]]; then
-  BIN="$TESSERA_BIN"
-  [[ -x "$BIN" ]] || { echo "TESSERA_BIN=$BIN is not an executable" >&2; exit 1; }
+if [[ -n "${MOSAICA_BIN:-}" ]]; then
+  BIN="$MOSAICA_BIN"
+  [[ -x "$BIN" ]] || { echo "MOSAICA_BIN=$BIN is not an executable" >&2; exit 1; }
   say "using $BIN"
 else
   say "building the release binary"
-  cargo build --release -p tessera-cli
-  BIN="./target/release/tessera"
+  cargo build --release -p mosaica-cli
+  BIN="./target/release/mosaica"
 fi
 
 # Per scale: items, the label the picker shows, and the port triple. Ports are fixed per scale
@@ -334,12 +334,12 @@ print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
 fi
 
 # `--deployment` is the other escape hatch, and it differs from `--bundle` in what it *does not*
-# do: it writes no deployment file. A ladder rung's `tessera.toml` — the one its `prepare.py`
+# do: it writes no deployment file. A ladder rung's `mosaica.toml` — the one its `prepare.py`
 # generated beside the parquets — carries the bundle, the three ports, the disclosure floor and the
 # names of the variables holding its credentials, and none of that is the demo's to overwrite.
 #
 # The secrets are read from a `.env` beside that file when the environment does not already carry
-# them. `tessera serve` reads credentials from the process environment alone, so a rung whose
+# them. `mosaica serve` reads credentials from the process environment alone, so a rung whose
 # credentials live only in its `.env` would otherwise refuse to start with nothing said about where
 # its secret was.
 if [[ -n "$deployment_override" ]]; then
@@ -385,7 +385,7 @@ if [[ -n "$deployment_override" ]]; then
     fi
     [[ -n "${!var:-}" ]] || { echo "$deployment_override declares $var for the $role plane and nothing sets it (not the environment, not $DEPLOY_DIR/.env)" >&2; exit 1; }
     # The presets script reads the demo's variable name, not this deployment's.
-    export TESSERA_OPERATOR_CRED="${!var}"
+    export MOSAICA_OPERATOR_CRED="${!var}"
   done
 
   # The browser talks to this server directly, so an origin the deployment does not enumerate is a
@@ -429,17 +429,17 @@ bundle_of() {
   if [[ -n "$bundle_override" ]]; then echo "$bundle_override"; else echo "$DEMO/bundle-$1"; fi
 }
 
-# Which `tessera.toml` a scale is built and served against: the operator's under `--deployment`,
+# Which `mosaica.toml` a scale is built and served against: the operator's under `--deployment`,
 # and otherwise the one `write_deployment` generates below.
 deployment_of() {
-  if [[ -n "$deployment_override" ]]; then echo "$deployment_override"; else echo "$DEMO/tessera-$1.toml"; fi
+  if [[ -n "$deployment_override" ]]; then echo "$deployment_override"; else echo "$DEMO/mosaica-$1.toml"; fi
 }
 
 # ------------------------------------------------------------------------------------ the builds
 
-# One `tessera.toml` per scale, written to the gitignored dev directory and used by **both**
-# verbs: `tessera build` reads `[bundle].path` as its output and `[build].schema` as its
-# declaration, and `tessera serve` opens exactly what the build wrote (configuration.md §3). The
+# One `mosaica.toml` per scale, written to the gitignored dev directory and used by **both**
+# verbs: `mosaica build` reads `[bundle].path` as its output and `[build].schema` as its
+# declaration, and `mosaica serve` opens exactly what the build wrote (configuration.md §3). The
 # paths are absolute because this file is generated per machine and never committed — a `source` in
 # the *declaration* is the one that has to travel.
 write_deployment() {
@@ -449,7 +449,7 @@ write_deployment() {
   local scale="$1" bundle
   bundle="$(bundle_of "$scale")"
   mkdir -p "$DEMO/$scale"
-  cat > "$DEMO/tessera-$scale.toml" <<EOF
+  cat > "$DEMO/mosaica-$scale.toml" <<EOF
 [bundle]
 path  = "$bundle"
 cache = "$DEMO/$scale/cache"
@@ -466,7 +466,7 @@ viewer = "127.0.0.1:$(viewer_of "$scale")"
 session = "127.0.0.1:$(session_of "$scale")"
 control = "127.0.0.1:$(control_of "$scale")"
 max_k = 5000
-operator_credential_env = "TESSERA_OPERATOR_CRED"
+operator_credential_env = "MOSAICA_OPERATOR_CRED"
 dev_cors_origins = ["http://localhost:$VITE_PORT"]
 
 [catalogue]
@@ -497,7 +497,7 @@ build_scale() {
   fi
 
   # The notebook's declaration names every file it reads, so the points and the declaration are
-  # the two worth checking here; `tessera check` in the build reports the rest by name.
+  # the two worth checking here; `mosaica check` in the build reports the rest by name.
   local -a fixtures=("$points" "$config")
   [[ -n "$(notebook_dir_of "$scale")" ]] || fixtures+=("$DATA/demo/archive.parquet"
            "$DATA/demo/primary_category.parquet"
@@ -517,7 +517,7 @@ build_scale() {
       echo "      ~/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json \\" >&2
       echo "      $DATA/corpus.parquet $DATA/demo/prose.parquet" >&2
       echo "  reference/.venv/bin/python probes/build_demo_datasets.py --data $DATA" >&2
-      echo "or set TESSERA_DATA to the checkout holding data/ (it is gitignored, so a worktree" >&2
+      echo "or set MOSAICA_DATA to the checkout holding data/ (it is gitignored, so a worktree" >&2
       echo "has none), or pass --bundle PATH to serve a bundle you already have." >&2
       exit 1
     }
@@ -538,12 +538,12 @@ build_scale() {
   # files are all one corpus, so it takes no limit.
   local -a limit=(--limit "$(items_of "$scale")")
   [[ -n "$(notebook_dir_of "$scale")" ]] && limit=()
-  # `TESSERA_BUILD_MEMORY_BUDGET` (e.g. `8g`) caps the build's own structures. Unset, the binary
+  # `MOSAICA_BUILD_MEMORY_BUDGET` (e.g. `8g`) caps the build's own structures. Unset, the binary
   # sizes its batches from `MemAvailable` at the moment it starts — which is the right default on
   # a machine doing nothing else, and wrong on one where the page cache for a 51 GB points file
   # and a 107 GB bundle is competing for the same pages. Naming a budget under the machine's RAM
   # buys spill instead of pressure, and the upper scales are where that trade is worth making.
-  # `TESSERA_BUILD_MEMORY_MAX` (e.g. `9G`) runs the build inside a transient cgroup rather than
+  # `MOSAICA_BUILD_MEMORY_MAX` (e.g. `9G`) runs the build inside a transient cgroup rather than
   # loose on the machine. This is not the same lever as the budget above and does not replace it:
   # the budget bounds the build's *own structures*, while the cgroup additionally charges the
   # **page cache** for a 51 GB points file and a 107 GB bundle against the same ceiling. Without
@@ -566,10 +566,10 @@ build_scale() {
   # the number to set; it reclaims this cgroup's page cache first and only kills if the anonymous
   # working set genuinely exceeds it, which is the protection actually wanted.
   local -a scope=()
-  if [[ -n "${TESSERA_BUILD_MEMORY_MAX:-}" ]]; then
+  if [[ -n "${MOSAICA_BUILD_MEMORY_MAX:-}" ]]; then
     scope=(systemd-run --user --scope -q --collect
-           -p "MemoryMax=$TESSERA_BUILD_MEMORY_MAX"
-           -p "MemoryHigh=${TESSERA_BUILD_MEMORY_HIGH:-infinity}"
+           -p "MemoryMax=$MOSAICA_BUILD_MEMORY_MAX"
+           -p "MemoryHigh=${MOSAICA_BUILD_MEMORY_HIGH:-infinity}"
            -p "MemorySwapMax=0")
   fi
   "${scope[@]}" \
@@ -577,7 +577,7 @@ build_scale() {
   "$BIN" build \
     --deployment "$(deployment_of "$scale")" \
     "${limit[@]}" \
-    ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
+    ${MOSAICA_BUILD_MEMORY_BUDGET:+--memory-budget "$MOSAICA_BUILD_MEMORY_BUDGET"} \
     --no-oracle-pairs
   local peak
   peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEMO/build-$scale.time")
@@ -618,13 +618,13 @@ start_scale() {
     if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
       exec 3<&- 3>&-
       echo "port $port is already in use, so $scale cannot be served on it." >&2
-      echo "Something is already listening — most likely a tessera serve from an earlier run." >&2
+      echo "Something is already listening — most likely a mosaica serve from an earlier run." >&2
       echo "Stop it, or serve this bundle on other ports." >&2
       exit 1
     fi
   done
 
-  say "starting tessera serve for $scale on :$viewer_port"
+  say "starting mosaica serve for $scale on :$viewer_port"
   "$BIN" serve --deployment "$(deployment_of "$scale")" &
   SERVE_PIDS+=($!)
   local pid=${SERVE_PIDS[-1]}
@@ -636,7 +636,7 @@ start_scale() {
   local ready=0
   for _ in $(seq 1 300); do
     if curl -sf "http://127.0.0.1:$viewer_port/readyz" >/dev/null 2>&1; then ready=1; break; fi
-    kill -0 "$pid" 2>/dev/null || { echo; echo "tessera serve ($scale) exited during startup" >&2; exit 1; }
+    kill -0 "$pid" 2>/dev/null || { echo; echo "mosaica serve ($scale) exited during startup" >&2; exit 1; }
     printf '.'; sleep 1
   done
   echo
@@ -651,11 +651,11 @@ for scale in "${scales[@]}"; do start_scale "$scale"; done
 # in a file, and a variable leaves nothing behind for the next run — or the next session — to read.
 # These name the *fallback* server, which is what the viewer uses when no dataset document reaches
 # it; the picker's entries come from `$DATASETS`.
-export VITE_TESSERA_VIEWER_URL="http://127.0.0.1:$(viewer_of "${scales[0]}")"
-export VITE_TESSERA_SESSION_URL="http://127.0.0.1:$(session_of "${scales[0]}")"
+export VITE_MOSAICA_VIEWER_URL="http://127.0.0.1:$(viewer_of "${scales[0]}")"
+export VITE_MOSAICA_SESSION_URL="http://127.0.0.1:$(session_of "${scales[0]}")"
 # The dataset document, through Vite's `/@fs/` route, so the bare address finds the picker's
 # entries without `?datasets=` — the address printed below still carries it for a link.
-export VITE_TESSERA_DATASETS="/@fs$DATASETS"
+export VITE_MOSAICA_DATASETS="/@fs$DATASETS"
 export VITE_PORT
 
 cd "$REPO/clients/ts"
@@ -802,4 +802,4 @@ echo "To watch the replica: zoom in a few notches, then pan away and back."
 echo "To record a session for someone else: add &trace=1, press m when it feels wrong, download."
 echo "Add &prefetch=0 to turn look-ahead off, cache still on, for comparison."
 echo "The smoke scripts take the whole URL: --url '$VIEWER_URL'"
-npm run dev -w @tesseradb/viewer
+npm run dev -w @mosaicajs/viewer

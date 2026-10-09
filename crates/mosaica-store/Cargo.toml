@@ -1,0 +1,42 @@
+[package]
+name = "mosaica-store"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+mosaica-types = { path = "../mosaica-types", features = ["serde"] }
+mosaica-access = { path = "../mosaica-access" }
+# The Roaring container assembler, shared with the filter index. `Permutation::project`
+# stamps looked-up rows into a bit array, which *is* the container payload.
+mosaica-roaring = { path = "../mosaica-roaring" }
+mosaica-spatial = { path = "../mosaica-spatial" }
+mosaica-analyse = { path = "../mosaica-analyse" }
+arrow = { workspace = true }
+# `terms/pairs.parquet` is the one bundle artefact contracts §2 defines in Parquet rather than
+# Arrow IPC; see `src/pairs.rs` for why its writer lives here with the other six.
+parquet = { workspace = true }
+croaring = { workspace = true }
+# A manifest's `deny` and `tombstones` are portable Roaring bytes, and JSON carries them as base64.
+base64 = "0.22"
+memmap2 = { workspace = true }
+# The system's page size, for the page-exact read advice on the band file.
+libc = "0.2"
+# Category codes are drawn from OS entropy at every mint (`src/vocabulary.rs`): a code that is a
+# position discloses vocabulary cardinality to anyone who can see one.
+rand = { workspace = true }
+rayon = { workspace = true }
+# The key index's page and header checksums, and the hash its keyword keys are.
+crc32fast = { workspace = true }
+twox-hash = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The reader's only log line: the honourable-state step-down (contracts §2.3). A facade crate
+# with no subscriber attached is a no-op, so this adds a diagnostic, not a runtime.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rand = { workspace = true }
+proptest = { workspace = true }

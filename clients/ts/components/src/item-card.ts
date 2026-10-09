@@ -1,8 +1,8 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import type {DeclaredScalar, ItemDetail, ItemViewPosition, Meta, Quantisation, Refusal} from '@tesseradb/client';
-import {GRID32} from '@tesseradb/client';
-import {TesseraElement, columnCaption, emit, idString, timestampText, type PickOutcome} from './base.js';
+import type {DeclaredScalar, ItemDetail, ItemViewPosition, Meta, Quantisation, Refusal} from '@mosaicajs/client';
+import {GRID32} from '@mosaicajs/client';
+import {MosaicaElement, columnCaption, emit, idString, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {refusalText, renderState, stateOf} from './states.js';
@@ -28,14 +28,14 @@ import {chrome, tokens} from './tokens.js';
  * `actions` slot sit beside the close button.
  *
  * @summary The selected item's fields, with Open and Copy id.
- * @tagname tessera-item-card
+ * @tagname mosaica-item-card
  * @category Elements
  * @slot field-<name> - Replaces the value of the field `<name>`, in the grid or the headline.
  * @slot actions - Buttons beside the close button, such as the explorer's Pin.
- * @fires {CustomEvent<TesseraEventDetails['tessera-open']>} tessera-open - Open was pressed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - The close button was
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-open']>} mosaica-open - Open was pressed.
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-close']>} mosaica-close - The close button was
  *   pressed, with `what` set to `item`.
- * @fires {CustomEvent<TesseraEventDetails['tessera-viewfollow']>} tessera-viewfollow - A view chip
+ * @fires {CustomEvent<MosaicaEventDetails['mosaica-viewfollow']>} mosaica-viewfollow - A view chip
  *   was pressed: follow the item into that view, at its position there.
  * @csspart title - The header row: the headline or the state, and the close button.
  * @csspart close - The close button.
@@ -56,7 +56,7 @@ import {chrome, tokens} from './tokens.js';
  * @csspart open - The Open button.
  * @csspart copy - The Copy id button, which copies the `tessera_id` to the clipboard.
  */
-export class TesseraItemCard extends TesseraElement {
+export class MosaicaItemCard extends MosaicaElement {
   static override styles = [
     tokens,
     chrome,
@@ -74,7 +74,7 @@ export class TesseraItemCard extends TesseraElement {
         font-weight: 400;
         letter-spacing: 0;
         text-transform: none;
-        color: var(--_tessera-ink);
+        color: var(--_mosaica-ink);
       }
       .head [part='headline'],
       .head .headline {
@@ -88,7 +88,7 @@ export class TesseraItemCard extends TesseraElement {
       }
       [part='subtitle'] {
         font-size: 12px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       :host([compact]) [part='title'] {
         margin-bottom: 6px;
@@ -119,9 +119,9 @@ export class TesseraItemCard extends TesseraElement {
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        margin: 10px calc(-1 * var(--_tessera-panel-inline, 14px)) 0;
-        padding: 8px var(--_tessera-panel-inline, 14px) 0;
-        border-top: 1px solid var(--_tessera-line-2);
+        margin: 10px calc(-1 * var(--_mosaica-panel-inline, 14px)) 0;
+        padding: 8px var(--_mosaica-panel-inline, 14px) 0;
+        border-top: 1px solid var(--_mosaica-line-2);
       }
       :host([compact]) [part='open'] {
         height: 24px;
@@ -162,10 +162,10 @@ export class TesseraItemCard extends TesseraElement {
         display: grid;
         place-items: center;
         border-radius: 5px;
-        color: var(--_tessera-ink-2);
+        color: var(--_mosaica-ink-2);
       }
       [part='close']:hover {
-        background: var(--_tessera-surface-2);
+        background: var(--_mosaica-surface-2);
       }
       .chips {
         display: flex;
@@ -174,8 +174,8 @@ export class TesseraItemCard extends TesseraElement {
         margin: 4px 0 10px;
       }
       [part='view-chip'][aria-current='true'] {
-        background: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
+        background: var(--_mosaica-accent);
+        color: var(--_mosaica-accent-ink);
       }
       [part='scoped'] {
         margin-top: 12px;
@@ -197,7 +197,7 @@ export class TesseraItemCard extends TesseraElement {
   /** A refusal to show in place of an item, for a host that fetches the record itself. */
   @property({attribute: false}) accessor refusal: Refusal | null = null;
   /**
-   * What the map's last click resolved to (`<tessera-map>`'s `lastPick`), shown while no item is
+   * What the map's last click resolved to (`<mosaica-map>`'s `lastPick`), shown while no item is
    * selected: `{kind: 'miss'}` shows "No item here", and a broken pick shows "Item unavailable".
    */
   @property({attribute: false}) accessor pick: PickOutcome = null;
@@ -235,7 +235,7 @@ export class TesseraItemCard extends TesseraElement {
 
   override render(): TemplateResult | typeof nothing {
     const {item, refusal, meta} = this.shown;
-    const close = html`<slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button>`;
+    const close = html`<slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'mosaica-close', {what: 'item'})}>${icon('close', 14)}</button>`;
     // The header row: what the card shows, and the close button where there is something to close.
     const head = (content: unknown, closable: boolean) => html`<div part="title" class="head">${content}${closable ? close : nothing}</div>`;
     const unavailable = (code: string | null) =>
@@ -276,7 +276,7 @@ export class TesseraItemCard extends TesseraElement {
       </div>
       ${this.scoped(item.detail.scoped)}
       <div class="row actions">
-        <button part="open" class="btn" type="button" @click=${() => emit(this, 'tessera-open', {id, fields})}>${icon('open', 14)}Open</button>
+        <button part="open" class="btn" type="button" @click=${() => emit(this, 'mosaica-open', {id, fields})}>${icon('open', 14)}Open</button>
         <button part="copy" class="btn" type="button" @click=${copy}>Copy id</button>
       </div>
     </div>`;
@@ -297,7 +297,7 @@ export class TesseraItemCard extends TesseraElement {
       ? html`<div part="subtitle" data-name=${subtitleName}><slot name=${`field-${subtitleName}`}>${present(fields[subtitleName], declared.find((c) => c.name === subtitleName))}</slot></div>`
       : nothing;
     return html`<div class="panel">
-      <div part="title" class="head"><div class="headline">${headline}${subtitle}</div><slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button></div>
+      <div part="title" class="head"><div class="headline">${headline}${subtitle}</div><slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'mosaica-close', {what: 'item'})}>${icon('close', 14)}</button></div>
       <span part="state" data-state="shown"></span>
       <div class="body">
         ${this.expanded ? this.views(item.detail.views, meta) : nothing}
@@ -313,7 +313,7 @@ export class TesseraItemCard extends TesseraElement {
         ${total > shown.length || this.expanded
           ? html`<button part="show-all" class="more-link" type="button" aria-expanded=${this.expanded ? 'true' : 'false'} @click=${() => (this.expanded = !this.expanded)}>${this.expanded ? 'Show fewer' : `Show all ${total.toLocaleString('en-GB')} fields`}</button>`
           : html`<span></span>`}
-        <button part="open" class="btn" type="button" @click=${() => emit(this, 'tessera-open', {id, fields})}>Open</button>
+        <button part="open" class="btn" type="button" @click=${() => emit(this, 'mosaica-open', {id, fields})}>Open</button>
       </div>
     </div>`;
   }
@@ -340,12 +340,12 @@ export class TesseraItemCard extends TesseraElement {
   }
 
   /**
-   * Follow the item into another view: emit `tessera-viewfollow` with the position dequantised
+   * Follow the item into another view: emit `mosaica-viewfollow` with the position dequantised
    * under that view's frame, in data coordinates.
    */
   private follow(position: ItemViewPosition, frame: Quantisation | null): void {
     if (!frame) return;
-    emit(this, 'tessera-viewfollow', {
+    emit(this, 'mosaica-viewfollow', {
       view: position.id,
       x: frame.xMin + (position.x / GRID32) * (frame.xMax - frame.xMin),
       y: frame.yMin + (position.y / GRID32) * (frame.yMax - frame.yMin)
@@ -393,10 +393,10 @@ function present(value: unknown, column: DeclaredScalar | undefined): string {
 }
 
 attachContextRoot();
-defineOnce('tessera-item-card', TesseraItemCard);
+defineOnce('mosaica-item-card', MosaicaItemCard);
 
 declare global {
   interface HTMLElementTagNameMap {
-    'tessera-item-card': TesseraItemCard;
+    'mosaica-item-card': MosaicaItemCard;
   }
 }

@@ -33,8 +33,8 @@ def fake_run(ts):
     def run(cmd, cwd, check):
         ran.append(cmd[1:])
         if cmd[1] == "run":
-            (ts / "components" / "dist" / "tessera-components.js").write_text("bundle")
-            (ts / "components" / "dist" / "tessera-components.js.sri").write_text("sha384-x")
+            (ts / "components" / "dist" / "mosaica-components.js").write_text("bundle")
+            (ts / "components" / "dist" / "mosaica-components.js.sri").write_text("sha384-x")
         return subprocess.CompletedProcess(cmd, 0)
 
     return ran, run
@@ -44,11 +44,11 @@ def test_builds_and_copies_the_bundle_skipping_npm_ci_when_current(tmp_path, mon
     ts = workspace(tmp_path, installed=True)
     ran, run = fake_run(ts)
     monkeypatch.setattr(hatch_build.shutil, "which", lambda name: "/usr/bin/npm")
-    static = tmp_path / "py" / "tesseradb" / "static"
+    static = tmp_path / "py" / "mosaica" / "static"
     copied = hatch_build.build_bundle(ts, static, run=run, log=lambda m: None)
-    assert ran == [["run", "bundle", "-w", "@tesseradb/components"]]
-    assert [p.name for p in copied] == ["tessera-components.js", "tessera-components.js.sri"]
-    assert (static / "tessera-components.js").read_text() == "bundle"
+    assert ran == [["run", "bundle", "-w", "@mosaicajs/components"]]
+    assert [p.name for p in copied] == ["mosaica-components.js", "mosaica-components.js.sri"]
+    assert (static / "mosaica-components.js").read_text() == "bundle"
 
 
 def test_runs_npm_ci_when_node_modules_is_absent_or_stale(tmp_path, monkeypatch):

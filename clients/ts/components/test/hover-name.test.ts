@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import type {Meta} from '@tesseradb/client';
+import type {Meta} from '@mosaicajs/client';
 import '../src/map.js';
 import {fakeStore, mount, settle, status} from './fake-store.js';
 
@@ -28,8 +28,8 @@ type HoverMap = {
 };
 
 async function map(scalars: {name: string; arrowType: string}[], attributes = '') {
-  const host = await mount(`<tessera-map ${attributes}></tessera-map>`);
-  const el = host.querySelector('tessera-map') as unknown as HoverMap;
+  const host = await mount(`<mosaica-map ${attributes}></mosaica-map>`);
+  const el = host.querySelector('mosaica-map') as unknown as HoverMap;
   const store = fakeStore({status: status({}), meta: meta(scalars)});
   el.store = store;
   // No deck here, so the map cannot unproject: the hovered artifact is resolved from a world

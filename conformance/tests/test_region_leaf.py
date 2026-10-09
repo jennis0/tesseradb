@@ -103,7 +103,7 @@ def region_column(points, served: dict[str, set[int]] | None = None) -> RegionCo
 def matched_sum(server, token: str, filters: dict, **kw) -> tuple[int, str | None]:
     resp = server.viewport_response(token, VIEW_ID, 0, WHOLE_MAP, k=0, filters=filters, **kw)
     tiles, _points = decode_viewport(resp.content)
-    return sum(t[2] for t in tiles), resp.headers.get("x-tessera-region")
+    return sum(t[2] for t in tiles), resp.headers.get("x-mosaica-region")
 
 
 def visible_sum(server, token: str) -> int:
@@ -121,7 +121,7 @@ def region_server(tmp_path_factory):
     # sources, so the withheld-by-criterion case has an artifact to be withheld.
     (work / "gated.toml").write_text(config_toml() + gated_layer_toml())
     bundle = work / "bundle-gated"
-    deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
+    deployment = write_deployment(work / "mosaica-gated.toml", bundle=bundle, schema=work / "gated.toml")
     cli_build(deployment, bundle)
     server, proc = spawn_server(
         bundle,
@@ -179,7 +179,7 @@ def test_the_meta_publishes_the_two_bounds_and_no_region_header_without_a_leaf(r
     selection = server.meta(token)["selection"]
     assert selection["max_region_vertices"] > 0 and selection["max_region_cells"] > 0
     resp = server.viewport_response(token, VIEW_ID, 0, WHOLE_MAP, k=0)
-    assert "x-tessera-region" not in resp.headers
+    assert "x-mosaica-region" not in resp.headers
     # Over the vertex cap: a 422 naming the count and the cap.
     many = [[float(i), float(i % 7)] for i in range(selection["max_region_vertices"] + 1)]
     refused = server.viewport_request(token, VIEW_ID, 0, WHOLE_MAP, k=0, filters={"region": {"polygon": many}})
@@ -272,7 +272,7 @@ def test_an_unknown_a_suppressed_and_a_withheld_artifact_are_one_response(region
         """The body's frames but the trailer, whose `stream_us` is a clock; and every header but
         the two timing ones (C4's channel, quantified elsewhere and deliberately not asserted)."""
         resp = server.viewport_response(token, VIEW_ID, 0, WHOLE_MAP, k=100_000, filters=leaf)
-        headers = {k: v for k, v in resp.headers.items() if k.startswith("x-tessera-") and k not in ("x-tessera-server-us", "x-tessera-admission-us")}
+        headers = {k: v for k, v in resp.headers.items() if k.startswith("x-mosaica-") and k not in ("x-mosaica-server-us", "x-mosaica-admission-us")}
         frames = [(kind, payload) for kind, payload in split_frames(resp.content) if kind != FRAME_TRAILER]
         return frames, headers
 
@@ -308,7 +308,7 @@ def test_region_is_a_reserved_column_name(tmp_path):
     config.write_text(
         config_toml().replace('name   = "fx_key"', 'name   = "region"')
     )
-    deployment = write_deployment(work / "tessera-reserved.toml", bundle=work / "bundle-reserved", schema=config)
+    deployment = write_deployment(work / "mosaica-reserved.toml", bundle=work / "bundle-reserved", schema=config)
     result = subprocess.run(
         [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(work / "bundle-reserved")],
         cwd=REPO_ROOT,

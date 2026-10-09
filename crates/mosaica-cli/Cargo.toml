@@ -1,0 +1,69 @@
+[package]
+name = "mosaica-cli"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[[bin]]
+name = "mosaica"
+path = "src/main.rs"
+
+[features]
+# The correctness suite's faults build (decision 0071): a `mosaica` binary whose write executor
+# carries the fault switchboard, its three publication-seam pause sites, and the bearer-gated
+# /control/faults/* arming surface. OFF by default — the default build is what every deployment
+# gets. A binary built with this goes to ITS OWN path, never target/release/mosaica, which
+# reference/oracle/harness.py builds with default features always and whose doc forbids any
+# non-default binary at that path:
+#
+#   cargo build --release -p mosaica-cli --features fault-injection --target-dir target/faults
+#
+# The binary lands at target/faults/release/mosaica. `scripts/check-layers.sh` rule 2 asserts,
+# from the resolved feature graph, that no default-features release build reaches the
+# switchboard — and that this build does.
+fault-injection = ["mosaica-server/fault-injection"]
+
+# The measurement build: a `mosaica` binary whose write executor, flush and viewport laps are
+# recorded rather than compiled out, readable at `/control/status`. OFF by default, and it goes to
+# its own path for the same reason `fault-injection` does:
+#
+#   cargo build --release -p mosaica-cli --features bench-timing --target-dir target/timing
+bench-timing = ["mosaica-server/bench-timing"]
+
+[dependencies]
+mosaica-build = { path = "../mosaica-build" }
+# The `tokenise` verb only — the conformance oracle's access to the shipped analyser, so the two
+# sides of the text differential share one pipeline (`records-and-search.md` §4.4).
+mosaica-analyse = { path = "../mosaica-analyse" }
+# The `corpus` verbs only — the correctness suite's access to the generated corpus
+# (`correctness-suite.md` §12.1), on the same drive-the-CLI precedent as `tokenise`.
+mosaica-corpus = { path = "../mosaica-corpus" }
+mosaica-spatial = { path = "../mosaica-spatial" }
+mosaica-config = { path = "../mosaica-config" }
+mosaica-server = { path = "../mosaica-server" }
+mosaica-store = { path = "../mosaica-store" }
+mosaica-types = { path = "../mosaica-types" }
+# The `items` and `artifacts` verbs: a bulk read's frames, and the zstd codec its pages may be
+# compressed with.
+mosaica-wire = { path = "../mosaica-wire" }
+# The `corpus` verbs' output encoding: expected items and censuses leave on stdout as Arrow IPC,
+# the same encoding the suite's other Arrow surfaces speak.
+arrow = { workspace = true }
+# The `items` and `artifacts` verbs write Parquet as well as Arrow IPC.
+parquet = { workspace = true }
+# The `items` and `artifacts` verbs' HTTP client, reading each response's frames as they arrive.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+clap = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The check verb's payload test round-trips stdout through the type `PUT /control/layers` takes:
+# a body that will not deserialise there is not a payload, whatever it looks like.
+serde_json = { workspace = true }
+# docs/reference/cli.md is rendered with its table helpers (`src/reference.rs`).
+mosaica-docgen = { path = "../mosaica-docgen" }
+

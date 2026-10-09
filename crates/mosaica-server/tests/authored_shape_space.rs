@@ -1,0 +1,385 @@
+//! **An authored shape lands in the same place whichever door it came through**
+//! (`polygon-membership.md` §6.1; [decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+//!
+//! An artifact's drawn geometry is read exactly as a membership shape is, and the space it was
+//! written in — the table's `default_space`, a row's own `space` — is part of that reading. A
+//! producer whose rows are in longitude and latitude writes both the polygon that selects and the
+//! outline that is drawn from one source and in one coordinate system; a service that projected
+//! the first and not the second would place a ±180 × ±90 drawing in a corner of the `[0, 1]`
+//! frame, refusing nothing. R12's degrees-looking report cannot catch it either: on a projected
+//! view the whole frame lies inside ±180 × ±90, so nothing looks written in degrees there.
+//!
+//! So the assertion is an equality across four declarations of one triangle — the membership shape
+//! and the drawing, at the build and at `PUT /control/layers/{name}/artifacts` — and the served
+//! rings are the observable, because they are what a viewer is actually shown.
+
+mod common;
+
+use std::path::Path;
+
+use serde_json::json;
+use tempfile::TempDir;
+
+use mosaica_build::config::{Config, Fields};
+use mosaica_build::{build, BuildArgs};
+use mosaica_spatial::Projection;
+
+use common::*;
+
+/// 8°W 50°N → 2°E 58°N → 8°W 58°N. Two of its edges are a meridian and a parallel — straight in
+/// both planes — so the diagonal is the only edge whose two readings differ, which is what makes
+/// the densification visible in the ring count as well as in the placement.
+const UK: &str = "POLYGON ((-8 50, 2 58, -8 58, -8 50))";
+
+/// Places inside the triangle, so every layer below has members to be counted over.
+const PLACES: &[(f64, f64)] = &[
+    (-3.0, 55.5),
+    (-6.0, 56.0),
+    (0.0, 57.5),
+    (-4.0, 54.0),
+    (-2.0, 56.5),
+    (-7.0, 55.0),
+];
+
+/// One artifact table for the drawing layer: a key, a membership and one ranked content holding
+/// the triangle's WKT — the shape a caller's own file has, and the only route by which a table's
+/// `default_space` governs an authored shape.
+fn write_drawings(path: &Path) {
+    use arrow::array::{ListBuilder, StringBuilder};
+
+    let mut keys = StringBuilder::new();
+    keys.append_value("uk");
+    let members = id_member_lists([(0..PLACES.len() as u64).collect::<Vec<_>>()]);
+    let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
+    contents.values().values().append_value(UK);
+    contents.values().append(true);
+    contents.append(true);
+
+    write_parquet(
+        path,
+        vec![
+            column("key", false, keys.finish()),
+            column("members", true, members),
+            column("contents", true, contents.finish()),
+        ],
+    );
+}
+
+/// The two layers the **build** publishes: one whose membership is the triangle, written inline
+/// with the row's own `space`, and one that merely draws it, read from a table whose
+/// `default_space` is the whole declaration of where its geometry is written. Between them the
+/// build's two spellings of the space are both exercised.
+///
+/// Parsed through `Config` rather than assembled as values, so the declaration-time half —
+/// a space is honourable only where the layer's views can honour it — is on the same route an
+/// operator's document takes.
+fn built_layers(dir: &Path) -> Config {
+    let path = dir.join("corpus.toml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+[sources]
+points   = "points.parquet"
+drawings = "drawings.parquet"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "s0"
+projection       = "web_mercator"
+extent           = {{ lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }}
+point_visibility = {{ default = "public" }}
+
+[[layer]]
+name                      = "regions/selects"
+views                     = ["s0"]
+membership                = "spatial"
+hierarchy                 = {{ kind = "flat", prune_children = false }}
+visibility                = "public"
+artifact_visibility       = {{ default = "inherited" }}
+require_member_visibility = "none"
+artifacts = [
+  {{ key = "uk", wkt = "{UK}", space = "wgs84" }},
+]
+
+  [layer.shape]
+  kind = "polygon"
+
+[[layer]]
+name                      = "regions/built"
+views                     = ["s0"]
+membership                = "enumerated"
+source                    = "drawings"
+default_space             = "wgs84"
+hierarchy                 = {{ kind = "flat", prune_children = false }}
+visibility                = "public"
+artifact_visibility       = {{ default = "inherited" }}
+require_member_visibility = "none"
+
+  [[layer.content.supplied]]
+  name = "outline"
+  type = "polygon"
+  require_member_visibility = "inherited"
+"#
+        ),
+    )
+    .unwrap();
+    write_drawings(&dir.join("drawings.parquet"));
+    Config::parse(&path, &Default::default()).expect("the fixture corpus parses")
+}
+
+/// A `web_mercator` bundle over the whole world, carrying the two build-published layers.
+fn build_projected(out: &Path, tmp: &Path) -> Config {
+    let points_path = tmp.join("points.parquet");
+    let pairs_path = tmp.join("pairs.parquet");
+    write_lon_lat(&points_path, PLACES);
+    write_pairs_n(&pairs_path, PLACES.len() as u64);
+    let config = built_layers(tmp);
+    build(&BuildArgs {
+        layers: config.layers.clone(),
+        layer_inputs: config.layer_sources.clone(),
+        ..with_id(
+            build_args(
+                out,
+                vec![mosaica_build::ViewArgs {
+                    projection: Projection::WebMercator,
+                    extent: world_frame(),
+                    point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
+                    ..view_args("s0", &points_path, AccessInput::relation(&pairs_path))
+                }],
+            ),
+            &points_path,
+        )
+    })
+    .expect("the projected fixture builds");
+    config
+}
+
+async fn serve_projected(tmp: &TempDir) -> TestServer {
+    let bundle_root = tmp.path().join("bundle");
+    build_projected(&bundle_root, tmp.path());
+    open(&tmp).await
+}
+
+/// The declaration `PUT /control/layers` takes for a layer that draws one authored polygon.
+fn drawing_layer(name: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "title": format!("{name} (title)"),
+        "views": ["s0"],
+        "membership": "enumerated",
+        "visibility": "public",
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": null,
+        "hierarchy": { "kind": "flat", "prune_children": false },
+        "content": {
+            "computed": [],
+            "supplied": [{
+                "name": "outline",
+                "type": "polygon",
+                "require_member_visibility": "inherited"
+            }]
+        },
+        "depends_on": [],
+        "levels": []
+    })
+}
+
+async fn publish(
+    server: &TestServer,
+    layer: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let encoded = layer.replace('/', "%2F");
+    let resp = server
+        .client
+        .put(server.control_url(&format!("/control/layers/{encoded}/artifacts")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// The drawn geometry of every served artifact, by layer, read by its identifier.
+async fn shapes_by_layer(
+    server: &TestServer,
+) -> std::collections::BTreeMap<String, Vec<Vec<Vec<[u32; 2]>>>> {
+    let auth = authorise(server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let body = json!({
+        "view": "s0", "zoom": 0, "per_tile": 1000, "bbox": [0.0, 0.0, 1.0, 1.0],
+        "layers": "all", "computed": []
+    });
+    let resp = post_viewport_artifacts(server, token, &body).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let mut shapes = std::collections::BTreeMap::new();
+    for row in decode_artifact_frames(&resp.bytes().await.unwrap())
+        .artifacts
+        .expect("an artifact is served")
+    {
+        let shape = shape_by_id(server, token, "s0", row.tessera_id, 0).await;
+        shapes.insert(row.layer, shape.expect("a drawn geometry"));
+    }
+    shapes
+}
+
+/// **One triangle in degrees, four declarations, one placement.** The membership shape and the
+/// drawing, published by the build and by the control plane, all land on the same frame
+/// coordinates — which is what makes the space a property of the submission rather than of the
+/// kind of geometry that carries it.
+#[tokio::test]
+async fn an_authored_wgs84_shape_lands_where_a_membership_one_does_through_either_door() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_projected(&tmp).await;
+
+    // The control plane's two: the batch's `default_space`, and a row overriding it.
+    assert_eq!(
+        put_layer(&server, drawing_layer("regions/batch")).await.0,
+        201
+    );
+    assert_eq!(
+        put_layer(&server, drawing_layer("regions/row")).await.0,
+        201
+    );
+    let members = members(0..PLACES.len() as u64);
+    let (status, body) = publish(
+        &server,
+        "regions/batch",
+        json!({
+            "default_space": "wgs84",
+            "artifacts": [{ "key": "uk", "members": members, "content": [{ "values": [UK] }] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = publish(
+        &server,
+        "regions/row",
+        json!({
+            "artifacts": [{
+                "key": "uk", "members": members, "space": "wgs84",
+                "content": [{ "values": [UK] }]
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let shapes = shapes_by_layer(&server).await;
+    let selects = shapes
+        .get("regions/selects")
+        .expect("the build's membership shape");
+    // The triangle reached the frame at all. Read as view coordinates these degrees are wholly
+    // outside the unit square and clip away to nothing, and an equality between two empty shapes
+    // would say nothing.
+    assert!(
+        selects.first().is_some_and(|part| !part.is_empty()),
+        "the triangle drew no ring; it did not reach the frame: {selects:?}"
+    );
+    for layer in ["regions/built", "regions/batch", "regions/row"] {
+        assert_eq!(
+            shapes.get(layer),
+            Some(selects),
+            "'{layer}' placed the same degrees somewhere else"
+        );
+    }
+}
+
+/// An authored shape content's report carries every field a membership shape's does, the
+/// decomposition's tile and cell counts included.
+#[tokio::test]
+async fn an_authored_shape_report_carries_the_decomposition() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_projected(&tmp).await;
+    assert_eq!(
+        put_layer(&server, drawing_layer("regions/report")).await.0,
+        201
+    );
+    let members = members(0..PLACES.len() as u64);
+    let (status, body) = publish(
+        &server,
+        "regions/report",
+        json!({
+            "default_space": "wgs84",
+            "artifacts": [{ "key": "uk", "members": members, "content": [{ "values": [UK] }] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let entry = body["shapes"]
+        .as_array()
+        .and_then(|shapes| shapes.iter().find(|s| s["content"] == 0))
+        .unwrap_or_else(|| panic!("no report for the authored content: {body}"));
+    let view = &entry["views"][0];
+    assert_eq!(view["view"], "s0", "{body}");
+    for field in ["parts", "rings", "interior_tiles", "boundary_cells"] {
+        assert!(view[field].is_u64(), "'{field}' missing from {view}");
+    }
+}
+
+/// **A `wgs84` authored shape on a view with no projection is refused**, at the control plane as
+/// at the build: such a view has one space and nothing to convert a degree from
+/// (`polygon-membership.md` §4.3). And a `wgs84` coordinate outside ±180 × ±90 is not a
+/// coordinate (`projections.md` §2). Both refusals are the membership path's, and the authored
+/// path reaches them because the space now reaches it.
+#[tokio::test]
+async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
+    let tmp = TempDir::new().unwrap();
+    // The fixture bundle every other server test uses: one view, `projection = "none"`.
+    let server = serve(&tmp).await;
+    assert_eq!(
+        put_layer(&server, drawing_layer("regions/flat")).await.0,
+        201
+    );
+
+    let (status, body) = publish(
+        &server,
+        "regions/flat",
+        json!({
+            "default_space": "wgs84",
+            "artifacts": [{ "key": "uk", "members": {}, "content": [{ "values": [UK] }] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
+
+    // The same declaration in view space is accepted, which is what says the refusal is about the
+    // space and not about the drawing.
+    let (status, body) = publish(
+        &server,
+        "regions/flat",
+        json!({
+            "artifacts": [{ "key": "uk", "members": {}, "content": [{ "values": [UK] }] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    // And on the projected bundle, a latitude that is not one.
+    let tmp = TempDir::new().unwrap();
+    let server = serve_projected(&tmp).await;
+    assert_eq!(
+        put_layer(&server, drawing_layer("regions/batch")).await.0,
+        201
+    );
+    let (status, body) = publish(
+        &server,
+        "regions/batch",
+        json!({
+            "default_space": "wgs84",
+            "artifacts": [{
+                "key": "uk", "members": {},
+                "content": [{ "values": ["POLYGON ((-8 50, 2 91, -8 91, -8 50))"] }]
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
+}

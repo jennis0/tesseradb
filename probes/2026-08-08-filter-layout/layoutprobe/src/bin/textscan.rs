@@ -21,8 +21,8 @@
 use std::time::Instant;
 
 use croaring::Bitmap;
-use tessera_filter::{Codes, ValueColumn};
-use tessera_types::AttrLocalId;
+use mosaica_filter::{Codes, ValueColumn};
+use mosaica_types::AttrLocalId;
 
 #[inline]
 fn splitmix(x: u64) -> u64 {

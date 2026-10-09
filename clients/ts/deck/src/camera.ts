@@ -1,5 +1,5 @@
-import {type Store, type ViewInput} from '@tesseradb/client';
-import {worldBbox} from '@tesseradb/client/internal';
+import {type Store, type ViewInput} from '@mosaicajs/client';
+import {worldBbox} from '@mosaicajs/client/internal';
 
 /** The part of a deck.gl `OrthographicView` view state that {@link viewInputOf} reads. */
 export type OrthographicCamera = {

@@ -11,7 +11,7 @@
 #
 #   BEFORE=path AFTER=path CORPUS=dir WORK=dir REPEATS=1 PAIRS=0 run.sh
 #
-# CORPUS is a prepared ladder corpus directory: its own `tessera.toml`, `corpus.toml`, sources and
+# CORPUS is a prepared ladder corpus directory: its own `mosaica.toml`, `corpus.toml`, sources and
 # `.env`. PAIRS=1 drops `--no-oracle-pairs`, so the comparison covers `pairs.parquet` too.
 set -euo pipefail
 
@@ -30,7 +30,7 @@ for run in $(seq 1 "$repeats"); do
   out="$work/bundle-$name-$which"
   rm -rf "$out"
   ( cd "$corpus" && /usr/bin/time -v "$binary" build \
-      --deployment tessera.toml --config corpus.toml --out "$out" "${pairs[@]}" \
+      --deployment mosaica.toml --config corpus.toml --out "$out" "${pairs[@]}" \
       --stage-timings --stage-timings-json "$work/stages-$name-$which.json" \
       > "$work/build-$name-$which.log" 2> "$work/time-$name-$which.log" )
   python3 - "$work/stages-$name-$which.json" "$work/time-$name-$which.log" "$name" "$which" <<'PY'

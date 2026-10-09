@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest';
-import {TesseraClient} from '../src/client.js';
+import {MosaicaClient} from '../src/client.js';
 import {createStore} from '../src/store.js';
 import type {ViewportPart, ViewportResponse} from '../src/types.js';
 import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, settle, tile, tileAnswers, view, scalar, camera} from './support.js';
@@ -117,7 +117,7 @@ function open(opts: {
     categories: async () => [],
     suggest: async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}),
     close: () => {}
-  } as unknown as TesseraClient;
+  } as unknown as MosaicaClient;
   const store = createStore({
     viewerUrl: 'http://viewer',
     token: 'tok',

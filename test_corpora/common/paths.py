@@ -1,7 +1,7 @@
 """Where the three kinds of file live, so moving one is an environment variable.
 
 Staged sources are the publisher's own bytes, read-only, on the share. Derived files are what a
-`prepare.py` writes and what `tessera build` reads, and are regenerable. Declarations live in
+`prepare.py` writes and what `mosaica build` reads, and are regenerable. Declarations live in
 git beside the script that produces their inputs.
 
 Never build or serve a bundle from the share: it is SMB, so a page fault is a network round
@@ -15,11 +15,11 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The publisher's own bytes, `<dataset>/<vintage>/`, read-only. `TESSERA_STAGED` names the share.
-STAGED_ROOT = Path(os.environ.get("TESSERA_STAGED", _REPO_ROOT / "data" / "staged"))
+#: The publisher's own bytes, `<dataset>/<vintage>/`, read-only. `MOSAICA_STAGED` names the share.
+STAGED_ROOT = Path(os.environ.get("MOSAICA_STAGED", _REPO_ROOT / "data" / "staged"))
 
 #: Everything a `prepare.py` writes, and every bundle built from it.
-LADDER_ROOT = Path(os.environ.get("TESSERA_LADDER", _REPO_ROOT / "data" / "ladder"))
+LADDER_ROOT = Path(os.environ.get("MOSAICA_LADDER", _REPO_ROOT / "data" / "ladder"))
 
 
 def staged(dataset: str, vintage: str) -> Path:

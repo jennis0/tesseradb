@@ -25,7 +25,7 @@ class Control:
     def __init__(self, base: str, cred: str, view: str | None = None):
         self.base = base
         self.headers = {"Authorization": f"Bearer {cred}"}
-        # `x-tessera-view` where the bundle has more than one; one view is the header's absence.
+        # `x-mosaica-view` where the bundle has more than one; one view is the header's absence.
         self.view = view
 
     def status(self) -> dict:
@@ -39,8 +39,8 @@ class Control:
             f"{self.base}/control/ingest",
             params=STRICT,
             headers=self.headers
-            | {"x-tessera-batch-id": batch_id, "Content-Type": "application/vnd.apache.arrow.stream"}
-            | ({"x-tessera-view": self.view} if self.view else {}),
+            | {"x-mosaica-batch-id": batch_id, "Content-Type": "application/vnd.apache.arrow.stream"}
+            | ({"x-mosaica-view": self.view} if self.view else {}),
             data=body,
             timeout=timeout,
         )

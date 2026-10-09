@@ -259,7 +259,7 @@ def family_probes(
 
 
 def tokens(binary: Path, analyser: str | None, texts: Sequence) -> list[str]:
-    """Every token of `texts` as the column's own analyser produces it, through `tessera
+    """Every token of `texts` as the column's own analyser produces it, through `mosaica
     tokenise`, so a probe's word is a term the index holds. Words of four letters or more are
     kept by the caller, which leaves out the short and numeric tokens every text has."""
     lines = "".join(" ".join(str(text).split()) + "\n" for text in texts)

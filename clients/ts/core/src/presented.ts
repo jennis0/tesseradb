@@ -56,14 +56,14 @@ export type PresentedStatus = 'idle' | 'loading' | 'retrying' | 'shown' | 'empty
  * @category Projections
  */
 export type Refusal = {
-  /** A {@link TesseraError}'s `code`, or `fetch-failed` for any other error. */
+  /** A {@link MosaicaError}'s `code`, or `fetch-failed` for any other error. */
   code: string;
-  /** A {@link TesseraError}'s `detail`, or the other error's message. */
+  /** A {@link MosaicaError}'s `detail`, or the other error's message. */
   detail: string;
 };
 
 /**
- * The {@link Refusal} a thrown error stands for: the `code` and `detail` of a {@link TesseraError},
+ * The {@link Refusal} a thrown error stands for: the `code` and `detail` of a {@link MosaicaError},
  * or `fetch-failed` and the message for any other error, such as one from a request that reached
  * no server.
  *

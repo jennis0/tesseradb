@@ -15,7 +15,7 @@ function u64Column(table: Table, name: string): BigUint64Array {
  * Numeric columns use `toArray()`, which returns Arrow's typed array; a spread would box every
  * element. `bool` and `utf8` have no typed form and are materialised. A type the manifest cannot
  * declare throws, since skipping it would drop the column with no error. The arms mirror
- * `tessera_wire::payload::ScalarColumn`, and the two change together. Nulls are read into
+ * `mosaica_wire::payload::ScalarColumn`, and the two change together. Nulls are read into
  * `present`; `toArray()` gives a null number's slot as `0`, and that value means nothing.
  */
 function scalarColumn(name: string, vector: Vector<DataType>): ScalarColumn {
@@ -233,7 +233,7 @@ function hashMembership(vectors: Vector<DataType>[], total: number): MembershipC
 
 /**
  * Gathers the even bits of a `u32` into the low 16 bits: the inverse of the Morton spread, as
- * `tessera_build::input::compact`.
+ * `mosaica_build::input::compact`.
  */
 function compact(v: number): number {
   let x = v & 0x55555555;

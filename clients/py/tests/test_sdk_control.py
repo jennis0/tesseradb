@@ -14,15 +14,15 @@ import threading
 
 import pytest
 
-from tesseradb import _control
-from tesseradb._control import (
+from mosaica import _control
+from mosaica._control import (
     MAX_ATTEMPTS,
     UNANSWERED,
     Control,
     batch_id,
 )
-from tesseradb._database import create
-from tesseradb._refusal import Refusal
+from mosaica._database import create
+from mosaica._refusal import Refusal
 
 
 class _Backpressure(http.server.BaseHTTPRequestHandler):
@@ -35,7 +35,7 @@ class _Backpressure(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802, the base class's spelling
         length = int(self.headers.get("content-length", "0"))
         _Backpressure.bodies.append(self.rfile.read(length))
-        _Backpressure.batches.append(self.headers.get("x-tessera-batch-id"))
+        _Backpressure.batches.append(self.headers.get("x-mosaica-batch-id"))
         if _Backpressure.refusals > 0:
             _Backpressure.refusals -= 1
             answer = json.dumps({"error": "busy", "retry_after_s": 0.01}).encode()
@@ -175,7 +175,7 @@ def test_a_commit_whose_pages_reach_no_server_reports_it_and_does_not_raise(tmp_
     import pandas as pd
 
     from conftest import binary
-    from tesseradb._database import Database, create
+    from mosaica._database import Database, create
 
     binary()
     db = create(tmp_path / "db")

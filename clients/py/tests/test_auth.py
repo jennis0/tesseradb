@@ -5,7 +5,7 @@ import urllib.request
 
 import pytest
 
-from tesseradb import Token, authorise, login, logout, revoke
+from mosaica import Token, authorise, login, logout, revoke
 
 
 class Response(io.BytesIO):

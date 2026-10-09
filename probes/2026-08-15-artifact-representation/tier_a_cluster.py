@@ -8,7 +8,7 @@ membership arrays M1 measures.
 import numpy as np, json, sys, time
 from sklearn.cluster import HDBSCAN
 
-FIX = '/tmp/tessera-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
+FIX = '/tmp/mosaica-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
 OUT = 'probes/2026-08-15-artifact-representation'
 
 def demorton(c):

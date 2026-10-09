@@ -33,7 +33,7 @@ and pin bytes never match". **The handle column that made it impossible no longe
 `tessera_id`, a keyed permutation of `(shard_id, entity_id)` — so the points batch is
 `(tessera_id, x, y, declared scalars…)`, in which every column is a deterministic function of the
 bundle and none is a function of the session. The per-session bytes that remain are the token and
-`x-tessera-pin`, both of which live in headers and never enter the body this compares.
+`x-mosaica-pin`, both of which live in headers and never enter the body this compares.
 
 **The points are compared by the entity each row names, not by its `tessera_id`.** Each state is
 a separate build, and every build generates its own identity key, so the same item has a different
@@ -106,7 +106,7 @@ ZOOM_RANGE = range(0, 7)
 # with no test failing. The three overrides keep the surface at full strength.
 #
 # Deliberately still NOT exercised here: cap truncation and theta's threshold clause themselves.
-# Those are tested in `crates/tessera-engine/tests/selection.rs`, against fixtures built for them.
+# Those are tested in `crates/mosaica-engine/tests/selection.rs`, against fixtures built for them.
 K = 500
 # §3.3 underlay depth offset. 4^2 = 16 sub-cells per tile is enough to produce a populated third
 # stream at every zoom without tripping the server's max_underlay_cells budget — the same value the

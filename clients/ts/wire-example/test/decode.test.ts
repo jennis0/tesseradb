@@ -1,5 +1,5 @@
 // The worked decode against the golden fixtures, read by path from the core package's test
-// directory. Nothing is imported from `@tesseradb/client`, whose decoder this example must not
+// directory. Nothing is imported from `@mosaicajs/client`, whose decoder this example must not
 // share code with. `expected.json` is the same file the Python example's
 // test reads, so the two decodes are held to one answer.
 

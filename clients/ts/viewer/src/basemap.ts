@@ -1,10 +1,10 @@
 import {BitmapLayer} from '@deck.gl/layers';
 import type {Layer} from '@deck.gl/core';
-import {WORLD_SIZE, type ViewInfo} from '@tesseradb/client';
-import {basemapScheme} from '@tesseradb/client/internal';
+import {WORLD_SIZE, type ViewInfo} from '@mosaicajs/client';
+import {basemapScheme} from '@mosaicajs/client/internal';
 
 /**
- * The viewer's basemap, built from what `/v1/meta` says the view is a picture of. `<tessera-map>`
+ * The viewer's basemap, built from what `/v1/meta` says the view is a picture of. `<mosaica-map>`
  * draws a `basemap` layer under the points; which tiles, from which server, is the host page's
  * choice.
  *

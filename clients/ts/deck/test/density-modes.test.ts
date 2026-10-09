@@ -1,17 +1,17 @@
 import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@tesseradb/client';
-import {SessionArtifactTable, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
+import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@mosaicajs/client';
+import {SessionArtifactTable, mortonOfTile, servedLineage} from '@mosaicajs/client/internal';
 import {band} from '../../core/test/support.js';
 import {contourThresholds, densityPosition, densityStops, type DensityCell, type DensityCounts, type DensityMode} from '../src/density.js';
-import {TesseraLayer, loadAggregationLayers, type TesseraLayerInternalProps} from '../src/layer.js';
+import {MosaicaLayer, loadAggregationLayers, type MosaicaLayerInternalProps} from '../src/layer.js';
 import {fakeDevice} from './fake-device.js';
 
 /**
  * Every density mode draws the counts by cell it is given. The marks are a sample capped per tile,
  * so the tests serve a sample that disagrees with the counts: a cell with three marks and a large
  * count beside a cell with many marks and a small one. What each mode was given to draw is read off
- * the sublayer the Tessera layer rendered.
+ * the sublayer the Mosaica layer rendered.
  */
 
 const DEPTH = 3;
@@ -55,10 +55,10 @@ type Cell = DensityCell;
 function host() {
   const manager = new LayerManager(fakeDevice(), {});
   const errors: unknown[] = [];
-  manager.setProps({onError: (error: unknown, layer: Layer) => (layer.id === 'tessera' ? errors.push(error) : undefined)});
+  manager.setProps({onError: (error: unknown, layer: Layer) => (layer.id === 'mosaica' ? errors.push(error) : undefined)});
   const sublayer = (id: string) => {
-    const layer = manager.getLayers().find((l) => l.id === 'tessera') as TesseraLayer | undefined;
-    return (layer?.getSubLayers() as Layer[] | undefined)?.find((l) => l.id === `tessera-${id}`);
+    const layer = manager.getLayers().find((l) => l.id === 'mosaica') as MosaicaLayer | undefined;
+    return (layer?.getSubLayers() as Layer[] | undefined)?.find((l) => l.id === `mosaica-${id}`);
   };
   const props = <T>(id: string) => sublayer(id)?.props as unknown as T;
   return {
@@ -66,15 +66,15 @@ function host() {
     sublayer,
     props,
     /** Draw, and draw again once the cells have settled, as a host's next frame would. */
-    draw: (props: Partial<TesseraLayerInternalProps>) => {
-      const layer = () => new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, densityCounts: counts, ...props} as TesseraLayerInternalProps);
+    draw: (props: Partial<MosaicaLayerInternalProps>) => {
+      const layer = () => new MosaicaLayer({id: 'mosaica', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, densityCounts: counts, ...props} as MosaicaLayerInternalProps);
       manager.setLayers([layer()]);
       vi.advanceTimersByTime(1000);
       manager.setLayers([layer()]);
     },
     /** Draw once, with no time to settle. */
-    drawNow: (props: Partial<TesseraLayerInternalProps>) =>
-      manager.setLayers([new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, densityCounts: counts, ...props} as TesseraLayerInternalProps)]),
+    drawNow: (props: Partial<MosaicaLayerInternalProps>) =>
+      manager.setLayers([new MosaicaLayer({id: 'mosaica', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, densityCounts: counts, ...props} as MosaicaLayerInternalProps)]),
     /**
      * The grid's colour at a world point, `[r, g, b, a]`, read from the image it draws; `null`
      * where no grid is drawn.

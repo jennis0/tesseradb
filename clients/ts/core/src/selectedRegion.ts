@@ -63,7 +63,7 @@ export type RegionProjection = {
    */
   served: Count;
   /**
-   * How the server counted the shape, from the `x-tessera-region` header: exactly, or over a cover
+   * How the server counted the shape, from the `x-mosaica-region` header: exactly, or over a cover
    * of the shape at a stated depth. `null` until a response has carried it.
    */
   verdict: RegionVerdict | null;

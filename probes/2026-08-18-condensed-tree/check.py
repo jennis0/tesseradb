@@ -124,7 +124,7 @@ subprocess.run(["rm", "-rf", str(bundle)], check=True)
 log("building")
 subprocess.run(
     [
-        "./target/release/tessera", "build",
+        "./target/release/mosaica", "build",
         "--points", str(SRC / "points.parquet"),
         "--pairs", str(WORK / "pairs.parquet"),
         "--schema", str(SRC / "schema.toml"),
@@ -171,18 +171,18 @@ viewer = "127.0.0.1:{VIEWER_PORT}"
 session = "127.0.0.1:{SESSION_PORT}"
 control = "127.0.0.1:{CONTROL_PORT}"
 max_k = 5000
-# The plane credentials are named here and supplied through the environment: `tessera serve`
+# The plane credentials are named here and supplied through the environment: `mosaica serve`
 # refuses to start rather than defaulting them, and refuses an inline value outright.
-session_credential_env = "TESSERA_SESSION_CRED"
-operator_credential_env = "TESSERA_OPERATOR_CRED"
+session_credential_env = "MOSAICA_SESSION_CRED"
+operator_credential_env = "MOSAICA_OPERATOR_CRED"
 """.lstrip())
 
 import os
 env = dict(os.environ,
-           TESSERA_SESSION_CRED="probe-session-credential",
-           TESSERA_OPERATOR_CRED="probe-operator-credential")
+           MOSAICA_SESSION_CRED="probe-session-credential",
+           MOSAICA_OPERATOR_CRED="probe-operator-credential")
 server = subprocess.Popen(
-    ["./target/release/tessera", "serve", "-c", str(config)],
+    ["./target/release/mosaica", "serve", "-c", str(config)],
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
 )
 try:
@@ -211,7 +211,7 @@ try:
         # The session plane's own bearer is the operator-configured shared credential; the token it
         # mints is the per-principal one the viewer plane takes.
         token = json.loads(post(SESSION_PORT, "/session/authorise", {"auth_data": cred},
-                                bearer=env["TESSERA_SESSION_CRED"]).read())["token"]
+                                bearer=env["MOSAICA_SESSION_CRED"]).read())["token"]
         req = {"view": "s0", "zoom": 0, "bbox": [0, 65536, 0, 65536], "k": 1,
                "layers": [LAYER]}
         if budget is not None:

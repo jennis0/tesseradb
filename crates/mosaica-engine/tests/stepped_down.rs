@@ -1,0 +1,141 @@
+//! **Step-down gates the write path** (owner-ruled 2026-08-04; write-path §5.6).
+//!
+//! A stepped-down node used to accept ingest and flush it: the manifest a flush publishes is
+//! assembled from the *served* (older) partition state at a higher `n`, permanently shadowing
+//! the stepped-past segment — and once rotation moves the reclaim bound, its acked rows are
+//! unrecoverable. The gates close all three routes: ingest is refused at the engine boundary,
+//! `plan_flush` publishes nothing, and rotation reclaims nothing. Denies are deliberately not
+//! gated — a deny threatens no segment and must never be refused.
+//!
+//! The stepped-down state is fabricated the way it arises: a newer `SEGMENTS-1.json` that is
+//! honourable (deltas-only state) but whose listed files fail verification, so the reader steps
+//! down to `SEGMENTS-0` and flags the partition.
+
+mod common;
+
+use std::time::Duration;
+
+use common::*;
+use mosaica_engine::{AcceptError, Engine, EngineConfig};
+use mosaica_lifecycle::wal::{Wal, WalRecord, WalRow};
+use mosaica_lifecycle::UnallocatedRow;
+
+const WAIT: Duration = Duration::from_secs(10);
+
+/// Write a `SEGMENTS-1.json` cloned from the build's `SEGMENTS-0.json`, carrying a delta-tier
+/// declaration and a file that does not verify — honourable, unverifiable, steppable.
+fn fabricate_stepped_down(root: &std::path::Path) {
+    let current: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
+    let prefix = current["prefix"].as_str().unwrap().to_string();
+    let dir = root.join(&prefix).join("partitions").join("default");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("SEGMENTS-0.json")).unwrap())
+            .unwrap();
+    manifest["deltas"] = serde_json::json!([1]);
+    manifest["files"] = serde_json::json!({
+        "partitions/default/never-written.arrow": { "size": 1, "sha256": "0".repeat(64) }
+    });
+    std::fs::write(
+        dir.join("SEGMENTS-1.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // A row already WAL-durable from a "previous run", so the buffer is non-empty at open and a
+    // flush would have something to publish — the plan gate is what must stop it.
+    let wal_path = tmp.path().join("wal.log");
+    {
+        let mut wal = Wal::open(&wal_path).unwrap();
+        wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
+            batch_id: "pre-existing".to_string(),
+            body_hash: [1u8; 32],
+            rows: vec![WalRow {
+                entity_id: mosaica_types::EntityId::new(N_ITEMS),
+                view: "s0".to_string(),
+                join: false,
+                descriptors: vec![b"0".to_vec()],
+                x: 0.5,
+                y: 0.5,
+                scalars: Vec::new(),
+                scoped: Vec::new(),
+            }],
+        })
+        .unwrap();
+        wal.fsync().unwrap();
+    }
+
+    fabricate_stepped_down(&root);
+
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &wal_path,
+        EngineConfig {
+            flush_max_age_secs: 1,
+            // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
+            // what bounds the window close's O(buffered) copy. Nothing here reaches it.
+            flush_max_items: 40_000,
+            max_merged_segment_bytes: None,
+            // Compaction §9's trigger is off unless a deployment configures one.
+            compaction: mosaica_engine::CompactionSchedule::off(),
+            ..config()
+        },
+    )
+    .expect("a steppable candidate steps down rather than failing the open");
+    assert!(
+        engine.any_partition_stepped_down(),
+        "the fabricated newer manifest must have been stepped past"
+    );
+    engine.start_write_executor(8).expect("executor starts");
+
+    // Ingest is refused at the engine boundary, before anything is acked or WAL-durable.
+    let row = UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 0.5,
+        y: 0.5,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let err = engine
+        .ingest_rows(vec![row], "refused-batch".to_string(), [2u8; 32])
+        .expect_err("a stepped-down node must not accept ingest");
+    assert!(
+        matches!(err, AcceptError::SteppedDown),
+        "expected the typed step-down refusal, got {err:?}"
+    );
+
+    // The buffered pre-existing row is not flushed: ticks pass, nothing publishes. And the
+    // suppression lane stays open — a deny is accepted, because denies threaten no segment.
+    wait_until("two ticks fire on the stepped-down node", WAIT, || {
+        engine.write_executor_stats().ticks >= 2
+    });
+    assert_eq!(
+        engine.generation().segments_version,
+        0,
+        "a stepped-down node publishes no geometry: the flush plan gate must refuse"
+    );
+    let entity = source_to_new_map(&root, &engine.generation().prefix)[&5];
+    engine
+        .accept_change(
+            mosaica_types::EntityId::new(entity),
+            mosaica_lifecycle::ChangeOp::Suppress,
+        )
+        .expect("denies are never gated on step-down");
+}

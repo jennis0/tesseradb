@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Recaptures core's golden fixtures from two `tessera serve`s this script builds and starts.
+// Recaptures core's golden fixtures from two `mosaica serve`s this script builds and starts.
 //
 //   node clients/ts/scripts/capture-golden.mjs
 //
@@ -189,7 +189,7 @@ function writeParquet(table, path) {
 
 /** `meta.json`, `viewport-plain.bin` and `viewport-underlay.bin`, over the wide corpus. */
 async function captureWide() {
-  const directory = mkdtempSync(join(tmpdir(), 'tessera-goldens-'));
+  const directory = mkdtempSync(join(tmpdir(), 'mosaica-goldens-'));
   try {
     writeParquet(wideTable(), join(directory, 'points.parquet'));
     const served = await start({corpus: {directory, schema: WIDE_SCHEMA}});

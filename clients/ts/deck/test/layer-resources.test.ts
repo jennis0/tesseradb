@@ -1,10 +1,10 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
+import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import {band} from '../../core/test/support.js';
 import {binDensity, filterDensity, type DensityCounts} from '../src/density.js';
-import {TesseraLayer, type TesseraLayerInternalProps} from '../src/layer.js';
+import {MosaicaLayer, type MosaicaLayerInternalProps} from '../src/layer.js';
 import {MarkSlab} from '../src/slab.js';
 import {fakeDevice, type FakeResource} from './fake-device.js';
 
@@ -35,7 +35,7 @@ function artifacts(): ArtifactsProjection {
 /**
  * The layer under deck.gl's own `LayerManager`, the object a `Deck` drives it through: matching by
  * id, state carried to each new instance, finalised when it leaves the list. The fake device draws
- * nothing, so the sublayers fail to build their programs; only the Tessera layer's own errors count.
+ * nothing, so the sublayers fail to build their programs; only the Mosaica layer's own errors count.
  * What the layer drew with is read off the sublayers it rendered: the positions buffer and lookup
  * texture its first marks sublayer was given, and the wash's bounds.
  */
@@ -43,17 +43,17 @@ function host() {
   const device = fakeDevice();
   const manager = new LayerManager(device, {});
   const errors: unknown[] = [];
-  manager.setProps({onError: (error: unknown, layer: Layer) => (layer.id === 'tessera' ? errors.push(error) : undefined)});
+  manager.setProps({onError: (error: unknown, layer: Layer) => (layer.id === 'mosaica' ? errors.push(error) : undefined)});
   const sublayer = (id: string) => {
-    const layer = manager.getLayers().find((l) => l.id === 'tessera') as TesseraLayer | undefined;
-    return (layer?.getSubLayers() as Layer[] | undefined)?.find((l) => l.id === `tessera-${id}`);
+    const layer = manager.getLayers().find((l) => l.id === 'mosaica') as MosaicaLayer | undefined;
+    return (layer?.getSubLayers() as Layer[] | undefined)?.find((l) => l.id === `mosaica-${id}`);
   };
   const marksLayer = () => sublayer('marks-p0');
   return {
     device,
     errors,
-    draw: (props: Partial<TesseraLayerInternalProps>) =>
-      manager.setLayers([new TesseraLayer({id: 'tessera', depth: 2, status: 'shown', artifacts: artifacts(), ...props} as TesseraLayerInternalProps)]),
+    draw: (props: Partial<MosaicaLayerInternalProps>) =>
+      manager.setLayers([new MosaicaLayer({id: 'mosaica', depth: 2, status: 'shown', artifacts: artifacts(), ...props} as MosaicaLayerInternalProps)]),
     remove: () => manager.setLayers([]),
     buffer: () => {
       const data = marksLayer()?.props.data as {attributes: Record<string, {buffer?: FakeResource}>} | undefined;
@@ -70,7 +70,7 @@ function host() {
   };
 }
 
-describe('TesseraLayer GPU resources', () => {
+describe('MosaicaLayer GPU resources', () => {
   it('makes its own slab and lookup texture on its device when the host passes none', () => {
     const h = host();
     h.draw({marks: marks(3)});
@@ -142,7 +142,7 @@ describe('TesseraLayer GPU resources', () => {
 
 });
 
-describe('TesseraLayer density wash', () => {
+describe('MosaicaLayer density wash', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();

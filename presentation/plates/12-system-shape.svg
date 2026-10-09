@@ -23,7 +23,7 @@
           <text x="700" y="82">ingest · delete · suppress</text>
         </g>
         <rect x="40" y="126" width="780" height="196" rx="3" fill="none" stroke="#9aa8b1" stroke-dasharray="5 4"/>
-        <text x="56" y="146" font-size="11.5" fill="#5b6a75" letter-spacing="1">TESSERA &#8212; ONE BINARY, ONE PROCESS</text>
+        <text x="56" y="146" font-size="11.5" fill="#5b6a75" letter-spacing="1">MOSAICA &#8212; ONE BINARY, ONE PROCESS</text>
         <rect x="60" y="160" width="200" height="50" rx="2" fill="#dcedf3" stroke="#0e6f8a"/>
         <g stroke="#c8d2d8" fill="#ffffff">
           <rect x="330" y="160" width="200" height="50" rx="2"/>

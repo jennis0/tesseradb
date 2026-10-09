@@ -1,4 +1,4 @@
-import type {TesseraClient} from './client.js';
+import type {MosaicaClient} from './client.js';
 import {rectArea, type TileRect} from './rects.js';
 import {tileRectOfBbox} from './budget.js';
 import {MAX_DEPTH, WORLD_SIZE, mortonOfTile, rectToRequestBbox} from './coords.js';
@@ -290,7 +290,7 @@ export class ArtifactChannel {
   private state: ArtifactChannelState = {layer: null, layers: [], artifacts: [], status: 'idle', refusal: null, version: 0, held: 0};
 
   constructor(
-    private readonly client: TesseraClient,
+    private readonly client: MosaicaClient,
     private readonly opts: ArtifactChannelOptions
   ) {
     this.clock = opts.clock ?? defaultClock();

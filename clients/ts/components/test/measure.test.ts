@@ -1,8 +1,8 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {type Artifact, type ArtifactsProjection, type Composition} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
+import {type Artifact, type ArtifactsProjection, type Composition} from '@mosaicajs/client';
+import {SessionArtifactTable, servedLineage} from '@mosaicajs/client/internal';
 import '../src/map.js';
-import type {TesseraMap} from '../src/map.js';
+import type {MosaicaMap} from '../src/map.js';
 import {fakeStore, mount, settle, status, type FakeStore} from './fake-store.js';
 
 /**
@@ -30,18 +30,18 @@ function artifacts(ids: bigint[]): ArtifactsProjection {
 /** A frame whose drawn and served counts disagree, which the composition check refuses. */
 const broken = {exactDrawn: 1, exactServed: 2, tiles: []} as unknown as Composition;
 
-async function map(markup: string): Promise<{el: TesseraMap; store: FakeStore; host: HTMLElement}> {
+async function map(markup: string): Promise<{el: MosaicaMap; store: FakeStore; host: HTMLElement}> {
   const host = await mount(markup);
-  const el = host.querySelector('tessera-map') as TesseraMap;
+  const el = host.querySelector('mosaica-map') as MosaicaMap;
   const store = fakeStore({status: status({})});
   el.store = store;
   await settle(host);
   return {el, store, host};
 }
 
-describe('<tessera-map measure>', () => {
+describe('<mosaica-map measure>', () => {
   it('off, runs no frame loop, samples no clusters and checks no composition', async () => {
-    const {el, store} = await map('<tessera-map></tessera-map>');
+    const {el, store} = await map('<mosaica-map></mosaica-map>');
     store.set('artifacts', artifacts([7n, 9n]));
     expect(() => store.set('view', {...store.get('view'), composition: broken})).not.toThrow();
     await frames(4);
@@ -50,7 +50,7 @@ describe('<tessera-map measure>', () => {
   });
 
   it('on, fills the frame gaps and the cluster sample, and checks each composition', async () => {
-    const {el, store} = await map('<tessera-map measure></tessera-map>');
+    const {el, store} = await map('<mosaica-map measure></mosaica-map>');
     store.set('artifacts', artifacts([7n, 9n]));
     await frames(4);
     expect(el.probe.timings.frame.n).toBeGreaterThan(0);
@@ -59,7 +59,7 @@ describe('<tessera-map measure>', () => {
   });
 
   it('turned on after the store is adopted, samples what is already served', async () => {
-    const {el, store, host} = await map('<tessera-map></tessera-map>');
+    const {el, store, host} = await map('<mosaica-map></mosaica-map>');
     store.set('artifacts', artifacts([3n]));
     el.measure = true;
     await settle(host);
@@ -74,14 +74,14 @@ describe('<tessera-map measure>', () => {
   });
 
   it('on reconnect, runs the frame loop only if measure is on', async () => {
-    const off = await map('<tessera-map></tessera-map>');
+    const off = await map('<mosaica-map></mosaica-map>');
     off.el.remove();
     off.host.append(off.el);
     await settle(off.host);
     await frames(4);
     expect(off.el.probe.timings.frame.n).toBe(0);
 
-    const on = await map('<tessera-map measure></tessera-map>');
+    const on = await map('<mosaica-map measure></mosaica-map>');
     on.el.remove();
     await frames(2);
     const whileAway = on.el.probe.timings.frame.n;

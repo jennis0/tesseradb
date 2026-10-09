@@ -7,7 +7,7 @@ compartment — **a licence**. 2.8× rung 3's rows at 1.33× the width, one view
 **on**.
 
 It is a **demonstrator and a speed benchmark** (owner rulings 2026-09-01 and 2026-09-02: this
-corpus tests Tessera's speed and memory, not the UMAP pipeline; layout quality matters only as far
+corpus tests Mosaica's speed and memory, not the UMAP pipeline; layout quality matters only as far
 as the demo looks good). Recall against an exact neighbour search is not measured and layout
 fidelity is not judged.
 
@@ -15,13 +15,13 @@ fidelity is not judged.
 trimmed to make it fit — the abstracts are 118.9 GB of characters uncompressed and they are indexed
 as text, because a corpus trimmed to fit deletes the finding. **The answer arrived one stage
 earlier than expected: it is the build, not the server, that met the wall.** The corpus prepares in
-43.8 minutes; `tessera build` reached the abstract text index and stopped making progress there,
+43.8 minutes; `mosaica build` reached the abstract text index and stopped making progress there,
 and then did the same one stage later at the record blob. Both were random walks over an arena two
 and a half times the size of the box, both are fixed, and **on 2026-09-04 the whole corpus built in
 2 h 56 m to a 70.78 GB bundle**. Everything below the *Measured* heading is what that cost.
 
 ```bash
-export TESSERA_LADDER="$PWD/data/ladder"
+export MOSAICA_LADDER="$PWD/data/ladder"
 
 # once: 235.6 GB off the share, resumable per chunk — the only pass over the publisher's bytes
 ~/venvs/projection/bin/python -m test_corpora.paperseek.stage
@@ -29,7 +29,7 @@ export TESSERA_LADDER="$PWD/data/ladder"
 # the corpus; --sample 0 takes all 102,117,343, --drop-vectors frees the 209 GB memmap after
 ~/venvs/projection/bin/python -m test_corpora.paperseek.prepare --sample 0 --drop-vectors
 
-cd "$TESSERA_LADDER/paperseek" && tessera check --payloads && tessera build --stage-timings
+cd "$MOSAICA_LADDER/paperseek" && mosaica check --payloads && mosaica build --stage-timings
 ```
 
 ## ⊘ Two licence claims on the share are wrong, and neither is this corpus's `licence` column
@@ -171,7 +171,7 @@ candidate terms.
 topic, 968,528 a year, 416,542 are open access, and **223,783 (22.4%) carry a real licence** — the
 other 776,217 carry `unlicensed`.
 
-`tessera build` **23.3 s** to a **744.3 MB** bundle over 12 terms; `verify --deep` clean in **0.33 s
+`mosaica build` **23.3 s** to a **744.3 MB** bundle over 12 terms; `verify --deep` clean in **0.33 s
 at 52.5 MB**. The build's memory split, by the text-peak probe's method:
 
 | | anonymous | file-backed | `VmHWM` |
@@ -251,7 +251,7 @@ list, ranked, which is what a measurement driver composes principals from.
 
 ### ⊘ The whole-corpus build does not converge on this box
 
-**This is the rung's finding and it is a negative one.** `tessera build --stage-timings` reached the
+**This is the rung's finding and it is a negative one.** `mosaica build --stage-timings` reached the
 text index and stopped making useful progress there. It was neither refused nor killed: it is still
 running, and it is stalled on I/O rather than computing.
 
@@ -330,7 +330,7 @@ this is the rung's own summary.
 
 | | |
 |---|---|
-| `tessera build --arena-order auto` | **10,578.4 s**, peak `VmHWM` **29,239 MiB**, anonymous high-water **5,047 MiB** |
+| `mosaica build --arena-order auto` | **10,578.4 s**, peak `VmHWM` **29,239 MiB**, anonymous high-water **5,047 MiB** |
 | the stages that bend | `attribute_tail` **6,369.1 s** · `text_index` **2,233.9 s** (57,637,877 terms) · `record_blob` **905.4 s** · `filter_postings` **762.9 s** |
 | `verify --deep` | clean in **74.24 s** at 3.22 GB — 1 partition, 1 view, 1 segment, 102,117,343 rows, 12 terms |
 | bundle | **70.78 GB**: `attrs` 66.22 GB (`record` **44.77 GB**, `abstract` **17.61 GB**, `title` 2.50 GB, `openalex_id` 916 MB, `publication_year` 416 MB) · `views` 3.06 GB · `entities` 817 MB · `members` 487 MB · `row-column` 204 MB |
@@ -350,7 +350,7 @@ source's prose is decoded twice and the arena written by entity, and `attribute_
 scatter rather than the decode: the join's chunk buffer does not grow with the corpus, so the arena
 is written as ~54 interleaved ascending runs here against six at 10⁷.
 
-⊘ **The box carried rung 5's share passes and GPU work throughout.** No other `tessera build` and no
+⊘ **The box carried rung 5's share passes and GPU work throughout.** No other `mosaica build` and no
 serve battery ran; the disk was this build's alone.
 
 ### 2026-09-04 — the same bundle in a third of the time
@@ -362,7 +362,7 @@ the design is [`build-column-extents.md`](../../docs/design/build-column-extents
 
 | | before | this run |
 |---|---|---|
-| `tessera build --arena-order auto` | 10,578.4 s | **4,169.9 s** |
+| `mosaica build --arena-order auto` | 10,578.4 s | **4,169.9 s** |
 | `attribute_tail` | 6,369.1 s | **890.2 s** |
 | `text_index` | 2,233.9 s | **1,688.4 s**, the same 57,637,877 terms |
 | `record_blob` | 905.4 s | **777.4 s** |
@@ -388,7 +388,7 @@ in page cache, and the text index that would not finish at 10⁸ takes **178 sec
 
 | | |
 |---|---|
-| `tessera build --limit 10000000` | **545 s**, **7.44 GB** bundle, anonymous high-water **1,685 MB** against **15,705 MB** of `VmHWM` |
+| `mosaica build --limit 10000000` | **545 s**, **7.44 GB** bundle, anonymous high-water **1,685 MB** against **15,705 MB** of `VmHWM` |
 | the stages that bend | `attribute_tail` 236.5 s · `text_index` **178.4 s** · `record_blob` 74.0 s · `filter_postings` 32.1 s |
 | `verify --deep` | clean in **5.45 s** at **342 MB** — 1 partition, 1 view, 1 segment, 10,000,000 rows |
 | bundle breakdown | `attrs` 6.6 GB (of which `record` 4.4 GB, `abstract` 1.8 GB, `title` 242 MB, `openalex_id` 93 MB, `publication_year` 39 MB) · `views` 286 MB · `entities` 77 MB · `members` 54 MB · `row-column` 20 MB · the rest under 1 MB |
@@ -409,7 +409,7 @@ to declare an empty cell for the same reason.
 
 ### Served, and the 24 GiB cap is not the constraint here
 
-`tessera serve` on 8131 against the 7.44 GB bundle, driven by `drive.py` — three principals × a
+`mosaica serve` on 8131 against the 7.44 GB bundle, driven by `drive.py` — three principals × a
 25-request pan sequence over five zoom levels, a `match` on `abstract` with a common and an absent
 token, and twenty item and ten artifact drill-downs. Then the same sequence again under
 `systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=0`.
@@ -460,7 +460,7 @@ properties, and this corpus separates them at every level of one layer.
 
 ### What is on disk
 
-`$TESSERA_LADDER/paperseek` is **108 GB**, and `paperseek-1m` beside it is 1.2 GB.
+`$MOSAICA_LADDER/paperseek` is **108 GB**, and `paperseek-1m` beside it is 1.2 GB.
 
 | | |
 |---|---|

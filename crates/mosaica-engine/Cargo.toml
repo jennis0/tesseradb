@@ -1,0 +1,115 @@
+[package]
+name = "mosaica-engine"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[features]
+default = []
+# Per-stage viewport timing (see `src/timing.rs`). OFF by default and must stay off in anything
+# shipped: `mosaica-server` additionally gates header emission on a config flag, and CI asserts a
+# release `mosaica-cli` emits no `x-mosaica-stage-ns`. Enabling it here does NOT enable it there —
+# but cargo's feature unification will, on a `--workspace` build, so both gates matter. The self
+# dev-dependency below names it explicitly so that the two selections agree: unification alone left
+# `cargo test -p mosaica-engine` with a strictly smaller set of tests than `cargo test --workspace`.
+bench-timing = []
+# Deliberate WAL/executor fault injection — see `mosaica-lifecycle/src/faults.rs`. Enabled via the
+# self dev-dependency below (tests) and via mosaica-server/mosaica-cli's declared, default-off
+# feature (the correctness suite's faults build — decision 0071), so no default-features build
+# carries it. It DOES still unify across a `cargo test --workspace` build, exactly as
+# `bench-timing` does — measured, not assumed — so `scripts/check-layers.sh` asserts the property
+# that actually matters: no default-features release build reaches it.
+fault-injection = ["mosaica-lifecycle/fault-injection"]
+
+[dependencies]
+mosaica-types = { path = "../mosaica-types" }
+mosaica-access = { path = "../mosaica-access" }
+mosaica-authz = { path = "../mosaica-authz" }
+# The single-flight cache behind the row-projection, region and occupancy caches. Shared with
+# mosaica-authz, which sits below this crate.
+mosaica-cache = { path = "../mosaica-cache" }
+mosaica-store = { path = "../mosaica-store" }
+mosaica-spatial = { path = "../mosaica-spatial" }
+mosaica-lifecycle = { path = "../mosaica-lifecycle" }
+# **The container encoder**, for the same reason `mosaica-store` and `mosaica-filter` hold it: a row
+# column's transposition already holds one Roaring block's worth of finished words per artifact, so
+# the container is its output rather than something to insert value by value
+# (`row_column::RowColumn::transpose`).
+mosaica-roaring = { path = "../mosaica-roaring" }
+# The filter artefact's reader. Entity-space only — it never sees a `RowId`, which is what
+# `check-layers.sh` pins by denying it `mosaica-store` and `mosaica-spatial`.
+mosaica-filter = { path = "../mosaica-filter" }
+# **The analyser a text column was indexed with**, resolved from the manifest's recorded identity so
+# a query is segmented by the same pipeline as the index (decision 0070). Analysing at the wire
+# instead would put that choice in a second place, free to drift from the artefact.
+mosaica-analyse = { path = "../mosaica-analyse" }
+mosaica-filter-write = { path = "../mosaica-filter-write" }
+croaring = { workspace = true }
+arc-swap = { workspace = true }
+# D-D: the engine's shared compute pool for the intra-request tile-loop sweep. No `tokio`
+# anywhere near this crate (lifecycle §7's sync-engine rule; see `scripts/check-layers.sh`'s
+# `deny mosaica-engine tokio`) — rayon's work-stealing pool is a plain-thread mechanism.
+rayon = { workspace = true }
+rustc-hash = "1"
+# The suggestion index's five side arrays, mapped rather than heap-resident (value-suggestion.md §6.1).
+memmap2 = { workspace = true }
+arrow = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+# `statvfs` for compaction §8's free-space pre-flight. No std API exposes it; `mosaica-build`
+# reaches for the same call for the same reason.
+libc = "0.2"
+rand = { workspace = true }
+# `overlay_soft_limit` alarms. The counter is the operator's durable signal, but a
+# counter nobody is told about is not an alarm, and the executor thread is the one place the
+# overlay grows at runtime — so the log line has to be emitted from this crate. `mosaica-store`
+# already carries the same workspace-pinned dependency for the same reason.
+tracing = { workspace = true }
+chacha20poly1305 = { workspace = true }
+base64 = { workspace = true }
+# The neighbour graph cluster colours are chosen over: a Delaunay triangulation of the cluster
+# centres. One file and one dependency (`robust`, for exact orientation tests), with no state.
+delaunator = "1.1"
+
+[dev-dependencies]
+# Self dev-dependency: the only way this crate's integration tests can enable a feature of the
+# library they link against. Not a cycle — cargo permits it for dev-dependencies, and `cargo tree
+# -e normal` does not see the edge, which is precisely what `scripts/check-layers.sh`'s rule 2
+# relies on: it asks cargo for the resolved feature set on normal edges and fails on any
+# `fault-injection` it finds there. (An earlier version of this note said the rule "reads
+# `cargo tree`" while the rule was in fact a grep over manifest text that exempted this whole file.
+# It is a `cargo tree` now, and demonstrated red by enabling the feature on the edge below.)
+# `bench-timing` is named here, rather than left to unification from `mosaica-bench`'s default
+# feature, so that `-p` and `--workspace` select the same tests: two `viewport.rs` tests are gated
+# on it entirely — one of them the only test of the mask independence C4's numerator rests on — and
+# four more lose an assertion arm without it. Which leak-register rows have a test is not a
+# benchmark crate's default feature to decide.
+mosaica-engine = { path = ".", features = ["fault-injection", "bench-timing"] }
+tempfile = { workspace = true }
+mosaica-build = { path = "../mosaica-build" }
+# **The corpus census, and this edge may only ever be a dev one.** The generator is a second
+# statement of the corpus and stays one only while it cannot read an artefact
+# (`correctness-suite.md` §13) — `check-layers.sh` asserts what *it* may depend on, and a normal
+# edge from here would not trip that rule while still putting the fixture and the system in one
+# dependency graph. It is a test-only edge, exactly as `mosaica-build` above is.
+mosaica-corpus = { path = "../mosaica-corpus" }
+parquet = { workspace = true }
+proptest = { workspace = true }
+criterion = "0.5"
+
+[[bench]]
+name = "viewport"
+harness = false
+
+[[bench]]
+name = "render_gather"
+harness = false
+
+# The two-axis sweep drives `Engine::set_serial_fallback_max_rows_for_test`, which does not exist
+# at all without `bench-timing` (session.rs's `#[cfg]`), so this example cannot compile without the
+# feature — declared here rather than left to fail a plain `cargo build --workspace`.
+# `calibration_sweep`/`min_len_sweep` need no such entry: they read `StageTimings` fields, which
+# are present (zeroed) in every build.
+[[example]]
+name = "tile_axis_sweep"
+required-features = ["bench-timing"]

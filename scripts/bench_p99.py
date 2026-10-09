@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """The 10^9 p99 measurement.
 
-Boots `tessera serve` against a pre-built bundle (default `/tmp/tessera-1e9`, built by
+Boots `mosaica serve` against a pre-built bundle (default `/tmp/mosaica-1e9`, built by
 `scripts/build_full.sh`), authorises one realistic principal (w = 10,000 random grants over the
 bundle's real dictionary — the recipe in `probes/mask_probe.py`'s "random w=" family), does one
 warm-up pass (fragment build + row-projection cache fill — reported separately, NOT counted
 against the viewport budget), then fires >= 2,000 random-pan viewports (~300 tiles each, mixed
-zooms, k=30) over HTTP and reports p50/p99/max both server-side (`x-tessera-server-us` response
+zooms, k=30) over HTTP and reports p50/p99/max both server-side (`x-mosaica-server-us` response
 header) and end-to-end (wall-clock around the HTTP call).
 
 The gate this exists to test: server-side p99 < 10 ms.
 
-Usage: reference/.venv/bin/python scripts/bench_p99.py [--bundle /tmp/tessera-1e9] [-n 2000]
+Usage: reference/.venv/bin/python scripts/bench_p99.py [--bundle /tmp/mosaica-1e9] [-n 2000]
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def spawn_with_long_boot_deadline(bundle_root: Path, tmp_dir: Path, boot_deadlin
     import os
 
     env = os.environ.copy()
-    env["TESSERA_REFERENCE_OPERATOR_CRED"] = harness.OPERATOR_CREDENTIAL
+    env["MOSAICA_REFERENCE_OPERATOR_CRED"] = harness.OPERATOR_CREDENTIAL
 
     log_file = open(log_path, "ab")
     boot_start = time.monotonic()
@@ -93,7 +93,7 @@ def spawn_with_long_boot_deadline(bundle_root: Path, tmp_dir: Path, boot_deadlin
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             extra = log_path.read_text(errors="replace")
-            raise RuntimeError(f"tessera serve exited early ({proc.returncode}):\n{extra}")
+            raise RuntimeError(f"mosaica serve exited early ({proc.returncode}):\n{extra}")
         try:
             resp = requests.get(f"{srv.viewer_base}/healthz", timeout=2)
             if resp.status_code == 200:
@@ -106,7 +106,7 @@ def spawn_with_long_boot_deadline(bundle_root: Path, tmp_dir: Path, boot_deadlin
 
     if not up:
         proc.terminate()
-        raise RuntimeError(f"tessera serve did not become healthy within {boot_deadline_s}s")
+        raise RuntimeError(f"mosaica serve did not become healthy within {boot_deadline_s}s")
 
     return srv, proc, boot_elapsed
 
@@ -119,8 +119,8 @@ def percentile(values: list[float], p: float) -> float:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bundle", default="/tmp/tessera-1e9")
-    ap.add_argument("--tmp", default="/tmp/tessera-1e9-serve")
+    ap.add_argument("--bundle", default="/tmp/mosaica-1e9")
+    ap.add_argument("--tmp", default="/tmp/mosaica-1e9-serve")
     ap.add_argument("-n", "--n-viewports", type=int, default=2000)
     ap.add_argument("--width", type=int, default=10_000, help="grant width w")
     ap.add_argument("--seed", type=int, default=0)
@@ -162,7 +162,7 @@ def main() -> int:
         t0 = time.perf_counter()
         warm_resp = srv.viewport_response(token, "s0", 6, [0.0, 0.0, EXTENT, EXTENT], k=30)
         warmup_s = time.perf_counter() - t0
-        warmup_server_us = int(warm_resp.headers.get("x-tessera-server-us", "0"))
+        warmup_server_us = int(warm_resp.headers.get("x-mosaica-server-us", "0"))
         print(
             f"Warm-up viewport [row-projection cache fill, one-off]: "
             f"{warmup_s * 1000:.1f} ms end-to-end, {warmup_server_us / 1000:.3f} ms server-side"
@@ -185,7 +185,7 @@ def main() -> int:
             resp = srv.viewport_response(token, "s0", zoom, bbox, k=30)
             e2e = (time.perf_counter() - t0) * 1e6
             e2e_us.append(e2e)
-            server_us.append(float(resp.headers.get("x-tessera-server-us", "nan")))
+            server_us.append(float(resp.headers.get("x-mosaica-server-us", "nan")))
 
             if (i + 1) % 500 == 0:
                 print(f"  {i + 1}/{n} viewports issued...")

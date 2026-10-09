@@ -1,4 +1,4 @@
-"""Decode the framed `/v1/viewport` body `tessera_wire::payload` builds (contracts §3.2 r26,
+"""Decode the framed `/v1/viewport` body `mosaica_wire::payload` builds (contracts §3.2 r26,
 `streamed-serving.md`): a sequence of frames, each `u8 kind` + `u32 LE payload length` + payload,
 every payload a complete Arrow IPC stream (JSON for the trailer):
 
@@ -19,7 +19,7 @@ and the `/v1/artifacts/viewport` body, the same framing with one kind and a trai
     kind 4  trailer    JSON (stream_us, arrow_serialise_ns,   exactly one, last
                         rows, frames)
 
-Mirrors `crates/tessera-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
+Mirrors `crates/mosaica-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
 independently implemented in Python (this is the client-side decode any real SDK would need, not
 shared Rust logic), so `conformance/tests` can reuse it without copy-paste;
 `reference/tests/wire.py` re-exports this module's `decode_viewport` unchanged.

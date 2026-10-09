@@ -1,8 +1,8 @@
-import {createStore, formatCount, formatMasked, type MarksProjection, type Store} from '@tesseradb/client';
+import {createStore, formatCount, formatMasked, type MarksProjection, type Store} from '@mosaicajs/client';
 import {fitWorld, pan, toScreen, worldBox, zoomAt, type Camera} from './camera.js';
 
 /**
- * The store under a host's own camera and a 2D canvas, with none of Tessera's rendering. Three
+ * The store under a host's own camera and a 2D canvas, with none of Mosaica's rendering. Three
  * calls: `createStore`, `setView` on every camera change, `subscribe('marks')` to draw. The host
  * formats counts with the package's two formatters: a sample shows both figures or neither, a
  * masked scalar one, and a stale view none.

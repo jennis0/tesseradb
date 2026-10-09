@@ -19,7 +19,7 @@
 use std::io::{BufRead, BufReader};
 use std::time::Instant;
 
-use tessera_filter::{SortedDict, SortedDictWriter};
+use mosaica_filter::{SortedDict, SortedDictWriter};
 
 /// The restart intervals compared. 16 is LevelDB's; the neighbours bound the trade either side.
 const INTERVALS: [u32; 4] = [8, 16, 32, 64];

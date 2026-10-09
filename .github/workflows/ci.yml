@@ -83,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # `stable`, matching rust-toolchain.toml's channel. Note this is a rolling channel, not a
-      # pin: the `.stderr` fixtures under crates/tessera-types/tests/ui are compiler output, so a
+      # pin: the `.stderr` fixtures under crates/mosaica-types/tests/ui are compiler output, so a
       # rustc release can turn this job red on wording alone. See that test's own doc for why
       # regenerating them is a judgement call rather than maintenance.
       - uses: dtolnay/rust-toolchain@stable
@@ -138,7 +138,7 @@ jobs:
       - name: tests, instrumented for coverage
         timeout-minutes: 90
         env:
-          TESSERA_TEST_TRACE_DIR: ${{ runner.temp }}/hang/trace
+          MOSAICA_TEST_TRACE_DIR: ${{ runner.temp }}/hang/trace
         run: |
           source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov clean --workspace
@@ -209,11 +209,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      # The suite spawns the real `tessera` binary as a subprocess and speaks the real API — it
+      # The suite spawns the real `mosaica` binary as a subprocess and speaks the real API — it
       # never calls into the engine directly. So the release binary is a prerequisite, not an
       # optimisation, and building it as its own step keeps a compile failure legible as a compile
       # failure rather than as a suite error.
-      - run: cargo build --release -p tessera-cli
+      - run: cargo build --release -p mosaica-cli
       # The dependency list is **read from `reference/pyproject.toml`**, not restated here. That
       # file argues the point at its own site: an undeclared dependency is a suite that runs on the
       # machine it was written on, and it has already been bitten twice by one. A second copy of
@@ -264,8 +264,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      # `tesseradb` depends on `tesseradb-native`, which carries the `tessera` binary and the
-      # `_tessera` extension module, so `clients/py/check.sh` now builds two crates before it can
+      # `mosaica` depends on `mosaica-native`, which carries the `mosaica` binary and the
+      # `_mosaica` extension module, so `clients/py/check.sh` now builds two crates before it can
       # install anything. This job is no longer cargo-free and no longer cheap; the cache is what
       # keeps it from being a second copy of the `rust` job's compile on every run.
       - uses: dtolnay/rust-toolchain@stable
@@ -282,15 +282,15 @@ jobs:
       # the gate because one rename — `ead7e90` — shipped three defects into `clients/` that a
       # Rust-and-Python gate could not see, each found later by a separate investigation. The
       # Python half exercises the wheel's build hook for real, that hook being the only thing
-      # between `pip install tesseradb[widget]` and a widget with no JavaScript in it.
+      # between `pip install mosaica[widget]` and a widget with no JavaScript in it.
       - run: bash scripts/check-clients.sh
       - run: bash clients/py/check.sh
         env:
-          PYTEST_ADDOPTS: --cov=tesseradb --cov-report=xml:coverage.xml
+          PYTEST_ADDOPTS: --cov=mosaica --cov-report=xml:coverage.xml
       # coverage.py names files relative to the package; Codacy matches them from the repository root.
       - name: coverage report
         if: ${{ !cancelled() }}
-        run: sed -i 's|filename="|filename="clients/py/tesseradb/|' clients/py/coverage.xml
+        run: sed -i 's|filename="|filename="clients/py/mosaica/|' clients/py/coverage.xml
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
