@@ -358,17 +358,29 @@ bundle/
 | the deny mask | per view | per (view, shard) |
 | filter rows | per request | per shard |
 
-`ShardedMask` has `count_ranges(shard, &[Range<u32>]) -> Vec<u64>`, which sorts a request's ranges
-and walks a leaf's containers once with a running rank. The sweep calls it once per shard in place
-of two `count_range` calls per part. Every other operation, `rows_in_range`,
-`for_each_run`, `contains` and the leaf-wise `and`, `or` and `andnot`, takes a shard. A leaf stays a
-`croaring` bitmap.
+`ShardedMask` has `count_ranges(shard, &[Range<u32>]) -> Vec<u64>`, which takes a request's ranges
+in row order and ranks their endpoints in one call to CRoaring's `roaring_bitmap_rank_many`, a walk
+of the leaf's containers with a running rank. The sweep calls it once per shard in place of two
+`count_range` calls per part. Every other operation, `rows_in_range`, `for_each_run`, `contains`
+and the leaf-wise `and`, `or` and `andnot`, takes a shard. A leaf stays a `croaring` bitmap.
 
-Measured on a synthetic 2³⁰-row universe, one thread (`probes/2026-09-04-epoch-shard-treemap-mask/`):
-counting a 256-tile request at depth 12 rose from 0.49 ms to 4.5 ms at 50% coverage when each tile
-was split across eight shards, because a rank inside a bitset container costs 1.6 to 1.9 µs cold
-however short the range. `count_ranges` pays that cost once per container per shard. Its gain is
-not measured (§8.1).
+Measured on a synthetic 2³⁰-row universe, one thread, a 4-core host
+(`probes/2026-10-09-shard-read-costs/`): today's count of a 3,000-tile contiguous request at depth
+10 and 10% coverage takes 8.0 ms at one shard and 875 ms at 100, because each range's count takes
+two ranks, each a popcount from its container's start, whatever the range's length.
+`count_ranges` takes 0.38 ms at one shard and 8.5 ms at 100. It gains only where a request's ranges
+share containers. On tiles scattered at random it is still 29 to 69 times its one-shard cost at
+N = 100.
+
+Decoding and selection then set what N costs. Each pays a fixed cost per part, so their cost grows
+with N times tiles where a tile holds few visible rows. Counting, decoding and selecting together,
+a request at N = 8 costs 0.9 to 1.7 times today's single shard at 10% coverage and above, and 2.0
+to 8.4 times for a viewer of 0.1% or 1% at depth 8 and deeper, 0.8 to 59 ms. At N = 100 the same
+figures reach 12 and 83 times. Decoding and selection are therefore batched per shard as the count
+is: one cursor walk of a leaf over the request's ranges in row order, and one selection over a
+shard's parts. Not measured yet. `rows_in_range`, the materialised `leaf ∩ range` a decode reads
+while the overlay holds denies, grows worst: 18 ms at one shard to 965 ms at 100 at depth 6 and 50%
+coverage, so the same batching applies to it.
 
 ### 3.3 Two passes
 
@@ -443,10 +455,20 @@ A shard's identity changes at that shard's compaction and at no other. A compact
 therefore invalidates only that shard's fragments, projections and figures. The background refresh
 runs per (session, view, shard), so a flush into one shard extends only that shard's projections.
 
+A level's figures summed across shards are also kept per grant. A change to one shard's figures
+updates the sum by that shard's difference. Summing every shard's count vector costs about 0.8 ms
+per shard at a million artifacts, measured: 2% of a 50% viewer's walk of the level at N = 100, and
+nearly as much as the whole walk of a 0.1% viewer (`probes/2026-10-09-shard-read-costs/`).
+
 ### 3.7 A session's cost
 
 A session's first request builds a projection per shard by today's four routes, each priced for its
-shard. The cost model for a dense session at 10¹¹ items, 25 GB a view and 140 s of CPU at first
+shard. One mask over 10⁸ entities projected through N permutations, against one, took 0.76 to 1.28
+times as long at N = 8, 32 and 100, and eight leaves per session took 1.09 times the memory of one
+(`probes/2026-10-09-shard-read-costs/`). The cost per row of a projection was flat from 10⁸ to
+4×10⁸ entities on a 12-core host and rose from 2.7 to 5.2 ns at 25% coverage on a 4-core one, so
+whether a shard of 2³² entities projects in proportion to its size is measured on the deployment's
+hardware. The cost model for a dense session at 10¹¹ items, 25 GB a view and 140 s of CPU at first
 touch, was made before term images existed. It is re-measured (§8.2).
 
 ## 4. The write path
@@ -624,18 +646,23 @@ Fixtures beyond that:
 
 ### 8.1 Before any code
 
-`mosaica-bench` keeps the three synthetic benches the earlier figures came from:
-`epoch_shard_treemap_mask`, `epoch_shard_projection` and `epoch_shard_tile_index`. They were run
-before term images, label columns, identity bands and figures existed.
+`mosaica-bench` keeps three synthetic benches: `epoch_shard_treemap_mask`, `epoch_shard_projection`
+and `epoch_shard_tile_index`. The first two ran again on main, with the mask bench extended, and
+their results are in `probes/2026-10-09-shard-read-costs/`, on a 4-core host.
 
-1. Run all three again on main.
-2. Add `count_ranges` to `epoch_shard_treemap_mask`, and measure a 256-tile and a 3,000-tile request
-   at N = 1, 8, 32 and 100, coverage 0.1% to 50%. Batching is the measure the read path's cost at
-   N rests on, and it is the one not measured.
-3. Add the pass 2 merge to the same bench: per-shard candidates merged by rank for every tile of a
-   3,000-tile request at N up to 100.
-4. Measure one level's F walk at N against N = 1 over the same rows. The walk is linear in rows, so
-   the ratio is expected near 1.
+- `count_ranges`, a range-local count and a contiguous-viewport layout were added to the mask
+  bench and measured at 256 and 3,000 tiles, N = 1, 8, 32 and 100, coverage 0.1% to 50% (§3.2).
+- The pass 2 merge is the bench's select column: `Selection::of` over a tile's N parts, the m
+  smallest identities across them (§3.2).
+- A level's figures walk at N against N = 1, with the sum of the shards' counts timed apart
+  (§3.6).
+- Projection per shard against one projection (§3.7).
+
+Three things are left before code:
+
+1. `epoch_shard_tile_index` on the MedCPT and PaperSeek bundles, on a host that holds them.
+2. The mask bench again on the 12-core host, so its figures sit beside the 2026-09-04 ones.
+3. Decoding and selection batched per shard, added to the mask bench and measured the same way.
 
 ### 8.2 One corpus at several shard sizes
 
@@ -686,7 +713,8 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 ### 8.5 What the measurements decide
 
 - `shards.size`: the default stays near the ceiling unless a smaller shard measures cheaper per
-  request, per compaction or per restart.
+  request, per compaction or per restart. The read path favours fewer shards: every operation on
+  the mask pays a fixed cost per part (§3.2).
 - `shards.reuse_min_free` and handing pool ids out in runs.
 - Compaction tiers and concurrent compactions.
 - The key filter's bits per value.
@@ -699,16 +727,19 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 | one level's figures fill on GBIF, 0.24 s to 12.5 s by coverage and level | measured | [serving](system/serving.md#a-levels-figures), `probes/2026-10-06-first-open-fills/` |
 | edit-freed ids stop the high water rising after two rounds on GeoNames | measured | [write path](system/write-path.md#freed-entity-ids) |
 | counting a 256-tile request at depth 12, 50% coverage: 0.49 ms at N = 1, 4.5 ms at N = 8 | measured, synthetic, one thread, before term images | `probes/2026-09-04-epoch-shard-treemap-mask/` |
+| counting a 3,000-tile contiguous request at depth 10, 10% coverage: 8.0 ms today and 0.38 ms with `count_ranges` at N = 1; 875 ms and 8.5 ms at N = 100 | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
+| counting, decoding and selecting together at N = 8: 0.9 to 1.7 times today's single shard at 10% coverage and above; 2.0 to 8.4 times at 0.1% and 1%, depth 8 and deeper | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
+| a level's figures walk and sum over 1,000,000 artifacts at N = 100: 1.05 times N = 1 at 50% coverage, 3.4 times at 0.1% | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
+| one mask projected through N = 8, 32 or 100 permutations: 0.76 to 1.28 times one; per-row cost from 10⁸ to 4×10⁸ rows rose 1.9 times at 25% coverage on a 4-core host | measured, synthetic, one thread | `probes/2026-10-09-shard-read-costs/` |
 | a per-shard tile index alone is 6 to 8.8 times the bytes at N = 8 | measured, before label columns served most levels | `probes/2026-09-04-epoch-shard-tile-index/` |
 | projection is linear in rows from 10⁸; eight leaves cost 1.10 times the memory and 1.4 times the time of one | measured, synthetic, before term images | `probes/2026-09-04-epoch-shard-projection/` |
 | a compaction of MedCPT, 36 million items: 330 s, of which 1.5% corpus-wide, 50.5% per row, 48.1% artifact structures | measured, once | `probes/2026-09-04-epoch-shard-fold-decomposition/` |
 | a compaction of Tree of Life after its 50% ingest cell: 1,313 s | measured, once | [ingest campaign](ingest-campaign.md) |
 | a compaction of a shard of 2³² items in two views: about 6.7 hours | modelled, linear in items from the Tree of Life run | this document |
-| counting a 3,000-tile request at N = 100: about 1.3 s unbatched and about 200 ms batched, one thread | modelled from the treemap constants | this document |
 | an id reaches the occupancy cap in about 1,100 years at 1% daily churn, 110 at 10% | modelled | §1.4 |
 | capacity: 2¹⁹ shards of about 2³² ids, about 2 × 10¹⁵ items | modelled | §2.1, §2.5 |
 | a session's visible set grows more slowly than the corpus | assumed; to be confirmed before any figure above 2³² items is promised | n/a |
-| `count_ranges`; the pass 2 merge; every route at N; churn locality; the key filter; compaction per shard | not measured | §8 |
+| decoding and selection batched per shard; the tile index on today's levels; every route at N on a built bundle; churn locality; the key filter; compaction per shard | not measured | §8 |
 
 ## 10. Stages
 
@@ -733,7 +764,7 @@ the refusal is removed at stage 5.
 
 | Stage | What it does | Gate |
 |---|---|---|
-| 0 | §8.1 | figures recorded in a probe |
+| 0 | §8.1; `count_ranges` in today's sweep, where it already counts a contiguous request 2.5 to 50 times faster at one shard, at depth 8 and deeper and 10% coverage or more | figures recorded in a probe |
 | 1 | the identity input gains the kind bit, the shard field and the occupancy, in the engine and in the oracle's own derivation and its vectors; the pool keeps a bitmap per occupancy; a compaction frees a deleted item's number at the next occupancy and retires one at the cap; format bump | reuse and cap fixtures; §8.4 on one shard |
 | 2 | `ShardId`; every per-entity and per-view structure moves under `shards/0/`; the manifest and side-manifest split; `shards.size` declared and recorded, and a size that would open a second shard refused on both paths; the compile-fail tests | the whole suite on rebuilt bundles |
 | 3 | layer spaces: artifact records, own-label postings and overlay move out of the point space; the two-region allocator and its low water go; artifact identifiers take the kind bit | layer drop fixture; byte scanner extended |
