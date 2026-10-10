@@ -88,8 +88,8 @@ executor's re-checks compare the tenancy too: the ingest re-check compares numbe
 (`write/executor/window.rs`), which a reused number passes.
 
 Every place that builds a `mosaica_id` from a number reads the tenancy from the index: the flush,
-ingest receipts, unique-value refusals and the edited-items lookup (`mosaica-store/src/flush.rs`,
-`ingest.rs`, `unique.rs`, `edited.rs`). The WAL records no tenancy. A replayed record follows the
+ingest receipts, unique-value refusals and the edited-items lookup (`mosaica-store/src/flush.rs`;
+`mosaica-engine/src/ingest.rs`, `unique.rs`, `edited.rs`). The WAL records no tenancy. A replayed record follows the
 bundle's last publication, and a number freed by a compaction is not issued until the WAL rotates
 past it, so the index answers every number a replayed record names as it stood when the record was
 written.
