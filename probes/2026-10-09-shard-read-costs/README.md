@@ -41,6 +41,17 @@ and above. A narrow viewer at depth 8 and deeper pays more: 1.9 to 8.1 times at 
 ones up to 64 times. At depth 6 and coverage of 10% or more the work per row dominates, and N costs
 1.0 to 1.4 times up to N = 100.
 
+**Skipping the parts of a tile with no visible row takes most of N's cost off a narrow viewer.**
+Today's sweep skips a tile with nothing visible but passes every part of the rest to selection,
+including parts with no visible row, and each costs a seek and a place in the merge. A second run,
+`run.sh parts` on 2026-10-10, measured selection both ways, `select_tiles` and `select_parts`, at
+depth 6 and deeper on the contiguous layouts, with the same rows served on every tile (Table 6).
+With the count batched as well, a viewer of 0.1% or 1% at depth 8 and deeper pays 1.2 to 3.1 times
+today's single shard at N = 8 and 5 to 12 times at N = 100, against 1.5 to 5.2 and up to 57 times
+with the count batched alone. A viewer of 10% or more changes little, because few of its parts are
+empty: 0.6 to 1.7 times at N = 8 and up to 11 times at N = 100. What remains is the cost per part of
+parts that hold rows.
+
 **The range-local count is the cheapest way to count a short range.** `count_local` counts
 `leaf ∩ range` against a one-run bitmap, which popcounts only the words inside the range. Today's
 count takes two ranks, each a popcount from the start of the range's container. On 256 random
@@ -194,6 +205,48 @@ ms per walk, median of five.
 | 0.1% | 32 | 63.4 | 24.6 | 2.03 |
 | 0.1% | 100 | 78.4 | 67.9 | 3.38 |
 
+## Table 6: mask work with empty parts skipped
+
+Count and select summed, in ms per request, contiguous tiles, from `treemap-parts-viewport-*.json`.
+"Today" is the per-range count and `select_tiles` at N = 1. "Count batched" is `count_ranges` and
+`select_tiles`; "and skipped" is `count_ranges` and `select_parts`. Each cell is the median of
+three samples; the ratio in brackets is against today.
+
+| tiles | coverage | depth | today N = 1 | N = 8, count batched | N = 8, and empty parts skipped | N = 32, count batched | N = 32, and skipped | N = 100, count batched | N = 100, and skipped |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 256 | 50% | 6 | 194 | 195 (1.0×) | 200 (1.0×) | 222 (1.1×) | 208 (1.1×) | 234 (1.2×) | 231 (1.2×) |
+| 256 | 50% | 8 | 14.6 | 15.6 (1.1×) | 15.8 (1.1×) | 22.7 (1.6×) | 22.8 (1.6×) | 38.4 (2.6×) | 38.0 (2.6×) |
+| 256 | 50% | 10 | 2.40 | 2.51 (1.0×) | 2.49 (1.0×) | 7.45 (3.1×) | 7.46 (3.1×) | 19.4 (8.1×) | 18.6 (7.8×) |
+| 256 | 50% | 12 | 1.12 | 0.80 (0.7×) | 0.79 (0.7×) | 2.07 (1.8×) | 1.83 (1.6×) | — | — |
+| 256 | 10% | 6 | 104 | 108 (1.0×) | 112 (1.1×) | 118 (1.1×) | 113 (1.1×) | 142 (1.4×) | 136 (1.3×) |
+| 256 | 10% | 8 | 8.35 | 9.89 (1.2×) | 8.82 (1.1×) | 14.8 (1.8×) | 15.7 (1.9×) | 25.1 (3.0×) | 25.3 (3.0×) |
+| 256 | 10% | 10 | 1.39 | 1.61 (1.2×) | 1.58 (1.1×) | 6.62 (4.7×) | 6.57 (4.7×) | 17.1 (12.3×) | 15.6 (11.2×) |
+| 256 | 10% | 12 | 0.78 | 0.62 (0.8×) | 0.50 (0.6×) | 1.77 (2.3×) | 0.91 (1.2×) | — | — |
+| 256 | 1% | 6 | 23.1 | 20.5 (0.9×) | 20.2 (0.9×) | 33.7 (1.5×) | 33.0 (1.4×) | 39.1 (1.7×) | 41.9 (1.8×) |
+| 256 | 1% | 8 | 1.62 | 2.48 (1.5×) | 1.88 (1.2×) | 7.37 (4.5×) | 7.27 (4.5×) | 15.5 (9.5×) | 18.2 (11.2×) |
+| 256 | 1% | 10 | 0.20 | 0.70 (3.5×) | 0.62 (3.1×) | 3.59 (17.9×) | 2.07 (10.3×) | 6.80 (33.9×) | 2.11 (10.5×) |
+| 256 | 1% | 12 | 0.05 | 0.23 (4.6×) | 0.11 (2.3×) | 0.89 (18.1×) | 0.39 (7.9×) | — | — |
+| 256 | 0.1% | 6 | 4.20 | 3.63 (0.9×) | 2.88 (0.7×) | 8.77 (2.1×) | 8.14 (1.9×) | 18.9 (4.5×) | 17.2 (4.1×) |
+| 256 | 0.1% | 8 | 0.20 | 0.58 (2.8×) | 0.52 (2.5×) | 1.84 (9.0×) | 1.05 (5.1×) | 5.15 (25.1×) | 1.67 (8.1×) |
+| 256 | 0.1% | 10 | 0.05 | 0.22 (4.5×) | 0.09 (1.8×) | 0.91 (18.7×) | 0.22 (4.6×) | 2.75 (56.6×) | 0.56 (11.6×) |
+| 256 | 0.1% | 12 | 0.02 | 0.06 (2.5×) | 0.05 (2.0×) | 0.22 (9.0×) | 0.15 (6.3×) | — | — |
+| 3,000 | 50% | 6 | 2,330 | 2,344 (1.0×) | 2,391 (1.0×) | 2,480 (1.1×) | 2,557 (1.1×) | 2,862 (1.2×) | 2,817 (1.2×) |
+| 3,000 | 50% | 8 | 176 | 188 (1.1×) | 189 (1.1×) | 266 (1.5×) | 267 (1.5×) | 469 (2.7×) | 443 (2.5×) |
+| 3,000 | 50% | 10 | 32.7 | 45.3 (1.4×) | 47.9 (1.5×) | 99.4 (3.0×) | 86.5 (2.6×) | 252 (7.7×) | 224 (6.8×) |
+| 3,000 | 50% | 12 | 12.0 | 17.4 (1.5×) | 17.8 (1.5×) | 39.9 (3.3×) | 36.6 (3.0×) | — | — |
+| 3,000 | 10% | 6 | 1,222 | 1,237 (1.0×) | 1,262 (1.0×) | 1,322 (1.1×) | 1,384 (1.1×) | 1,597 (1.3×) | 1,700 (1.4×) |
+| 3,000 | 10% | 8 | 96.7 | 103 (1.1×) | 103 (1.1×) | 166 (1.7×) | 203 (2.1×) | 327 (3.4×) | 321 (3.3×) |
+| 3,000 | 10% | 10 | 22.6 | 30.9 (1.4×) | 38.6 (1.7×) | 68.2 (3.0×) | 67.2 (3.0×) | 160 (7.1×) | 150 (6.6×) |
+| 3,000 | 10% | 12 | 14.2 | 9.90 (0.7×) | 8.34 (0.6×) | 23.2 (1.6×) | 12.0 (0.8×) | — | — |
+| 3,000 | 1% | 6 | 331 | 282 (0.9×) | 327 (1.0×) | 309 (0.9×) | 319 (1.0×) | 424 (1.3×) | 453 (1.4×) |
+| 3,000 | 1% | 8 | 27.2 | 40.8 (1.5×) | 39.9 (1.5×) | 86.6 (3.2×) | 79.5 (2.9×) | 182 (6.7×) | 164 (6.0×) |
+| 3,000 | 1% | 10 | 5.83 | 13.6 (2.3×) | 12.4 (2.1×) | 42.8 (7.3×) | 26.6 (4.6×) | 76.1 (13.0×) | 29.5 (5.1×) |
+| 3,000 | 1% | 12 | 0.57 | 2.97 (5.2×) | 1.45 (2.5×) | 16.0 (27.9×) | 6.45 (11.2×) | — | — |
+| 3,000 | 0.1% | 6 | 69.9 | 76.5 (1.1×) | 68.7 (1.0×) | 89.1 (1.3×) | 94.3 (1.3×) | 184 (2.6×) | 178 (2.5×) |
+| 3,000 | 0.1% | 8 | 5.88 | 13.9 (2.4×) | 13.1 (2.2×) | 31.7 (5.4×) | 23.2 (4.0×) | 66.7 (11.3×) | 38.9 (6.6×) |
+| 3,000 | 0.1% | 10 | 0.66 | 2.91 (4.4×) | 1.13 (1.7×) | 12.9 (19.5×) | 3.76 (5.7×) | 33.1 (50.3×) | 7.00 (10.6×) |
+| 3,000 | 0.1% | 12 | 0.26 | 0.66 (2.5×) | 0.46 (1.7×) | 2.37 (9.0×) | 1.62 (6.1×) | — | — |
+
 ## How the cases are built
 
 The mask bench's model is the 2026-09-04 probe's: a universe of 2³⁰ rows, one bitmap at N = 1 or N
@@ -210,7 +263,8 @@ run-heavy variant, whose tables are in `treemap-*.md`.
   bench's per-part offsets can reorder them.
 - `count_local` builds its one-run bitmap inside the timer, as an engine call would.
 - Every part, including one with no visible row, goes to decode and select, as the bench did on
-  2026-09-04.
+  2026-09-04. `select_tiles` skips a tile with no visible row, as `tile_sweep` does, and
+  `select_parts` also each part with none; both are checked to serve the same rows on every tile.
 - The figures walk's labels are drawn uniformly at random, so its count vector is written at random
   addresses. A real level's labels follow the map, which would make the walk cheaper and leave the
   sum unchanged.

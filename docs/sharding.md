@@ -378,7 +378,16 @@ few visible rows. Counting and selecting together, a request at N = 8 costs 0.7 
 today's single shard at 10% coverage and above, and 1.9 to 8.1 times for a viewer of 0.1% or 1% at
 depth 8 and deeper, 0.3 to 55 ms. At N = 100 the same figures reach 10 and 64 times. Selection
 is therefore batched per shard as the count is: one cursor walk of a leaf over the request's ranges
-in row order, feeding the merge of the shard's parts. Not measured yet. `rows_in_range`, the
+in row order, feeding the merge of the shard's parts. Not measured yet.
+
+Leaving out the parts of a tile with no visible row takes most of N's cost off a narrow viewer.
+Measured with the count batched, a viewer of 0.1% or 1% at depth 8 and deeper pays 1.2 to 3.1 times
+today's single shard at N = 8 and 5 to 12 times at N = 100, against up to 57 times without; a
+viewer of 10% or more changes little (`probes/2026-10-09-shard-read-costs/`, Table 6). Which parts
+are empty depends on where the viewer's items sit, which under reuse depends on other viewers'
+deletions, so the skip is a timing question §6 has to settle before it is built.
+
+`rows_in_range`, the
 materialised `leaf ∩ range` that selection reads while the overlay holds denies, grows worst: 18 ms
 at one shard to 965 ms at 100 at depth 6 and 50% coverage, so the same batching applies to it.
 
@@ -609,6 +618,11 @@ builds today's bundle, apart from the directory layout and the manifest.
   items reuse ids in the shards other viewers' deletions emptied, so work that skipped such shards
   would vary with other viewers' deletions. A fragment-cache hit is per shard, a finer sample of the
   cache's existing timing channel.
+- Not settled: whether selection may leave out a tile's parts with no visible row (§3.2). Today's
+  sweep skips a tile with no visible row, whose count the response serves. A part's emptiness is
+  not served, and under reuse it depends on other viewers' deletions. The skip saves a seek and a
+  merge entry per empty part, about 0.1 µs measured, which is the size of the timing difference it
+  would add.
 - An identifier that inverts to a dropped shard or layer space takes the same lookups as one naming
   an item the viewer may not see.
 - A reused number carries nothing of its previous holder (§1.3), and its previous `tessera_id` never
@@ -729,6 +743,7 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 | counting a 256-tile request at depth 12, 50% coverage: 0.49 ms at N = 1, 4.5 ms at N = 8 | measured, synthetic, one thread, before term images | `probes/2026-09-04-epoch-shard-treemap-mask/` |
 | counting a 3,000-tile contiguous request at depth 10, 10% coverage: 8.0 ms today and 0.38 ms with `count_ranges` at N = 1; 875 ms and 8.5 ms at N = 100 | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
 | counting and selecting together at N = 8: 0.7 to 1.6 times today's single shard at 10% coverage and above; 1.9 to 8.1 times at 0.1% and 1%, depth 8 and deeper | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
+| with a tile's empty parts also left out of selection, at depth 8 and deeper: 1.2 to 3.1 times at 0.1% and 1% at N = 8, 5 to 12 times at N = 100 | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/`, Table 6 |
 | a level's figures walk and sum over 1,000,000 artifacts at N = 100: 1.05 times N = 1 at 50% coverage, 3.4 times at 0.1% | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
 | one mask projected through N = 8, 32 or 100 permutations: 0.76 to 1.28 times one; per-row cost from 10⁸ to 4×10⁸ rows rose 1.9 times at 25% coverage on a 4-core host | measured, synthetic, one thread | `probes/2026-10-09-shard-read-costs/` |
 | a per-shard tile index alone is 6 to 8.8 times the bytes at N = 8 | measured, before label columns served most levels | `probes/2026-09-04-epoch-shard-tile-index/` |
