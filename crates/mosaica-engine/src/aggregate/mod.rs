@@ -450,7 +450,15 @@ impl Engine {
             .iter()
             .enumerate()
             .map(|(index, grouping)| {
-                Plan::of(self, session, &generation, req.view, index, grouping, req.caps.cells)
+                Plan::of(
+                    self,
+                    session,
+                    &generation,
+                    req.view,
+                    index,
+                    grouping,
+                    req.caps.cells,
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         let layers: Vec<Option<u64>> = plans.iter().map(Plan::layer_entity).collect();

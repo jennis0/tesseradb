@@ -198,7 +198,12 @@ impl Columns {
     fn within(self, rect: &CellRect) -> Columns {
         let keep: Vec<bool> = self.cells.iter().map(|&cell| rect.contains(cell)).collect();
         let pick = |values: Vec<u64>| -> Vec<u64> {
-            values.into_iter().zip(&keep).filter(|(_, &k)| k).map(|(v, _)| v).collect()
+            values
+                .into_iter()
+                .zip(&keep)
+                .filter(|(_, &k)| k)
+                .map(|(v, _)| v)
+                .collect()
         };
         Columns {
             cells: pick(self.cells),
@@ -311,9 +316,12 @@ impl Plan {
                     y_min: q.y_min,
                     y_max: q.y_max,
                 };
-                let bbox = grouping
-                    .area
-                    .unwrap_or([extent.x_min, extent.y_min, extent.x_max, extent.y_max]);
+                let bbox = grouping.area.unwrap_or([
+                    extent.x_min,
+                    extent.y_min,
+                    extent.x_max,
+                    extent.y_max,
+                ]);
                 let rect = |depth: u8| cells_for_bbox(bbox, depth.min(32), &extent);
                 let count = rect(depth).count();
                 if count > limit {
@@ -553,7 +561,10 @@ impl Plan {
         Ok(Some(Page {
             head,
             batch,
-            bytes: kept.saturating_mul(row_bits).div_ceil(8).saturating_add(dictionary),
+            bytes: kept
+                .saturating_mul(row_bits)
+                .div_ceil(8)
+                .saturating_add(dictionary),
             cut_by_bytes,
             next,
         }))
@@ -652,7 +663,11 @@ impl Plan {
                     push("key", Arc::new(ids), true);
                     if let Some(titles) = &groups.titles {
                         let positions = repeated(runs, |g| g.min(listed) as i32).into();
-                        push("title", title_column(runs, listed, positions, titles)?, true);
+                        push(
+                            "title",
+                            title_column(runs, listed, positions, titles)?,
+                            true,
+                        );
                     }
                     let slot = |g: u32| {
                         let slots = groups.slots.as_ref()?;
@@ -691,7 +706,11 @@ impl Plan {
                     .map_err(malformed)?;
                     push("key", Arc::new(key), true);
                     if let Some(titles) = &groups.titles {
-                        push("title", title_column(runs, listed, positions, titles)?, true);
+                        push(
+                            "title",
+                            title_column(runs, listed, positions, titles)?,
+                            true,
+                        );
                     }
                 }
             }
@@ -735,13 +754,13 @@ fn typed(kind: Kind, values: &[Option<Edge>]) -> ArrayRef {
         None => None,
     };
     match kind {
-        Kind::Float => Arc::new(Float64Array::from_iter(values.iter().map(|value| {
-            match *value {
+        Kind::Float => Arc::new(Float64Array::from_iter(values.iter().map(
+            |value| match *value {
                 Some(Edge::Float(x)) => Some(x),
                 Some(Edge::Int(x)) => Some(x as f64),
                 None => None,
-            }
-        }))),
+            },
+        ))),
         Kind::Signed => Arc::new(Int64Array::from_iter(
             values.iter().map(|v| int(v).map(|x| x as i64)),
         )),
@@ -916,7 +935,11 @@ impl Plan {
             1u64 << (2 * u32::from(depth))
         };
         let most_cells = self.area_cells.min(cx.view_rows());
-        let factor = cx.engine.switches.aggregate_range_factor.load(Ordering::Relaxed);
+        let factor = cx
+            .engine
+            .switches
+            .aggregate_range_factor
+            .load(Ordering::Relaxed);
         let ranges = |size: u64| depth <= 16 && most_cells.saturating_mul(factor) <= size;
         let methods: Vec<(bool, bool)> = groups
             .sizes
@@ -1210,7 +1233,10 @@ impl Walk<'_> {
 }
 
 /// The parts of `chunks` inside `ranges`, both ascending.
-fn clip(chunks: &[std::ops::Range<u64>], ranges: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64>> {
+fn clip(
+    chunks: &[std::ops::Range<u64>],
+    ranges: &[std::ops::Range<u64>],
+) -> Vec<std::ops::Range<u64>> {
     let mut out = Vec::new();
     let mut r = 0;
     for chunk in chunks {

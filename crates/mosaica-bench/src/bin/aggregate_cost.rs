@@ -29,9 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::array::{Array, AsArray};
-use arrow::datatypes::{
-    DataType, Float64Type, Int64Type, TimestampMicrosecondType, UInt64Type,
-};
+use arrow::datatypes::{DataType, Float64Type, Int64Type, TimestampMicrosecondType, UInt64Type};
 use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use serde_json::{json, Value};
@@ -350,7 +348,11 @@ fn main() -> Result<(), BoxError> {
         let edges = read(&engine, &session, &args.view, None, &[histogram(None)])?.edges;
         cases.push((format!("{column} bins 20"), histogram(None), true));
         if let Some(range) = edges {
-            cases.push((format!("{column} bins 20 in a range"), histogram(Some(range)), true));
+            cases.push((
+                format!("{column} bins 20 in a range"),
+                histogram(Some(range)),
+                true,
+            ));
         }
     }
     let depths = match args.density_depth.is_empty() {
