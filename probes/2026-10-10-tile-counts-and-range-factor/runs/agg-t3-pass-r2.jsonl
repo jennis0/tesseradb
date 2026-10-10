@@ -1,0 +1,12 @@
+{"repeat":3,"threads":4,"view":"s0"}
+{"case":"viewport zoom 4","ms":{"fastest":13.413503,"median":13.474525,"slowest":13.569563},"region":false}
+{"case":"density d4","items":925543,"last_run_ms":{"batch":0.012465,"cells":5.90636,"compose":0.021664,"count":0.0,"pass":5.867704},"method":"pass","ms":{"fastest":6.027622,"median":6.044225,"slowest":6.507816},"pages":1,"region":false,"rows":256}
+{"case":"density d5","items":925543,"last_run_ms":{"batch":0.012999,"cells":6.175715,"compose":0.018996,"count":0.0,"pass":6.146925},"method":"pass","ms":{"fastest":6.284142,"median":6.393791,"slowest":6.568619},"pages":1,"region":false,"rows":1024}
+{"case":"density d6","items":925543,"last_run_ms":{"batch":0.030153,"cells":7.0779,"compose":0.029876,"count":0.0,"pass":7.029248},"method":"pass","ms":{"fastest":6.470414,"median":7.168755,"slowest":7.221919000000001},"pages":1,"region":false,"rows":4096}
+{"case":"density d7","items":925543,"last_run_ms":{"batch":0.056618,"cells":7.076084,"compose":0.020191,"count":0.0,"pass":7.040372},"method":"pass","ms":{"fastest":7.230637,"median":7.231191,"slowest":7.287932},"pages":1,"region":false,"rows":16384}
+{"case":"density d8","items":925543,"last_run_ms":{"batch":0.161886,"cells":6.284887,"compose":0.019517,"count":0.0,"pass":6.249131},"method":"pass","ms":{"fastest":6.536121,"median":7.2992,"slowest":7.649638},"pages":1,"region":false,"rows":65536}
+{"case":"density d9","items":925543,"last_run_ms":{"batch":0.775291,"cells":7.263058,"compose":0.018953,"count":0.0,"pass":7.215537},"method":"pass","ms":{"fastest":7.052117999999999,"median":8.133855,"slowest":8.163956},"pages":1,"region":false,"rows":254494}
+{"case":"density d10","items":925543,"last_run_ms":{"batch":2.677089,"cells":7.791197,"compose":0.021806,"count":0.0,"pass":7.740711},"method":"pass","ms":{"fastest":11.326707,"median":12.039963,"slowest":13.016902},"pages":1,"region":false,"rows":615027}
+{"case":"density d11","items":925543,"last_run_ms":{"batch":2.86768,"cells":8.9518,"compose":0.020821,"count":0.0,"pass":8.899651},"method":"pass","ms":{"fastest":10.410855999999999,"median":11.826201,"slowest":11.961034},"pages":1,"region":false,"rows":830269}
+{"case":"density d12","items":925543,"last_run_ms":{"batch":6.381727,"cells":7.710149,"compose":0.029188,"count":0.0,"pass":7.648497},"method":"pass","ms":{"fastest":12.652676,"median":16.319684000000002,"slowest":18.538294},"pages":1,"region":false,"rows":900386}
+{"case":"viewport zoom 4","ms":{"fastest":0.9545699999999999,"median":1.143258,"slowest":1.511404},"region":true}

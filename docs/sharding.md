@@ -360,8 +360,8 @@ bundle/
 
 `ShardedMask` has `count_ranges(shard, &[Range<u32>]) -> Vec<u64>`, which takes a request's ranges
 in row order and ranks their endpoints in one call to CRoaring's `roaring_bitmap_rank_many`, a walk
-of the leaf's containers with a running rank. The sweep calls it once per shard in place of two
-`count_range` calls per part. Every other operation, `rows_in_range`, `for_each_run`, `contains`
+of the leaf's containers with a running rank. The sweep calls it once per shard, as it calls
+`EffectiveMask::count_ranges` once per request today. Every other operation, `rows_in_range`, `for_each_run`, `contains`
 and the leaf-wise `and`, `or` and `andnot`, takes a shard. A leaf stays a `croaring` bitmap.
 
 Measured on a synthetic 2³⁰-row universe, one thread, a 4-core host
@@ -781,7 +781,7 @@ the refusal is removed at stage 5.
 
 | Stage | What it does | Gate |
 |---|---|---|
-| 0 | §8.1; `count_ranges` in today's engine. Built for the density underlay's and the aggregate's cells, which are 1.4 to 10 times faster for a viewer who sees most of the map (`probes/2026-10-10-batched-cell-counts/`). Not built yet: the sweep's tile counts, which count one range at a time, where the bench counts a contiguous request 2.5 to 50 times faster at one shard | figures recorded in a probe |
+| 0 | §8.1; `count_ranges` in today's engine. Built for the density underlay's and the aggregate's cells, which are 1.4 to 10 times faster for a viewer who sees most of the map (`probes/2026-10-10-batched-cell-counts/`), and for the sweep's tile counts, whose count stage is 4 to 28 times faster for a viewer of 30% or more at depth 6 and deeper, and whose request is 6 to 43% faster for a viewer of 30% (`probes/2026-10-10-tile-counts-and-range-factor/`) | figures recorded in a probe |
 | 1 | the identity input gains the kind bit, the shard field and the occupancy, in the engine and in the oracle's own derivation and its vectors; the pool keeps a bitmap per occupancy; a compaction frees a deleted item's number at the next occupancy and retires one at the cap; format bump | reuse and cap fixtures; §8.4 on one shard |
 | 2 | `ShardId`; every per-entity and per-view structure moves under `shards/0/`; the manifest and side-manifest split; `shards.size` declared and recorded, and a size that would open a second shard refused on both paths; the compile-fail tests | the whole suite on rebuilt bundles |
 | 3 | layer spaces: artifact records, own-label postings and overlay move out of the point space; the two-region allocator and its low water go; artifact identifiers take the kind bit | layer drop fixture; byte scanner extended |
