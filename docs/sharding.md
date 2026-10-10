@@ -13,7 +13,7 @@ marks meet.
 
 Three things fill the space faster than the corpus grows.
 
-- A deleted item's number, the entity id it was first given and from which its `tessera_id` is
+- A deleted item's number, the entity id it was first given and from which its `mosaica_id` is
   derived, is never issued again. Every insert therefore spends an id for good. Under a steady rate
   of deletions and inserts the space fills while the live corpus stays the same size. Only the ids
   that edits leave behind are freed ([write path](system/write-path.md#freed-entity-ids)).
@@ -33,7 +33,7 @@ gains a unit it can seal, compact, verify and drop on its own.
 The design has four parts.
 
 1. A deleted item's number is issued again, and a count of its previous holders goes into the
-   `tessera_id`, so the space follows the live corpus (§1). This part stands on its own and is the
+   `mosaica_id`, so the space follows the live corpus (§1). This part stands on its own and is the
    first stage.
 2. The corpus becomes a list of point shards in one process, each with its own entity space.
    Artifacts leave the point space for one space per layer (§2).
@@ -50,26 +50,26 @@ An edit moves an item to a new entity and keeps its number. The compaction that 
 entity's rows frees the entity, unless it is an item's number. A freed id is held back until the
 write-ahead log (WAL) keeps no record older than the compaction's publication. It is then issued,
 lowest first, before any id from the high water. The free and held sets are one pool per bundle,
-written into every side-manifest. A deleted item's number stays reserved, so that a `tessera_id` a
+written into every side-manifest. A deleted item's number stays reserved, so that a `mosaica_id` a
 client holds never comes to name another item.
 
 ### 1.2 The occupancy
 
-Each id has an occupancy: how many items have held it as their number before. The `tessera_id` of
+Each id has an occupancy: how many items have held it as their number before. The `mosaica_id` of
 an item becomes
 
 ```text
-tessera_id = FPE_k( (kind: 1) ‖ (shard: 19) ‖ (occupancy: 12) ‖ (number: 32) )
+mosaica_id = FPE_k( (kind: 1) ‖ (shard: 19) ‖ (occupancy: 12) ‖ (number: 32) )
 ```
 
 where `FPE_k` is the keyed Feistel permutation the bundle uses today
 (`crates/mosaica-types/src/identity.rs`). Its 32-bit high half holds the shard id today, which is
 0 in every bundle. The kind bit is 0 for an item and 1 for an artifact (§2.2). An item takes the
-occupancy of the id it is given. Its `tessera_id` is fixed for its life, across edits, as it is
+occupancy of the id it is given. Its `mosaica_id` is fixed for its life, across edits, as it is
 today. When the item is deleted and its number freed, the number's next holder takes the next
-occupancy and so a different `tessera_id`.
+occupancy and so a different `mosaica_id`.
 
-A held `tessera_id` therefore never names another item. A lookup inverts it to (shard, occupancy,
+A held `mosaica_id` therefore never names another item. A lookup inverts it to (shard, occupancy,
 number) and compares the whole identifier with the one stored at the row the number leads to, as
 it does today. An identifier with an occupancy below the current one fails that comparison and
 answers as one that names nothing.
@@ -79,7 +79,7 @@ state ([write path](system/write-path.md#generations)).
 
 ### 1.3 What frees a number
 
-A compaction removes the rows of deleted entities. For each removed row it reads the `tessera_id`
+A compaction removes the rows of deleted entities. For each removed row it reads the `mosaica_id`
 stored at the row and inverts it to (occupancy, number). Where no live entity holds that number
 any longer, the number is freed at occupancy + 1. A removed entity that is not a number, an id an
 edit moved its item onto, is freed at occupancy 0 (§1.4). The edited-items map tells the two apart,
@@ -104,7 +104,7 @@ holds ids no item has held as its number, which are the ids edits leave behind.
 - A new item takes an id from the lowest occupancy, the lowest id first, before any id from the high
   water.
 - An edit's new entity takes an id of occupancy 0, or one from the high water. It never takes one of
-  a higher occupancy. Its rows carry its item's `tessera_id`, so it never becomes a number, and it
+  a higher occupancy. Its rows carry its item's `mosaica_id`, so it never becomes a number, and it
   returns to occupancy 0 when freed. No record of where it came from is needed.
 - A number at occupancy 4,095 is not freed. The compaction that removes its last row retires it,
   and the shard counts it.
@@ -121,8 +121,8 @@ higher churn is measured at the first stage's gate (§8.4).
 
 ### 1.5 What a client sees
 
-A deleted item's `tessera_id` answers as one that names nothing, as it does today, and goes on doing
-so after its number is reused. A rebuild still gives every item a new `tessera_id`. Nothing else
+A deleted item's `mosaica_id` answers as one that names nothing, as it does today, and goes on doing
+so after its number is reused. A rebuild still gives every item a new `mosaica_id`. Nothing else
 changes for a client.
 
 ```mermaid
@@ -137,7 +137,7 @@ stateDiagram-v2
   retired --> [*]
 ```
 
-*A number's life. Each pass round the loop gives the id's next holder a different `tessera_id`.*
+*A number's life. Each pass round the loop gives the id's next holder a different `mosaica_id`.*
 
 ## 2. Shards and layer spaces
 
@@ -206,10 +206,10 @@ Dropping a layer drops its space whole at the next publication, and the name sta
 layer space is rewritten in place to remove the records of deleted artifacts, keeping every id, on
 its own gauges: the deleted artifacts and the size of its overlay.
 
-An artifact's `tessera_id` becomes
+An artifact's `mosaica_id` becomes
 
 ```text
-tessera_id = FPE_k( (kind: 1) ‖ (layer space: 31) ‖ (entity: 32) )
+mosaica_id = FPE_k( (kind: 1) ‖ (layer space: 31) ‖ (entity: 32) )
 ```
 
 With artifacts gone from it, a point shard's ids run to `u32::MAX`, and the two-region allocator
@@ -256,16 +256,16 @@ flowchart TB
 |---|---|---|---|
 | `RowId` | `u32` | a row in one view of one shard | disc, inside that shard |
 | `EntityId` | `u64`, value below 2³² | an entity in one point shard or one layer space | disc, inside that shard or space |
-| `ShardId` | `u32`, below 2¹⁹ | a point shard | disc and the manifest; the wire only inside a `tessera_id` |
-| `LayerSpace` | `u32`, below 2³¹ | a layer space | disc and the manifest; the wire only inside a `tessera_id` |
+| `ShardId` | `u32`, below 2¹⁹ | a point shard | disc and the manifest; the wire only inside a `mosaica_id` |
+| `LayerSpace` | `u32`, below 2³¹ | a layer space | disc and the manifest; the wire only inside a `mosaica_id` |
 | `ShardRow` | `u64` | shard × 2³² + row, the key of a sharded mask | neither: inside the engine only |
-| `tessera_id` | `u64` | an item or an artifact | the wire, as today |
+| `mosaica_id` | `u64` | an item or an artifact | the wire, as today |
 
 `RowId` keeps its type and every store API that takes one also takes a `ShardId`. The compile-fail
 tests gain three cases: a `ShardRow` cannot be built from an `EntityId`, nor from a `LayerSpace`,
 and a `RowId` cannot be read out of a `ShardRow` without its shard.
 
-The priority, the top 16 bits of `tessera_id`, is unchanged. The permutation is keyed over its
+The priority, the top 16 bits of `mosaica_id`, is unchanged. The permutation is keyed over its
 whole input, so no two items in any two shards share an identity and ranks from different shards
 interleave uniformly.
 
@@ -324,7 +324,7 @@ bundle/
 
 | Manifest field | Change |
 |---|---|
-| `identity.shard_id` | removed: the shard is in each `tessera_id`'s own input |
+| `identity.shard_id` | removed: the shard is in each `mosaica_id`'s own input |
 | `entity_id_high_water`, `entity_id_low_water` | removed: each shard's high water is in its record, and there is no low water |
 | `shards` | new: one record per point shard: number, state, high water, pool size, retired count, when it opened and sealed |
 | `next_shard_id`, `next_layer_space` | new: monotone counters |
@@ -416,11 +416,11 @@ response sends.
 | Route and figure | Each shard | Combined by |
 |---|---|---|
 | viewport counts: visible, matched, highlighted, and sub-cell density | `count_ranges` over the request's ranges | sum |
-| viewport points, threshold and cap | the visible items in the tile below the combined cut, ascending by `tessera_id`, at most the cap | merge by `tessera_id`, cut at the cap |
+| viewport points, threshold and cap | the visible items in the tile below the combined cut, ascending by `mosaica_id`, at most the cap | merge by `mosaica_id`, cut at the cap |
 | viewport points, floor | its `m` smallest visible identities in the tile | merge, keep `m` |
 | identity bands | the band each shard reads is chosen from the combined cut and that shard's tile count | inside the two rows above |
 | a point's artifact tag in each layer | read from that shard's level column | none: whether the artifact is served comes from its combined figures |
-| artifacts of each tile | candidates from that shard's coverings, labels above the base or tile index, each tested for a visible member in the tile | union, one entry per artifact, ordered by combined count then `tessera_id`, cut to `per_tile` |
+| artifacts of each tile | candidates from that shard's coverings, labels above the base or tile index, each tested for a visible member in the tile | union, one entry per artifact, ordered by combined count then `mosaica_id`, cut to `per_tile` |
 | a level's figures: count, centroid, box | F per (grant, shard), D per (shard, deny version), T per (session, shard) | counts and position sums add; each side of the box is the extreme across shards of each shard's first kept extreme row that D does not hold, or of a walk of that shard where D holds all eight |
 | a `nested` or `dag` cut | counts in the cut's tiles | summed, then cut once |
 | membership requirement | visible members of the artifact | summed, against the declared total held in the layer space |
@@ -431,8 +431,8 @@ response sends.
 | aggregate: sampled bins | counts below the cut set from the combined set size, read from the band or by scan as that shard's figures price it | summed, then scaled |
 | a field's figures | tallies of the admitted key lists; D per deny version | count, sum and no-value add; the smallest and largest are each shard's first kept value D does not hold, or a walk of that shard, then the extreme across shards |
 | category listing and suggest | which values a visible item carries, and counts | union of presence; counts summed |
-| item and artifact cards | none | dispatched to the shard or layer space the `tessera_id` inverts to |
-| bulk items in map order | rows in (cell, `tessera_id`) order | merge in that order; the cursor is unchanged |
+| item and artifact cards | none | dispatched to the shard or layer space the `mosaica_id` inverts to |
+| bulk items in map order | rows in (cell, `mosaica_id`) order | merge in that order; the cursor is unchanged |
 | bulk items in stored order | rows in entity order | shard by shard; the cursor gains the shard |
 | bulk artifacts, browse | none per artifact | counts from the combined figures |
 | filters | every leaf, inside that shard's mask; `eq` and `in` on a unique field read each shard's index after its key filter; `member_of` reads that shard's slice | per shard: a filter only narrows that shard's visible rows |
@@ -443,9 +443,9 @@ suite's second mode checks (§7).
 
 ### 3.5 Order and streaming
 
-A tile's points are sent in ascending `tessera_id` order today, and a response that stops early
+A tile's points are sent in ascending `mosaica_id` order today, and a response that stops early
 holds a prefix of each tile's answer. The merge in pass 2 emits in that order, so the prefix rule
-holds unchanged. A bulk read in map order merges every shard's segments by (cell, `tessera_id`), as
+holds unchanged. A bulk read in map order merges every shard's segments by (cell, `mosaica_id`), as
 it merges one view's segments today, and its cursor holds the same value. The compute permit is
 released after the counts frame, as today, which is after pass 1.
 
@@ -502,7 +502,7 @@ remains, is not part of this design. It is decided from the churn measurement (�
 
 ### 4.2 Resolving a batch
 
-A row's `tessera_id` inverts to its shard, occupancy and number. A unique value is looked up in
+A row's `mosaica_id` inverts to its shard, occupancy and number. A unique value is looked up in
 every shard. Each shard holds a key filter beside each unique index, about 10 bits per value,
 rebuilt at the shard's compaction. A lookup probes every filter and searches only the shards that
 answer. The executor's in-memory record of the unique values recent flushes moved to disc stays one
@@ -625,7 +625,7 @@ builds today's bundle, apart from the directory layout and the manifest.
   would add.
 - An identifier that inverts to a dropped shard or layer space takes the same lookups as one naming
   an item the viewer may not see.
-- A reused number carries nothing of its previous holder (§1.3), and its previous `tessera_id` never
+- A reused number carries nothing of its previous holder (§1.3), and its previous `mosaica_id` never
   names the new item (§1.2).
 - A bulk read in stored order walks shards in number order. Stored order already follows the order
   items were numbered in.
@@ -644,7 +644,7 @@ Fixtures beyond that:
 
 | Fixture | Checks |
 |---|---|
-| reuse | a deleted item's number is issued again at the next occupancy; the old `tessera_id` answers as naming nothing on every route; the new item carries nothing of the old, in any home, across a flush, merge, compaction and restart |
+| reuse | a deleted item's number is issued again at the next occupancy; the old `mosaica_id` answers as naming nothing on every route; the new item carries nothing of the old, in any home, across a flush, merge, compaction and restart |
 | cap | a number at occupancy 4,095 is retired by the compaction that removes it and never issued again |
 | sealed shard | takes edits, deletions and suppressions; the removal rules hold per shard; an edit's new entity stays in the shard |
 | allocation | new items go to the largest pool above the threshold; a steady churn opens no shard |

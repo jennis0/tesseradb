@@ -8,8 +8,9 @@ ratios between shard counts are what compare.
 
 Harnesses: `crates/mosaica-bench/src/bin/epoch_shard_treemap_mask.rs`, extended at 790efb3a, and
 `crates/mosaica-bench/src/bin/epoch_shard_projection.rs`, unchanged. Sequence: [`run.sh`](run.sh).
-Every cell with its samples: `treemap-*.json`; the bench's own tables: `treemap-*.md`; the
-projection's raw output: `runs/`, folded by `collate_projection.py` into `projection-result.json`.
+`run.sh` writes each run's cells as JSON and tables beside it, and the projection's raw output into
+`runs/`, which `collate_projection.py` folds into `projection-result.json`. Those outputs are not
+kept in the tree; the tables below are taken from them.
 
 This is §8.1 of [the sharding plan](../../docs/sharding.md). The tile-index bench,
 `epoch_shard_tile_index`, did not run: it reads the MedCPT and PaperSeek bundles, which are not
@@ -184,7 +185,7 @@ reuses one scratch.
 | 32 | `project_with` | 25% | 240.6 | 245.4 | 1.02 | 1.05 |
 | 100 | `project_with` | 25% | 233.5 | 204.5 | 0.88 | 0.91 |
 
-The linearity table and the token table are printed by `python3 collate_projection.py`. Its
+After a run, `python3 collate_projection.py` prints the linearity table and the token table. Its
 heading over the shard table names N = 100 for every row; the rows are N = 100, 32 and 8 in that
 order within each coverage, as their container counts (1,600, 1,536, 1,528) show.
 
@@ -207,7 +208,7 @@ ms per walk, median of five.
 
 ## Table 6: mask work with empty parts skipped
 
-Count and select summed, in ms per request, contiguous tiles, from `treemap-parts-viewport-*.json`.
+Count and select summed, in ms per request, contiguous tiles, from `run.sh parts`.
 "Today" is the per-range count and `select_tiles` at N = 1. "Count batched" is `count_ranges` and
 `select_tiles`; "and skipped" is `count_ranges` and `select_parts`. Each cell is the median of
 three samples; the ratio in brackets is against today.
@@ -252,8 +253,8 @@ three samples; the ratio in brackets is against today.
 The mask bench's model is the 2026-09-04 probe's: a universe of 2³⁰ rows, one bitmap at N = 1 or N
 leaves of 2³⁰/N rows at the same density, and a tile at depth d one range of 2³⁰/4ᵈ rows, or N
 ranges of 2³⁰/(N·4ᵈ), one per leaf at the same map position. Each part starts up to one container
-past its nominal start, as a real tile's range does. Rows are drawn independently, except in the
-run-heavy variant, whose tables are in `treemap-*.md`.
+past its nominal start, as a real tile's range does. Rows are drawn independently, except in a
+run-heavy variant at 10%, which `run.sh treemap` also measures.
 
 - `--layout random` places a request's tiles anywhere, as the 2026-09-04 probe did. `--layout
   viewport` places them as a contiguous block of the map in Morton order, as a screen asks for
