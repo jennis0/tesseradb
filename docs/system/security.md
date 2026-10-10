@@ -253,16 +253,19 @@ group by access. A bulk read in stored order discloses the second of these, as
 [reading in bulk](#reading-in-bulk) states. No content is at stake: content is protected by the
 first property.
 
-The `mosaica_id` a client receives is a keyed permutation of the entity id, so two of them reveal
-nothing about whether their items are adjacent. The key is drawn from the operating system's random
-source each time `mosaica build` creates a bundle, and is stored in that bundle's manifest. Nobody
-configures or supplies it, and no response or log line carries it. A copy of a bundle keeps its
-`mosaica_id`s. A rebuild creates a new bundle with a new key, so every `mosaica_id` changes. No
-request accepts an entity id, so a client cannot enumerate them by trying values. A bulk read's
-cursor holds internal positions only inside its encryption, and a cursor the server did not issue
-for that read does not open. The permutation is not cryptographic, and it should not be assumed to
-resist a viewer who has obtained known pairs of an entity id and its `mosaica_id`; no route on the
-viewer plane yields one, so what the permutation hides does not depend on cryptographic strength.
+The `mosaica_id` a client receives is a keyed permutation of the item's number, the entity id it was
+first given, and of its tenancy, how many items held that number before it, so two of them reveal
+nothing about whether their items are adjacent. A deleted item's number is issued again at the next
+tenancy, so a `mosaica_id` a client holds never comes to name another item. The key is drawn from
+the operating system's random source each time `mosaica build` creates a bundle, and is stored in
+that bundle's manifest. Nobody configures or supplies it, and no response or log line carries it. A
+copy of a bundle keeps its `mosaica_id`s. A rebuild creates a new bundle with a new key, so every
+`mosaica_id` changes. No request accepts an entity id, so a client cannot enumerate them by trying
+values. A bulk read's cursor holds internal positions only inside its encryption, and a cursor the
+server did not issue for that read does not open. The permutation is not cryptographic, and it
+should not be assumed to resist a viewer who has obtained known pairs of an entity id and its
+`mosaica_id`; no route on the viewer plane yields one, so what the permutation hides does not depend
+on cryptographic strength.
 
 ## A lookup by value answers an invisible holder as absent
 
@@ -313,30 +316,33 @@ follows its size, so a value held only by an item the viewer cannot see drives t
 a value nobody holds, with the same rows, counts and pages. The index lookup's own time can differ
 between a value that is held and one that is not, which the timing row below covers.
 
-**Stored order shows which items share a full set of index keys.** A read of items in stored
-order returns a viewer's items in the order of their entity ids. Within each build batch and each
-ingest window, entity ids are assigned in order of each item's full set of index keys: its labels
-read as one disjunction, each term among its operands, and one key for each conjunction among them
-([access control](access-control.md#how-labels-are-indexed)), including keys the viewer does not
-satisfy. Within one set, a build orders
-items by their map cell in the build's anchor view and then by source order, and an ingest orders
-them in the order its window received them, so a viewer who reads positions or unique values can see
-where one set ends and the next begins.
+**Stored order shows which items share a full set of index keys.** A read of items in stored order
+returns a viewer's items in the order of their numbers, the entity id each was first given. Within
+each build batch and each ingest window, numbers are assigned in order of each item's full set of
+index keys: its labels read as one disjunction, each term among its operands, and one key for each
+conjunction among them ([access control](access-control.md#how-labels-are-indexed)), including keys
+the viewer does not satisfy. Within one set, a build orders items by their map cell in the build's
+anchor view and then by source order, and an ingest orders them in the order its window received
+them, so a viewer who reads positions or unique values can see where one set ends and the next
+begins.
 
-An edit moves an item to a new entity, taken in the window that commits it, so an edited item
-reads as one arriving in that window.
+An edit moves an item to a new entity and keeps its number, so the item keeps its place. A deleted
+item's number is issued again, lowest first, to an item a later window inserts, which therefore
+stands where the deleted item stood. A viewer who sees the items either side of it learns that an
+item between them was deleted, though they may never have seen it, and that at least as many were
+deleted there as new items appear between them.
 
-A viewer therefore learns which of their visible items share a full set of index keys, and
-roughly in which batch or window each arrived or was last edited. Where two such groups show the
-same clauses on the item card, the viewer learns that the items of at least one of them carry a key
-the viewer does not satisfy, which is what the item card withholds by serving only clauses the
-viewer satisfies. The sets are ordered by the keys' internal numbers, which follow the order in
-which keys first appeared, so the order of the sets hints at which keys the viewer does not satisfy
-appeared first.
-The viewer learns no term's name, no count of the items they cannot see, and nothing about any one
-item outside their visible set. Map order discloses none of this grouping and serves every field
-stored order serves. **Not built yet:** restricting stored order to some viewers. Every viewer may
-ask for it, and a viewer held to map order would lose speed and no data.
+A viewer therefore learns which of their visible items share a full set of index keys, and roughly
+in which batch or window each arrived. Where two such groups show the same clauses on the item card,
+the viewer learns that the items of at least one of them carry a key the viewer does not satisfy,
+which is what the item card withholds by serving only clauses the viewer satisfies. The sets are
+ordered by the keys' internal numbers, which follow the order in which keys first appeared, so the
+order of the sets hints at which keys the viewer does not satisfy appeared first. The viewer learns
+no term's name, no count of the items they cannot see beyond that lower bound on deletions, and
+nothing about any one item outside their visible set but that it was deleted from between two of
+theirs. Map order discloses none of this grouping and serves every field stored order serves. **Not
+built yet:** restricting stored order to some viewers. Every viewer may ask for it, and a viewer
+held to map order would lose speed and no data.
 
 **The cursor is sealed to one read.** A cursor carries internal positions: a map cell and a
 `mosaica_id` in map order, an entity id in stored order, and an artifact's level and publication
@@ -397,18 +403,19 @@ children in its place, as the map shows them.
 
 ## Residual disclosure
 
-Seven channels let a viewer learn something beyond the items they are entitled to see, past what
+Eight channels let a viewer learn something beyond the items they are entitled to see, past what
 the properties above bound. Each row states its own status: most channels are accepted for the
 reason given, and one, the per-tile timing channel, remains open.
 
 | What a viewer can learn | How | Severity | Why | Specification rows |
 |---|---|---|---|---|
 | Roughly how much of the corpus lies outside their own set; that a token, keyword, category value or unique field value they can name exists somewhere in the corpus, and coarsely how widely; and that the corpus is being written to | Response time for a viewport, a filter, a category listing, a count by group or a bulk read in either order grows with the work a request does over rows and terms the viewer cannot see, not only their own. A changed content key on a response says the corpus has changed since the viewer's last request | Low | Only the per-tile timing component of this row is open and unquantified: correlating cost with the viewer's own visible count leaves a residual nobody has bounded. A response's cost also varies with how many artifacts in view were withheld by their own label or their membership requirement, since each is found before it is tested, and the identifier route does more work for a withheld artifact than for an identifier naming nothing; a viewer needs an artifact's `mosaica_id` to probe the second, and is never served one for an artifact withheld from them. On the route that serves the artifacts of each tile, the candidates a tile tests are proposed by coverings of every member, seen or not, so how long a tile takes also depends on where members the viewer cannot see lie; which artifacts the tile serves does not. A viewer whose visible set has lost any base row to a deletion or suppression has those rows subtracted from an annotation level's counts using labels the server reads for every deleted and suppressed base row in the view, under any grant. Where more than 4,096 of those rows have no label held, the request walks the viewer's whole visible set instead, which takes seconds on a corpus of GBIF's size, while the labels are read in the background. Such a viewer's response time therefore moves with how many rows were deleted or suppressed anywhere in the view since the labels were last read, including rows under keys the viewer does not hold. The channel is coarse, and it reveals the volume of deletions and suppressions in the view, never which rows; it is accepted on that basis, close to knowing that the corpus is being written to. Every other component (the category, text and suggestion timing variants, and the content key itself) is bounded to a quantity the viewer already possesses or is about to receive, and is accepted on that basis. A count by group reads each value's per-value record over the whole corpus where the field keeps one, as a category listing's visibility test and a suggestion's do, so its time depends on how many values exist and coarsely how widely each is held, including a value named in the request that the viewer cannot see. That is accepted, on the same basis as the listing and suggestion timing. A sampled histogram reads every entry of a band in the pieces it reads from the band, including deleted, suppressed and invisible rows, and chooses between the band and a scan of the set's own rows by comparing the band's entries with the set's rows, so its time depends on how many rows below the cut the viewer cannot see. The answer does not: both reads take the same items. The entry count is bounded by the view's rows below the cut, a coarse figure about the whole view; it is accepted on the same basis. A finer per-term version of the content key, and a timing channel over how many partitions a token reaches, are specified but not built: a deployment holds one partition today and nothing finer than the coarse content key reaches the wire | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
-| When an item they once saw was deleted or suppressed; and, by comparing `mosaica_id`s out of band, that two viewers are looking at the same item | A `mosaica_id` is stable for the item's life in one bundle, so a held one stops resolving on the viewer's next request after the change. Two viewers who compare `mosaica_id`s for items they can each see can tell they name the same item. An operator's unique values carry whatever structure the operator put in them | Medium | The price of a `mosaica_id` a client can bookmark and share. Nothing lets a client vary the key | C6, C17 |
+| When an item they once saw was deleted or suppressed; and, by comparing `mosaica_id`s out of band, that two viewers are looking at the same item | A `mosaica_id` is stable for the item's life in one bundle, so a held one stops resolving on the viewer's next request after the change, and never names another item. Two viewers who compare `mosaica_id`s for items they can each see can tell they name the same item. An operator's unique values carry whatever structure the operator put in them | Medium | The price of a `mosaica_id` a client can bookmark and share. Nothing lets a client vary the key | C6, C17 |
 | A lower bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count from below | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |
 | That an item they were never entitled to see has been deleted, when a permissive annotation layer's membership set loses it | Under a layer declared permissive, content generated from a deleted item keeps serving until compaction removes the deleted member from the generating set. At that point the content stops serving for every viewer who satisfies the surviving members, including one who never satisfied the original generating set, telling them an item they were never entitled to see has been deleted | Medium | Bounded by the caller's own declaration: strict is the default and never shrinks, so an undeclared layer never signals this. Permissive is a caller's choice for a set where losing one member changes nothing the content asserts | C7 |
-| Which of their visible items share a full set of index keys, and so, where two such groups show the same clauses on the item card, that items in at least one of them carry a key the viewer does not satisfy; roughly in which build batch or ingest window each arrived or was last edited; and a hint of the order in which keys they do not satisfy first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full key set, and their positions or unique values show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
+| Which of their visible items share a full set of index keys, and so, where two such groups show the same clauses on the item card, that items in at least one of them carry a key the viewer does not satisfy; roughly in which build batch or ingest window each arrived; and a hint of the order in which keys they do not satisfy first appeared | A bulk read of items in stored order returns items in number order, which groups them by full key set, and their positions or unique values show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
+| That an item they never saw was deleted, and roughly where in stored order it stood | A deleted item's number is issued again to an item a later window inserts, so in stored order the new item stands where the deleted one stood ([reading in bulk](#reading-in-bulk)). A viewer who sees the items either side, and then a new one between them, learns that at least one item between them was deleted | Medium | Bounded to positions among the viewer's own visible items, and only where a new item the viewer can see takes the number: no term, label or field of the deleted item, and no count beyond a lower bound. The price of a number space that follows the live corpus rather than every item ever inserted. Map order returns the same rows and fields and discloses none of it | none |
 | That another session with the same grant, which includes every anonymous viewer of a public deployment, recently authorised, read a layer's level, or read a field's figures in this view; and, weakly, how busy sessions under other grants are | Three entries are shared by every session with the same grant: the authorised set, built at authorisation; the per-artifact counts, centroids and boxes of a level served from a column, built on its first read under the grant; and a field's figures, joined from the bundle's stored tallies on the field's first summary or histogram with default edges, or walked for a field declared at a running service. A read the cache already holds answers in milliseconds, and one that builds the entry takes longer: up to seconds for an authorisation, a level or a walked field, and milliseconds for a joined field. So the time a first response takes says whether another such session asked for the same entry since it was last built: since the last write, for the authorised set; since the last compaction, for a level's counts, which are kept on disk across a restart; and since the last compaction or restart, for a field's figures. Eviction is least recently used across all grants, so an entry that was expected to be held and has to be built again says other sessions have been busy | Low | It discloses activity and nothing about any item: the shared entry is computed from rows the asker's grant admits, and every request subtracts what its own overlay denies and adds its own rows above the base before anything is served | none |
 
 A caller-declared quantity the service serves as declared, rather than a viewer's own inference, is
