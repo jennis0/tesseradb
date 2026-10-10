@@ -372,15 +372,15 @@ two ranks, each a popcount from its container's start, whatever the range's leng
 share containers. On tiles scattered at random it is still 29 to 69 times its one-shard cost at
 N = 100.
 
-Decoding and selection then set what N costs. Each pays a fixed cost per part, so their cost grows
-with N times tiles where a tile holds few visible rows. Counting, decoding and selecting together,
-a request at N = 8 costs 0.9 to 1.7 times today's single shard at 10% coverage and above, and 2.0
-to 8.4 times for a viewer of 0.1% or 1% at depth 8 and deeper, 0.8 to 59 ms. At N = 100 the same
-figures reach 12 and 83 times. Decoding and selection are therefore batched per shard as the count
-is: one cursor walk of a leaf over the request's ranges in row order, and one selection over a
-shard's parts. Not measured yet. `rows_in_range`, the materialised `leaf ∩ range` a decode reads
-while the overlay holds denies, grows worst: 18 ms at one shard to 965 ms at 100 at depth 6 and 50%
-coverage, so the same batching applies to it.
+Selection then sets what N costs. It reads each part's visible rows and merges the parts'
+identities, and pays a fixed cost per part, so its cost grows with N times tiles where a tile holds
+few visible rows. Counting and selecting together, a request at N = 8 costs 0.7 to 1.6 times
+today's single shard at 10% coverage and above, and 1.9 to 8.1 times for a viewer of 0.1% or 1% at
+depth 8 and deeper, 0.3 to 55 ms. At N = 100 the same figures reach 10 and 64 times. Selection
+is therefore batched per shard as the count is: one cursor walk of a leaf over the request's ranges
+in row order, feeding the merge of the shard's parts. Not measured yet. `rows_in_range`, the
+materialised `leaf ∩ range` that selection reads while the overlay holds denies, grows worst: 18 ms
+at one shard to 965 ms at 100 at depth 6 and 50% coverage, so the same batching applies to it.
 
 ### 3.3 Two passes
 
@@ -662,7 +662,7 @@ Three things are left before code:
 
 1. `epoch_shard_tile_index` on the MedCPT and PaperSeek bundles, on a host that holds them.
 2. The mask bench again on the 12-core host, so its figures sit beside the 2026-09-04 ones.
-3. Decoding and selection batched per shard, added to the mask bench and measured the same way.
+3. Selection batched per shard, added to the mask bench and measured the same way.
 
 ### 8.2 One corpus at several shard sizes
 
@@ -728,7 +728,7 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 | edit-freed ids stop the high water rising after two rounds on GeoNames | measured | [write path](system/write-path.md#freed-entity-ids) |
 | counting a 256-tile request at depth 12, 50% coverage: 0.49 ms at N = 1, 4.5 ms at N = 8 | measured, synthetic, one thread, before term images | `probes/2026-09-04-epoch-shard-treemap-mask/` |
 | counting a 3,000-tile contiguous request at depth 10, 10% coverage: 8.0 ms today and 0.38 ms with `count_ranges` at N = 1; 875 ms and 8.5 ms at N = 100 | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
-| counting, decoding and selecting together at N = 8: 0.9 to 1.7 times today's single shard at 10% coverage and above; 2.0 to 8.4 times at 0.1% and 1%, depth 8 and deeper | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
+| counting and selecting together at N = 8: 0.7 to 1.6 times today's single shard at 10% coverage and above; 1.9 to 8.1 times at 0.1% and 1%, depth 8 and deeper | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
 | a level's figures walk and sum over 1,000,000 artifacts at N = 100: 1.05 times N = 1 at 50% coverage, 3.4 times at 0.1% | measured, synthetic, one thread, 4 cores | `probes/2026-10-09-shard-read-costs/` |
 | one mask projected through N = 8, 32 or 100 permutations: 0.76 to 1.28 times one; per-row cost from 10⁸ to 4×10⁸ rows rose 1.9 times at 25% coverage on a 4-core host | measured, synthetic, one thread | `probes/2026-10-09-shard-read-costs/` |
 | a per-shard tile index alone is 6 to 8.8 times the bytes at N = 8 | measured, before label columns served most levels | `probes/2026-09-04-epoch-shard-tile-index/` |
@@ -739,7 +739,7 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 | an id reaches the occupancy cap in about 1,100 years at 1% daily churn, 110 at 10% | modelled | §1.4 |
 | capacity: 2¹⁹ shards of about 2³² ids, about 2 × 10¹⁵ items | modelled | §2.1, §2.5 |
 | a session's visible set grows more slowly than the corpus | assumed; to be confirmed before any figure above 2³² items is promised | n/a |
-| decoding and selection batched per shard; the tile index on today's levels; every route at N on a built bundle; churn locality; the key filter; compaction per shard | not measured | §8 |
+| selection batched per shard; the tile index on today's levels; every route at N on a built bundle; churn locality; the key filter; compaction per shard | not measured | §8 |
 
 ## 10. Stages
 

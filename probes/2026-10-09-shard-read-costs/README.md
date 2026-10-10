@@ -31,14 +31,15 @@ are arrays and today's count is two binary searches, batching saves nothing at N
 a fixed 40 to 80 µs on a scattered request, because `rank_many` reads every container header of
 the leaf.
 
-**Once the count is batched, decoding and selection set the cost of N.** Both pay a fixed cost per
-part, a cursor seek or a part of the selection's merge, so their cost grows with N times tiles
-where a tile holds few visible rows. Table 1 adds the three operations a viewport request makes
-on the mask. Against today's single shard, a request at N = 8 costs 0.9 to 1.7 times as much at
-10% coverage and above. A narrow viewer at depth 8 and deeper pays more: 2.0 to 8.4 times at N = 8
-for 0.1% and 1%, which is 0.8 to 59 ms in absolute terms. At N = 100 dense viewers pay up to 12
-times and narrow ones up to 83 times. At depth 6 and coverage of 10% or more the work per row
-dominates, and N costs 1.0 to 1.4 times up to N = 100.
+**Once the count is batched, selection sets the cost of N.** Selection reads each part's visible
+rows and merges the parts' identities, and pays a fixed cost per part, a cursor seek and the part's
+share of the merge, so its cost grows with N times tiles where a tile holds few visible rows.
+Table 1 adds the count and the selection, the two operations a viewport request makes on the mask.
+Against today's single shard, a request at N = 8 costs 0.7 to 1.6 times as much at 10% coverage
+and above. A narrow viewer at depth 8 and deeper pays more: 1.9 to 8.1 times at N = 8 for 0.1% and
+1%, which is 0.3 to 55 ms in absolute terms. At N = 100 dense viewers pay up to 10 times and narrow
+ones up to 64 times. At depth 6 and coverage of 10% or more the work per row dominates, and N costs
+1.0 to 1.4 times up to N = 100.
 
 **The range-local count is the cheapest way to count a short range.** `count_local` counts
 `leaf ∩ range` against a one-run bitmap, which popcounts only the words inside the range. Today's
@@ -72,39 +73,44 @@ entities therefore depends on the deployment's hardware, and is measured there.
 
 ## Table 1: mask work per viewport request
 
-Count, decode and select summed, in ms per request, contiguous tiles. "Today" is the per-range
-count at N = 1. Every other column uses `count_ranges`. Ratios are against today.
+Count and select summed, in ms per request, contiguous tiles. Select reads each part's visible rows
+itself, which the decode column measures on its own, so decode is not added again. "Today" is the
+per-range count at N = 1. Every other column uses `count_ranges`. Ratios are against today.
 
 | tiles | coverage | depth | today N = 1 | batched N = 1 | N = 8 | N = 32 | N = 100 | N = 8 ÷ today | N = 32 ÷ today | N = 100 ÷ today |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 256 | 50% | 6 | 309 | 309 | 308 | 318 | 346 | 1.00 | 1.03 | 1.12 |
-| 256 | 50% | 8 | 21.9 | 21.5 | 22.3 | 30.9 | 52.5 | 1.02 | 1.41 | 2.40 |
-| 256 | 50% | 10 | 2.80 | 2.28 | 4.34 | 9.05 | 23.2 | 1.55 | 3.23 | 8.29 |
-| 256 | 50% | 12 | 1.04 | 0.43 | 1.08 | 4.23 | — | 1.04 | 4.09 | — |
-| 256 | 10% | 6 | 117 | 117 | 120 | 153 | 161 | 1.03 | 1.30 | 1.37 |
-| 256 | 10% | 8 | 8.98 | 8.57 | 11.0 | 17.4 | 34.3 | 1.22 | 1.93 | 3.81 |
-| 256 | 10% | 10 | 1.55 | 1.03 | 2.24 | 8.32 | 18.7 | 1.44 | 5.37 | 12.09 |
-| 256 | 10% | 12 | 0.84 | 0.24 | 0.76 | 4.12 | — | 0.90 | 4.90 | — |
-| 256 | 1% | 6 | 19.7 | 19.7 | 23.8 | 27.0 | 44.9 | 1.21 | 1.37 | 2.28 |
-| 256 | 1% | 8 | 1.71 | 1.70 | 4.15 | 8.30 | 20.8 | 2.42 | 4.85 | 12.19 |
-| 256 | 1% | 10 | 0.25 | 0.25 | 1.08 | 3.66 | 11.9 | 4.24 | 14.38 | 46.85 |
-| 256 | 0.1% | 6 | 6.35 | 6.35 | 6.87 | 9.66 | 25.1 | 1.08 | 1.52 | 3.96 |
-| 256 | 0.1% | 8 | 0.40 | 0.39 | 1.40 | 2.85 | 9.20 | 3.54 | 7.21 | 23.28 |
-| 256 | 0.1% | 10 | 0.09 | 0.09 | 0.76 | 2.30 | 7.56 | 8.39 | 25.42 | 83.45 |
-| 3,000 | 50% | 6 | 3,553 | 3,553 | 3,668 | 3,888 | 4,058 | 1.03 | 1.09 | 1.14 |
-| 3,000 | 50% | 8 | 253 | 248 | 263 | 348 | 649 | 1.04 | 1.37 | 2.56 |
-| 3,000 | 50% | 10 | 36.9 | 29.3 | 57.8 | 107 | 293 | 1.57 | 2.91 | 7.94 |
-| 3,000 | 50% | 12 | 14.0 | 6.44 | 24.1 | 51.4 | — | 1.71 | 3.66 | — |
-| 3,000 | 10% | 6 | 1,456 | 1,456 | 1,507 | 1,587 | 1,854 | 1.03 | 1.09 | 1.27 |
-| 3,000 | 10% | 8 | 112 | 106 | 119 | 214 | 395 | 1.06 | 1.91 | 3.53 |
-| 3,000 | 10% | 10 | 22.2 | 14.6 | 36.2 | 84.4 | 228 | 1.63 | 3.80 | 10.28 |
-| 3,000 | 10% | 12 | 9.87 | 2.31 | 12.0 | 33.9 | — | 1.21 | 3.43 | — |
-| 3,000 | 1% | 6 | 257 | 258 | 319 | 334 | 512 | 1.24 | 1.30 | 1.99 |
-| 3,000 | 1% | 8 | 29.2 | 29.1 | 59.2 | 98.7 | 249 | 2.02 | 3.37 | 8.52 |
-| 3,000 | 1% | 10 | 7.08 | 6.96 | 21.3 | 51.7 | 142 | 3.01 | 7.30 | 20.03 |
-| 3,000 | 0.1% | 6 | 46.2 | 46.1 | 69.4 | 117 | 257 | 1.50 | 2.52 | 5.56 |
-| 3,000 | 0.1% | 8 | 6.41 | 6.25 | 18.3 | 48.5 | 127 | 2.86 | 7.57 | 19.81 |
-| 3,000 | 0.1% | 10 | 1.14 | 0.97 | 6.72 | 28.5 | 86.6 | 5.89 | 24.97 | 75.85 |
+| 256 | 50% | 6 | 208 | 208 | 203 | 212 | 237 | 0.98 | 1.02 | 1.14 |
+| 256 | 50% | 8 | 15.2 | 14.8 | 15.6 | 23.5 | 41.2 | 1.03 | 1.55 | 2.71 |
+| 256 | 50% | 10 | 2.40 | 1.87 | 3.72 | 7.61 | 19.0 | 1.55 | 3.17 | 7.93 |
+| 256 | 50% | 12 | 0.99 | 0.38 | 0.82 | 3.46 | — | 0.83 | 3.51 | — |
+| 256 | 10% | 6 | 95.0 | 94.9 | 97.9 | 129 | 128 | 1.03 | 1.35 | 1.35 |
+| 256 | 10% | 8 | 7.64 | 7.22 | 9.29 | 14.7 | 27.7 | 1.22 | 1.93 | 3.63 |
+| 256 | 10% | 10 | 1.44 | 0.92 | 1.87 | 7.11 | 14.8 | 1.30 | 4.94 | 10.31 |
+| 256 | 10% | 12 | 0.79 | 0.19 | 0.53 | 3.02 | — | 0.67 | 3.83 | — |
+| 256 | 1% | 6 | 19.1 | 19.1 | 22.9 | 24.9 | 38.5 | 1.20 | 1.30 | 2.01 |
+| 256 | 1% | 8 | 1.64 | 1.63 | 3.76 | 6.94 | 16.3 | 2.28 | 4.22 | 9.93 |
+| 256 | 1% | 10 | 0.22 | 0.22 | 0.78 | 2.33 | 7.80 | 3.57 | 10.69 | 35.75 |
+| 256 | 1% | 12 | 0.06 | 0.06 | 0.40 | 1.60 | — | 6.26 | 25.07 | — |
+| 256 | 0.1% | 6 | 6.21 | 6.21 | 6.01 | 8.32 | 19.7 | 0.97 | 1.34 | 3.17 |
+| 256 | 0.1% | 8 | 0.32 | 0.31 | 0.97 | 1.72 | 5.52 | 3.05 | 5.45 | 17.44 |
+| 256 | 0.1% | 10 | 0.06 | 0.06 | 0.49 | 1.19 | 3.86 | 8.14 | 19.62 | 63.72 |
+| 256 | 0.1% | 12 | 0.05 | 0.05 | 0.29 | 1.16 | — | 5.40 | 21.48 | — |
+| 3,000 | 50% | 6 | 2,325 | 2,325 | 2,439 | 2,544 | 2,729 | 1.05 | 1.09 | 1.17 |
+| 3,000 | 50% | 8 | 179 | 174 | 185 | 259 | 510 | 1.03 | 1.44 | 2.84 |
+| 3,000 | 50% | 10 | 32.1 | 24.5 | 49.9 | 87.7 | 232 | 1.56 | 2.73 | 7.23 |
+| 3,000 | 50% | 12 | 13.4 | 5.85 | 20.6 | 41.9 | — | 1.53 | 3.11 | — |
+| 3,000 | 10% | 6 | 1,173 | 1,173 | 1,224 | 1,297 | 1,494 | 1.04 | 1.11 | 1.27 |
+| 3,000 | 10% | 8 | 95.3 | 89.3 | 98.7 | 179 | 318 | 1.03 | 1.88 | 3.34 |
+| 3,000 | 10% | 10 | 20.9 | 13.3 | 32.0 | 69.0 | 171 | 1.53 | 3.30 | 8.20 |
+| 3,000 | 10% | 12 | 9.46 | 1.90 | 9.30 | 22.6 | — | 0.98 | 2.39 | — |
+| 3,000 | 1% | 6 | 249 | 250 | 300 | 307 | 446 | 1.21 | 1.23 | 1.79 |
+| 3,000 | 1% | 8 | 28.4 | 28.2 | 54.9 | 81.6 | 192 | 1.94 | 2.88 | 6.76 |
+| 3,000 | 1% | 10 | 6.49 | 6.36 | 17.6 | 35.7 | 95.1 | 2.71 | 5.50 | 14.66 |
+| 3,000 | 1% | 12 | 1.16 | 1.00 | 4.66 | 22.2 | — | 4.03 | 19.16 | — |
+| 3,000 | 0.1% | 6 | 44.8 | 44.7 | 64.7 | 101 | 210 | 1.44 | 2.24 | 4.67 |
+| 3,000 | 0.1% | 8 | 5.89 | 5.73 | 14.9 | 34.9 | 73.5 | 2.53 | 5.92 | 12.47 |
+| 3,000 | 0.1% | 10 | 0.78 | 0.61 | 3.92 | 16.1 | 46.7 | 5.00 | 20.52 | 59.51 |
+| 3,000 | 0.1% | 12 | 0.61 | 0.45 | 3.32 | 14.2 | — | 5.42 | 23.24 | — |
 
 A dash is a depth at which a tile holds fewer rows than shards, which the bench skips.
 
