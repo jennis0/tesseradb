@@ -117,6 +117,9 @@ struct Args {
     /// Untimed requests before the samples.
     #[arg(long, default_value_t = 1)]
     warmup: usize,
+    /// Shallowest tile depth.
+    #[arg(long, default_value_t = 0)]
+    min_depth: u8,
     /// Deepest tile depth. A depth whose per-leaf range is under one row is skipped.
     #[arg(long, default_value_t = 14)]
     max_depth: u8,
@@ -133,6 +136,9 @@ struct Args {
     /// block.
     #[arg(long, value_enum, default_value_t = Layout::Random)]
     layout: Layout,
+    /// Operations to measure, from the list printed in the tables; empty measures every one.
+    #[arg(long, value_delimiter = ',')]
+    ops: Vec<String>,
     /// Artifacts in the level the figures walk counts into; 0 skips the walk.
     #[arg(long, default_value_t = 0)]
     figures_artifacts: u32,
@@ -557,13 +563,15 @@ struct Report {
     figures: Vec<FiguresCell>,
 }
 
-const OPS: [&str; 6] = [
+const OPS: [&str; 8] = [
     "count",
     "count_ranges",
     "count_local",
     "decode",
     "rows_in_range",
     "select",
+    "select_tiles",
+    "select_parts",
 ];
 
 fn median(xs: &[f64]) -> f64 {
@@ -698,16 +706,19 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     };
 
     let map = case.map;
-    let us = measure(args.warmup, args.samples, || {
-        let mut sum = 0u64;
-        for tile in &parts {
-            for (s, r) in tile {
-                sum += map.range_cardinality(*s, r.clone());
+    let wants = |op: &str| args.ops.is_empty() || args.ops.iter().any(|o| o == op);
+    if wants("count") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut sum = 0u64;
+            for tile in &parts {
+                for (s, r) in tile {
+                    sum += map.range_cardinality(*s, r.clone());
+                }
             }
-        }
-        black_box(sum);
-    });
-    record("count", us);
+            black_box(sum);
+        });
+        record("count", us);
+    }
 
     // Each leaf's ranges in tile order, and their endpoints sorted, both outside the timer.
     let by_leaf: Vec<Vec<Range<u32>>> = (0..shards as usize)
@@ -716,7 +727,12 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     let leaf_ends: Vec<LeafEnds> = by_leaf.iter().map(|r| LeafEnds::of(r)).collect();
     let mut ranks = vec![0u64; 2 * tiles];
     let mut counts = vec![0u64; tiles];
-    for (s, le) in leaf_ends.iter().enumerate() {
+    let checked = if wants("count_ranges") || wants("count_local") {
+        leaf_ends.as_slice()
+    } else {
+        &[]
+    };
+    for (s, le) in checked.iter().enumerate() {
         map.rank_many(s as u32, &le.ends, &mut ranks);
         le.counts(&ranks, &mut counts);
         for (t, c) in counts.iter().enumerate() {
@@ -731,52 +747,66 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
             );
         }
     }
-    let us = measure(args.warmup, args.samples, || {
-        let mut sum = 0u64;
-        for (s, le) in leaf_ends.iter().enumerate() {
-            map.rank_many(s as u32, &le.ends, &mut ranks);
-            sum += le.counts(&ranks, &mut counts);
-        }
-        black_box(sum);
-    });
-    record("count_ranges", us);
-
-    let us = measure(args.warmup, args.samples, || {
-        let mut sum = 0u64;
-        for tile in &parts {
-            for (s, r) in tile {
-                sum += map.count_local(*s, r.clone());
+    if wants("count_ranges") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut sum = 0u64;
+            for (s, le) in leaf_ends.iter().enumerate() {
+                map.rank_many(s as u32, &le.ends, &mut ranks);
+                sum += le.counts(&ranks, &mut counts);
             }
-        }
-        black_box(sum);
-    });
-    record("count_local", us);
+            black_box(sum);
+        });
+        record("count_ranges", us);
+    }
 
-    let us = measure(args.warmup, args.samples, || {
-        let mut visited = 0u64;
-        let mut acc = 0u32;
-        for (tile, vis) in parts.iter().zip(&visible) {
-            for ((s, r), v) in tile.iter().zip(vis) {
-                let (n, a) = decode_part(map, *s, r.clone(), *v);
-                visited += n;
-                acc ^= a;
+    if wants("count_local") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut sum = 0u64;
+            for tile in &parts {
+                for (s, r) in tile {
+                    sum += map.count_local(*s, r.clone());
+                }
             }
-        }
-        black_box((visited, acc));
-    });
-    record("decode", us);
+            black_box(sum);
+        });
+        record("count_local", us);
+    }
 
-    let us = measure(args.warmup, args.samples, || {
-        let mut card = 0u64;
-        for tile in &parts {
-            for (s, r) in tile {
-                card += map.rows_in_range(*s, r.clone()).cardinality();
+    if wants("decode") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut visited = 0u64;
+            let mut acc = 0u32;
+            for (tile, vis) in parts.iter().zip(&visible) {
+                for ((s, r), v) in tile.iter().zip(vis) {
+                    let (n, a) = decode_part(map, *s, r.clone(), *v);
+                    visited += n;
+                    acc ^= a;
+                }
             }
-        }
-        black_box(card);
-    });
-    record("rows_in_range", us);
+            black_box((visited, acc));
+        });
+        record("decode", us);
+    }
 
+    if wants("rows_in_range") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut card = 0u64;
+            for tile in &parts {
+                for (s, r) in tile {
+                    card += map.rows_in_range(*s, r.clone()).cardinality();
+                }
+            }
+            black_box(card);
+        });
+        record("rows_in_range", us);
+    }
+
+    if !["select", "select_tiles", "select_parts"]
+        .iter()
+        .any(|op| wants(op))
+    {
+        return;
+    }
     if tile_rows > case.id_rows {
         eprintln!(
             "  depth {depth}: tile of {tile_rows} rows exceeds the {} -row id column, select skipped",
@@ -830,35 +860,81 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     };
     let segment = case.segment;
     let mask = case.mask;
-    let us = measure(args.warmup, args.samples, || {
-        let mut served = 0usize;
-        for ((tile, vis), offs) in parts.iter().zip(&visible).zip(&offsets) {
-            let sel_parts: Vec<SelectionPart<'_>> = tile
-                .iter()
-                .zip(vis)
-                .zip(offs)
-                .map(|(((s, r), v), off)| {
-                    let view_start = u64::from(*s) * shard_rows + u64::from(r.start);
-                    SelectionPart {
-                        segment,
-                        range: *off..*off + (r.end - r.start),
-                        row_base: (view_start - u64::from(*off)) as u32,
-                        visible: *v,
-                    }
-                })
-                .collect();
-            let tile_visible: u64 = vis.iter().sum();
-            let selected = Selection::of(
-                mask,
-                &SelectionParts::new(&sel_parts),
-                &params,
-                tile_visible,
+    // One tile's selection parts; with `skip_empty`, only the parts holding a visible row.
+    let tile_parts = |t: usize, skip_empty: bool| -> Vec<SelectionPart<'_>> {
+        parts[t]
+            .iter()
+            .zip(&visible[t])
+            .zip(&offsets[t])
+            .filter(|((_, v), _)| !skip_empty || **v > 0)
+            .map(|(((s, r), v), off)| {
+                let view_start = u64::from(*s) * shard_rows + u64::from(r.start);
+                SelectionPart {
+                    segment,
+                    range: *off..*off + (r.end - r.start),
+                    row_base: (view_start - u64::from(*off)) as u32,
+                    visible: *v,
+                }
+            })
+            .collect()
+    };
+    let select = |t: usize, sel_parts: &[SelectionPart<'_>]| {
+        let tile_visible: u64 = visible[t].iter().sum();
+        Selection::of(mask, &SelectionParts::new(sel_parts), &params, tile_visible).rows
+    };
+
+    // A part with no visible row adds no row to a tile's selection, so leaving it out serves the
+    // same rows. Checked on every tile, outside the timers.
+    if wants("select_parts") {
+        for t in 0..tiles {
+            let all = select(t, &tile_parts(t, false));
+            let held = select(t, &tile_parts(t, true));
+            assert_eq!(
+                all, held,
+                "skipping empty parts changed tile {t}'s selection"
             );
-            served += selected.rows.len();
         }
-        black_box(served);
-    });
-    record("select", us);
+    }
+
+    // Every tile, every part: the 2026-09-04 measurement.
+    if wants("select") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut served = 0usize;
+            for t in 0..tiles {
+                served += select(t, &tile_parts(t, false)).len();
+            }
+            black_box(served);
+        });
+        record("select", us);
+    }
+
+    // Tiles with no visible row skipped, as `tile_sweep` skips them; every part of the rest.
+    if wants("select_tiles") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut served = 0usize;
+            for t in 0..tiles {
+                if visible[t].iter().any(|v| *v > 0) {
+                    served += select(t, &tile_parts(t, false)).len();
+                }
+            }
+            black_box(served);
+        });
+        record("select_tiles", us);
+    }
+
+    // Tiles and parts with no visible row skipped.
+    if wants("select_parts") {
+        let us = measure(args.warmup, args.samples, || {
+            let mut served = 0usize;
+            for t in 0..tiles {
+                if visible[t].iter().any(|v| *v > 0) {
+                    served += select(t, &tile_parts(t, true)).len();
+                }
+            }
+            black_box(served);
+        });
+        record("select_parts", us);
+    }
 }
 
 /// A label per row of the universe, each an artifact drawn at random: the level's column.
@@ -1140,7 +1216,7 @@ fn main() {
                 figures_cells.push(figures(&args, variant, *coverage_pct, &map, labels));
                 eprintln!("  figures done in {:.1} s", t.elapsed().as_secs_f64());
             }
-            for depth in 0..=args.max_depth {
+            for depth in args.min_depth..=args.max_depth {
                 let t = Instant::now();
                 run_depth(&args, &case, depth, &mut cells);
                 eprintln!("  depth {depth} done in {:.1} s", t.elapsed().as_secs_f64());

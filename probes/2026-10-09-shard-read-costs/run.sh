@@ -5,6 +5,7 @@
 #
 #   bash run.sh treemap      # the sweep's mask operations, three tile layouts
 #   bash run.sh projection   # Permutation::project per leaf
+#   bash run.sh parts        # selection skipping parts with no visible row
 #   bash run.sh all
 #
 # Build first:
@@ -43,6 +44,15 @@ treemap_all() {
   treemap viewport-256 --layout viewport --tiles 256 --samples 3
 }
 
+# Selection that skips the parts of a tile with no visible row, against today's, which skips only
+# tiles with none. Depth 6 and deeper, where a part's fixed cost is not lost in the rows it reads.
+parts_all() {
+  for tiles in 256 3000; do
+    treemap "parts-viewport-$tiles" --layout viewport --tiles "$tiles" --samples 3 --min-depth 6 \
+      --run-heavy-pct 0 --ops count,count_ranges,select_tiles,select_parts
+  done
+}
+
 projection_all() {
   for rows in 1000000 10000000 100000000 400000000; do
     projection "linear-$rows" --part linearity --rows "$rows"
@@ -58,12 +68,13 @@ projection_all() {
 case ${1:-all} in
   treemap) treemap_all ;;
   projection) projection_all ;;
+  parts) parts_all ;;
   all)
     treemap_all
     projection_all
     ;;
   *)
-    echo "usage: run.sh treemap|projection|all" >&2
+    echo "usage: run.sh treemap|projection|parts|all" >&2
     exit 1
     ;;
 esac
