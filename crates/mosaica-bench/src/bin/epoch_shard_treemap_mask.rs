@@ -997,9 +997,12 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
         let batched = || -> Vec<Vec<u32>> {
             let mut heaps: Vec<BinaryHeap<(u64, u32)>> = visible
                 .iter()
-                .map(|v| {
-                    let tile_visible: u64 = v.iter().sum();
-                    BinaryHeap::with_capacity(params.cap.min(tile_visible as usize) + 1)
+                .map(|v| match v.iter().sum::<u64>() {
+                    // A tile with nothing visible is never walked, so it allocates nothing.
+                    0 => BinaryHeap::new(),
+                    tile_visible => {
+                        BinaryHeap::with_capacity(params.cap.min(tile_visible as usize) + 1)
+                    }
                 })
                 .collect();
             let mut c_theta = vec![0u64; tiles];
