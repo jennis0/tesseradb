@@ -916,7 +916,8 @@ impl Plan {
             1u64 << (2 * u32::from(depth))
         };
         let most_cells = self.area_cells.min(cx.view_rows());
-        let ranges = |size: u64| depth <= 16 && most_cells.saturating_mul(RANGE_FACTOR) <= size;
+        let factor = cx.engine.switches.aggregate_range_factor.load(Ordering::Relaxed);
+        let ranges = |size: u64| depth <= 16 && most_cells.saturating_mul(factor) <= size;
         let methods: Vec<(bool, bool)> = groups
             .sizes
             .iter()
@@ -997,7 +998,7 @@ const CHUNKS_PER_THREAD: u64 = 4;
 
 /// Range counts are taken for a group when its items number at least this many times the cells
 /// that could hold them: a range count costs about as much as reading this many rows.
-const RANGE_FACTOR: u64 = 64;
+pub(crate) const RANGE_FACTOR: u64 = 64;
 
 /// Where each group's rows are read for a cell count.
 enum Source<'s> {

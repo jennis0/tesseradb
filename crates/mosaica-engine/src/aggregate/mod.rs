@@ -42,7 +42,7 @@ use crate::viewport::{filter_refusal, SinkClosed, SinkResult};
 
 use cursor::{AggregateCursor, Position};
 use table::Plan;
-pub(crate) use table::{ALONE_ROWS, MIN_CHUNK_ROWS};
+pub(crate) use table::{ALONE_ROWS, MIN_CHUNK_ROWS, RANGE_FACTOR};
 
 /// One `POST /v1/aggregate` response, as the engine sees it.
 #[derive(Debug, Clone)]

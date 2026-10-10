@@ -5,8 +5,8 @@
 //! grouping, each with no filter and under a polygon, beside the viewport request over the same
 //! set at zoom 4 and the whole extent. A histogram is timed with its default edges, which read
 //! the whole visible set's values first, and with the range those edges span, which does not.
-//! The principal holds every term in the bundle's dictionary. The engine's pool is `--threads`
-//! wide.
+//! The principal holds `--terms`, or every term in the bundle's dictionary. The engine's pool is
+//! `--threads` wide.
 //!
 //! Every figure is the median of `--repeat` runs, with the fastest and slowest beside it, after one
 //! run that is not counted. Each case also reports its last run's time by stage: composing the
@@ -75,6 +75,18 @@ struct Args {
     /// Only the cases whose name contains one of these; every case where none is given.
     #[arg(long)]
     case: Vec<String>,
+    /// The terms the principal holds, comma-separated; every term in the dictionary where not
+    /// given.
+    #[arg(long, value_delimiter = ',')]
+    terms: Vec<String>,
+    /// The depths of the density cases; 6, 16 and 32 where none is given.
+    #[arg(long)]
+    density_depth: Vec<u8>,
+    /// Count a group's cells by range where its items number at least this many times the cells
+    /// that could hold them, in place of the engine's own factor: 0 for every group at depth 16
+    /// or less, 18446744073709551615 for none.
+    #[arg(long)]
+    range_factor: Option<u64>,
 }
 
 /// Counts what a response carries and keeps none of it, but a histogram's outer edges.
@@ -266,6 +278,9 @@ fn main() -> Result<(), BoxError> {
             compaction: mosaica_engine::CompactionSchedule::off(),
         },
     )?;
+    if let Some(factor) = args.range_factor {
+        engine.set_aggregate_range_factor_for_test(factor);
+    }
     let meta = engine.meta();
     let view = meta
         .views
@@ -280,7 +295,10 @@ fn main() -> Result<(), BoxError> {
         y_min: q.y_min,
         y_max: q.y_max,
     };
-    let terms = dictionary_terms(&args.bundle)?;
+    let terms = match args.terms.is_empty() {
+        true => dictionary_terms(&args.bundle)?,
+        false => args.terms.clone(),
+    };
     let session = engine.authorise(json!({ "terms": terms }).to_string().as_bytes())?;
     engine.viewport(&session, ViewportRequest::new(&args.view, 0, whole, 1))?;
     std::thread::sleep(Duration::from_millis(500));
@@ -335,7 +353,11 @@ fn main() -> Result<(), BoxError> {
             cases.push((format!("{column} bins 20 in a range"), histogram(Some(range)), true));
         }
     }
-    for depth in [6u8, 16, 32] {
+    let depths = match args.density_depth.is_empty() {
+        true => vec![6u8, 16, 32],
+        false => args.density_depth.clone(),
+    };
+    for depth in depths {
         cases.push((format!("density d{depth}"), density(depth), depth == 16));
     }
     cases.push((

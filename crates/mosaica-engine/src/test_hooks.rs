@@ -292,6 +292,17 @@ impl Engine {
         self.switches.coalesce_enabled.store(enabled, Ordering::SeqCst);
     }
 
+    /// Count an aggregate's cells by range for a group whose items number at least `factor` times
+    /// the cells that could hold them, rather than [`crate::aggregate::RANGE_FACTOR`]: 0 counts
+    /// every group by range at depth 16 or less, `u64::MAX` none.
+    #[cfg(feature = "bench-timing")]
+    #[doc(hidden)]
+    pub fn set_aggregate_range_factor_for_test(&self, factor: u64) {
+        self.switches
+            .aggregate_range_factor
+            .store(factor, Ordering::Relaxed);
+    }
+
     /// Override the serial/parallel fan-out threshold (`viewport::SERIAL_FALLBACK_MAX_ROWS`),
     /// so a small fixture can force the parallel branch to engage without changing production
     /// behaviour — the real threshold is too high to clear inside a unit test.

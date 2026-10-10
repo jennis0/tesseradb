@@ -40,6 +40,9 @@ pub(crate) struct TestSwitches {
     pub(crate) aggregate_min_chunk_rows: AtomicU64,
     /// The rows past which an aggregate's run of cells is sent as a page of its own.
     pub(crate) aggregate_alone_rows: AtomicU64,
+    /// How many times the cells that could hold a group's items it must number for the aggregate
+    /// to count its cells by range: [`crate::aggregate::RANGE_FACTOR`].
+    pub(crate) aggregate_range_factor: AtomicU64,
     /// The most terms a flush may carry the dictionary to: [`mosaica_authz::MAX_DISTINCT_TERMS`].
     pub(crate) max_distinct_terms: AtomicU64,
     /// How many visible items cluster centres are taken from: [`crate::slots::SAMPLE`].
@@ -192,6 +195,7 @@ impl Default for TestSwitches {
             tags_from_labels: AtomicBool::new(true),
             aggregate_min_chunk_rows: AtomicU64::new(crate::aggregate::MIN_CHUNK_ROWS),
             aggregate_alone_rows: AtomicU64::new(crate::aggregate::ALONE_ROWS),
+            aggregate_range_factor: AtomicU64::new(crate::aggregate::RANGE_FACTOR),
             max_distinct_terms: AtomicU64::new(mosaica_authz::MAX_DISTINCT_TERMS),
             slot_sample: AtomicU64::new(crate::slots::SAMPLE),
             #[cfg(feature = "fault-injection")]
