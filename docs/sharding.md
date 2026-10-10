@@ -37,8 +37,8 @@ The design has four parts.
    first stage.
 2. The corpus becomes a list of point shards in one process, each with its own entity space.
    Artifacts leave the point space for one space per layer (§2).
-3. Every request is answered from every shard, and the answers are combined. §3 gives the
-   combination for each route.
+3. Every request is answered from each shard in which the viewer can see something, and the
+   answers are combined. §3 gives the combination for each route.
 4. The shard size is part of the declaration, so a small corpus can run as many shards in a test
    (§2.5). §8 says how sharding's cost is measured.
 
@@ -340,7 +340,7 @@ bundle/
 
 - A request's work over its tiles is one call per shard over the request's sorted ranges, as
   `tile_ranges_all` is one call per segment today. Nothing is invoked once per (tile, shard).
-- Every shard is read, including one in which the viewer can see nothing (§6).
+- A shard in which the viewer can see nothing is left out of the request (§6).
 - A figure that decides what is served is summed or merged across every shard before any shard
   selects anything. Such figures are the viewer's visible total over the view, an artifact's count,
   a histogram's edges and a group's rank. No density rule, quota or rank is applied within one
@@ -614,10 +614,11 @@ builds today's bundle, apart from the directory layout and the manifest.
 - The kind, the shard, the occupancy and the layer space sit inside the keyed permutation. A viewer
   cannot read them, order identifiers by them or count gaps between them. The permutation is a
   blinding, not encryption, and a holder of the bundle inverts it, as today.
-- Every shard is read for every request, including a shard whose leaf is empty for the viewer. New
-  items reuse ids in the shards other viewers' deletions emptied, so work that skipped such shards
-  would vary with other viewers' deletions. A fragment-cache hit is per shard, a finer sample of the
-  cache's existing timing channel.
+- A shard whose leaf is empty for the viewer is left out of the request. New items reuse ids in
+  the shards other viewers' deletions emptied, so which shards a request leaves out varies with
+  other viewers' deletions. The difference is a shard's fixed cost per request, not yet measured,
+  and is accepted. A fragment-cache hit is per shard, a finer sample of the cache's existing timing
+  channel.
 - Selection leaves out a tile's parts with no visible row (§3.2). Today's sweep skips a tile with
   no visible row, whose count the response serves. A part's emptiness is not served, and under
   reuse it depends on other viewers' deletions. The skip saves a seek and a merge entry per empty
@@ -651,6 +652,7 @@ Fixtures beyond that:
 | unique across shards | a value held in one shard refuses a new item setting it in another |
 | build equals ingest | `build_equals_ingest.rs` across a shard boundary |
 | restart | `shards.size`, pools, held sets and occupancies survive a restart |
+| narrow viewer | a viewer whose items lie in one shard, and one whose items in a shard were all deleted and their numbers reused, get on every route what the oracle computes |
 | dropped shard | counts fall by its contribution; its identifiers answer as naming nothing; its number is not reused |
 | corrupt shard | a bundle with a corrupted file in one shard refuses at open, naming the shard |
 | layer drop | its space is removed at the next publication; its artifacts' identifiers answer as naming nothing; its number is not reused |
