@@ -7,6 +7,12 @@
 //! the containers once and carries the rank forward inside each, so the ranges that share a
 //! container popcount it once between them. croaring does not wrap that call, so it is made
 //! through `croaring-sys`, which names the same `roaring_bitmap_t` croaring's `Bitmap` wraps.
+//!
+//! `rank_many` also adds up the cardinality of every container below the first value it ranks,
+//! which on a bitmap of 2³² rows is tens of thousands of containers for each call. The call is
+//! therefore made on a view of only the containers the ranges reach: the same `roaring_array_t`
+//! with its pointers moved to the first such container and its size cut to their number. Its ranks
+//! count from that container, and a range's count is the difference of two of them.
 
 use std::ops::Range;
 
@@ -65,17 +71,45 @@ pub fn count_ranges(bitmap: &Bitmap, ranges: &[Range<u32>]) -> Vec<u64> {
         .collect()
 }
 
-/// The rank of each of `values`, ascending: how many members of `bitmap` are at or below it.
+/// For each of `values`, ascending, how many members of `bitmap` are at or below it and in or
+/// after the container that holds or follows `values[0]`. The difference of two of these is the
+/// difference of the two ranks.
 fn rank_many(bitmap: &Bitmap, values: &[u32]) -> Vec<u64> {
     debug_assert!(values.is_sorted());
     let mut ranks = vec![0u64; values.len()];
-    let raw: *const Bitmap = bitmap;
-    // SAFETY: `Bitmap` is `repr(transparent)` over `roaring_bitmap_t` (asserted above in size).
-    // The call reads `values.len()` values from `values`, which it requires ascending, and writes
-    // one rank for each into `ranks`, which holds as many.
+    let (Some(&first), Some(&last)) = (values.first(), values.last()) else {
+        return ranks;
+    };
+    let raw = (bitmap as *const Bitmap).cast::<croaring_sys::roaring_bitmap_t>();
+    // SAFETY: `Bitmap` is `repr(transparent)` over `roaring_bitmap_t` (its size is asserted above),
+    // so `raw` points at the bitmap's own `roaring_array_t` for as long as `bitmap` is borrowed.
+    // Its `keys`, `containers` and `typecodes` each hold `size` entries, read only once `size` is
+    // known to be positive. The view shares those arrays from `lo` for `hi − lo` entries, which
+    // lie inside them, and lives on this stack frame: nothing frees, grows or writes it.
+    // `roaring_bitmap_rank_many` reads the view and `values.len()` values, which it requires
+    // ascending, and writes one rank for each into `ranks`, which holds as many.
     unsafe {
+        let whole = &(*raw).high_low_container;
+        let size = usize::try_from(whole.size).unwrap_or(0);
+        if size == 0 {
+            return ranks;
+        }
+        let keys = std::slice::from_raw_parts(whole.keys, size);
+        let lo = keys.partition_point(|&k| u32::from(k) < first >> 16);
+        let hi = keys.partition_point(|&k| u32::from(k) <= last >> 16);
+        let span = (hi - lo) as i32;
+        let view = croaring_sys::roaring_bitmap_t {
+            high_low_container: croaring_sys::roaring_array_t {
+                size: span,
+                allocation_size: span,
+                containers: whole.containers.add(lo),
+                keys: whole.keys.add(lo),
+                typecodes: whole.typecodes.add(lo),
+                flags: whole.flags,
+            },
+        };
         croaring_sys::roaring_bitmap_rank_many(
-            raw.cast::<croaring_sys::roaring_bitmap_t>(),
+            &view,
             values.as_ptr(),
             values.as_ptr().add(values.len()),
             ranks.as_mut_ptr(),
@@ -147,6 +181,45 @@ mod tests {
                 .map(|r| b.range_cardinality(r.clone()))
                 .collect();
             assert_eq!(count_ranges(&b, &ranges), want);
+        }
+    }
+
+    /// Ranges that reach only some containers of a bitmap spanning many, including none at all,
+    /// the first and the last: the view's ranks start at the first container reached, and the
+    /// counts are croaring's.
+    #[test]
+    fn counts_over_a_part_of_a_wide_bitmap_equal_croarings() {
+        let mut b = Bitmap::new();
+        for block in (0..2_000u32).step_by(3) {
+            b.add_range(block << 16..(block << 16) + 5_000);
+            b.add((block << 16) + 40_000 + block);
+        }
+        let past = 2_000u32 << 16;
+        for ranges in [
+            vec![
+                (1_000 << 16) + 10..(1_000 << 16) + 20,
+                (1_000 << 16) + 20..(1_001 << 16) + 9,
+            ],
+            vec![0..3, 3..70_000],
+            vec![
+                (1_998 << 16)..(1_999 << 16) + 70,
+                (1_999 << 16) + 70..u32::MAX,
+            ],
+            vec![
+                (1 << 16) + 6_000..(1 << 16) + 7_000,
+                (4 << 16) + 6_000..(4 << 16) + 7_000,
+            ],
+            vec![past..past + 100, past + 100..u32::MAX],
+            vec![
+                (600 << 16) + 39_000..(1_400 << 16) + 41_000,
+                (1_400 << 16) + 41_000..(1_400 << 16) + 41_000,
+            ],
+        ] {
+            let want: Vec<u64> = ranges
+                .iter()
+                .map(|r| b.range_cardinality(r.clone()))
+                .collect();
+            assert_eq!(count_ranges(&b, &ranges), want, "{ranges:?}");
         }
     }
 
