@@ -123,10 +123,11 @@ pub struct StageTimings {
     /// once before the parallel section. Serial-prefix, same wall-clock meaning at every
     /// `compute_threads` — not to be confused with the genuinely per-tile fields below.
     pub tile_ranges_ns: u64,
-    /// `EffectiveMask::count_range`, summed over tiles. The count loop.
+    /// The tiles' counts: one `EffectiveMask::count_ranges` over every tile's parts, before the
+    /// fan-out, and each tile's filtered and highlighted counts, summed over tiles.
     ///
-    /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
-    /// struct's doc.
+    /// **The per-tile share is a cross-worker sum under `compute_threads > 1`, not a wall-clock
+    /// partition** — see this struct's doc.
     pub count_ns: u64,
     /// §7.2's selection, summed over tiles: the tiered decode of the visible set
     /// (`select::decode_tier` — full-range slice, run decode, or batched value decode, each

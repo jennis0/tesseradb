@@ -262,11 +262,12 @@ impl EffectiveMask {
     }
 
     /// The rows in `r` visible, matching the filter and satisfying the highlight —
-    /// `TileCount::highlighted`. Equal to [`Self::count_matched_range`] with no highlight, so
-    /// the column is always present on the wire. `highlighted ≤ matched ≤ visible` always holds.
-    pub fn count_highlighted_range(&self, r: Range<u32>) -> u64 {
+    /// `TileCount::highlighted` — where `matched` is `r`'s [`Self::count_matched_range`]. Equal
+    /// to `matched` with no highlight, so the column is always present on the wire.
+    /// `highlighted ≤ matched ≤ visible` always holds.
+    pub fn count_highlighted_range(&self, r: Range<u32>, matched: u64) -> u64 {
         match &self.highlight {
-            None => self.count_matched_range(r),
+            None => matched,
             Some(highlight) => {
                 debug_assert!(
                     highlight.covers(&r),
@@ -333,13 +334,13 @@ impl EffectiveMask {
         self.base.cardinality() - self.minus.cardinality() + self.plus.cardinality()
     }
 
-    /// The rows in `r` that are visible and match the request's filter — `TileCount::matched`,
-    /// distinct from [`Self::count_range`]'s composed visible count: `visible` is how many
-    /// items in this tile the principal may see, `matched` how many the filter admits. Without a
-    /// filter the two agree, and this returns `count_range` rather than materialising a bitmap.
-    pub fn count_matched_range(&self, r: Range<u32>) -> u64 {
+    /// The rows in `r` that are visible and match the request's filter — `TileCount::matched` —
+    /// where `visible` is `r`'s [`Self::count_range`]: `visible` is how many items in this tile
+    /// the principal may see, `matched` how many the filter admits. Without a filter the two
+    /// agree, and this returns `visible` rather than materialising a bitmap.
+    pub fn count_matched_range(&self, r: Range<u32>, visible: u64) -> u64 {
         match &self.filter {
-            None => self.count_range(r),
+            None => visible,
             // With a filter present the term-by-term arithmetic does not hold — a row can be in
             // `base` and out of the filter — so this materialises the intersection instead.
             // O(containers in the range), not O(rows).
