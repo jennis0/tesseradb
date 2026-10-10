@@ -53,41 +53,67 @@ lowest first, before any id from the high water. The free and held sets are one 
 written into every side-manifest. A deleted item's number stays reserved, so that a `mosaica_id` a
 client holds never comes to name another item.
 
-### 1.2 The occupancy
+### 1.2 The tenancy
 
-Each id has an occupancy: how many items have held it as their number before. The `mosaica_id` of
-an item becomes
+Each id has a tenancy: how many items have held it as their number before. The `mosaica_id` of an
+item becomes
 
 ```text
-mosaica_id = FPE_k( (kind: 1) ‖ (shard: 19) ‖ (occupancy: 12) ‖ (number: 32) )
+mosaica_id = FPE_k( (kind: 1) ‖ (shard: 19) ‖ (tenancy: 12) ‖ (number: 32) )
 ```
 
 where `FPE_k` is the keyed Feistel permutation the bundle uses today
 (`crates/mosaica-types/src/identity.rs`). Its 32-bit high half holds the shard id today, which is
 0 in every bundle. The kind bit is 0 for an item and 1 for an artifact (§2.2). An item takes the
-occupancy of the id it is given. Its `mosaica_id` is fixed for its life, across edits, as it is
-today. When the item is deleted and its number freed, the number's next holder takes the next
-occupancy and so a different `mosaica_id`.
+tenancy of the id it is given. Its `mosaica_id` is fixed for its life, across edits, as it is
+today. When the item is deleted and its number freed, the number's tenancy rises by one, so its
+next holder has a different `mosaica_id`.
 
-A held `mosaica_id` therefore never names another item. A lookup inverts it to (shard, occupancy,
-number) and compares the whole identifier with the one stored at the row the number leads to, as
-it does today. An identifier with an occupancy below the current one fails that comparison and
-answers as one that names nothing.
+An id's tenancy changes only when a compaction frees it as a number. Issuing the id does not change
+it, and neither does an edit's use of it. Each shard keeps its ids' tenancies in a tenancy index:
+twelve Roaring bitmaps, the k-th holding the ids whose tenancy has bit k set. An id never freed as a
+number is in none of them, so a shard without deletions stores nothing. The compaction that frees
+numbers writes the index in the publication that removes their rows, and it is memory-mapped.
+Modelled at 1% daily churn, a full shard's index is about 1 to 1.5 GB after a year, about three bits
+an id; its ceiling is twelve bits an id.
 
-The occupancy has its own name because "generation" already means a published version of serving
-state ([write path](system/write-path.md#generations)).
+A held `mosaica_id` therefore never names another item. Every place that resolves one inverts it to
+(shard, tenancy, number) and reads the number's tenancy from the index, twelve probes whatever the
+identifier. One that differs answers as an identifier that names nothing. Nothing compares
+identifiers today, because no number is reused: the item card and the resolver behind
+`/control/changes`, ingest and membership addressing map (shard, number) straight to an entity
+(`viewport/item.rs`, `control.rs` `mosaica_ids_in`). The item card reads the tenancy before its
+visibility test, so a stale, an invisible and an unheld identifier cost the same. The write
+executor's re-checks compare the tenancy too: the ingest re-check compares numbers alone today
+(`write/executor/window.rs`), which a reused number passes.
+
+Every place that builds a `mosaica_id` from a number reads the tenancy from the index: the flush,
+ingest receipts, unique-value refusals and the edited-items lookup (`mosaica-store/src/flush.rs`,
+`ingest.rs`, `unique.rs`, `edited.rs`). The WAL records no tenancy. A replayed record follows the
+bundle's last publication, and a number freed by a compaction is not issued until the WAL rotates
+past it, so the index answers every number a replayed record names as it stood when the record was
+written.
+
+The tenancy has its own name because "generation" already means a published version of serving
+state ([write path](system/write-path.md#generations)), and "occupancy" the tiles a viewer's items
+occupy, which θ is anchored on.
 
 ### 1.3 What frees a number
 
-A compaction removes the rows of deleted entities. For each removed row it reads the `mosaica_id`
-stored at the row and inverts it to (occupancy, number). Where no live entity holds that number
-any longer, the number is freed at occupancy + 1. A removed entity that is not a number, an id an
-edit moved its item onto, is freed at occupancy 0 (§1.4). The edited-items map tells the two apart,
-as it does today.
+A compaction frees a number when it removes the number's last entity: the number itself and every
+entity an edit moved its item onto, which the edited-items map pairs with it. Until then the number
+resolves through that map (`edited.rs` `entities_of_numbers`), so a number freed earlier would leave
+its next holder resolving to an entity of its last. The number's tenancy rises by one in the index
+the compaction publishes. A removed entity that is not a number, an id an edit moved its item onto,
+is freed at tenancy 0. The edited-items map tells the two apart, as it does today.
 
-An item deleted before any flush placed it has no row to read. The flush that discards its buffered
-row records the number and its occupancy in the shard's side-manifest, and the next compaction frees
-it from there.
+An item deleted before any flush placed it has no rows. Its deletion is in the overlay, and the
+compaction that retires that deletion frees its number as it frees any other.
+
+A compaction that frees numbers makes every command resolved before it stale. The write executor
+resolves a deny, a publication or a growth against an edit stamp, and today treats a compaction with
+no edit since as harmless (`edited.rs` `Stamp::since`). Once deletions free numbers, such a
+compaction moves the stamp, and the command is resolved again.
 
 The rules that keep a freed id from carrying anything of its previous holder apply to a freed number
 unchanged. Its rows, term-index entries, memberships, unique values and suppression are gone before
@@ -98,15 +124,16 @@ edit-freed ids (`freed_ids_carry_nothing`) is extended to freed numbers.
 
 ### 1.4 The pool
 
-The pool holds one bitmap per occupancy: the ids free to be issued at that occupancy. Occupancy 0
-holds ids no item has held as its number, which are the ids edits leave behind.
+The pool holds the ids free to be issued, and the index gives each its tenancy. Tenancy 0 holds ids
+no item has held as its number, which are the ids edits leave behind.
 
-- A new item takes an id from the lowest occupancy, the lowest id first, before any id from the high
-  water.
-- An edit's new entity takes an id of occupancy 0, or one from the high water. It never takes one of
-  a higher occupancy. Its rows carry its item's `mosaica_id`, so it never becomes a number, and it
-  returns to occupancy 0 when freed. No record of where it came from is needed.
-- A number at occupancy 4,095 is not freed. The compaction that removes its last row retires it,
+- A new item takes an id from the lowest tenancy, the lowest id first, before any id from the high
+  water. In a sealed shard it takes ids of tenancy 1 and above only: ids of tenancy 0 are kept for
+  edits, which can take no other from the pool (§4.3).
+- An edit's new entity takes an id of tenancy 0, or one from the high water. It never takes one of a
+  higher tenancy. Its rows carry its item's `mosaica_id`, so it never becomes a number, and it
+  returns to tenancy 0 when freed.
+- A number at tenancy 4,095 is not freed. The compaction that removes its last entity retires it,
   and the shard counts it.
 
 Modelled: an id whose holder turns over every 100 days, 1% daily churn, reaches the cap in about
@@ -127,13 +154,13 @@ changes for a client.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> live: a new item takes the id at occupancy o
+  [*] --> live: a new item takes the id at tenancy t
   live --> live: an edit moves the item to another entity, and the number stays
   live --> deleted: delete, or a view drop leaves it in no view
-  deleted --> held: the compaction removes its last row
+  deleted --> held: the compaction removes its last entity
   held --> free: the WAL rotates past that compaction
-  free --> live: a new item takes it at occupancy o + 1
-  deleted --> retired: the compaction removes its last row, at o = 4,095
+  free --> live: a new item takes it at tenancy t + 1
+  deleted --> retired: the compaction removes its last entity, at t = 4,095
   retired --> [*]
 ```
 
@@ -172,8 +199,8 @@ flowchart TD
 
 | State | Issues ids to new items | Issues ids to edits | Takes deletions and suppressions | Compacted |
 |---|---|---|---|---|
-| Open | from its pool, then its high water | from occupancy 0, then its high water | yes | yes |
-| Sealed | from its pool | from occupancy 0, then its high water up to the ceiling | yes | yes |
+| Open | from its pool, then its high water | from tenancy 0, then its high water | yes | yes |
+| Sealed | from its pool, tenancy 1 and above | from tenancy 0, then its high water up to the ceiling | yes | yes |
 | Dropped | no | no | no | no |
 
 A dropped shard's number is never used again. The manifest allocates shard numbers from a monotone
@@ -234,7 +261,7 @@ flowchart TB
   end
   subgraph P["point shard: one per opened shard"]
     direction TB
-    P1["entity space, allocator, pool by occupancy"]
+    P1["entity space, allocator, pool, tenancy index"]
     P2["postings, transpose, edited items,<br/>unique indexes, attributes, records, text"]
     P3["overlay"]
     P4["per view: row space, permutation,<br/>segments, term images, field tallies"]
@@ -285,8 +312,8 @@ lets the open shard go on issuing ids. A sealed shard stays sealed.
 The default is 2³² − 2²⁸, 4,026,531,840. A sealed shard keeps the 2²⁸ ids above it for edits of its
 own items (§4.3). The default is chosen again from measurement (§8.5).
 
-The field widths of the identity are fixed. A test reaches the occupancy cap by seeding a pool at
-occupancy 4,095.
+The field widths of the identity are fixed. A test reaches the tenancy cap by seeding a pool at
+tenancy 4,095.
 
 ### 2.6 Bundle layout
 
@@ -492,8 +519,8 @@ The allocation target for new items is chosen at each commit window.
 3. When the open shard's high water reaches `shards.size`, it seals. When a window still has rows
    to place and no pool meets the threshold, the next shard opens.
 
-Within a target the window's rows are sorted by signature, as today, and take ids lowest occupancy
-first, lowest id first. A window can straddle a change of target, and each row records the shard it
+Within a target the window's rows are sorted by signature, as today, and take ids lowest tenancy
+first, lowest id first, as §1.4 says. A window can straddle a change of target, and each row records the shard it
 landed in. A corpus whose live size is steady opens no shard, so the number of shards is about the
 live count over `shards.size`.
 
@@ -502,20 +529,22 @@ remains, is not part of this design. It is decided from the churn measurement (�
 
 ### 4.2 Resolving a batch
 
-A row's `mosaica_id` inverts to its shard, occupancy and number. A unique value is looked up in
+A row's `mosaica_id` inverts to its shard, tenancy and number, and its tenancy is compared with
+the index (§1.2). A unique value is looked up in
 every shard. Each shard holds a key filter beside each unique index, about 10 bits per value,
 rebuilt at the shard's compaction. A lookup probes every filter and searches only the shards that
 answer. The executor's in-memory record of the unique values recent flushes moved to disc stays one
 record across shards. A value held in any shard refuses a new item that sets it, as it does in one
 space today.
 
-Each WAL row records its shard and, for a new item, its occupancy. Replay rebuilds each shard's
-allocator, pool and held sets from that shard's side-manifest and the records naming it.
+Each WAL record that names an entity names its shard or layer space. None records a tenancy
+(§1.2). Replay rebuilds each shard's allocator, pool and held sets from that shard's side-manifest
+and the records naming it.
 
 ### 4.3 Edits stay in their item's shard
 
-An edit takes its new entity in the shard that holds the item's number: an id of occupancy 0 from
-that shard's pool, or one from its high water, which for a sealed shard may run past `shards.size`
+An edit takes its new entity in the shard that holds the item's number: an id of tenancy 0 from
+that shard's pool, which a sealed shard keeps for edits (§1.4), or one from its high water, which for a sealed shard may run past `shards.size`
 up to the entity ceiling. The edited-items map, the item's memberships and the generating sets it
 joins therefore stay inside one shard. Where the shard has no such id, the edit is refused with the
 shard's figures, as an exhausted allocator refuses today, and the shard's next compaction frees the
@@ -527,8 +556,10 @@ shard's compaction would need the other shards' deletions to decide whether a nu
 
 ### 4.4 Denies
 
-`/control/changes` inverts each identifier to (shard, number), and through that shard's
-edited-items map to the entity that holds the number now, or to (layer space, entity). It applies
+`/control/changes` inverts each identifier to (shard, tenancy, number), compares the tenancy with
+the index (§1.2), and goes through that shard's edited-items map to the entity that holds the
+number now, or to (layer space, entity). An identifier whose tenancy differs is refused as naming
+nothing. It applies
 the change to that shard's or that space's overlay. The two removal rules hold per shard. A
 deletion leaves the overlay at the compaction of its own shard that removes its rows. A suppression
 leaves it when it is lifted, or at the compaction that removes the entity it names. An item's
@@ -584,7 +615,7 @@ shard's directory and retires its number, and every identifier it issued answers
 nothing.
 
 `/control/status` gains one record per shard: number, state, whether it is the allocation target,
-live rows, high water, ids left, pool size by occupancy, retired count, overlay sizes, segments,
+live rows, high water, ids left, pool size by tenancy, retired count, overlay sizes, segments,
 and its last compaction's duration and peak memory. Its totals become sums. Each of the four
 surfaces reaches seal, drop and the shard list.
 
@@ -611,7 +642,7 @@ builds today's bundle, apart from the directory layout and the manifest.
 - Nothing per shard reaches the viewer plane. The geometry stamp stays one digest of the prefix. The
   byte scanner in conformance checks that no entity id, shard number, layer-space number or
   per-shard count is on the wire.
-- The kind, the shard, the occupancy and the layer space sit inside the keyed permutation. A viewer
+- The kind, the shard, the tenancy and the layer space sit inside the keyed permutation. A viewer
   cannot read them, order identifiers by them or count gaps between them. The permutation is a
   blinding, not encryption, and a holder of the bundle inverts it, as today.
 - A shard whose leaf is empty for the viewer is left out of the request. New items reuse ids in
@@ -628,8 +659,11 @@ builds today's bundle, apart from the directory layout and the manifest.
   an item the viewer may not see.
 - A reused number carries nothing of its previous holder (§1.3), and its previous `mosaica_id` never
   names the new item (§1.2).
-- A bulk read in stored order walks shards in number order. Stored order already follows the order
-  items were numbered in.
+- A bulk read in stored order walks shards in number order. A new item takes the lowest freed
+  number, so it appears in stored order where a deleted item was, and a viewer who sees the items
+  either side learns that an item between them was deleted, though they may never have seen it.
+  That is accepted, and stage 1 adds it to the threat model's residual disclosure
+  ([security](system/security.md#residual-disclosure)) beside its account of stored order.
 - The removal rules for deletions and suppressions hold per shard (§4.4).
 
 ## 7. Tests
@@ -637,21 +671,25 @@ builds today's bundle, apart from the directory layout and the manifest.
 The conformance suite runs in two modes: with the default shard size, and with a size small enough
 that every corpus spans several shards. Every assertion it makes today holds in both. The
 identifiers differ between the modes, as they differ between two builds, and so do the samples
-drawn by rank. The oracle reads each item's shard and occupancy from the bundle, as it reads the
-shard id and entity ids today, reproduces every identifier, and checks each sample against its own
-selection over them.
+drawn by rank. The oracle derives every identifier itself, as it does today. It reads each item's shard and
+number from the bundle, takes the tenancy from its own count of the items it has seen hold that
+number, never from the stored identifiers or the tenancy index, and checks each sample against its
+own selection over them. Every identifier a receipt carries must invert to the tenancy it expects.
 
 Fixtures beyond that:
 
 | Fixture | Checks |
 |---|---|
-| reuse | a deleted item's number is issued again at the next occupancy; the old `mosaica_id` answers as naming nothing on every route; the new item carries nothing of the old, in any home, across a flush, merge, compaction and restart |
-| cap | a number at occupancy 4,095 is retired by the compaction that removes it and never issued again |
+| reuse | a deleted item's number is issued again at the next tenancy; the old `mosaica_id` answers as naming nothing on every route; the new item carries nothing of the old, in any home, across a flush, merge, compaction and restart |
+| stale identifier | after a deleted item's number is issued again, a deletion, suppression, edit or membership sent with the old `mosaica_id` is refused as naming nothing and changes no item, as is one resolved before the compaction that freed the number |
+| early free | an item edited, then deleted while a compaction is in flight, keeps its number until the compaction that removes its last entity; its next holder resolves to itself |
+| buffered delete | an item deleted before its first flush has its number freed by the compaction that retires the deletion |
+| cap | a number at tenancy 4,095 is retired by the compaction that removes it and never issued again |
 | sealed shard | takes edits, deletions and suppressions; the removal rules hold per shard; an edit's new entity stays in the shard |
 | allocation | new items go to the largest pool above the threshold; a steady churn opens no shard |
 | unique across shards | a value held in one shard refuses a new item setting it in another |
 | build equals ingest | `build_equals_ingest.rs` across a shard boundary |
-| restart | `shards.size`, pools, held sets and occupancies survive a restart |
+| restart | `shards.size`, pools, held sets and tenancy indexes survive a restart |
 | narrow viewer | a viewer whose items lie in one shard, and one whose items in a shard were all deleted and their numbers reused, get on every route what the oracle computes |
 | dropped shard | counts fall by its contribution; its identifiers answer as naming nothing; its number is not reused |
 | corrupt shard | a bundle with a corrupted file in one shard refuses at open, naming the shard |
@@ -753,7 +791,7 @@ on one shard, and it decides whether pool ids need handing out in runs (§4.1).
 | a compaction of MedCPT, 36 million items: 330 s, of which 1.5% corpus-wide, 50.5% per row, 48.1% artifact structures | measured, once | `probes/2026-09-04-epoch-shard-fold-decomposition/` |
 | a compaction of Tree of Life after its 50% ingest cell: 1,313 s | measured, once | [ingest campaign](ingest-campaign.md) |
 | a compaction of a shard of 2³² items in two views: about 6.7 hours | modelled, linear in items from the Tree of Life run | this document |
-| an id reaches the occupancy cap in about 1,100 years at 1% daily churn, 110 at 10% | modelled | §1.4 |
+| an id reaches the tenancy cap in about 1,100 years at 1% daily churn, 110 at 10% | modelled | §1.4 |
 | capacity: 2¹⁹ shards of about 2³² ids, about 2 × 10¹⁵ items | modelled | §2.1, §2.5 |
 | a session's visible set grows more slowly than the corpus | assumed; to be confirmed before any figure above 2³² items is promised | n/a |
 | selection batched per shard; the tile index on today's levels; every route at N on a built bundle; churn locality; the key filter; compaction per shard | not measured | §8 |
@@ -782,7 +820,7 @@ the refusal is removed at stage 5.
 | Stage | What it does | Gate |
 |---|---|---|
 | 0 | §8.1; `count_ranges` in today's engine. Built for the density underlay's and the aggregate's cells, which are 1.4 to 10 times faster for a viewer who sees most of the map (`probes/2026-10-10-batched-cell-counts/`), and for the sweep's tile counts, whose count stage is 4 to 28 times faster for a viewer of 30% or more at depth 6 and deeper, and whose request is 6 to 43% faster for a viewer of 30% (`probes/2026-10-10-tile-counts-and-range-factor/`) | figures recorded in a probe |
-| 1 | the identity input gains the kind bit, the shard field and the occupancy, in the engine and in the oracle's own derivation and its vectors; the pool keeps a bitmap per occupancy; a compaction frees a deleted item's number at the next occupancy and retires one at the cap; format bump | reuse and cap fixtures; §8.4 on one shard |
+| 1 | the identity input gains the kind bit, the shard field and the tenancy, in the engine and in the oracle's own derivation and its vectors; the tenancy index, written by the compaction that frees numbers and read wherever an identifier is built or resolved; the executor's re-checks compare the tenancy, and a compaction that frees numbers moves the edit stamp; a compaction frees a deleted item's number with its last entity at the next tenancy and retires one at the cap; the threat model's stored-order residual (§6); format bump | reuse, stale identifier, early free, buffered delete and cap fixtures; §8.4 on one shard |
 | 2 | `ShardId`; every per-entity and per-view structure moves under `shards/0/`; the manifest and side-manifest split; `shards.size` declared and recorded, and a size that would open a second shard refused on both paths; the compile-fail tests | the whole suite on rebuilt bundles |
 | 3 | layer spaces: artifact records, own-label postings and overlay move out of the point space; the two-region allocator and its low water go; artifact identifiers take the kind bit | layer drop fixture; byte scanner extended |
 | 4 | `ShardedMask`; every route combined as §3.4 says; caches keyed per shard; projections shared by grant; a build writes several shards past `shards.size` | the conformance suite's read tests in both modes; §8.2 |
