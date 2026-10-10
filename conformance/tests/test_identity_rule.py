@@ -4,7 +4,8 @@ Every write names items by `mosaica_id` and by the values of fields declared uni
 sends ingest batches, changes and member tables to a real `mosaica serve` and compares each answer
 with the model's: which rows were refused and why, the receipt's counts and `mosaica_ids`, the
 status a strict request is refused with, and what the deployment then serves, read back through
-`/v1/items`.
+`/v1/items`. Every identifier a receipt issues or answers is checked against the oracle's own count
+of each number's holders, read from the bundle as built (`oracle.tenancy`).
 
 The corpus is 120 items on one view, each with a distinct integer position. Two fields are unique:
 `code`, a keyword, and `num`, a `u64`; some items hold neither, some one, some both. Every value a
@@ -30,6 +31,7 @@ import pytest
 import requests
 
 from oracle import naming
+from oracle.bundle import Bundle
 from oracle.harness import (
     cli_build,
     ensure_cli_built,
@@ -38,6 +40,7 @@ from oracle.harness import (
     write_deployment,
 )
 from oracle.naming import INTEGER, KEYWORD, Creates, Holdings, Names, Refused
+from oracle.tenancy import HolderCount
 from oracle.wire import split_items_frames
 
 VIEW = "world"
@@ -130,13 +133,16 @@ def pristine_bundle(tmp_path_factory) -> Path:
 
 
 class Deployment:
-    """One server over a private copy of the bundle, and the model of what it holds."""
+    """One server over a private copy of the bundle, and the model of what it holds. `built` is
+    the copy as built, read before the server opened it."""
 
-    def __init__(self, server):
+    def __init__(self, server, built: Bundle):
         self.server = server
         self.token = server.authorise([])["token"]
         self.batches = count()
-        self.holdings = Holdings(unique=dict(UNIQUE), items=self.served())
+        self.holdings = Holdings(
+            unique=dict(UNIQUE), items=self.served(), numbers=HolderCount.of_bundle(built)
+        )
         assert sorted(map(_canonical, self.holdings.items.values())) == sorted(
             _canonical(planted(i)) for i in range(N_ITEMS)
         ), "the build serves the corpus it was given"
@@ -260,11 +266,12 @@ def _canonical(values: dict) -> tuple:
 def deployment(pristine_bundle, tmp_path):
     bundle = tmp_path / "bundle"
     shutil.copytree(pristine_bundle, bundle)
+    built = Bundle(bundle)
     state = tmp_path / "state"
     state.mkdir()
     server, proc = spawn_server(bundle, state)
     try:
-        yield Deployment(server)
+        yield Deployment(server, built)
     finally:
         stop_server(proc)
 
@@ -991,3 +998,66 @@ def test_an_ingest_that_can_only_edit_and_names_items_by_no_column_is_malformed(
     for rows in ([{}, {"code": None}], [{"mosaica_id": None}], [{}, fresh_position()]):
         assert not naming.malformed_ingest(dep.holdings, rows)
         check_ingest(dep, rows)
+
+
+# ---------------------------------------------------------------------------------------------
+# A deleted item's number, issued again
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_nothing(deployment):
+    """Three items are deleted, the first of them suppressed, and a compaction removes them. The
+    next batch's new items take their numbers, the lowest first, one tenancy higher, so no new
+    `mosaica_id` is a deleted item's. The deleted items' identifiers then name nothing on the item
+    card, in a change, in an ingest row or in a member table, and each new item holds only what its
+    row set.
+
+    Skipped where every new item's number comes from the high water: a server without stage 1 of
+    `docs/sharding.md` keeps a deleted item's number reserved."""
+    dep = deployment
+    numbers = dep.holdings.numbers
+    deleted = sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v)[:3]
+    freed = {numbers.number_of(t)[1] for t in deleted}
+    check_changes(dep, [{"op": "suppress", "match": {"mosaica_id": str(deleted[0])}}])
+    check_changes(dep, [{"op": "delete", "match": {"mosaica_id": str(t)}} for t in deleted])
+    dep.server.compact()
+
+    high_water = int(dep.server.status()["entity_id_high_water"])
+    before = set(dep.holdings.items)
+    rows = [fresh_position() for _ in deleted] + [{"code": fresh_code(), **fresh_position()}]
+    check_ingest(dep, rows)
+    if int(dep.server.status()["entity_id_high_water"]) == high_water + len(rows):
+        pytest.skip(
+            f"the server took all {len(rows)} new items' numbers from its high water and none "
+            "from the deleted items: it does not reuse numbers (docs/sharding.md §1, stage 1)"
+        )
+    at = {(v["x"], v["y"]): t for t, v in dep.holdings.items.items() if t not in before}
+    made = [at[(row["x"], row["y"])] for row in rows]
+    assert numbers.number_of(made[0]) == (1, min(freed)), "the first takes the lowest freed number"
+
+    for t in deleted:
+        assert dep.server.item(dep.token, t).status_code == 404
+    for t in made:
+        card = dep.server.item(dep.token, t)
+        assert card.status_code == 200, card.text
+        values = dep.holdings.items[t]
+        assert card.json()["fields"] == {c: v for c, v in values.items() if c in UNIQUE}
+
+    stale = [str(t) for t in deleted]
+    resp = dep.changes([{"op": "delete", "match": {"mosaica_id": s}} for s in stale], strict=True)
+    assert resp.status_code == naming.ADDRESSING_STRICT_STATUS[naming.UNKNOWN_MOSAICA_ID], resp.text
+    changes = [
+        {"op": op, "match": {"mosaica_id": s}} for s in stale for op in ("suppress", "delete")
+    ]
+    assert check_changes(dep, changes) == [Refused(naming.UNKNOWN_MOSAICA_ID)] * len(changes)
+
+    rows = [{"mosaica_id": s, "code": fresh_code()} for s in stale]
+    rows += [{"mosaica_id": s, **fresh_position()} for s in stale]
+    assert check_ingest(dep, rows) == [Refused(naming.UNKNOWN_MOSAICA_ID)] * len(rows)
+
+    members = [{"mosaica_id": t} for t in stale + [str(t) for t in made]]
+    body = {"artifacts": [{"key": "reused", "members": member_table(members)}]}
+    resp = dep.artifacts("PUT", GROUPS, body)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["refused"] == expected_refused(dep.holdings, [(0, "members", members)])
+    assert dep.members(GROUPS, resp.json()["artifacts"][0]["mosaica_id"]) == set(made)

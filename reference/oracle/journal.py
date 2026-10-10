@@ -66,6 +66,7 @@ import requests
 
 from .bundle import Bundle
 from .mask import ChangeSet
+from .tenancy import HolderCount
 
 # The four `/control/changes` operations. The server refuses `predicate`; it is kept so a test
 # can submit it and see the refusal.
@@ -96,13 +97,14 @@ class IngestOp:
 
     sequence: int
     batch_id: str
-    #: The rows that created an item, each taking a new entity id. A row adding an item to a view
-    #: or changing nothing takes none.
+    #: The rows that created an item, each taking a number. A row adding an item to a view or
+    #: changing nothing takes none.
     created: int
     mosaica_ids: tuple[str, ...] = ()
-    # The `entity_id_high_water` the barrier waits for: what it was before the call, plus the
-    # rows the service said created an item. Captured per batch because that is the only quantity
-    # `/control/status` exposes that moves with an ingest at all (see `barrier`).
+    # The `entity_id_high_water` the barrier waits for: what it was before the call, raised past
+    # every number the batch's new items took. A new item given a deleted item's number takes it
+    # from below the high water and raises nothing. Captured per batch because that is the only
+    # quantity `/control/status` exposes that moves with an ingest at all (see `barrier`).
     required_high_water: int = 0
     applied: bool = False
 
@@ -128,6 +130,9 @@ class AckedJournal:
     def __init__(self, server, bundle: Bundle):
         self.server = server
         self.bundle = bundle
+        #: Each number's holders, from the bundle as built and every acked ingest and deletion.
+        #: Every identifier an acked receipt carries is checked against it.
+        self.holders = HolderCount.of_bundle(bundle)
         self.ops: list[ChangeOp] = []
         self.ingests: list[IngestOp] = []
         self.refused: list[Refusal] = []
@@ -172,6 +177,8 @@ class AckedJournal:
 
         self._sequence += 1
         if response.status_code == 200:
+            if op == "delete":
+                self.holders.delete(supplied)
             self.ops.append(
                 ChangeOp(
                     sequence=self._sequence,
@@ -212,6 +219,8 @@ class AckedJournal:
         response = self.server.changes(payload, strict=True)
         if response.status_code == 200:
             for entity_id, op, term_ids in items:
+                if op == "delete":
+                    self.holders.delete(self.bundle.mosaica_id_of(entity_id))
                 self._sequence += 1
                 self.ops.append(
                     ChangeOp(
@@ -240,20 +249,23 @@ class AckedJournal:
         2.1's Task 8 makes routine rather than exotic: a batch accepted into a held commit window
         is acked and durable and still invisible, and the I1 differential has to model both facts
         at once.
+
+        Every identifier the receipt carries is checked against `holders` first, and a new item's
+        must carry its number's tenancy: how many items the journal has seen hold the number.
         """
         before = int(self.server.status()["entity_id_high_water"])
         response = self.server.ingest(body, batch_id, strict=True)
         self._sequence += 1
         if response.status_code == 200:
             payload = response.json()
-            created = int(payload["created"])
+            numbers = self.holders.receipt(payload)
             self.ingests.append(
                 IngestOp(
                     sequence=self._sequence,
                     batch_id=batch_id,
-                    created=created,
-                    mosaica_ids=tuple(payload.get("mosaica_ids", ()) or ()),
-                    required_high_water=before + created,
+                    created=int(payload["created"]),
+                    mosaica_ids=tuple(payload["mosaica_ids"]),
+                    required_high_water=max([before, *(n + 1 for n in numbers)]),
                 )
             )
         else:
@@ -280,7 +292,7 @@ class AckedJournal:
 
         Phase 1's `/control/status` exposes exactly one field that moves with an ingest —
         `entity_id_high_water` — so that is what is polled, against the value captured before the
-        call plus the rows the service said created an item. It is a **proxy and is named as
+        call raised past every number the batch's new items took. It is a **proxy and is named as
         one**: it establishes that allocation happened, not that a segment was written, and in Phase 1
         allocation precedes the ack, so the wait is usually already over when it starts. That is
         the honest state of affairs rather than a barrier that only appears to do something. When

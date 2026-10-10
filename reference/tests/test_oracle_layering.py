@@ -39,6 +39,7 @@ DEFINITIONAL = (
     "record_blob",
     "text",
     "naming",
+    "tenancy",
     "access",
 )
 DRIVERS = ("harness", "journal")

@@ -647,11 +647,12 @@ class Bundle:
                 )
 
     def mosaica_id_of(self, entity_id: int) -> int:
-        """Pure function, no file read (memo §6): `forward(identity.key, identity.shard_id,
-        entity_id)`. Requires a post-r6 bundle (`identity` present in MANIFEST)."""
+        """Pure function, no file read (memo §6): the identifier of the item the build gave
+        `entity_id` as its number, in the manifest's shard at tenancy 0. Requires a post-r6 bundle
+        (`identity` present in MANIFEST)."""
         if self.identity_key is None:
             raise ValueError("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
-        return identity_mod.forward(self.identity_key, self.identity_shard_id, entity_id)
+        return identity_mod.forward_item(self.identity_key, self.identity_shard_id, 0, entity_id)
 
     def derive_row_order(self, view_id: str) -> np.ndarray:
         """Re-derive row order from `(source-recomputed morton, forward(identity.key,

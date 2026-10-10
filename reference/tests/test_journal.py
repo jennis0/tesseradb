@@ -17,7 +17,20 @@ from __future__ import annotations
 
 import pytest
 
+from oracle.identity import IdentityKey, forward_item
 from oracle.journal import AckedJournal, IngestOp
+
+KEY = IdentityKey.from_hex("000102030405060708090a0b0c0d0e0f")
+
+
+def item(number: int, tenancy: int = 0) -> int:
+    """The `mosaica_id` of the item holding `number` at `tenancy`, in shard 0."""
+    return forward_item(KEY, 0, tenancy, number)
+
+
+def receipt(*numbers: tuple[int, int]) -> dict:
+    """An ingest receipt whose rows each created the item holding `(number, tenancy)`."""
+    return {"created": len(numbers), "mosaica_ids": [str(item(n, t)) for n, t in numbers]}
 
 
 class _Response:
@@ -40,7 +53,7 @@ class _StubServer:
         self.ingest_calls: list = []
         self.next_change = _Response(200, {})
         self.next_batch = _Response(200, {})
-        self.next_ingest = _Response(200, {"created": 0})
+        self.next_ingest = _Response(200, {"created": 0, "mosaica_ids": []})
 
     def status(self):
         return {"entity_id_high_water": self.high_water}
@@ -59,13 +72,16 @@ class _StubServer:
 
 
 class _StubBundle:
-    """Just enough `Bundle` for the journal: mosaica ids and a term dictionary."""
+    """Just enough `Bundle` for the journal: a key, a build of 100 items and a term dictionary."""
 
+    identity_key = KEY
+    identity_shard_id = 0
+    manifest = {"entity_id_high_water": 100}
     dictionary = {0: b"term-zero", 1: b"term-one"}
 
     @staticmethod
     def mosaica_id_of(entity_id: int) -> int:
-        return 1000 + entity_id
+        return item(entity_id)
 
 
 @pytest.fixture
@@ -113,7 +129,7 @@ def test_an_acked_batch_journals_every_item_in_order(stub):
     assert not journal.refused
 
     sent = server.batch_calls[0]
-    assert sent[0]["match"] == {"mosaica_id": "1007"}
+    assert sent[0]["match"] == {"mosaica_id": str(item(7))}
     assert all(set(item) == {"op", "match"} for item in sent)
 
     # `predicate` with an empty term set removes the item from any session's mask via `L`, which is
@@ -132,14 +148,14 @@ def test_an_acked_ingest_is_not_an_applied_one(stub):
     """
     server, journal = stub
     server.high_water = 100
-    server.next_ingest = _Response(200, {"created": 3, "mosaica_ids": ["11", "12", "13"]})
+    server.next_ingest = _Response(200, receipt((100, 0), (101, 0), (102, 0)))
 
     journal.ingest(b"arrow-bytes", "batch-1")
 
     assert len(journal.ingests) == 1
     op = journal.ingests[0]
     assert (op.batch_id, op.created, op.applied) == ("batch-1", 3, False)
-    assert op.required_high_water == 103, "the barrier waits for `before + created`"
+    assert op.required_high_water == 103, "the barrier waits past every number the batch took"
     assert journal.acked_count == 1
     # Acked-but-unapplied contributes nothing to the composed mask, which is correct twice over:
     # the entities postdate the bundle, and nothing has said they are visible.
@@ -150,7 +166,7 @@ def test_the_barrier_waits_for_the_watermark_and_then_marks_applied(stub):
     """`barrier` is the only thing that may set `applied`, and it may only do so on evidence."""
     server, journal = stub
     server.high_water = 100
-    server.next_ingest = _Response(200, {"created": 3})
+    server.next_ingest = _Response(200, receipt((100, 0), (101, 0), (102, 0)))
     journal.ingest(b"arrow", "batch-1")
 
     server.high_water = 102  # short by one row
@@ -203,3 +219,33 @@ def test_a_refused_ingest_journals_a_refusal_and_no_batch(stub):
     assert len(journal.refused) == 1
     assert journal.refused[0].status == 503
     assert journal.acked_count == 0
+
+
+def test_a_new_item_on_a_deleted_items_number_takes_nothing_from_the_high_water(stub):
+    """A compaction frees a deleted item's number, and a new item takes it one tenancy higher. The
+    barrier then waits only for the numbers taken from the high water."""
+    server, journal = stub
+    journal.change(7, "delete")
+    server.next_ingest = _Response(200, receipt((7, 1), (100, 0)))
+
+    journal.ingest(b"arrow", "batch-1")
+
+    assert journal.ingests[0].required_high_water == 101
+
+
+@pytest.mark.parametrize(
+    "issued",
+    [
+        pytest.param(receipt((7, 0)), id="the deleted item's own identifier"),
+        pytest.param(receipt((8, 1)), id="a number whose holder was not deleted"),
+        pytest.param(receipt((100, 1)), id="a tenancy no item reached"),
+    ],
+)
+def test_a_receipt_issuing_an_identifier_out_of_turn_is_not_journalled(stub, issued):
+    server, journal = stub
+    journal.change(7, "delete")
+    server.next_ingest = _Response(200, issued)
+
+    with pytest.raises(AssertionError):
+        journal.ingest(b"arrow", "batch-1")
+    assert journal.ingests == []

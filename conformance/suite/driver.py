@@ -102,6 +102,7 @@ from typing import Callable, Sequence
 import requests
 
 from oracle import wire
+from oracle.bundle import Bundle
 from oracle.harness import (
     CLI_BIN,
     OPERATOR_CREDENTIAL,
@@ -115,6 +116,7 @@ from oracle.harness import (
     kill_server,
     stop_server,
 )
+from oracle.tenancy import HolderCount
 
 from .battery import Battery, Recorded, Viewport, build_battery, record
 from .entitlement import CappedDelta, Delta, Entity, Nothing, Rows, Uncheckable, Unexplained, diff
@@ -600,6 +602,10 @@ class SuiteHarness:
     #: battery item back to the item the fixture planted.
     fx_by_mosaica: dict[int, int] = field(default_factory=dict)
     item_ids: tuple[int, ...] = ()
+    #: Each number's holders, read from the bundle as built at the Build stage, then raised by every
+    #: acked ingest and told of every acked deletion. Every identifier a receipt carries is checked
+    #: against it (`oracle.tenancy`).
+    holders: HolderCount | None = None
     #: The scope unit currently wrapping the server (constrained profile only).
     _scope_unit: str | None = field(default=None, init=False, repr=False)
     #: The last scope memory reading taken before its cgroup was reaped — the walk's measurement.
@@ -1034,6 +1040,7 @@ class Build(Stage):
     label = "build"
 
     def apply(self, h: SuiteHarness) -> None:
+        h.holders = HolderCount.of_bundle(Bundle(h.bundle_root))
         h.spawn()
         h.authorise()
 
@@ -1095,6 +1102,7 @@ class Write(Stage):
             raise RuntimeError(
                 f"ingest created {created} items where the batch carried {len(self._fx_keys)} rows"
             )
+        h.holders.receipt(resp.json())
 
     def apply(self, h: SuiteHarness) -> None:
         self._ingest(h)
@@ -1260,6 +1268,8 @@ class Deny(Stage):
         resp = h.server.change(mosaica_id, self.op)
         if resp.status_code != 200:
             raise RuntimeError(f"{self.op} refused ({resp.status_code}): {resp.text}")
+        if self.op == "delete":
+            h.holders.delete(int(mosaica_id))
 
     def entitlement(self) -> Delta:
         if self._fx is None:
