@@ -1026,11 +1026,10 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     before = set(dep.holdings.items)
     rows = [fresh_position() for _ in deleted] + [{"code": fresh_code(), **fresh_position()}]
     check_ingest(dep, rows)
-    if int(dep.server.status()["entity_id_high_water"]) == high_water + len(rows):
-        pytest.skip(
-            f"the server took all {len(rows)} new items' numbers from its high water and none "
-            "from the deleted items: it does not reuse numbers (docs/sharding.md §1, stage 1)"
-        )
+    assert int(dep.server.status()["entity_id_high_water"]) < high_water + len(rows), (
+        f"the server took all {len(rows)} new items' numbers from its high water and none from "
+        "the deleted items"
+    )
     at = {(v["x"], v["y"]): t for t, v in dep.holdings.items.items() if t not in before}
     made = [at[(row["x"], row["y"])] for row in rows]
     assert numbers.number_of(made[0]) == (1, min(freed)), "the first takes the lowest freed number"
