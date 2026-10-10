@@ -764,7 +764,7 @@ the refusal is removed at stage 5.
 
 | Stage | What it does | Gate |
 |---|---|---|
-| 0 | §8.1; `count_ranges` in today's sweep, where it already counts a contiguous request 2.5 to 50 times faster at one shard, at depth 8 and deeper and 10% coverage or more | figures recorded in a probe |
+| 0 | §8.1; `count_ranges` in today's engine. Built for the density underlay's and the aggregate's cells, which are 1.4 to 10 times faster for a viewer who sees most of the map (`probes/2026-10-10-batched-cell-counts/`). Not built yet: the sweep's tile counts, which count one range at a time, where the bench counts a contiguous request 2.5 to 50 times faster at one shard | figures recorded in a probe |
 | 1 | the identity input gains the kind bit, the shard field and the occupancy, in the engine and in the oracle's own derivation and its vectors; the pool keeps a bitmap per occupancy; a compaction frees a deleted item's number at the next occupancy and retires one at the cap; format bump | reuse and cap fixtures; §8.4 on one shard |
 | 2 | `ShardId`; every per-entity and per-view structure moves under `shards/0/`; the manifest and side-manifest split; `shards.size` declared and recorded, and a size that would open a second shard refused on both paths; the compile-fail tests | the whole suite on rebuilt bundles |
 | 3 | layer spaces: artifact records, own-label postings and overlay move out of the point space; the two-region allocator and its low water go; artifact identifiers take the kind bit | layer drop fixture; byte scanner extended |

@@ -1,0 +1,9 @@
+{"repeat":5,"threads":4,"view":"s0"}
+{"case":"viewport zoom 4","ms":{"fastest":2.16385,"median":2.235543,"slowest":2.5045979999999997},"region":false}
+{"case":"density d6","items":20000000,"last_run_ms":{"batch":0.012835,"cells":1.231798,"compose":0.030728,"count":0.0,"pass":1.212246},"method":"ranges","ms":{"fastest":1.3235569999999999,"median":1.543811,"slowest":2.120934},"pages":1,"region":false,"rows":4096}
+{"case":"density d16","items":20000000,"last_run_ms":{"batch":1.474286,"cells":41.841429,"compose":0.515742,"count":0.0,"pass":41.730242},"method":"pass","ms":{"fastest":48.045736,"median":53.791546000000004,"slowest":61.271414},"pages":20,"region":false,"rows":19953189}
+{"case":"density d32","items":20000000,"last_run_ms":{"batch":1.40877,"cells":72.523562,"compose":0.482268,"count":0.0,"pass":72.404665},"method":"pass","ms":{"fastest":82.339479,"median":85.307169,"slowest":100.497444},"pages":20,"region":false,"rows":19999997}
+{"case":"bay top 10 x cells d16","items":20000000,"last_run_ms":{"batch":35.640295,"cells":148.6256,"compose":3.506304,"count":0.254921,"pass":148.152607},"method":"pass","ms":{"fastest":182.294492,"median":203.35140099999998,"slowest":222.39615300000003},"pages":141,"region":false,"rows":19993513}
+{"case":"viewport zoom 4","ms":{"fastest":0.860774,"median":0.874442,"slowest":1.182614},"region":true}
+{"case":"density d16","items":0,"last_run_ms":{"batch":0.004434,"cells":0.341415,"compose":0.078691,"count":0.0,"pass":0.336001},"method":"pass","ms":{"fastest":0.256922,"median":0.407511,"slowest":0.476795},"pages":1,"region":true,"rows":0}
+{"case":"bay top 10 x cells d16","items":0,"last_run_ms":{"batch":0.009402,"cells":0.23021,"compose":0.148026,"count":0.068096,"pass":0.210567},"method":"pass","ms":{"fastest":0.384918,"median":0.46748500000000004,"slowest":0.683434},"pages":1,"region":true,"rows":0}
