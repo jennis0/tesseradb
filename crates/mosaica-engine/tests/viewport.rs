@@ -697,6 +697,50 @@ fn underlay_sub_cells_sum_to_the_tile_s_masked_visible_count() {
     }
 }
 
+/// Over more rows than one 65,536-row container holds, a tile or a sub-cell that spans several
+/// containers, from row 0 or from later, counts every visible item in it: the tiles sum to the
+/// visible total, and each tile's sub-cells to its count.
+#[test]
+fn counts_spanning_several_containers_sum_to_the_visible_total() {
+    const ITEMS: u64 = 300_000;
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        ITEMS,
+    );
+    let engine = open_engine_with(&bundle_root, tmp.path(), config());
+
+    for (credential, items) in [
+        (full_coverage_credential(), ITEMS),
+        (subset_credential(), ITEMS.div_ceil(3)),
+    ] {
+        let session = engine.authorise(&credential).unwrap();
+        for zoom in [0u8, 1] {
+            let out = engine
+                .viewport(
+                    &session,
+                    ViewportRequest::new("s0", zoom, [0.0, 0.0, 1000.0, 1000.0], 30)
+                        .underlay_offset(Some(1)),
+                )
+                .unwrap();
+            let visible: u64 = out.tiles.iter().map(|t| t.visible).sum();
+            assert_eq!(visible, items, "zoom {zoom}: the tiles' counts");
+            for tile in &out.tiles {
+                let summed: u64 = out
+                    .sub_cells
+                    .iter()
+                    .filter(|c| c.cell >> 2 == tile.tile)
+                    .map(|c| c.count)
+                    .sum();
+                assert_eq!(summed, tile.visible, "zoom {zoom}, tile {}", tile.tile);
+            }
+        }
+    }
+}
+
 /// A less-authorised principal sees strictly smaller sub-cell totals than a fully-authorised one —
 /// the underlay is per-viewer, like every other count (§7.1).
 #[test]

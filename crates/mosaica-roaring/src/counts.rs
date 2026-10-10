@@ -32,11 +32,15 @@ pub fn count_ranges(bitmap: &Bitmap, ranges: &[Range<u32>]) -> Vec<u64> {
     // Each range's `start − 1` (none where it starts at 0) and `end − 1`, with where each lands.
     let mut ends: Vec<u32> = Vec::with_capacity(2 * ranges.len());
     let mut at: Vec<(Option<usize>, usize)> = Vec::with_capacity(ranges.len());
+    // A range from 0 counts by its end's rank alone, which must then count from the first
+    // container.
+    let mut from_zero = false;
     for r in ranges {
         if r.start >= r.end {
             at.push((None, usize::MAX));
             continue;
         }
+        from_zero |= r.start == 0;
         let lo = (r.start > 0).then(|| {
             ends.push(r.start - 1);
             ends.len() - 1
@@ -59,7 +63,12 @@ pub fn count_ranges(bitmap: &Bitmap, ranges: &[Range<u32>]) -> Vec<u64> {
             }
         }
     }
-    let ranks = rank_many(bitmap, &ends);
+    let from = if from_zero {
+        0
+    } else {
+        ends.first().copied().unwrap_or(0)
+    };
+    let ranks = rank_many(bitmap, &ends, from);
     at.iter()
         .map(|&(lo, hi)| {
             if hi == usize::MAX {
@@ -72,14 +81,15 @@ pub fn count_ranges(bitmap: &Bitmap, ranges: &[Range<u32>]) -> Vec<u64> {
 }
 
 /// For each of `values`, ascending, how many members of `bitmap` are at or below it and in or
-/// after the container that holds or follows `values[0]`. The difference of two of these is the
-/// difference of the two ranks.
-fn rank_many(bitmap: &Bitmap, values: &[u32]) -> Vec<u64> {
+/// after the container that holds or follows `from`, which is at most `values[0]`. The difference
+/// of two of these is the difference of the two ranks, and with `from` 0 each is the rank itself.
+fn rank_many(bitmap: &Bitmap, values: &[u32], from: u32) -> Vec<u64> {
     debug_assert!(values.is_sorted());
     let mut ranks = vec![0u64; values.len()];
     let (Some(&first), Some(&last)) = (values.first(), values.last()) else {
         return ranks;
     };
+    debug_assert!(from <= first);
     let raw = (bitmap as *const Bitmap).cast::<croaring_sys::roaring_bitmap_t>();
     // SAFETY: `Bitmap` is `repr(transparent)` over `roaring_bitmap_t` (its size is asserted above),
     // so `raw` points at the bitmap's own `roaring_array_t` for as long as `bitmap` is borrowed.
@@ -95,7 +105,7 @@ fn rank_many(bitmap: &Bitmap, values: &[u32]) -> Vec<u64> {
             return ranks;
         }
         let keys = std::slice::from_raw_parts(whole.keys, size);
-        let lo = keys.partition_point(|&k| u32::from(k) < first >> 16);
+        let lo = keys.partition_point(|&k| u32::from(k) < from >> 16);
         let hi = keys.partition_point(|&k| u32::from(k) <= last >> 16);
         let span = (hi - lo) as i32;
         let view = croaring_sys::roaring_bitmap_t {
@@ -185,8 +195,8 @@ mod tests {
     }
 
     /// Ranges that reach only some containers of a bitmap spanning many, including none at all,
-    /// the first and the last: the view's ranks start at the first container reached, and the
-    /// counts are croaring's.
+    /// the first and the last, and ranges from 0 that end past the first container, alone, beside
+    /// later ranges and out of order: the counts are croaring's.
     #[test]
     fn counts_over_a_part_of_a_wide_bitmap_equal_croarings() {
         let mut b = Bitmap::new();
@@ -210,6 +220,13 @@ mod tests {
                 (4 << 16) + 6_000..(4 << 16) + 7_000,
             ],
             vec![past..past + 100, past + 100..u32::MAX],
+            vec![0..(1_500 << 16) + 41_000],
+            vec![
+                0..(3 << 16) + 2,
+                (1_200 << 16)..(1_200 << 16) + 9,
+                (1_201 << 16)..past,
+            ],
+            vec![(1_200 << 16)..(1_200 << 16) + 9, 0..(3 << 16) + 2],
             vec![
                 (600 << 16) + 39_000..(1_400 << 16) + 41_000,
                 (1_400 << 16) + 41_000..(1_400 << 16) + 41_000,

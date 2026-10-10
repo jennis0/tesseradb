@@ -80,6 +80,15 @@ by range, each about one container wide, so the cells share few containers: 1.82
 and 1.34 to 1.54 ms after. Its other cell cases take the pass over the set's rows, which the
 change does not touch; their spread between runs, up to 45%, is this host's.
 
+## A correction
+
+0d9348ff's view counted a range from row 0 wrongly where the range ended past its first
+container: with no lower rank to subtract, its count was its end's rank, taken from the first
+container the call reached rather than from the first container of the bitmap. A one-tile request
+over this corpus counted 33 of a viewer's 77,456 items. A call holding such a range now ranks from
+the bitmap's first container. No case above holds one: every cell from row 0 ends inside the first
+container.
+
 ## Not measured
 
 - A bundle of several segments, where a tile's cells are counted once per segment.
